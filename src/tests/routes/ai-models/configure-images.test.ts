@@ -75,6 +75,8 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfigStrict: vi.fn().mockResolvedValue({}),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
+  spawnOpenclawCli: vi.fn().mockResolvedValue(""),
+  runOpenclawDoctorFix: vi.fn().mockResolvedValue(undefined),
   runOpenclawConfigSetBatch: vi.fn(),
   runOpenclawConfigUnset: vi.fn(),
   applyModelOverrideToAllAgentSessions: vi.fn().mockResolvedValue(undefined),
@@ -253,11 +255,11 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       expect(String(entry.name).trim()).not.toBe("");
     });
 
-    it("sets agents.defaults.imageGenerationModel — the write that makes the tool appear", async () => {
+    it("sets agents.defaults.mediaModels.image — the write that makes the tool appear", async () => {
       // Not `imageModel`: that is a separate key selecting the vision model.
       await connectClawai();
 
-      const call = callFor("agents.defaults.imageGenerationModel");
+      const call = callFor("agents.defaults.mediaModels.image");
       expect(call?.[2]).toBe("--json");
       expect(JSON.parse(call?.[1] ?? "null")).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
       // The route also writes `imageModel` — the vision key, from a different
@@ -284,7 +286,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
 
       expect(res.status).toBe(200);
       expect(callFor("models.providers.openai.apiKey")).toBeDefined();
-      expect(callFor("agents.defaults.imageGenerationModel")).toBeDefined();
+      expect(callFor("agents.defaults.mediaModels.image")).toBeDefined();
     });
 
     it("does not touch the openai provider when there is no ClawBox AI token", async () => {
@@ -292,7 +294,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
 
       expect(res.status).toBe(200);
       expect(callFor("models.providers.openai.apiKey")).toBeUndefined();
-      expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
     });
   });
 
@@ -312,7 +314,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       await connectClawai();
 
       expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
-      expect(callFor("agents.defaults.imageGenerationModel")).toBeDefined();
+      expect(callFor("agents.defaults.mediaModels.image")).toBeDefined();
     });
 
     it.each<[string, unknown]>([
@@ -329,7 +331,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       expect(res.status).toBe(200); // still a successful ClawBox AI connect
       expect(callFor("models.providers.openai.apiKey")).toBeUndefined();
       expect(callFor("models.providers.openai.models")).toBeUndefined();
-      expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
       // …and the chat provider was configured regardless.
       expect(callFor("models.providers.deepseek")).toBeDefined();
     });
@@ -429,7 +431,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
         expect(res.status).toBe(200); // ClawBox AI chat still connected
         expect(callFor("models.providers.openai.apiKey")).toBeUndefined();
         expect(callFor("models.providers.openai.models")).toBeUndefined();
-        expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
+        expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
         expect(callFor("models.providers.deepseek")).toBeDefined();
         return warn.mock.calls.map((call) => call.join(" ")).join("\n");
       } finally {
@@ -494,7 +496,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
 
     it("leaves an existing primary alone", async () => {
       await connectWithImageModel({ primary: "replicate/flux-pro" });
-      expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
     });
 
     it("leaves a fallbacks-only config alone", async () => {
@@ -503,12 +505,12 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       // dist/model-config.helpers-BS3FWcoO.js:25 on 2026.7.1-2) accepts primary
       // OR a non-empty fallback, so fallbacks-only is a working setup.
       await connectWithImageModel({ fallbacks: ["replicate/flux-pro"] });
-      expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
     });
 
     it("leaves a primary+fallbacks config alone", async () => {
       await connectWithImageModel({ primary: "replicate/flux-pro", fallbacks: ["stability/sd3"] });
-      expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
     });
 
     it("still provisions the provider block when the slot is taken", async () => {
@@ -527,7 +529,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
 
       await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-key" }));
 
-      expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
     });
 
     it.each<[string, unknown]>([
@@ -543,7 +545,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
     ])("claims the slot when it holds %s — OpenClaw resolves no model from it", async (_label, existing) => {
       await connectWithImageModel(existing);
 
-      expect(JSON.parse(callFor("agents.defaults.imageGenerationModel")?.[1] ?? "null")).toEqual({
+      expect(JSON.parse(callFor("agents.defaults.mediaModels.image")?.[1] ?? "null")).toEqual({
         primary: CLAWBOX_AI_IMAGE_MODEL,
       });
     });

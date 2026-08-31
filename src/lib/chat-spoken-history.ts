@@ -1,4 +1,5 @@
 import { createHash } from "crypto";
+import { readTranscriptRaw } from "./openclaw-session-store";
 import { constants, type BigIntStats } from "fs";
 import fs, { type FileHandle } from "fs/promises";
 import path from "path";
@@ -268,33 +269,47 @@ export async function loadSpokenHistory(
   if (!sessionKey || sessionKey.length > 512 || /[\u0000-\u001f\u007f]/.test(sessionKey)) return [];
   const home = options.openclawHome ?? OPENCLAW_HOME;
   const maxTailBytes = options.maxTailBytes ?? DEFAULT_TAIL_BYTES;
-  const transcriptHandle = await resolveTranscript(sessionKey, home);
-  if (!transcriptHandle) return [];
+  // OpenClaw 2 keeps the transcript in the per-agent SQLite store; the
+  // legacy .jsonl file remains the source on a box the doctor has not
+  // migrated. Same projection either way — the store's event_json rows ARE
+  // the old file's lines.
+  const agentMatch = /^agent:([A-Za-z0-9_-]+):/.exec(sessionKey);
+  const agentId = agentMatch?.[1] ?? "main";
+  const fromStore = readTranscriptRaw(sessionKey, agentId, maxTailBytes, path.join(home, "agents"));
+  let raw: string;
+  let cacheKey: string;
+  if (fromStore) {
+    raw = fromStore.raw.length > maxTailBytes ? fromStore.raw.slice(-maxTailBytes) : fromStore.raw;
+    cacheKey = [home, sessionKey, maxTailBytes, fromStore.identity].join("\u0000");
+    if (cachedHistory?.key === cacheKey) return cloneHistory(cachedHistory.items);
+  } else {
+    const transcriptHandle = await resolveTranscript(sessionKey, home);
+    if (!transcriptHandle) return [];
 
-  let identity: BigIntStats;
-  try {
-    identity = await transcriptHandle.stat({ bigint: true });
-  } catch (err) {
-    await transcriptHandle.close().catch(() => {});
-    if (isMissingFile(err)) return [];
-    throw err;
+    let identity: BigIntStats;
+    try {
+      identity = await transcriptHandle.stat({ bigint: true });
+    } catch (err) {
+      await transcriptHandle.close().catch(() => {});
+      if (isMissingFile(err)) return [];
+      throw err;
+    }
+    cacheKey = [
+      home,
+      sessionKey,
+      maxTailBytes,
+      identity.dev,
+      identity.ino,
+      identity.size,
+      identity.mtimeNs,
+      identity.ctimeNs,
+    ].join("\u0000");
+    if (cachedHistory?.key === cacheKey) {
+      await transcriptHandle.close();
+      return cloneHistory(cachedHistory.items);
+    }
+    raw = await readTail(transcriptHandle, maxTailBytes, Number(identity.size));
   }
-  const cacheKey = [
-    home,
-    sessionKey,
-    maxTailBytes,
-    identity.dev,
-    identity.ino,
-    identity.size,
-    identity.mtimeNs,
-    identity.ctimeNs,
-  ].join("\u0000");
-  if (cachedHistory?.key === cacheKey) {
-    await transcriptHandle.close();
-    return cloneHistory(cachedHistory.items);
-  }
-
-  const raw = await readTail(transcriptHandle, maxTailBytes, Number(identity.size));
   const targets: AssistantTarget[] = [];
   const recovered = new Map<number, string[]>();
   let currentRunPrefix: string | undefined;

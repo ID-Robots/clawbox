@@ -27,6 +27,14 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-gateway
 # does call it (src/app/setup-api/browser/route.ts). TASK-445 round 2.
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-gateway.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-gateway
+# reset-failed: clears the start-rate-limit state (StartLimitBurst=20/hour)
+# a crash-looping gateway leaves behind — during the OpenClaw 1->2 update a
+# few bad boots were enough, after which every allowed `restart` was refused
+# with "Start request repeated too quickly" for the rest of the hour and
+# nothing running as clawbox could clear it. Read-mostly and scoped to the
+# one unit, like the grants above; restartGateway() uses it best-effort.
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-gateway.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-gateway
 # Mask/unmask: factory reset masks the gateway before wiping ~/.openclaw
 # so systemd's `Restart=always` can't race-restart it mid-wipe and let the
 # gateway recreate plugin-runtime-deps. `--runtime` mask writes the symlink

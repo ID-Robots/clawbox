@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import fs from "fs/promises";
+import { listAgentIds, sessionStorePath, sweepSessionEntries } from "@/lib/openclaw-session-store";
 import path from "path";
 import { NextResponse } from "next/server";
 import { get, set, setMany } from "@/lib/config-store";
@@ -127,6 +128,34 @@ async function patchAllSessionOverrides(
   localModelId: string,
 ): Promise<FilesBackup> {
   const filesBackup: FilesBackup = {};
+  // OpenClaw 2 agents keep their sessions in SQLite. The sweep and its
+  // backup work exactly as for the legacy files; the backup key is the
+  // synthetic `sqlite:<agentId>` and restore routes it back to the store.
+  for (const agentId of listAgentIds(AGENTS_DIR)) {
+    if (!sessionStorePath(agentId, AGENTS_DIR)) continue;
+    const fileBackup: SessionsFileBackup = {};
+    const swept = sweepSessionEntries(agentId, (sessionKey, session) => {
+      const snapshot: SessionOverrideSnapshot = {};
+      for (const field of SESSION_OVERRIDE_FIELDS) {
+        if (Object.prototype.hasOwnProperty.call(session, field)) {
+          snapshot[field] = session[field];
+        }
+      }
+      fileBackup[sessionKey] = snapshot;
+      session.providerOverride = localProvider;
+      session.modelOverride = localModelId;
+      session.modelOverrideSource = "manual";
+      session.authProfileOverride = `${localProvider}:default`;
+      session.authProfileOverrideSource = "manual";
+      session.modelProvider = localProvider;
+      session.model = localModelId;
+      return true;
+    }, AGENTS_DIR);
+    // A failed sweep wrote nothing (single transaction) - recording its
+    // backup would let a later restore write stale values over sessions
+    // this pass never touched.
+    if (swept?.ok) filesBackup[`sqlite:${agentId}`] = fileBackup;
+  }
   const files = await listSessionsFiles();
   for (const file of files) {
     const parsed = await readSessionsJson(file, "patch");
@@ -174,10 +203,44 @@ async function patchAllSessionOverrides(
  * Sessions that have appeared since the backup was taken are left alone
  * (no backup entry → nothing to restore → user's current state wins).
  */
-async function restoreSessionOverrides(backup: FilesBackup): Promise<void> {
+async function restoreSessionOverrides(backup: FilesBackup): Promise<boolean> {
+  let allOk = true;
+  const restoreIntoStore = (agentId: string, sessions: SessionsFileBackup) => {
+    const swept = sweepSessionEntries(agentId, (sessionKey, session) => {
+      const snapshot = sessions[sessionKey];
+      if (!snapshot) return false;
+      for (const field of SESSION_OVERRIDE_FIELDS) {
+        if (Object.prototype.hasOwnProperty.call(snapshot, field)) {
+          session[field] = snapshot[field];
+        } else {
+          delete session[field];
+        }
+      }
+      return true;
+    }, AGENTS_DIR);
+    if (!swept?.ok) {
+      allOk = false;
+      console.error(`[local-only] SQLite restore did not complete for agent ${agentId}`);
+    }
+  };
   for (const [file, sessions] of Object.entries(backup)) {
+    if (file.startsWith("sqlite:")) {
+      restoreIntoStore(file.slice("sqlite:".length), sessions);
+      continue;
+    }
     const parsed = await readSessionsJson(file, "restore");
-    if (!parsed) continue;
+    if (!parsed) {
+      // Local-only switched on BEFORE the OpenClaw 2 migration, switched
+      // off after: the backup names a sessions.json the doctor has since
+      // folded into the agent SQLite store. The snapshots still apply -
+      // same keys, same entries - so route them into the store instead of
+      // silently leaving every session pinned to the local model.
+      const agentId = path.basename(path.dirname(path.dirname(file)));
+      if (agentId && sessionStorePath(agentId, AGENTS_DIR)) {
+        restoreIntoStore(agentId, sessions);
+      }
+      continue;
+    }
 
     for (const [sessionKey, snapshot] of Object.entries(sessions)) {
       const session = parsed[sessionKey];
@@ -194,9 +257,13 @@ async function restoreSessionOverrides(backup: FilesBackup): Promise<void> {
     try {
       await atomicWriteJson(file, parsed);
     } catch (err) {
+      // A legacy write that failed is exactly as incomplete as a refused
+      // SQLite sweep: the caller must keep the snapshot and the mode.
+      allOk = false;
       console.error(`[local-only] Failed to write restored sessions file ${file}:`, err);
     }
   }
+  return allOk;
 }
 
 // Local-only mode is built entirely out of OpenClaw CLI calls: it flips
@@ -297,16 +364,33 @@ export async function POST(request: Request) {
       if (Array.isArray(savedFallbacks) && savedFallbacks.length > 0) {
         await setConfig("agents.defaults.model.fallbacks", JSON.stringify(savedFallbacks));
       }
+      let restoreOk = true;
       if (savedSessionOverrides) {
-        await restoreSessionOverrides(savedSessionOverrides);
+        restoreOk = await restoreSessionOverrides(savedSessionOverrides);
       }
 
       await setMany({
         [SAVED_PRIMARY_KEY]: undefined,
         [SAVED_FALLBACKS_KEY]: undefined,
-        [SAVED_SESSION_OVERRIDES_KEY]: undefined,
-        [MODE_KEY]: undefined,
+        // The snapshot is the ONLY copy of the pre-Local-only overrides. A
+        // restore that could not complete (contended or corrupt store) keeps
+        // it, so the next toggle-off can finish the job instead of stranding
+        // every session on the local model for ever.
+        [SAVED_SESSION_OVERRIDES_KEY]: restoreOk ? undefined : savedSessionOverrides,
+        // The mode stays ON while the restore is incomplete: clearing it
+        // would make the next disable return early as a no-op, and an
+        // enable-then-disable cycle would overwrite the kept snapshot with
+        // local values. The owner retries the same toggle instead.
+        [MODE_KEY]: restoreOk ? undefined : true,
       });
+      if (!restoreOk) {
+        return NextResponse.json({
+          enabled: true,
+          restoreIncomplete: true,
+          warning:
+            "Some sessions could not be switched back yet (the session store was busy). Local-only stays on — try turning it off again in a moment.",
+        });
+      }
     }
 
     let restartWarning: string | undefined;

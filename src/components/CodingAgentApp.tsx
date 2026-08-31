@@ -15,16 +15,12 @@ import { formatBytes } from "@/lib/format-bytes";
 import { renderText } from "@/lib/chat-markdown";
 import { artifactUrl } from "@/lib/use-coding-agent-activity";
 import {
-  buildNewAppPrompt,
-  DEFAULT_NEW_APP_TEMPLATE,
-  NEW_APP_TEMPLATES,
-  dispatchChatMessage,
   dispatchOpenApp,
   notifyCodingRunStarted,
   onCodingAgentChanged,
   onStandaloneAppPage,
-  type NewAppTemplate,
 } from "@/lib/ui-events";
+import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
 import { copyToClipboard } from "@/lib/clipboard";
 import type { AgentStatus, Effort, GitHubState } from "./CodingAgentSettingsPanel";
 
@@ -113,22 +109,10 @@ interface Project {
   latestRun: Pick<Run, "id" | "status" | "task" | "startedAt" | "completedAt"> | null;
 }
 
-/**
- * The longest name the wizard accepts — the same bound as
- * assertProjectName in src/lib/code-projects.ts (MAX_PROJECT_NAME_LENGTH),
- * which is what refuses the name once the assistant scaffolds the project.
- * Checked here so the owner hears it before the handoff, not from a tool
- * error in the chat. Exported so a test can pin the two together; a client
- * component cannot import the library constant, which pulls in fs.
- */
-export const NEW_APP_NAME_MAX = 60;
-/** The select's option label per starter — the order and default live in ui-events. */
-const NEW_APP_TEMPLATE_LABEL: Record<NewAppTemplate, string> = {
-  nextjs: "codingAgent.newTemplateNextjs",
-  react: "codingAgent.newTemplateReact",
-  app: "codingAgent.newTemplateApp",
-  blank: "codingAgent.newTemplateBlank",
-};
+// The wizard's name bound lives with the wizard now (NewAppWizardCard); it is
+// re-exported here so the test that pins it to the project library's
+// MAX_PROJECT_NAME_LENGTH keeps one import to reach it by.
+export { NEW_APP_NAME_MAX };
 
 /**
  * The desktop's id for a deployed web app. page.tsx builds every installed
@@ -305,10 +289,6 @@ export default function CodingAgentApp() {
   // never by a poll. `handed` is the line left behind once the message is
   // in the chat — the card is gone by then, and the chat is where to look.
   const [showNew, setShowNew] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [newWhat, setNewWhat] = useState("");
-  const [newTemplate, setNewTemplate] = useState<NewAppTemplate>(DEFAULT_NEW_APP_TEMPLATE);
-  const [newError, setNewError] = useState<string | null>(null);
   const [handed, setHanded] = useState(false);
   // Clearing is two taps, not a browser confirm(): the second tap is the
   // confirmation. The offer is taken back on its own after CONFIRM_MS, and
@@ -625,34 +605,17 @@ export default function CodingAgentApp() {
   const openNew = () => {
     setShowNew(true);
     setHanded(false);
-    setNewError(null);
   };
 
-  const closeNew = () => {
-    setShowNew(false);
-    setNewError(null);
-  };
+  const closeNew = () => setShowNew(false);
 
   /**
-   * Create: check what the assistant would refuse, compose the one message,
-   * hand it to the chat, and get out of the way. No fetch here on purpose —
-   * the run route is the assistant's to call, with the project it has just
-   * scaffolded, and the owner is in the chat to see it happen.
+   * The card composed the one message and handed it to the chat (it never
+   * calls the run route — the assistant does, with the project it has just
+   * scaffolded). All that is left here is the line saying where to look.
    */
-  const createNew = () => {
-    const name = newName.trim();
-    const what = newWhat.trim();
-    const maxWhat = status?.maxTaskChars ?? 4_000;
-    if (!name) return setNewError(t("codingAgent.newNameRequired"));
-    if (name.length > NEW_APP_NAME_MAX) return setNewError(t("codingAgent.newNameTooLong", { max: NEW_APP_NAME_MAX }));
-    if (!what) return setNewError(t("codingAgent.newWhatRequired"));
-    if (what.length > maxWhat) return setNewError(t("codingAgent.newWhatTooLong", { max: maxWhat }));
-    dispatchChatMessage(buildNewAppPrompt({ name, description: what, template: newTemplate }));
+  const onHanded = () => {
     setShowNew(false);
-    setNewError(null);
-    setNewName("");
-    setNewWhat("");
-    setNewTemplate(NEW_APP_TEMPLATES[0]);
     setHanded(true);
   };
 
@@ -859,73 +822,12 @@ export default function CodingAgentApp() {
           )}
 
           {showNew && (
-            <form
-              onSubmit={(e) => { e.preventDefault(); createNew(); }}
-              data-testid="coding-agent-new-card"
-              className="mt-2 rounded-xl bg-white/[0.03] border border-[var(--coral-bright)]/30 px-3 py-3 space-y-2.5"
-            >
-              <p className="text-xs font-medium text-[var(--text-primary)]">{t("codingAgent.newTitle")}</p>
-              <label className="block text-[11px] text-[var(--text-muted)]">
-                {t("codingAgent.newNameLabel")}
-                <input
-                  type="text"
-                  value={newName}
-                  onChange={(e) => { setNewName(e.target.value); setNewError(null); }}
-                  maxLength={NEW_APP_NAME_MAX}
-                  placeholder={t("codingAgent.newNamePlaceholder")}
-                  autoFocus
-                  data-testid="coding-agent-new-name"
-                  className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-[var(--coral-bright)]/60"
-                />
-              </label>
-              <label className="block text-[11px] text-[var(--text-muted)]">
-                {t("codingAgent.newWhatLabel")}
-                <textarea
-                  value={newWhat}
-                  onChange={(e) => { setNewWhat(e.target.value); setNewError(null); }}
-                  maxLength={status?.maxTaskChars ?? 4_000}
-                  rows={3}
-                  placeholder={t("codingAgent.newWhatPlaceholder")}
-                  data-testid="coding-agent-new-what"
-                  className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-[var(--coral-bright)]/60 resize-y"
-                />
-              </label>
-              <label className="block text-[11px] text-[var(--text-muted)]">
-                {t("codingAgent.newTemplateLabel")}
-                <select
-                  value={newTemplate}
-                  onChange={(e) => setNewTemplate(e.target.value as NewAppTemplate)}
-                  data-testid="coding-agent-new-template"
-                  className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--coral-bright)]/60"
-                >
-                  {NEW_APP_TEMPLATES.map((tpl) => (
-                    <option key={tpl} value={tpl}>
-                      {t(NEW_APP_TEMPLATE_LABEL[tpl])}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {newError && (
-                <p className="text-[11px] text-amber-400" role="alert" data-testid="coding-agent-new-error">{newError}</p>
-              )}
-              <div className="flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={closeNew}
-                  data-testid="coding-agent-new-cancel"
-                  className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-muted)] hover:bg-white/5"
-                >
-                  {t("cancel")}
-                </button>
-                <button
-                  type="submit"
-                  data-testid="coding-agent-new-create"
-                  className="text-[11px] px-3 py-1 rounded-lg bg-[var(--coral-bright)] text-black font-medium hover:opacity-90"
-                >
-                  {t("codingAgent.newCreate")}
-                </button>
-              </div>
-            </form>
+            <NewAppWizardCard
+              className="mt-2"
+              maxTaskChars={status?.maxTaskChars ?? DEFAULT_MAX_TASK_CHARS}
+              onClose={closeNew}
+              onHanded={onHanded}
+            />
           )}
 
           {handed && !showNew && (

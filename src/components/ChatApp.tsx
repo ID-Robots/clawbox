@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react'
+import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import * as kv from '@/lib/client-kv'
 import { describeChatFailure } from '@/lib/chat-error-text'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
@@ -155,7 +156,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     let connectSent = false
     let ws: WebSocket
 
-    const sendConnect = (nonce: string) => {
+    const sendConnect = (challenge?: Record<string, unknown>) => {
       if (connectSent || !ws || ws.readyState !== WebSocket.OPEN) return
       connectSent = true
 
@@ -176,6 +177,20 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           setErrorMsg(err.message || 'Auth failed')
         },
       })
+      // OpenClaw 2 device identity — see gateway-device-identity.ts. Null
+      // against an older gateway (no challenge ts) and simply omitted then.
+      const clientPlatform = navigator.platform || 'web'
+      const scopes = ['operator.admin', 'operator.approvals', 'operator.pairing']
+      const device = buildDeviceConnectParams({
+        nonce: challenge?.nonce,
+        ts: challenge?.ts,
+        token,
+        role: 'operator',
+        scopes,
+        clientId: 'openclaw-control-ui',
+        clientMode: 'webchat',
+        platform: clientPlatform,
+      })
       ws.send(JSON.stringify({
         type: 'req', id, method: 'connect',
         params: {
@@ -184,16 +199,17 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           client: {
             id: 'openclaw-control-ui',
             version: 'clawbox-chat',
-            platform: navigator.platform || 'web',
+            platform: clientPlatform,
             mode: 'webchat',
             instanceId: uuid(),
           },
           role: 'operator',
-          scopes: ['operator.admin', 'operator.approvals', 'operator.pairing'],
+          scopes,
           caps: ['tool-events'],
           auth: { token },
           userAgent: navigator.userAgent,
           locale: navigator.language,
+          ...(device ? { device } : {}),
         },
       }))
     }
@@ -221,9 +237,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         const eventName = data.event as string
 
         if (eventName === 'connect.challenge') {
-          const payload = data.payload as Record<string, unknown> | undefined
-          const nonce = (payload?.nonce as string) || ''
-          sendConnect(nonce)
+          sendConnect(data.payload as Record<string, unknown> | undefined)
           return
         }
 

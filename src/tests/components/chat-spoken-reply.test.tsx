@@ -3,6 +3,13 @@ import { render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 
+// The popup this suite mounts grew a session-tab strip and the OpenClaw 2
+// device-identity handshake; under a FULL suite run every vitest worker gets
+// a slice of the Jetson's six cores and the 5 s default started expiring on
+// whichever test mounted while the box was busiest (a different one each
+// run — solo runs never failed). The work is real, not hung: give it room.
+vi.setConfig({ testTimeout: 15000 });
+
 /**
  * A spoken reply has to be something the user can play.
  *

@@ -52,7 +52,9 @@ const LOCAL = "tts-local-cli";
 
 function config(over: Record<string, unknown> = {}) {
   return {
-    messages: { tts: { provider: LOCAL, providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" } } } },
+    // The v2 home: OpenClaw 2 keeps the speech block at top-level tts, and
+    // the route writes to whichever home holds the providers.
+    tts: { provider: LOCAL, providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" } } },
     models: { providers: { openai: { apiKey: "claw_84d065b" } } },
     ...over,
   };
@@ -136,12 +138,12 @@ describe("GET /setup-api/tts", () => {
 describe("POST /setup-api/tts — select", () => {
   it("writes the provider the choice resolves to", async () => {
     readConfigMock.mockResolvedValue(config({
-      messages: { tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" } } } },
+      tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" } } },
     }));
     const { POST } = await route();
     const res = await POST(post({ action: "select", choice: "local" }));
     expect(res.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["messages.tts.provider", LOCAL]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", LOCAL]);
     // The choice, and nothing the owner did not pick: no backfilled language.
     expect(writeStateMock.mock.calls[0][0]).toEqual({ choice: "local" });
   });
@@ -163,7 +165,7 @@ describe("POST /setup-api/tts — select", () => {
     const { POST } = await route();
     const res = await POST(post({ action: "select", choice: "cloud" }));
     expect(res.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["messages.tts.provider", "openai"]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", "openai"]);
   });
 
   it("does not rewrite the config when the box is already on that provider", async () => {
@@ -176,7 +178,7 @@ describe("POST /setup-api/tts — select", () => {
   it("keeps the customer's choice out of the file when the config write failed", async () => {
     configSetMock.mockRejectedValue(new Error("ConfigMutationConflictError"));
     readConfigMock.mockResolvedValue(config({
-      messages: { tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" } } } },
+      tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" } } },
     }));
     const { POST } = await route();
     const res = await POST(post({ action: "select", choice: "local" }));
@@ -195,7 +197,7 @@ describe("POST /setup-api/tts — select", () => {
       stored = next;
     });
     readConfigMock.mockResolvedValue(config({
-      messages: { tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" } } } },
+      tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" } } },
     }));
     configSetMock.mockImplementation(() => new Promise((resolve) => setTimeout(resolve, 30)));
     const { POST } = await route();
@@ -244,18 +246,18 @@ describe("POST /setup-api/tts — voice and language", () => {
 
   it("writes the cloud voice into the provider OpenClaw speaks with", async () => {
     readConfigMock.mockResolvedValue(config({
-      messages: { tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" }, openai: { apiKey: "claw_84d065b", baseUrl: "https://clawbox.com/api/ai" } } } },
+      tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" }, openai: { apiKey: "claw_84d065b", baseUrl: "https://clawbox.com/api/ai" } } },
     }));
     const { POST } = await route();
     const res = await POST(post({ action: "voice", engine: "cloud", voice: "nova" }));
     expect(res.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["messages.tts.providers.openai.voice", "nova"]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.providers.openai.voice", "nova"]);
   });
 
   it("refuses a cloud voice the configured model cannot speak, and says which model", async () => {
     // tts-1 has no ballad or verse; saving one would be a voice that never speaks.
     readConfigMock.mockResolvedValue(config({
-      messages: { tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" }, openai: { apiKey: "claw_84d065b", baseUrl: "https://clawbox.com/api/ai", model: "tts-1" } } } },
+      tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" }, openai: { apiKey: "claw_84d065b", baseUrl: "https://clawbox.com/api/ai", model: "tts-1" } } },
     }));
     const { POST } = await route();
     const bad = await POST(post({ action: "voice", engine: "cloud", voice: "verse" }));
@@ -264,7 +266,7 @@ describe("POST /setup-api/tts — voice and language", () => {
     expect(configSetMock).not.toHaveBeenCalled();
     const ok = await POST(post({ action: "voice", engine: "cloud", voice: "nova" }));
     expect(ok.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["messages.tts.providers.openai.voice", "nova"]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.providers.openai.voice", "nova"]);
   });
 
   it("refuses a cloud voice for a box that has no cloud voice", async () => {
@@ -293,7 +295,7 @@ describe("POST /setup-api/tts — voice and language", () => {
     const { GET } = await route();
     expect((await (await GET()).json()).cloudModel).toBeNull();
     readConfigMock.mockResolvedValue(config({
-      messages: { tts: { provider: LOCAL, providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" }, openai: { model: "tts-1-hd" } } } },
+      tts: { provider: LOCAL, providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" }, openai: { model: "tts-1-hd" } } },
     }));
     expect((await (await GET()).json()).cloudModel).toBe("tts-1-hd");
   });

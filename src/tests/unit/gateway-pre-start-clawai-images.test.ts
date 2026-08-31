@@ -67,7 +67,7 @@ type OpenAiModelEntry = { id?: string; name?: string; baseUrl?: string; api?: st
  * `changed`) — mock at that boundary and nothing else, so the migration logic
  * under test is 100% the shipped bytes.
  */
-function migrate(cfg: Config): { cfg: Config; changed: boolean; log: string } {
+function migrate(cfg: Config, v2 = false): { cfg: Config; changed: boolean; log: string } {
   const file = path.join(dir, "config.json");
   writeFileSync(file, JSON.stringify(cfg));
   const program = [
@@ -77,6 +77,7 @@ function migrate(cfg: Config): { cfg: Config; changed: boolean; log: string } {
     'agents_defaults = cfg.setdefault("agents", {}).setdefault("defaults", {})',
     'deepseek_provider = models_providers.get("deepseek")',
     "changed = False",
+    ...(v2 ? ["CLAWBOX_OPENCLAW_V2 = True"] : []),
     POLICY,
     "print(json.dumps({'cfg': cfg, 'changed': changed}))",
   ].join("\n");
@@ -535,5 +536,38 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
 
       expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
     });
+  });
+});
+
+// OpenClaw 2's home for the image-generation pick is
+// agents.defaults.mediaModels.image; the legacy imageGenerationModel key
+// fails config validation there. Same block, other home — picked from
+// CLAWBOX_OPENCLAW_V2, bound via globals() so this preamble can set it.
+describe.skipIf(!hasPython3)("the image-generation home on OpenClaw 2", () => {
+  function mediaImage(cfg: Config): unknown {
+    const agents = (cfg.agents ?? {}) as { defaults?: { mediaModels?: { image?: unknown } } };
+    return agents.defaults?.mediaModels?.image;
+  }
+
+  it("claims mediaModels.image on a paired box, and never writes the legacy key", () => {
+    const { cfg, changed } = migrate(pairedBox(), true);
+    expect(changed).toBe(true);
+    expect(mediaImage(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
+    expect(imageGenerationModel(cfg)).toBeUndefined();
+  });
+
+  it("is idempotent in the v2 home too", () => {
+    const once = migrate(pairedBox(), true);
+    const twice = migrate(once.cfg, true);
+    expect(twice.changed).toBe(false);
+    expect(twice.cfg).toEqual(once.cfg);
+  });
+
+  it("leaves an owner's mediaModels.image alone", () => {
+    const { cfg } = migrate(
+      pairedBox({ agents: { defaults: { mediaModels: { image: { primary: "openai/their-pick" } } } } }),
+      true,
+    );
+    expect(mediaImage(cfg)).toEqual({ primary: "openai/their-pick" });
   });
 });

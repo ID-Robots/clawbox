@@ -41,6 +41,37 @@ if [ ! -x "$OPENCLAW_BIN" ]; then
   exit 0
 fi
 
+# OpenClaw 2 (>= 2026.8) renamed the config homes this script writes:
+# messages.tts -> tts, agents.defaults.imageGenerationModel ->
+# agents.defaults.mediaModels.image, tools.media.audio.models ->
+# tools.media.models (rows carry capabilities: ["audio"]), and retired
+# gateway.controlUi.allowInsecureAuth / dangerouslyDisableDeviceAuth.
+# v2 also REFUSES a config carrying the legacy keys once its own loader
+# migration has produced the new ones, so writing the old names against a
+# v2 gateway does not degrade politely — it kept this gateway from ever
+# reporting ready. Decided from the pinned target (the fleet's source of
+# truth), falling back to the installed binary when the pin is unknown.
+# The INSTALLED binary is the authority: it is the process that will parse
+# what this script writes. A partially failed update (repo synced, npm
+# install not yet done) leaves pin=2026.8.1 with a 2026.7 binary — deciding
+# from the pin there would write v2 keys a v1 gateway refuses AND delete the
+# controlUi auth switches v1 still needs. The pin only fills in when the
+# binary cannot be asked.
+CLAWBOX_OPENCLAW_EFFECTIVE="$("$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1)"
+if [ -z "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
+  CLAWBOX_OPENCLAW_EFFECTIVE="${OPENCLAW_TARGET}"
+fi
+# An explicit CLAWBOX_OPENCLAW_V2 in the environment wins — the unit tests
+# pin BOTH generations of this script against fixture configs, and they must
+# not follow whatever the box's own pin file happens to say.
+if [ -z "${CLAWBOX_OPENCLAW_V2:-}" ]; then
+  CLAWBOX_OPENCLAW_V2=0
+  if [ -n "$CLAWBOX_OPENCLAW_EFFECTIVE" ] && [ "$(printf '%s\n' 2026.8 "$CLAWBOX_OPENCLAW_EFFECTIVE" | sort -V | head -1)" = "2026.8" ]; then
+    CLAWBOX_OPENCLAW_V2=1
+  fi
+fi
+export CLAWBOX_OPENCLAW_V2
+
 # Resolve configured mDNS hostname (defaults to "clawbox" if unset/invalid)
 CONFIGURED_HOSTNAME="clawbox"
 if [ -f "$HOSTNAME_ENV" ]; then
@@ -140,6 +171,9 @@ export CLAWBOX_DEVICE_STORE="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/data/config.
 
 python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile, secrets
+
+# OpenClaw 2 config homes — see the bash block that computes this.
+CLAWBOX_OPENCLAW_V2 = os.environ.get("CLAWBOX_OPENCLAW_V2") == "1"
 
 # Gateway auth token gates LAN access to the agent's privileged tools
 # (run_command / file_write / system_power). Earlier builds wrote the public
@@ -278,7 +312,12 @@ def _openai_gpt_to_codex(model_id):
     _bare = _m[len("openai/"):]
     return "codex/" + _bare if _bare.lower() in _CODEX_SUPPORTED else None
 
-if _has_codex_oauth_profile() and not _has_openai_api_key_profile():
+# OpenClaw 2 migrates every codex/* reference to openai/* itself (doctor
+# --fix, "retaining Codex runtime intent") — rewriting the other way here
+# would fight that migration on every boot. Bound via globals() because the
+# unit tests run this block extracted from the file.
+_clawbox_v2_codex = bool(globals().get("CLAWBOX_OPENCLAW_V2", False))
+if (not _clawbox_v2_codex) and _has_codex_oauth_profile() and not _has_openai_api_key_profile():
     _migrated_primary = _openai_gpt_to_codex(model_defaults.get("primary"))
     if _migrated_primary:
         model_defaults["primary"] = _migrated_primary
@@ -420,8 +459,17 @@ def set_if(obj, key, value):
         obj[key] = value
         changed = True
 
-set_if(control_ui, "allowInsecureAuth", True)
-set_if(control_ui, "dangerouslyDisableDeviceAuth", True)
+_clawbox_v2 = bool(globals().get("CLAWBOX_OPENCLAW_V2", False))
+if not _clawbox_v2:
+    # Retired on OpenClaw 2: the control UI pairs through the normal device
+    # flow, and a config still carrying either key fails validation outright.
+    set_if(control_ui, "allowInsecureAuth", True)
+    set_if(control_ui, "dangerouslyDisableDeviceAuth", True)
+else:
+    for _retired in ("allowInsecureAuth", "dangerouslyDisableDeviceAuth"):
+        if _retired in control_ui:
+            del control_ui[_retired]
+            changed = True
 # Compare allowedOrigins as sets since ordering shouldn't force a
 # rewrite — the gateway doesn't care about the order, and the LAN IP
 # enumeration can reorder entries between boots.
@@ -839,7 +887,21 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
         # `primary` alone would replace the whole object below and take the
         # owner's fallbacks with it — the exact outcome the paragraph above
         # says must not happen.
-        _image_model_cfg = agents_defaults.get("imageGenerationModel")
+        _clawbox_v2 = bool(globals().get("CLAWBOX_OPENCLAW_V2", False))
+        if _clawbox_v2:
+            # v2: the same object lives at agents.defaults.mediaModels.image
+            # (the loader migration moves imageGenerationModel there verbatim).
+            _media_models = agents_defaults.get("mediaModels")
+            if not isinstance(_media_models, dict):
+                _media_models = {}
+            # An owner's pick still sitting in the LEGACY key (the loader
+            # migration has not run yet on this file) is a configured model,
+            # not an empty slot to claim.
+            _image_model_cfg = _media_models.get("image")
+            if _image_model_cfg is None:
+                _image_model_cfg = agents_defaults.get("imageGenerationModel")
+        else:
+            _image_model_cfg = agents_defaults.get("imageGenerationModel")
         _image_model_fallbacks = (
             _image_model_cfg.get("fallbacks") if isinstance(_image_model_cfg, dict) else None
         )
@@ -851,7 +913,11 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
             )
         )
         if not _has_image_model:
-            agents_defaults["imageGenerationModel"] = {"primary": CLAWBOX_IMAGE_MODEL_REF}
+            if _clawbox_v2:
+                _media_models["image"] = {"primary": CLAWBOX_IMAGE_MODEL_REF}
+                agents_defaults["mediaModels"] = _media_models
+            else:
+                agents_defaults["imageGenerationModel"] = {"primary": CLAWBOX_IMAGE_MODEL_REF}
             changed = True
 
 # Migration: ClawBox AI speech to text.
@@ -897,12 +963,22 @@ CLAWBOX_CLOUD_AUDIO_MODEL = {"provider": "openai", "model": CLAWBOX_TRANSCRIBE_M
 # workspace foreign.
 CLAWBOX_AUDIO_MODELS = [CLAWBOX_CLOUD_AUDIO_MODEL]
 CLAWBOX_STT_CLIENT_SCRIPT = "stt-client.py"
+# v2 keeps baseUrl under tools.media.audio; the model list moved to
+# tools.media.models with capabilities: ["audio"] per row. Bound via
+# globals() because the unit tests run this block extracted from the file.
+_clawbox_v2 = bool(globals().get("CLAWBOX_OPENCLAW_V2", False))
 
 
 def _is_clawbox_audio_model(_entry):
-    """Is one models[] row one of the two ClawBox itself writes?"""
+    """Is one models[] row one of the two ClawBox itself writes?
+
+    v2 rows carry capabilities: ["audio"]; the field says where the row may
+    be used, not whose it is, so it is ignored for the ownership question.
+    """
     if not isinstance(_entry, dict):
         return False
+    if list(_entry.get("capabilities") or []) in ([], ["audio"]):
+        _entry = {k: v for k, v in _entry.items() if k != "capabilities"}
     if _entry.get("type") == "cli":
         _args = _entry.get("args")
         _named = [_entry.get("command")] + (list(_args) if isinstance(_args, list) else [])
@@ -968,7 +1044,16 @@ if _clawai_openai_route_is_ours:
         _audio = {}
 
     _audio_base_url = _audio.get("baseUrl")
-    _audio_models = _audio.get("models")
+    # v2 keeps baseUrl under tools.media.audio but the model list moved up to
+    # tools.media.models (one list for every media capability; audio rows are
+    # tagged capabilities: ["audio"]).
+    _audio_models = _media.get("models") if _clawbox_v2 else _audio.get("models")
+    if _clawbox_v2 and _audio_models is None and _audio.get("models") is not None:
+        # A legacy tools.media.audio.models list the loader migration has not
+        # moved yet. Seeding the v2 home beside it would duplicate the rows
+        # the moment the migration runs; whatever the list holds, this boot
+        # leaves the whole surface alone and the next boot sees it migrated.
+        _audio_models = _audio.get("models")
     _audio_has_base_url = isinstance(_audio_base_url, str) and bool(_audio_base_url.strip())
     _audio_route_taken = bool(
         (_audio_has_base_url and not _same_endpoint(_audio_base_url, _clawai_proxy_base_url))
@@ -983,7 +1068,13 @@ if _clawai_openai_route_is_ours:
         # Seed the list only where there is none. A list this migration
         # recognises is left exactly as Settings wrote it, order included.
         if _audio_models is None:
-            _audio["models"] = [dict(_entry) for _entry in CLAWBOX_AUDIO_MODELS]
+            _seed = [dict(_entry) for _entry in CLAWBOX_AUDIO_MODELS]
+            if _clawbox_v2:
+                for _row in _seed:
+                    _row["capabilities"] = ["audio"]
+                _media["models"] = _seed
+            else:
+                _audio["models"] = _seed
         _media["audio"] = _audio
         _tools["media"] = _media
         cfg["tools"] = _tools
@@ -1042,6 +1133,9 @@ CLAWBOX_SPEECH_DEVICE_TIER = "pro"
 # provider entry survives `openclaw config set`, is not stripped, does not
 # upset `openclaw doctor`, and the entry still synthesises.
 CLAWBOX_SPEECH_MANAGED_KEY = "clawboxManaged"
+# v2 moved messages.tts to a top-level tts object; same inner shape. Bound
+# via globals() because the unit tests run this block extracted from the file.
+_clawbox_v2 = bool(globals().get("CLAWBOX_OPENCLAW_V2", False))
 
 def _clawai_device_tier():
     """The portal-confirmed plan stamp, or None when the store cannot be read.
@@ -1070,7 +1164,18 @@ if _clawai_openai_route_is_ours and _clawai_speech_entitled:
     _messages = cfg.get("messages")
     if not isinstance(_messages, dict):
         _messages = {}
-    _tts = _messages.get("tts")
+    # v2 moved the whole block from messages.tts to a top-level tts object,
+    # inner shape unchanged (the loader migration carries clawboxManaged
+    # through, so ownership stamps survive the move).
+    _tts = (cfg.get("tts") if _clawbox_v2 else _messages.get("tts"))
+    if _clawbox_v2 and not isinstance(_tts, dict):
+        _legacy_tts = _messages.get("tts") if isinstance(_messages, dict) else None
+        if isinstance(_legacy_tts, dict) and _legacy_tts.get("providers"):
+            # A legacy messages.tts block the loader migration has not moved
+            # yet: writing the v2 home beside it would leave two speech
+            # configs racing the migration. Leave it; next boot reads the
+            # migrated home.
+            _tts = _legacy_tts
     if not isinstance(_tts, dict):
         _tts = {}
     _tts_providers = _tts.get("providers")
@@ -1108,8 +1213,11 @@ if _clawai_openai_route_is_ours and _clawai_speech_entitled:
         if _speech != _speech_before:
             _tts_providers["openai"] = _speech
             _tts["providers"] = _tts_providers
-            _messages["tts"] = _tts
-            cfg["messages"] = _messages
+            if _clawbox_v2:
+                cfg["tts"] = _tts
+            else:
+                _messages["tts"] = _tts
+                cfg["messages"] = _messages
             changed = True
 
 elif _clawai_openai_route_is_ours:
@@ -1129,7 +1237,7 @@ elif _clawai_openai_route_is_ours:
     # locally instead — which is precisely what it does once the entry is gone.
     # Silently rewriting their pick would hide the downgrade.
     _messages = cfg.get("messages")
-    _tts = _messages.get("tts") if isinstance(_messages, dict) else None
+    _tts = (cfg.get("tts") if _clawbox_v2 else (_messages.get("tts") if isinstance(_messages, dict) else None))
     _tts_providers = _tts.get("providers") if isinstance(_tts, dict) else None
     _speech = _tts_providers.get("openai") if isinstance(_tts_providers, dict) else None
     if isinstance(_speech, dict):
@@ -1230,6 +1338,13 @@ PY
 # system updates. Idempotent: skips the rewrite if the field already
 # matches the target.
 DEEPSEEK_PLUGIN_JSON="$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/dist/extensions/deepseek/openclaw.plugin.json"
+if [ ! -f "$DEEPSEEK_PLUGIN_JSON" ]; then
+  # OpenClaw 2 unbundled the provider: the manifest lives with the installed
+  # plugin, not in the core dist. Same patch, same idempotence — without this
+  # the xhigh declaration silently stopped landing and the effort picker
+  # refused xhigh for deepseek on every 2026.8 box.
+  DEEPSEEK_PLUGIN_JSON="$(dirname "$OPENCLAW_CONFIG")/extensions/deepseek/openclaw.plugin.json"
+fi
 if [ -f "$DEEPSEEK_PLUGIN_JSON" ]; then
   python3 - "$DEEPSEEK_PLUGIN_JSON" <<'PY'
 import json, os, sys, tempfile
@@ -1470,7 +1585,13 @@ if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
   # turn 401s while the UI still shows the provider as connected. Migrate
   # first, so the mirror below reads a populated store.
   AUTH_PROFILE_MIGRATION="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/scripts/migrate-auth-profiles.js"
-  if [ -f "$AUTH_PROFILE_MIGRATION" ]; then
+  # v1 only: the script copies legacy auth-profiles.json entries into the
+  # auth_profile_store table of openclaw-agent.sqlite — a table OpenClaw 2
+  # retired (state/openclaw.sqlite's config_machine_state records
+  # auth.sharedStore = state-db, and migration_sources shows the move).
+  # Writing it on a gen-2 box recreates exactly the legacy state doctor
+  # migrates away from; core owns its own store there.
+  if [ "$CLAWBOX_OPENCLAW_V2" != "1" ] && [ -f "$AUTH_PROFILE_MIGRATION" ]; then
     node "$AUTH_PROFILE_MIGRATION" "$OPENCLAW_HOME_DIR" || true
   fi
 
@@ -1606,6 +1727,38 @@ unset CLAWBOX_MCP_TOKEN_VAL
 # "nothing", even though the skill is installed at
 # <workspace>/skills/).
 #
+# OpenClaw 2 unbundled the DeepSeek provider into its own plugin
+# (@openclaw/deepseek-provider) and refuses gateway readiness while a
+# configured provider has no consented plugin behind it. ClawBox AI rides
+# the deepseek provider on every paired box, and the configure route writes
+# openclaw.json directly (it never runs onboarding), so nothing else
+# installs the plugin — the first 2026.8.1 boot on a paired box parked at
+# "Plugin \"deepseek\" requires capability consent" until it was installed
+# by hand. Heal it here, exactly like the codex plugin above: idempotent
+# (the marker file check), consent given explicitly, non-fatal — a failed
+# install leaves the gateway refusing readiness with its own clear message.
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ ! -f "$OPENCLAW_HOME_DIR/extensions/deepseek/openclaw.plugin.json" ]; then
+  NEEDS_DEEPSEEK_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except (FileNotFoundError, json.JSONDecodeError):
+    print("0"); sys.exit(0)
+providers = ((cfg.get("models") or {}).get("providers") or {})
+deepseek = providers.get("deepseek")
+key = deepseek.get("apiKey") if isinstance(deepseek, dict) else None
+print("1" if isinstance(key, str) and key.strip() else "0")
+PY
+)"
+  if [ "$NEEDS_DEEPSEEK_PLUGIN" = "1" ]; then
+    echo "  Installing @openclaw/deepseek-provider (OpenClaw 2 unbundled it; ClawBox AI needs it)..."
+    if timeout 180 "$OPENCLAW_BIN" plugins install clawhub:@openclaw/deepseek-provider --accept-capabilities </dev/null; then
+      echo "  DeepSeek provider plugin installed"
+    else
+      echo "  WARN: could not install @openclaw/deepseek-provider; the gateway will refuse readiness until it is installed"
+    fi
+  fi
+fi
 # Resolve the workspace from agents.defaults.workspace in openclaw.json,
 # matching the same logic getSkillsDir() uses on the ClawBox API side —
 # falls back to ~/.openclaw/workspace when unset, handles absolute vs

@@ -437,7 +437,8 @@ harness_has_no_gpu() {
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
-OPENCLAW_VERSION="2026.7.1-2"
+OPENCLAW_VERSION="2026.8.1"
+
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
 # the fleet runs the build WE chose instead of whatever
 # NousResearch/hermes-agent had on `main` the second a box was flashed.
@@ -462,6 +463,28 @@ HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-fcbd1076a93841fa88855acce810e342a5b78101
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
+
+# Is the OpenClaw on this box generation 2 (>= 2026.8)? The INSTALLED binary
+# answers when it can — it is the process that parses whatever we write — and
+# the pinned target only fills in before the first install. Used to route the
+# steps that speak different config dialects per generation.
+# The generation rule itself, callable with any version string, so the
+# installed-binary probe below and the freshly-pinned TARGET gate in
+# step_openclaw_install cannot drift apart.
+openclaw_version_is_v2() {
+  [ -n "$1" ] && [ "$(printf '%s\n' 2026.8 "$1" | sort -V | head -1)" = "2026.8" ]
+}
+openclaw_is_v2() {
+  local v=""
+  if [ -x "$NPM_PREFIX/bin/openclaw" ]; then
+    v=$("$NPM_PREFIX/bin/openclaw" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1)
+  fi
+  if [ -z "$v" ] && [ -f "$PROJECT_DIR/config/openclaw-target.txt" ]; then
+    v=$(head -1 "$PROJECT_DIR/config/openclaw-target.txt" | awk '{print $1}')
+  fi
+  [ -z "$v" ] && v="$OPENCLAW_VERSION"
+  openclaw_version_is_v2 "$v"
+}
 
 # ── Service registry ─────────────────────────────────────────────────────────
 # Authoritative list of clawbox systemd units. Used by step_systemd_services
@@ -664,7 +687,7 @@ ensure_openclaw_node_engine() {
 
   local got
   got=$(node --version 2>/dev/null || echo "missing")
-  echo "  Node.js $got does not satisfy OpenClaw 2026.7.1 engine requirements; upgrading Node.js 22..."
+  echo "  Node.js $got does not satisfy OpenClaw 2026.8.1 engine requirements; upgrading Node.js 22..."
   wait_for_apt
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   wait_for_apt
@@ -673,7 +696,7 @@ ensure_openclaw_node_engine() {
   if ! node_satisfies_openclaw_engine; then
     got=$(node --version 2>/dev/null || echo "missing")
     echo "Error: Node.js upgrade did not reach an OpenClaw-compatible version — got $got." >&2
-    echo "       OpenClaw 2026.7.1 requires Node >=22.22.3 <23, >=24.15.0 <25, or >=25.9.0." >&2
+    echo "       OpenClaw 2026.8.1 requires Node >=22.22.3 <23, >=24.15.0 <25, or >=25.9.0." >&2
     exit 1
   fi
 
@@ -982,7 +1005,7 @@ step_apt_update() {
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 gh build-essential cmake ninja-build pkg-config
-  # Node.js for production server and OpenClaw. OpenClaw 2026.7.1 tightened
+  # Node.js for production server and OpenClaw. OpenClaw 2026.8.1 tightened
   # its engines to >=22.22.3; older ClawBox images may have v22.22.2, which
   # looks like "Node 22" but crashes the OpenClaw CLI after npm install.
   if node_satisfies_openclaw_engine; then
@@ -2205,6 +2228,28 @@ step_openclaw_install() {
     echo "  OpenClaw installed: $($OPENCLAW_BIN --version 2>/dev/null || echo 'unknown version')"
   fi
 
+  # OpenClaw 2 (>= 2026.8) refuses gateway readiness while legacy state is
+  # present: the sessions/transcripts move into SQLite and stale config keys
+  # fail validation, and BOTH migrations are doctor's to run. A box upgraded
+  # without this step boots into a gateway that never comes up. Non-fatal on
+  # purpose — a doctor refusal leaves evidence in the gateway's own logs and
+  # the gateway start below will say so loudly — and non-interactive so an
+  # unattended update never parks on a prompt.
+  if openclaw_version_is_v2 "$TARGET"; then
+    echo "  Running openclaw doctor --fix (OpenClaw 2 config + session migrations)..."
+    # The sessions-to-SQLite move must not race a still-running v1 gateway
+    # writing the very files being migrated; gateway_setup restarts it later.
+    systemctl stop clawbox-gateway.service 2>/dev/null || true
+    as_clawbox -H "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null \
+      || echo "  WARN: openclaw doctor --fix did not complete; the gateway may refuse readiness until it is run"
+    # The stop above was for doctor's benefit. A FULL install restarts the
+    # gateway later (gateway_setup), but this step is also on the standalone
+    # run-step allow-list, where nothing follows — leaving it down would turn
+    # a UI-triggered core update into an outage. Best effort: a box where the
+    # unit does not exist yet (first install) has nothing to start.
+    systemctl start clawbox-gateway.service 2>/dev/null || true
+  fi
+
   # Force-reinstall every externally-installed plugin so they're bumped
   # alongside the core. Without this, a core 5.12→5.22 bump leaves
   # @openclaw/codex stuck at whatever was first installed by
@@ -2343,6 +2388,15 @@ step_clawkeep_install() {
 
 step_openclaw_patch() {
   is_hermes_edition && return 0
+  # OpenClaw 2 rewrote the connect handler this step used to sed: the scope
+  # regex now matches sites where the injected identifiers do not exist (a
+  # broken bundle), and the device-identity bypass it papered over is retired
+  # outright — ClawBox implements the REAL device identity client-side now
+  # (src/lib/gateway-device-identity.ts). Nothing here applies to gen 2.
+  if openclaw_is_v2; then
+    echo "  Gateway patches: not needed on OpenClaw 2 (device identity implemented client-side)"
+    return 0
+  fi
   # Patcher restricts file searches to .js (runtime bundles) — newer openclaw
   # releases ship .d.ts declaration files alongside bundled JS, and literal
   # type strings would otherwise match files we cannot patch.
@@ -2451,13 +2505,30 @@ step_openclaw_config() {
   local CURRENT_PRIMARY
   CURRENT_PRIMARY=$(as_clawbox "$OPENCLAW_BIN" config get agents.defaults.model.primary 2>/dev/null || echo "")
   if [ -z "$CURRENT_PRIMARY" ] || [ "$CURRENT_PRIMARY" = "null" ]; then
-    oc_config_set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
-    echo "  Default model set"
+    if openclaw_is_v2; then
+      # OpenClaw 2 VALIDATES model refs at config set, and this v1-era seed
+      # names a model no fresh box can resolve (the anthropic provider is not
+      # configured yet), so the write failed three times and aborted every
+      # fresh 2026.8.1 install (caught by e2e-install on PR #565). A fresh
+      # gen-2 box needs no placeholder at all: the gateway runs
+      # --allow-unconfigured and onboarding/the configure route write the
+      # real primary the moment the owner picks a provider.
+      echo "  Default model left unset (OpenClaw 2 validates refs; onboarding sets it)"
+    else
+      oc_config_set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
+      echo "  Default model set"
+    fi
   else
     echo "  Default model already set ($CURRENT_PRIMARY) — preserving"
   fi
-  oc_config_set agents.defaults.compaction.reserveTokensFloor 24000
-  echo "  Compaction reserve floor set"
+  if openclaw_is_v2; then
+    # Gen 2 replaced the reserve-tuning keys with compaction.mode and fails
+    # validation on the old one; its own safeguard default needs no seeding.
+    echo "  Compaction reserve floor: managed by OpenClaw 2 (compaction.mode)"
+  else
+    oc_config_set agents.defaults.compaction.reserveTokensFloor 24000
+    echo "  Compaction reserve floor set"
+  fi
 
   if [ -z "$CLAWBOX_AI_KEY" ] && [ -f "$CLAWBOX_AI_ENV" ]; then
     CLAWBOX_AI_KEY=$(grep '^CLAWBOX_AI_API_KEY=' "$CLAWBOX_AI_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -2465,8 +2536,18 @@ step_openclaw_config() {
   if [ -n "$CLAWBOX_AI_KEY" ]; then
     local CLAWBOX_AI_PROVIDER_JSON
     CLAWBOX_AI_PROVIDER_JSON=$(node -e 'const key=process.argv[1]; process.stdout.write(JSON.stringify({baseUrl:"https://api.deepseek.com",api:"openai-completions",apiKey:key,models:[{id:"deepseek-chat",name:"ClawBox AI",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:65536,maxTokens:8192}]}));' "$CLAWBOX_AI_KEY")
-    mkdir -p "$(dirname "$AUTH_PROFILES")"
-    CLAWBOX_AI_KEY="$CLAWBOX_AI_KEY" AUTH_PROFILES="$AUTH_PROFILES" node -e 'const fs=require("fs"); const p=process.env.AUTH_PROFILES; let data={version:1,profiles:{}}; try{data=JSON.parse(fs.readFileSync(p,"utf8"));}catch{} data.profiles["deepseek:default"]={type:"api_key",provider:"deepseek",key:process.env.CLAWBOX_AI_KEY}; fs.writeFileSync(p, JSON.stringify(data,null,2), { mode: 0o600 });'
+    if openclaw_is_v2; then
+      # OpenClaw 2 keeps credentials in its sqlite auth store, and recreating
+      # the legacy auth-profiles.json poisons it (the gateway refuses with
+      # AuthProfileMigrationRequiredError until doctor runs — the exact defect
+      # PR #565 chased through the configure route). The CLI owns the store's
+      # schema on every generation; the key rides stdin, never argv.
+      printf '%s\n' "$CLAWBOX_AI_KEY" | as_clawbox -H "$OPENCLAW_BIN" models auth paste-api-key --provider deepseek --profile-id deepseek:default \
+        || echo "  WARN: models auth paste-api-key failed; ClawBox AI fallback credential not stored"
+    else
+      mkdir -p "$(dirname "$AUTH_PROFILES")"
+      CLAWBOX_AI_KEY="$CLAWBOX_AI_KEY" AUTH_PROFILES="$AUTH_PROFILES" node -e 'const fs=require("fs"); const p=process.env.AUTH_PROFILES; let data={version:1,profiles:{}}; try{data=JSON.parse(fs.readFileSync(p,"utf8"));}catch{} data.profiles["deepseek:default"]={type:"api_key",provider:"deepseek",key:process.env.CLAWBOX_AI_KEY}; fs.writeFileSync(p, JSON.stringify(data,null,2), { mode: 0o600 });'
+    fi
     oc_config_set auth.profiles.deepseek:default '{"provider":"deepseek","mode":"api_key"}' --json
     oc_config_set models.providers.deepseek "$CLAWBOX_AI_PROVIDER_JSON" --json
     oc_config_set agents.defaults.model.fallback "deepseek/deepseek-chat"
@@ -2792,7 +2873,12 @@ step_openclaw_tts() {
   # chosen ElevenLabs (or turned TTS off) must not have it silently reset by
   # every update, and rebuild_reboot re-invokes this step.
   local CURRENT_TTS
-  CURRENT_TTS=$(as_clawbox "$OPENCLAW_BIN" config get messages.tts.provider 2>/dev/null || echo "")
+  # OpenClaw 2 moved the speech block from messages.tts to a top-level tts
+  # object; writing the old home there fails config validation and a fresh
+  # v2 box would never get its local voice.
+  local TTS_HOME="messages.tts"
+  openclaw_is_v2 && TTS_HOME="tts"
+  CURRENT_TTS=$(as_clawbox "$OPENCLAW_BIN" config get "$TTS_HOME.provider" 2>/dev/null || echo "")
   if [ -n "$CURRENT_TTS" ] && [ "$CURRENT_TTS" != "null" ]; then
     # An owner who chose ElevenLabs keeps it. But when the box is already on
     # OUR provider, preserving the selection is not enough: the update that
@@ -2846,7 +2932,7 @@ step_openclaw_tts() {
   # then gives up; if the provider definition did not land, naming it as THE
   # provider leaves the box pointing at a provider that does not exist, and
   # every spoken reply fails — strictly worse than not having run at all.
-  if ! oc_config_set messages.tts.providers.tts-local-cli "$TTS_PROVIDER_JSON" --json; then
+  if ! oc_config_set "$TTS_HOME.providers.tts-local-cli" "$TTS_PROVIDER_JSON" --json; then
     echo "  ERROR: could not write the tts-local-cli provider — leaving messages.tts.provider unset" >&2
     return 1
   fi
@@ -2864,7 +2950,7 @@ step_openclaw_tts() {
     return 1
   fi
 
-  if ! oc_config_set messages.tts.provider "tts-local-cli"; then
+  if ! oc_config_set "$TTS_HOME.provider" "tts-local-cli"; then
     echo "  ERROR: could not select the tts-local-cli provider" >&2
     return 1
   fi

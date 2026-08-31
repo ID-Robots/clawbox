@@ -28,7 +28,7 @@ import {
  * The sibling of /setup-api/tts, for the other direction of speech. The one
  * preference reaches two surfaces: the chat microphone reads it per request
  * (src/app/setup-api/chat/transcribe), and channel voice notes get it as the
- * order of `tools.media.audio.models[]` in openclaw.json, which is why a POST
+ * order of `tools.media.models[]` in openclaw.json, which is why a POST
  * here can end in a gateway restart.
  *
  * GET touches only the filesystem, plus one cached python import check. The
@@ -91,11 +91,24 @@ export async function GET() {
  */
 async function syncChannelAudio(order: SttEngine[], localInstalled: boolean): Promise<boolean> {
   const models = buildAudioModels(order, localInstalled);
-  const audio = (await readConfig()).tools?.media?.audio;
-  if (audio?.baseUrl === CLAWBOX_AI_PROXY_URL && isDeepStrictEqual(audio.models, models)) return false;
+  // OpenClaw 2: the endpoint stays under tools.media.audio, but the model
+  // list lives in the SHARED tools.media.models — one list for every media
+  // capability, so rows that are not ours to order (no capabilities, or
+  // capabilities without "audio": vision, video, an owner's own entries)
+  // must ride along untouched. Only the audio subset is this route's.
+  const media = (await readConfig()).tools?.media;
+  const existing = Array.isArray(media?.models) ? media.models : [];
+  const isAudioRow = (row: unknown): boolean => {
+    if (!row || typeof row !== "object") return false;
+    const caps = (row as { capabilities?: unknown }).capabilities;
+    return Array.isArray(caps) && caps.includes("audio");
+  };
+  const foreign = existing.filter((row) => !isAudioRow(row));
+  const merged = [...foreign, ...models];
+  if (media?.audio?.baseUrl === CLAWBOX_AI_PROXY_URL && isDeepStrictEqual(existing.filter(isAudioRow), models)) return false;
   await runOpenclawConfigSetBatch([
     ["tools.media.audio.baseUrl", JSON.stringify(CLAWBOX_AI_PROXY_URL), "--json"],
-    ["tools.media.audio.models", JSON.stringify(models), "--json"],
+    ["tools.media.models", JSON.stringify(merged), "--json"],
   ]);
   return true;
 }

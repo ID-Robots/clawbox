@@ -140,7 +140,7 @@ describe("New chat where there is no gateway to reset", () => {
     await sendTurn(textarea, "remember the number 41");
     await screen.findByText("hello back");
 
-    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+    fireEvent.click(screen.getByTestId("chat-new-tab"));
 
     await waitFor(() => expect(screen.queryByText("hello back")).toBeNull());
     expect(screen.queryByText("remember the number 41")).toBeNull();
@@ -163,7 +163,7 @@ describe("New chat where there is no gateway to reset", () => {
     await sendTurn(textarea, "what was the number?");
     expect(box.chatPosts[1].sessionId).toBe(HERMES_SESSION);
 
-    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+    fireEvent.click(screen.getByTestId("chat-new-tab"));
     await waitFor(() => expect(screen.queryByText("hello back")).toBeNull());
 
     await sendTurn(textarea, "what was the number?");

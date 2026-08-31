@@ -64,7 +64,7 @@ type AudioConfig = { baseUrl?: unknown; models?: unknown; [key: string]: unknown
  * `routeIsOurs: false` is the real script's starting value, i.e. a box whose openai slot belongs to its
  * owner or that has no ClawBox AI token at all.
  */
-function migrate(cfg: Config, routeIsOurs = true): { cfg: Config; changed: boolean; log: string } {
+function migrate(cfg: Config, routeIsOurs = true, v2 = false): { cfg: Config; changed: boolean; log: string } {
   const file = path.join(dir, "config.json");
   writeFileSync(file, JSON.stringify(cfg));
   const program = [
@@ -73,6 +73,7 @@ function migrate(cfg: Config, routeIsOurs = true): { cfg: Config; changed: boole
     "changed = False",
     `_clawai_openai_route_is_ours = ${routeIsOurs ? "True" : "False"}`,
     `_clawai_proxy_base_url = ${JSON.stringify(PROXY)}`,
+    ...(v2 ? ["CLAWBOX_OPENCLAW_V2 = True"] : []),
     POLICY,
     "print(json.dumps({'cfg': cfg, 'changed': changed}))",
   ].join("\n");
@@ -310,5 +311,39 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI speech-to-text mig
       const { cfg } = migrate({});
       expect(audio(cfg)!.models).toEqual(OURS);
     });
+  });
+});
+
+// OpenClaw 2 (>= 2026.8) keeps the endpoint under tools.media.audio but the
+// model list moved to the shared tools.media.models, every row tagged with
+// capabilities: ["audio"]. The block picks the home from CLAWBOX_OPENCLAW_V2
+// (bound via globals() precisely so this file can set it in the preamble).
+describe.skipIf(!hasPython3)("the same migration on OpenClaw 2 homes", () => {
+  it("seeds the shared tools.media.models list, tagged for audio, and leaves audio.models alone", () => {
+    const { cfg, changed } = migrate({}, true, true);
+    expect(changed).toBe(true);
+    const media = (cfg.tools as { media?: { models?: unknown; audio?: AudioConfig } } | undefined)?.media;
+    expect(media?.audio).toEqual({ baseUrl: PROXY });
+    expect(media?.models).toEqual([{ ...CLOUD, capabilities: ["audio"] }]);
+  });
+
+  it("leaves a Settings-written order in the shared list untouched — capabilities and all", () => {
+    const existing = [LOCAL_CLI, { ...CLOUD, capabilities: ["audio"] }];
+    const { cfg, changed } = migrate(
+      { tools: { media: { audio: { baseUrl: PROXY }, models: existing } } },
+      true,
+      true,
+    );
+    expect(changed).toBe(false);
+    expect((cfg.tools as { media?: { models?: unknown } }).media?.models).toEqual(existing);
+  });
+
+  it("treats a foreign row in the shared list as the owner's own transcription route", () => {
+    const foreign = [{ provider: "deepgram", model: "nova" }];
+    const { cfg, changed } = migrate({ tools: { media: { models: foreign } } }, true, true);
+    expect(changed).toBe(false);
+    const media = (cfg.tools as { media?: { models?: unknown; audio?: AudioConfig } }).media;
+    expect(media?.models).toEqual(foreign);
+    expect(media?.audio).toBeUndefined();
   });
 });

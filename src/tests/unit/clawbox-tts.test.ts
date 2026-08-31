@@ -677,7 +677,13 @@ describe("install.sh wires TTS to the on-device chain", () => {
   it("seeds the provider only when the owner has not chosen one", () => {
     // Same contract as agents.defaults.model.primary: an owner who switched to
     // ElevenLabs must not be reset to the local CLI by every update.
-    expect(step).toContain("config get messages.tts.provider");
+    // OpenClaw 2 moved the speech block to a top-level tts object; the step
+    // resolves the home once and speaks whichever dialect the box's binary
+    // does. Pinning the mapping keeps a future edit from writing one
+    // generation's keys to the other's gateway.
+    expect(step).toContain('TTS_HOME="messages.tts"');
+    expect(step).toContain('openclaw_is_v2 && TTS_HOME="tts"');
+    expect(step).toContain('config get "$TTS_HOME.provider"');
     expect(step).toMatch(/CURRENT_TTS.*!=.*"null"|"\$CURRENT_TTS" != "null"/);
     expect(step).toContain("preserving");
     // The preserve branch must return BEFORE anything is written, otherwise
@@ -687,7 +693,7 @@ describe("install.sh wires TTS to the on-device chain", () => {
     // the step on this path too — that population (already-configured, updating
     // in place) is exactly the one that had the defect.
     const guardIndex = step.indexOf("preserving");
-    const setIndex = step.indexOf("oc_config_set messages.tts.provider");
+    const setIndex = step.indexOf('oc_config_set "$TTS_HOME.provider"');
     expect(step.slice(guardIndex, setIndex)).toMatch(/return "\$TTS_RC"/);
     expect(setIndex).toBeGreaterThan(guardIndex);
   });
@@ -696,16 +702,16 @@ describe("install.sh wires TTS to the on-device chain", () => {
     // oc_config_set retries 3x then returns 1. Naming tts-local-cli as THE
     // provider after its definition failed to land points the box at a
     // provider that does not exist and breaks every spoken reply.
-    expect(step).toContain("if ! oc_config_set messages.tts.providers.tts-local-cli");
-    const defineIndex = step.indexOf("oc_config_set messages.tts.providers.tts-local-cli");
-    const selectIndex = step.indexOf("oc_config_set messages.tts.provider ");
+    expect(step).toContain('if ! oc_config_set "$TTS_HOME.providers.tts-local-cli"');
+    const defineIndex = step.indexOf('oc_config_set "$TTS_HOME.providers.tts-local-cli"');
+    const selectIndex = step.indexOf('oc_config_set "$TTS_HOME.provider" ');
     expect(step.slice(defineIndex, selectIndex)).toContain("return 1");
   });
 
   it("refuses to wire the provider to a command that is not there", () => {
     expect(step).toContain('[ ! -x "$TTS_SCRIPT" ]');
     const checkIndex = step.indexOf('[ ! -x "$TTS_SCRIPT" ]');
-    const setIndex = step.indexOf("oc_config_set messages.tts.providers");
+    const setIndex = step.indexOf('oc_config_set "$TTS_HOME.providers');
     expect(checkIndex).toBeLessThan(setIndex);
   });
 
@@ -722,7 +728,7 @@ describe("install.sh wires TTS to the on-device chain", () => {
   });
 
   it("writes config through the retrying helper, not a raw config set", () => {
-    expect(step).toContain("oc_config_set messages.tts.providers.tts-local-cli");
+    expect(step).toContain('oc_config_set "$TTS_HOME.providers.tts-local-cli"');
     expect(step).not.toMatch(/^\s*as_clawbox "\$OPENCLAW_BIN" config set/m);
   });
 

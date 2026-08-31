@@ -57,11 +57,12 @@ export function sttEngineOrder(primary: SttEngine): SttEngine[] {
   return primary === "cloud" ? ["cloud", "local"] : ["local", "cloud"];
 }
 
-/** One `tools.media.audio.models[]` entry, in either of the shapes OpenClaw accepts. */
+/** One `tools.media.models[]` entry, in either of the shapes OpenClaw accepts. */
 export type AudioModelEntry = Record<string, unknown>;
 
 /**
- * The `tools.media.audio.models[]` array for an engine order.
+ * The `tools.media.models[]` array for an engine order (OpenClaw 2's one
+ * shared media-model list; audio rows are tagged capabilities: ["audio"]).
  *
  * The cloud entry is the provider row gateway-pre-start.sh has always seeded.
  * The local entry is a CLI row running the same stt-client.py the chat
@@ -74,7 +75,9 @@ export function buildAudioModels(order: readonly SttEngine[], localInstalled: bo
   const entries: AudioModelEntry[] = [];
   for (const engine of order) {
     if (engine === "cloud") {
-      entries.push({ provider: "openai", model: TRANSCRIBE_MODEL });
+      // capabilities says where the row may be used; OpenClaw 2's shared
+      // tools.media.models list requires it on every row.
+      entries.push({ provider: "openai", model: TRANSCRIBE_MODEL, capabilities: ["audio"] });
     } else if (localInstalled) {
       entries.push({
         type: "cli",

@@ -71,6 +71,8 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfigStrict: vi.fn().mockResolvedValue({}),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
+  spawnOpenclawCli: vi.fn().mockResolvedValue(""),
+  runOpenclawDoctorFix: vi.fn().mockResolvedValue(undefined),
   runOpenclawConfigSetBatch: vi.fn(),
   applyModelOverrideToAllAgentSessions: vi.fn(),
   parseFullyQualifiedModel: vi.fn(parseFullyQualifiedModelImpl),

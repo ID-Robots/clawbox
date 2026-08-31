@@ -1,4 +1,5 @@
 import fs from "fs/promises";
+import { listAgentIds, sessionStorePath, sweepSessionEntries } from "./openclaw-session-store";
 import fsSync from "fs";
 import path from "path";
 import { execFile, spawn } from "child_process";
@@ -140,6 +141,13 @@ export interface SpawnOpenclawOptions {
   /** Capture and resolve stdout (needed to read `--json` output). Default false. */
   captureStdout?: boolean;
   /**
+   * Write this to the child's stdin and close it. The one way to hand the CLI
+   * a secret without putting it in argv (`models auth paste-api-key` reads the
+   * key from stdin). Callers passing one should set labelArgs anyway — the
+   * value never appears in the label, but argv hygiene is theirs to keep.
+   */
+  stdinData?: string;
+  /**
    * Argv to name the process by in error messages, when the real argv must not
    * appear in one. Defaults to `args`. See {@link spawnOpenclawConfigSet}.
    */
@@ -168,7 +176,7 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
     return Promise.reject(new OpenclawUnavailableError());
   }
   const bin = findOpenclawBin();
-  const { uid, gid, captureStdout = false } = options;
+  const { uid, gid, captureStdout = false, stdinData } = options;
   const timeoutMs = options.timeoutMs ?? 30_000;
   const cwd = options.cwd ?? process.env.HOME ?? "/home/clawbox";
   const env = { HOME: "/home/clawbox", ...process.env, ...(options.env ?? {}) };
@@ -177,7 +185,7 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
   return new Promise((resolve, reject) => {
     let settled = false;
     const child = spawn(bin, args, {
-      stdio: ["ignore", captureStdout ? "pipe" : "ignore", "pipe"],
+      stdio: [stdinData !== undefined ? "pipe" : "ignore", captureStdout ? "pipe" : "ignore", "pipe"],
       cwd,
       ...(uid !== undefined ? { uid } : {}),
       ...(gid !== undefined ? { gid } : {}),
@@ -192,6 +200,13 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
+
+    if (stdinData !== undefined) {
+      // EPIPE when the child exits before reading — close() reports the truth.
+      child.stdin?.on("error", () => {});
+      child.stdin?.write(stdinData);
+      child.stdin?.end();
+    }
 
     const timer = setTimeout(() => {
       if (!settled) {
@@ -559,7 +574,54 @@ export async function applyModelOverrideToAllAgentSessions(
   let filesUpdated = 0;
   let sessionsUpdated = 0;
 
-  const files = await listAgentSessionsFiles(agentsDir);
+  /** The per-entry mutation, shared verbatim by both store generations. */
+  const applyToSession = (session: Record<string, unknown>): boolean => {
+    if (skipUserTagged && session.modelOverrideSource === "user") {
+      const sameProvider =
+        session.providerOverride === update.provider ||
+        session.modelProvider === update.provider;
+      const sameModel =
+        session.modelOverride === update.modelId ||
+        session.model === update.modelId;
+      if (!sameProvider || !sameModel) {
+        return false;
+      }
+    }
+    session.providerOverride = update.provider;
+    session.modelOverride = update.modelId;
+    session.modelOverrideSource = source;
+    session.authProfileOverride = authProfile;
+    session.authProfileOverrideSource = source;
+    session.modelProvider = update.provider;
+    session.model = update.modelId;
+    if (isThinkingLevel(session.thinkingLevel)) {
+      const reasoning = getProviderReasoningConfig(update.provider, `${update.provider}/${update.modelId}`);
+      if (!reasoning.levels.includes(session.thinkingLevel)) {
+        session.thinkingLevel = reasoning.default;
+      }
+    }
+    return true;
+  };
+
+  // OpenClaw 2 agents keep their sessions in SQLite; an agent with a store is
+  // swept there and its (absent or archived) sessions.json is left alone.
+  const migratedAgents = new Set<string>();
+  for (const agentId of listAgentIds(agentsDir)) {
+    if (!sessionStorePath(agentId, agentsDir)) continue;
+    const result = sweepSessionEntries(agentId, (_key, entry) => applyToSession(entry), agentsDir);
+    // A failed sweep is not a swept agent: leave it to the legacy file pass
+    // rather than reporting sessions updated that never were.
+    if (!result?.ok) continue;
+    migratedAgents.add(agentId);
+    if (result.updated > 0) {
+      filesUpdated += 1;
+      sessionsUpdated += result.updated;
+    }
+  }
+
+  const files = (await listAgentSessionsFiles(agentsDir)).filter(
+    (file) => !migratedAgents.has(path.basename(path.dirname(path.dirname(file)))),
+  );
   for (const file of files) {
     let parsed: unknown;
     try {
@@ -578,24 +640,9 @@ export async function applyModelOverrideToAllAgentSessions(
       // for a soft sweep. A session whose existing override matches
       // the new target is still touched so its source/authProfile
       // converge with the target — only diverging user picks stay put.
-      if (skipUserTagged && session.modelOverrideSource === "user") {
-        const sameProvider =
-          session.providerOverride === update.provider ||
-          session.modelProvider === update.provider;
-        const sameModel =
-          session.modelOverride === update.modelId ||
-          session.model === update.modelId;
-        if (!sameProvider || !sameModel) {
-          continue;
-        }
+      if (!applyToSession(session)) {
+        continue;
       }
-      session.providerOverride = update.provider;
-      session.modelOverride = update.modelId;
-      session.modelOverrideSource = source;
-      session.authProfileOverride = authProfile;
-      session.authProfileOverrideSource = source;
-      session.modelProvider = update.provider;
-      session.model = update.modelId;
       // Normalise the sticky reasoning-effort override to the new model's
       // capability. `thinkingLevel` is a per-session sticky the gateway keeps
       // (set via `sessions.patch`); repointing the session to a model that
@@ -604,14 +651,6 @@ export async function applyModelOverrideToAllAgentSessions(
       // next turn with `thinkingLevel "high" is not supported for llamacpp/…
       // (use off)`. Only rewrite when the existing level is actually
       // unsupported, so a compatible level (e.g. cloud→cloud) is left intact.
-      if (isThinkingLevel(session.thinkingLevel)) {
-        // Model-qualified: ClawBox AI's default depends on the tier the target
-        // model belongs to, so a stale level folds to the RIGHT default.
-        const reasoning = getProviderReasoningConfig(update.provider, `${update.provider}/${update.modelId}`);
-        if (!reasoning.levels.includes(session.thinkingLevel)) {
-          session.thinkingLevel = reasoning.default;
-        }
-      }
       touchedInFile += 1;
     }
 
@@ -642,6 +681,12 @@ export function parseFullyQualifiedModel(fq: string): { provider: string; modelI
 
 export interface OpenClawConfig {
   [key: string]: unknown;
+  /** OpenClaw 2's home for speech output (was messages.tts before 2026.8). */
+  tts?: {
+    provider?: string;
+    providers?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
   channels?: {
     [name: string]: {
       enabled?: boolean;
@@ -682,6 +727,8 @@ export interface OpenClawConfig {
     // list of engines (src/lib/stt-preference.ts builds the audio one).
     media?: {
       audio?: { baseUrl?: string; models?: unknown[]; [key: string]: unknown };
+      /** OpenClaw 2's shared media-model list (audio rows carry capabilities: ["audio"]). */
+      models?: unknown[];
       [key: string]: unknown;
     };
   };
@@ -707,6 +754,8 @@ export interface OpenClawConfig {
       // `model`, entirely separate key — and distinct again from `imageModel`,
       // which selects the vision (image *understanding*) model.
       imageGenerationModel?: { primary?: string; fallbacks?: string[] };
+      /** OpenClaw 2's home for the same choice: mediaModels.image. */
+      mediaModels?: { image?: { primary?: string; fallbacks?: string[] }; [key: string]: unknown };
       // Which model *looks at* an image — the vision model OpenClaw resolves
       // when a text-only session model is handed a picture and the `image`
       // tool has to describe it. Same shape, separate key from
@@ -892,7 +941,7 @@ function existingChannelBlock(
   return isPlainObject(existing) ? existing : {};
 }
 
-async function writeConfig(config: OpenClawConfig): Promise<void> {
+export async function writeConfig(config: OpenClawConfig): Promise<void> {
   await fs.mkdir(OPENCLAW_HOME, { recursive: true });
   const tmpPath = CONFIG_PATH + ".tmp";
   await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), "utf-8");
@@ -967,9 +1016,14 @@ export async function clearSkillEntry(skillId: string): Promise<boolean> {
  */
 export async function ensureMicrosoftTtsExcluded(): Promise<boolean> {
   const config = await readConfig();
+  // OpenClaw 2 home first (top-level tts), then the pre-2026.8 messages.tts.
+  // The switch is written back into whichever home the providers were found
+  // in — writing the other one would be a key the running gateway refuses.
+  const topLevel = (config as { tts?: Record<string, unknown> }).tts;
   const messages = (config as { messages?: Record<string, unknown> }).messages;
-  const tts = messages?.tts as { providers?: Record<string, unknown> } | undefined;
-  const providers = tts?.providers;
+  const legacy = messages?.tts as { providers?: Record<string, unknown> } | undefined;
+  const tts = (topLevel && typeof topLevel === "object" ? topLevel : undefined) ?? legacy;
+  const providers = (tts as { providers?: Record<string, unknown> } | undefined)?.providers;
   if (!providers || typeof providers !== "object") return false;
   if (!providers["tts-local-cli"]) return false;
   const microsoft = providers.microsoft;
@@ -1012,6 +1066,16 @@ export async function ensureCompactionReserveFloor(
   reserveTokensFloor = DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR
 ): Promise<void> {
   const config = await readConfig();
+  // OpenClaw 2 replaced the reserve-tuning keys with compaction.mode and
+  // fails config validation on reserveTokensFloor — writing it here would
+  // brick the next gateway load. The mode key is the generation marker the
+  // loader migration leaves behind; a config carrying it never gets the
+  // legacy write. (A fresh v2 box without it is covered by the writers all
+  // being gone: install.sh, the configure route and the reset seed are
+  // version-gated, so this repair is the last legacy writer standing.)
+  const compactionProbe = (config as { agents?: { defaults?: { compaction?: { mode?: unknown } } } })
+    .agents?.defaults?.compaction;
+  if (compactionProbe && typeof compactionProbe.mode === "string") return;
   const agents = ensurePlainObject(asBag(config), "agents");
   const defaults = ensurePlainObject(agents, "defaults");
   const compaction = ensurePlainObject(defaults, "compaction");
@@ -1530,8 +1594,42 @@ export function gatewayIsAbsent(): boolean {
   return readEdition() === "hermes";
 }
 
+/**
+ * OpenClaw 2 keeps auth profiles in `state/openclaw.sqlite` and refuses to
+ * hydrate plaintext credentials found in openclaw.json — the gateway exits
+ * with AuthProfileMigrationRequiredError until `doctor --fix` migrates them.
+ * Every `config set auth.profiles.*` recreates that condition, so the
+ * configure route runs this right before its gateway restart, mirroring
+ * install.sh: gateway stopped first (doctor migrates the store the gateway
+ * holds open), safe migrations only, and the caller's restart starts it
+ * again. On OpenClaw 1 there is nothing to migrate and doctor answers fast.
+ */
+export async function runOpenclawDoctorFix(): Promise<void> {
+  if (gatewayIsAbsent()) return;
+  try {
+    await exec("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
+      timeout: 30000,
+    });
+  } catch {
+    /* older sudoers or already stopped — doctor itself reports real trouble */
+  }
+  await spawnOpenclaw(["doctor", "--fix", "--non-interactive"], { timeoutMs: 180_000 });
+}
+
 export async function restartGateway(): Promise<void> {
   if (gatewayIsAbsent()) return;
+  // Best effort, before the restart: a unit that crash-looped through its
+  // StartLimitBurst (20/hour — one bad config during an update is enough)
+  // refuses every restart for the rest of the window with "Start request
+  // repeated too quickly", and nothing else running as the clawbox user can
+  // clear that state. Ignored wherever sudoers has not learned the verb yet.
+  try {
+    await exec("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "reset-failed", "clawbox-gateway.service"], {
+      timeout: 15000,
+    });
+  } catch {
+    /* older sudoers, or nothing to reset — the restart below tells the truth */
+  }
   try {
     await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], {
       timeout: 60000,

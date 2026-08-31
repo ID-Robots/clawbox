@@ -4,7 +4,7 @@
  *
  * WHY A SCRIPT AND NOT A LIBRARY. The client already exists for OpenClaw's
  * media-understanding surface (a `type: "cli"` entry in
- * `tools.media.audio.models[]` runs it for every channel voice note), and it
+ * `tools.media.models[]` runs it for every channel voice note), and it
  * owns the awkward parts: it starts the `whisper-server` user unit on demand
  * so the model stays loaded between calls, talks to it over a unix socket,
  * and falls back to an in-process decode when the server is not there. The

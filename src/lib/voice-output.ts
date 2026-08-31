@@ -57,6 +57,12 @@ import {
  * to it.
  */
 export interface VoiceConfigView {
+  /** OpenClaw 2's home for the speech config. */
+  tts?: {
+    provider?: unknown;
+    providers?: unknown;
+  };
+  /** The pre-2026.8 home; still read so a not-yet-migrated box keeps its voice. */
   messages?: {
     tts?: {
       provider?: unknown;
@@ -216,13 +222,13 @@ export function cloudModelFrom(config: VoiceConfigView): string | null {
 }
 
 function ttsProviders(config: VoiceConfigView): Record<string, TtsProviderEntry> {
-  const providers = config.messages?.tts?.providers;
+  const providers = config.tts?.providers ?? config.messages?.tts?.providers;
   if (!providers || typeof providers !== "object" || Array.isArray(providers)) return {};
   return providers as Record<string, TtsProviderEntry>;
 }
 
 export function configuredTtsProviderId(config: VoiceConfigView): string | null {
-  return normalizeProviderId(config.messages?.tts?.provider);
+  return normalizeProviderId(config.tts?.provider ?? config.messages?.tts?.provider);
 }
 
 /**

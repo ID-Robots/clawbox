@@ -17,7 +17,7 @@ let lib: Lib;
 let originalHome: string | undefined;
 
 const HOME = "/home/testbox";
-const CLOUD = { provider: "openai", model: "gpt-4o-mini-transcribe" };
+const CLOUD = { provider: "openai", model: "gpt-4o-mini-transcribe", capabilities: ["audio"] };
 const LOCAL = {
   type: "cli",
   command: "/usr/bin/python3",

@@ -88,6 +88,9 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfigStrict: vi.fn(),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
+  runOpenclawDoctorFix: vi.fn().mockResolvedValue(undefined),
+  spawnOpenclawCli: vi.fn().mockResolvedValue(""),
+  writeConfig: vi.fn().mockResolvedValue(undefined),
   runOpenclawConfigSetBatch: vi.fn(),
   runOpenclawConfigUnset: vi.fn(),
   // Added by PR #83 — the configure route sweeps agent sessions so the
@@ -140,7 +143,11 @@ vi.mock("@/lib/local-ai-token", () => ({
 
 import { getAll, setMany } from "@/lib/config-store";
 import { unpairLocal } from "@/lib/clawkeep";
-import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel } from "@/lib/openclaw-config";
+import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel,
+  writeConfig,
+  runOpenclawDoctorFix,
+  spawnOpenclawCli,
+} from "@/lib/openclaw-config";
 import { configSetCalls, configSetCommands, failConfigSetsMatching, findConfigSet } from "./config-set-calls";
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
@@ -193,6 +200,20 @@ function createFailingChildProcess(errorMessage: string): ChildProcess {
   });
 
   return emitter;
+}
+
+/**
+ * The `models auth paste-api-key` call that stored a credential: args carry
+ * provider + profile id (never the secret), the secret rides stdinData.
+ */
+function pasteCallFor(profileId: string) {
+  return vi.mocked(spawnOpenclawCli).mock.calls.find(
+    (call) => Array.isArray(call[0]) && call[0].includes("paste-api-key") && call[0].includes(profileId),
+  );
+}
+
+function pasteStdin(profileId: string): string {
+  return (pasteCallFor(profileId)?.[1] as { stdinData?: string } | undefined)?.stdinData ?? "";
 }
 
 describe("POST /setup-api/ai-models/configure", () => {
@@ -330,6 +351,26 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands).toContain("config set agents.defaults.model.primary openai/gpt-5");
   });
 
+  it("refuses an unknown authMode before any write", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "anthropic",
+      apiKey: "sk-test",
+      authMode: "yolo",
+    }));
+    expect(res.status).toBe(400);
+    expect(vi.mocked(spawnOpenclawCli)).not.toHaveBeenCalled();
+    expect(mockFs.writeFile).not.toHaveBeenCalled();
+  });
+
+  it("accepts authMode 'local' (the Ollama hook's spelling)", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "ollama",
+      apiKey: "mistral:7b",
+      authMode: "local",
+    }));
+    expect(res.status).toBe(200);
+  });
+
   it("returns 400 for ClawBox AI when no token is provided or stored", async () => {
     const res = await configurePost(jsonRequest({
       provider: "clawai",
@@ -350,14 +391,9 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
 
-    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
-    expect(writtenContent.profiles["deepseek:default"]).toEqual(
-      expect.objectContaining({
-        type: "api_key",
-        provider: "deepseek",
-        key: "portal-token-123",
-      }),
-    );
+    const paste = pasteCallFor("deepseek:default");
+    expect(paste?.[0]).toEqual(expect.arrayContaining(["--provider", "deepseek"]));
+    expect(pasteStdin("deepseek:default")).toContain("portal-token-123");
 
     const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.deepseek");
     const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
@@ -457,7 +493,10 @@ describe("POST /setup-api/ai-models/configure", () => {
     // the agent's system prompt + tools, so every turn overflows before the
     // model runs.
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
-    expect(commands).toContain("config set agents.defaults.compaction.reserveTokensFloor 8192");
+    // OpenClaw 2 retired the reserve-tuning keys (compaction.mode owns this
+    // now); the route must not write one for ANY provider, small-window
+    // local models included.
+    expect(commands.some((c) => c.includes("reserveTokensFloor"))).toBe(false);
   });
 
   it("honours the model FIELD for Ollama when the apiKey slot is empty", async () => {
@@ -523,7 +562,6 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
-    expect(commands).toContain("config set agents.defaults.compaction.reserveTokensFloor 24000");
     expect(commands).toContain("config set gateway.auth.mode token");
     // Token must be a per-device 32-byte random hex from
     // getOrGenerateGatewayToken — never the legacy literal "clawbox"
@@ -751,13 +789,10 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "sk-test",
     }));
 
-    expect(mockFs.writeFile).toHaveBeenCalled();
-    const writeCall = mockFs.writeFile.mock.calls[0];
-    const writtenContent = JSON.parse(writeCall[1] as string);
-
-    expect(writtenContent.profiles["anthropic:default"]).toBeDefined();
-    expect(writtenContent.profiles["anthropic:default"].type).toBe("api_key");
-    expect(writtenContent.profiles["anthropic:default"].key).toBe("sk-test");
+    // Stored through the CLI's own auth store (paste-api-key, key on stdin) —
+    // the CLI owns the `api_key` shape on every generation.
+    expect(pasteCallFor("anthropic:default")).toBeDefined();
+    expect(pasteStdin("anthropic:default")).toContain("sk-test");
   });
 
   it("writes auth profile with the local-ai bearer for Ollama", async () => {
@@ -766,11 +801,9 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "mistral:7b",
     }));
 
-    const writeCall = mockFs.writeFile.mock.calls[0];
-    const writtenContent = JSON.parse(writeCall[1] as string);
     // Per-install token (>=16 chars) — the proxy validates against the same
     // value via `verifyLocalAiBearer` in src/lib/local-ai-token.ts.
-    expect(writtenContent.profiles["ollama:default"].key).toMatch(/^[a-f0-9]{32,}$/);
+    expect(pasteStdin("ollama:default")).toMatch(/[a-f0-9]{32,}/);
   });
 
   it("writes auth profile with the local-ai bearer for llama.cpp", async () => {
@@ -779,9 +812,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "gemma-q4",
     }));
 
-    const writeCall = mockFs.writeFile.mock.calls[0];
-    const writtenContent = JSON.parse(writeCall[1] as string);
-    expect(writtenContent.profiles["llamacpp:default"].key).toMatch(/^[a-f0-9]{32,}$/);
+    expect(pasteStdin("llamacpp:default")).toMatch(/[a-f0-9]{32,}/);
   });
 
   it("configures ClawBox AI as a fallback model when a stored user token is present", async () => {
@@ -798,14 +829,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands).toContain('config set agents.defaults.model.fallbacks ["deepseek/deepseek-v4-flash"] --json');
     expect(commands.some((command) => command.includes("config set models.providers.deepseek"))).toBe(true);
 
-    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
-    expect(writtenContent.profiles["deepseek:default"]).toEqual(
-      expect.objectContaining({
-        type: "api_key",
-        provider: "deepseek",
-        key: "stored-fallback-token",
-      })
-    );
+    expect(pasteStdin("deepseek:default")).toContain("stored-fallback-token");
   });
 
   it("prefers the configured local AI model as the OpenClaw fallback", async () => {
@@ -1010,10 +1034,9 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     // ...and the managed auth profile uses api_key (not the legacy token mode
     // that 6.8 no longer turns into an Authorization header).
-    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
-    expect(writtenContent.profiles["openrouter:default"]).toEqual(
-      expect.objectContaining({ type: "api_key", provider: "openrouter", key: "sk-or-v1-test" })
-    );
+    const paste = pasteCallFor("openrouter:default");
+    expect(paste?.[0]).toEqual(expect.arrayContaining(["--provider", "openrouter"]));
+    expect(pasteStdin("openrouter:default")).toContain("sk-or-v1-test");
   });
 
   it("honors an openrouter model picked by the user", async () => {
@@ -1067,10 +1090,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(modelIds).toContain("gemini-3.1-flash-lite");
 
     // ...and the managed auth profile is api_key with the inline key.
-    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
-    expect(writtenContent.profiles["google:default"]).toEqual(
-      expect.objectContaining({ type: "api_key", provider: "google", key: "AIzaTestKey123" })
-    );
+    expect(pasteStdin("google:default")).toContain("AIzaTestKey123");
   });
 
   it("configures anthropic as an openai-compat provider with the key inline", async () => {
@@ -1095,10 +1115,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
     expect(modelIds).toContain("claude-sonnet-4-6");
 
-    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
-    expect(writtenContent.profiles["anthropic:default"]).toEqual(
-      expect.objectContaining({ type: "api_key", provider: "anthropic", key: "sk-ant-test123" })
-    );
+    expect(pasteStdin("anthropic:default")).toContain("sk-ant-test123");
   });
 
   // ------------------------------------------------------------------
@@ -1703,6 +1720,74 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(invocationCount()).toBeLessThanOrEqual(2);
     });
 
+    it("saves the primary directly when OpenClaw 2's catalog refuses the reference", async () => {
+      // v2 validates agents.defaults.model.primary against a live catalog
+      // refresh; a placeholder key resolves zero models and refuses the whole
+      // batch. The route must retry the batch without the primary and write
+      // the primary itself, keeping the save-without-validating contract.
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(
+        new Error(
+          'Cannot set model reference "deepseek/deepseek-v4-pro" at agents.defaults.model.primary: Unable to refresh provider catalog',
+        ),
+      );
+      vi.mocked(readConfigStrict).mockResolvedValueOnce({});
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+
+      expect(res.status).toBe(200);
+      const batches = vi.mocked(runOpenclawConfigSetBatch).mock.calls;
+      // The refused batch and its retry lead; the flow may batch again later.
+      expect(batches.length).toBeGreaterThanOrEqual(2);
+      const firstOps = batches[0][0] as Array<[string, string]>;
+      const primaryOp = firstOps.find(([p]) => p === "agents.defaults.model.primary");
+      expect(primaryOp).toBeDefined();
+      const retryPaths = (batches[1][0] as Array<[string, string]>).map(([p]) => p);
+      expect(retryPaths).not.toContain("agents.defaults.model.primary");
+      const written = vi.mocked(writeConfig).mock.calls.at(-1)?.[0] as {
+        agents?: { defaults?: { model?: { primary?: string } } };
+      };
+      expect(written?.agents?.defaults?.model?.primary).toBe(primaryOp?.[1]);
+    });
+
+    it("stores an API key through the CLI's auth store, key on stdin, no doctor", async () => {
+      // OpenClaw 2 refuses a hand-written auth-profiles.json (legacy store);
+      // `models auth paste-api-key` writes the running generation's store and
+      // needs no migration afterwards — so doctor must NOT run here.
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+      expect(res.status).toBe(200);
+      const paste = vi.mocked(spawnOpenclawCli).mock.calls.find(
+        (call) => Array.isArray(call[0]) && call[0].includes("paste-api-key"),
+      );
+      expect(paste).toBeDefined();
+      expect(paste?.[0]).not.toContain("claw_token_abc");
+      expect((paste?.[1] as { stdinData?: string })?.stdinData).toContain("claw_token_abc");
+      expect(vi.mocked(runOpenclawDoctorFix)).not.toHaveBeenCalled();
+    });
+
+    it("refuses to rebuild the config from a fragment when the direct-write read fails", async () => {
+      // readConfigStrict throws on a malformed openclaw.json (only ENOENT is
+      // {}); the fallback must NOT write model.primary into an empty object —
+      // that would replace the whole config with a fragment (CodeRabbit #565).
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(
+        new Error('Cannot set model reference "deepseek/deepseek-v4-pro" at agents.defaults.model.primary: Unable to refresh provider catalog'),
+      );
+      vi.mocked(readConfigStrict).mockRejectedValueOnce(new Error("openclaw.json does not contain a configuration object"));
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+
+      expect(res.status).toBe(500);
+      expect(vi.mocked(writeConfig)).not.toHaveBeenCalled();
+    });
+
     it("still writes every key the old sequence wrote", async () => {
       await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_token_abc" }));
 
@@ -1714,17 +1799,14 @@ describe("POST /setup-api/ai-models/configure", () => {
       for (const expected of [
         "auth.profiles.deepseek:default",
         "agents.defaults.model.primary",
-        "agents.defaults.compaction.reserveTokensFloor",
         "gateway.auth.mode",
         "gateway.auth.token",
-        "gateway.controlUi.allowInsecureAuth",
-        "gateway.controlUi.dangerouslyDisableDeviceAuth",
         "models.providers.deepseek",
         "models.mode",
         "agents.defaults.imageModel",
         "models.providers.openai.apiKey",
         "models.providers.openai.models",
-        "agents.defaults.imageGenerationModel",
+        "agents.defaults.mediaModels.image",
         "agents.defaults.model.fallbacks",
       ]) {
         expect(paths).toContain(expected);
@@ -1742,7 +1824,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       // The expensive ones. Each of these used to be written twice.
       expect(paths.filter((p) => p === "models.providers.deepseek")).toHaveLength(1);
       expect(paths.filter((p) => p === "models.providers.openai.apiKey")).toHaveLength(1);
-      expect(paths.filter((p) => p === "agents.defaults.imageGenerationModel")).toHaveLength(1);
+      expect(paths.filter((p) => p === "agents.defaults.mediaModels.image")).toHaveLength(1);
       // Two, not one: the generic auth-profile step and the ClawBox AI step
       // both name this path, with the same value. That overlap predates this
       // change (it used to make three) and removing it is a different edit.
