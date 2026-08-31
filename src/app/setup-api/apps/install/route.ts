@@ -171,6 +171,16 @@ const FAILURES: Array<{
 ];
 const UNKNOWN_FAILURE = { code: "failed" as const, status: 502, retryable: true, message: () => "Install failed. Please try again." };
 
+/**
+ * Request-derived text on its way into a log line: one line, bounded, and
+ * never handed to console.* as a format string (CodeQL js/log-injection,
+ * js/tainted-format-string — the ref is validated upstream, but the sink
+ * carries its own guard).
+ */
+function logSafe(value: string): string {
+  return value.replace(/[^\x20-\x7E]+/g, " ").slice(0, 200);
+}
+
 function classifyInstallError(rawMsg: string, killed: boolean) {
   if (killed) return FAILURES.find((f) => f.code === "timeout") ?? UNKNOWN_FAILURE;
   return FAILURES.find((f) => f.pattern.test(rawMsg)) ?? UNKNOWN_FAILURE;
@@ -199,11 +209,11 @@ async function runOpenclawInstall(openclawBin: string, ref: string): Promise<Cla
       const failure = classifyInstallError(rawMsg, killed);
       if (failure.code === "rate_limited" && attempt < RATE_LIMIT_BACKOFF_MS.length) {
         const delay = RATE_LIMIT_BACKOFF_MS[attempt];
-        console.warn(`[apps/install] ClawHub 429 on ${ref} (attempt ${attempt + 1}); backing off ${delay}ms`);
+        console.warn("[apps/install] ClawHub 429 on %s (attempt %d); backing off %dms", logSafe(ref), attempt + 1, delay);
         await new Promise((r) => setTimeout(r, delay));
         continue;
       }
-      console.warn(`[apps/install] openclaw skills install ${ref} failed:`, rawMsg);
+      console.warn("[apps/install] openclaw skills install %s failed: %s", logSafe(ref), logSafe(rawMsg));
       return {
         success: false,
         error: failure.message(ref),

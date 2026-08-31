@@ -113,6 +113,11 @@ export async function listSkills(): Promise<SkillInfo[]> {
  * answers in milliseconds either way.
  */
 export async function findSkill(appId: string): Promise<SkillInfo | null> {
+  // The route validates its query param, but this is the function that puts
+  // the name into a filesystem path, so the guard lives here too (CodeQL
+  // js/path-injection): a skill folder name is a bare slug — no separators,
+  // no leading dot or dash — and anything else cannot be installed.
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(appId)) return null;
   const skills = await listSkills();
   const hit = skills.find((s) => s.name === appId);
   if (hit) return hit;
