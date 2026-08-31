@@ -8,7 +8,7 @@
  * never writes routing state of its own.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
 import LocalAiPanel from "@/components/LocalAiPanel";
 import { OPEN_APP_EVENT } from "@/lib/ui-events";
@@ -289,6 +289,15 @@ describe("LocalAiPanel", () => {
       }
       return answer(input, init);
     });
+    // Capture the poll's tick instead of waiting out the real 5 s interval:
+    // the recovery is driven by calling it, so the test costs milliseconds
+    // and cannot flake on a loaded runner. restoreMocks puts the real
+    // setInterval back after the test.
+    const ticks: Array<() => void> = [];
+    vi.spyOn(window, "setInterval").mockImplementation(((handler: TimerHandler) => {
+      ticks.push(handler as () => void);
+      return 0;
+    }) as typeof window.setInterval);
     renderPanel();
     const skeleton = screen.getByTestId("local-ai-loading");
     // waitFor rather than a one-shot assertion: the catalogue loads async, so
@@ -296,10 +305,11 @@ describe("LocalAiPanel", () => {
     await waitFor(() => expect(within(skeleton).getByRole("alert")).toHaveTextContent("Could not read what is running on this box."));
     // The poll keeps trying; the message goes with the skeleton once it lands.
     fail = false;
-    fireEvent.click(screen.getByTestId("local-ai-loading"));
-    await waitFor(() => expect(screen.queryByTestId("local-ai-load-failed")).not.toBeInTheDocument(), { timeout: 7000 });
+    expect(ticks.length).toBeGreaterThan(0);
+    await act(async () => { for (const tick of ticks) tick(); });
+    await waitFor(() => expect(screen.queryByTestId("local-ai-load-failed")).not.toBeInTheDocument());
     expect(screen.getByTestId("local-ai-panel")).toBeInTheDocument();
-  }, 10_000);
+  });
 
   it("names engines in the 'could not read' banner the way their rows do", async () => {
     stubFetch();

@@ -246,8 +246,13 @@ chmod 700 "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
 # interactively ("accept the trust dialog here once interactively, or set
 # projects[...].hasTrustDialogAccepted in <config>").
 #
-# Both are written only when absent — a config that already has its answers
-# is left alone, byte for byte — and through a temp file plus rename.
+# Both flags are seeded whenever they are not already `true` — NOT only when
+# absent, because Claude Code records `false` for both on its own (the trust
+# flag on every clean exit, see above; onboarding when a run creates the state
+# file without walking the wizard), so an absent-only check would show the
+# wizard again on exactly the boxes this exists for. A config whose answers
+# are already `true` is left alone, byte for byte — and every write goes
+# through a temp file plus rename.
 seed_harness_config() {
   python3 - "$CLAUDE_CONFIG_DIR/.claude.json" "$HOME" "$1" <<'PYEOF' || true
 import json, os, sys, tempfile

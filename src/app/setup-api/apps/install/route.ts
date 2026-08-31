@@ -36,7 +36,11 @@ type ClawhubResult = {
   rateLimited?: boolean;
 };
 
-// Same-app concurrent calls share one subprocess so we don't double the rate-limit budget.
+// Concurrent calls for the same ref share one subprocess so we don't double
+// the rate-limit budget. Keyed by the publisher-qualified ref, not the bare
+// slug: an ambiguous slug re-posted with two different publishers is two
+// different installs, and sharing one subprocess would report the first
+// publisher's result as the second's.
 const inFlightInstalls = new Map<string, Promise<ClawhubResult>>();
 
 // The id everything local is keyed by — the skill folder, the icon file, the
@@ -226,17 +230,17 @@ async function runOpenclawInstall(openclawBin: string, ref: string): Promise<Cla
   }
 }
 
-async function installSkill(openclawBin: string, appId: string, ref: string): Promise<ClawhubResult> {
+async function installSkill(openclawBin: string, ref: string): Promise<ClawhubResult> {
   // Reuse the existing in-flight subprocess if one is already running for
-  // this appId — see comment on `inFlightInstalls`.
-  const existing = inFlightInstalls.get(appId);
+  // this exact ref — see comment on `inFlightInstalls`.
+  const existing = inFlightInstalls.get(ref);
   if (existing) return existing;
   const promise = runOpenclawInstall(openclawBin, ref);
-  inFlightInstalls.set(appId, promise);
+  inFlightInstalls.set(ref, promise);
   try {
     return await promise;
   } finally {
-    inFlightInstalls.delete(appId);
+    inFlightInstalls.delete(ref);
   }
 }
 
@@ -244,7 +248,8 @@ async function installSkill(openclawBin: string, appId: string, ref: string): Pr
 // unreachable, `storeMeta` wrote the title-cased fallback and re-installs
 // won't refresh it — uninstall+reinstall to recover. Accepted because hitting
 // the Store API on every install retry is worse. The install and uninstall
-// routes are the only writers of these two keys; the desktop reads them.
+// routes and the webapp registry (src/lib/webapp-registry.ts) are the only
+// writers of these two keys; the desktop reads them.
 async function syncInstalledPreferences(appId: string, detail: Promise<StoreDetail | null>): Promise<string | undefined> {
   try {
     const all = await configGetAll();
@@ -326,7 +331,7 @@ export async function POST(req: Request) {
     }
 
     const ref = owner ? `@${owner}/${appId}` : appId;
-    const clawhubResult = await installSkill(openclawBin, appId, ref);
+    const clawhubResult = await installSkill(openclawBin, ref);
     if (!clawhubResult.success) {
       // Non-2xx so a caller that only reads the status (the MCP tools, curl)
       // is not told an install happened; the body keeps the `clawhub` shape

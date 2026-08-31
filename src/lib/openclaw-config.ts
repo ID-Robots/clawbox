@@ -918,6 +918,13 @@ export async function readSkillEnabled(skillId: string): Promise<boolean> {
 }
 
 export async function setSkillEnabled(skillId: string, enabled: boolean): Promise<void> {
+  // Guarded here, not only in the apps/settings route: `__proto__` would
+  // resolve to Object.prototype in ensurePlainObject and write `enabled` onto
+  // every object in the process without ever reaching the file, and a second
+  // caller (an MCP tool, a CLI path) must not be able to reintroduce that.
+  if (skillId === "__proto__" || skillId === "constructor" || skillId === "prototype") {
+    throw new Error(`Invalid skill id: ${skillId}`);
+  }
   const config = await readConfigStrict();
   const skills = ensurePlainObject(asBag(config), "skills");
   const entries = ensurePlainObject(skills, "entries");

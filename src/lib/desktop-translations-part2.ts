@@ -508,7 +508,7 @@ export const fr: Record<string, string> = {
   "ollama.searchPlaceholder": "Rechercher des modèles Ollama...",
   "ollama.select": "Sélectionner",
   "ollama.selected": "Sélectionné :",
-  "ollama.noModelsFound": "Aucun modèle de {max}B ou moins trouvé pour ' {query} '",
+  "ollama.noModelsFound": "Aucun modèle de {max}B ou moins trouvé pour '{query}'",
   "ollama.useAnyway": "Utiliser quand même « {model} »",
   "ollama.downloading": "Téléchargement...",
   "ollama.configuring": "Configuration...",

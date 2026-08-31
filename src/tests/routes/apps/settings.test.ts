@@ -73,6 +73,19 @@ describe("/setup-api/apps/settings", () => {
     expect(setSkillEnabled).toHaveBeenCalledWith("test-app", false);
   });
 
+  it("refuses a non-boolean _setEnabled — the string \"false\" must not enable", async () => {
+    const { setSkillEnabled } = await import("@/lib/openclaw-config");
+    for (const value of ["false", "true", 1, 0, null, {}]) {
+      const req = new Request("http://localhost/setup-api/apps/settings", {
+        method: "POST",
+        body: JSON.stringify({ appId: "test-app", settings: { _setEnabled: value } }),
+      });
+      const res = await POST(req);
+      expect(res.status).toBe(400);
+    }
+    expect(setSkillEnabled).not.toHaveBeenCalled();
+  });
+
   it("answers 500 without the underlying message when the write fails", async () => {
     const { setSkillEnabled } = await import("@/lib/openclaw-config");
     vi.mocked(setSkillEnabled).mockRejectedValue(new Error("EACCES: /home/clawbox/.openclaw/openclaw.json"));

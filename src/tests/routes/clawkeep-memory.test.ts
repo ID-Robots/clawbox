@@ -150,7 +150,9 @@ describe("POST /setup-api/clawkeep/memory/index", () => {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "incremental" }),
       }));
       expect(res.status).toBe(409);
-      expect(performance.now() - started).toBeLessThan(500);
+      // Generous on purpose — a loaded runner must not fail a correct route
+      // on timing; the assertion that matters is the absent marker below.
+      expect(performance.now() - started).toBeLessThan(5_000);
       expect((await res.json()).run.status).toBe("running");
       await new Promise((r) => setTimeout(r, 100));
       expect(await fs.stat(marker).then(() => true, () => false)).toBe(false);

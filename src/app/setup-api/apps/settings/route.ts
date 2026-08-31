@@ -34,9 +34,10 @@ export async function POST(req: Request) {
     if (!appId || typeof appId !== "string" || !/^[A-Za-z0-9_-]+$/.test(appId)) {
       return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
     }
-    // "__proto__" passes the charset check but setSkillEnabled would resolve
-    // it to Object.prototype and write `enabled` onto every object in the
-    // process. Same guard the KV route's RESERVED_KEYS applies.
+    // "__proto__" passes the charset check but would resolve to
+    // Object.prototype in setSkillEnabled — which refuses it too (the
+    // invariant lives there); this early check answers a clean 400 rather
+    // than a 500. Same guard the KV route's RESERVED_KEYS applies.
     if (appId === "__proto__" || appId === "constructor" || appId === "prototype") {
       return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
     }
@@ -48,7 +49,11 @@ export async function POST(req: Request) {
     // setSkillEnabled for why the CLI is not spawned for it. GET
     // /setup-api/apps/skill-info?appId= reads the same key back.
     if ("_setEnabled" in settings) {
-      const enabled = !!settings._setEnabled;
+      // A string "false" would coerce truthy and enable the skill.
+      if (typeof settings._setEnabled !== "boolean") {
+        return NextResponse.json({ error: "_setEnabled must be a boolean" }, { status: 400 });
+      }
+      const enabled = settings._setEnabled;
       try {
         await setSkillEnabled(appId, enabled);
       } catch (err) {

@@ -27,6 +27,18 @@ function isValidValue(v: unknown): v is string {
   return typeof v === "string" && Buffer.byteLength(v, "utf8") <= MAX_VALUE_BYTES;
 }
 
+/** The legacy slot's value, when it is what the ring can hold: a JSON object. */
+function parseLegacyAction(value: string): Record<string, unknown> | null {
+  let action: unknown;
+  try {
+    action = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  if (!action || typeof action !== "object" || Array.isArray(action)) return null;
+  return action as Record<string, unknown>;
+}
+
 // GET /setup-api/kv?key=foo        → single key
 // GET /setup-api/kv?prefix=clawbox → all keys with prefix
 // GET /setup-api/kv                → all keys
@@ -61,10 +73,21 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: `Too many entries (max ${MAX_ENTRIES})` }, { status: 413 });
       }
       const entries: Record<string, string> = {};
+      let legacyAction: Record<string, unknown> | null = null;
       for (const [k, v] of Object.entries(body.entries)) {
-        if (isValidKey(k) && isValidValue(v)) entries[k] = v;
+        if (!isValidKey(k) || !isValidValue(v)) continue;
+        // The retired single-slot key is folded into the ring here too — it
+        // must never be persisted as a plain entry, where no desktop would
+        // see it. The batch stays as lenient as its other entries: a value
+        // that is not a JSON object is dropped like an invalid key.
+        if (k === LEGACY_PENDING_ACTION_KEY) {
+          legacyAction = parseLegacyAction(v);
+          continue;
+        }
+        entries[k] = v;
       }
       if (Object.keys(entries).length > 0) kvSetMany(entries);
+      if (legacyAction) await pushPendingAction(legacyAction);
       return NextResponse.json({ ok: true });
     }
     if (typeof body.key === "string" && typeof body.value === "string") {
@@ -73,16 +96,9 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: `Value too large (max ${MAX_VALUE_BYTES} bytes)` }, { status: 413 });
       }
       if (body.key === LEGACY_PENDING_ACTION_KEY) {
-        let action: unknown;
-        try {
-          action = JSON.parse(body.value);
-        } catch {
-          return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-        }
-        if (!action || typeof action !== "object" || Array.isArray(action)) {
-          return NextResponse.json({ error: "Invalid request" }, { status: 400 });
-        }
-        await pushPendingAction(action as Record<string, unknown>);
+        const action = parseLegacyAction(body.value);
+        if (!action) return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+        await pushPendingAction(action);
         return NextResponse.json({ ok: true });
       }
       kvSet(body.key, body.value);

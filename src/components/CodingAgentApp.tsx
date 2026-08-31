@@ -451,10 +451,11 @@ export default function CodingAgentApp() {
    * the file grows while it works. A finished one gets `claude-ds --resume`,
    * which drops the owner into that exact session to carry on by hand.
    *
-   * Nothing at all for a run with neither: the button is not offered
-   * without a session (a run paused or failed before Claude Code announced
-   * one has nothing to resume, and the runner refuses to resume it too), so
-   * a bare `cd` into the folder is not a thing this can open any more.
+   * Nothing at all for a run that can do neither: the button is not offered
+   * unless there is a session to resume or a live transcript to tail (a run
+   * paused or failed before Claude Code announced a session has nothing to
+   * resume, and the runner refuses to resume it too), so a bare `cd` into
+   * the folder is not a thing this can open any more.
    */
   const openInTerminal = (run: Run) => {
     let command: string;
@@ -1293,10 +1294,11 @@ export default function CodingAgentApp() {
                               {busy === `backup-${run.id}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
                             </button>
                           )}
-                          {/* Only once there is a session to open — see
-                              openInTerminal. A fresh run gets its button a
-                              poll or two after spawn. */}
-                          {run.sessionId && (
+                          {/* Only once there is something to open — see
+                              openInTerminal: a live tail needs only the
+                              transcript (which lands before the session id on
+                              a fresh run), --resume needs the session. */}
+                          {(run.sessionId || (run.status === "running" && run.transcriptPath)) && (
                           <button
                             type="button"
                             onClick={() => openInTerminal(run)}

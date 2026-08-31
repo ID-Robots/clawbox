@@ -174,6 +174,15 @@ const HERMES_DASH_PROXY_PORT = 8090;
  */
 function usePreferenceWriter(loadedRef: { current: boolean }) {
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  // A write still pending when the desktop unmounts must not fire from the
+  // torn-down tree.
+  useEffect(() => {
+    const map = timers.current;
+    return () => {
+      for (const t of map.values()) clearTimeout(t);
+      map.clear();
+    };
+  }, []);
   return useCallback((body: Record<string, unknown>) => {
     // Nothing is written before the saved preferences have been read: until
     // then the state is the defaults, and writing them would erase the device's.
@@ -1073,9 +1082,18 @@ function ChromeDesktopInner() {
     setUninstallConfirm(appId);
   }, []);
 
+  // Read through a ref inside the callback: capturing `uninstallConfirm`
+  // directly made react-hooks/preserve-manual-memoization skip compiling the
+  // whole component. The dialog's confirm button only renders (and is only
+  // clickable) after the render that set the state, so the ref is current.
+  const uninstallConfirmRef = useRef<string | null>(null);
+  useEffect(() => {
+    uninstallConfirmRef.current = uninstallConfirm;
+  }, [uninstallConfirm]);
+
   const confirmUninstallApp = useCallback(async () => {
-    if (!uninstallConfirm) return;
-    const appId = uninstallConfirm;
+    const appId = uninstallConfirmRef.current;
+    if (!appId) return;
     // Remove skill files and reload gateway
     try {
       const controller = new AbortController();
@@ -1113,7 +1131,7 @@ function ChromeDesktopInner() {
     setUninstallConfirm(null);
     // Refresh agent session with updated skills
     window.dispatchEvent(new CustomEvent('clawbox-skill-installed', { detail: { action: 'uninstall', id: appId } }));
-  }, [uninstallConfirm]);
+  }, []);
 
   // Get all apps including installed ones
   const getAllApps = useCallback((): AppDef[] => {

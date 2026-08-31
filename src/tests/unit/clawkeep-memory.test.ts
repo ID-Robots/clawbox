@@ -404,6 +404,10 @@ describe("how a run ends", () => {
       if (!childPid) await new Promise((r) => setTimeout(r, 20));
     }
     await new Promise((r) => setTimeout(r, 100));
+    // Never signal pid 0: on Unix that targets this whole process group —
+    // the test runner included — so a run that never recorded its child must
+    // fail here, not kill the suite.
+    expect(childPid).toBeGreaterThan(0);
     process.kill(childPid, "SIGKILL");
     const run = await settledRun();
     expect(run.status).toBe("failed");

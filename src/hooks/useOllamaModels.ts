@@ -175,10 +175,12 @@ export function useOllamaModels(callbacks: OllamaCallbacks, configureScope: Conf
         let finished = false;
         while (!pullError) {
           const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
+          buf += done ? decoder.decode() : decoder.decode(value, { stream: true });
           const lines = buf.split("\n");
-          buf = lines.pop() || "";
+          // The last piece is a partial line while the stream is open — but
+          // once it closed, it is the terminal line arriving without its
+          // newline, and dropping it would call a finished pull a failure.
+          buf = done ? "" : (lines.pop() || "");
           for (const line of lines) {
             if (!line.trim()) continue;
             try {
@@ -193,6 +195,7 @@ export function useOllamaModels(callbacks: OllamaCallbacks, configureScope: Conf
               /* skip */
             }
           }
+          if (done) break;
         }
         if (pullError) await reader.cancel().catch(() => {});
         await checkOllamaStatus();

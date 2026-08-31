@@ -514,6 +514,17 @@ describe("the first-run onboarding", () => {
     expect(readConfig()).toMatchObject({ theme: "light", hasCompletedOnboarding: true });
   });
 
+  it("re-answers an onboarding recorded as false, not only an absent one", () => {
+    // Deliberate: `false` here is not an owner's answer — it is an
+    // interrupted wizard (or Claude Code's own initial write), and on this
+    // box the question has only one answer. Seeding only-when-absent would
+    // put the theme picker back in front of "Open in terminal".
+    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+    writeFileSync(claudeConfig(), JSON.stringify({ hasCompletedOnboarding: false, theme: "light" }), "utf-8");
+    expect(runWrapper().status).toBe(0);
+    expect(readConfig()).toMatchObject({ theme: "light", hasCompletedOnboarding: true });
+  });
+
   it("does not rewrite a config that already has the answers", () => {
     // Bytes, not mtime, for the reason the trust test gives.
     mkdirSync(path.join(home, ".claude-ds"), { recursive: true });

@@ -172,9 +172,10 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   // is off — 13-17 s measured on an Orin Nano — and "Speaking…" alone for
   // that long reads as a hang. Count the seconds, so the wait is visibly
   // progressing, and name the reason once it is clearly a cold start.
+  // The counter is reset where the play request starts (see `play`), not
+  // here: a synchronous setState in an effect body cascades a render.
   useEffect(() => {
     if (busy !== "play") return;
-    setSpeakingFor(0);
     const startedAt = Date.now();
     const timer = window.setInterval(() => setSpeakingFor(Math.floor((Date.now() - startedAt) / 1000)), 1000);
     return () => window.clearInterval(timer);
@@ -251,6 +252,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   }, [active, status, busy, post]);
 
   const play = useCallback(async (engine: VoiceEngineId, voice: string, text: string) => {
+    setSpeakingFor(0);
     setBusy("play");
     setError(null);
     setAutoplayBlocked(false);

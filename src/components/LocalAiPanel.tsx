@@ -131,28 +131,36 @@ async function readInstallStream(
   if (!reader) return { ok: false };
   const decoder = new TextDecoder();
   let buffer = "";
+  const consume = (line: string): { ok: boolean; error?: string } | null => {
+    if (!line) return null;
+    let payload: { status?: unknown; error?: unknown; success?: unknown };
+    try {
+      payload = JSON.parse(line);
+    } catch {
+      return null;
+    }
+    if (typeof payload.status === "string") onStatus(payload.status);
+    if (typeof payload.error === "string") return { ok: false, error: payload.error };
+    if (payload.success === true) return { ok: true };
+    return null;
+  };
   for (;;) {
     const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
     let newline = buffer.indexOf("\n");
     while (newline >= 0) {
       const line = buffer.slice(0, newline).trim();
       buffer = buffer.slice(newline + 1);
       newline = buffer.indexOf("\n");
-      if (!line) continue;
-      let payload: { status?: unknown; error?: unknown; success?: unknown };
-      try {
-        payload = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (typeof payload.status === "string") onStatus(payload.status);
-      if (typeof payload.error === "string") return { ok: false, error: payload.error };
-      if (payload.success === true) return { ok: true };
+      const outcome = consume(line);
+      if (outcome) return outcome;
     }
+    if (done) break;
   }
-  return { ok: false };
+  // The closing line may arrive without its newline; it still decides the
+  // outcome — dropping it turned a finished multi-minute install into an
+  // error.
+  return consume(buffer.trim()) ?? { ok: false };
 }
 
 /** The on-device roles by kind, each read from the surface that decides it. */

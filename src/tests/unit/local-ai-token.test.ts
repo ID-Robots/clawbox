@@ -98,10 +98,13 @@ describe("verifyLocalAiBearer", () => {
     await writeAuthProfiles("llamacpp-local");
     expect(verifyLocalAiBearer("Bearer llamacpp-local")).toBe(true);
     // Rewritten by any path (a config repair, a manual edit): no sentinel in
-    // the config means nothing to honour, flag or no flag. The mtime moves
-    // forward so the cached reading is dropped.
-    await new Promise((r) => setTimeout(r, 20));
+    // the config means nothing to honour, flag or no flag. The mtime is set
+    // forward explicitly so the cached reading is dropped even on a
+    // filesystem whose mtime granularity would swallow a quick rewrite.
     await writeAuthProfiles(getLocalAiToken());
+    const profile = path.join(openclawHome, "agents", "main", "agent", "auth-profiles.json");
+    const later = new Date(Date.now() + 5_000);
+    await fs.utimes(profile, later, later);
     expect(verifyLocalAiBearer("Bearer llamacpp-local")).toBe(false);
   });
 });

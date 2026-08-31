@@ -101,10 +101,14 @@ export async function lookupClawhubOwner(
       const matches = (body?.matches ?? []).flatMap((m) => {
         const match = m as Partial<ClawhubMatch> | null;
         if (!match || !isClawhubHandle(match.ownerHandle)) return [];
+        // Same encoding rule as clawhubSkillUrl: a slug with a `/`, `?`, `#`
+        // or whitespace must not change the shape of the fallback ref or URL.
         return [{
           ownerHandle: match.ownerHandle,
-          ref: typeof match.ref === "string" ? match.ref : `@${match.ownerHandle}/${slug}`,
-          url: typeof match.url === "string" ? match.url : `https://clawhub.ai/${match.ownerHandle}/skills/${slug}`,
+          ref: typeof match.ref === "string" ? match.ref : `@${match.ownerHandle}/${encodeURIComponent(slug)}`,
+          url: typeof match.url === "string"
+            ? match.url
+            : `https://clawhub.ai/${match.ownerHandle}/skills/${encodeURIComponent(slug)}`,
         }];
       });
       return matches.length > 0

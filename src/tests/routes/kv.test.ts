@@ -165,8 +165,55 @@ describe("/setup-api/kv", () => {
       expect(typeof ring[0].id).toBe("string");
       expect(typeof ring[0].ts).toBe("number");
 
+      // A second legacy post appends; it does not replace the first.
+      await POST(new Request("http://localhost/setup-api/kv", {
+        method: "POST",
+        body: JSON.stringify({ key: "ui:pending-action", value: JSON.stringify({ type: "notify", message: "there" }) }),
+      }));
+      const afterRes = await GET(new Request("http://localhost/setup-api/kv?key=ui:pending-actions"));
+      const after = JSON.parse((await afterRes.json()).value);
+      expect(after.map((a: { message: string }) => a.message)).toEqual(["hi", "there"]);
+
       const slotRes = await GET(new Request("http://localhost/setup-api/kv?key=ui:pending-action"));
       expect((await slotRes.json()).value).toBeNull();
+    });
+
+    // The batched form must not become a side door for the retired slot:
+    // `{entries}` used to persist it through kvSetMany, where no desktop
+    // would ever see it.
+    it("folds the legacy slot out of a batched entries post too", async () => {
+      const store = new Map<string, string>();
+      mockKvSet.mockImplementation((k: string, v: string) => { store.set(k, v); });
+      mockKvGet.mockImplementation((k: string) => store.get(k) ?? null);
+
+      const res = await POST(new Request("http://localhost/setup-api/kv", {
+        method: "POST",
+        body: JSON.stringify({ entries: {
+          "ui:pending-action": JSON.stringify({ type: "notify", message: "batched" }),
+          other_key: "kept",
+        } }),
+      }));
+      expect(await res.json()).toEqual({ ok: true });
+
+      // The plain entry still lands; the slot never does.
+      expect(mockKvSetMany).toHaveBeenCalledWith({ other_key: "kept" });
+      const ringRes = await GET(new Request("http://localhost/setup-api/kv?key=ui:pending-actions"));
+      const ring = JSON.parse((await ringRes.json()).value);
+      expect(ring).toHaveLength(1);
+      expect(ring[0]).toMatchObject({ type: "notify", message: "batched" });
+
+      // A slot value the ring cannot hold is dropped like any other invalid
+      // batch entry — not stored, not a 400 for the rest of the batch.
+      const bad = await POST(new Request("http://localhost/setup-api/kv", {
+        method: "POST",
+        body: JSON.stringify({ entries: { "ui:pending-action": "not json", still_ok: "1" } }),
+      }));
+      expect(await bad.json()).toEqual({ ok: true });
+      expect(mockKvSetMany).toHaveBeenLastCalledWith({ still_ok: "1" });
+      const ringAfter = JSON.parse((await (await GET(
+        new Request("http://localhost/setup-api/kv?key=ui:pending-actions"),
+      )).json()).value);
+      expect(ringAfter).toHaveLength(1);
     });
 
     it("refuses a legacy pending action that is not a JSON object", async () => {

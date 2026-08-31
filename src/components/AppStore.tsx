@@ -600,13 +600,16 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     // The publisher namespace is what makes a ClawHub URL real. Best is the
     // handle ClawHub itself named (`ownerHandle`, via the detail proxy); the
     // store's `developer` is a guess that is only for an old server whose
-    // detail has no ownerHandle field at all — an explicit null means ClawHub
-    // could not name the publisher, and rebuilding the link from `developer`
-    // would resurrect the dead URL the server removed. The store's own page is
-    // the honest fallback — labelled as the store page, not as ClawHub. See
+    // LOADED detail has no ownerHandle field at all — an explicit null means
+    // ClawHub could not name the publisher, and rebuilding the link from
+    // `developer` would resurrect the dead URL the server removed. While the
+    // detail is still in flight (`detail === null`) nothing is known yet, so
+    // the guess must not fire either — a click in that window would open the
+    // dead page under a "view on ClawHub" label. The store's own page is the
+    // honest fallback — labelled as the store page, not as ClawHub. See
     // src/lib/clawhub-url.ts.
     const hubUrl = clawhubSkillUrl(selectedApp.id, detail?.ownerHandle || undefined)
-      || (detail && "ownerHandle" in detail ? undefined : clawhubSkillUrl(selectedApp.id, selectedApp.developer))
+      || (detail === null || "ownerHandle" in detail ? undefined : clawhubSkillUrl(selectedApp.id, selectedApp.developer))
       || selectedApp.url;
     const hubIsClawhub = !!hubUrl && hubUrl.startsWith("https://clawhub.ai/");
 
