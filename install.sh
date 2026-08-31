@@ -2492,8 +2492,19 @@ step_openclaw_config() {
   local CURRENT_PRIMARY
   CURRENT_PRIMARY=$(as_clawbox "$OPENCLAW_BIN" config get agents.defaults.model.primary 2>/dev/null || echo "")
   if [ -z "$CURRENT_PRIMARY" ] || [ "$CURRENT_PRIMARY" = "null" ]; then
-    oc_config_set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
-    echo "  Default model set"
+    if openclaw_is_v2; then
+      # OpenClaw 2 VALIDATES model refs at config set, and this v1-era seed
+      # names a model no fresh box can resolve (the anthropic provider is not
+      # configured yet), so the write failed three times and aborted every
+      # fresh 2026.8.1 install (caught by e2e-install on PR #565). A fresh
+      # gen-2 box needs no placeholder at all: the gateway runs
+      # --allow-unconfigured and onboarding/the configure route write the
+      # real primary the moment the owner picks a provider.
+      echo "  Default model left unset (OpenClaw 2 validates refs; onboarding sets it)"
+    else
+      oc_config_set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
+      echo "  Default model set"
+    fi
   else
     echo "  Default model already set ($CURRENT_PRIMARY) — preserving"
   fi

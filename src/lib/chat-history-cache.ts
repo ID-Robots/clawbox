@@ -43,10 +43,19 @@ export function uuid(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
-  });
+  // randomUUID is SECURE-CONTEXT-ONLY, and ClawBox pages live on plain-HTTP
+  // LAN origins — so this branch is the one every real box runs. It used to
+  // be Math.random, which was tolerable for idempotency keys and became
+  // untenable the moment these ids started naming gateway sessions
+  // (CodeQL js/insecure-randomness on PR #565). getRandomValues has no
+  // secure-context gate anywhere ClawBox renders: RFC 4122 v4 from 16
+  // crypto-strength bytes.
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 // Remove stale chat caches written by older builds.
