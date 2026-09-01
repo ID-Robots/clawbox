@@ -61,6 +61,7 @@ export default function TelegramConfiguringOverlay({
   useEffect(() => {
     cancelledRef.current = false;
     const timers: ReturnType<typeof setTimeout>[] = [];
+    const requestControllers = new Set<AbortController>();
 
     function delay(ms: number): Promise<void> {
       return new Promise((resolve) => {
@@ -70,27 +71,74 @@ export default function TelegramConfiguringOverlay({
     }
 
     const POLL_INTERVAL_MS = 2000;
-    const maxAttempts = Math.ceil(healthTimeoutMs / POLL_INTERVAL_MS);
     // Attach the rejection handler immediately. The visual choreography takes
     // six seconds before readiness polling starts, while the configure POST
-    // can fail much earlier; leaving its promise bare until Promise.all below
+    // can fail much earlier; leaving its promise bare until it is awaited below
     // would emit an unhandled rejection in that gap.
     const configureResult = (waitFor ?? Promise.resolve()).then(
       () => ({ ok: true as const }),
       (error: unknown) => ({ ok: false as const, error }),
     );
 
-    async function pollGatewayHealth(): Promise<boolean> {
-      for (let i = 0; i < maxAttempts; i++) {
-        if (cancelledRef.current) return false;
+    /** Fetch and parse one readiness response without crossing the shared deadline. */
+    async function fetchJsonBeforeDeadline(
+      path: string,
+      deadline: number,
+      maxRequestMs: number,
+    ): Promise<Record<string, unknown> | null> {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0 || cancelledRef.current) return null;
+
+      const controller = new AbortController();
+      requestControllers.add(controller);
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const request = (async () => {
         try {
-          const res = await fetch("/setup-api/gateway/health", { cache: "no-store" });
-          if (res.ok) {
-            const data = await res.json();
-            if (data.available) return true;
-          }
-        } catch { /* gateway not ready yet */ }
-        await delay(POLL_INTERVAL_MS);
+          const res = await fetch(path, {
+            cache: "no-store",
+            signal: controller.signal,
+          });
+          if (!res.ok) return null;
+          const data: unknown = await res.json();
+          return typeof data === "object" && data !== null
+            ? data as Record<string, unknown>
+            : null;
+        } catch {
+          return null;
+        }
+      })();
+      const timeout = new Promise<null>((resolve) => {
+        timeoutId = setTimeout(() => {
+          controller.abort();
+          resolve(null);
+        }, Math.min(remainingMs, maxRequestMs));
+        timers.push(timeoutId);
+      });
+
+      try {
+        return await Promise.race([request, timeout]);
+      } finally {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+        requestControllers.delete(controller);
+      }
+    }
+
+    async function waitForNextProbe(deadline: number): Promise<boolean> {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0 || cancelledRef.current) return false;
+      await delay(Math.min(POLL_INTERVAL_MS, remainingMs));
+      return !cancelledRef.current && Date.now() < deadline;
+    }
+
+    async function pollGatewayHealth(deadline: number): Promise<boolean> {
+      while (!cancelledRef.current && Date.now() < deadline) {
+        const data = await fetchJsonBeforeDeadline(
+          "/setup-api/gateway/health",
+          deadline,
+          POLL_INTERVAL_MS,
+        );
+        if (data?.available === true) return true;
+        if (!(await waitForNextProbe(deadline))) return false;
       }
       return false;
     }
@@ -114,22 +162,17 @@ export default function TelegramConfiguringOverlay({
      * The route caches its Hermes probe for 15 s, so polling every 2 s costs at
      * most one real CLI round-trip per window rather than one per attempt.
      */
-    async function pollHermesTelegramReady(): Promise<boolean> {
-      for (let i = 0; i < maxAttempts; i++) {
-        if (cancelledRef.current) return false;
-        try {
-          const res = await fetch("/setup-api/telegram/status", {
-            cache: "no-store",
-            // The probe shells out to the Hermes CLI; a request that stalls
-            // must not eat more of the budget than one attempt is worth.
-            signal: AbortSignal.timeout(10_000),
-          });
-          if (res.ok) {
-            const data = await res.json();
-            if (data.receiving === true) return true;
-          }
-        } catch { /* messaging gateway not up yet */ }
-        await delay(POLL_INTERVAL_MS);
+    async function pollHermesTelegramReady(deadline: number): Promise<boolean> {
+      while (!cancelledRef.current && Date.now() < deadline) {
+        // The status route shells out to the Hermes CLI, so permit a longer
+        // individual probe while still capping it at the shared deadline.
+        const data = await fetchJsonBeforeDeadline(
+          "/setup-api/telegram/status",
+          deadline,
+          10_000,
+        );
+        if (data?.receiving === true) return true;
+        if (!(await waitForNextProbe(deadline))) return false;
       }
       return false;
     }
@@ -162,7 +205,10 @@ export default function TelegramConfiguringOverlay({
       // release the UI even if the configure request itself has stalled. A
       // Promise.all here made its timeout wait forever for that pending request,
       // which meant the parent's abort/retry recovery could never run.
-      const ready = await (hermes ? pollHermesTelegramReady() : pollGatewayHealth());
+      const readinessDeadline = Date.now() + Math.max(0, healthTimeoutMs);
+      const ready = await (hermes
+        ? pollHermesTelegramReady(readinessDeadline)
+        : pollGatewayHealth(readinessDeadline));
       if (cancelledRef.current) return;
       if (!ready) {
         // Nothing reported itself listening within healthTimeoutMs. This is
@@ -191,6 +237,7 @@ export default function TelegramConfiguringOverlay({
     overlayRef.current?.focus();
     return () => {
       cancelledRef.current = true;
+      requestControllers.forEach((controller) => controller.abort());
       timers.forEach((t) => clearTimeout(t));
     };
   }, [onDone, onTimeout, waitFor, healthTimeoutMs]);

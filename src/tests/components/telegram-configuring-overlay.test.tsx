@@ -223,4 +223,34 @@ describe("TelegramConfiguringOverlay readiness", () => {
     expect(onDone).not.toHaveBeenCalled();
     expect(called(fetchMock, "/setup-api/gateway/health")).toBe(true);
   });
+
+  it("enforces the readiness deadline when the gateway health request never settles", async () => {
+    const onDone = vi.fn();
+    const onTimeout = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/setup-api/harness/active") {
+        return jsonResponse({ active: "openclaw", edition: "openclaw" });
+      }
+      if (String(input) === "/setup-api/gateway/health") {
+        return new Promise<Response>(() => {});
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const healthTimeoutMs = 4_000;
+    render(
+      <TelegramConfiguringOverlay
+        onDone={onDone}
+        onTimeout={onTimeout}
+        waitFor={Promise.resolve()}
+        healthTimeoutMs={healthTimeoutMs}
+      />,
+    );
+
+    await advance(PHASES_MS + healthTimeoutMs);
+    await waitFor(() => expect(onTimeout).toHaveBeenCalledTimes(1));
+    expect(onDone).not.toHaveBeenCalled();
+    expect(called(fetchMock, "/setup-api/gateway/health")).toBe(true);
+  });
 });
