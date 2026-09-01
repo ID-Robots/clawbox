@@ -60,10 +60,13 @@ describe("ReconnectStage offline logo", () => {
   it("keeps the mascot's sizing and ring layout unchanged", () => {
     renderOverlay();
     const logo = screen.getByTestId("reconnect-logo");
-    expect(logo).toHaveAttribute("width", "100");
-    expect(logo).toHaveAttribute("height", "100");
-    expect(logo.className).toContain("h-[100px]");
-    expect(logo.className).toContain("w-[100px]");
+    // 72px: the tight square artwork drawn at this size is ~70px wide and
+    // ~55px tall, which is the footprint the old padded 100px render had
+    // inside the 64px ring.
+    expect(logo).toHaveAttribute("width", "72");
+    expect(logo).toHaveAttribute("height", "72");
+    expect(logo.className).toContain("h-[72px]");
+    expect(logo.className).toContain("w-[72px]");
     expect(logo.className).toContain("object-contain");
   });
 

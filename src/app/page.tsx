@@ -244,9 +244,10 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
   }
 
   if (id === "clawbox") {
-    // PNG ships with transparent padding, so a 1× render looks shrunk inside
-    // the tile. Scale up and let the flex parent center the overflow.
-    const scaled = Math.round(px * 2.5);
+    // The crab fills its square except for a little headroom above the
+    // claws, so a 1.3× render is exactly tile-high and overhangs the sides a
+    // touch; the flex parent centres the overflow.
+    const scaled = Math.round(px * 1.3);
     return (
       <img
         src="/clawbox-crab.png"

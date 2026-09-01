@@ -316,9 +316,9 @@ function SetupCompletionOverlay({
                 <Image
                   src="/clawbox-crab.png"
                   alt="ClawBox"
-                  width={100}
-                  height={100}
-                  className="h-[100px] w-[100px] object-contain"
+                  width={72}
+                  height={72}
+                  className="h-[72px] w-[72px] object-contain"
                   priority
                 />
               </div>
