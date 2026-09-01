@@ -30,14 +30,22 @@ import { getLocalAiOpenAiBaseUrl, getLocalAiProxyBaseUrl } from "@/lib/local-ai-
 
 describe("local AI base URLs", () => {
   const savedRoot = process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL;
+  const savedClawboxPort = process.env.CLAWBOX_PORT;
+  const savedPort = process.env.PORT;
 
   beforeEach(() => {
     delete process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL;
+    delete process.env.CLAWBOX_PORT;
+    delete process.env.PORT;
   });
 
   afterEach(() => {
     if (savedRoot === undefined) delete process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL;
     else process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL = savedRoot;
+    if (savedClawboxPort === undefined) delete process.env.CLAWBOX_PORT;
+    else process.env.CLAWBOX_PORT = savedClawboxPort;
+    if (savedPort === undefined) delete process.env.PORT;
+    else process.env.PORT = savedPort;
   });
 
   it("gives OpenClaw the bare Ollama proxy root for the NATIVE api", () => {
@@ -68,5 +76,14 @@ describe("local AI base URLs", () => {
     expect(getLocalAiOpenAiBaseUrl("ollama")).toBe(
       "http://10.42.0.1:8080/setup-api/local-ai/ollama/v1",
     );
+  });
+
+  it("routes both local providers through the x64 UI port", () => {
+    process.env.CLAWBOX_PORT = "3005";
+
+    expect(getLocalAiProxyBaseUrl("ollama"))
+      .toBe("http://127.0.0.1:3005/setup-api/local-ai/ollama");
+    expect(getLocalAiProxyBaseUrl("llamacpp"))
+      .toBe("http://127.0.0.1:3005/setup-api/local-ai/llamacpp/v1");
   });
 });

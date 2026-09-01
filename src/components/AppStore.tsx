@@ -211,6 +211,11 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         const res = await fetch(`${STORE_API}?${params}`, { signal: controller.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: ApiResponse = await res.json();
+        // A response whose filter was abandoned must not overwrite the list
+        // the next filter is already building. `fetch` normally rejects when
+        // aborted, but a mock, cache hit, or fully-received body may still
+        // resolve after cleanup has fired.
+        if (controller.signal.aborted) return;
         const fresh = sortApps(data.apps.map(apiToStoreApp), sortByRef.current);
         setApps(fresh);
         seenSlugsRef.current = new Set(fresh.map(a => a.id));
@@ -238,12 +243,74 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
           setPendingCategories([]);
         }
       } finally {
-        setLoading(false);
+        // The replacement request owns loading now. Clearing it from this
+        // stale effect would flash an empty-state over its in-flight result.
+        if (!controller.signal.aborted) setLoading(false);
       }
     };
     const timer = setTimeout(doFetch, search ? 300 : 0);
     return () => { clearTimeout(timer); controller.abort(); };
   }, [category, search, attempt]);
+
+  /**
+   * Complete the Installed view from its real source of truth: installed ids.
+   *
+   * The catalogue's first response is capped at 200 rows. Filtering only that
+   * page made a perfectly healthy installed skill disappear whenever its row
+   * lived in a later category batch. The per-slug endpoint is deliberately
+   * used here so entering Installed fetches only the missing rows, while rows
+   * already present in `apps` remain instant and incur no extra request.
+   */
+  useEffect(() => {
+    if (category !== "Installed") return;
+
+    const missingIds = installedAppIds.filter((id) => !seenSlugsRef.current.has(id));
+    if (missingIds.length === 0) {
+      setLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setLoading(true);
+
+    void Promise.all(missingIds.map(async (id): Promise<StoreApp | null> => {
+      try {
+        const res = await fetch(`${STORE_API}?slug=${encodeURIComponent(id)}`, { signal: controller.signal });
+        if (!res.ok) return null;
+        const app = await res.json() as Partial<ApiApp>;
+        if (
+          app.slug !== id
+          || typeof app.name !== "string"
+          || typeof app.summary !== "string"
+          || typeof app.category !== "string"
+          || typeof app.rating !== "number"
+          || typeof app.installs !== "string"
+        ) return null;
+        return apiToStoreApp(app as ApiApp);
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") {
+          console.error(`[AppStore] installed app lookup failed for ${id}:`, err);
+        }
+        return null;
+      }
+    })).then((found) => {
+      if (controller.signal.aborted) return;
+      const additions = found.filter((app): app is StoreApp => app !== null);
+      if (additions.length === 0) return;
+      additions.forEach((app) => seenSlugsRef.current.add(app.id));
+      setApps((current) => {
+        const currentIds = new Set(current.map((app) => app.id));
+        const unseen = additions.filter((app) => !currentIds.has(app.id));
+        return unseen.length > 0
+          ? [...current, ...sortApps(unseen, sortByRef.current)]
+          : current;
+      });
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoading(false);
+    });
+
+    return () => controller.abort();
+  }, [category, installedAppIds]);
 
   // Pull richer per-skill metadata when a detail view opens (featured, dates,
   // precise install count, executes-code). Best-effort — the modal still works

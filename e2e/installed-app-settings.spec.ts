@@ -46,6 +46,27 @@ test("installed app settings can save configuration and toggle enablement", asyn
   const settingsWindow = page.getByTestId("chrome-window-installed-home-assistant");
   await expect(settingsWindow).toBeVisible();
 
+  // Installing a skill opens the contextual chat prompt above the desktop.
+  // Close it the way a user would before operating the window underneath;
+  // forcing the switch click would prove only that its handler exists, not
+  // that this UI path is actually reachable.
+  const chatPopup = page.getByTestId("chat-popup");
+  if (await chatPopup.isVisible()) {
+    await chatPopup.getByTestId("chat-popup-close").click();
+    await expect(chatPopup).toHaveCount(0);
+  }
+
+  const enabledSwitch = settingsWindow.getByRole("switch", { name: "Enable skill" });
+  await expect(enabledSwitch).toBeChecked();
+  const disableRequest = page.waitForRequest((request) =>
+    request.url().endsWith("/setup-api/apps/settings") &&
+    request.method() === "POST" &&
+    request.postDataJSON()?.settings?._setEnabled === false
+  );
+  await enabledSwitch.click();
+  await disableRequest;
+  await expect(enabledSwitch).not.toBeChecked();
+
   await settingsWindow.getByPlaceholder("http://homeassistant.local:8123").fill("http://ha.local:8123");
   await settingsWindow.getByPlaceholder("Enter HA access token").fill("ha-secret-token");
   // No webhook switch: the form offers only what the skill's config writer

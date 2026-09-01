@@ -66,8 +66,9 @@ test.describe("login round-trip", () => {
 
     // Either the page stays on /login or it surfaces an error message.
     // We give it a short window to potentially redirect (which it shouldn't).
-    await page.waitForTimeout(2_000);
+    await expect(page.getByText("Incorrect password", { exact: true })).toBeVisible();
     expect(page.url()).toMatch(/\/login/);
+    expect((await ctx.cookies()).some((cookie) => cookie.name === "clawbox_session")).toBe(false);
     await ctx.close();
   });
 });

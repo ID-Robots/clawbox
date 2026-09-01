@@ -1,7 +1,9 @@
 /**
- * Upgrade test: install.sh was run against `main`; we pin .update-branch to
- * `beta`, trigger the in-app updater, and verify the device lands on the
- * beta HEAD after the post-reboot continuation step.
+ * Upgrade test: the general suite first installs the checked-out PR head so
+ * all preceding installer/UI assertions exercise the code under review. This
+ * serial tail then uses that live updater to establish a real `main` baseline,
+ * pins .update-branch to the target, and verifies main → target through the
+ * post-reboot continuation step.
  *
  * This test relies on the shared container set up by `global-setup.ts` —
  * run it after happy-path.spec.ts. Because the updater literally bounces
@@ -27,16 +29,48 @@ const UPGRADE_BRANCH = process.env.CLAWBOX_UPGRADE_TARGET_BRANCH ?? "beta";
 test.describe.configure({ mode: "serial" });
 
 test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
+  test("establish a real main baseline through the in-app updater", async () => {
+    // Do not make the whole suite install stale main just to create this one
+    // precondition: security/UI tests before this file must run against the PR
+    // head. Transition this already-configured device to main through the same
+    // update path a field device uses, preserving its setup state.
+    // This suite initially installs the PR head (OpenClaw 2 / schema 2026.8)
+    // so every general assertion exercises the code under review. `main`
+    // currently pins OpenClaw 2026.7, whose binary deliberately refuses to
+    // touch config last written by 2026.8. A field device should never be
+    // downgraded this way; this is only the ephemeral harness constructing a
+    // clean historical baseline. Archive the future OpenClaw home while
+    // leaving ClawBox's data/config.json (the setup state this test promises to
+    // preserve) untouched, then let main create the store shape it understands.
+    await dockerExec([
+      "bash", "-lc",
+      "set -e; systemctl stop clawbox-gateway.service || true; " +
+      "test ! -e /home/clawbox/.openclaw-e2e-future; " +
+      "if [ -e /home/clawbox/.openclaw ]; then mv /home/clawbox/.openclaw /home/clawbox/.openclaw-e2e-future; fi; " +
+      "install -d -o clawbox -g clawbox -m 700 /home/clawbox/.openclaw",
+    ], { user: "root" });
+
+    await setUpdateBranch("main");
+    const result = await startUpdate(true);
+    expect(result.started).toBe(true);
+
+    const state = await waitForUpdate({ timeoutMs: 45 * 60_000 });
+    expect(["completed", "failed"]).toContain(state.phase);
+    if (state.phase === "failed") {
+      const failedStep = state.steps.find((step) => step.status === "failed");
+      throw new Error(
+        `main baseline failed at step '${failedStep?.id}': ${failedStep?.error ?? state.error ?? "unknown"}`,
+      );
+    }
+    for (const step of state.steps) {
+      expect(step.status).toBe("completed");
+    }
+    await waitForHttpReady(60_000);
+  });
+
   test("verify current branch is main", async () => {
     const branch = await readGitBranch();
-    // On a fresh `git clone --branch main` we'd expect main, but a developer
-    // might have seeded the container from a branch checkout. In that case
-    // the upgrade still exercises the important code path (fetch + reset),
-    // just from a different starting point — log and continue.
-    if (branch !== "main") {
-      console.warn(`[upgrade] starting branch is '${branch}', not 'main'`);
-    }
-    expect(typeof branch).toBe("string");
+    expect(branch, "the upgrade must exercise main → target, not target → itself").toBe("main");
   });
 
   test(`pin .update-branch to ${UPGRADE_BRANCH}`, async () => {

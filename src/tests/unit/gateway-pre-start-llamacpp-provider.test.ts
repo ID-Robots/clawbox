@@ -117,6 +117,37 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
     expect(p.models?.[0]?.contextWindow).toBe(131072);
   });
 
+  it("uses the configured x64 UI port for the local proxy", () => {
+    writeToken(TOKEN);
+    const { cfg } = migrate(
+      {
+        models: { providers: {} },
+        agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+      },
+      { CLAWBOX_PORT: "3005" },
+    );
+
+    expect(llamacppProvider(cfg).baseUrl)
+      .toBe("http://127.0.0.1:3005/setup-api/local-ai/llamacpp/v1");
+  });
+
+  it("preserves the explicit local-AI proxy authority on x64", () => {
+    writeToken(TOKEN);
+    const { cfg } = migrate(
+      {
+        models: { providers: {} },
+        agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+      },
+      {
+        CLAWBOX_PORT: "3005",
+        CLAWBOX_LOCAL_AI_PROXY_BASE_URL: "http://10.42.0.1:8080/",
+      },
+    );
+
+    expect(llamacppProvider(cfg).baseUrl)
+      .toBe("http://10.42.0.1:8080/setup-api/local-ai/llamacpp/v1");
+  });
+
   // The exact hardware sequence: a box on the retired Anthropic id with an empty
   // provider map. The migration moves it to llamacpp; the repair must make that
   // destination resolvable, or the box is mute either way.
@@ -225,6 +256,34 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
 
     expect(changed).toBe(false);
     expect(llamacppProvider(cfg)).toEqual({});
+  });
+
+  it("does not touch a malformed models value when llama.cpp is unused", () => {
+    writeToken(TOKEN);
+    const { cfg, changed } = migrate({
+      models: "operator-owned-scalar",
+      agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
+    });
+
+    expect(changed).toBe(false);
+    expect(cfg.models).toBe("operator-owned-scalar");
+  });
+
+  it("repairs malformed models and providers containers only when needed", () => {
+    writeToken(TOKEN);
+    const scalarModels = migrate({
+      models: "broken",
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+    const scalarProviders = migrate({
+      models: { providers: "broken" },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(llamacppProvider(scalarModels.cfg).models?.[0]?.id)
+      .toBe("gemma4-e2b-it-q4_0");
+    expect(llamacppProvider(scalarProviders.cfg).models?.[0]?.id)
+      .toBe("gemma4-e2b-it-q4_0");
   });
 
   // --- CodeRabbit round on #562 ------------------------------------------

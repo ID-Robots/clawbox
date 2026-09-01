@@ -17,7 +17,13 @@ const SAVED_FALLBACKS_KEY = "local_only_saved_fallbacks";
 const SAVED_SESSION_OVERRIDES_KEY = "local_only_saved_session_overrides";
 const MODE_KEY = "local_only_mode";
 
-const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR || "/home/clawbox/.openclaw/agents";
+const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR
+  || path.join(
+    process.env.CLAWBOX_OPENCLAW_HOME
+    || process.env.OPENCLAW_HOME
+    || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw"),
+    "agents",
+  );
 
 // Fields on each entry of `<agent>/sessions/sessions.json` that OpenClaw
 // reads to pick which provider/model the ongoing session is bound to.

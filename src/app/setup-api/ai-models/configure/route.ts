@@ -17,9 +17,9 @@ import {
   compactionReserveFloorForContext,
   inferConfiguredLocalModel,
   readConfig as readOpenClawConfig,
-  writeConfig as writeOpenClawConfig,
   spawnOpenclawCli,
   readConfigStrict as readOpenClawConfigStrict,
+  setPrimaryModelWithoutCatalogValidation,
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
   setProviderPlugins,
@@ -90,7 +90,9 @@ import { installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_HOME_DIR =
-  process.env.OPENCLAW_HOME || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
+  process.env.CLAWBOX_OPENCLAW_HOME
+  || process.env.OPENCLAW_HOME
+  || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
 const CLAWBOX_HOME_DIR = process.env.HOME ?? "/home/clawbox";
 const AUTH_PROFILES_PATH = path.join(
   OPENCLAW_HOME_DIR,
@@ -346,6 +348,24 @@ async function pasteAuthApiKey(provider: string, profileId: string, key: string)
     ["models", "auth", "paste-api-key", "--provider", provider, "--profile-id", profileId],
     { stdinData: key + "\n", timeoutMs: 60_000 },
   );
+}
+
+/**
+ * Whether the installed binary uses OpenClaw 2's SQLite credential store.
+ * Ask the binary itself rather than the repository pin: a partially completed
+ * update can leave those two versions different, and the installed process is
+ * the one that must be able to consume the credential we just wrote.
+ */
+async function installedOpenclawUsesSqliteAuthStore(): Promise<boolean> {
+  const output = await spawnOpenclawCli(["--version"], {
+    captureStdout: true,
+    timeoutMs: 30_000,
+  });
+  const match = /\b(20\d{2})\.(\d+)\.(\d+)\b/.exec(output);
+  if (!match) throw new Error("Could not determine the installed OpenClaw version");
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  return year > 2026 || (year === 2026 && month >= 8);
 }
 
 async function getConfiguredClawboxAiToken(preferredToken?: string) {
@@ -1903,10 +1923,11 @@ export async function POST(request: Request) {
       // migration IMMEDIATELY, before the config-set batch, catalog refresh
       // and session sweep execute against a poisoned shared auth store (it
       // also backs the CLI itself, so those calls would start failing too).
-      // Fail closed on a migrated box: archiving the file we just wrote and
-      // answering 502 beats "success" with a dead agent — but only when a
-      // .migrated-* sibling proves this store went sqlite; a v1 box keeps
-      // its legitimate legacy file and the old best-effort behavior.
+      // Fail closed on a v2 box: archiving the file we just wrote and answering
+      // 502 beats "success" with a dead agent. A migrated sibling is sufficient
+      // proof; an early doctor failure may create none, so the installed binary
+      // version is the second authority. An explicit v1 keeps its legitimate
+      // legacy file and the old best-effort behavior.
       try {
         await runOpenclawDoctorFix();
       } catch (doctorErr) {
@@ -1916,7 +1937,22 @@ export async function POST(request: Request) {
           "[configure] doctor --fix failed after the OAuth store write:",
           doctorErr instanceof Error ? JSON.stringify(logSafe(doctorErr.message)) : doctorErr,
         );
-        if (migratedStore) {
+        let mustRollBack = migratedStore;
+        if (!mustRollBack) {
+          try {
+            mustRollBack = await installedOpenclawUsesSqliteAuthStore();
+          } catch (versionErr) {
+            // An unknown generation cannot prove that the legacy file is safe.
+            // Credential writes fail closed; the owner can retry once the CLI
+            // is healthy instead of receiving success with a dead gateway.
+            mustRollBack = true;
+            console.error(
+              "[configure] could not verify OpenClaw generation after doctor failure:",
+              versionErr instanceof Error ? JSON.stringify(logSafe(versionErr.message)) : versionErr,
+            );
+          }
+        }
+        if (mustRollBack) {
           const stamp = new Date().toISOString().replace(/[:.]/g, "-");
           await fs.rename(AUTH_PROFILES_PATH, `${AUTH_PROFILES_PATH}.failed-${stamp}`).catch(() => {});
           return NextResponse.json(
@@ -2038,17 +2074,11 @@ export async function POST(request: Request) {
       // gateway tolerates an unresolvable primary at rest; the model is
       // proven the first time it speaks, exactly as before OpenClaw 2.
       const primaryModel = String(baseOps[primaryIdx][1]);
-      // STRICT read: readOpenClawConfig answers {} for an unreadable or
-      // malformed file, and writing that back with only model.primary would
-      // replace the whole config (providers, profiles, gateway auth) with a
-      // fragment. Strict throws on anything but ENOENT, which lands in the
-      // route's generic catch as an honest 500 instead of a silent wipe.
-      const parsed = await readOpenClawConfigStrict();
-      const agents = (parsed.agents ??= {});
-      const defaults = (agents.defaults ??= {}) as Record<string, unknown>;
-      const model = (defaults.model ??= {}) as Record<string, unknown>;
-      model.primary = primaryModel;
-      await writeOpenClawConfig(parsed);
+      // The narrow helper performs a strict read under the same cross-process
+      // sidecar lock OpenClaw's CLI/gateway use. That prevents a complete-file
+      // write from overwriting a concurrent auth/provider/gateway mutation and
+      // refuses malformed input instead of rebuilding the config from a fragment.
+      await setPrimaryModelWithoutCatalogValidation(primaryModel);
       console.warn(
         "[AI Config] Primary written directly — the CLI refused the reference (empty catalog for this key/plugin):",
         // JSON-quoted: the modeled sanitizer for js/log-injection (see 3ef684a1).

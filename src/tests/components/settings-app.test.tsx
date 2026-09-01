@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 import { resetHarnessCache } from "@/lib/client-harness";
 
@@ -23,6 +23,17 @@ vi.mock("@/lib/i18n", () => ({
 
 vi.mock("next/image", () => ({
   default: () => null,
+}));
+
+// Settings owns the timeout consequences; the overlay's own readiness state
+// machine has a dedicated component suite. This button exposes that one
+// callback while keeping the full Settings form and request lifecycle real.
+vi.mock("@/components/TelegramConfiguringOverlay", () => ({
+  default: ({ onTimeout }: { onTimeout: () => void }) => (
+    <button type="button" data-testid="telegram-force-timeout" onClick={onTimeout}>
+      Force Telegram timeout
+    </button>
+  ),
 }));
 
 const defaultUi: UISettings = {
@@ -173,12 +184,31 @@ describe("SettingsApp factory reset overlay", () => {
     });
 
     const overlay = await screen.findByRole("status");
+    const progressDialog = screen.getByRole("dialog", { name: /settings\.resetting/ });
     expect(overlay).toBeInTheDocument();
+    expect(overlay).toHaveAttribute("aria-live", "polite");
+    expect(progressDialog).toHaveFocus();
     expect(document.body).toContainElement(overlay);
     expect(container).not.toContainElement(overlay);
+    expect(root).toHaveAttribute("inert");
+    expect(root).toHaveAttribute("aria-hidden", "true");
+    fireEvent.keyDown(progressDialog, { key: "Escape" });
+    expect(progressDialog).toBeInTheDocument();
+    expect(progressDialog).toHaveFocus();
     expect(within(overlay).getAllByText("settings.erasingSettings")).toHaveLength(2);
     expect(within(overlay).getByText("settings.waitingOnline")).toBeInTheDocument();
     expect(within(overlay).getByText("settings.startingSetup")).toBeInTheDocument();
+  });
+
+  it("renders custom wallpaper removal beside, not inside, the selection control", async () => {
+    render(<SettingsApp ui={{ ...defaultUi, customWallpapers: ["data:image/png;base64,AA=="] }} />);
+    fireEvent.click(screen.getByRole("button", { name: /settings\.appearance/ }));
+
+    const select = await screen.findByRole("button", { name: "Custom 1" });
+    const remove = screen.getByRole("button", { name: "Remove Custom 1" });
+    expect(select).not.toContainElement(remove);
+    expect(remove.className).toContain("opacity-60");
+    expect(remove.className).not.toContain("opacity-0 ");
   });
 
   it("keeps the dialog up and shows why when the box refuses the reset", async () => {
@@ -207,23 +237,153 @@ describe("SettingsApp factory reset overlay", () => {
     expect(document.getElementById("factory-reset-confirm")).toBeInTheDocument();
   });
 
+  it("does not enter reconnect polling when the reset request never reaches the box", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      if (input.toString() === "/setup-api/setup/reset") {
+        return Promise.reject(new TypeError("network offline"));
+      }
+      return defaultFetch(input, init);
+    }));
+
+    render(<SettingsApp ui={defaultUi} />);
+    fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /factoryReset/ }));
+    fireEvent.change(document.getElementById("factory-reset-password")!, { target: { value: "hunter2" } });
+    fireEvent.change(document.getElementById("factory-reset-confirm")!, { target: { value: "RESET" } });
+    fireEvent.click(screen.getByRole("button", { name: "settings.reset" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("settings.connectionFailed");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(document.getElementById("factory-reset-confirm")).toBeInTheDocument();
+  });
+
+  it("hard timeout aborts and invalidates a late successful reset-status response", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let acceptedAt = 0;
+    let lateResolve: ((response: Response) => void) | null = null;
+    let lateSignal: AbortSignal | undefined;
+    try {
+      vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = input.toString();
+        if (url === "/setup-api/setup/reset") {
+          acceptedAt = Date.now();
+          return jsonResponse({ success: true });
+        }
+        if (url === "/setup-api/setup/status" && acceptedAt > 0) {
+          // Polls normally answer "not back yet". The final poll starts one
+          // second before the five-minute hard deadline and deliberately
+          // ignores abort, like a cache/transport that has already received
+          // the response bytes but has not resolved its promise yet.
+          if (Date.now() - acceptedAt >= 299_000) {
+            lateSignal = init?.signal as AbortSignal | undefined;
+            return new Promise<Response>((resolve) => { lateResolve = resolve; });
+          }
+          return Promise.resolve(new Response("{}", { status: 503 }));
+        }
+        return defaultFetch(input, init);
+      }));
+
+      render(<SettingsApp ui={defaultUi} />);
+      fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
+      fireEvent.click(await screen.findByRole("button", { name: /factoryReset/ }));
+      fireEvent.change(document.getElementById("factory-reset-password")!, { target: { value: "hunter2" } });
+      fireEvent.change(document.getElementById("factory-reset-confirm")!, { target: { value: "RESET" } });
+      fireEvent.click(screen.getByRole("button", { name: "settings.reset" }));
+      await screen.findByRole("status");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(Math.max(0, acceptedAt + 299_100 - Date.now()));
+      });
+      await waitFor(() => expect(lateResolve).not.toBeNull());
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(Math.max(0, acceptedAt + 300_100 - Date.now()));
+      });
+      expect(lateSignal?.aborted).toBe(true);
+      expect(await screen.findByRole("dialog", { name: "settings.factoryResetTitle" })).toBeInTheDocument();
+      expect(screen.queryByRole("status")).toBeNull();
+
+      const timersBeforeLateSuccess = vi.getTimerCount();
+      await act(async () => {
+        lateResolve?.(new Response("{}", { status: 200 }));
+        await Promise.resolve();
+      });
+
+      // The stale success neither re-enters the progress UI nor schedules the
+      // 1.5 s redirect; settling its own request timeout removes one timer.
+      expect(screen.getByRole("dialog", { name: "settings.factoryResetTitle" })).toBeInTheDocument();
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(vi.getTimerCount()).toBeLessThan(timersBeforeLateSuccess);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("closes the reset dialog on Escape and clears what was typed", async () => {
     render(<SettingsApp ui={defaultUi} />);
 
     fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
-    fireEvent.click(await screen.findByRole("button", { name: /factoryReset/ }));
-    fireEvent.change(document.getElementById("factory-reset-password")!, { target: { value: "hunter2" } });
+    const trigger = await screen.findByRole("button", { name: /factoryReset/ });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const password = document.getElementById("factory-reset-password")!;
+    const cancel = screen.getByRole("button", { name: "cancel" });
 
-    fireEvent.keyDown(window, { key: "Escape" });
+    expect(password).toHaveFocus();
+    fireEvent.keyDown(password, { key: "Tab", shiftKey: true });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(cancel, { key: "Tab" });
+    expect(password).toHaveFocus();
+
+    fireEvent.change(password, { target: { value: "hunter2" } });
+
+    fireEvent.keyDown(password, { key: "Escape" });
 
     await waitFor(() => {
       expect(document.getElementById("factory-reset-confirm")).not.toBeInTheDocument();
     });
+    expect(trigger).toHaveFocus();
 
     // Reopening must not hand the next caller the last password typed.
     fireEvent.click(screen.getByRole("button", { name: /factoryReset/ }));
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     expect(document.getElementById("factory-reset-password")).toHaveValue("");
+  });
+
+  it("aborts an active Telegram configure request on readiness timeout and enables retry", async () => {
+    let configureSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      if (input.toString() === "/setup-api/telegram/configure") {
+        configureSignal = init?.signal as AbortSignal | undefined;
+        return new Promise((_resolve, reject) => {
+          configureSignal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          }, { once: true });
+        });
+      }
+      return defaultFetch(input, init);
+    }));
+
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const nav = container.querySelector("nav");
+    if (!nav) throw new Error("desktop sidebar nav did not render");
+    const channels = [...nav.querySelectorAll(":scope > button")]
+      .find((button) => (button.textContent ?? "").includes("settings.channels"));
+    if (!channels) throw new Error("Messaging Channels nav entry did not render");
+    fireEvent.click(channels);
+    fireEvent.click(await screen.findByTestId("settings-channel-telegram"));
+
+    const token = await screen.findByLabelText("settings.botToken");
+    fireEvent.change(token, { target: { value: "123456789:test-token" } });
+    fireEvent.click(screen.getByRole("button", { name: /settings\.connect$/ }));
+
+    await waitFor(() => expect(configureSignal).toBeDefined());
+    fireEvent.click(await screen.findByTestId("telegram-force-timeout"));
+
+    await waitFor(() => expect(configureSignal?.aborted).toBe(true));
+    const retry = await screen.findByRole("button", { name: /settings\.connect$/ });
+    expect(retry).toBeEnabled();
+    expect(await screen.findByText("settings.connectionFailed")).toBeInTheDocument();
   });
 
   it("kicks off the ClawBox AI device-auth handshake when the desktop deep-link event is fired", async () => {
