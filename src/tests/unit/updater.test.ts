@@ -176,6 +176,7 @@ describe("updater", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
     delete process.env.GATEWAY_HEALTH_WAIT_MS;
     delete process.env.GATEWAY_RECOVERY_WAIT_MS;
     delete process.env.GATEWAY_WAIT_INTERVAL_MS;
@@ -410,7 +411,10 @@ describe("updater", () => {
 
       updater.resetUpdateState();
       expect(await updater.checkContinuation()).toBe(true);
-      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      await vi.waitFor(
+        () => expect(updater.getUpdateState().phase).toBe("failed"),
+        { timeout: 5_000 },
+      );
 
       const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
       expect(postStep?.status).toBe("failed");
@@ -464,6 +468,7 @@ describe("updater", () => {
 
       const priorRoot = process.env.CLAWBOX_ROOT;
       process.env.CLAWBOX_ROOT = process.cwd();
+      vi.stubEnv("CLAWBOX_OPENCLAW_HOME", "/tmp/clawbox-updater-openclaw-home");
       vi.resetModules();
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
@@ -476,7 +481,7 @@ describe("updater", () => {
           `${cmd} ${(args as string[]).join(" ")}`,
         );
         const consentIndex = calls.findIndex((call) =>
-          call.includes("plugins enable codex --accept-capabilities"),
+          call.includes("plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities"),
         );
         const restartIndex = calls.findIndex((call) =>
           call.includes("systemctl restart clawbox-gateway.service"),
@@ -511,7 +516,7 @@ describe("updater", () => {
         .map((call, index) => call.includes("systemctl --runtime unmask clawbox-gateway.service") ? index : -1)
         .filter((index) => index >= 0);
       const consentIndex = calls.findIndex((call) =>
-        call.includes("plugins enable codex --accept-capabilities"),
+        call.includes("plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities"),
       );
       const doctorIndex = calls.findIndex((call) =>
         call.includes("openclaw doctor --fix --yes --non-interactive"),
@@ -533,6 +538,92 @@ describe("updater", () => {
       expect(doctorIndex).toBeLessThan(unmaskIndexes[1]);
       expect(restartIndexes).toHaveLength(1);
       expect(restartIndexes[0]).toBeGreaterThan(unmaskIndexes[1]);
+      const preStartOptions = mockExecFile.mock.calls[preStartIndex]?.[2] as
+        | { env?: NodeJS.ProcessEnv }
+        | undefined;
+      expect(preStartOptions?.env?.OPENCLAW_HOME)
+        .toBe("/tmp/clawbox-updater-openclaw-home");
+    });
+
+    it("continues to doctor and restart when the targeted Codex repair fails", async () => {
+      setupExecFileMock({
+        "plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities": new Error(
+          "Codex repair timed out",
+        ),
+        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "Plugin \"codex\" requires capability consent\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockIsPortOpen.mockImplementation(async () =>
+        mockExecFile.mock.calls.some(([cmd, args]) =>
+          cmd === "/usr/bin/sudo"
+            && (args as string[]).join(" ").includes("systemctl restart clawbox-gateway.service"),
+        ),
+      );
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        "[Updater] Codex capability repair did not complete:",
+        "Codex repair timed out",
+      );
+      expect(calls.some((call) => call.includes("openclaw doctor --fix --yes --non-interactive")))
+        .toBe(true);
+      expect(calls.some((call) => call.includes("systemctl restart clawbox-gateway.service")))
+        .toBe(true);
+      warnSpy.mockRestore();
+    });
+
+    it("retries a failed maintenance unmask and surfaces the cleanup failure", async () => {
+      setupExecFileMock({
+        "systemctl --runtime unmask clawbox-gateway.service": new Error("unmask failed"),
+        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(
+        () => expect(updater.getUpdateState().phase).toBe("failed"),
+        { timeout: 5_000 },
+      );
+
+      const unmaskCalls = mockExecFile.mock.calls.filter(([cmd, args]) =>
+        cmd === "/usr/bin/sudo"
+          && (args as string[]).join(" ").includes("systemctl --runtime unmask clawbox-gateway.service"),
+      );
+      expect(unmaskCalls.length).toBeGreaterThanOrEqual(3);
+      expect(updater.getUpdateState().steps.find((step) => step.id === "post_update")?.error)
+        .toContain("unmask failed");
+      errorSpy.mockRestore();
     });
 
     it("does not re-enable an explicitly disabled unused Codex plugin from a stale journal line", async () => {
@@ -575,7 +666,9 @@ describe("updater", () => {
       const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
         `${cmd} ${(args as string[]).join(" ")}`,
       );
-      expect(calls.some((call) => call.includes("plugins enable codex --accept-capabilities"))).toBe(false);
+      expect(calls.some((call) =>
+        call.includes("plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities"),
+      )).toBe(false);
     });
 
     it("records explicit consent but does not restart when current pre-start fails", async () => {
@@ -611,7 +704,7 @@ describe("updater", () => {
       );
       const preStartIndex = calls.findIndex((call) => call.includes("scripts/gateway-pre-start.sh"));
       const consentIndex = calls.findIndex((call) =>
-        call.includes("plugins enable codex --accept-capabilities"),
+        call.includes("plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities"),
       );
       const finalUnmaskIndex = calls
         .map((call, index) => call.includes("systemctl --runtime unmask clawbox-gateway.service") ? index : -1)

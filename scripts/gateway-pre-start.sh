@@ -327,10 +327,23 @@ if isinstance(_fallbacks_now, list):
 # the local runtime but would skip this repair and still fail model resolution.
 _wants_llamacpp = [r.strip() for r in _llamacpp_refs if r.strip().startswith("llamacpp/")]
 
-_mp = cfg.setdefault("models", {}).setdefault("providers", {})
 # Key presence, not truthiness: an existing but empty {} entry is a deliberate
 # operator choice and must be preserved, which .get() would silently overwrite.
-if _wants_llamacpp and "llamacpp" not in _mp:
+_models_now = cfg.get("models")
+_providers_now = _models_now.get("providers") if isinstance(_models_now, dict) else None
+if _wants_llamacpp and not (
+    isinstance(_providers_now, dict) and "llamacpp" in _providers_now
+):
+    # Touch models/providers only on the repair path. A malformed scalar must
+    # not crash ExecStartPre, and an unrelated config must not gain an empty
+    # models key merely because some other migration changed the file.
+    if not isinstance(_models_now, dict):
+        _models_now = {}
+        cfg["models"] = _models_now
+    if not isinstance(_providers_now, dict):
+        _providers_now = {}
+        _models_now["providers"] = _providers_now
+    _mp = _providers_now
     # The proxy authenticates openclaw -> Next.js with a per-install bearer
     # (src/lib/local-ai-token.ts). Writing the entry WITHOUT it would trade
     # "Unknown model" for a 401 on every turn, which is not an improvement, so
@@ -363,8 +376,14 @@ if _wants_llamacpp and "llamacpp" not in _mp:
             _ctx = 0
         if _ctx < 16384:
             _ctx = 131072
+        _proxy_port = (os.environ.get("CLAWBOX_PORT") or os.environ.get("PORT") or "80").strip()
+        if not _proxy_port.isdigit() or not 1 <= int(_proxy_port) <= 65535:
+            _proxy_port = "80"
+        _proxy_default = "http://127.0.0.1" + (
+            "" if _proxy_port == "80" else ":" + _proxy_port
+        )
         _proxy_root = (
-            os.environ.get("CLAWBOX_LOCAL_AI_PROXY_BASE_URL") or "http://127.0.0.1"
+            os.environ.get("CLAWBOX_LOCAL_AI_PROXY_BASE_URL") or _proxy_default
         ).strip().rstrip("/")
         _mp["llamacpp"] = {
             "baseUrl": _proxy_root + "/setup-api/local-ai/llamacpp/v1",

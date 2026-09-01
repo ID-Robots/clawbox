@@ -833,6 +833,20 @@ async function stopGatewayForMaintenance(): Promise<void> {
   );
 }
 
+async function removeGatewayMaintenanceMask(): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await setGatewayMaintenanceMask(false);
+      return;
+    } catch (err) {
+      lastError = err;
+      if (attempt < 3) await delay(250);
+    }
+  }
+  throw lastError;
+}
+
 /**
  * Keep systemd from starting the gateway while an OpenClaw writer is active.
  * Mask comes before stop so a root update step cannot race the stop with its
@@ -842,13 +856,30 @@ async function withGatewayQuiesced<T>(operation: () => Promise<T>): Promise<T> {
   if (gatewayIsAbsent()) return operation();
 
   let masked = false;
+  let operationFailed = false;
   try {
     await setGatewayMaintenanceMask(true);
     masked = true;
     await stopGatewayForMaintenance();
     return await operation();
+  } catch (err) {
+    operationFailed = true;
+    throw err;
   } finally {
-    if (masked) await setGatewayMaintenanceMask(false);
+    if (masked) {
+      try {
+        await removeGatewayMaintenanceMask();
+      } catch (unmaskErr) {
+        console.error(
+          "[Updater] Failed to remove the gateway maintenance mask:",
+          unmaskErr instanceof Error ? unmaskErr.message : unmaskErr,
+        );
+        // Preserve the operation's real error when both failed. If cleanup is
+        // the only failure, surface it: reporting success would leave the
+        // gateway runtime-masked until reboot.
+        if (!operationFailed) throw unmaskErr;
+      }
+    }
   }
 }
 
@@ -856,6 +887,9 @@ async function withGatewayQuiesced<T>(operation: () => Promise<T>): Promise<T> {
 async function runCurrentGatewayPreStart(): Promise<void> {
   if (!existsSync(CURRENT_GATEWAY_PRE_START)) return;
   const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
+  const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
+    || process.env.OPENCLAW_HOME
+    || path.join(home, ".openclaw");
   await execFile("/bin/bash", [CURRENT_GATEWAY_PRE_START], {
     // Match the unit's 600s TimeoutStartSec with a little process overhead.
     // Killing this halfway through a plugin migration recreates the lock race
@@ -867,7 +901,7 @@ async function runCurrentGatewayPreStart(): Promise<void> {
       HOME: home,
       CLAWBOX_HOME_DIR: home,
       CLAWBOX_ROOT: PROJECT_DIR,
-      OPENCLAW_HOME: process.env.OPENCLAW_HOME || path.join(home, ".openclaw"),
+      OPENCLAW_HOME: openclawHome,
     },
   });
 }
@@ -876,11 +910,37 @@ async function runCurrentGatewayPreStart(): Promise<void> {
 async function repairCodexCapabilityConsent(journal: string): Promise<void> {
   if (!CODEX_CAPABILITY_CONSENT_RE.test(journal)) return;
   if (!(await codexCapabilityRepairIsAllowed())) return;
-  await execFile(
-    OPENCLAW_BIN,
-    ["plugins", "enable", "codex", "--accept-capabilities"],
-    { timeout: 90_000, maxBuffer: 2 * 1024 * 1024 },
-  );
+  let target = OPENCLAW_VERSION_FALLBACK;
+  try {
+    target = (await readFile(OPENCLAW_TARGET_FILE, "utf-8")).trim().split(/\s+/)[0] || target;
+  } catch {
+    // The compiled fallback is the same pin used by the installer.
+  }
+  try {
+    // A migrated v1 install can leave only the managed-project declaration,
+    // without node_modules. `enable` then says "Plugin not found"; a pinned
+    // force-install repairs that partial project and records consent in one
+    // idempotent operation. OpenClaw state leases live for five minutes after
+    // a killed startup, so this budget must outlast that bounded stale lease.
+    await execFile(
+      OPENCLAW_BIN,
+      [
+        "plugins",
+        "install",
+        `@openclaw/codex@${target}`,
+        "--force",
+        "--accept-capabilities",
+      ],
+      { timeout: 360_000, maxBuffer: 4 * 1024 * 1024 },
+    );
+  } catch (err) {
+    // Best effort: the clean restart and positive port probe below decide the
+    // result. This must not replace a preceding pre-start failure either.
+    console.warn(
+      "[Updater] Codex capability repair did not complete:",
+      err instanceof Error ? err.message : err,
+    );
+  }
 }
 
 /** Respect an owner-disabled unused Codex plugin even if old logs mention it. */

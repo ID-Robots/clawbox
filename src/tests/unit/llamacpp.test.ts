@@ -6,6 +6,7 @@ describe("llamacpp config helpers", () => {
     delete process.env.LLAMACPP_MODEL;
     delete process.env.LLAMACPP_CONTEXT_WINDOW;
     delete process.env.LLAMACPP_MAX_TOKENS;
+    vi.unstubAllEnvs();
     vi.resetModules();
   });
 
@@ -32,6 +33,23 @@ describe("llamacpp config helpers", () => {
     const mod = await import("@/lib/llamacpp");
 
     expect(mod.getLlamaCppProxyBaseUrl()).toBe("http://127.0.0.1/setup-api/local-ai/llamacpp/v1");
+  });
+
+  it("routes the proxy through the configured x64 UI port", async () => {
+    vi.stubEnv("CLAWBOX_PORT", "3005");
+    const mod = await import("@/lib/llamacpp");
+
+    expect(mod.getLlamaCppProxyBaseUrl())
+      .toBe("http://127.0.0.1:3005/setup-api/local-ai/llamacpp/v1");
+  });
+
+  it("preserves an explicit local-AI proxy authority", async () => {
+    vi.stubEnv("CLAWBOX_PORT", "3005");
+    vi.stubEnv("CLAWBOX_LOCAL_AI_PROXY_BASE_URL", "http://10.42.0.1:8080/");
+    const mod = await import("@/lib/llamacpp");
+
+    expect(mod.getLlamaCppProxyBaseUrl())
+      .toBe("http://10.42.0.1:8080/setup-api/local-ai/llamacpp/v1");
   });
 
   it("respects an explicit LLAMACPP_MODEL override", async () => {
