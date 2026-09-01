@@ -270,9 +270,9 @@ export default function WifiStep({ onNext }: WifiStepProps) {
           <Image
             src="/clawbox-crab.png"
             alt="ClawBox"
-            width={120}
-            height={120}
-            className="w-20 h-20 sm:w-[120px] sm:h-[120px] object-contain animate-welcome-powerup"
+            width={62}
+            height={62}
+            className="w-[41px] h-[41px] sm:w-[62px] sm:h-[62px] object-contain animate-welcome-powerup"
             priority
           />
           <h1 className="text-xl sm:text-2xl font-bold font-display text-center">

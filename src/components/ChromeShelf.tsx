@@ -296,7 +296,7 @@ export default function ChromeShelf({
                 title={t("shelf.chat")}
                 aria-label={t("shelf.chat")}
               >
-                <img src="/clawbox-crab.png" alt="Chat" className="w-10 h-10 object-contain" />
+                <img src="/clawbox-crab.png" alt="Chat" className="w-[21px] h-[21px] object-contain" />
               </button>
             )}
             <div className="absolute right-2 flex items-center gap-1">
@@ -388,7 +388,7 @@ export default function ChromeShelf({
               title={t("shelf.chat")}
               aria-label={t("shelf.chat")}
             >
-              <img src="/clawbox-crab.png" alt="Chat" className="w-10 h-10 object-contain" />
+              <img src="/clawbox-crab.png" alt="Chat" className="w-[21px] h-[21px] object-contain" />
             </button>
           )}
           {renderShieldButton()}

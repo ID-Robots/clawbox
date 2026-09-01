@@ -2643,9 +2643,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <Image
                   src="/clawbox-crab.png"
                   alt="ClawBox"
-                  width={96}
-                  height={96}
-                  className="w-24 h-24 object-contain animate-welcome-powerup relative z-10"
+                  width={50}
+                  height={50}
+                  className="w-[50px] h-[50px] object-contain animate-welcome-powerup relative z-10"
                 />
               </div>
             )}
@@ -5968,7 +5968,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <img
                 src="/clawbox-crab.png"
                 alt="ClawBox"
-                className="w-24 h-24 object-contain relative z-10"
+                className="w-[50px] h-[50px] object-contain relative z-10"
                 style={updateState?.phase === "completed" || updateError || updateState?.phase === "failed" ? {} : { animation: "update-float 3s ease-in-out infinite" }}
               />
             </div>
@@ -6062,8 +6062,8 @@ function RemoteLoginPlaceholder({ onSignIn }: { onSignIn: () => void }) {
         <img
           src="/clawbox-crab.png"
           alt=""
-          width={64}
-          height={64}
+          width={48}
+          height={48}
           className="select-none pointer-events-none drop-shadow-[0_0_12px_rgba(249,115,22,0.5)]"
         />
         <div>

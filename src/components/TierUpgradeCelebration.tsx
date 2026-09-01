@@ -261,8 +261,8 @@ function CelebrationShell({ tone, badge, headline, body, primary, onClose }: She
           <img
             src="/clawbox-crab.png"
             alt=""
-            width={72}
-            height={72}
+            width={55}
+            height={55}
             className={"select-none pointer-events-none " + glowClass}
           />
           <span

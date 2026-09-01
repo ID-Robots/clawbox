@@ -71,15 +71,16 @@ const CRAB_BODY_PX = 150
  * the ZZZ cluster, the 60px drag hit-box, the ground line the feet stand on —
  * was measured against the original artwork, whose PNG carried a third of its
  * height as transparent padding below the crab: drawn `contain` into the
- * 150px box, the visible crab was ~75px wide and ~61px tall with its feet
+ * 150px box, the visible crab was ~73px wide and ~61px tall with its feet
  * 50px above the box's bottom edge (i.e. standing on the shelf's top edge,
  * the box overlapping the bar). `public/clawbox-crab.png` is now a tight
- * square, so the same footprint is reproduced explicitly: an 84px square
- * whose art (97% wide, rows 13%–89%) lands ~81px wide, ~64px tall, feet at
- * 50px. Change these together with the artwork, never one without the other.
+ * square (186x146 px of crab in 192x192), so the same footprint is reproduced
+ * explicitly: a 78px square whose art lands ~76px wide, ~59px tall, with its
+ * feet 42 + 8.5 ≈ 50px up. Change these together with the artwork, never one
+ * without the other.
  */
-const CRAB_ART_PX = 84
-const CRAB_ART_BOTTOM_PX = 41
+const CRAB_ART_PX = 78
+const CRAB_ART_BOTTOM_PX = 42
 
 /**
  * Clearance between the top of the pet's VISIBLE ART and its bubble.

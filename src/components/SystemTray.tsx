@@ -163,7 +163,7 @@ export default function SystemTray({
           ) : (
             <div className="relative w-32 h-32 flex items-center justify-center">
               <div className="absolute inset-0 rounded-full border-[3px] border-white/10 animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
-              <Image src="/clawbox-crab.png" alt="ClawBox" width={96} height={96} className="w-24 h-24 object-contain animate-welcome-powerup" priority />
+              <Image src="/clawbox-crab.png" alt="ClawBox" width={50} height={50} className="w-[50px] h-[50px] object-contain animate-welcome-powerup" priority />
             </div>
           )}
 
