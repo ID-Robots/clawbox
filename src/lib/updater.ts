@@ -856,31 +856,36 @@ async function withGatewayQuiesced<T>(operation: () => Promise<T>): Promise<T> {
   if (gatewayIsAbsent()) return operation();
 
   let masked = false;
-  let operationFailed = false;
+  let outcome!: { ok: true; value: T } | { ok: false; error: unknown };
   try {
     await setGatewayMaintenanceMask(true);
     masked = true;
     await stopGatewayForMaintenance();
-    return await operation();
+    outcome = { ok: true, value: await operation() };
   } catch (err) {
-    operationFailed = true;
-    throw err;
-  } finally {
-    if (masked) {
-      try {
-        await removeGatewayMaintenanceMask();
-      } catch (unmaskErr) {
-        console.error(
-          "[Updater] Failed to remove the gateway maintenance mask:",
-          unmaskErr instanceof Error ? unmaskErr.message : unmaskErr,
-        );
-        // Preserve the operation's real error when both failed. If cleanup is
-        // the only failure, surface it: reporting success would leave the
-        // gateway runtime-masked until reboot.
-        if (!operationFailed) throw unmaskErr;
-      }
+    outcome = { ok: false, error: err };
+  }
+
+  let cleanupFailed = false;
+  let cleanupError: unknown;
+  if (masked) {
+    try {
+      await removeGatewayMaintenanceMask();
+    } catch (unmaskErr) {
+      cleanupFailed = true;
+      cleanupError = unmaskErr;
+      console.error(
+        "[Updater] Failed to remove the gateway maintenance mask:",
+        unmaskErr instanceof Error ? unmaskErr.message : unmaskErr,
+      );
     }
   }
+
+  // Preserve the operation's real error when both failed. If cleanup is the
+  // only failure, surface it: success would leave the gateway masked to reboot.
+  if (!outcome.ok) throw outcome.error;
+  if (cleanupFailed) throw cleanupError;
+  return outcome.value;
 }
 
 /** Run the newly checked-out pre-start repair while the gateway is stopped. */

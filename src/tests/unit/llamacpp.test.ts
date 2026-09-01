@@ -1,6 +1,12 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 describe("llamacpp config helpers", () => {
+  beforeEach(() => {
+    vi.stubEnv("CLAWBOX_LOCAL_AI_PROXY_BASE_URL", "");
+    vi.stubEnv("CLAWBOX_PORT", "");
+    vi.stubEnv("PORT", "");
+  });
+
   afterEach(() => {
     delete process.env.LLAMACPP_BASE_URL;
     delete process.env.LLAMACPP_MODEL;
