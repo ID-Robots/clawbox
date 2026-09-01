@@ -1,3 +1,5 @@
+import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
+
 const DEFAULT_LLAMACPP_BASE_URL = "http://127.0.0.1:8080/v1";
 // The wire-visible model id. It is only llama-server's --alias, so it does NOT
 // encode the quantisation provenance and must stay stable across GGUF changes:
@@ -73,16 +75,7 @@ export function getLlamaCppBaseUrl(): string {
 }
 
 export function getLlamaCppProxyBaseUrl(): string {
-  const configuredPort = (process.env.CLAWBOX_PORT || process.env.PORT || "80").trim();
-  const validPort = /^\d+$/.test(configuredPort)
-    && Number(configuredPort) >= 1
-    && Number(configuredPort) <= 65535;
-  const port = validPort ? configuredPort : "80";
-  const defaultRoot = `http://127.0.0.1${port === "80" ? "" : `:${port}`}`;
-  const root = (process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL || defaultRoot)
-    .trim()
-    .replace(/\/+$/, "");
-  return `${root}/setup-api/local-ai/llamacpp/v1`;
+  return `${getLocalAiProxyRootUrl()}/setup-api/local-ai/llamacpp/v1`;
 }
 
 export function getDefaultLlamaCppModel(): string {

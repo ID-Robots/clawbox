@@ -4,6 +4,7 @@ import { startLlamaCppServer, stopLlamaCppServer } from "@/instrumentation-node"
 import { terminateByArgv } from "@/lib/process-match";
 import { isOllamaExecutable } from "@/lib/local-models";
 import { getDefaultLlamaCppModel, getLlamaCppBaseUrl, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
+import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 import {
   getLlamaCppLaunchSpec,
   getLlamaCppProvisioningStatus,
@@ -11,9 +12,10 @@ import {
   resolveConfiguredLlamaCppAlias,
 } from "@/lib/llamacpp-server";
 
+export { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
+
 const execFile = promisify(execFileCb);
 const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
-const DEFAULT_LOCAL_AI_PROXY_ROOT_URL = "http://127.0.0.1";
 const DEFAULT_LOCAL_AI_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_OLLAMA_STARTUP_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 1_000;
@@ -62,13 +64,6 @@ function normalizeBaseUrl(value: string, fallback: string): string {
 
 export function getOllamaBaseUrl(): string {
   return normalizeBaseUrl(process.env.OLLAMA_HOST || DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_BASE_URL);
-}
-
-export function getLocalAiProxyRootUrl(): string {
-  return normalizeBaseUrl(
-    process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL || DEFAULT_LOCAL_AI_PROXY_ROOT_URL,
-    DEFAULT_LOCAL_AI_PROXY_ROOT_URL,
-  );
 }
 
 export function getLocalAiProxyBaseUrl(provider: LocalAiProvider): string {

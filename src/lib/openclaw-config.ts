@@ -6,6 +6,7 @@ import { execFile, spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { promisify } from "util";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
+import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 import { readEdition } from "@/lib/edition-source";
 import { getProviderReasoningConfig, isThinkingLevel } from "@/lib/chat-reasoning";
 import { isSafeDiscordToken } from "@/lib/discord-api";
@@ -773,11 +774,8 @@ export interface OpenClawConfig {
   };
 }
 
-const DEFAULT_LOCAL_AI_PROXY_ROOT_URL = "http://127.0.0.1";
-
 function getOllamaProxyBaseUrl(): string {
-  const root = (process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL || DEFAULT_LOCAL_AI_PROXY_ROOT_URL).trim().replace(/\/+$/, "");
-  return `${root}/setup-api/local-ai/ollama`;
+  return `${getLocalAiProxyRootUrl()}/setup-api/local-ai/ollama`;
 }
 
 function normalizeLocalProvider(provider: string | null | undefined): "llamacpp" | "ollama" | null {
