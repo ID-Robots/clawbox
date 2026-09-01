@@ -142,6 +142,7 @@ interface PluginFlowOptions {
   installedVersion?: string;
   peerHealthy?: boolean;
   layout?: "flat-managed" | "project-managed" | "registry";
+  registryDependenciesOk?: boolean;
 }
 
 /** Execute the shipped shell command flow against a fake OpenClaw binary. */
@@ -173,6 +174,7 @@ function runPluginFlow(options: PluginFlowOptions): string[] {
       CODEX_PLUGIN_ENABLED: options.enabledByConfig ? "1" : "0",
       CODEX_PLUGIN_DIR: pluginDir,
       CODEX_PLUGIN_LAYOUT: options.layout ?? "project-managed",
+      CODEX_REGISTRY_DEPS_OK: options.registryDependenciesOk ? "1" : "0",
       OPENCLAW_TARGET: "2026.8.1",
       OPENCLAW_BIN: fakeOpenClaw,
       CODEX_TEST_LOG: log,
@@ -194,7 +196,12 @@ function resolveRegistryOnlyPlugin(): string {
 
   const fakeOpenClaw = path.join(dir, "registry-openclaw");
   const registryJson = JSON.stringify({
-    plugins: [{ id: "codex", rootDir: registryRoot, source: path.join(registryRoot, "dist", "index.js") }],
+    plugins: [{
+      id: "codex",
+      rootDir: registryRoot,
+      source: path.join(registryRoot, "dist", "index.js"),
+      dependencyStatus: { requiredInstalled: true },
+    }],
   });
   writeFileSync(
     fakeOpenClaw,
@@ -204,12 +211,13 @@ function resolveRegistryOnlyPlugin(): string {
 
   return execFileSync(
     "bash",
-    ["-c", `set -euo pipefail\n${PLUGIN_RESOLVER}\nprintf '%s|%s\\n' "$CODEX_PLUGIN_LAYOUT" "$CODEX_PLUGIN_DIR"`],
+    ["-c", `set -euo pipefail\n${PLUGIN_RESOLVER}\nprintf '%s|%s|%s\\n' "$CODEX_PLUGIN_LAYOUT" "$CODEX_PLUGIN_DIR" "$CODEX_REGISTRY_DEPS_OK"`],
     {
       env: {
         ...process.env,
         OPENCLAW_HOME_DIR: openclawHome,
         OPENCLAW_BIN: fakeOpenClaw,
+        CLAWBOX_OPENCLAW_V2: "1",
       },
       encoding: "utf-8",
     },
@@ -255,7 +263,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
 
   it("resolves a historical Codex package that only OpenClaw's registry can see", () => {
     expect(resolveRegistryOnlyPlugin()).toBe(
-      `registry|${path.join(dir, "global-plugins", "codex")}`,
+      `registry|${path.join(dir, "global-plugins", "codex")}|1`,
     );
   });
 
@@ -326,6 +334,19 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
       installedVersion: "2026.8.1",
       peerHealthy: false,
       layout: "registry",
+      registryDependenciesOk: true,
+    })).toEqual(["plugins enable codex --accept-capabilities"]);
+  });
+
+  it("trusts parent-resolved registry dependencies for a project-managed plugin", () => {
+    expect(runPluginFlow({
+      v2: true,
+      needsCodex: true,
+      enabledByConfig: false,
+      installedVersion: "2026.8.1",
+      peerHealthy: false,
+      layout: "project-managed",
+      registryDependenciesOk: true,
     })).toEqual(["plugins enable codex --accept-capabilities"]);
   });
 

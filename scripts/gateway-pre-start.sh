@@ -1559,6 +1559,31 @@ for plugin in plugins:
     CODEX_PLUGIN_LAYOUT="registry"
   fi
 fi
+# OpenClaw's registry resolves dependencies through parent/global node_modules,
+# not only the plugin's direct nested folder. Its requiredInstalled verdict is
+# therefore authoritative when available; a missing direct peer file can still
+# be a completely healthy global/project install. Retain the filesystem check
+# as the fallback for older CLIs or malformed registry output.
+CODEX_REGISTRY_DEPS_OK=0
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+  CODEX_REGISTRY_DEPS_OK="$(
+    timeout 20 "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
+      python3 -c 'import json, sys
+try:
+    data = json.load(sys.stdin)
+except (json.JSONDecodeError, OSError):
+    print("0"); raise SystemExit(0)
+plugins = data.get("plugins", []) if isinstance(data, dict) else []
+for plugin in plugins:
+    if not isinstance(plugin, dict) or plugin.get("id") != "codex":
+        continue
+    deps = plugin.get("dependencyStatus")
+    print("1" if isinstance(deps, dict) and deps.get("requiredInstalled") is True else "0")
+    break
+else:
+    print("0")'
+  )" || CODEX_REGISTRY_DEPS_OK=0
+fi
 NEEDS_CODEX_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, sys
 try:
@@ -1637,13 +1662,13 @@ CODEX_PEER_DEP="$CODEX_PLUGIN_DIR/node_modules/openclaw/package.json"
 CODEX_NEEDS_INSTALL=0
 CODEX_INSTALL_REASON=""
 if [ "$CODEX_SHOULD_LOAD" = "1" ]; then
-  # The nested peer symlink is a managed-home install invariant. A plugin root
-  # returned by OpenClaw's registry may be global and legitimately omit it;
-  # the registry already resolved that package for the running core. Treating
-  # that layout as broken launches a needless reinstall in ExecStartPre, which
-  # an updater restart can kill mid-transaction and leave SQLite locked.
+  # The direct nested peer symlink is only one valid resolution shape. Trust a
+  # positive registry dependency verdict across managed, project, and global
+  # layouts; treating a healthy parent-resolved plugin as broken launches a
+  # needless reinstall in ExecStartPre, which an updater restart can kill
+  # mid-transaction and leave SQLite locked.
   if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] || {
-    [ "$CODEX_PLUGIN_LAYOUT" != "registry" ] && [ ! -e "$CODEX_PEER_DEP" ];
+    [ "$CODEX_REGISTRY_DEPS_OK" != "1" ] && [ ! -e "$CODEX_PEER_DEP" ];
   }; then
     CODEX_NEEDS_INSTALL=1
     CODEX_INSTALL_REASON="missing or peer-dep broken"
