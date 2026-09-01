@@ -1,4 +1,4 @@
-declare module "@novnc/novnc/lib/rfb" {
+declare module "@novnc/novnc" {
   export default class RFB {
     constructor(target: HTMLElement, urlOrChannel: string | WebSocket, options?: Record<string, unknown>);
     disconnect(): void;
@@ -19,12 +19,4 @@ declare module "@novnc/novnc/lib/rfb" {
     qualityLevel: number;
     compressionLevel: number;
   }
-}
-
-declare module "@novnc/novnc/lib/input/keysymdef" {
-  const keysymdef: {
-    lookup(codepoint: number): number;
-  };
-
-  export default keysymdef;
 }

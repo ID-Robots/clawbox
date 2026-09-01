@@ -12,6 +12,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * config — so the correct behaviour is to do nothing at all.
  */
 const execFileMock = vi.hoisted(() => vi.fn());
+type ExecCallback = (
+  error: Error | null,
+  result?: { stdout: string; stderr: string },
+) => void;
 vi.mock("child_process", async (orig) => ({
   ...(await orig<typeof import("child_process")>()),
   execFile: execFileMock,
@@ -22,7 +26,7 @@ describe("restartGateway across editions", () => {
     vi.resetModules();
     execFileMock.mockReset();
     // promisify(execFile) resolves through the node-style callback.
-    execFileMock.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+    execFileMock.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: ExecCallback) => {
       cb(null, { stdout: "", stderr: "" });
     });
   });
@@ -54,14 +58,26 @@ describe("restartGateway across editions", () => {
     expect(args).toContain("clawbox-gateway.service");
   });
 
-  it("treats a masked unit as absent rather than as a failure", async () => {
+  it("does not bypass an OpenClaw maintenance mask through the user unit", async () => {
     const { restartGateway } = await load("openclaw");
-    execFileMock.mockImplementationOnce((_c: string, _a: string[], _o: unknown, cb: Function) => {
-      cb(new Error("Failed to restart clawbox-gateway.service: Unit clawbox-gateway.service is masked."));
+    const masked = new Error(
+      "Failed to restart clawbox-gateway.service: Unit clawbox-gateway.service is masked.",
+    );
+    execFileMock.mockImplementation((_c: string, args: string[], _o: unknown, cb: ExecCallback) => {
+      if (args.includes("restart") && args.includes("clawbox-gateway.service")) {
+        cb(masked);
+        return;
+      }
+      cb(null, { stdout: "", stderr: "" });
     });
-    // Falls through to the user-unit fallback (mocked to succeed) instead of
-    // throwing, which is what surfaced the error banner to the customer.
-    await expect(restartGateway()).resolves.toBeUndefined();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(restartGateway()).rejects.toBe(masked);
+
+    expect(execFileMock.mock.calls.some(([, args]) =>
+      (args as string[]).includes("--user"),
+    )).toBe(false);
+    errorSpy.mockRestore();
   });
 
   it("exposes no reloadGateway at all — skill installs bounce nothing", async () => {

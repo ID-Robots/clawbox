@@ -43,7 +43,9 @@ const requireNodeSqlite = (() => {
   };
 })();
 
-export const OPENCLAW_HOME_DEFAULT = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
+export const OPENCLAW_HOME_DEFAULT = process.env.CLAWBOX_OPENCLAW_HOME
+  || process.env.OPENCLAW_HOME
+  || path.join(process.env.HOME || "/home/clawbox", ".openclaw");
 export const AGENTS_DIR_DEFAULT = path.join(OPENCLAW_HOME_DEFAULT, "agents");
 
 /** The per-agent SQLite store, or null when this agent is not migrated. */
@@ -154,6 +156,10 @@ export interface SessionEntrySweepResult {
    *  be said about what was written, and a caller must not treat the pass
    *  as done — record no backup, count no update. */
   ok: boolean;
+  /** Present only when the store is from a newer OpenClaw generation. The
+   *  caller must not reinterpret that refusal as permission to mutate a
+   *  leftover legacy sessions.json for the same migrated agent. */
+  unsupportedSchema?: number;
 }
 
 /**
@@ -178,22 +184,24 @@ export function sweepSessionEntries(
     return { updated: 0, ok: false };
   }
   try {
-    // OpenClaw's own store code refuses schemas newer than it knows
-    // (createNewerSqliteSchemaVersionError, user_version > its build's cap);
-    // this sweep must be no braver — a newer core may have moved or re-keyed
-    // entry_json, and a blind UPDATE would corrupt what it no longer
-    // understands. 2026.8.1 stamps user_version 19.
-    const versionRow = db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined;
-    const schemaVersion = typeof versionRow?.user_version === "number" ? versionRow.user_version : 0;
-    if (schemaVersion > KNOWN_SESSION_SCHEMA_VERSION) {
-      console.error(
-        `[session-store] ${dbPath} carries schema v${schemaVersion}, newer than the v${KNOWN_SESSION_SCHEMA_VERSION} this sweep knows; refusing to write`,
-      );
-      return { updated: 0, ok: false };
-    }
     db.exec("BEGIN IMMEDIATE");
     let updated = 0;
     try {
+      // Inspect the schema only AFTER taking the write reservation. Otherwise
+      // another OpenClaw process can migrate v19 → v20 between this read and
+      // BEGIN IMMEDIATE, leaving this old writer to mutate a schema it never
+      // understood. OpenClaw's own store code refuses versions above its cap;
+      // this sweep must be no braver. 2026.8.1 stamps user_version 19.
+      const versionRow = db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined;
+      const schemaVersion = typeof versionRow?.user_version === "number" ? versionRow.user_version : 0;
+      if (schemaVersion > KNOWN_SESSION_SCHEMA_VERSION) {
+        console.error(
+          `[session-store] ${dbPath} carries schema v${schemaVersion}, newer than the v${KNOWN_SESSION_SCHEMA_VERSION} this sweep knows; refusing to write`,
+        );
+        db.exec("ROLLBACK");
+        return { updated: 0, ok: false, unsupportedSchema: schemaVersion };
+      }
+
       const rows = db
         .prepare("SELECT session_key AS key, entry_json AS entry FROM session_nodes")
         .all() as Array<{ key?: string | null; entry?: string | null }>;

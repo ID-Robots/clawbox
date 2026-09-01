@@ -3,8 +3,10 @@ import { listAgentIds, sessionStorePath, sweepSessionEntries } from "./openclaw-
 import fsSync from "fs";
 import path from "path";
 import { execFile, spawn } from "child_process";
+import { randomUUID } from "crypto";
 import { promisify } from "util";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
+import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 import { readEdition } from "@/lib/edition-source";
 import { getProviderReasoningConfig, isThinkingLevel } from "@/lib/chat-reasoning";
 import { isSafeDiscordToken } from "@/lib/discord-api";
@@ -427,7 +429,9 @@ export async function runOpenclawConfigUnset(
   );
 }
 
-export const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
+export const OPENCLAW_HOME = process.env.CLAWBOX_OPENCLAW_HOME
+  || process.env.OPENCLAW_HOME
+  || path.join(process.env.HOME || "/home/clawbox", ".openclaw");
 const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR || path.join(OPENCLAW_HOME, "agents");
 export const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
 export const DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR = 24000;
@@ -609,8 +613,11 @@ export async function applyModelOverrideToAllAgentSessions(
   for (const agentId of listAgentIds(agentsDir)) {
     if (!sessionStorePath(agentId, agentsDir)) continue;
     const result = sweepSessionEntries(agentId, (_key, entry) => applyToSession(entry), agentsDir);
-    // A failed sweep is not a swept agent: leave it to the legacy file pass
-    // rather than reporting sessions updated that never were.
+    // A newer SQLite schema is still authoritative for this migrated agent.
+    // It refused our write on purpose; falling through to an old sessions.json
+    // would report success while the gateway keeps reading unchanged SQLite.
+    if (result?.unsupportedSchema !== undefined) migratedAgents.add(agentId);
+    // Other failed sweeps retain the established best-effort legacy behavior.
     if (!result?.ok) continue;
     migratedAgents.add(agentId);
     if (result.updated > 0) {
@@ -767,11 +774,8 @@ export interface OpenClawConfig {
   };
 }
 
-const DEFAULT_LOCAL_AI_PROXY_ROOT_URL = "http://127.0.0.1";
-
 function getOllamaProxyBaseUrl(): string {
-  const root = (process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL || DEFAULT_LOCAL_AI_PROXY_ROOT_URL).trim().replace(/\/+$/, "");
-  return `${root}/setup-api/local-ai/ollama`;
+  return `${getLocalAiProxyRootUrl()}/setup-api/local-ai/ollama`;
 }
 
 function normalizeLocalProvider(provider: string | null | undefined): "llamacpp" | "ollama" | null {
@@ -946,6 +950,342 @@ export async function writeConfig(config: OpenClawConfig): Promise<void> {
   const tmpPath = CONFIG_PATH + ".tmp";
   await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), "utf-8");
   await fs.rename(tmpPath, CONFIG_PATH);
+}
+
+const OPENCLAW_CONFIG_LOCK_STALE_MS = 30_000;
+const OPENCLAW_CONFIG_LOCK_MAX_BYTES = 1024 * 1024;
+
+type FileStat = Awaited<ReturnType<typeof fs.lstat>>;
+type LockOwnerPayload = {
+  pid?: number;
+  createdAt?: string;
+  starttime?: number;
+  clawboxOwnerToken?: string;
+};
+type LockSnapshot = { raw: string; payload: LockOwnerPayload | null; stat: FileStat };
+
+/** True only when both stats name the same filesystem object. */
+function sameFileIdentity(left: FileStat, right: FileStat): boolean {
+  return BigInt(left.dev) === BigInt(right.dev) && BigInt(left.ino) === BigInt(right.ino);
+}
+
+/** Normalize Stats/BigIntStats' millisecond timestamp overload to a number. */
+function fileMtimeMs(stat: FileStat): number {
+  return Number(stat.mtimeMs);
+}
+
+/** Read Linux's process-start identity, which disambiguates a reused PID. */
+async function processStarttime(pid: number): Promise<number | null> {
+  if (process.platform !== "linux" || !Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const raw = await fs.readFile(`/proc/${pid}/stat`, "utf8");
+    const commEnd = raw.lastIndexOf(")");
+    if (commEnd < 0) return null;
+    const fields = raw.slice(commEnd + 1).trimStart().split(/\s+/);
+    const value = Number(fields[19]);
+    return Number.isInteger(value) && value >= 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Prove a PID dead without treating EPERM or an unreadable procfs as death. */
+async function pidIsDefinitelyDead(pid: number): Promise<boolean> {
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ESRCH";
+  }
+  if (process.platform !== "linux") return false;
+  try {
+    return /^State:\s+Z\b/m.test(await fs.readFile(`/proc/${pid}/status`, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read one stable, bounded snapshot of a sidecar without following symlinks.
+ * A changed inode or oversized/malformed payload is retained, never guessed
+ * stale; fail-closed is the safe direction for another process's lock.
+ */
+async function readLockSnapshot(lockPath: string): Promise<LockSnapshot | null> {
+  const noFollow = typeof fsSync.constants.O_NOFOLLOW === "number" ? fsSync.constants.O_NOFOLLOW : 0;
+  const nonBlock = typeof fsSync.constants.O_NONBLOCK === "number" ? fsSync.constants.O_NONBLOCK : 0;
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    // Open first, with symlink following disabled, then inspect and read only
+    // through that pinned descriptor. A pathname lstat before open is a TOCTOU:
+    // another process can replace the sidecar between the check and use. The
+    // post-read lstat below is only an identity proof that this still-pinned
+    // file remains the path's current owner.
+    handle = await fs.open(lockPath, fsSync.constants.O_RDONLY | noFollow | nonBlock);
+    const opened = await handle.stat();
+    if (!opened.isFile()) return null;
+    const capacity = Math.min(opened.size, OPENCLAW_CONFIG_LOCK_MAX_BYTES) + 1;
+    const buffer = Buffer.alloc(capacity);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > OPENCLAW_CONFIG_LOCK_MAX_BYTES) return null;
+    const after = await fs.lstat(lockPath).catch(() => null);
+    if (!after?.isFile() || !sameFileIdentity(opened as FileStat, after)) return null;
+    const raw = buffer.subarray(0, bytesRead).toString("utf8");
+    let payload: LockOwnerPayload | null = null;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        payload = parsed as LockOwnerPayload;
+      }
+    } catch {
+      // OpenClaw's ownership token is whitespace, so its payload remains valid
+      // JSON. Any other trailing content is not an owner we can safely judge.
+    }
+    return { raw, payload, stat: after };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ELOOP") return null;
+    throw err;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/** Apply OpenClaw's dead-PID/expired-owner stale policy to one snapshot. */
+async function lockIsStale(snapshot: LockSnapshot): Promise<boolean> {
+  const payload = snapshot.payload;
+  const pid = typeof payload?.pid === "number" && Number.isInteger(payload.pid) && payload.pid > 0
+    ? payload.pid
+    : null;
+  if (pid !== null) {
+    if (typeof payload?.starttime === "number" && Number.isInteger(payload.starttime) && payload.starttime >= 0) {
+      const current = await processStarttime(pid);
+      if (current !== null && current !== payload.starttime) return true;
+    }
+    // A valid, live PID wins over an old createdAt, exactly as OpenClaw's own
+    // shouldRemoveDeadOwnerOrExpiredLock policy does.
+    return pidIsDefinitelyDead(pid);
+  }
+  const createdAt = typeof payload?.createdAt === "string" ? Date.parse(payload.createdAt) : Number.NaN;
+  // A crash can leave the exclusively-created sidecar empty, before its owner
+  // payload is written. Missing/malformed owner data ages by the file itself;
+  // otherwise that zero-byte lock can never be reclaimed.
+  const ownerTimestamp = Number.isFinite(createdAt) ? createdAt : fileMtimeMs(snapshot.stat);
+  return Number.isFinite(ownerTimestamp) && Date.now() - ownerTimestamp > OPENCLAW_CONFIG_LOCK_STALE_MS;
+}
+
+type ReclaimGuardState = "missing" | "active" | "reclaimed";
+
+/**
+ * Inspect OpenClaw's reclaim guard through a pinned directory descriptor.
+ * A recent guard is live and retained. An abandoned guard ages out after the
+ * same 30 s as its lock. Reclamation first atomically renames the path to an
+ * unpredictable quarantine: a successor created at the canonical path is
+ * never removed, and the moved directory is deleted only when its descriptor
+ * identity is the stale directory we observed.
+ */
+async function inspectReclaimGuard(guardPath: string): Promise<ReclaimGuardState> {
+  const noFollow = typeof fsSync.constants.O_NOFOLLOW === "number" ? fsSync.constants.O_NOFOLLOW : 0;
+  const nonBlock = typeof fsSync.constants.O_NONBLOCK === "number" ? fsSync.constants.O_NONBLOCK : 0;
+  const directory = typeof fsSync.constants.O_DIRECTORY === "number" ? fsSync.constants.O_DIRECTORY : 0;
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    handle = await fs.open(guardPath, fsSync.constants.O_RDONLY | noFollow | nonBlock | directory);
+    const opened = await handle.stat() as FileStat;
+    if (!opened.isDirectory()) return "active";
+    const guardMtimeMs = fileMtimeMs(opened);
+    if (!Number.isFinite(guardMtimeMs) || Date.now() - guardMtimeMs <= OPENCLAW_CONFIG_LOCK_STALE_MS) {
+      return "active";
+    }
+    const quarantinePath = `${guardPath}.quarantine-${randomUUID()}`;
+    try {
+      await fs.rename(guardPath, quarantinePath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return "missing";
+      if (code === "EEXIST" || code === "ENOTEMPTY") return "active";
+      throw err;
+    }
+
+    let movedHandle: Awaited<ReturnType<typeof fs.open>> | null = null;
+    try {
+      movedHandle = await fs.open(quarantinePath, fsSync.constants.O_RDONLY | noFollow | nonBlock | directory);
+      const moved = await movedHandle.stat() as FileStat;
+      if (!moved.isDirectory() || !sameFileIdentity(opened, moved)) {
+        // The canonical path was replaced between open and rename. Retain the
+        // moved successor under quarantine and restore guard *presence* with
+        // an exclusive mkdir; never rename over a newer live guard.
+        await fs.mkdir(guardPath).catch((err) => {
+          if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        });
+        return "active";
+      }
+      try {
+        await fs.rmdir(quarantinePath);
+        return "reclaimed";
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return "reclaimed";
+        if (code === "EEXIST" || code === "ENOTEMPTY") {
+          await fs.mkdir(guardPath).catch((mkdirErr) => {
+            if ((mkdirErr as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirErr;
+          });
+          return "active";
+        }
+        throw err;
+      }
+    } finally {
+      await movedHandle?.close().catch(() => {});
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return "missing";
+    if (code === "ELOOP" || code === "ENOTDIR") return "active";
+    throw err;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/** Remove only the exact inode and bytes represented by `snapshot`. */
+async function unlinkUnchangedSnapshot(lockPath: string, snapshot: LockSnapshot): Promise<boolean> {
+  const current = await readLockSnapshot(lockPath);
+  if (!current || !sameFileIdentity(snapshot.stat, current.stat) || snapshot.raw !== current.raw) return false;
+  try {
+    await fs.unlink(lockPath);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
+}
+
+/** Reclaim one proven-stale lock under OpenClaw's `.reclaim` hand-off guard. */
+async function reclaimStaleLock(lockPath: string): Promise<boolean> {
+  const observed = await readLockSnapshot(lockPath);
+  if (!observed || !(await lockIsStale(observed))) return false;
+  const guardPath = `${lockPath}.reclaim`;
+  try {
+    await fs.mkdir(guardPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw err;
+  }
+  try {
+    const current = await readLockSnapshot(lockPath);
+    if (!current
+      || !sameFileIdentity(observed.stat, current.stat)
+      || observed.raw !== current.raw
+      || !(await lockIsStale(current))) return false;
+    return unlinkUnchangedSnapshot(lockPath, current);
+  } finally {
+    await fs.rmdir(guardPath).catch(() => {});
+  }
+}
+
+/** Release our sidecar only while its inode or unique owner token is ours. */
+async function releaseOwnedLock(lockPath: string, heldStat: FileStat | null, ownerToken: string): Promise<void> {
+  const current = await readLockSnapshot(lockPath).catch(() => null);
+  if (!current) return;
+  const owns = heldStat
+    ? sameFileIdentity(heldStat, current.stat)
+    : current.payload?.clawboxOwnerToken === ownerToken;
+  if (owns) await unlinkUnchangedSnapshot(lockPath, current).catch(() => {});
+}
+
+/**
+ * Run one direct config mutation under OpenClaw 2's cross-process sidecar
+ * lock. The core CLI uses an exclusive `openclaw.json.lock` regular file for
+ * the same purpose, so holding it serializes this exceptional unvalidated
+ * write with gateway and CLI mutations as well as concurrent setup requests.
+ */
+async function withOpenclawConfigSidecarLock<T>(mutate: () => Promise<T>): Promise<T> {
+  const lockPath = `${CONFIG_PATH}.lock`;
+  const reclaimGuardPath = `${lockPath}.reclaim`;
+  const deadline = Date.now() + 30_000;
+  let attempt = 0;
+  let lockHandle: Awaited<ReturnType<typeof fs.open>>;
+  let heldStat: FileStat | null = null;
+  const ownerToken = randomUUID();
+  const starttime = await processStarttime(process.pid);
+  const ownerRaw = JSON.stringify({
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+    ...(starttime === null ? {} : { starttime }),
+    clawboxOwnerToken: ownerToken,
+  }) + "\n";
+
+  // `readConfigStrict` deliberately treats ENOENT as a fresh `{}` config and
+  // `writeConfig` creates this directory. The lock has to preserve that same
+  // first-run contract rather than failing one step earlier when even the
+  // OpenClaw home directory does not exist yet.
+  await fs.mkdir(OPENCLAW_HOME, { recursive: true });
+
+  while (true) {
+    try {
+      const guardState = await inspectReclaimGuard(reclaimGuardPath);
+      if (guardState === "active") {
+        throw Object.assign(new Error(`config lock reclamation is active: ${reclaimGuardPath}`), { code: "EEXIST" });
+      }
+      if (guardState === "reclaimed") continue;
+      lockHandle = await fs.open(lockPath, "wx", 0o600);
+      let acquisitionError: unknown = null;
+      try {
+        heldStat = await lockHandle.stat() as FileStat;
+      } catch (err) {
+        acquisitionError = err;
+      }
+      try {
+        await lockHandle.writeFile(ownerRaw, "utf8");
+      } catch (err) {
+        acquisitionError ??= err;
+      }
+      if (acquisitionError) {
+        await lockHandle.close().catch(() => {});
+        await releaseOwnedLock(lockPath, heldStat, ownerToken);
+        throw acquisitionError;
+      }
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw err;
+      }
+      if (await reclaimStaleLock(lockPath)) continue;
+      if (Date.now() >= deadline) throw err;
+      const delayMs = Math.min(250, Math.round(25 * (1.2 ** attempt)));
+      attempt += 1;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  try {
+    return await mutate();
+  } finally {
+    await lockHandle.close().catch(() => {});
+    await releaseOwnedLock(lockPath, heldStat, ownerToken);
+  }
+}
+
+/**
+ * Set only `agents.defaults.model.primary` without catalog validation.
+ *
+ * This is reserved for the setup contract that accepts a placeholder API key:
+ * OpenClaw 2's CLI rejects the model when its live catalog cannot authenticate,
+ * even though the gateway may keep that unresolved reference at rest. The
+ * complete-file fallback must nevertheless use the core's sidecar lock so it
+ * cannot overwrite a concurrent provider, auth, or gateway mutation.
+ */
+export async function setPrimaryModelWithoutCatalogValidation(modelRef: string): Promise<void> {
+  if (!parseFullyQualifiedModel(modelRef)) {
+    throw new Error(`Invalid fully-qualified model reference: ${modelRef}`);
+  }
+  await withOpenclawConfigSidecarLock(async () => {
+    const config = await readConfigStrict();
+    const agents = (config.agents ??= {});
+    const defaults = (agents.defaults ??= {}) as Record<string, unknown>;
+    const model = (defaults.model ??= {}) as Record<string, unknown>;
+    model.primary = modelRef;
+    await writeConfig(config);
+  });
 }
 
 /**
@@ -1636,10 +1976,14 @@ export async function restartGateway(): Promise<void> {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // "is masked" is the other way this unit says "I am not running here" — a
-    // masked unit is a deliberate removal, not an error to surface. Without it
-    // the message fell past this branch to the throw below.
-    if (/clawbox-gateway\.service.*(?:not found|is masked)|Unit clawbox-gateway\.service not found|could not be found/i.test(message)) {
+    // Fall back only when this installation genuinely has no ClawBox system
+    // unit. A runtime mask is an update/factory-reset lock: starting the legacy
+    // user unit through it would defeat the lock and recreate concurrent
+    // gateway/SQLite writers.
+    const systemGatewayMasked = /clawbox-gateway\.service[^\n]*\bmasked\b/i.test(message);
+    const systemGatewayMissing =
+      /clawbox-gateway\.service[^\n]*(?:not found|could not be found)/i.test(message);
+    if (!systemGatewayMasked && systemGatewayMissing) {
       try {
         await exec("systemctl", ["--user", "restart", "openclaw-gateway.service"], {
           timeout: 60000,

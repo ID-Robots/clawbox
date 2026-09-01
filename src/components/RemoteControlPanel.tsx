@@ -22,8 +22,13 @@ const POLL_INTERVAL_MS = 2_000;
 export default function RemoteControlPanel() {
   const { t } = useT();
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  // `false` means the latest status request was unreadable, not that the
+  // tunnel is absent. Keep it separate from the last good payload so a stale
+  // `installed: false` cannot turn a connectivity error into an install offer.
+  const [statusReadable, setStatusReadable] = useState(false);
   const [loading, setLoading] = useState(true);
   const [action, setAction] = useState<"idle" | "starting" | "stopping" | "regenerating">("idle");
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // A start/stop that WORKED but could not be recorded for the next boot.
   // Not an error — the unit is in the state the owner asked for — but the
@@ -43,11 +48,17 @@ export default function RemoteControlPanel() {
     try {
       const res = await fetch("/setup-api/portal/status", { cache: "no-store" });
       if (!res.ok) throw new Error(`Status ${res.status}`);
-      const data = await res.json() as StatusResponse;
+      const data = await res.json() as StatusResponse | null;
+      if (!data?.tunnel || typeof data.tunnel.installed !== "boolean") {
+        throw new Error(t("remoteControl.loadFailed"));
+      }
       setStatus(data);
+      setStatusReadable(true);
+      setStatusError(null);
       return data;
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("remoteControl.loadFailed"));
+      setStatusReadable(false);
+      setStatusError(err instanceof Error ? err.message : t("remoteControl.loadFailed"));
       return null;
     }
   }, [t]);
@@ -226,10 +237,11 @@ export default function RemoteControlPanel() {
         <p className="text-sm text-[var(--text-muted)]">{t("remoteControl.subtitle")}</p>
       </div>
 
+      {statusError && <StatusMessage type="error" message={statusError} />}
       {error && <StatusMessage type="error" message={error} />}
       {bootWarning && <StatusMessage type="info" message={bootWarning} />}
 
-      {!tunnelInstalled && (
+      {statusReadable && !tunnelInstalled && (
         <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
           <div className="flex items-start gap-4 mb-4">
             <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">

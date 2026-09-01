@@ -104,6 +104,34 @@ function audioRequest(bytes: Buffer = AUDIO, name = "recording.webm"): NextReque
   } as unknown as ConstructorParameters<typeof NextRequest>[1]);
 }
 
+/**
+ * Fully serialize a FormData fixture that the route is expected to reject
+ * before reading it all.
+ *
+ * Passing FormData directly to NextRequest starts Node's bundled undici
+ * serializer on an unobserved async producer. These rejection tests correctly
+ * cancel the unread request tail, but under V8 coverage that producer can then
+ * enqueue into the closed stream (`ERR_INVALID_STATE`). A real network sender
+ * receives the cancellation instead; supplying its already-encoded wire bytes
+ * keeps the route behavior under test without leaving a fixture task behind.
+ */
+async function serializedFormRequest(form: FormData): Promise<NextRequest> {
+  const serialized = new Response(form);
+  const body = Buffer.from(await serialized.arrayBuffer());
+  return new NextRequest("http://localhost/setup-api/chat/transcribe", {
+    method: "POST",
+    headers: { "content-type": serialized.headers.get("content-type") ?? "" },
+    body,
+  } as unknown as ConstructorParameters<typeof NextRequest>[1]);
+}
+
+/** A fully serialized file upload for early-rejection cases. */
+async function serializedAudioRequest(bytes: Buffer, name = "recording.webm"): Promise<NextRequest> {
+  const form = new FormData();
+  form.set("file", new Blob([new Uint8Array(bytes)], { type: "audio/webm" }), name);
+  return serializedFormRequest(form);
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
@@ -268,9 +296,7 @@ describe("/setup-api/chat/transcribe", () => {
   it("rejects a multipart body with no file part", async () => {
     const form = new FormData();
     form.set("note", "no audio here");
-    const res = await POST(new NextRequest("http://localhost/setup-api/chat/transcribe", {
-      method: "POST", body: form,
-    } as unknown as ConstructorParameters<typeof NextRequest>[1]));
+    const res = await POST(await serializedFormRequest(form));
 
     expect(res.status).toBe(400);
     expect((await res.json()).error).toContain("file");
@@ -281,10 +307,7 @@ describe("/setup-api/chat/transcribe", () => {
     const form = new FormData();
     for (let i = 0; i < 100; i++) form.append(`tiny-${i}`, "x");
     form.append("file", new Blob([new Uint8Array(AUDIO)], { type: "audio/webm" }), "recording.webm");
-    const res = await POST(new NextRequest("http://localhost/setup-api/chat/transcribe", {
-      method: "POST",
-      body: form,
-    }));
+    const res = await POST(await serializedFormRequest(form));
 
     expect(res.status).toBe(400);
     expect(fetchMock).not.toHaveBeenCalled();
@@ -303,7 +326,7 @@ describe("/setup-api/chat/transcribe", () => {
 
   it("refuses a recording over the size limit without sending it", async () => {
     const { MAX_AUDIO_BYTES } = await import("@/app/setup-api/chat/transcribe/route");
-    const res = await POST(audioRequest(Buffer.alloc(MAX_AUDIO_BYTES + 1, 0x41)));
+    const res = await POST(await serializedAudioRequest(Buffer.alloc(MAX_AUDIO_BYTES + 1, 0x41)));
 
     expect(res.status).toBe(413);
     expect(fetchMock).not.toHaveBeenCalled();

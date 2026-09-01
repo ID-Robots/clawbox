@@ -191,7 +191,17 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
     <div className="w-full max-w-[520px]" data-testid="setup-step-telegram">
       <div className="card-surface rounded-[var(--r-3)] p-5 sm:p-8 relative overflow-hidden">
         {configuring && (
-          <TelegramConfiguringOverlay waitFor={configurePromise} onDone={onNext} />
+          <TelegramConfiguringOverlay
+            waitFor={configurePromise}
+            onDone={onNext}
+            onTimeout={() => {
+              saveControllerRef.current?.abort();
+              setSaving(false);
+              setConfiguring(false);
+              setConfigurePromise(undefined);
+              setStatus({ type: "error", message: t("telegram.readinessTimeout") });
+            }}
+          />
         )}
         <div className={configuring ? "invisible h-0 overflow-hidden" : ""}>
         {/* font-bold / font-semibold / font-normal below are --w-head /

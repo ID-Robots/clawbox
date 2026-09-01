@@ -260,6 +260,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.hermesStartingService": "Starting the messaging service",
     "telegram.hermesWaitingService": "Waiting for the messaging service",
     "telegram.hermesPleaseWait": "Please wait while the messaging service starts",
+    "telegram.readinessTimeout": "Telegram was saved, but its messaging service did not become ready in time. Retry or skip for now.",
 
     // === SetupWizard ===
     "wizard.help1Title": "Connecting to the Internet",
@@ -969,6 +970,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.hermesStartingService": "Стартиране на услугата за съобщения",
     "telegram.hermesWaitingService": "Изчакване на услугата за съобщения",
     "telegram.hermesPleaseWait": "Моля, изчакайте, докато услугата за съобщения стартира",
+    "telegram.readinessTimeout": "Telegram беше запазен, но услугата му за съобщения не се стартира навреме. Опитайте отново или пропуснете засега.",
 
     // === SetupWizard ===
     "wizard.help1Title": "Свързване с интернет",
@@ -1675,6 +1677,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.hermesStartingService": "Nachrichtendienst wird gestartet",
     "telegram.hermesWaitingService": "Warte auf den Nachrichtendienst",
     "telegram.hermesPleaseWait": "Bitte warten Sie, während der Nachrichtendienst startet",
+    "telegram.readinessTimeout": "Telegram wurde gespeichert, aber der Nachrichtendienst wurde nicht rechtzeitig bereit. Versuche es erneut oder überspringe diesen Schritt vorerst.",
 
     // === SetupWizard ===
     "wizard.help1Title": "Internetverbindung herstellen",
@@ -2381,6 +2384,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.hermesStartingService": "Iniciando el servicio de mensajería",
     "telegram.hermesWaitingService": "Esperando al servicio de mensajería",
     "telegram.hermesPleaseWait": "Espera mientras se inicia el servicio de mensajería",
+    "telegram.readinessTimeout": "Telegram se guardó, pero su servicio de mensajería no estuvo listo a tiempo. Vuelve a intentarlo u omítelo por ahora.",
 
     // === SetupWizard ===
     "wizard.help1Title": "Conexión a Internet",
@@ -3087,6 +3091,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.hermesStartingService": "Démarrage du service de messagerie",
     "telegram.hermesWaitingService": "En attente du service de messagerie",
     "telegram.hermesPleaseWait": "Veuillez patienter pendant le démarrage du service de messagerie",
+    "telegram.readinessTimeout": "Telegram a été enregistré, mais son service de messagerie n’a pas été prêt à temps. Réessayez ou ignorez cette étape pour le moment.",
 
     // === SetupWizard ===
     "wizard.help1Title": "Connexion à Internet",
@@ -3793,6 +3798,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.hermesStartingService": "Avvio del servizio di messaggistica",
     "telegram.hermesWaitingService": "In attesa del servizio di messaggistica",
     "telegram.hermesPleaseWait": "Attendi mentre il servizio di messaggistica si avvia",
+    "telegram.readinessTimeout": "Telegram è stato salvato, ma il servizio di messaggistica non è diventato pronto in tempo. Riprova oppure salta per ora.",
 
     // === SetupWizard ===
     "wizard.help1Title": "Connessione a Internet",
@@ -4499,6 +4505,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.hermesStartingService": "メッセージングサービスを起動中",
     "telegram.hermesWaitingService": "メッセージングサービスを待機中",
     "telegram.hermesPleaseWait": "メッセージングサービスの起動をお待ちください",
+    "telegram.readinessTimeout": "Telegram は保存されましたが、メッセージングサービスの準備が時間内に完了しませんでした。再試行するか、今はスキップしてください。",
 
     // === SetupWizard ===
     "wizard.help1Title": "インターネット接続",
@@ -5205,6 +5212,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.hermesStartingService": "Berichtenservice starten",
     "telegram.hermesWaitingService": "Wachten op de berichtenservice",
     "telegram.hermesPleaseWait": "Even geduld terwijl de berichtenservice start",
+    "telegram.readinessTimeout": "Telegram is opgeslagen, maar de berichtenservice was niet op tijd gereed. Probeer opnieuw of sla dit voorlopig over.",
 
     // === SetupWizard ===
     "wizard.help1Title": "Verbinding maken met internet",
@@ -5911,6 +5919,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.hermesStartingService": "Startar meddelandetjänsten",
     "telegram.hermesWaitingService": "Väntar på meddelandetjänsten",
     "telegram.hermesPleaseWait": "Vänta medan meddelandetjänsten startar",
+    "telegram.readinessTimeout": "Telegram sparades, men meddelandetjänsten blev inte redo i tid. Försök igen eller hoppa över tills vidare.",
 
     // === SetupWizard ===
     "wizard.help1Title": "Anslut till internet",
@@ -6617,6 +6626,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "telegram.hermesStartingService": "正在启动消息服务",
     "telegram.hermesWaitingService": "正在等待消息服务",
     "telegram.hermesPleaseWait": "请稍候，消息服务正在启动",
+    "telegram.readinessTimeout": "Telegram 已保存，但消息服务未能及时就绪。请重试，或暂时跳过。",
 
     // === SetupWizard ===
     "wizard.help1Title": "连接互联网",

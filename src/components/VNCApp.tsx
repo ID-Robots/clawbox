@@ -37,7 +37,7 @@ function apiError(data: unknown): string | undefined {
 export default function VNCApp() {
   const { t } = useT();
   const canvasContainerRef = useRef<HTMLDivElement>(null);
-  const rfbRef = useRef<InstanceType<typeof import("@novnc/novnc/lib/rfb").default> | null>(null);
+  const rfbRef = useRef<InstanceType<typeof import("@novnc/novnc").default> | null>(null);
   const vncFocusedRef = useRef(false);
   const pressedKeysRef = useRef<Map<string, TrackedKey>>(new Map());
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
@@ -191,13 +191,13 @@ export default function VNCApp() {
   useEffect(() => {
     if (!vncInfo || !canvasContainerRef.current) return;
 
-    let rfb: InstanceType<typeof import("@novnc/novnc/lib/rfb").default> | null = null;
+    let rfb: InstanceType<typeof import("@novnc/novnc").default> | null = null;
     let canvas: HTMLCanvasElement | null = null;
     let handleContextMenu: ((event: Event) => void) | null = null;
 
     const connect = async () => {
       try {
-        const { default: RFB } = await import("@novnc/novnc/lib/rfb");
+        const { default: RFB } = await import("@novnc/novnc");
         // Same-origin WebSocket path: the production server proxies
         // /novnc-ws upgrades to 127.0.0.1:${vncInfo.wsPort} (websockify).
         // This keeps the flow working on the LAN, under HTTPS (no mixed

@@ -2,6 +2,12 @@ import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
 test("desktop keeps the mascot below the chat popup", async ({ page }) => {
+  // At the normal 1280px test viewport the 520px popup has to clamp against
+  // the right edge when the mascot starts at 85vw. Use a wide desktop here so
+  // the centring branch itself is exercised; edge clamping is covered by the
+  // same placement formula and must not be mistaken for misalignment.
+  await page.setViewportSize({ width: 1920, height: 1080 });
+
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
@@ -29,10 +35,21 @@ test("desktop keeps the mascot below the chat popup", async ({ page }) => {
 
   await page.goto("/");
   await expect(page.getByTestId("desktop-root")).toBeVisible();
-  await expect(page.getByTestId("chat-popup")).toBeVisible();
+  const popup = page.getByTestId("chat-popup");
+  await expect(popup).toBeVisible();
 
-  const popupBox = await page.getByTestId("chat-popup").boundingBox();
-  const mascotBox = await page.locator('img[src="/clawbox-box.png"]').first().boundingBox();
+  // Bounding boxes during the 620ms scale/rotate entrance depend on runner
+  // load and are not the resting layout. Wait for that exact animation rather
+  // than sleeping or accepting an ever-wider geometry tolerance.
+  await expect.poll(() => popup.evaluate((element) => {
+    const entrance = element.getAnimations().find((animation) =>
+      animation instanceof CSSAnimation && animation.animationName === "clawChatBurstIn"
+    );
+    return entrance?.playState ?? "not-started";
+  })).toBe("finished");
+
+  const popupBox = await popup.boundingBox();
+  const mascotBox = await page.locator('[data-mascot="crab"]').boundingBox();
 
   expect(popupBox).not.toBeNull();
   expect(mascotBox).not.toBeNull();
@@ -40,6 +57,6 @@ test("desktop keeps the mascot below the chat popup", async ({ page }) => {
   const popupCenterX = (popupBox!.x + popupBox!.width / 2);
   const mascotCenterX = (mascotBox!.x + mascotBox!.width / 2);
 
-  expect(Math.abs(mascotCenterX - popupCenterX)).toBeLessThan(60);
+  expect(Math.abs(mascotCenterX - popupCenterX)).toBeLessThanOrEqual(1);
   expect(mascotBox!.y).toBeGreaterThan(popupBox!.y + popupBox!.height - 40);
 });

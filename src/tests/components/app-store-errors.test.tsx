@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import AppStore from "@/components/AppStore";
 
 /**
@@ -99,6 +99,96 @@ describe("app store — load failure", () => {
     fireEvent.click(screen.getByRole("button", { name: "store.retry" }));
     await screen.findByText("Weather Deck");
     expect(screen.queryByText("store.loadError")).toBeNull();
+  });
+});
+
+describe("app store — installed catalogue", () => {
+  it("loads an installed app whose row is absent from the initial catalogue page", async () => {
+    const installedOnly = {
+      name: "Later Page Skill",
+      slug: "later-page-skill",
+      summary: "Installed, but outside the capped first catalogue page.",
+      category: "Utilities",
+      rating: 4.8,
+      installs: "900+",
+      developer: "late-publisher",
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/setup-api/apps/store?slug=later-page-skill") {
+        return jsonResponse(installedOnly);
+      }
+      if (url.startsWith("/setup-api/apps/store")) return jsonResponse(LIST);
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <AppStore
+        installedAppIds={["later-page-skill"]}
+        onInstall={vi.fn()}
+        onUninstall={vi.fn()}
+      />,
+    );
+
+    // The first page genuinely does not contain the installed slug.
+    await screen.findByText("Weather Deck");
+    expect(screen.queryByText("Later Page Skill")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "store.installed" }));
+
+    expect(await screen.findByText("Later Page Skill")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/setup-api/apps/store?slug=later-page-skill",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(screen.queryByText("store.noInstalledApps")).toBeNull();
+  });
+
+  it("ignores a stale first-page response after switching to Installed", async () => {
+    let resolveFirstPage: ((response: Response) => void) | null = null;
+    const firstPage = new Promise<Response>((resolve) => { resolveFirstPage = resolve; });
+    const installedOnly = {
+      name: "Installed During Load",
+      slug: "installed-during-load",
+      summary: "The installed lookup owns the list after the tab switch.",
+      category: "Utilities",
+      rating: 4.7,
+      installs: "700+",
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/setup-api/apps/store?slug=installed-during-load") {
+        return jsonResponse(installedOnly);
+      }
+      if (url.startsWith("/setup-api/apps/store")) return firstPage;
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <AppStore
+        installedAppIds={["installed-during-load"]}
+        onInstall={vi.fn()}
+        onUninstall={vi.fn()}
+      />,
+    );
+
+    // Ensure the first-page request is genuinely in flight before changing
+    // tabs; the mock intentionally ignores AbortSignal and resolves late.
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes("limit=200"))).toBe(true);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "store.installed" }));
+    expect(await screen.findByText("Installed During Load")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveFirstPage?.(await jsonResponse(LIST));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("Installed During Load")).toBeInTheDocument();
+    expect(screen.queryByText("store.noInstalledApps")).toBeNull();
   });
 });
 

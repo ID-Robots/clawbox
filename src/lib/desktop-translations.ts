@@ -98,6 +98,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "tray.waitingOnline": "Waiting for device to come back online",
     "tray.backOnline": "Device is back online",
     "tray.restoringSession": "Restoring your session...",
+    "tray.powerFailed": "The device did not accept the power request. Try again.",
     "tray.confirm": "Confirm?",
     "tray.restart": "Restart",
     "tray.shutDown": "Shut Down",
@@ -392,6 +393,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "installed.connecting": "Connecting...",
     "installed.savedToConfig": "Saved to skill config",
     "installed.saved": "Saved",
+    "installed.saveFailed": "Could not save skill settings",
     "installed.haWebhookNote": "Inbound webhooks are set up in Home Assistant itself — see the skill's store page for the guide.",
 
     // === SettingsApp ===

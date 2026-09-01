@@ -20,9 +20,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-OPENCLAW_BIN="/home/clawbox/.npm-global/bin/openclaw"
-OPENCLAW_CONFIG="/home/clawbox/.openclaw/openclaw.json"
-HOSTNAME_ENV="/home/clawbox/clawbox/data/hostname.env"
+CLAWBOX_HOME_DIR="${CLAWBOX_HOME_DIR:-${HOME:-/home/clawbox}}"
+CLAWBOX_ROOT="${CLAWBOX_ROOT:-$CLAWBOX_HOME_DIR/clawbox}"
+CLAWBOX_PORT="${CLAWBOX_PORT:-80}"
+OPENCLAW_BIN="${OPENCLAW_BIN:-$CLAWBOX_HOME_DIR/.npm-global/bin/openclaw}"
+OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-${OPENCLAW_HOME:-$CLAWBOX_HOME_DIR/.openclaw}/openclaw.json}"
+HOSTNAME_ENV="${HOSTNAME_ENV:-$CLAWBOX_ROOT/data/hostname.env}"
 
 # Pinned OpenClaw target — external plugins (e.g. @openclaw/codex) must stay
 # locked to the same version as the core, or they drift ahead via @latest and
@@ -30,7 +33,7 @@ HOSTNAME_ENV="/home/clawbox/clawbox/data/hostname.env"
 # source install.sh and updater.ts use. Empty = pin unknown, fall back to the
 # unpinned alias (preserves old behaviour rather than risk skipping a repair).
 OPENCLAW_TARGET=""
-OPENCLAW_PIN_FILE="/home/clawbox/clawbox/config/openclaw-target.txt"
+OPENCLAW_PIN_FILE="${OPENCLAW_PIN_FILE:-$CLAWBOX_ROOT/config/openclaw-target.txt}"
 if [ -n "${OPENCLAW_PIN_VERSION:-}" ]; then
   OPENCLAW_TARGET="${OPENCLAW_PIN_VERSION}"
 elif [ -f "$OPENCLAW_PIN_FILE" ]; then
@@ -107,6 +110,7 @@ fi
 # already matches the target state. The CLI calls below (gateway
 # restart + MCP server) are guarded by their own idempotency checks.
 export CLAWBOX_HOSTNAME="$CONFIGURED_HOSTNAME"
+export CLAWBOX_PORT
 # Serialize the LAN_IPS bash array into an env var Python can parse —
 # newline-separated is bash-safe (IPv4s contain no newlines).
 if [ ${#LAN_IPS[@]} -gt 0 ]; then
@@ -167,7 +171,7 @@ export CLAWBOX_EXTRA_ORIGINS
 # The cloud-voice migration below needs the portal-confirmed plan stamp that
 # lives there, and only there. Exported rather than passed as a second argv so
 # the block keeps the single-argument shape every other python heredoc here has.
-export CLAWBOX_DEVICE_STORE="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/data/config.json"
+export CLAWBOX_DEVICE_STORE="$CLAWBOX_ROOT/data/config.json"
 
 python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile, secrets
@@ -217,6 +221,14 @@ allowed_origins = [
     "http://10.43.0.1",
     *lan_ips,
 ]
+port = os.environ.get("CLAWBOX_PORT", "80").strip()
+if port and port != "80":
+    allowed_origins.extend([
+        f"http://{hostname}.local:{port}",
+        f"http://localhost:{port}",
+        f"http://127.0.0.1:{port}",
+        *(f"{origin}:{port}" for origin in lan_ips),
+    ])
 # Merge already-validated extra origins (scripts/gateway_origins.py) into the
 # generated defaults, deterministically and before the set comparison below —
 # defaults first, extras appended in file order, de-duplicated.
@@ -236,11 +248,34 @@ except json.JSONDecodeError:
 
 changed = False
 
+# OpenClaw 2 moved/retired these v1 state and tuning fields. Doctor normally
+# removes them, but plugin-verification failures can make doctor exit before
+# it writes the repaired config, leaving the gateway in a permanent loop.
+# They remain valid on v1, so never run this cleanup there.
+if CLAWBOX_OPENCLAW_V2:
+    meta = cfg.get("meta")
+    if isinstance(meta, dict) and "lastTouchedAt" in meta:
+        del meta["lastTouchedAt"]
+        changed = True
+    commands = cfg.get("commands")
+    if isinstance(commands, dict) and "ownerDisplay" in commands:
+        del commands["ownerDisplay"]
+        changed = True
+    tailscale = (cfg.get("gateway") or {}).get("tailscale") if isinstance(cfg.get("gateway"), dict) else None
+    if isinstance(tailscale, dict) and "resetOnExit" in tailscale:
+        del tailscale["resetOnExit"]
+        changed = True
+
 # Strip invalid agent keys that prevent gateway from starting.
 agents_defaults = cfg.setdefault("agents", {}).setdefault("defaults", {})
 for k in ("tools", "systemPromptSuffix"):
     if k in agents_defaults:
         del agents_defaults[k]
+        changed = True
+if CLAWBOX_OPENCLAW_V2:
+    compaction = agents_defaults.get("compaction")
+    if isinstance(compaction, dict) and "reserveTokensFloor" in compaction:
+        del compaction["reserveTokensFloor"]
         changed = True
 
 # Model migration: some early ClawBox images/configs can leave the active
@@ -292,10 +327,23 @@ if isinstance(_fallbacks_now, list):
 # the local runtime but would skip this repair and still fail model resolution.
 _wants_llamacpp = [r.strip() for r in _llamacpp_refs if r.strip().startswith("llamacpp/")]
 
-_mp = cfg.setdefault("models", {}).setdefault("providers", {})
 # Key presence, not truthiness: an existing but empty {} entry is a deliberate
 # operator choice and must be preserved, which .get() would silently overwrite.
-if _wants_llamacpp and "llamacpp" not in _mp:
+_models_now = cfg.get("models")
+_providers_now = _models_now.get("providers") if isinstance(_models_now, dict) else None
+if _wants_llamacpp and not (
+    isinstance(_providers_now, dict) and "llamacpp" in _providers_now
+):
+    # Touch models/providers only on the repair path. A malformed scalar must
+    # not crash ExecStartPre, and an unrelated config must not gain an empty
+    # models key merely because some other migration changed the file.
+    if not isinstance(_models_now, dict):
+        _models_now = {}
+        cfg["models"] = _models_now
+    if not isinstance(_providers_now, dict):
+        _providers_now = {}
+        _models_now["providers"] = _providers_now
+    _mp = _providers_now
     # The proxy authenticates openclaw -> Next.js with a per-install bearer
     # (src/lib/local-ai-token.ts). Writing the entry WITHOUT it would trade
     # "Unknown model" for a 401 on every turn, which is not an improvement, so
@@ -328,8 +376,14 @@ if _wants_llamacpp and "llamacpp" not in _mp:
             _ctx = 0
         if _ctx < 16384:
             _ctx = 131072
+        _proxy_port = (os.environ.get("CLAWBOX_PORT") or os.environ.get("PORT") or "80").strip()
+        if not _proxy_port.isdigit() or not 1 <= int(_proxy_port) <= 65535:
+            _proxy_port = "80"
+        _proxy_default = "http://127.0.0.1" + (
+            "" if _proxy_port == "80" else ":" + _proxy_port
+        )
         _proxy_root = (
-            os.environ.get("CLAWBOX_LOCAL_AI_PROXY_BASE_URL") or "http://127.0.0.1"
+            os.environ.get("CLAWBOX_LOCAL_AI_PROXY_BASE_URL") or _proxy_default
         ).strip().rstrip("/")
         _mp["llamacpp"] = {
             "baseUrl": _proxy_root + "/setup-api/local-ai/llamacpp/v1",
@@ -435,8 +489,9 @@ if (not _clawbox_v2_codex) and _has_codex_oauth_profile() and not _has_openai_ap
 # ClawBox used to delete this key unconditionally, because
 # @openclaw/codex >= 2026.5.27 writes it and an older *pinned* core rejected it
 # in strict config validation, bricking the AI provider page. That is still
-# worth guarding, so the strip is kept for everything that is NOT a codex
-# model -- an orphaned agentRuntime on some other provider has no purpose.
+# worth guarding on v1. OpenClaw 2 natively uses this key to retain runtime
+# intent while migrating codex/* references to openai/*, so deleting it there
+# erases the only signal that the migrated model still requires Codex.
 #
 # Also seed the entry for any codex model the box is actually configured to
 # use, so picking one in the UI works after the next gateway start rather than
@@ -461,7 +516,7 @@ for _model_key in list(agents_models.keys()):
 for _model_key, _model_val in list(agents_models.items()):
     if not isinstance(_model_val, dict):
         continue
-    if not _is_codex_ref(_model_key) and "agentRuntime" in _model_val:
+    if (not _clawbox_v2_codex) and not _is_codex_ref(_model_key) and "agentRuntime" in _model_val:
         del _model_val["agentRuntime"]
         changed = True
 
@@ -509,6 +564,26 @@ if isinstance(channels, dict):
         # chats; owner DMs still work) is the safe choice.
         if _channel.get("groupPolicy") not in (None, "open", "disabled", "allowlist"):
             _channel["groupPolicy"] = "disabled"
+            changed = True
+
+# OpenClaw 2 split some formerly bundled channels into consent-gated external
+# plugins. A legacy config can retain plugins.entries.<channel>.enabled=true
+# even when that channel is explicitly disabled; core then tries to repair the
+# absent plugin, blocks on capability consent, and refuses gateway readiness.
+# Remove only that contradictory stale enablement. An enabled channel, or a
+# plugin entry the owner explicitly disabled, is preserved.
+plugin_entries = (cfg.get("plugins") or {}).get("entries") if isinstance(cfg.get("plugins"), dict) else None
+if isinstance(plugin_entries, dict) and isinstance(channels, dict):
+    for _channel_name in ("slack",):
+        _entry = plugin_entries.get(_channel_name)
+        _channel = channels.get(_channel_name)
+        if (
+            isinstance(_entry, dict)
+            and _entry.get("enabled") is True
+            and isinstance(_channel, dict)
+            and _channel.get("enabled") is False
+        ):
+            del plugin_entries[_channel_name]
             changed = True
 
 # Migration: devices that configured OpenRouter before the provider-def
@@ -1414,6 +1489,26 @@ else:
     print("  Gateway config already correct, skipping write")
 PY
 
+# OpenClaw 2 refuses to start while any legacy auth-profiles.json remains,
+# even when the credentials were already copied into SQLite. Provider setup
+# normally runs doctor before restarting, but an interrupted configure or a
+# late writer from an older x64 install can recreate the file after that pass.
+# Repair only when the sentinel file exists, so normal boots pay no CLI cost.
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+  LEGACY_AUTH_PROFILE="$(find "$(dirname "$OPENCLAW_CONFIG")/agents" -mindepth 3 -maxdepth 3 -name auth-profiles.json -type f -print -quit 2>/dev/null || true)"
+  if [ -n "$LEGACY_AUTH_PROFILE" ]; then
+    echo "  Migrating legacy auth profiles into OpenClaw 2 SQLite state..."
+    if ! timeout 180 "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null; then
+      echo "  ERROR: OpenClaw 2 auth-profile migration failed" >&2
+      exit 1
+    fi
+    if find "$(dirname "$OPENCLAW_CONFIG")/agents" -mindepth 3 -maxdepth 3 -name auth-profiles.json -type f -print -quit 2>/dev/null | grep -q .; then
+      echo "  ERROR: OpenClaw doctor left a legacy auth-profiles.json in place" >&2
+      exit 1
+    fi
+  fi
+fi
+
 # Patch the installed openclaw deepseek plugin JSON to declare that the
 # DeepSeek V4 models accept `off` and `xhigh` reasoning efforts. The shipped plugin
 # only sets `supportsReasoningEffort: true`, but `catalogSupportsXHigh()`
@@ -1534,9 +1629,70 @@ OPENCLAW_HOME_DIR="$(dirname "$OPENCLAW_CONFIG")"
 # layout actually holds the package.json; keep the flat path as the default so
 # a first-time install still has a well-known destination.
 CODEX_PLUGIN_DIR="$OPENCLAW_HOME_DIR/npm/node_modules/@openclaw/codex"
+CODEX_PLUGIN_LAYOUT="flat-managed"
 if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ]; then
   CODEX_PLUGIN_DIR_FOUND="$(ls -d "$OPENCLAW_HOME_DIR"/npm/projects/*/node_modules/@openclaw/codex 2>/dev/null | head -1 || true)"
-  [ -n "$CODEX_PLUGIN_DIR_FOUND" ] && CODEX_PLUGIN_DIR="$CODEX_PLUGIN_DIR_FOUND"
+  if [ -n "$CODEX_PLUGIN_DIR_FOUND" ]; then
+    CODEX_PLUGIN_DIR="$CODEX_PLUGIN_DIR_FOUND"
+    CODEX_PLUGIN_LAYOUT="project-managed"
+  fi
+fi
+# A historical/global install can be visible to OpenClaw's registry without
+# living in either managed-home layout above. That is the main→v2 upgrade
+# shape: the gateway loads Codex and requires consent, while a filesystem-only
+# check sees no package and silently skips the entire repair path. Ask the
+# pinned CLI for the root it will actually load, time-bounded because this is
+# ExecStartPre, and accept it only when it contains the expected package file.
+if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+  CODEX_PLUGIN_DIR_FOUND="$(
+    timeout 20 "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
+      python3 -c 'import json, os, sys
+try:
+    data = json.load(sys.stdin)
+except (json.JSONDecodeError, OSError):
+    raise SystemExit(0)
+plugins = data.get("plugins", []) if isinstance(data, dict) else []
+for plugin in plugins:
+    if not isinstance(plugin, dict) or plugin.get("id") != "codex":
+        continue
+    root = plugin.get("rootDir")
+    source = plugin.get("source")
+    if not isinstance(root, str) and isinstance(source, str):
+        parent = os.path.dirname(source)
+        root = os.path.dirname(parent) if os.path.basename(parent) == "dist" else parent
+    if isinstance(root, str):
+        print(root)
+    break'
+  )" || CODEX_PLUGIN_DIR_FOUND=""
+  if [ -n "$CODEX_PLUGIN_DIR_FOUND" ] && [ -f "$CODEX_PLUGIN_DIR_FOUND/package.json" ]; then
+    CODEX_PLUGIN_DIR="$CODEX_PLUGIN_DIR_FOUND"
+    CODEX_PLUGIN_LAYOUT="registry"
+  fi
+fi
+# OpenClaw's registry resolves dependencies through parent/global node_modules,
+# not only the plugin's direct nested folder. Its requiredInstalled verdict is
+# therefore authoritative when available; a missing direct peer file can still
+# be a completely healthy global/project install. Retain the filesystem check
+# as the fallback for older CLIs or malformed registry output.
+CODEX_REGISTRY_DEPS_OK=0
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+  CODEX_REGISTRY_DEPS_OK="$(
+    timeout 20 "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
+      python3 -c 'import json, sys
+try:
+    data = json.load(sys.stdin)
+except (json.JSONDecodeError, OSError):
+    print("0"); raise SystemExit(0)
+plugins = data.get("plugins", []) if isinstance(data, dict) else []
+for plugin in plugins:
+    if not isinstance(plugin, dict) or plugin.get("id") != "codex":
+        continue
+    deps = plugin.get("dependencyStatus")
+    print("1" if isinstance(deps, dict) and deps.get("requiredInstalled") is True else "0")
+    break
+else:
+    print("0")'
+  )" || CODEX_REGISTRY_DEPS_OK=0
 fi
 NEEDS_CODEX_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, sys
@@ -1545,7 +1701,12 @@ try:
         cfg = json.load(f)
 except (FileNotFoundError, json.JSONDecodeError):
     print("0"); sys.exit(0)
-primary = (cfg.get("agents", {}).get("defaults", {}).get("model", {}) or {}).get("primary") or ""
+agents = cfg.get("agents")
+defaults = agents.get("defaults", {}) if isinstance(agents, dict) else {}
+model_selection = defaults.get("model", {}) if isinstance(defaults, dict) else {}
+primary = model_selection.get("primary") if isinstance(model_selection, dict) else ""
+models_raw = defaults.get("models", {}) if isinstance(defaults, dict) else {}
+models = models_raw if isinstance(models_raw, dict) else {}
 # Defensive: `cfg["auth"]` may be missing, `None`, or a corrupted
 # scalar on a hand-edited config. Match the same isinstance pattern
 # used at line 131 for openrouter so a malformed auth block doesn't
@@ -1557,6 +1718,11 @@ uses_codex = (
     isinstance(primary, str)
     and (primary.lower().startswith("codex/") or primary.lower().startswith("openai-codex/"))
 ) or any(
+    isinstance(settings, dict)
+    and isinstance(settings.get("agentRuntime"), dict)
+    and str(settings["agentRuntime"].get("id", "")).lower() == "codex"
+    for settings in models.values()
+) or any(
     (isinstance(k, str)
      and (k.lower().startswith("codex:") or k.lower().startswith("openai-codex:"))) or
     (isinstance(v, dict) and isinstance(v.get("provider"), str)
@@ -1566,6 +1732,30 @@ uses_codex = (
 print("1" if uses_codex else "0")
 PY
 )"
+# OpenClaw 2 loads an installed plugin by default when its config entry is
+# absent. That default-enabled state must participate in BOTH the package
+# health/version checks and capability consent below; otherwise a migrated
+# 2026.7 package can be consented but remain broken against a 2026.8 core.
+CODEX_PLUGIN_ENABLED=0
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+  CODEX_PLUGIN_ENABLED="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    print("1"); sys.exit(0)
+plugins = cfg.get("plugins")
+entries = plugins.get("entries", {}) if isinstance(plugins, dict) else {}
+codex = entries.get("codex") if isinstance(entries, dict) else None
+print("0" if isinstance(codex, dict) and codex.get("enabled") is False else "1")
+PY
+)"
+fi
+CODEX_SHOULD_LOAD="$NEEDS_CODEX_PLUGIN"
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_PLUGIN_ENABLED" = "1" ]; then
+  CODEX_SHOULD_LOAD=1
+fi
 # Also check the nested peer-dep symlink. `openclaw plugins install
 # codex` writes `<codex>/node_modules/openclaw -> <global openclaw>`
 # alongside the package.json; if that symlink is missing or dangling
@@ -1581,8 +1771,15 @@ PY
 CODEX_PEER_DEP="$CODEX_PLUGIN_DIR/node_modules/openclaw/package.json"
 CODEX_NEEDS_INSTALL=0
 CODEX_INSTALL_REASON=""
-if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
-  if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] || [ ! -e "$CODEX_PEER_DEP" ]; then
+if [ "$CODEX_SHOULD_LOAD" = "1" ]; then
+  # The direct nested peer symlink is only one valid resolution shape. Trust a
+  # positive registry dependency verdict across managed, project, and global
+  # layouts; treating a healthy parent-resolved plugin as broken launches a
+  # needless reinstall in ExecStartPre, which an updater restart can kill
+  # mid-transaction and leave SQLite locked.
+  if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] || {
+    [ "$CODEX_REGISTRY_DEPS_OK" != "1" ] && [ ! -e "$CODEX_PEER_DEP" ];
+  }; then
     CODEX_NEEDS_INSTALL=1
     CODEX_INSTALL_REASON="missing or peer-dep broken"
   elif [ -n "$OPENCLAW_TARGET" ]; then
@@ -1618,6 +1815,10 @@ if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
   # bare alias only when the pin is unknown, so a needed repair still happens.
   CODEX_SPEC="codex"
   [ -n "$OPENCLAW_TARGET" ] && CODEX_SPEC="@openclaw/codex@$OPENCLAW_TARGET"
+  CODEX_CAPABILITY_ARGS=()
+  if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+    CODEX_CAPABILITY_ARGS=(--accept-capabilities)
+  fi
   # Hard time-box this install. gateway-pre-start.sh runs as a BLOCKING
   # ExecStartPre for clawbox-gateway.service, so an npm install that hangs
   # (slow/blocked/offline registry on a Jetson) would keep the gateway from
@@ -1626,10 +1827,27 @@ if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
   # log a warning and let the gateway start anyway. Codex is one provider;
   # a degraded Codex is far better than a dead box, and the next boot (or a
   # manual `openclaw plugins install`) can still repair it.
-  if timeout 120 "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force >/dev/null 2>&1; then
+  if timeout 120 "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force "${CODEX_CAPABILITY_ARGS[@]}" >/dev/null 2>&1; then
     echo "  Codex runtime plugin installed/repaired ($CODEX_SPEC)"
   else
     echo "  WARN: 'openclaw plugins install $CODEX_SPEC' failed or timed out; Codex chats will fail until resolved (gateway will still start)"
+  fi
+elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
+  # OpenClaw 2 added declared-capability consent to managed plugins. A plugin
+  # migrated from 2026.7 may already have the right package, peer dependency,
+  # and version — so every repair check above passes — while its install record
+  # has no accepted surface hash. The gateway then refuses readiness with
+  # "Plugin codex requires capability consent" forever. `enable` is the
+  # idempotent local operation for this exact state: it records the current
+  # reviewed surface when needed and otherwise leaves an already-enabled,
+  # already-consented plugin unchanged. Time-box because this is ExecStartPre.
+  # A v1 install can leave Codex enabled even after the owner switches primary
+  # auth to another provider. V2 verifies every enabled/default-enabled plugin
+  # before opening its port, so consent it even when no Codex model is selected.
+  if timeout 60 "$OPENCLAW_BIN" plugins enable codex --accept-capabilities </dev/null >/dev/null 2>&1; then
+    echo "  Codex runtime plugin capabilities accepted/current"
+  else
+    echo "  WARN: could not confirm Codex plugin capabilities; gateway readiness may remain blocked"
   fi
 fi
 
@@ -1675,7 +1893,7 @@ if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
   # attaches no profile (`profile=-` in the log), sends no bearer, and every
   # turn 401s while the UI still shows the provider as connected. Migrate
   # first, so the mirror below reads a populated store.
-  AUTH_PROFILE_MIGRATION="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/scripts/migrate-auth-profiles.js"
+  AUTH_PROFILE_MIGRATION="$CLAWBOX_ROOT/scripts/migrate-auth-profiles.js"
   # v1 only: the script copies legacy auth-profiles.json entries into the
   # auth_profile_store table of openclaw-agent.sqlite — a table OpenClaw 2
   # retired (state/openclaw.sqlite's config_machine_state records
@@ -1686,7 +1904,7 @@ if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
     node "$AUTH_PROFILE_MIGRATION" "$OPENCLAW_HOME_DIR" || true
   fi
 
-  CODEX_AUTH_MIRROR="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/scripts/codex-auth-mirror.js"
+  CODEX_AUTH_MIRROR="$CLAWBOX_ROOT/scripts/codex-auth-mirror.js"
   if [ -f "$CODEX_AUTH_MIRROR" ]; then
     node "$CODEX_AUTH_MIRROR" "$OPENCLAW_HOME_DIR" "$HOME/.codex/auth.json" || true
   else
@@ -1708,7 +1926,7 @@ fi
 # a ~600MB download. The script takes its own lock, so overlapping restarts do
 # not stack up pulls.
 LOCAL_EMBEDDINGS="$SCRIPT_DIR/ensure-local-embeddings.sh"
-LOCAL_EMBEDDINGS_LOG="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/data/local-embeddings.log"
+LOCAL_EMBEDDINGS_LOG="$CLAWBOX_ROOT/data/local-embeddings.log"
 if [ -x "$LOCAL_EMBEDDINGS" ]; then
   mkdir -p "$(dirname "$LOCAL_EMBEDDINGS_LOG")" 2>/dev/null || true
   setsid nohup "$LOCAL_EMBEDDINGS" >>"$LOCAL_EMBEDDINGS_LOG" 2>&1 &
@@ -1727,7 +1945,7 @@ fi
 # verifier. production-server.js also seeds this file at Next.js boot;
 # we mirror that here so the gateway can register the MCP server even
 # if it comes up before clawbox-setup on a fresh boot.
-MCP_TOKEN_FILE="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/data/.mcp-token"
+MCP_TOKEN_FILE="$CLAWBOX_ROOT/data/.mcp-token"
 if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$(wc -c < "$MCP_TOKEN_FILE" 2>/dev/null || echo 0)" -lt 32 ]; then
   mkdir -p "$(dirname "$MCP_TOKEN_FILE")"
   if command -v openssl >/dev/null 2>&1; then
@@ -1766,6 +1984,9 @@ if [ -z "$CLAWBOX_MCP_TOKEN_VAL" ]; then
   exit 1
 fi
 export CLAWBOX_MCP_TOKEN_VAL
+export CLAWBOX_BUN_BIN="${CLAWBOX_BUN_BIN:-$CLAWBOX_HOME_DIR/.bun/bin/bun}"
+export CLAWBOX_MCP_ENTRY="${CLAWBOX_MCP_ENTRY:-$CLAWBOX_ROOT/mcp/clawbox-mcp.ts}"
+export CLAWBOX_API_BASE="${CLAWBOX_API_BASE:-http://127.0.0.1:$CLAWBOX_PORT}"
 python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile
 
@@ -1780,10 +2001,10 @@ except (FileNotFoundError, json.JSONDecodeError):
     sys.exit(0)
 
 desired = {
-    "command": "/home/clawbox/.bun/bin/bun",
-    "args": ["run", "/home/clawbox/clawbox/mcp/clawbox-mcp.ts"],
+    "command": os.environ["CLAWBOX_BUN_BIN"],
+    "args": ["run", os.environ["CLAWBOX_MCP_ENTRY"]],
     "env": {
-        "CLAWBOX_API_BASE": "http://127.0.0.1:80",
+        "CLAWBOX_API_BASE": os.environ["CLAWBOX_API_BASE"],
         "CLAWBOX_MCP_TOKEN": token,
     },
 }
@@ -1883,7 +2104,7 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   mkdir -p "$CLAWBOX_WORKSPACE/skills" 2>/dev/null || true
 fi
 
-CLAWBOX_GUIDE_SRC="/home/clawbox/clawbox/config/clawbox-workspace-guide.md"
+CLAWBOX_GUIDE_SRC="$CLAWBOX_ROOT/config/clawbox-workspace-guide.md"
 CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 if [ -d "$CLAWBOX_WORKSPACE" ] && [ -f "$CLAWBOX_GUIDE_SRC" ]; then
   # Seed-if-missing rather than overwrite-on-diff. The agent and the

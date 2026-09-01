@@ -23,6 +23,7 @@ vi.mock("@/lib/i18n", () => ({
         "ai.multiProvider": "Multi-provider AI gateway",
         "ai.runLocally": "Run AI models locally on device",
         "ai.showMore": "Show more providers...",
+        "ai.openAuthPage": "Open authorization page",
         "ai.skipClawai": "Skip — set up ClawBox AI with a portal token",
         skip: "Skip",
         recommended: "Recommended",
@@ -382,6 +383,50 @@ describe("AIModelsStep variants", () => {
     expect(
       fetchMock.mock.calls.some(([input]) => typeof input === "string" && input.includes("/setup-api/ai-models/configure")),
     ).toBe(false);
+  });
+
+  it("reserves the redirect OAuth tab before awaiting and offers a blocked-popup recovery link", async () => {
+    let resolveStart: (() => void) | null = null;
+    const startReady = new Promise<void>((resolve) => { resolveStart = resolve; });
+    const authorizationUrl = "https://console.anthropic.com/oauth/authorize?state=test";
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      if (url.includes("/setup-api/ai-models/oauth/providers")) {
+        return { ok: true, json: async () => ({ providers: ["anthropic"] }) } as Response;
+      }
+      if (url.includes("/setup-api/ai-models/oauth/start")) {
+        await startReady;
+        return { ok: true, json: async () => ({ url: authorizationUrl }) } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
+
+    const { getByRole, findByRole } = render(
+      <AIModelsStep
+        providerIds={["anthropic"]}
+        defaultProviderId="anthropic"
+        title="Connect AI Provider"
+        description="Primary provider"
+      />,
+    );
+
+    const connect = await findByRole("button", { name: "Connect to Anthropic Claude" });
+    fireEvent.click(connect);
+
+    // The popup reservation happens in the click stack, before device I/O can
+    // consume browser user activation. This spy returns null to model a browser
+    // that still blocks it.
+    expect(openSpy).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/oauth/start"))).toBe(true);
+    expect(getByRole("button", { name: "Connect to Anthropic Claude" })).toBeInTheDocument();
+
+    resolveStart?.();
+
+    const recovery = await findByRole("link", { name: "Open authorization page" });
+    expect(recovery).toHaveAttribute("href", authorizationUrl);
+    expect(recovery).toHaveAttribute("target", "_blank");
   });
 
   it("renders the device code and completes once /clawai/poll reports success", async () => {

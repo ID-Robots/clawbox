@@ -93,7 +93,7 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
   // connection); "saved" = values stored but the skill has no on-device config
   // writer yet (so it can't use them). Distinguishing the two keeps us from
   // claiming a wiring that never happened.
-  const [saveResult, setSaveResult] = useState<"idle" | "connected" | "saved">("idle");
+  const [saveResult, setSaveResult] = useState<"idle" | "connected" | "saved" | "error">("idle");
   const [skillInfo, setSkillInfo] = useState<SkillInfo | null>(null);
   const [loadingSkill, setLoadingSkill] = useState(true);
   const [skillError, setSkillError] = useState(false);
@@ -205,24 +205,31 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
 
   const handleSave = useCallback(async () => {
     setSaving(true);
+    setSaveResult("idle");
     try {
-      await fetch("/setup-api/preferences", {
+      const preferencesRes = await fetch("/setup-api/preferences", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ [`app_${appId}_settings`]: settings }),
       });
+      if (!preferencesRes.ok) throw new Error(`preferences HTTP ${preferencesRes.status}`);
       const res = await fetch("/setup-api/apps/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ appId, settings }),
       });
+      if (!res.ok) throw new Error(`skill settings HTTP ${res.status}`);
       // Only claim "Connected" when the backend actually wrote the skill's
       // config (configWritten). Otherwise the values are stored but the skill
       // can't read them yet — don't imply it's wired up.
       const data = res.ok ? await res.json().catch(() => null) : null;
       setSaveResult(data?.configWritten ? "connected" : "saved");
       setTimeout(() => setSaveResult("idle"), 4000);
-    } catch {}
+    } catch (err) {
+      console.warn("[settings] Failed to save skill settings:", err);
+      setSaveResult("error");
+      setTimeout(() => setSaveResult("idle"), 4000);
+    }
     setSaving(false);
   }, [appId, settings]);
 
@@ -401,6 +408,11 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
                 {t("installed.savedNotWired")}
               </p>
             )}
+            {saveResult === "error" && (
+              <p role="alert" className="text-xs text-red-400 mt-3 leading-relaxed">
+                {t("installed.saveFailed")}
+              </p>
+            )}
           </>
         )}
       </div>
@@ -436,10 +448,12 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
                 ? "bg-green-500/20 text-green-400"
                 : saveResult === "saved"
                 ? "bg-amber-500/15 text-amber-300"
+                : saveResult === "error"
+                ? "bg-red-500/15 text-red-400"
                 : "bg-white/10 hover:bg-white/15 text-white"
             } disabled:opacity-50`}
           >
-            {saving ? t("installed.connecting") : saveResult === "connected" ? t("installed.savedToConfig") : saveResult === "saved" ? t("installed.saved") : t("installed.connect")}
+            {saving ? t("installed.connecting") : saveResult === "connected" ? t("installed.savedToConfig") : saveResult === "saved" ? t("installed.saved") : saveResult === "error" ? t("installed.saveFailed") : t("installed.connect")}
           </button>
         )}
       </div>

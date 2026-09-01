@@ -15,6 +15,10 @@ import type { StoreApp } from "@/components/AppStore";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 
 const TerminalApp = dynamic(() => import("@/components/TerminalApp"), { ssr: false });
+const ChatApp = dynamic(() => import("@/components/ChatApp"), { ssr: false });
+const ClawKeepApp = dynamic(() => import("@/components/ClawKeepApp"), { ssr: false });
+const SystemUpdateApp = dynamic(() => import("@/components/SystemUpdateApp"), { ssr: false });
+const SetupWizard = dynamic(() => import("@/components/SetupWizard"), { ssr: false });
 const InstalledAppSettings = dynamic(() => import("@/components/InstalledAppSettings"), { ssr: false });
 const CodingAgentApp = dynamic(() => import("@/components/CodingAgentApp"), { ssr: false });
 const FilesApp = dynamic(() => import("@/components/FilesApp"), { ssr: false });
@@ -29,7 +33,7 @@ const MemoryShardApp = dynamic(() => import("@/components/MemoryShardApp"), { ss
 // ("Open in new tab"), so without the same gate the desktop applies, /app/store
 // would render the whole OpenClaw App Store on a Hermes device.
 const OPENCLAW_ONLY_APP_IDS = ["store", "openclaw", "memory-shard"];
-const HERMES_ONLY_APP_IDS = ["hermes-skills"];
+const HERMES_ONLY_APP_IDS = ["hermes", "hermes-skills"];
 
 const APP_TITLES: Record<string, string> = {
   settings: "Settings",
@@ -42,6 +46,11 @@ const APP_TITLES: Record<string, string> = {
   openclaw: "OpenClaw",
   "hermes-skills": "Hermes Skills",
   "memory-shard": "Memory Shard",
+  clawbox: "Chat",
+  clawkeep: "ClawKeep",
+  system_update: "System Update",
+  setup: "Setup",
+  hermes: "Hermes",
 };
 
 export default function StandaloneAppPage() {
@@ -71,6 +80,15 @@ export default function StandaloneAppPage() {
     const section = new URLSearchParams(window.location.search).get(STANDALONE_SETTINGS_SECTION_PARAM);
     if (section) handoffSettingsSection(section);
   }, [id]);
+
+  // Hermes is an external dashboard rather than a React app. The desktop
+  // opens it directly on the auth-proxy port; the standalone route behind
+  // shelf/desktop "Open in new tab" must do the same instead of rendering an
+  // "App not found" dead end.
+  useEffect(() => {
+    if (id !== "hermes" || harness !== "hermes") return;
+    window.location.replace(`${window.location.protocol}//${window.location.hostname}:8090/`);
+  }, [harness, id]);
 
   // An installed app's id says nothing about what it is. The desktop decides
   // from installed_meta (getAllApps in page.tsx): a webapp is framed, a store
@@ -168,6 +186,16 @@ export default function StandaloneAppPage() {
       }
     }
     switch (id) {
+      case "clawbox":
+        return <ChatApp />;
+      case "clawkeep":
+        return <ClawKeepApp />;
+      case "system_update":
+        return <SystemUpdateApp />;
+      case "setup":
+        return <SetupWizard />;
+      case "hermes":
+        return loading;
       case "terminal":
         return <TerminalApp />;
       case "coding":
