@@ -192,4 +192,35 @@ describe("TelegramConfiguringOverlay readiness", () => {
     await waitFor(() => expect(onTimeout).toHaveBeenCalledTimes(1));
     expect(onDone).not.toHaveBeenCalled();
   });
+
+  it("reports readiness expiry even when the configure request never settles", async () => {
+    const onDone = vi.fn();
+    const onTimeout = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/setup-api/harness/active") {
+        return jsonResponse({ active: "openclaw", edition: "openclaw" });
+      }
+      if (String(input) === "/setup-api/gateway/health") {
+        return jsonResponse({ available: false, port: 18789 });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pendingConfigure = new Promise<void>(() => {});
+    const healthTimeoutMs = 4_000;
+    render(
+      <TelegramConfiguringOverlay
+        onDone={onDone}
+        onTimeout={onTimeout}
+        waitFor={pendingConfigure}
+        healthTimeoutMs={healthTimeoutMs}
+      />,
+    );
+
+    await advance(PHASES_MS + healthTimeoutMs);
+    await waitFor(() => expect(onTimeout).toHaveBeenCalledTimes(1));
+    expect(onDone).not.toHaveBeenCalled();
+    expect(called(fetchMock, "/setup-api/gateway/health")).toBe(true);
+  });
 });

@@ -157,15 +157,13 @@ export default function TelegramConfiguringOverlay({
       // Wait for BOTH signals before declaring ready:
       //   1. the caller's configure request has succeeded (waitFor)
       //   2. the harness's own messaging path reports it is listening again
-      // Running them concurrently matches the phase-3 spinner the user already
-      // sees — we don't want to add more delay, just make sure neither
-      // completes prematurely.
-      const [ready, configured] = await Promise.all([
-        hermes ? pollHermesTelegramReady() : pollGatewayHealth(),
-        configureResult,
-      ]);
+      // Both already run concurrently: configureResult is attached above and
+      // the readiness poll starts here. Await readiness FIRST so expiry can
+      // release the UI even if the configure request itself has stalled. A
+      // Promise.all here made its timeout wait forever for that pending request,
+      // which meant the parent's abort/retry recovery could never run.
+      const ready = await (hermes ? pollHermesTelegramReady() : pollGatewayHealth());
       if (cancelledRef.current) return;
-      if (!configured.ok) throw configured.error;
       if (!ready) {
         // Nothing reported itself listening within healthTimeoutMs. This is
         // not completion: setup must stay on Telegram, and Settings must show
@@ -173,6 +171,10 @@ export default function TelegramConfiguringOverlay({
         onTimeout();
         return;
       }
+
+      const configured = await configureResult;
+      if (cancelledRef.current) return;
+      if (!configured.ok) throw configured.error;
 
       setPhase(4);
       await delay(1500);
