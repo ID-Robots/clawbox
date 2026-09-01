@@ -510,6 +510,26 @@ describe("openclaw-config", () => {
       );
     });
 
+    it("does not bypass a runtime mask by starting the standalone user gateway", async () => {
+      const masked = new Error(
+        "Failed to restart clawbox-gateway.service: Unit clawbox-gateway.service is masked.",
+      );
+      setupExecFileMock({
+        "/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service": masked,
+      });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await expect(openclawConfig.restartGateway()).rejects.toBe(masked);
+
+      expect(mockExecFile).not.toHaveBeenCalledWith(
+        "systemctl",
+        ["--user", "restart", "openclaw-gateway.service"],
+        expect.anything(),
+        expect.any(Function),
+      );
+      errorSpy.mockRestore();
+    });
+
     it("throws when restart fails", async () => {
       setupExecFileMock({
         systemctl: new Error("Service not found"),

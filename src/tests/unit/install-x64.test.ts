@@ -39,6 +39,12 @@ describe("install-x64.sh safety contracts", () => {
     expect(SOURCE).toContain(String.raw`PLAYWRIGHT_BROWSERS_PATH=\"$PLAYWRIGHT_PATH\" \"$BUN\" x playwright install chromium`);
   });
 
+  it("grants the updater exact runtime gateway mask and unmask commands", () => {
+    expect(SOURCE).toContain("/usr/bin/systemctl --runtime mask $GATEWAY_SERVICE");
+    expect(SOURCE).toContain("/usr/bin/systemctl --runtime unmask $GATEWAY_SERVICE");
+    expect(SOURCE).not.toMatch(/systemctl --runtime (?:mask|unmask) \*/);
+  });
+
   it("patches every gateway file when the configured home contains spaces", () => {
     const root = mkdtempSync(path.join(tmpdir(), "clawbox-x64-spaced-path-"));
     try {

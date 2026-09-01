@@ -338,7 +338,8 @@ describe("updater", () => {
       const timeoutErr = Object.assign(new Error("Command failed"), { killed: true });
       setupExecFileMock({
         "start clawbox-root-update@post_update.service": timeoutErr,
-        "show clawbox-root-update@post_update.service": { stdout: "success\n", stderr: "" },
+        "show clawbox-root-update@post_update.service -p ActiveState": { stdout: "inactive\n", stderr: "" },
+        "show clawbox-root-update@post_update.service -p Result": { stdout: "success\n", stderr: "" },
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -362,6 +363,17 @@ describe("updater", () => {
       });
       const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
       expect(postStep?.status).toBe("completed");
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      const settleIndex = calls.findIndex((call) =>
+        call.includes("show clawbox-root-update@post_update.service -p ActiveState --value"),
+      );
+      const firstUnmaskIndex = calls.findIndex((call) =>
+        call.includes("systemctl --runtime unmask clawbox-gateway.service"),
+      );
+      expect(settleIndex).toBeGreaterThanOrEqual(0);
+      expect(firstUnmaskIndex).toBeGreaterThan(settleIndex);
       expect(mockSetMany).toHaveBeenCalledWith(
         expect.objectContaining({ update_completed: true }),
       );
@@ -396,6 +408,171 @@ describe("updater", () => {
         expect(state.phase).toBe("failed");
         expect(state.error).toContain("OpenClaw gateway is not listening on port 18789");
       });
+    });
+
+    it("serializes post_update and repairs reported Codex consent before one recovery restart", async () => {
+      setupExecFileMock({
+        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "Plugin \"codex\" requires capability consent\n[sqlite/transaction] SQLite transaction lock wait failed\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "Codex runtime plugin capabilities accepted/current\n", stderr: "" },
+      });
+
+      const priorRoot = process.env.CLAWBOX_ROOT;
+      process.env.CLAWBOX_ROOT = process.cwd();
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      // Health is impossible until BOTH explicit consent and the later system
+      // restart occurred. Merely invoking pre-start must never make this green.
+      mockIsPortOpen.mockImplementation(async () => {
+        const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+          `${cmd} ${(args as string[]).join(" ")}`,
+        );
+        const consentIndex = calls.findIndex((call) =>
+          call.includes("plugins enable codex --accept-capabilities"),
+        );
+        const restartIndex = calls.findIndex((call) =>
+          call.includes("systemctl restart clawbox-gateway.service"),
+        );
+        return consentIndex >= 0 && restartIndex > consentIndex;
+      });
+      updater = await import("@/lib/updater");
+      if (priorRoot === undefined) delete process.env.CLAWBOX_ROOT;
+      else process.env.CLAWBOX_ROOT = priorRoot;
+
+      updater.resetUpdateState();
+      const result = await updater.checkContinuation();
+      expect(result).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      const postUpdateIndex = calls.findIndex((call) =>
+        call.includes("systemctl start clawbox-root-update@post_update.service"),
+      );
+      const preStartIndex = calls.findIndex((call) =>
+        call.includes("/bin/bash") && call.includes("scripts/gateway-pre-start.sh"),
+      );
+      const maskIndexes = calls
+        .map((call, index) => call.includes("systemctl --runtime mask clawbox-gateway.service") ? index : -1)
+        .filter((index) => index >= 0);
+      const stopIndexes = calls
+        .map((call, index) => call.includes("systemctl stop clawbox-gateway.service") ? index : -1)
+        .filter((index) => index >= 0);
+      const unmaskIndexes = calls
+        .map((call, index) => call.includes("systemctl --runtime unmask clawbox-gateway.service") ? index : -1)
+        .filter((index) => index >= 0);
+      const consentIndex = calls.findIndex((call) =>
+        call.includes("plugins enable codex --accept-capabilities"),
+      );
+      const doctorIndex = calls.findIndex((call) =>
+        call.includes("openclaw doctor --fix --yes --non-interactive"),
+      );
+      const restartIndexes = calls
+        .map((call, index) => call.includes("systemctl restart clawbox-gateway.service") ? index : -1)
+        .filter((index) => index >= 0);
+
+      expect(maskIndexes).toHaveLength(2);
+      expect(stopIndexes).toHaveLength(2);
+      expect(unmaskIndexes).toHaveLength(2);
+      expect(maskIndexes[0]).toBeLessThan(stopIndexes[0]);
+      expect(stopIndexes[0]).toBeLessThan(postUpdateIndex);
+      expect(postUpdateIndex).toBeLessThan(unmaskIndexes[0]);
+      expect(maskIndexes[1]).toBeLessThan(stopIndexes[1]);
+      expect(stopIndexes[1]).toBeLessThan(preStartIndex);
+      expect(preStartIndex).toBeLessThan(consentIndex);
+      expect(consentIndex).toBeLessThan(doctorIndex);
+      expect(doctorIndex).toBeLessThan(unmaskIndexes[1]);
+      expect(restartIndexes).toHaveLength(1);
+      expect(restartIndexes[0]).toBeGreaterThan(unmaskIndexes[1]);
+    });
+
+    it("does not consent an unrelated plugin when the gateway reported no Codex blocker", async () => {
+      setupExecFileMock({
+        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "gateway stopped for updater maintenance\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockIsPortOpen.mockImplementation(async () =>
+        mockExecFile.mock.calls.some(([cmd, args]) =>
+          cmd === "/usr/bin/sudo"
+            && (args as string[]).join(" ").includes("systemctl restart clawbox-gateway.service"),
+        ),
+      );
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      expect(calls.some((call) => call.includes("plugins enable codex --accept-capabilities"))).toBe(false);
+    });
+
+    it("records explicit consent but does not restart when current pre-start fails", async () => {
+      setupExecFileMock({
+        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "Plugin \"codex\" requires capability consent\n",
+          stderr: "",
+        },
+        "/bin/bash": new Error("pre-start failed"),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const priorRoot = process.env.CLAWBOX_ROOT;
+      process.env.CLAWBOX_ROOT = process.cwd();
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      updater = await import("@/lib/updater");
+      if (priorRoot === undefined) delete process.env.CLAWBOX_ROOT;
+      else process.env.CLAWBOX_ROOT = priorRoot;
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      const preStartIndex = calls.findIndex((call) => call.includes("scripts/gateway-pre-start.sh"));
+      const consentIndex = calls.findIndex((call) =>
+        call.includes("plugins enable codex --accept-capabilities"),
+      );
+      const finalUnmaskIndex = calls
+        .map((call, index) => call.includes("systemctl --runtime unmask clawbox-gateway.service") ? index : -1)
+        .filter((index) => index >= 0)
+        .at(-1) ?? -1;
+      expect(consentIndex).toBeGreaterThan(preStartIndex);
+      expect(finalUnmaskIndex).toBeGreaterThan(consentIndex);
+      expect(calls.some((call) => call.includes("systemctl restart clawbox-gateway.service"))).toBe(false);
     });
 
     it("quarantines known legacy gateway blockers and completes when the gateway recovers", async () => {
@@ -475,6 +652,38 @@ describe("updater", () => {
       const aptStep = state.steps.find((step) => step.id === "apt_update");
       expect(aptStep?.status).toBe("pending");
       expect(state.error).toBe("fatal: invalid branch name in .update-branch");
+    });
+  });
+
+  describe("startOpenclawUpdate", () => {
+    it("keeps the gateway masked throughout the root package replacement", async () => {
+      updater.resetUpdateState();
+
+      expect(updater.startOpenclawUpdate().started).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      const installIndex = calls.findIndex((call) =>
+        call.includes("systemctl start clawbox-root-update@openclaw_install.service"),
+      );
+      const firstMaskIndex = calls.findIndex((call) =>
+        call.includes("systemctl --runtime mask clawbox-gateway.service"),
+      );
+      const firstStopIndex = calls.findIndex((call) =>
+        call.includes("systemctl stop clawbox-gateway.service"),
+      );
+      const firstUnmaskIndex = calls.findIndex((call) =>
+        call.includes("systemctl --runtime unmask clawbox-gateway.service"),
+      );
+
+      expect(firstMaskIndex).toBeLessThan(firstStopIndex);
+      expect(firstStopIndex).toBeLessThan(installIndex);
+      expect(installIndex).toBeLessThan(firstUnmaskIndex);
+      expect(calls.slice(firstMaskIndex, firstUnmaskIndex + 1).some((call) =>
+        call.includes("systemctl restart clawbox-gateway.service"),
+      )).toBe(false);
     });
   });
 
@@ -763,6 +972,25 @@ describe("updater", () => {
         // build it rebooted onto is the code it just synced.
         "verify_build_identity",
       ]);
+    });
+
+    it("runs a Hermes continuation without touching gateway maintenance", async () => {
+      mockGet.mockResolvedValue(true);
+      const fresh = await loadUpdater("hermes");
+      mockExecFile.mockClear();
+
+      expect(await fresh.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(fresh.getUpdateState().phase).toBe("completed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      expect(calls.some((call) =>
+        call.includes("systemctl --runtime mask clawbox-gateway.service")
+          || call.includes("systemctl --runtime unmask clawbox-gateway.service")
+          || call.includes("systemctl stop clawbox-gateway.service")
+          || call.includes("scripts/gateway-pre-start.sh"),
+      )).toBe(false);
     });
 
     it("leaves the openclaw edition unchanged apart from having no hermes step", async () => {

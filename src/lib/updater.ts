@@ -73,8 +73,9 @@ interface UpdateStepDef {
    * A budget overrun doesn't fail the update for this step — it's marked
    * completed and the run carries on. For steps whose content is non-fatal
    * by design (post_update: every fixup inside is `|| warn`), an overrun
-   * painting "Update failed" on a successful update is worse than letting
-   * the unit finish in the background. Genuine unit failures still fail.
+   * painting "Update failed" on a successful update is misleading. The
+   * quiesced runner still waits for the root unit to settle before advancing;
+   * genuine unit failures still fail.
    */
   advisoryOnOverrun?: boolean;
   /**
@@ -763,8 +764,18 @@ const GATEWAY_PORT = Number(process.env.GATEWAY_PORT || "18789");
 const GATEWAY_HEALTH_WAIT_MS = Number(process.env.GATEWAY_HEALTH_WAIT_MS || "30000");
 const GATEWAY_RECOVERY_WAIT_MS = Number(process.env.GATEWAY_RECOVERY_WAIT_MS || "45000");
 const GATEWAY_WAIT_INTERVAL_MS = Number(process.env.GATEWAY_WAIT_INTERVAL_MS || "1500");
+const ROOT_STEP_SETTLE_TIMEOUT_MS = Number(process.env.ROOT_STEP_SETTLE_TIMEOUT_MS || "7200000");
 const LEGACY_GATEWAY_BLOCKER_RE =
   /installs\.json|conflicting plugin install metadata|carl_pir|belongs to agent piper/i;
+const CODEX_CAPABILITY_CONSENT_RE =
+  /Plugin\s+["']?codex["']?\s+requires capability consent/i;
+const CURRENT_GATEWAY_PRE_START = path.join(PROJECT_DIR, "scripts", "gateway-pre-start.sh");
+const GATEWAY_QUIESCED_ROOT_STEPS = new Set(["openclaw_install", "post_update"]);
+
+// A serialized root step deliberately leaves the gateway stopped. Its next
+// health check must repair/start it instead of accepting a stale listener or
+// spending the normal readiness window waiting for a service we stopped.
+let gatewayNeedsRecovery = false;
 
 async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -793,6 +804,80 @@ async function runOpenclawDoctorFix(): Promise<void> {
   }
 }
 
+async function setGatewayMaintenanceMask(masked: boolean): Promise<void> {
+  const options = { timeout: 30_000, maxBuffer: 1024 * 1024 };
+  if (masked) {
+    await execFile(
+      "/usr/bin/sudo",
+      ["-n", "/usr/bin/systemctl", "--runtime", "mask", "clawbox-gateway.service"],
+      options,
+    );
+    return;
+  }
+  await execFile(
+    "/usr/bin/sudo",
+    ["-n", "/usr/bin/systemctl", "--runtime", "unmask", "clawbox-gateway.service"],
+    options,
+  );
+}
+
+async function stopGatewayForMaintenance(): Promise<void> {
+  await execFile(
+    "/usr/bin/sudo",
+    ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"],
+    { timeout: 30_000, maxBuffer: 1024 * 1024 },
+  );
+}
+
+/**
+ * Keep systemd from starting the gateway while an OpenClaw writer is active.
+ * Mask comes before stop so a root update step cannot race the stop with its
+ * own restart. The runtime mask is always removed, including failure paths.
+ */
+async function withGatewayQuiesced<T>(operation: () => Promise<T>): Promise<T> {
+  if (gatewayIsAbsent()) return operation();
+
+  let masked = false;
+  try {
+    await setGatewayMaintenanceMask(true);
+    masked = true;
+    await stopGatewayForMaintenance();
+    return await operation();
+  } finally {
+    if (masked) await setGatewayMaintenanceMask(false);
+  }
+}
+
+/** Run the newly checked-out pre-start repair while the gateway is stopped. */
+async function runCurrentGatewayPreStart(): Promise<void> {
+  if (!existsSync(CURRENT_GATEWAY_PRE_START)) return;
+  const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
+  await execFile("/bin/bash", [CURRENT_GATEWAY_PRE_START], {
+    // Match the unit's 600s TimeoutStartSec with a little process overhead.
+    // Killing this halfway through a plugin migration recreates the lock race
+    // this maintenance path exists to avoid.
+    timeout: 650_000,
+    maxBuffer: 4 * 1024 * 1024,
+    env: {
+      ...process.env,
+      HOME: home,
+      CLAWBOX_HOME_DIR: home,
+      CLAWBOX_ROOT: PROJECT_DIR,
+      OPENCLAW_HOME: process.env.OPENCLAW_HOME || path.join(home, ".openclaw"),
+    },
+  });
+}
+
+/** Accept only the ClawBox-managed plugin named by a concrete gateway error. */
+async function repairCodexCapabilityConsent(journal: string): Promise<void> {
+  if (!CODEX_CAPABILITY_CONSENT_RE.test(journal)) return;
+  await execFile(
+    OPENCLAW_BIN,
+    ["plugins", "enable", "codex", "--accept-capabilities"],
+    { timeout: 90_000, maxBuffer: 2 * 1024 * 1024 },
+  );
+}
+
 async function readGatewayJournalTail(): Promise<string> {
   try {
     const { stdout } = await execFile(
@@ -804,6 +889,18 @@ async function readGatewayJournalTail(): Promise<string> {
   } catch {
     return "";
   }
+}
+
+function getGatewayFailureDetail(logText: string): string | null {
+  const lines = logText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (const pattern of [CODEX_CAPABILITY_CONSENT_RE, /SQLite transaction lock wait failed/i]) {
+    const match = [...lines].reverse().find((line) => pattern.test(line));
+    if (match) return match;
+  }
+  return lines.length > 0 ? lines[lines.length - 1] : null;
 }
 
 async function quarantineLegacyOpenclawState(): Promise<void> {
@@ -825,19 +922,34 @@ mv -v "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"* "$Q
 }
 
 async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): Promise<void> {
-  if (options.restartFirst) {
-    await restartGateway();
-  }
+  const recoverImmediately = options.restartFirst || gatewayNeedsRecovery;
+  gatewayNeedsRecovery = false;
+  if (!recoverImmediately && await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
 
-  if (await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
-
-  await runOpenclawDoctorFix();
-  await restartGateway().catch(() => {});
-  if (await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
+  // post_update and the standalone OpenClaw updater both run several config,
+  // doctor and plugin commands. Do all remaining repair against a stopped,
+  // masked gateway so the v2 SQLite store has one writer. A pre-start timeout
+  // is fatal here: restarting after killing a migration midway is unsafe.
+  await withGatewayQuiesced(async () => {
+    const journal = await readGatewayJournalTail();
+    try {
+      await runCurrentGatewayPreStart();
+    } catch (err) {
+      // If an earlier pre-start migration fails, still record the narrowly
+      // scoped consent named by the existing journal. Do not restart after a
+      // partial pre-start; propagate its failure once the repair is recorded.
+      await repairCodexCapabilityConsent(journal);
+      throw err;
+    }
+    await repairCodexCapabilityConsent(journal);
+    await runOpenclawDoctorFix();
+  });
+  await restartGateway();
+  if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
 
   const beforeRecoveryLog = await readGatewayJournalTail();
   if (!LEGACY_GATEWAY_BLOCKER_RE.test(beforeRecoveryLog)) {
-    const lastLog = getLastLogLine(beforeRecoveryLog);
+    const lastLog = getGatewayFailureDetail(beforeRecoveryLog);
     throw new Error(
       lastLog
         ? `OpenClaw gateway is not listening on port ${GATEWAY_PORT}: ${lastLog}`
@@ -845,13 +957,15 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     );
   }
 
-  await quarantineLegacyOpenclawState();
-  await runOpenclawDoctorFix();
+  await withGatewayQuiesced(async () => {
+    await quarantineLegacyOpenclawState();
+    await runOpenclawDoctorFix();
+  });
   await restartGateway();
   if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
 
   const afterRecoveryLog = await readGatewayJournalTail();
-  const lastLog = getLastLogLine(afterRecoveryLog);
+  const lastLog = getGatewayFailureDetail(afterRecoveryLog);
   throw new Error(
     lastLog
       ? `OpenClaw gateway still offline after legacy state recovery: ${lastLog}`
@@ -943,8 +1057,8 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     // outlive a 1-minute budget — which painted a false-red step on an
     // otherwise successful update. The fixups can legitimately wait even
     // longer (wait_for_apt alone allows 900s), so an overrun past these 5
-    // minutes is advisory: the unit finishes on its own (TimeoutStartSec is
-    // 30 min) and everything inside it is non-fatal by design.
+    // minutes is advisory once the root unit has settled; everything inside
+    // it is non-fatal by design.
     // 15 min, raised from 5. post_update now also REPAIRS a device that a
     // pre-fix factory reset left without its Hermes agent install or its
     // offline Gemma GGUF (step_hermes_install + step_llamacpp_model at the end
@@ -953,12 +1067,9 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     // venv build (~90s measured) and a 3.2 GB model download, on top of the
     // fixups that already routinely outlive a minute.
     //
-    // The raise is not cosmetic. `advisoryOnOverrun` does not pause the
-    // update: it marks the step completed and moves straight on to
-    // `hermes_edition`, which hard-fails when ~/.local/bin/hermes is not yet
-    // runnable. So an overrun DURING the repair would report the repair as
-    // fine and then fail the step after it. The budget has to cover the repair
-    // rather than lean on the advisory path.
+    // The runner now keeps the gateway quiesced and waits for an overrun unit
+    // to settle before moving on. This budget still covers the healthy repair
+    // path so the UI does not sit beyond its advertised estimate.
     //
     // Still well inside the unit's own ceiling (TimeoutStartSec=7200 in
     // config/clawbox-root-update@.service), and advisoryOnOverrun stays as the
@@ -1055,6 +1166,49 @@ async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
     }
     throw err;
   }
+}
+
+async function waitForRootStepToSettle(stepId: string): Promise<void> {
+  const serviceName = `clawbox-root-update@${stepId}.service`;
+  const deadline = Date.now() + ROOT_STEP_SETTLE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      const { stdout } = await execFile(
+        "/usr/bin/systemctl",
+        ["show", serviceName, "-p", "ActiveState", "--value"],
+        { timeout: 10_000 },
+      );
+      if (/^(?:inactive|failed)$/.test(stdout.trim())) return;
+    } catch {
+      // A transient systemd query failure must not unmask a still-running
+      // writer. Keep the gateway quiesced and retry within the unit ceiling.
+    }
+    await delay(2_000);
+  }
+  throw new Error(`${stepId} did not settle before its root service timeout`);
+}
+
+/** Run root steps that mutate OpenClaw without a live gateway/SQLite writer. */
+async function execAsRootWithGatewayQuiesced(stepId: string, timeoutMs: number): Promise<void> {
+  await withGatewayQuiesced(async () => {
+    gatewayNeedsRecovery = true;
+    try {
+      await execAsRoot(stepId, timeoutMs);
+    } catch (err) {
+      if (!(err instanceof BudgetOverrunError)) throw err;
+
+      // The blocking systemctl client timed out, not the root unit. Keep the
+      // runtime mask in place until the unit truly exits, otherwise the
+      // advisory-overrun path would launch gateway_verify against it.
+      await waitForRootStepToSettle(stepId);
+      if ((await getRootStepResult(stepId)) === "failed") {
+        throw new Error(
+          (await readRootStepFailure(stepId)) ?? `${stepId} failed after exceeding its wait budget`,
+        );
+      }
+      throw err;
+    }
+  });
 }
 
 let cachedTargetVersion: string | null = null;
@@ -1550,7 +1704,11 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       if (step.customRun) {
         await step.customRun();
       } else if (step.requiresRoot) {
-        await execAsRoot(step.id, step.timeoutMs);
+        if (GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
+          await execAsRootWithGatewayQuiesced(step.id, step.timeoutMs);
+        } else {
+          await execAsRoot(step.id, step.timeoutMs);
+        }
       } else if (step.command) {
         await execShell(step.command, {
           timeout: step.timeoutMs,
@@ -1561,18 +1719,17 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       console.log(`[Updater] Completed: ${step.label}`);
     } catch (err) {
       let message = err instanceof Error ? err.message : "Unknown error";
-      // An overrun on an advisory step doesn't fail the update: the unit is
-      // still running and will finish on its own — mark the step completed
-      // and move on, instead of painting "Update failed" (with a Retry that
-      // would re-run the whole update) over a successful one.
+      // An overrun on an advisory step doesn't fail the update. Serialized
+      // gateway writers have already waited for the root unit to settle before
+      // reaching this catch, so advancing cannot overlap its remaining work.
       if (err instanceof BudgetOverrunError && step.advisoryOnOverrun) {
         state.steps[i].status = "completed";
         console.warn(`[Updater] ${step.label}: ${message} — treating as advisory`);
         continue;
       }
       // Only let the unit's journal override the error when the unit actually
-      // FAILED — on a budget overrun it's still running, and its last log line
-      // is just whatever fixup happened to finish most recently.
+      // FAILED — on a generic budget overrun its last journal line can still
+      // be whatever fixup happened to finish most recently.
       if (step.requiresRoot && (await getRootStepResult(step.id)) === "failed") {
         const rootFailure = await readRootStepFailure(step.id);
         if (rootFailure) message = rootFailure;

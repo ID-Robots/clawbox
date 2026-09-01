@@ -1104,12 +1104,14 @@ SuccessExitStatus=143 SIGTERM
 WantedBy=multi-user.target
 EOF
 
-  # Provider configuration restarts the system gateway from the unprivileged
-  # web process. Grant only the three service operations that route uses.
+  # Provider configuration and the in-app updater manage the system gateway
+  # from the unprivileged web process. The updater's runtime mask keeps the
+  # gateway from racing OpenClaw npm/plugin/SQLite migrations; it is paired
+  # with an exact unmask grant and always removed in a finally path.
   local sudoers_tmp
   sudoers_tmp=$(mktemp)
   cat > "$sudoers_tmp" <<EOF
-$CLAWBOX_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop $GATEWAY_SERVICE, /usr/bin/systemctl reset-failed $GATEWAY_SERVICE, /usr/bin/systemctl restart $GATEWAY_SERVICE, /usr/bin/systemctl start clawbox-browser.service, /usr/bin/systemctl stop clawbox-browser.service, /usr/bin/systemctl enable --now ollama.service, /usr/bin/systemctl start ollama.service, /usr/bin/systemctl stop ollama.service
+$CLAWBOX_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop $GATEWAY_SERVICE, /usr/bin/systemctl --runtime mask $GATEWAY_SERVICE, /usr/bin/systemctl --runtime unmask $GATEWAY_SERVICE, /usr/bin/systemctl reset-failed $GATEWAY_SERVICE, /usr/bin/systemctl restart $GATEWAY_SERVICE, /usr/bin/systemctl start clawbox-browser.service, /usr/bin/systemctl stop clawbox-browser.service, /usr/bin/systemctl enable --now ollama.service, /usr/bin/systemctl start ollama.service, /usr/bin/systemctl stop ollama.service
 EOF
   chmod 440 "$sudoers_tmp"
   if ! visudo -cf "$sudoers_tmp" >/dev/null; then

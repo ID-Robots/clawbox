@@ -1978,10 +1978,14 @@ export async function restartGateway(): Promise<void> {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // "is masked" is the other way this unit says "I am not running here" — a
-    // masked unit is a deliberate removal, not an error to surface. Without it
-    // the message fell past this branch to the throw below.
-    if (/clawbox-gateway\.service.*(?:not found|is masked)|Unit clawbox-gateway\.service not found|could not be found/i.test(message)) {
+    // Fall back only when this installation genuinely has no ClawBox system
+    // unit. A runtime mask is an update/factory-reset lock: starting the legacy
+    // user unit through it would defeat the lock and recreate concurrent
+    // gateway/SQLite writers.
+    const systemGatewayMasked = /clawbox-gateway\.service[^\n]*\bmasked\b/i.test(message);
+    const systemGatewayMissing =
+      /clawbox-gateway\.service[^\n]*(?:not found|could not be found)/i.test(message);
+    if (!systemGatewayMasked && systemGatewayMissing) {
       try {
         await exec("systemctl", ["--user", "restart", "openclaw-gateway.service"], {
           timeout: 60000,
