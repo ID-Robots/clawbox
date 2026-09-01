@@ -45,8 +45,12 @@ vi.mock("@/lib/child-run", async (importOriginal) => {
 });
 vi.mock("fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs/promises")>();
-  const opendir = ((dir: string, options?: unknown) =>
-    opendirOverride.fn ? opendirOverride.fn(dir) : actual.opendir(dir, options as never)) as typeof actual.opendir;
+  // An override answering undefined for a directory leaves it to the real
+  // opendir, so one test can lock a single folder and keep the rest real.
+  const opendir = ((dir: string, options?: unknown) => {
+    const answer = opendirOverride.fn?.(dir);
+    return answer === undefined ? actual.opendir(dir, options as never) : answer;
+  }) as typeof actual.opendir;
   return { ...actual, opendir, default: { ...actual, opendir } };
 });
 
@@ -182,4 +186,91 @@ describe("the walk's entry budget", () => {
     expect(result.notes).toEqual([]);
     expect(result.extracted).toBe(1);
   });
+});
+
+describe("folders that cannot be read", () => {
+  const denied = (dir: string) => Promise.reject(Object.assign(new Error(`EACCES: permission denied, opendir '${dir}'`), { code: "EACCES" }));
+
+  it("says so for the source itself instead of calling it empty", async () => {
+    // Before, an unreadable source came back as `derived: null` with no
+    // note — indistinguishable from a folder with nothing in it.
+    fs.writeFileSync(path.join(source, "note.txt"), "unreachable\n");
+    opendirOverride.fn = denied;
+
+    const result = await extractDocuments(source);
+
+    expect(result.notes).toEqual(["This folder could not be read."]);
+    expect(result.derived).toBeNull();
+    expect(result.extracted).toBe(0);
+  });
+
+  it("skips a locked folder inside, keeps the rest, and counts it for the owner", async () => {
+    fs.writeFileSync(path.join(source, "open.txt"), "open\n");
+    fs.mkdirSync(path.join(source, "locked"));
+    fs.writeFileSync(path.join(source, "locked", "hidden.txt"), "hidden\n");
+    opendirOverride.fn = (dir) => (path.basename(dir) === "locked" ? denied(dir) : undefined);
+
+    const result = await extractDocuments(source);
+
+    expect(result.notes).toEqual(["One folder inside could not be read and was skipped."]);
+    expect(result.extracted).toBe(1);
+    const contents = fs.readdirSync(result.derived!).map((name) => fs.readFileSync(path.join(result.derived!, name), "utf8"));
+    expect(contents).toEqual(["open\n"]);
+  });
+
+  it("counts a folder that stops being readable mid-walk, and keeps what it read", async () => {
+    // A listing that yields one real-looking file and then fails: the file
+    // stands (it is copied from the real source below), the failure is a
+    // skipped folder, not a truncation.
+    fs.writeFileSync(path.join(source, "first.txt"), "first\n");
+    let calls = 0;
+    const failing = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => {
+            calls += 1;
+            if (calls === 1) return { done: false, value: { name: "first.txt", isDirectory: () => false, isFile: () => true } };
+            throw Object.assign(new Error("EIO: i/o error, dir.read"), { code: "EIO" });
+          },
+          return: async () => ({ done: true, value: undefined }),
+        };
+      },
+    };
+    opendirOverride.fn = () => Promise.resolve(failing);
+
+    const result = await extractDocuments(source);
+
+    expect(result.notes).toEqual(["This folder could not be read."]);
+    expect(result.extracted).toBe(1);
+  });
+
+  it("puts the truncation note before the unreadable one", async () => {
+    // Both at once: the budget note stays first — that the scan stopped short
+    // is the larger fact — and the cut to three keeps both. The listing is
+    // scripted, not real, because a real directory's order is the
+    // filesystem's: read first, node_modules spent the budget before the walk
+    // ever reached the locked folder.
+    let pulled = 0;
+    const lockedThenEndless = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => {
+            pulled += 1;
+            if (pulled === 1) return { done: false, value: { name: "locked", isDirectory: () => true, isFile: () => false } };
+            return { done: false, value: { name: `${pulled}.bin`, isDirectory: () => false, isFile: () => true } };
+          },
+          return: async () => ({ done: true, value: undefined }),
+        };
+      },
+    };
+    opendirOverride.fn = (dir) => (path.basename(dir) === "locked" ? denied(dir) : Promise.resolve(lockedThenEndless));
+
+    const result = await extractDocuments(source);
+
+    expect(result.notes).toEqual([
+      "This folder holds more than 20000 entries; only the first 20000 were scanned.",
+      "One folder inside could not be read and was skipped.",
+    ]);
+  });
+
 });

@@ -82,6 +82,15 @@ interface WalkBudget {
   left: number;
   /** Set once the budget ran out with entries still unread. */
   truncated: boolean;
+  /**
+   * Folders that could not be opened or stopped being readable mid-walk. The
+   * walk goes on past them — what it found stands — but they are counted, so
+   * the owner hears that the scan was partial rather than that the folder
+   * was empty; `rootUnreadable` is the source folder itself, which has no
+   * "rest" to go on with.
+   */
+  unreadable: number;
+  rootUnreadable: boolean;
 }
 
 async function* walk(dir: string, budget: WalkBudget, depth = 0): AsyncGenerator<string> {
@@ -95,6 +104,8 @@ async function* walk(dir: string, budget: WalkBudget, depth = 0): AsyncGenerator
   try {
     handle = await fs.opendir(dir);
   } catch {
+    budget.unreadable += 1;
+    if (depth === 0) budget.rootUnreadable = true;
     return;
   }
   try {
@@ -115,7 +126,10 @@ async function* walk(dir: string, budget: WalkBudget, depth = 0): AsyncGenerator
     }
   } catch {
     // A directory that stopped being readable mid-walk ends here, the way one
-    // that could not be opened ended above: what was found before stands.
+    // that could not be opened ended above: what was found before stands,
+    // and the owner is told the scan was partial.
+    budget.unreadable += 1;
+    if (depth === 0) budget.rootUnreadable = true;
   }
 }
 
@@ -168,7 +182,7 @@ export async function extractDocuments(source: string): Promise<ExtractionResult
   const notes: string[] = [];
   let seen = 0;
   let sawExtractable = false;
-  const budget: WalkBudget = { left: MAX_ENTRIES, truncated: false };
+  const budget: WalkBudget = { left: MAX_ENTRIES, truncated: false, unreadable: 0, rootUnreadable: false };
 
   for await (const file of walk(path.resolve(source), budget)) {
     if (seen >= MAX_FILES) {
@@ -217,9 +231,20 @@ export async function extractDocuments(source: string): Promise<ExtractionResult
     }
   }
 
-  // The note belongs to the folder rather than to a file, and goes FIRST so
-  // the cut to three below keeps it: the owner should hear that the scan
-  // stopped short before hearing which single file could not be read.
+  // These notes belong to the folder rather than to a file, and go FIRST so
+  // the cut to three below keeps them: the owner should hear that the scan
+  // stopped short before hearing which single file could not be read. A
+  // source that could not be read at all is the whole story — not an empty
+  // folder, which is what a silent null would have said.
+  if (budget.rootUnreadable) {
+    notes.unshift("This folder could not be read.");
+  } else if (budget.unreadable > 0) {
+    notes.unshift(
+      budget.unreadable === 1
+        ? "One folder inside could not be read and was skipped."
+        : `${budget.unreadable} folders inside could not be read and were skipped.`,
+    );
+  }
   if (budget.truncated) {
     notes.unshift(`This folder holds more than ${MAX_ENTRIES} entries; only the first ${MAX_ENTRIES} were scanned.`);
   }
