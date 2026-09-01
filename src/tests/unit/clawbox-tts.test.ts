@@ -4,6 +4,8 @@ import { spawnSync, spawn, type ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { testEnv } from "@/tests/helpers/env";
+
 // These run the shipped scripts/openclaw/clawbox-tts.sh itself against a stub
 // `kokoro` executable on PATH — not a reimplementation of its logic in
 // TypeScript. The engine is the part that breaks, so the stub is scripted to
@@ -152,8 +154,8 @@ function startServer(mode: "ok" | "refuse"): string {
   return sock;
 }
 
-function baseEnv(extra: Record<string, string> = {}): Record<string, string> {
-  return {
+function baseEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  return testEnv({
     PATH: `${binDir}:/usr/bin:/bin`,
     HOME: dir,
     CALLS_LOG: callsLog,
@@ -164,7 +166,7 @@ function baseEnv(extra: Record<string, string> = {}): Record<string, string> {
     // unless a test deliberately stands a server up.
     KOKORO_SOCKET: path.join(dir, "no-such.sock"),
     ...extra,
-  };
+  });
 }
 
 function run(args: string[], extraEnv: Record<string, string> = {}) {
@@ -824,7 +826,7 @@ describe("install-voice.sh installs no second engine", () => {
     // The check runs before anything is executed, so this is safe to invoke.
     const r = spawnSync("bash", [path.resolve(process.cwd(), "scripts/install-voice.sh"), "--piper-only"], {
       encoding: "utf8",
-      env: { PATH: "/usr/bin:/bin", HOME: tmpdir(), CLAWBOX_HOME: path.join(tmpdir(), "no-such-home") },
+      env: testEnv({ PATH: "/usr/bin:/bin", HOME: tmpdir(), CLAWBOX_HOME: path.join(tmpdir(), "no-such-home") }),
       timeout: 30_000,
     });
     expect(r.status).toBe(2);

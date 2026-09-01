@@ -4,6 +4,8 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
+import { testEnv } from "@/tests/helpers/env";
+
 // scripts/register-mcp.sh is what puts the ClawBox MCP server into Hermes'
 // config. Before it existed, the only thing that ever registered the MCP was
 // scripts/gateway-pre-start.sh — an ExecStartPre of the OpenClaw gateway unit,
@@ -40,7 +42,7 @@ let lockPath: string;
 function run(env: Record<string, string> = {}): { status: number; stdout: string; stderr: string } {
   const r = spawnSync("bash", [SCRIPT], {
     encoding: "utf-8",
-    env: {
+    env: testEnv({
       PATH: process.env.PATH ?? "",
       HOME: home,
       CLAWBOX_ROOT: root,
@@ -49,7 +51,7 @@ function run(env: Record<string, string> = {}): { status: number; stdout: string
       BUN_BIN: path.join(home, "fake-bun"),
       CLAWBOX_EDITION_FILE: lockPath,
       ...env,
-    },
+    }),
   });
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }

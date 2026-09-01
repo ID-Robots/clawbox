@@ -71,7 +71,9 @@ describe("a clean stop is not reported as a failure", () => {
   it("run-tunnel.sh returns 0 when it was asked to stop", () => {
     // `set -o pipefail` + cloudflared killed by SIGTERM = pipeline status 143.
     expect(RUN_TUNNEL_SH).toContain("PIPESTATUS[0]");
-    expect(RUN_TUNNEL_SH).toMatch(/SIGNALLED.*=.*"1".*\|\|.*143.*\|\|.*130/s);
+    // [\s\S] spans newlines like the /s flag would, but /s needs a TS target of
+    // es2018+ and this tsconfig targets es2017.
+    expect(RUN_TUNNEL_SH).toMatch(/SIGNALLED[\s\S]*=[\s\S]*"1"[\s\S]*\|\|[\s\S]*143[\s\S]*\|\|[\s\S]*130/);
     expect(RUN_TUNNEL_SH).toContain("trap on_signal INT TERM");
   });
 });

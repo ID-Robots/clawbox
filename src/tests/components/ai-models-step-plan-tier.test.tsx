@@ -138,7 +138,10 @@ describe("AIModelsStep — the plan card follows the account, not local storage"
   it("never overrides a plan the user picked in this session", async () => {
     // A late status answer must not yank the card out from under a click that
     // already happened — the wizard is where someone upgrades.
-    let releaseStatus: (() => void) | null = null;
+    // A no-op rather than null: the executor assigns inside a closure, so
+    // control-flow analysis otherwise narrows the variable to `null` at the
+    // call below and `?.()` becomes a call on `never`.
+    let releaseStatus: () => void = () => {};
     const gate = new Promise<void>((resolve) => { releaseStatus = resolve; });
     // Resolves once the panel has actually READ the late answer. Asserting on
     // "fetch was called" alone would pass before the response ever came back,
@@ -174,7 +177,7 @@ describe("AIModelsStep — the plan card follows the account, not local storage"
       expect.objectContaining({ cache: "no-store" }),
     );
 
-    releaseStatus?.();
+    releaseStatus();
     // Wait until the panel has read the late answer, then let React drain, so
     // this asserts the reconcile DECLINED to move the card rather than that it
     // simply had not run yet.

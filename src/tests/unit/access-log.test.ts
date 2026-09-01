@@ -1,6 +1,8 @@
 import { EventEmitter } from "events";
 import { describe, expect, it } from "vitest";
 
+import { testEnv } from "@/tests/helpers/env";
+
 // scripts/access-log.js is CommonJS on purpose — production-server.js is CJS and
 // has to be (it monkey-patches http.Server.prototype.listen before Next's
 // standalone bundle loads), so the logger it requires cannot be an ES module.
@@ -193,20 +195,20 @@ describe("access log — host", () => {
 
 describe("access log — volume controls", () => {
   it("is on by default and off only when explicitly disabled", () => {
-    expect(accessLogEnabled({} as NodeJS.ProcessEnv)).toBe(true);
-    expect(accessLogEnabled({ CLAWBOX_ACCESS_LOG: "1" } as NodeJS.ProcessEnv)).toBe(true);
+    expect(accessLogEnabled(testEnv())).toBe(true);
+    expect(accessLogEnabled(testEnv({ CLAWBOX_ACCESS_LOG: "1" }))).toBe(true);
     for (const off of ["0", "false", "off", "no", "OFF"]) {
-      expect(accessLogEnabled({ CLAWBOX_ACCESS_LOG: off } as NodeJS.ProcessEnv)).toBe(false);
+      expect(accessLogEnabled(testEnv({ CLAWBOX_ACCESS_LOG: off }))).toBe(false);
     }
   });
 
   it("skips build assets by default and includes them on request", () => {
-    const env = {} as NodeJS.ProcessEnv;
+    const env = testEnv();
     expect(shouldSkip("/_next/static/chunks/main.js", env)).toBe(true);
     expect(shouldSkip("/_next/image?url=x", env)).toBe(true);
     expect(shouldSkip("/setup-api/system/stats", env)).toBe(false);
 
-    const verbose = { CLAWBOX_ACCESS_LOG_STATIC: "1" } as NodeJS.ProcessEnv;
+    const verbose = testEnv({ CLAWBOX_ACCESS_LOG_STATIC: "1" });
     expect(logsStaticAssets(verbose)).toBe(true);
     expect(shouldSkip("/_next/static/chunks/main.js", verbose)).toBe(false);
   });
@@ -218,7 +220,7 @@ describe("access log — attachAccessLog", () => {
     const lines: string[] = [];
     let clock = 0;
     const attached = attachAccessLog(server, {
-      env: options.env ?? ({} as NodeJS.ProcessEnv),
+      env: options.env ?? testEnv(),
       write: (line) => lines.push(line),
       now: () => clock,
     });
@@ -255,7 +257,7 @@ describe("access log — attachAccessLog", () => {
     const server = new EventEmitter();
     const seen: string[] = [];
     server.on("request", () => seen.push("next-handler"));
-    attachAccessLog(server, { env: {} as NodeJS.ProcessEnv, write: () => {} });
+    attachAccessLog(server, { env: testEnv(), write: () => {} });
     server.emit("request", fakeReq(), new FakeRes());
     expect(seen).toEqual(["next-handler"]);
   });
@@ -263,7 +265,7 @@ describe("access log — attachAccessLog", () => {
   it("does nothing when disabled", () => {
     const server = new EventEmitter();
     const attached = attachAccessLog(server, {
-      env: { CLAWBOX_ACCESS_LOG: "0" } as NodeJS.ProcessEnv,
+      env: testEnv({ CLAWBOX_ACCESS_LOG: "0" }),
       write: () => {},
     });
     expect(attached).toBe(false);
@@ -293,7 +295,7 @@ describe("access log — attachAccessLog", () => {
   it("never lets a failing writer take the request path down", () => {
     const server = new EventEmitter();
     attachAccessLog(server, {
-      env: {} as NodeJS.ProcessEnv,
+      env: testEnv(),
       write: () => {
         throw new Error("journal is full");
       },

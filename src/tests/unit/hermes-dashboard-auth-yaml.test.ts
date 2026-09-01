@@ -38,7 +38,7 @@ function run(root: string, configPath: string, username?: string) {
 }
 
 /** Run the read-only classifier (`--check`) against a given root + config. */
-function check(root: string, configPath: string, extraEnv: NodeJS.ProcessEnv = {}) {
+function check(root: string, configPath: string, extraEnv: Record<string, string> = {}) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     CLAWBOX_ROOT: root,

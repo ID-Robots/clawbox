@@ -4,6 +4,8 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
+import { testEnv } from "@/tests/helpers/env";
+
 // A device is flashed with CLAWBOX_VERSION=<branch>, which flash.sh hands to
 // install.sh as CLAWBOX_BRANCH. What the device later UPDATES to is decided
 // separately, by resolve_update_branch (install.sh) and resolveUpdateBranch
@@ -103,7 +105,7 @@ function runPersist(env: Record<string, string> = {}): {
     encoding: "utf-8",
     // Deliberately NOT inheriting process.env: a CLAWBOX_BRANCH exported in a
     // developer's shell would rewrite what each case is asking.
-    env: { PATH: process.env.PATH ?? "", ...env },
+    env: testEnv({ PATH: process.env.PATH ?? "", ...env }),
   });
   const chowns = fs
     .readFileSync(chownLog, "utf-8")
