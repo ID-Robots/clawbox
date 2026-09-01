@@ -58,8 +58,11 @@ export default function TelegramConfiguringOverlay({
   const overlayRef = useRef<HTMLDivElement>(null);
   const onDoneRef = useRef(onDone);
   const onTimeoutRef = useRef(onTimeout);
-  onDoneRef.current = onDone;
-  onTimeoutRef.current = onTimeout;
+
+  useEffect(() => {
+    onDoneRef.current = onDone;
+    onTimeoutRef.current = onTimeout;
+  }, [onDone, onTimeout]);
 
   useEffect(() => {
     let cancelled = false;
