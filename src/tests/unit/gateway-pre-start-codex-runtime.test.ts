@@ -100,7 +100,10 @@ afterEach(() => {
 });
 
 /** Run the extracted policy against a config and return the resulting models map. */
-function applyPolicy(config: Record<string, unknown>): Record<string, ModelSettings> {
+function applyPolicy(
+  config: Record<string, unknown>,
+  openclawV2 = false,
+): Record<string, ModelSettings> {
   const file = path.join(dir, "config.json");
   writeFileSync(file, JSON.stringify(config));
   const program = [
@@ -109,6 +112,7 @@ function applyPolicy(config: Record<string, unknown>): Record<string, ModelSetti
     "changed = False",
     "agents_defaults = cfg.setdefault('agents', {}).setdefault('defaults', {})",
     "model_defaults = agents_defaults.setdefault('model', {})",
+    `_clawbox_v2_codex = ${openclawV2 ? "True" : "False"}`,
     POLICY,
     "print(json.dumps(agents_defaults.get('models') or {}))",
   ].join("\n");
@@ -263,13 +267,24 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
       },
       plugins: { entries: { codex: { enabled: false } } },
     };
+    const normalizedModels = applyPolicy(migratedConfig, true);
+    const normalizedConfig = {
+      ...migratedConfig,
+      agents: {
+        defaults: {
+          ...migratedConfig.agents.defaults,
+          models: normalizedModels,
+        },
+      },
+    };
 
-    expect(probeNeedsCodex(migratedConfig)).toBe("1");
-    expect(probeCodexEnabled(migratedConfig)).toBe("0");
+    expect(normalizedModels["openai/gpt-5.6-sol"].agentRuntime).toEqual({ id: "codex" });
+    expect(probeNeedsCodex(normalizedConfig)).toBe("1");
+    expect(probeCodexEnabled(normalizedConfig)).toBe("0");
     expect(runPluginFlow({
       v2: true,
-      needsCodex: probeNeedsCodex(migratedConfig) === "1",
-      enabledByConfig: probeCodexEnabled(migratedConfig) === "1",
+      needsCodex: probeNeedsCodex(normalizedConfig) === "1",
+      enabledByConfig: probeCodexEnabled(normalizedConfig) === "1",
       installedVersion: "2026.8.1",
       peerHealthy: true,
     })).toEqual(["plugins enable codex --accept-capabilities"]);

@@ -379,8 +379,9 @@ if (not _clawbox_v2_codex) and _has_codex_oauth_profile() and not _has_openai_ap
 # ClawBox used to delete this key unconditionally, because
 # @openclaw/codex >= 2026.5.27 writes it and an older *pinned* core rejected it
 # in strict config validation, bricking the AI provider page. That is still
-# worth guarding, so the strip is kept for everything that is NOT a codex
-# model -- an orphaned agentRuntime on some other provider has no purpose.
+# worth guarding on v1. OpenClaw 2 natively uses this key to retain runtime
+# intent while migrating codex/* references to openai/*, so deleting it there
+# erases the only signal that the migrated model still requires Codex.
 #
 # Also seed the entry for any codex model the box is actually configured to
 # use, so picking one in the UI works after the next gateway start rather than
@@ -405,7 +406,7 @@ for _model_key in list(agents_models.keys()):
 for _model_key, _model_val in list(agents_models.items()):
     if not isinstance(_model_val, dict):
         continue
-    if not _is_codex_ref(_model_key) and "agentRuntime" in _model_val:
+    if (not _clawbox_v2_codex) and not _is_codex_ref(_model_key) and "agentRuntime" in _model_val:
         del _model_val["agentRuntime"]
         changed = True
 
