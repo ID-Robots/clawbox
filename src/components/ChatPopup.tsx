@@ -3964,8 +3964,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   if (!isOpen) return null
 
-  // Default position: above mascot (desktop only)
-  const defaultLeft = Math.max(8, Math.min((mascotX ?? 15) / 100 * (typeof window !== 'undefined' ? window.innerWidth : 1000) - 200, (typeof window !== 'undefined' ? window.innerWidth : 1000) - size.w - 8))
+  // Default position: above the mascot (desktop only), centred on it. Half
+  // the popup's REAL width — this used to subtract a literal 200, half of the
+  // 400px the popup was before it grew to 520 (and before its size became
+  // something the owner can change), which left it 60px to the right of the
+  // crab on any screen wide enough not to clamp it against the right edge.
+  const defaultLeft = Math.max(8, Math.min((mascotX ?? 15) / 100 * (typeof window !== 'undefined' ? window.innerWidth : 1000) - size.w / 2, (typeof window !== 'undefined' ? window.innerWidth : 1000) - size.w - 8))
   const posStyle: React.CSSProperties = panelMode
     ? { right: CHAT_PANEL_GAP, top: CHAT_PANEL_GAP, bottom: SHELF_HEIGHT_PX + CHAT_PANEL_GAP }
     : mobile

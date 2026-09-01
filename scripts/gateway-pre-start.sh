@@ -1842,9 +1842,27 @@ print("1" if isinstance(key, str) and key.strip() else "0")
 PY
 )"
   if [ "$NEEDS_DEEPSEEK_PLUGIN" = "1" ]; then
+    # Pinned to the INSTALLED core, like @openclaw/codex above. The plugin is
+    # cut from the openclaw/openclaw tree with the core's own version number
+    # and each release declares the plugin API it needs: the day 2026.8.2
+    # shipped, the unpinned spec resolved to a build wanting ">=2026.8.2",
+    # the pinned 2026.8.1 runtime refused it ("requires plugin API
+    # >=2026.8.2, but this OpenClaw runtime exposes 2026.8.1"), and every
+    # fresh install parked at a gateway that would not report ready. The
+    # binary decides, not the pin file: it is the process that loads the
+    # plugin, and the two disagree mid-update. The unpinned spec is only the
+    # fallback for a core with no plugin build of its own version.
+    DEEPSEEK_PLUGIN_SPEC="clawhub:@openclaw/deepseek-provider"
+    DEEPSEEK_PLUGIN_PINNED=""
+    if [ -n "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
+      DEEPSEEK_PLUGIN_PINNED="${DEEPSEEK_PLUGIN_SPEC}@${CLAWBOX_OPENCLAW_EFFECTIVE}"
+    fi
     echo "  Installing @openclaw/deepseek-provider (OpenClaw 2 unbundled it; ClawBox AI needs it)..."
-    if timeout 180 "$OPENCLAW_BIN" plugins install clawhub:@openclaw/deepseek-provider --accept-capabilities </dev/null; then
-      echo "  DeepSeek provider plugin installed"
+    if [ -n "$DEEPSEEK_PLUGIN_PINNED" ] \
+      && timeout 180 "$OPENCLAW_BIN" plugins install "$DEEPSEEK_PLUGIN_PINNED" --accept-capabilities </dev/null; then
+      echo "  DeepSeek provider plugin installed ($DEEPSEEK_PLUGIN_PINNED)"
+    elif timeout 180 "$OPENCLAW_BIN" plugins install "$DEEPSEEK_PLUGIN_SPEC" --accept-capabilities </dev/null; then
+      echo "  DeepSeek provider plugin installed ($DEEPSEEK_PLUGIN_SPEC)"
     else
       echo "  WARN: could not install @openclaw/deepseek-provider; the gateway will refuse readiness until it is installed"
     fi
