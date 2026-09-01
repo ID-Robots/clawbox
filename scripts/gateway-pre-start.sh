@@ -1639,11 +1639,16 @@ try:
     with open(sys.argv[1]) as f:
         cfg = json.load(f)
 except (FileNotFoundError, json.JSONDecodeError):
-    print("0"); sys.exit(0)
+    # An installed plugin with no config entry is enabled by default in
+    # OpenClaw 2, so absence still requires capability consent.
+    print("1"); sys.exit(0)
 plugins = cfg.get("plugins")
 entries = plugins.get("entries", {}) if isinstance(plugins, dict) else {}
 codex = entries.get("codex") if isinstance(entries, dict) else None
-print("1" if isinstance(codex, dict) and codex.get("enabled") is True else "0")
+# OpenClaw's default is enabled. Only an explicit false suppresses loading;
+# treating a missing row as disabled skipped consent on main→v2 upgrades and
+# left the gateway crash-looping before it opened its port.
+print("0" if isinstance(codex, dict) and codex.get("enabled") is False else "1")
 PY
 )"
   if [ "$NEEDS_CODEX_PLUGIN" = "1" ] || [ "$CODEX_PLUGIN_ENABLED" = "1" ]; then

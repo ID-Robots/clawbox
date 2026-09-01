@@ -101,11 +101,16 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
       .toBeGreaterThan(SCRIPT_SOURCE.indexOf(healthyV2Branch));
   });
 
-  it("detects an enabled migrated Codex plugin even when no Codex model is selected", () => {
+  it("treats an installed Codex plugin as enabled by default unless explicitly disabled", () => {
     expect(probeCodexEnabled({
       agents: { defaults: { model: { primary: "openai/gpt-5.6-sol" } } },
       plugins: { entries: { codex: { enabled: true } } },
     })).toBe("1");
+    expect(probeCodexEnabled({
+      agents: { defaults: { model: { primary: "openai/gpt-5.6-sol" } } },
+      plugins: { entries: {} },
+    })).toBe("1");
+    expect(probeCodexEnabled({})).toBe("1");
     expect(probeCodexEnabled({ plugins: { entries: { codex: { enabled: false } } } })).toBe("0");
   });
 
