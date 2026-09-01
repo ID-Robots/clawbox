@@ -72,6 +72,14 @@ async function installFakeGatewaySocket(page: Page) {
         }
 
         if (message.method === "chat.send") {
+          // The popup greets an empty transcript with a "hi" of its own, and
+          // that turn is answered here like any other. The owner's turn gets a
+          // reply that names it, so a test can tell the two apart: asserting
+          // the greeting's words after typing found that bubble AND the new
+          // one — the same text twice, which a strict locator refuses — and
+          // passed only when it looked before the second reply landed.
+          const sent = String((message.params as { message?: unknown } | undefined)?.message ?? "");
+          const reply = sent === "hi" ? "Hello from the fake gateway" : `Fake gateway heard: ${sent}`;
           emit({
             type: "res",
             id: message.id,
@@ -85,7 +93,7 @@ async function installFakeGatewaySocket(page: Page) {
               payload: {
                 sessionKey: "main",
                 state: "delta",
-                message: { text: "Hello from the" },
+                message: { text: reply.slice(0, 14) },
               },
             });
           }, 20);
@@ -96,7 +104,7 @@ async function installFakeGatewaySocket(page: Page) {
               payload: {
                 sessionKey: "main",
                 state: "final",
-                message: { text: "Hello from the fake gateway" },
+                message: { text: reply },
               },
             });
           }, 50);
@@ -153,8 +161,10 @@ test("chat popup connects, streams a reply, and supports panel docking", async (
   const chatInput = page.locator("textarea").last();
   await chatInput.fill("What changed?");
   await page.getByTitle("Send").click();
-  await expect(page.getByText("What changed?")).toBeVisible();
-  await expect(page.getByText("Hello from the fake gateway", { exact: true })).toBeVisible();
+  // Exact: the reply below quotes the question, and a substring match would
+  // find both bubbles.
+  await expect(page.getByText("What changed?", { exact: true })).toBeVisible();
+  await expect(page.getByText("Fake gateway heard: What changed?", { exact: true })).toBeVisible();
 
   await page.getByTitle("Dock to right").click();
   await expect(page.getByTitle("Undock panel")).toBeVisible();

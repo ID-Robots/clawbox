@@ -36,7 +36,6 @@ vi.mock("@/lib/i18n", () => ({
         // now (src/components/DeviceCodeCard.tsx) and speaks through t(),
         // where it used to carry hardcoded English. Same strings, from the
         // real catalogue.
-        "ai.openAuthPage": "Open authorization page",
         "ai.thenEnterCode": "Then enter this code:",
         "ai.codeExpires": "Code expires in 15 minutes",
         "ai.waitingAuth": "Waiting for authorization...",
