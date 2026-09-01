@@ -20,11 +20,15 @@ message actions are covered with mocks unless explicitly marked live.
 | VNC/websockify + standalone Remote Desktop | Pass after QA-002 |
 | Store catalogue, ClawKeep, system/provider/tunnel/update status | Pass |
 | Standalone built-ins (`/app/*`) | Mixed: all render, OpenClaw assets fail (QA-044) |
-| Mobile Settings account/password overlays | Automated after QA-004 |
 | Service restart persistence | Pass |
 | Voice cloud sample playback | Pass |
 | Memory Shard incremental index | Pass |
 | Privileged x64 recovery/actions | Fail (QA-040–QA-042) |
+
+Automated-only coverage: the mobile Settings account/password overlay
+regressions pass after QA-004. The follow-up real-device audit below covers the
+mobile section list and all channel detail/back paths, but did not submit an
+account or password change.
 
 ## UI path matrix
 
@@ -54,7 +58,7 @@ reindex, and software update stopped at their confirmation boundary.
 | --- | --- | --- |
 | Desktop shell | Launcher search/no-results, shelf, Files window maximize/restore/minimize/close, tray, first-click restart arm | Pass; accessible names fail QA-047 |
 | Routes | Desktop, setup redirect, subscribe plans, 12 standalone apps | Mixed; OpenClaw Control UI fails QA-044 |
-| Settings | All 9 sections plus Telegram, Email, WhatsApp, Discord detail/back paths | Mixed; x64 Network/System/Remote failures QA-041/QA-043 |
+| Settings | 9 top-level sections: Appearance, Providers, Local AI, Channels, Voice, Network, Remote Control, System, About; plus Telegram, Email, WhatsApp, Discord detail/back paths | Mixed; x64 Network/System/Remote failures QA-041/QA-043 |
 | Chat popup | Real ClawBox AI turn, tabs/two-click close, provider menu, dock/undock, attachment/remove, HTTP voice recovery | Pass |
 | Standalone Chat | Render, staged image preview | Text chat renders; image-only send fails QA-046 |
 | Files | Downloads upload, context menu, delete confirmation, cleanup | Pass; dialog/keyboard semantics confirmed QA-016/QA-037 |
