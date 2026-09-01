@@ -56,10 +56,13 @@ export default function TelegramConfiguringOverlay({
   const [phase, setPhase] = useState(0);
   const [dots, setDots] = useState("");
   const overlayRef = useRef<HTMLDivElement>(null);
-  const cancelledRef = useRef(false);
+  const onDoneRef = useRef(onDone);
+  const onTimeoutRef = useRef(onTimeout);
+  onDoneRef.current = onDone;
+  onTimeoutRef.current = onTimeout;
 
   useEffect(() => {
-    cancelledRef.current = false;
+    let cancelled = false;
     const timers: ReturnType<typeof setTimeout>[] = [];
     const requestControllers = new Set<AbortController>();
 
@@ -79,6 +82,26 @@ export default function TelegramConfiguringOverlay({
       () => ({ ok: true as const }),
       (error: unknown) => ({ ok: false as const, error }),
     );
+    type ConfigureOutcome = Awaited<typeof configureResult>;
+
+    async function waitForConfigureBeforeDeadline(
+      deadline: number,
+    ): Promise<ConfigureOutcome | null> {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0 || cancelled) return null;
+
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<null>((resolve) => {
+        timeoutId = setTimeout(() => resolve(null), remainingMs);
+        timers.push(timeoutId);
+      });
+      try {
+        const result = await Promise.race([configureResult, timeout]);
+        return !cancelled && Date.now() < deadline ? result : null;
+      } finally {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+      }
+    }
 
     /** Fetch and parse one readiness response without crossing the shared deadline. */
     async function fetchJsonBeforeDeadline(
@@ -87,7 +110,7 @@ export default function TelegramConfiguringOverlay({
       maxRequestMs: number,
     ): Promise<Record<string, unknown> | null> {
       const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0 || cancelledRef.current) return null;
+      if (remainingMs <= 0 || cancelled) return null;
 
       const controller = new AbortController();
       requestControllers.add(controller);
@@ -116,7 +139,8 @@ export default function TelegramConfiguringOverlay({
       });
 
       try {
-        return await Promise.race([request, timeout]);
+        const data = await Promise.race([request, timeout]);
+        return !cancelled && Date.now() < deadline ? data : null;
       } finally {
         if (timeoutId !== undefined) clearTimeout(timeoutId);
         requestControllers.delete(controller);
@@ -125,13 +149,13 @@ export default function TelegramConfiguringOverlay({
 
     async function waitForNextProbe(deadline: number): Promise<boolean> {
       const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0 || cancelledRef.current) return false;
+      if (remainingMs <= 0 || cancelled) return false;
       await delay(Math.min(POLL_INTERVAL_MS, remainingMs));
-      return !cancelledRef.current && Date.now() < deadline;
+      return !cancelled && Date.now() < deadline;
     }
 
     async function pollGatewayHealth(deadline: number): Promise<boolean> {
-      while (!cancelledRef.current && Date.now() < deadline) {
+      while (!cancelled && Date.now() < deadline) {
         const data = await fetchJsonBeforeDeadline(
           "/setup-api/gateway/health",
           deadline,
@@ -163,7 +187,7 @@ export default function TelegramConfiguringOverlay({
      * most one real CLI round-trip per window rather than one per attempt.
      */
     async function pollHermesTelegramReady(deadline: number): Promise<boolean> {
-      while (!cancelledRef.current && Date.now() < deadline) {
+      while (!cancelled && Date.now() < deadline) {
         // The status route shells out to the Hermes CLI, so permit a longer
         // individual probe while still capping it at the shared deadline.
         const data = await fetchJsonBeforeDeadline(
@@ -181,20 +205,20 @@ export default function TelegramConfiguringOverlay({
       // Resolve before the phase machine reaches the steps whose meaning
       // depends on it. Cached, so this is a no-op read in the normal case.
       const activeEdition = await resolveEdition();
-      if (cancelledRef.current) return;
+      if (cancelled) return;
       setEdition(activeEdition);
       const hermes = activeEdition === "hermes";
 
       await delay(1500);
-      if (cancelledRef.current) return;
+      if (cancelled) return;
       setPhase(1);
 
       await delay(2500);
-      if (cancelledRef.current) return;
+      if (cancelled) return;
       setPhase(2);
 
       await delay(2000);
-      if (cancelledRef.current) return;
+      if (cancelled) return;
       setPhase(3);
 
       // Wait for BOTH signals before declaring ready:
@@ -209,38 +233,42 @@ export default function TelegramConfiguringOverlay({
       const ready = await (hermes
         ? pollHermesTelegramReady(readinessDeadline)
         : pollGatewayHealth(readinessDeadline));
-      if (cancelledRef.current) return;
+      if (cancelled) return;
       if (!ready) {
         // Nothing reported itself listening within healthTimeoutMs. This is
         // not completion: setup must stay on Telegram, and Settings must show
         // an actionable failure instead of silently hiding the overlay.
-        onTimeout();
+        onTimeoutRef.current();
         return;
       }
 
-      const configured = await configureResult;
-      if (cancelledRef.current) return;
+      const configured = await waitForConfigureBeforeDeadline(readinessDeadline);
+      if (cancelled) return;
+      if (configured === null) {
+        onTimeoutRef.current();
+        return;
+      }
       if (!configured.ok) throw configured.error;
 
       setPhase(4);
       await delay(1500);
-      if (cancelledRef.current) return;
-      onDone();
+      if (cancelled) return;
+      onDoneRef.current();
     }
 
     void run().catch((err) => {
-      if (cancelledRef.current) return;
+      if (cancelled) return;
       console.warn("[telegram] Readiness sequence failed:", err);
-      onTimeout();
+      onTimeoutRef.current();
     });
 
     overlayRef.current?.focus();
     return () => {
-      cancelledRef.current = true;
+      cancelled = true;
       requestControllers.forEach((controller) => controller.abort());
       timers.forEach((t) => clearTimeout(t));
     };
-  }, [onDone, onTimeout, waitFor, healthTimeoutMs]);
+  }, [waitFor, healthTimeoutMs]);
 
   useEffect(() => {
     const id = setInterval(() => setDots((d) => (d.length >= 3 ? "" : d + ".")), 500);

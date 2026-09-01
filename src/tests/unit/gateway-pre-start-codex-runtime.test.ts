@@ -1,5 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -42,7 +50,23 @@ function extractEnabledProbe(): string {
 
 const ENABLED_PROBE = hasPython3 ? extractEnabledProbe() : "";
 
+/** Pull the package-health/repair/consent command flow out verbatim. */
+function extractPluginFlow(): string {
+  const start = SCRIPT_SOURCE.indexOf('CODEX_SHOULD_LOAD="$NEEDS_CODEX_PLUGIN"');
+  const end = SCRIPT_SOURCE.indexOf("# Codex reads its ChatGPT session", start);
+  if (start < 0 || end < 0) throw new Error("Codex plugin command flow not found");
+  return SCRIPT_SOURCE.slice(start, end);
+}
+
+const PLUGIN_FLOW = extractPluginFlow();
+
 let dir: string;
+
+interface ModelSettings {
+  agentRuntime?: { id?: string };
+  params?: unknown;
+  [key: string]: unknown;
+}
 
 beforeEach(() => {
   dir = mkdtempSync(path.join(tmpdir(), "codex-runtime-policy-"));
@@ -53,7 +77,7 @@ afterEach(() => {
 });
 
 /** Run the extracted policy against a config and return the resulting models map. */
-function applyPolicy(config: Record<string, any>): Record<string, any> {
+function applyPolicy(config: Record<string, unknown>): Record<string, ModelSettings> {
   const file = path.join(dir, "config.json");
   writeFileSync(file, JSON.stringify(config));
   const program = [
@@ -67,14 +91,62 @@ function applyPolicy(config: Record<string, any>): Record<string, any> {
   ].join("\n");
   return JSON.parse(
     execFileSync("python3", ["-c", program, file], { encoding: "utf-8" }).trim(),
-  );
+  ) as Record<string, ModelSettings>;
 }
 
 /** Run the exact shell-embedded probe that decides whether consent is needed. */
-function probeCodexEnabled(config: Record<string, any>): string {
+function probeCodexEnabled(config: Record<string, unknown>): string {
   const file = path.join(dir, "enabled-config.json");
   writeFileSync(file, JSON.stringify(config));
   return execFileSync("python3", ["-c", ENABLED_PROBE, file], { encoding: "utf-8" }).trim();
+}
+
+interface PluginFlowOptions {
+  v2: boolean;
+  needsCodex: boolean;
+  enabledByConfig: boolean;
+  installedVersion?: string;
+  peerHealthy?: boolean;
+}
+
+/** Execute the shipped shell command flow against a fake OpenClaw binary. */
+function runPluginFlow(options: PluginFlowOptions): string[] {
+  const pluginDir = path.join(dir, "plugin", "node_modules", "@openclaw", "codex");
+  if (options.installedVersion) {
+    mkdirSync(pluginDir, { recursive: true });
+    writeFileSync(
+      path.join(pluginDir, "package.json"),
+      JSON.stringify({ version: options.installedVersion }),
+    );
+  }
+  if (options.peerHealthy) {
+    const peerDir = path.join(pluginDir, "node_modules", "openclaw");
+    mkdirSync(peerDir, { recursive: true });
+    writeFileSync(path.join(peerDir, "package.json"), JSON.stringify({ version: "2026.8.1" }));
+  }
+
+  const log = path.join(dir, "openclaw-commands.log");
+  const fakeOpenClaw = path.join(dir, "openclaw");
+  writeFileSync(fakeOpenClaw, '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "$CODEX_TEST_LOG"\n');
+  chmodSync(fakeOpenClaw, 0o755);
+
+  execFileSync("bash", ["-c", `set -euo pipefail\n${PLUGIN_FLOW}`], {
+    env: {
+      ...process.env,
+      CLAWBOX_OPENCLAW_V2: options.v2 ? "1" : "0",
+      NEEDS_CODEX_PLUGIN: options.needsCodex ? "1" : "0",
+      CODEX_PLUGIN_ENABLED: options.enabledByConfig ? "1" : "0",
+      CODEX_PLUGIN_DIR: pluginDir,
+      OPENCLAW_TARGET: "2026.8.1",
+      OPENCLAW_BIN: fakeOpenClaw,
+      CODEX_TEST_LOG: log,
+    },
+    stdio: "pipe",
+  });
+
+  return existsSync(log)
+    ? readFileSync(log, "utf-8").trim().split("\n").filter(Boolean)
+    : [];
 }
 
 describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
@@ -88,11 +160,11 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
 
   it("accepts declared capabilities when the migrated plugin needs no reinstall", () => {
     const healthyV2Branch =
-      'elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]';
+      'elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]';
     expect(SCRIPT_SOURCE).toContain(healthyV2Branch);
     expect(SCRIPT_SOURCE).toContain('CODEX_PLUGIN_ENABLED="$(python3 - "$OPENCLAW_CONFIG"');
     expect(SCRIPT_SOURCE).toContain(
-      '[ "$NEEDS_CODEX_PLUGIN" = "1" ] || [ "$CODEX_PLUGIN_ENABLED" = "1" ]',
+      'if [ "$CODEX_SHOULD_LOAD" = "1" ]; then',
     );
     expect(SCRIPT_SOURCE).toContain(
       'plugins enable codex --accept-capabilities',
@@ -112,6 +184,60 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
     })).toBe("1");
     expect(probeCodexEnabled({})).toBe("1");
     expect(probeCodexEnabled({ plugins: { entries: { codex: { enabled: false } } } })).toBe("0");
+  });
+
+  it("repairs a stale default-enabled v2 plugin at the pinned version", () => {
+    expect(runPluginFlow({
+      v2: true,
+      needsCodex: false,
+      enabledByConfig: true,
+      installedVersion: "2026.7.0",
+      peerHealthy: true,
+    })).toEqual([
+      "plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities",
+    ]);
+  });
+
+  it("repairs a broken peer dependency before consenting a default-enabled plugin", () => {
+    expect(runPluginFlow({
+      v2: true,
+      needsCodex: false,
+      enabledByConfig: true,
+      installedVersion: "2026.8.1",
+      peerHealthy: false,
+    })).toEqual([
+      "plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities",
+    ]);
+  });
+
+  it("consents a healthy default-enabled v2 plugin without reinstalling it", () => {
+    expect(runPluginFlow({
+      v2: true,
+      needsCodex: false,
+      enabledByConfig: true,
+      installedVersion: "2026.8.1",
+      peerHealthy: true,
+    })).toEqual(["plugins enable codex --accept-capabilities"]);
+  });
+
+  it("leaves an explicitly disabled unused plugin alone", () => {
+    expect(runPluginFlow({
+      v2: true,
+      needsCodex: false,
+      enabledByConfig: false,
+      installedVersion: "2026.8.1",
+      peerHealthy: true,
+    })).toEqual([]);
+  });
+
+  it("repairs a v1 plugin without passing the v2 capability flag", () => {
+    expect(runPluginFlow({
+      v2: false,
+      needsCodex: true,
+      enabledByConfig: false,
+      installedVersion: "2026.8.1",
+      peerHealthy: false,
+    })).toEqual(["plugins install @openclaw/codex@2026.8.1 --force"]);
   });
 
   it("sets agentRuntime on the configured codex primary", () => {

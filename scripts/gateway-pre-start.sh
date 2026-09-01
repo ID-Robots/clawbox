@@ -1550,6 +1550,30 @@ uses_codex = (
 print("1" if uses_codex else "0")
 PY
 )"
+# OpenClaw 2 loads an installed plugin by default when its config entry is
+# absent. That default-enabled state must participate in BOTH the package
+# health/version checks and capability consent below; otherwise a migrated
+# 2026.7 package can be consented but remain broken against a 2026.8 core.
+CODEX_PLUGIN_ENABLED=0
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+  CODEX_PLUGIN_ENABLED="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    print("1"); sys.exit(0)
+plugins = cfg.get("plugins")
+entries = plugins.get("entries", {}) if isinstance(plugins, dict) else {}
+codex = entries.get("codex") if isinstance(entries, dict) else None
+print("0" if isinstance(codex, dict) and codex.get("enabled") is False else "1")
+PY
+)"
+fi
+CODEX_SHOULD_LOAD="$NEEDS_CODEX_PLUGIN"
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_PLUGIN_ENABLED" = "1" ]; then
+  CODEX_SHOULD_LOAD=1
+fi
 # Also check the nested peer-dep symlink. `openclaw plugins install
 # codex` writes `<codex>/node_modules/openclaw -> <global openclaw>`
 # alongside the package.json; if that symlink is missing or dangling
@@ -1565,7 +1589,7 @@ PY
 CODEX_PEER_DEP="$CODEX_PLUGIN_DIR/node_modules/openclaw/package.json"
 CODEX_NEEDS_INSTALL=0
 CODEX_INSTALL_REASON=""
-if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
+if [ "$CODEX_SHOULD_LOAD" = "1" ]; then
   if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] || [ ! -e "$CODEX_PEER_DEP" ]; then
     CODEX_NEEDS_INSTALL=1
     CODEX_INSTALL_REASON="missing or peer-dep broken"
@@ -1619,7 +1643,7 @@ if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
   else
     echo "  WARN: 'openclaw plugins install $CODEX_SPEC' failed or timed out; Codex chats will fail until resolved (gateway will still start)"
   fi
-elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
   # OpenClaw 2 added declared-capability consent to managed plugins. A plugin
   # migrated from 2026.7 may already have the right package, peer dependency,
   # and version — so every repair check above passes — while its install record
@@ -1628,35 +1652,13 @@ elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]
   # idempotent local operation for this exact state: it records the current
   # reviewed surface when needed and otherwise leaves an already-enabled,
   # already-consented plugin unchanged. Time-box because this is ExecStartPre.
-  # Check explicit enablement too, not only NEEDS_CODEX_PLUGIN: a v1 install
-  # can leave Codex enabled even after the owner switches primary/auth to plain
-  # OpenAI. V2 verifies every ENABLED plugin before opening its port, so that
-  # stale-but-enabled record can brick a box even though no Codex model is in
-  # use (the main→v2 e2e upgrade caught exactly this shape).
-  CODEX_PLUGIN_ENABLED="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        cfg = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
-    # An installed plugin with no config entry is enabled by default in
-    # OpenClaw 2, so absence still requires capability consent.
-    print("1"); sys.exit(0)
-plugins = cfg.get("plugins")
-entries = plugins.get("entries", {}) if isinstance(plugins, dict) else {}
-codex = entries.get("codex") if isinstance(entries, dict) else None
-# OpenClaw's default is enabled. Only an explicit false suppresses loading;
-# treating a missing row as disabled skipped consent on main→v2 upgrades and
-# left the gateway crash-looping before it opened its port.
-print("0" if isinstance(codex, dict) and codex.get("enabled") is False else "1")
-PY
-)"
-  if [ "$NEEDS_CODEX_PLUGIN" = "1" ] || [ "$CODEX_PLUGIN_ENABLED" = "1" ]; then
-    if timeout 60 "$OPENCLAW_BIN" plugins enable codex --accept-capabilities </dev/null >/dev/null 2>&1; then
-      echo "  Codex runtime plugin capabilities accepted/current"
-    else
-      echo "  WARN: could not confirm Codex plugin capabilities; gateway readiness may remain blocked"
-    fi
+  # A v1 install can leave Codex enabled even after the owner switches primary
+  # auth to another provider. V2 verifies every enabled/default-enabled plugin
+  # before opening its port, so consent it even when no Codex model is selected.
+  if timeout 60 "$OPENCLAW_BIN" plugins enable codex --accept-capabilities </dev/null >/dev/null 2>&1; then
+    echo "  Codex runtime plugin capabilities accepted/current"
+  else
+    echo "  WARN: could not confirm Codex plugin capabilities; gateway readiness may remain blocked"
   fi
 fi
 

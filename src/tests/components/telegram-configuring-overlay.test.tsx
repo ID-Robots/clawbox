@@ -253,4 +253,71 @@ describe("TelegramConfiguringOverlay readiness", () => {
     expect(onDone).not.toHaveBeenCalled();
     expect(called(fetchMock, "/setup-api/gateway/health")).toBe(true);
   });
+
+  it("times out when readiness is healthy but the configure request never settles", async () => {
+    const onDone = vi.fn();
+    const onTimeout = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/setup-api/harness/active") {
+        return jsonResponse({ active: "openclaw", edition: "openclaw" });
+      }
+      if (String(input) === "/setup-api/gateway/health") {
+        return jsonResponse({ available: true, port: 18789 });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const healthTimeoutMs = 4_000;
+    render(
+      <TelegramConfiguringOverlay
+        onDone={onDone}
+        onTimeout={onTimeout}
+        waitFor={new Promise<void>(() => {})}
+        healthTimeoutMs={healthTimeoutMs}
+      />,
+    );
+
+    await advance(PHASES_MS + healthTimeoutMs);
+    await waitFor(() => expect(onTimeout).toHaveBeenCalledTimes(1));
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
+  it("keeps one readiness sequence when parent callback identities change", async () => {
+    const firstDone = vi.fn();
+    const latestDone = vi.fn();
+    const configured = Promise.resolve();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/setup-api/harness/active") {
+        return jsonResponse({ active: "openclaw", edition: "openclaw" });
+      }
+      if (String(input) === "/setup-api/gateway/health") {
+        return jsonResponse({ available: true, port: 18789 });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const view = render(
+      <TelegramConfiguringOverlay
+        onDone={firstDone}
+        onTimeout={vi.fn()}
+        waitFor={configured}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("telegram.restartingGateway")).toBeInTheDocument());
+    await advance(1_500);
+
+    view.rerender(
+      <TelegramConfiguringOverlay
+        onDone={latestDone}
+        onTimeout={vi.fn()}
+        waitFor={configured}
+      />,
+    );
+    await advance(PHASES_MS - 1_500 + READY_PHASE_MS);
+
+    await waitFor(() => expect(latestDone).toHaveBeenCalledTimes(1));
+    expect(firstDone).not.toHaveBeenCalled();
+  });
 });
