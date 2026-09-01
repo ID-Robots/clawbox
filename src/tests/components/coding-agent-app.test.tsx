@@ -95,6 +95,8 @@ function stubFetch(
   // one does) still steers the answer.
   let enabledPosted: boolean | null = null;
   let setupCompletePosted: boolean | null = null;
+  // undefined until a post carries the field; null is a posted "clear it".
+  let directoryPosted: string | null | undefined;
   const isEnabled = () => enabledPosted ?? status.enabled;
   const payload = () => ({
     enabled: isEnabled(),
@@ -107,7 +109,9 @@ function stubFetch(
     // fixture with no default folder is a box that legitimately refuses to
     // start it. Mirrors the projects payload above, and the tests that mean
     // "nothing is set" pass projectsDir: null and get that here too.
-    defaultDirectory: opts.projectsDir === undefined ? "/home/clawbox/Projects" : opts.projectsDir,
+    defaultDirectory: directoryPosted !== undefined
+      ? directoryPosted
+      : (opts.projectsDir === undefined ? "/home/clawbox/Projects" : opts.projectsDir),
     setupComplete: setupCompletePosted ?? status.setupComplete ?? true,
     effort: "ultracode",
     effortLevels: ["low", "xhigh", "max", "ultracode"],
@@ -171,8 +175,11 @@ function stubFetch(
       posts.push({ url, body });
       if (typeof body.enabled === "boolean") enabledPosted = body.enabled;
       if (typeof body.setupComplete === "boolean") setupCompletePosted = body.setupComplete;
+      // Held like the other overrides: the real route re-reads persisted state,
+      // so a later post that says nothing about the folder keeps the saved one.
+      if ("defaultDirectory" in body) directoryPosted = body.defaultDirectory as string | null;
       // The route answers the whole status, re-read after the change.
-      return json({ ...payload(), defaultDirectory: body.defaultDirectory ?? null });
+      return json(payload());
     }
     if (url === "/setup-api/coding-agent/run" && init?.method === "POST") {
       posts.push({ url, body: JSON.parse(String(init.body)) });
@@ -250,8 +257,8 @@ describe("CodingAgentApp", () => {
       render(<CodingAgentApp />);
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-enable"));
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
-      expect(screen.getByTestId("coding-agent-wizard-effort-ultracode")).toHaveAttribute("aria-checked", "true");
-      expect(screen.getByTestId("coding-agent-wizard-effort-low")).toHaveAttribute("aria-checked", "false");
+      expect(screen.getByTestId("coding-agent-wizard-effort-ultracode")).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByTestId("coding-agent-wizard-effort-low")).toHaveAttribute("aria-pressed", "false");
       // The owner is told before they choose, not by a bill afterwards.
       expect(screen.getByTestId("coding-agent-wizard-cost").textContent)
         .toBe(translations.en["codingAgent.wizardEffortCost"]);
@@ -415,6 +422,24 @@ describe("CodingAgentApp", () => {
     await screen.findByText(translations.en["codingAgent.title"]);
     expect(screen.queryByText(/open the Terminal app and run claude-ds/)).not.toBeInTheDocument();
     expect(screen.queryByText(/works in the background inside a project folder/)).not.toBeInTheDocument();
+  });
+
+  it("reads the help behind a question mark to a screen reader, not only 'expanded'", async () => {
+    // The tip is what the question mark is FOR: while it is open the button
+    // must be described by it, and the reference must go when it closes.
+    stubFetch({ enabled: true, readiness: READY });
+    render(<CodingAgentApp />);
+    fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
+    const mark = await screen.findByTestId("coding-agent-harness-help");
+    expect(mark).not.toHaveAttribute("aria-describedby");
+    fireEvent.click(mark);
+    const tip = screen.getByTestId("coding-agent-harness-help-text");
+    expect(tip).toHaveAttribute("role", "tooltip");
+    expect(tip.id).not.toBe("");
+    expect(mark).toHaveAttribute("aria-describedby", tip.id);
+    expect(mark).toHaveAccessibleDescription(translations.en["codingAgent.harnessTestHint"]);
+    fireEvent.click(mark);
+    expect(mark).not.toHaveAttribute("aria-describedby");
   });
 
   it("says nothing at all about readiness when the harness is fine", async () => {
@@ -716,6 +741,37 @@ describe("the harness self-test", () => {
     render(<CodingAgentApp />);
     fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
     expect(await screen.findByTestId("coding-agent-harness-test")).toBeDisabled();
+  });
+
+  it("is offered while a settled run only waits on GitHub Actions — the CI wait occupies no harness", async () => {
+    const pr = {
+      phase: "waiting", number: 7, url: "https://github.com/o/r/pull/7", branch: "coding/run-k3x9q2ab", base: "main",
+      checks: { total: 2, passed: 0, failed: 0, pending: 2 }, detail: null, startedAt: Date.now() - 30_000, endedAt: null,
+      reviewOk: true,
+    };
+    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, pr }]);
+    render(<CodingAgentApp />);
+    fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
+    expect(await screen.findByTestId("coding-agent-harness-test")).toBeEnabled();
+  });
+
+  it("refuses, in the owner's words, when no project folder is set — and asks the box for nothing", async () => {
+    // The smoke run lives INSIDE the default project folder, so without one
+    // there is nowhere to put it. The refusal is worded through the
+    // component's own `t` (the helper is not a component and cannot reach the
+    // locale itself), and it happens before any route is touched: a scratch
+    // folder made against a folder that does not exist, or a run posted for
+    // the resolver to refuse, would each be a worse answer than the sentence.
+    stubFetch({ enabled: true, readiness: READY }, [], { projectsDir: null });
+    render(<CodingAgentApp />);
+    fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
+    fireEvent.click(await screen.findByTestId("coding-agent-harness-test"));
+    expect(await screen.findByText(translations.en["codingAgent.harnessTestNoFolder"])).toBeInTheDocument();
+    expect(translations.en["codingAgent.harnessTestNoFolder"]).toBe("Choose a project folder first.");
+    expect(posts.some((p) => p.url === "/setup-api/coding-agent/browse")).toBe(false);
+    expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(false);
+    // The button is handed back: the owner fixes the folder and tries again.
+    expect(screen.getByTestId("coding-agent-harness-test")).toBeEnabled();
   });
 
   it("tells the desktop a run started, once the route has said so", async () => {

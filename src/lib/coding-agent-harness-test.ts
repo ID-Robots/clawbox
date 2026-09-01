@@ -12,6 +12,14 @@
  * is a smoke test, so the "a short task is not a small task" bar in the brief
  * does not inflate it.
  */
+/**
+ * The caller's translator. Every refusal below is shown to the owner as-is —
+ * both callers put it straight into their error line — so it is worded through
+ * the component's own `t`, which follows the locale the moment it changes.
+ * This module is not a component and cannot reach the i18n context itself.
+ */
+type Translate = (key: string) => string;
+
 export const HARNESS_TEST_PROJECT = "harness-test";
 
 export const HARNESS_TEST_TASK =
@@ -36,11 +44,14 @@ export const HARNESS_TEST_TASK =
  * this, and keeps the default as the single place that decides where "inside"
  * is.
  */
-export async function startHarnessTest(defaultDirectory: string | null): Promise<
+export async function startHarnessTest(
+  defaultDirectory: string | null,
+  t: Translate,
+): Promise<
   { ok: true; runId: string | null } | { ok: false; error: string }
 > {
   if (!defaultDirectory) {
-    return { ok: false, error: "Choose a project folder first." };
+    return { ok: false, error: t("codingAgent.harnessTestNoFolder") };
   }
   try {
     // 409 means it is already there, which is the normal case after the first
@@ -52,7 +63,7 @@ export async function startHarnessTest(defaultDirectory: string | null): Promise
     });
     if (!made.ok && made.status !== 409) {
       const out = (await made.json().catch(() => null)) as { error?: string } | null;
-      return { ok: false, error: out?.error || "Could not create the test folder." };
+      return { ok: false, error: out?.error || t("codingAgent.wizardCreateFolderFailed") };
     }
     const res = await fetch("/setup-api/coding-agent/run", {
       method: "POST",
@@ -61,12 +72,12 @@ export async function startHarnessTest(defaultDirectory: string | null): Promise
     });
     if (!res.ok) {
       const out = (await res.json().catch(() => null)) as { error?: string } | null;
-      return { ok: false, error: out?.error || "Could not start the test run." };
+      return { ok: false, error: out?.error || t("codingAgent.harnessTestFailed") };
     }
     // The id, so the caller can open the live view on the run it just started.
     const started = (await res.json().catch(() => null)) as { run?: { id?: string } } | null;
     return { ok: true, runId: started?.run?.id ?? null };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : "Could not start the test run." };
+    return { ok: false, error: err instanceof Error ? err.message : t("codingAgent.harnessTestFailed") };
   }
 }

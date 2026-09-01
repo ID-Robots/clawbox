@@ -31,7 +31,6 @@ export default function CodingAgentDelegationArt({ className = "" }: { className
     <svg
       viewBox="0 0 320 140"
       className={`w-full max-w-[22rem] h-auto ${className}`}
-      role="img"
       aria-hidden="true"
       focusable="false"
     >

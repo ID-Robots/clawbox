@@ -43,6 +43,15 @@ export type PrPhase =
   /** The flow itself broke (no remote, gh missing, push refused). */
   | "failed";
 
+/** Every phase a stored record may carry — the allow-list the reader of
+ *  coding-agent-runs.json validates against, kept beside the type so the two
+ *  cannot drift apart (the same reason RUN_STATUSES lives with its type). */
+export const PR_PHASES: readonly PrPhase[] = ["opening", "waiting", "merged", "blocked", "failed"];
+
+export function isPrPhase(value: unknown): value is PrPhase {
+  return typeof value === "string" && (PR_PHASES as readonly string[]).includes(value);
+}
+
 export interface PrChecks {
   total: number;
   passed: number;
@@ -64,6 +73,17 @@ export interface PrState {
   startedAt: number;
   /** When it reached a settled phase. */
   endedAt: number | null;
+  /**
+   * The automatic review pass's verdict, recorded when the pull request is
+   * opened: false when a review was due and did not complete. True when no
+   * review was due, so the checks alone decide.
+   *
+   * ON THE RECORD, not in the watcher's closure: the watcher is rebuilt from
+   * this file after a restart, and a verdict that lived only in memory came
+   * back as "passed" — a suite going green after a reboot merged work the
+   * review had rejected.
+   */
+  reviewOk: boolean;
 }
 
 export function emptyChecks(): PrChecks {
@@ -137,6 +157,12 @@ export function decideMerge(input: {
   if (snapshot.checks.failed > 0) {
     return { action: "block", detail: `${snapshot.checks.failed} of ${snapshot.checks.total} checks failed. The branch is pushed and the pull request is open for you to look at.` };
   }
+  // A review that did not pass is a definite no, so it is answered before any
+  // waiting: polling a suite for half an hour to then refuse on the review
+  // would have been thirty minutes of `gh` calls for an answer already known.
+  if (!reviewOk) {
+    return { action: "block", detail: "The automatic review pass did not finish cleanly, so this was not merged." };
+  }
   if (snapshot.noChecks || snapshot.checks.total === 0) {
     if (waitedMs < NO_CHECKS_GRACE_MS) return { action: "wait" };
     return {
@@ -144,13 +170,14 @@ export function decideMerge(input: {
       detail: "No checks ran on this pull request, so there is nothing to go green. It is open and waiting for you — add a workflow under .github/workflows to have runs merge themselves.",
     };
   }
-  if (snapshot.checks.pending > 0) return { action: "wait" };
+  // The ceiling comes BEFORE the pending branch: a check that never completes
+  // (a stuck runner, a conclusion gh spells in a way foldChecks does not know)
+  // answers "pending" on every poll, and tested the other way round it was
+  // waited on forever.
   if (waitedMs >= MAX_WAIT_MS) {
     return { action: "block", detail: "Gave up waiting for GitHub Actions. The pull request is open." };
   }
-  if (!reviewOk) {
-    return { action: "block", detail: "The automatic review pass did not finish cleanly, so this was not merged." };
-  }
+  if (snapshot.checks.pending > 0) return { action: "wait" };
   if (snapshot.mergeable === "CONFLICTING") {
     return { action: "block", detail: "The pull request conflicts with its base branch." };
   }

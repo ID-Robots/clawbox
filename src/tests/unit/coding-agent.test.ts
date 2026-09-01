@@ -1365,6 +1365,74 @@ describe("after a restart", () => {
   });
 });
 
+describe("the pull request on disk", () => {
+  /** A finished record, as an older server wrote it, carrying the `pr` blob under test. */
+  function writeRunWithPr(pr: Record<string, unknown>): void {
+    fs.writeFileSync(runsFile(), JSON.stringify([{
+      id: "run-prblob01",
+      task: "opened a pull request",
+      directory: home,
+      projectId: null,
+      source: "owner",
+      status: "completed",
+      startedAt: Date.now() - 60_000,
+      completedAt: Date.now() - 30_000,
+      sessionId: "sess-old",
+      model: null,
+      summary: null,
+      error: null,
+      numTurns: 2,
+      filesTouched: [],
+      commandsRun: 0,
+      permissionDenials: 0,
+      progress: [],
+      exitCode: 0,
+      pr,
+    }]));
+  }
+
+  it("repairs a wrong field to its default rather than trusting it", () => {
+    // A number that is a string reached `gh pr view` as an argument, and a
+    // count that was not a count reached the owner as "undefined of undefined
+    // checks". A verdict the record does not carry is not a pass.
+    writeRunWithPr({ phase: "waiting", startedAt: 1, number: "7", checks: { total: "x" } });
+    const pr = lib.listRuns()[0]?.pr;
+    expect(pr).not.toBeNull();
+    expect(pr?.phase).toBe("waiting");
+    expect(pr?.number).toBeNull();
+    expect(pr?.checks).toEqual({ total: 0, passed: 0, failed: 0, pending: 0 });
+    expect(pr?.reviewOk).toBe(false);
+    // The fields the blob never had are filled in too, so no reader sees undefined.
+    expect(pr).toMatchObject({ url: null, branch: null, base: null, detail: null, endedAt: null });
+  });
+
+  it("keeps every field of a well-formed blob", () => {
+    writeRunWithPr({
+      phase: "merged", number: 7, url: "https://github.com/o/r/pull/7", branch: "clawbox/run-prblob01", base: "main",
+      checks: { total: 3, passed: 2, failed: 0, pending: 1 }, detail: null, startedAt: 1, endedAt: 2, reviewOk: true,
+    });
+    expect(lib.listRuns()[0]?.pr).toEqual({
+      phase: "merged", number: 7, url: "https://github.com/o/r/pull/7", branch: "clawbox/run-prblob01", base: "main",
+      checks: { total: 3, passed: 2, failed: 0, pending: 1 }, detail: null, startedAt: 1, endedAt: 2, reviewOk: true,
+    });
+  });
+
+  it("drops a blob whose phase is not one of ours — that is not a pull request", () => {
+    writeRunWithPr({ phase: "open", startedAt: 1, number: 7, checks: { total: 1, passed: 1, failed: 0, pending: 0 } });
+    const run = lib.listRuns()[0];
+    expect(run?.id).toBe("run-prblob01");
+    expect(run?.pr).toBeNull();
+  });
+
+  it("drops a blob without a start, and one that is not an object", () => {
+    writeRunWithPr({ phase: "waiting", number: 7 });
+    expect(lib.listRuns()[0]?.pr).toBeNull();
+    lib._resetCodingAgentStateForTests();
+    writeRunWithPr("waiting" as unknown as Record<string, unknown>);
+    expect(lib.listRuns()[0]?.pr).toBeNull();
+  });
+});
+
 describe("naming the sub-agents that are out", () => {
   beforeEach(() => readyDevice());
 

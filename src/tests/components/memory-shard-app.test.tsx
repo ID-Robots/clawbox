@@ -104,6 +104,26 @@ describe("the Memory Shard app", () => {
     expect(screen.getByText("Healthy")).toBeTruthy();
   });
 
+  it("opens the setup wizard on a box whose owner has not been through it", async () => {
+    memory = { ...LOCAL_MEMORY, enabled: false, setupComplete: false };
+    mount();
+    expect(await screen.findByTestId("memory-shard-wizard")).toBeTruthy();
+    // The wizard REPLACES the card: an index card underneath it would invite
+    // "Index now" on a box with no embedding model yet.
+    expect(screen.queryByRole("button", { name: "Index now" })).toBeNull();
+  });
+
+  it("does not put a configured owner in front of onboarding when the status carries no flag", async () => {
+    // The e2e mock's `{}` again, and a server mid-restart answers the same way.
+    // A missing `setupComplete` says nothing about setup: only an explicit
+    // false opens the wizard, so the index card stays and says it is loading.
+    memory = {} as Record<string, unknown>;
+    mount();
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    expect(await screen.findByText(/Memory index — Loading/)).toBeTruthy();
+    expect(screen.queryByTestId("memory-shard-wizard")).toBeNull();
+  });
+
   it("keeps its loading line when the route answers something else, rather than throwing", async () => {
     // Exactly what the e2e mock does: any unrecognised /setup-api/* path is
     // answered `{}` with HTTP 200. That used to be adopted as a status, and

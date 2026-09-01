@@ -75,7 +75,9 @@ export default function CodingAgentResetCard({ onReset }: { onReset?: () => void
         label={t("codingAgent.resetTitle")}
         testId="coding-agent-reset-help"
       />
-      {error && <p className="mt-2 text-[11px] text-red-400" role="alert">{error}</p>}
+      {/* The host is a wrapping flex row: full-basis puts the message on its
+          own line under the button instead of beside it as a third column. */}
+      {error && <p className="basis-full mt-2 text-[11px] text-red-400" role="alert">{error}</p>}
     </>
   );
 }

@@ -398,12 +398,21 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     expect(res.status).toBe(200);
   });
 
-  it("lets the pick through when the cached surface is empty", async () => {
+  it("refuses a typed id an EMPTY cached surface plus the curated catalogue lacks", async () => {
+    // A file holding `models: []` is served to the picker through
+    // `augmentWithStaticCatalog`, so the customer was shown the curated rows —
+    // the guard judges by the same list rather than answering UNKNOWN. Only a
+    // MISSING cache (the test above) is unknown.
     mockSurfaceRead.mockResolvedValue(surfaceCache([]) as never);
 
     const res = await configurePost(subscribe({ model: OFF_CATALOGUE_ID }));
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
+    const { error } = await res.json();
+    expect(error).toContain(OFF_CATALOGUE_ID);
+    // What it offers instead is exactly the curated list the picker showed.
+    expect(error).toContain("claude-sonnet-5");
+    expectNoSideEffects();
   });
 
   it("does not read the Claude surface for a non-Claude provider", async () => {

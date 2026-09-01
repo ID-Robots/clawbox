@@ -11,6 +11,10 @@
  * that keep it from becoming a second, weaker way to walk the disk: it never
  * leaves the browse root, it never lists a file, and a protected secret store
  * is answered exactly like a folder that is not there.
+ *
+ * POST /setup-api/coding-agent/browse — the picker's "Create folder" field. It
+ * takes a NAME and puts it inside a directory the same containment rule
+ * cleared, so what is pinned is that the name can never be a path.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
@@ -125,6 +129,72 @@ describe("GET /setup-api/coding-agent/browse", () => {
 
   it("answers 404, not 500, for a folder that is not there", async () => {
     expect((await browse("nope")).status).toBe(404);
+  });
+
+  it("reports truncation from the folders it shows, not from every dirent", async () => {
+    // A home directory with hundreds of files and a handful of folders omits
+    // nothing from the picker, so it must not warn about folders it never cut.
+    fs.mkdirSync(path.join(base, "Projects"));
+    for (let i = 0; i < 501; i++) fs.writeFileSync(path.join(base, `file-${i}.txt`), "");
+    const body = await (await browse()).json();
+    expect(body.entries.map((e: { name: string }) => e.name)).toEqual(["Projects"]);
+    expect(body.truncated).toBe(false);
+  });
+});
+
+describe("POST /setup-api/coding-agent/browse", () => {
+  const mkdir = async (body: unknown, cookie: string | null = ownerCookie()) => {
+    const { POST } = await import("@/app/setup-api/coding-agent/browse/route");
+    const { NextRequest } = await import("next/server");
+    return POST(
+      new NextRequest("http://localhost/setup-api/coding-agent/browse", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) },
+        body: JSON.stringify(body),
+      }),
+    );
+  };
+
+  it("refuses without an owner session — the agent holds the bearer", async () => {
+    const res = await mkdir({ dir: fs.realpathSync(base), name: "site" }, null);
+    expect(res.status).toBe(403);
+    expect((await res.json()).kind).toBe("owner_only");
+    expect(fs.existsSync(path.join(base, "site"))).toBe(false);
+  });
+
+  it("refuses a name that is a path, hidden, or a dot name", async () => {
+    const dir = fs.realpathSync(base);
+    for (const name of ["../escape", "a/b", ".hidden", "..", ".", "", "a\\b"]) {
+      const res = await mkdir({ dir, name });
+      expect(res.status, JSON.stringify(name)).toBe(400);
+      expect((await res.json()).kind, JSON.stringify(name)).toBe("invalid");
+    }
+    expect(fs.readdirSync(base)).toEqual([]);
+  });
+
+  it("refuses a parent outside the root even with a good name", async () => {
+    expect((await mkdir({ dir: "/etc", name: "ok" })).status).toBe(404);
+    expect((await mkdir({ dir: "../../etc", name: "ok" })).status).toBe(404);
+  });
+
+  it("creates the folder, answers its absolute path and the fresh listing", async () => {
+    const dir = fs.realpathSync(base);
+    const res = await mkdir({ dir, name: "site" });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.created).toBe(path.join(dir, "site"));
+    expect(path.isAbsolute(body.created)).toBe(true);
+    expect(fs.statSync(path.join(dir, "site")).isDirectory()).toBe(true);
+    // The picker redraws from this answer, so the new folder must be in it.
+    expect(body.entries.map((e: { name: string }) => e.name)).toEqual(["site"]);
+  });
+
+  it("refuses the same name twice — a silent success would lie", async () => {
+    const dir = fs.realpathSync(base);
+    expect((await mkdir({ dir, name: "site" })).status).toBe(200);
+    const again = await mkdir({ dir, name: "site" });
+    expect(again.status).toBe(409);
+    expect((await again.json()).kind).toBe("exists");
   });
 });
 

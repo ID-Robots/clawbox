@@ -455,11 +455,12 @@ export default function MemoryShardApp() {
    *  box paints the index card for a moment and then swaps it for the wizard. */
   const [resolved, setResolved] = useState(false);
 
-  const loadState = useCallback(async () => {
+  const loadState = useCallback(async (signal?: AbortSignal) => {
     try {
-      const res = await fetch("/setup-api/clawkeep/memory", { cache: "no-store" });
+      const res = await fetch("/setup-api/clawkeep/memory", { cache: "no-store", signal });
       if (!res.ok) throw new Error("status");
       const status = await res.json() as { enabled?: boolean; setupComplete?: boolean };
+      if (signal?.aborted) return;
       // ONLY an explicit boolean opens the wizard.
       //
       // A status this app cannot recognise — the e2e mock answers `{}` with a
@@ -473,11 +474,19 @@ export default function MemoryShardApp() {
     } catch {
       // Same rule: an unreachable status says nothing about setup.
     } finally {
-      setResolved(true);
+      // An aborted read is the window closing; there is nobody left to tell.
+      if (!signal?.aborted) setResolved(true);
     }
   }, []);
 
-  useEffect(() => { void loadState(); }, [loadState]);
+  // The first read is tied to the window, the way the wizard's browse request
+  // is: closing it mid-request drops the answer rather than delivering it to a
+  // component that is gone.
+  useEffect(() => {
+    const ctl = new AbortController();
+    void loadState(ctl.signal);
+    return () => ctl.abort();
+  }, [loadState]);
 
   const showWizard = state !== null && !state.setupComplete;
 

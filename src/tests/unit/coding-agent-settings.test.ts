@@ -255,10 +255,47 @@ describe("the folder the device proposes", () => {
   it("does not create folders outside the owner's home", async () => {
     // Creating directories on someone's behalf is this feature's business
     // only inside their own home; anywhere else a missing folder stays an error.
-    const lib = await import("@/lib/coding-agent");
-    await expect(lib.setDefaultDirectory("/nonexistent-root-folder-xyz")).rejects.toThrow();
     const fs = await import("fs");
-    expect(fs.existsSync("/nonexistent-root-folder-xyz")).toBe(false);
+    const os = await import("os");
+    const path = await import("path");
+    // Writable, and outside the owner's home: a mkdir here would SUCCEED if
+    // the fence were gone, so the assertion tests the fence and not the
+    // permissions of "/" — where an unprivileged mkdir fails on its own and
+    // would have satisfied this test with no guard at all.
+    const outside = path.join(fs.realpathSync(os.tmpdir()), "coding-outside-home-xyz");
+    expect(outside.startsWith(fs.realpathSync(os.homedir()) + path.sep)).toBe(false);
+    const lib = await import("@/lib/coding-agent");
+    await expect(lib.setDefaultDirectory(outside)).rejects.toThrow();
+    expect(fs.existsSync(outside)).toBe(false);
+  });
+
+  it("does not create folders through a symlink that leaves the home", async () => {
+    // The lexical fence sees ~/scratch/Projects as inside the home; on disk
+    // ~/scratch may be a link to anywhere, and mkdir follows it — so the
+    // nearest EXISTING ancestor has to be realpath'd and checked too, or the
+    // owner's typed path would create a folder somewhere else entirely.
+    const fs = await import("fs");
+    const os = await import("os");
+    const path = await import("path");
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "coding-home-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "coding-outside-"));
+    const prev = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      fs.symlinkSync(outside, path.join(home, "scratch"));
+      vi.resetModules();
+      const lib = await import("@/lib/coding-agent");
+      const typed = path.join(home, "scratch", "Projects");
+      await expect(lib.setDefaultDirectory(typed)).rejects.toThrow();
+      // Neither through the link nor under the real home.
+      expect(fs.existsSync(path.join(outside, "Projects"))).toBe(false);
+      expect(fs.existsSync(typed)).toBe(false);
+      expect(configSet).not.toHaveBeenCalled();
+    } finally {
+      process.env.HOME = prev;
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   });
 });
 

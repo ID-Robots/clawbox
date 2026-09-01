@@ -4071,8 +4071,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         50%      { opacity: 0.35; }
       }
       .claw-tab-hover-close { opacity: 0; transition: opacity 0.12s ease; }
-      [role="tab"]:hover .claw-tab-hover-close,
-      [role="tab"]:focus-within .claw-tab-hover-close { opacity: 1; }`}</style>
+      .claw-tab-plate:hover .claw-tab-hover-close,
+      .claw-tab-plate:focus-within .claw-tab-hover-close { opacity: 1; }`}</style>
       {/* Header — drag handle (desktop) / simple bar (mobile).
           A real bar in the flow, not a strip floating over the transcript.
           The floating version faded from the shell colour to transparent
@@ -4135,11 +4135,33 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 const switchable = status === 'connected' && !active && !!tab.key
                 const select = () => { if (switchable) void switchSession(tab.key) }
                 return (
-                  /* The wrapper groups the tab with its own control BESIDE it —
-                     a button nested inside role="tab" is one opaque element to
-                     assistive tech, and 16px inside a padded row was below the
-                     24px minimum target. */
-                  <div key={tab.main ? 'main' : tab.key} style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+                  /* The plate is the WRAPPER, and the tab and its control are
+                     siblings inside it. role="tab" makes its descendants
+                     presentational, so a close button nested in it was one opaque
+                     element to assistive tech and, at tabIndex -1, unreachable
+                     from the keyboard. Putting the background and hover on the
+                     wrapper keeps what the owner asked for — one plate, the ✕ part
+                     of it, not a separate control that happens to sit beside it —
+                     while each action keeps its own semantics and focus stop. */
+                  <div
+                    key={tab.main ? 'main' : tab.key}
+                    className="claw-tab-plate"
+                    data-active={active || undefined}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
+                      // minWidth so a short auto-label ("Chat 2") makes the same
+                      // plate as a long one: without it every tab was exactly as
+                      // wide as its text, and the whole strip re-flowed the moment
+                      // a tab was renamed from the owner's first message.
+                      padding: '4px 8px', borderRadius: 8, minWidth: 92, maxWidth: 150, minHeight: 24,
+                      background: active && tabs.length > 0 ? 'rgba(255,255,255,0.08)' : 'transparent',
+                      color: active ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.5)',
+                      fontSize: 12, fontWeight: 600, letterSpacing: 0.2,
+                      userSelect: 'none', transition: 'background 0.15s, color 0.15s',
+                    }}
+                    onMouseEnter={(e) => { if (switchable) { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = 'rgba(255,255,255,0.8)' } }}
+                    onMouseLeave={(e) => { if (!active) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.5)' } }}
+                  >
                     <div
                       role="tab"
                       tabIndex={0}
@@ -4151,20 +4173,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       onClick={select}
                       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select() } }}
                       style={{
-                        display: 'flex', alignItems: 'center', gap: 6,
-                        // minWidth so a short auto-label ("Chat 2") makes the same
-                        // plate as a long one: without it every tab was exactly as
-                        // wide as its text, and the whole strip re-flowed the moment
-                        // a tab was renamed from the owner's first message.
-                        padding: '4px 8px', borderRadius: 8, minWidth: 92, maxWidth: 150, minHeight: 24,
-                        background: active && tabs.length > 0 ? 'rgba(255,255,255,0.08)' : 'transparent',
-                        color: active ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.5)',
+                        display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1,
                         cursor: switchable ? 'pointer' : 'default',
-                        fontSize: 12, fontWeight: 600, letterSpacing: 0.2,
-                        userSelect: 'none', transition: 'background 0.15s, color 0.15s',
+                        // The plate's padding is on the wrapper, so push the focus
+                        // ring out to the plate's edge rather than hugging the text.
+                        outlineOffset: 4,
                       }}
-                      onMouseEnter={(e) => { if (switchable) { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = 'rgba(255,255,255,0.8)' } }}
-                      onMouseLeave={(e) => { if (!active) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.5)' } }}
                     >
                       {busy && (
                         <span data-testid="chat-tab-busy" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: '#f97316', flexShrink: 0, animation: 'clawHeaderPulse 1.2s ease-in-out infinite' }} />
@@ -4173,69 +4187,68 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                         <span data-testid="chat-tab-unread" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', flexShrink: 0 }} />
                       )}
                       <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, flex: 1 }}>{tab.label}</span>
-                      {!tab.main && active && (
-                        /* Inside the tab, not beside it: as a sibling it read as a
-                           separate control that happened to sit next to the plate.
-                           ONE click closes now — the old first tap only armed a red
-                           "Close tab?" in place, which is the confirmation the owner
-                           was seeing and did not want. Neutral, on the tab's own
-                           hover ladder rather than a raw red tint. */
-                        <span
-                          role="button"
-                          tabIndex={-1}
-                          onPointerDown={stopHeaderDrag}
-                          onClick={(e) => { e.stopPropagation(); closeTab(tab.key) }}
-                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); closeTab(tab.key) } }}
-                          aria-label={t('chat.tabClose')}
-                          title={t('chat.tabClose')}
-                          data-testid="chat-tab-close"
-                          style={{
-                            marginLeft: 2, marginRight: -2, width: 18, height: 18, borderRadius: 5,
-                            display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-                            color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
-                            transition: 'background 0.15s, color 0.15s',
-                          }}
-                          onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.9)'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
-                          onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'transparent' }}
-                        >
-                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
-                            <path d="M18 6L6 18M6 6l12 12" />
-                          </svg>
-                        </span>
-                      )}
-                      {tab.main && active && (
-                        /* Inside the tab, like the close ✕ beside it — and that
-                           move is also the FIX for a dead style: the reveal rule
-                           is `[role="tab"]:hover .claw-tab-hover-close`, but this
-                           button was rendered as a SIBLING of role="tab", so the
-                           descendant selector could never match and the button sat
-                           at opacity 0 permanently. Invisible, still clickable, and
-                           invisible to jsdom too — which is why the test passed. */
-                        <span
-                          role="button"
-                          tabIndex={-1}
-                          onPointerDown={stopHeaderDrag}
-                          onClick={(e) => { e.stopPropagation(); if (!startingSession) void startNewSession() }}
-                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); if (!startingSession) void startNewSession() } }}
-                          aria-label={t('chat.tabRestart')}
-                          title={t('chat.tabRestart')}
-                          data-testid="chat-tab-restart"
-                          className="claw-tab-hover-close"
-                          style={{
-                            marginLeft: 2, marginRight: -2, width: 18, height: 18, borderRadius: 5,
-                            display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-                            color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
-                            transition: 'background 0.15s, color 0.15s',
-                          }}
-                          onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.9)'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
-                          onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'transparent' }}
-                        >
-                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
-                            <path d="M18 6L6 18M6 6l12 12" />
-                          </svg>
-                        </span>
-                      )}
                     </div>
+                    {!tab.main && active && (
+                      /* ONE click closes — the old first tap only armed a red
+                         "Close tab?" in place, which is the confirmation the owner
+                         was seeing and did not want. Neutral, on the plate's own
+                         hover ladder rather than a raw red tint. A native button:
+                         focusable in the tab order, Enter and Space for free. */
+                      <button
+                        type="button"
+                        onPointerDown={stopHeaderDrag}
+                        onClick={(e) => { e.stopPropagation(); closeTab(tab.key) }}
+                        aria-label={t('chat.tabClose')}
+                        title={t('chat.tabClose')}
+                        data-testid="chat-tab-close"
+                        style={{
+                          background: 'none', border: 'none', padding: 0,
+                          marginLeft: 2, marginRight: -2, width: 18, height: 18, borderRadius: 5,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                          color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
+                          transition: 'background 0.15s, color 0.15s',
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.9)'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'transparent' }}
+                      >
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                          <path d="M18 6L6 18M6 6l12 12" />
+                        </svg>
+                      </button>
+                    )}
+                    {tab.main && active && (
+                      /* Revealed on hover of the PLATE (`.claw-tab-plate:hover`),
+                         which is the fix for a dead style: the reveal rule used
+                         to be `[role="tab"]:hover .claw-tab-hover-close` while the
+                         button sat beside role="tab", so the descendant selector
+                         never matched and the button stayed at opacity 0 —
+                         invisible, still clickable, and invisible to jsdom too,
+                         which is why the test passed. Scoping the rule to the
+                         wrapper keeps the button a sibling of the tab with its
+                         own focus stop; :focus-within shows it to the keyboard. */
+                      <button
+                        type="button"
+                        onPointerDown={stopHeaderDrag}
+                        onClick={(e) => { e.stopPropagation(); if (!startingSession) void startNewSession() }}
+                        aria-label={t('chat.tabRestart')}
+                        title={t('chat.tabRestart')}
+                        data-testid="chat-tab-restart"
+                        className="claw-tab-hover-close"
+                        style={{
+                          background: 'none', border: 'none', padding: 0,
+                          marginLeft: 2, marginRight: -2, width: 18, height: 18, borderRadius: 5,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                          color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
+                          transition: 'background 0.15s, color 0.15s',
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.9)'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'transparent' }}
+                      >
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                          <path d="M18 6L6 18M6 6l12 12" />
+                        </svg>
+                      </button>
+                    )}
                   </div>
                 )
               })}

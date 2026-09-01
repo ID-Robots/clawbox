@@ -43,7 +43,19 @@ function trimUrlTail(url: string): string {
   return url.slice(0, end);
 }
 
-/** Plain text with its bare URLs turned into anchors. */
+/**
+ * Plain text with its bare URLs turned into anchors.
+ *
+ * The attribute is the parsed URL's own `href`, not the matched text: the
+ * parser settles the scheme (only http/https get through), and its output is
+ * a fresh string the message text never reaches, which is why neither XSS
+ * query (js/xss, js/xss-through-dom) tracks the chat input into the
+ * attribute — `isSafeHref` answers the same question, but as a boolean about
+ * a COPY, and the value it vouched for would still be the text itself.
+ * Parsing normalises a little (a bare host gains its trailing slash,
+ * non-ASCII path characters are percent-encoded); the browser does exactly
+ * that at navigation anyway, and the visible link stays what was pasted.
+ */
 function linkifyPlain(text: string, keyPrefix: string): React.ReactNode {
   if (!text) return text;
   BARE_URL_RE.lastIndex = 0;
@@ -55,8 +67,17 @@ function linkifyPlain(text: string, keyPrefix: string): React.ReactNode {
   while ((m = BARE_URL_RE.exec(text)) !== null) {
     const raw = trimUrlTail(m[0]);
     if (!raw) continue;
-    const href = raw.startsWith("www.") ? `https://${raw}` : raw;
-    if (!isSafeHref(href)) continue;
+    const candidate = raw.startsWith("www.") ? `https://${raw}` : raw;
+    let href: string;
+    try {
+      const parsed = new URL(candidate);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") continue;
+      href = parsed.href;
+    } catch {
+      // `https://` with nothing behind it, or a host the parser refuses: not
+      // a link. The text stays in the sentence as it was.
+      continue;
+    }
     if (m.index > last) out.push(text.slice(last, m.index));
     out.push(
       <a

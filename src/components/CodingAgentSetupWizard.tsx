@@ -285,7 +285,7 @@ export default function CodingAgentSetupWizard({
     try {
       // The folder the owner just chose, not a ClawBox-internal one. It is
       // saved by now: this step runs after saveAndTest().
-      const started = await startHarnessTest(folder.trim() || null);
+      const started = await startHarnessTest(folder.trim() || null, t);
       if (!started.ok) throw new Error(started.error);
       notifyCodingRunStarted();
       await finish();
@@ -533,13 +533,16 @@ export default function CodingAgentSetupWizard({
           {/* Effort, with the honest note about what the default costs. */}
           <div className="mt-5">
             <p className="text-xs font-semibold text-[var(--text-primary)]">{t("codingAgent.effortLabel")}</p>
-            <div className="mt-2 flex flex-wrap gap-1.5" role="radiogroup" aria-label={t("codingAgent.effortLabel")}>
+            {/* Toggle buttons, not a radio group: each is its own tab stop and
+                arrow keys do nothing here, so the radio contract would promise
+                keyboard behaviour that is not there. The same pattern as the
+                settings panel's effort row. */}
+            <div className="mt-2 flex flex-wrap gap-1.5" role="group" aria-label={t("codingAgent.effortLabel")}>
               {status.effortLevels.map((level) => (
                 <button
                   key={level}
                   type="button"
-                  role="radio"
-                  aria-checked={effort === level}
+                  aria-pressed={effort === level}
                   onClick={() => setEffort(level)}
                   data-testid={`coding-agent-wizard-effort-${level}`}
                   className={`text-[11px] px-2.5 py-1 rounded-lg border transition ${

@@ -27,6 +27,19 @@ export async function GET(request: NextRequest) {
         headers: { "Content-Type": "text/plain" },
       });
     }
+    // /setup-api/ is ClawBox's OWN namespace — the route handlers live there
+    // precisely so they cannot collide with the gateway's /api/* — and the
+    // gateway serves nothing under it. A /setup-api path that reached this
+    // catch-all is therefore a route that does not exist, and the honest
+    // answer is 404: proxied, it came back 502 from a gateway that had never
+    // heard of it (or the SPA shell, before the resource rule below), and a
+    // client probing for an endpoint could not tell "not here" from "down".
+    if (request.nextUrl.pathname.startsWith("/setup-api/")) {
+      return new NextResponse("Not found", {
+        status: 404,
+        headers: { "Content-Type": "text/plain" },
+      });
+    }
     // A STATIC path is served as bytes, not as the SPA shell. The Control UI
     // keeps whole trees outside /assets — /themes/*.css, /fonts/*.css,
     // /provider-icons, /file-icons, /app-art — and this route answers every
@@ -47,11 +60,15 @@ export async function GET(request: NextRequest) {
     //   /health, /healthz        (an uptime monitor got HTML that parses as nothing)
     // Every one of those is fetched by script or by an <img>, never navigated
     // to, so the fetch metadata separates them from a real page load exactly.
-    // `Sec-Fetch-Mode` is sent by every current browser; the Accept sniff is
-    // the fallback for anything that does not send it (curl asks for */*, and
-    // gets the real resource, which is what a monitor needs).
-    const navigating = request.headers.get("sec-fetch-mode") === "navigate"
-      || (request.headers.get("accept") ?? "").includes("text/html");
+    // `Sec-Fetch-Mode` is sent by every current browser and is the authority
+    // when present: a script `fetch()` that asks for text/html still says
+    // `cors`, and it wants the resource, not the shell. The Accept sniff is
+    // ONLY the fallback for a client that sends no fetch metadata at all (curl
+    // asks for */*, and gets the real resource, which is what a monitor needs).
+    const secFetchMode = request.headers.get("sec-fetch-mode");
+    const navigating = secFetchMode
+      ? secFetchMode === "navigate"
+      : (request.headers.get("accept") ?? "").includes("text/html");
     if (!navigating) {
       return proxyGatewayRequest(request);
     }

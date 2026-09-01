@@ -73,7 +73,13 @@ describe("buildNewAppPrompt", () => {
   it("keeps every template out of ClawBox's own data directory", () => {
     for (const template of ["nextjs", "react", "app", "blank"] as const) {
       const text = buildNewAppPrompt({ name: "x", description: "y", template });
-      expect(text, template).toContain("under my project folder");
+      expect(text, template).toContain("new git folder under my project folder");
+      // The negative half of the name, asserted as such: no template may point
+      // the assistant at data/code-projects, and the only code project a
+      // prompt may mention is the one it tells the assistant NOT to make —
+      // `code_project_init` or "as a code project" would be a regression.
+      expect(text, template).not.toContain("data/code-projects");
+      expect(text.replace(/not as a code project/gu, ""), template).not.toMatch(/code[ _-]project/iu);
     }
   });
 

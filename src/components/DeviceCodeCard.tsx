@@ -15,10 +15,13 @@ import { copyToClipboard } from "@/lib/clipboard";
  * two looks and one of them worse. This is the good one, shared.
  *
  * The code is copied AUTOMATICALLY when it appears: the very next thing anyone
- * does with it is paste it, and the copy is attempted inside the click that
- * asked for the code, which is the gesture browsers want. It can still fail
- * silently (a locked-down WebView, a denied permission) — hence the Copy
- * button stays, and the flash only appears when the copy actually landed.
+ * does with it is paste it. That copy is best-effort, and honestly so: every
+ * host awaits the device-code request before it renders this card, so the
+ * copy runs from an effect long after the click that asked for the code — the
+ * transient activation Safari and Firefox insist on is gone by then, and only
+ * a browser that lets the active tab write without a gesture (Chromium, the
+ * box's own included) lands it. Hence the Copy button stays, inside a real
+ * click, and the flash only appears when a copy actually landed.
  */
 export default function DeviceCodeCard({
   code,
@@ -52,8 +55,10 @@ export default function DeviceCodeCard({
     if (await copyToClipboard(code)) flash();
   };
 
-  // Auto-copy each NEW code, once. Keyed on the code itself so a re-issued one
-  // copies again and the same one never re-copies on an unrelated re-render.
+  // Auto-copy each NEW code, once — outside any user gesture, so it may
+  // quietly do nothing (see the note above). Keyed on the code itself so a
+  // re-issued one copies again and the same one never re-copies on an
+  // unrelated re-render.
   useEffect(() => {
     let alive = true;
     void copyToClipboard(code).then((ok) => {

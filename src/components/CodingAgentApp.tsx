@@ -390,6 +390,11 @@ export default function CodingAgentApp() {
   // moment the checks chip starts changing — it would freeze at whatever the
   // last poll happened to see, clock included.
   const anyRunning = runs.some((r) => isLive(r.status) || isPrPending(r.pr));
+  // Only a LIVE run moves a progress bar or occupies the harness; a PR waiting
+  // on Actions does neither, so the clock and the harness gate read this one —
+  // a CI wait can last many minutes, and a re-render a second for nothing is
+  // the kind of idle CPU work this box cannot spare.
+  const anyLive = runs.some((r) => isLive(r.status));
   const sawRunning = useRef(false);
   useEffect(() => {
     if (anyRunning) {
@@ -408,10 +413,10 @@ export default function CodingAgentApp() {
   // would freeze the bar for five seconds at a time.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!anyRunning) return;
+    if (!anyLive) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [anyRunning]);
+  }, [anyLive]);
 
   const readError = async (res: Response, fallback: string) => {
     try {
@@ -461,7 +466,7 @@ export default function CodingAgentApp() {
       // the run below is where a real failure would surface.
       // In the owner's own project folder, not a ClawBox-internal one — see
       // startHarnessTest.
-      const started = await startHarnessTest(status?.defaultDirectory ?? null);
+      const started = await startHarnessTest(status?.defaultDirectory ?? null, t);
       if (!started.ok) throw new Error(started.error);
       setShowRuns(true);
       // The live view opens on the run as soon as its transcript exists.
@@ -747,7 +752,7 @@ export default function CodingAgentApp() {
                 its explanation on the question mark beside it. The headings
                 above them were saying the button's own words twice. */}
             <div className={`${CARD} mt-4 grid gap-4 grid-cols-1 @md:grid-cols-3`} data-testid="coding-agent-owner-tools">
-              <div className="flex items-center gap-2" data-testid="coding-agent-reset-card">
+              <div className="flex flex-wrap items-center gap-2" data-testid="coding-agent-reset-card">
                 <CodingAgentResetCard
                   // Start over lands on the front door, not on a settings page
                   // for a configuration that was just erased.
@@ -759,7 +764,7 @@ export default function CodingAgentApp() {
                 <button
                   type="button"
                   onClick={() => void testHarness()}
-                  disabled={busy === "harness-test" || anyRunning || !status?.enabled || !status?.ready}
+                  disabled={busy === "harness-test" || anyLive || !status?.enabled || !status?.ready}
                   data-testid="coding-agent-harness-test"
                   className={`${BTN_SECONDARY} flex-1`}
                 >

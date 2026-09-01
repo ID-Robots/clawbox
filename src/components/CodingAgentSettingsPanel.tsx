@@ -671,9 +671,11 @@ export default function CodingAgentSettingsPanel({
             see that it was on. Not optimistic, like the main switch. */}
         <div className="flex items-start justify-between gap-4 mt-4">
           <div className="min-w-0 flex items-center gap-1.5">
-            <label className="text-xs font-medium text-[var(--text-secondary)]">
+            {/* A span, not a label: the switch is a button, which no label can
+                name, and it carries its own aria-label. */}
+            <span className="text-xs font-medium text-[var(--text-secondary)]">
               {t("codingAgent.reviewPassLabel")}
-            </label>
+            </span>
             <HelpTip
               text={t("codingAgent.reviewPassHint")}
               label={t("codingAgent.reviewPassLabel")}
@@ -695,9 +697,9 @@ export default function CodingAgentSettingsPanel({
             one of the things that gates the merge. */}
         <div className="flex items-start justify-between gap-4 mt-4">
           <div className="min-w-0 flex items-center gap-1.5">
-            <label className="text-xs font-medium text-[var(--text-secondary)]">
+            <span className="text-xs font-medium text-[var(--text-secondary)]">
               {t("codingAgent.autoPrLabel")}
-            </label>
+            </span>
             <HelpTip
               text={t("codingAgent.autoPrHint")}
               label={t("codingAgent.autoPrLabel")}

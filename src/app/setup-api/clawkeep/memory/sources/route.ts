@@ -32,12 +32,22 @@ async function resolveInsideRoot(asked: string): Promise<{ ok: true; dir: string
   } catch {
     root = configured;
   }
+  // Written as relative-then-join rather than a `startsWith` helper, the same
+  // way the folder picker's own resolveDir is: it is the same rule, but a
+  // scanner can only tie a guard to the sink when the guard is inline on the
+  // very value that reaches it (js/path-injection stayed open here behind the
+  // closure, exactly as it did in the chat media route). `rel` is empty for
+  // the root itself, so the root still resolves.
   const requested = path.isAbsolute(asked) ? path.resolve(asked) : path.resolve(root, asked);
-  const within = (p: string) => p === root || p.startsWith(root + path.sep);
-  if (!within(requested)) return { ok: false, status: 404 };
+  const rel = path.relative(root, requested);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return { ok: false, status: 404 };
+  const candidate = path.join(root, rel);
   try {
-    const real = await fs.realpath(requested);
-    if (!within(real)) return { ok: false, status: 404 };
+    // Checked AGAIN after resolving links: the lexical check above cannot see
+    // that a folder inside the root is a symlink pointing out of it.
+    const real = await fs.realpath(candidate);
+    const realRel = path.relative(root, real);
+    if (realRel.startsWith("..") || path.isAbsolute(realRel)) return { ok: false, status: 404 };
     if (isProtectedFilePath(real)) return { ok: false, status: 404 };
     const stat = await fs.stat(real);
     if (!stat.isDirectory()) return { ok: false, status: 400 };
@@ -104,7 +114,9 @@ export async function DELETE(request: NextRequest) {
   const kept = paths.filter((p) => path.resolve(p) !== target);
   if (kept.length !== paths.length) {
     await writeExtraPaths(kept);
-    console.error(`[memory-shard] source removed by the owner: ${target}`);
+    // JSON-quoted: the request body's path is what is being printed, and the
+    // quoting is the sanitizer js/log-injection models (see 3ef684a1).
+    console.error(`[memory-shard] source removed by the owner: ${JSON.stringify(target)}`);
   }
   return NextResponse.json({ paths: await readExtraPaths() });
 }

@@ -586,6 +586,7 @@ export const fr: Record<string, string> = {
   "codingAgent.harnessTestTitle": "Test de l'environnement",
   "codingAgent.harnessTestHint": "Lance une petite exécution réelle dans un projet jetable pour prouver que le shell délégué fonctionne de bout en bout : Claude Code démarre, écrit un fichier, pilote le navigateur et rend compte. Elle coûte comme n'importe quelle exécution et exige l'agent activé et prêt.",
   "codingAgent.harnessTestFailed": "Impossible de démarrer le test du harnais",
+  "codingAgent.harnessTestNoFolder": "Choisissez d'abord un dossier de projets.",
   "codingAgent.deniedHelp": "L'agent de code ne peut exécuter qu'un ensemble fixe de commandes dans son propre dossier. C'est la limite de sécurité qui fonctionne, pas une panne — l'exécution trouve généralement un autre moyen.",
   "codingAgent.stop": "Arrêter",
   "codingAgent.back": "Retour",
@@ -660,7 +661,7 @@ export const fr: Record<string, string> = {
   "codingAgent.reviewPassTitle": "Relecture automatique de {id}",
 
   "codingAgent.wizardTitle": "Configurer l'agent de code",
-  "codingAgent.wizardIntro": "L'agent de code permet à votre assistant de confier une tâche entière à Claude Code sur cette box : il lit et écrit des fichiers dans un dossier, y exécute des commandes et rend compte. La configuration tient en deux étapes.",
+  "codingAgent.wizardIntro": "L'agent de code permet à votre assistant de confier une tâche entière à Claude Code sur cette box : il lit et écrit des fichiers dans un dossier, y exécute des commandes et rend compte. La configuration tient en trois étapes.",
   "codingAgent.wizardEnable": "Activer",
   "codingAgent.wizardStepOf": "Étape {n} sur {total}",
   "codingAgent.wizardNext": "Suivant",

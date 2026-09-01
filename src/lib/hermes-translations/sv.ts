@@ -582,6 +582,7 @@ export const sv: Record<string, string> = {
   "codingAgent.harnessTestTitle": "Testkörning",
   "codingAgent.harnessTestHint": "Startar en liten, riktig körning i ett kladdprojekt för att visa att det delegerade skalet fungerar hela vägen: Claude Code startar, skriver en fil, styr webbläsaren och rapporterar tillbaka. Den kostar som vilken körning som helst och kräver att agenten är på och redo.",
   "codingAgent.harnessTestFailed": "Kunde inte starta harnesstestet",
+  "codingAgent.harnessTestNoFolder": "Välj en projektmapp först.",
   "codingAgent.deniedHelp": "Kodagenten får bara köra en fast uppsättning kommandon i sin egen mapp. Det är säkerhetsgränsen som fungerar, inte ett fel — körningen hittar oftast en annan väg.",
   "codingAgent.stop": "Stoppa",
   "codingAgent.back": "Tillbaka",
@@ -656,7 +657,7 @@ export const sv: Record<string, string> = {
   "codingAgent.reviewPassTitle": "Automatisk granskning av {id}",
 
   "codingAgent.wizardTitle": "Ställ in kodagenten",
-  "codingAgent.wizardIntro": "Med kodagenten lämnar din assistent över en hel uppgift till Claude Code på den här boxen: den läser och skriver filer i en mapp, kör kommandon där och rapporterar tillbaka. Det tar två steg att ställa in.",
+  "codingAgent.wizardIntro": "Med kodagenten lämnar din assistent över en hel uppgift till Claude Code på den här boxen: den läser och skriver filer i en mapp, kör kommandon där och rapporterar tillbaka. Det tar tre steg att ställa in.",
   "codingAgent.wizardEnable": "Aktivera",
   "codingAgent.wizardStepOf": "Steg {n} av {total}",
   "codingAgent.wizardNext": "Nästa",

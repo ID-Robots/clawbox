@@ -15,7 +15,8 @@ import { useT } from "@/lib/i18n";
  *
  * Every animation lives under `@media (prefers-reduced-motion: no-preference)`
  * in globals.css, so an owner who turned motion off gets the same static
- * diagram. `aria-hidden` because the sentence beneath says this in words.
+ * diagram. `aria-hidden` because the sentence beneath says this in words —
+ * and no `role="img"` beside it, which a hidden element cannot carry anyway.
  */
 export default function MemoryShardArt({ className = "" }: { className?: string }) {
   const { t } = useT();
@@ -34,7 +35,6 @@ export default function MemoryShardArt({ className = "" }: { className?: string 
     <svg
       viewBox="0 0 320 140"
       className={`w-full max-w-[22rem] h-auto ${className}`}
-      role="img"
       aria-hidden="true"
       focusable="false"
     >

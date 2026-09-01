@@ -13,10 +13,18 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import MemoryShardWizard from "@/components/MemoryShardWizard";
+import { clawkeepTranslations } from "@/lib/clawkeep-translations";
 
-let posts: { url: string; body: unknown }[] = [];
+// Rendered without an I18nProvider, `t` answers the key itself — which is
+// what these tests match on. The translation table is imported only to prove
+// the key the wizard shows is one that has words behind it.
+const START_FAILED = "clawkeep.memory.startFailed";
 
-function stub(opts: { modelPresent?: boolean } = {}) {
+// The signal rides along so a test can ask, after the fact, whether the wizard
+// cancelled a request it no longer had a window for.
+let posts: { url: string; body: unknown; signal?: AbortSignal | null }[] = [];
+
+function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: boolean } = {}) {
   posts = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -38,10 +46,25 @@ function stub(opts: { modelPresent?: boolean } = {}) {
       return json({ ok: true });
     }
     if (url === "/setup-api/ollama/pull" && init?.method === "POST") {
-      posts.push({ url, body: JSON.parse(String(init.body)) });
+      posts.push({ url, body: JSON.parse(String(init.body)), signal: init.signal });
+      if (opts.pullHangs) {
+        // A download that never finishes: the stream stays open until the
+        // client goes away, which is exactly what the real route does.
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"status":"pulling","completed":1,"total":100}\n'));
+          },
+        });
+        return new Response(stream, { status: 200, headers: { "content-type": "application/x-ndjson" } });
+      }
       // Ollama's own NDJSON, byte counts and all.
       const body = '{"status":"pulling","completed":50,"total":100}\n{"status":"success","completed":100,"total":100}\n';
       return new Response(body, { status: 200, headers: { "content-type": "application/x-ndjson" } });
+    }
+    if (url === "/setup-api/clawkeep/memory/index" && init?.method === "POST") {
+      posts.push({ url, body: JSON.parse(String(init.body)) });
+      const status = opts.indexStatus ?? 200;
+      return json(status === 200 ? { ok: true } : { error: "nope" }, status);
     }
     if (init?.method) posts.push({ url, body: init.body ? JSON.parse(String(init.body)) : null });
     return json({ ok: true });
@@ -93,6 +116,12 @@ describe("MemoryShardWizard", () => {
 
     const order = posts.map((p) => p.url);
     expect(order.indexOf("/setup-api/clawkeep/memory/provider")).toBeGreaterThan(order.indexOf("/setup-api/ollama/pull"));
+    // Under the route's own field names. The route replaces the whole
+    // schedule and resets any field it does not recognise, so a body that
+    // said `time`/`dayOfWeek` quietly saved 03:00 on Sunday whatever was
+    // picked — the defaults here are the same values, which is what hid it.
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/schedule")?.body)
+      .toEqual({ enabled: true, frequency: "daily", timeOfDay: "03:00", weekday: 0 });
     // The completion flag is LAST, with the switch, after everything that can fail.
     const enable = posts.find((p) => p.url === "/setup-api/clawkeep/memory/enable");
     expect(enable?.body).toEqual({ enabled: true, setupComplete: true });
@@ -109,5 +138,59 @@ describe("MemoryShardWizard", () => {
     fireEvent.click(screen.getByTestId("memory-shard-index-now"));
     await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/clawkeep/memory/enable")).toBe(true));
     expect(posts.find((p) => p.url === "/setup-api/ollama/pull")).toBeUndefined();
+  });
+
+  /** Intro -> folders -> schedule -> provision, and press the button. */
+  async function runProvision(done: () => void) {
+    render(<MemoryShardWizard onDone={done} />);
+    fireEvent.click(await screen.findByTestId("memory-shard-enable"));
+    fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
+    fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
+    fireEvent.click(screen.getByTestId("memory-shard-index-now"));
+  }
+
+  it("says so in the wizard when the first pass could not be started, and does not finish", async () => {
+    stub({ indexStatus: 500 });
+    const done = vi.fn();
+    await runProvision(done);
+    // The message is the wizard's own: the card that would replace it can only
+    // show "never ran", with no reason attached.
+    expect(await screen.findByText(START_FAILED)).toBeInTheDocument();
+    expect(clawkeepTranslations.en[START_FAILED]).toBe("Indexing could not be started. Try again.");
+    expect(done).not.toHaveBeenCalled();
+    // The switch and the flag were written before the pass was asked for, so
+    // they are not what the failure is about.
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/enable")?.body)
+      .toEqual({ enabled: true, setupComplete: true });
+  });
+
+  it("treats a 409 from the index route as the box already indexing, and finishes", async () => {
+    stub({ indexStatus: 409 });
+    const done = vi.fn();
+    await runProvision(done);
+    await waitFor(() => expect(done).toHaveBeenCalled());
+    expect(screen.queryByText(START_FAILED)).not.toBeInTheDocument();
+  });
+
+  it("aborts the download when the window closes mid-pull", async () => {
+    stub({ pullHangs: true });
+    const done = vi.fn();
+    const { unmount } = render(<MemoryShardWizard onDone={done} />);
+    fireEvent.click(await screen.findByTestId("memory-shard-enable"));
+    fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
+    fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
+    fireEvent.click(screen.getByTestId("memory-shard-index-now"));
+
+    await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/ollama/pull")).toBe(true));
+    const pull = posts.find((p) => p.url === "/setup-api/ollama/pull");
+    expect(pull?.signal?.aborted).toBe(false);
+
+    unmount();
+
+    // The pull route drops its Ollama connection when its client goes away;
+    // a fetch left running after the window closed would keep that client.
+    expect(pull?.signal?.aborted).toBe(true);
+    expect(done).not.toHaveBeenCalled();
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/provider")).toBeUndefined();
   });
 });

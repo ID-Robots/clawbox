@@ -1010,8 +1010,13 @@ step_apt_update() {
   # folder of PDFs added as a source would be walked and every file silently
   # skipped, while the panel reported the folder as indexed. It was already on
   # the dev box by accident of another package; naming it here is what makes the
-  # feature true on a fresh flash.
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 gh build-essential cmake ninja-build pkg-config poppler-utils
+  # feature true on a fresh flash. The same extractor hands .docx, .odt and .rtf
+  # to `libreoffice --headless --convert-to txt`, so the same rule applies:
+  # libreoffice-writer is the smallest package that carries the Writer import
+  # filters those formats need (and pulls in libreoffice-common, which owns the
+  # /usr/bin/libreoffice launcher) — the full `libreoffice` metapackage would add
+  # Calc, Impress, Base and a Java runtime for nothing the box ever converts.
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer
   # Node.js for production server and OpenClaw. OpenClaw 2026.8.1 tightened
   # its engines to >=22.22.3; older ClawBox images may have v22.22.2, which
   # looks like "Node 22" but crashes the OpenClaw CLI after npm install.

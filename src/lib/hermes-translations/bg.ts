@@ -544,7 +544,7 @@ export const bg: Record<string, string> = {
   "codingAgent.backupDone": "Архивирано в {repo}",
   "codingAgent.backupFailed": "Архивирането в GitHub не бе успешно.",
   "codingAgent.recentRuns": "Последни изпълнения",  "codingAgent.clearRuns": "Изчисти историята",
-  "codingAgent.clearRunsHint": "Премахва от списъка приключилите изпълнения и папките им с доказателства. Активните, поставените на пауза и чернолите се запазват — те още държат сесия, която можете да подновите.",
+  "codingAgent.clearRunsHint": "Премахва от списъка приключилите изпълнения и папките им с доказателства. Активните, поставените на пауза и черновите се запазват — те още държат сесия, която можете да подновите.",
   "codingAgent.clearConfirm": "Изчисти — натисни пак",
   "codingAgent.clearFailed": "Историята не можа да бъде изчистена.",
 
@@ -573,6 +573,7 @@ export const bg: Record<string, string> = {
   "codingAgent.harnessTestTitle": "Тестово изпълнение",
   "codingAgent.harnessTestHint": "Стартира едно малко, истинско изпълнение в черновен проект, за да докаже, че делегираната обвивка работи от край до край: Claude Code се стартира, записва файл, управлява браузъра и се отчита. Струва колкото всяко изпълнение и изисква агентът да е включен и готов.",
   "codingAgent.harnessTestFailed": "Тестът на харнеса не можа да започне",
+  "codingAgent.harnessTestNoFolder": "Първо изберете папка за проекти.",
   "codingAgent.deniedHelp": "Кодиращият агент може да изпълнява само определен набор команди в собствената си папка. Това е защитата, която работи, а не грешка — изпълнението обикновено намира друг начин.",
   "codingAgent.stop": "Спри",
   "codingAgent.back": "Назад",
@@ -647,7 +648,7 @@ export const bg: Record<string, string> = {
   "codingAgent.reviewPassTitle": "Автоматичен преглед на {id}",
 
   "codingAgent.wizardTitle": "Настройка на кодиращия агент",
-  "codingAgent.wizardIntro": "Кодиращият агент позволява на асистента ви да предаде цяла задача на Claude Code на тази кутия: чете и записва файлове в една папка, изпълнява команди там и се отчита. Настройката е в две стъпки.",
+  "codingAgent.wizardIntro": "Кодиращият агент позволява на асистента ви да предаде цяла задача на Claude Code на тази кутия: чете и записва файлове в една папка, изпълнява команди там и се отчита. Настройката е в три стъпки.",
   "codingAgent.wizardEnable": "Активиране",
   "codingAgent.wizardStepOf": "Стъпка {n} от {total}",
   "codingAgent.wizardNext": "Напред",

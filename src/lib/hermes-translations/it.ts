@@ -597,6 +597,7 @@ export const it: Record<string, string> = {
   "codingAgent.harnessTestTitle": "Prova dell'ambiente",
   "codingAgent.harnessTestHint": "Avvia una piccola esecuzione reale in un progetto di prova per dimostrare che la shell delegata funziona da capo a fondo: Claude Code parte, scrive un file, guida il browser e riferisce. Costa come qualsiasi esecuzione e richiede l'agente attivo e pronto.",
   "codingAgent.harnessTestFailed": "Impossibile avviare il test dell'harness",
+  "codingAgent.harnessTestNoFolder": "Scelga prima una cartella dei progetti.",
   "codingAgent.deniedHelp": "L'agente di codice può eseguire solo un insieme fisso di comandi nella propria cartella. È il limite di sicurezza che funziona, non un errore: l'esecuzione di solito trova un'altra strada.",
   "codingAgent.stop": "Interrompi",
   "codingAgent.back": "Indietro",
@@ -671,7 +672,7 @@ export const it: Record<string, string> = {
   "codingAgent.reviewPassTitle": "Revisione automatica di {id}",
 
   "codingAgent.wizardTitle": "Configura l'agente di codice",
-  "codingAgent.wizardIntro": "L'agente di codice consente al suo assistente di affidare un'intera attività a Claude Code su questa box: legge e scrive file in una cartella, vi esegue comandi e riferisce. La configurazione richiede due passaggi.",
+  "codingAgent.wizardIntro": "L'agente di codice consente al suo assistente di affidare un'intera attività a Claude Code su questa box: legge e scrive file in una cartella, vi esegue comandi e riferisce. La configurazione richiede tre passaggi.",
   "codingAgent.wizardEnable": "Attiva",
   "codingAgent.wizardStepOf": "Passaggio {n} di {total}",
   "codingAgent.wizardNext": "Avanti",

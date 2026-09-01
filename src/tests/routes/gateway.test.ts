@@ -135,6 +135,37 @@ describe("GET /[...gateway] (catch-all route)", () => {
     expect(mockServeGatewayHTML).toHaveBeenCalled();
   });
 
+  it("proxies a script fetch that asks for text/html but says sec-fetch-mode: cors", async () => {
+    // Fetch metadata is the authority when the browser sends it: a `fetch()`
+    // from a script says `cors` whatever its Accept header, and it wants the
+    // resource, not the shell. The Accept sniff is only for clients that send
+    // no metadata at all.
+    mockGetAll.mockResolvedValue({ setup_complete: true });
+    mockProxyGatewayRequest.mockResolvedValue(new NextResponse("{}", { status: 200 }));
+
+    await gatewayGet(
+      createRequest("http://localhost/control-ui-config.json", { "sec-fetch-mode": "cors", accept: "text/html" }),
+    );
+
+    expect(mockProxyGatewayRequest).toHaveBeenCalled();
+    expect(mockServeGatewayHTML).not.toHaveBeenCalled();
+  });
+
+  it("answers 404 for a /setup-api path no route handler matched", async () => {
+    // /setup-api/ is ClawBox's own namespace and the gateway serves nothing
+    // under it, so an unmatched path there is a missing route — not something
+    // to proxy (502 from a gateway that never heard of it) or to answer with
+    // the SPA shell. A client probing for an endpoint must be able to tell
+    // "not here" from "down".
+    mockGetAll.mockResolvedValue({ setup_complete: true });
+
+    const res = await gatewayGet(createRequest("http://localhost/setup-api/ai-models/providers", { accept: "*/*" }));
+
+    expect(res.status).toBe(404);
+    expect(mockProxyGatewayRequest).not.toHaveBeenCalled();
+    expect(mockServeGatewayHTML).not.toHaveBeenCalled();
+  });
+
   it("returns 500 on error", async () => {
     mockGetAll.mockRejectedValue(new Error("Config read failed"));
 

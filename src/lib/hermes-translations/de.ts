@@ -585,6 +585,7 @@ export const de: Record<string, string> = {
   "codingAgent.harnessTestTitle": "Testlauf",
   "codingAgent.harnessTestHint": "Startet einen kleinen, echten Lauf in einem Wegwerf-Projekt, um zu belegen, dass die delegierte Shell durchgängig funktioniert: Claude Code startet, schreibt eine Datei, steuert den Browser und meldet sich zurück. Er kostet wie jeder andere Lauf und setzt voraus, dass der Agent eingeschaltet und bereit ist.",
   "codingAgent.harnessTestFailed": "Der Harness-Test konnte nicht gestartet werden",
+  "codingAgent.harnessTestNoFolder": "Wählen Sie zuerst einen Projektordner.",
   "codingAgent.deniedHelp": "Der Coding-Agent darf nur einen festen Satz Befehle in seinem eigenen Ordner ausführen. Das ist die Schutzgrenze bei der Arbeit, kein Fehler — der Lauf findet meist einen anderen Weg.",
   "codingAgent.stop": "Stoppen",
   "codingAgent.back": "Zurück",
@@ -659,7 +660,7 @@ export const de: Record<string, string> = {
   "codingAgent.reviewPassTitle": "Automatischer Prüflauf von {id}",
 
   "codingAgent.wizardTitle": "Coding-Agent einrichten",
-  "codingAgent.wizardIntro": "Mit dem Coding-Agenten übergibt Ihr Assistent eine ganze Aufgabe an Claude Code auf dieser Box: Er liest und schreibt Dateien in einem Ordner, führt dort Befehle aus und meldet sich zurück. Die Einrichtung dauert zwei Schritte.",
+  "codingAgent.wizardIntro": "Mit dem Coding-Agenten übergibt Ihr Assistent eine ganze Aufgabe an Claude Code auf dieser Box: Er liest und schreibt Dateien in einem Ordner, führt dort Befehle aus und meldet sich zurück. Die Einrichtung dauert drei Schritte.",
   "codingAgent.wizardEnable": "Aktivieren",
   "codingAgent.wizardStepOf": "Schritt {n} von {total}",
   "codingAgent.wizardNext": "Weiter",

@@ -28,8 +28,11 @@ function links(container: HTMLElement) {
 describe("bare URLs in chat text", () => {
   it("links a pasted https URL", () => {
     const { container } = draw("Tunnel is up: https://foo-bar.trycloudflare.com now");
+    // The href is the parsed URL's own `href`, so a bare host gains the
+    // trailing slash the URL parser normalises it to; the visible text stays
+    // exactly what was pasted.
     expect(links(container)).toEqual([
-      { href: "https://foo-bar.trycloudflare.com", text: "https://foo-bar.trycloudflare.com" },
+      { href: "https://foo-bar.trycloudflare.com/", text: "https://foo-bar.trycloudflare.com" },
     ]);
     // The surrounding sentence survives — linkifying must not eat text.
     expect(container.textContent).toContain("Tunnel is up:");
@@ -46,7 +49,7 @@ describe("bare URLs in chat text", () => {
   it("gives a www host a scheme, since href without one is a relative path", () => {
     const { container } = draw("docs at www.clawbox.com today");
     expect(links(container)).toEqual([
-      { href: "https://www.clawbox.com", text: "www.clawbox.com" },
+      { href: "https://www.clawbox.com/", text: "www.clawbox.com" },
     ]);
   });
 
@@ -67,7 +70,6 @@ describe("bare URLs in chat text", () => {
   });
 
   it("does not linkify a javascript: URL", () => {
-    // eslint-disable-next-line no-script-url
     const { container } = draw("try javascript:alert(1) here");
     expect(links(container)).toEqual([]);
   });
@@ -87,8 +89,20 @@ describe("bare URLs in chat text", () => {
   it("links each of several URLs in one line", () => {
     const { container } = draw("https://a.example.com and https://b.example.com");
     expect(links(container).map((l) => l.href)).toEqual([
-      "https://a.example.com",
-      "https://b.example.com",
+      "https://a.example.com/",
+      "https://b.example.com/",
     ]);
+  });
+
+  it("leaves a scheme with nothing behind it as text, since the parser refuses it", () => {
+    // A bare `https://` followed by a space never matches the pattern (it
+    // demands at least one character after the slashes), so the input has to
+    // sneak past it: "https://." matches, trimUrlTail hands the full stop back
+    // to the sentence, and what is left is `https://` — which the URL parser
+    // throws on. That is the catch branch: the sentence must survive untouched
+    // rather than gain an empty or broken anchor.
+    const { container } = draw("the prefix is https://. and that is all");
+    expect(links(container)).toEqual([]);
+    expect(container.textContent).toBe("the prefix is https://. and that is all");
   });
 });

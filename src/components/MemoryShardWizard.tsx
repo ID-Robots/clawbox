@@ -43,6 +43,11 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   const [sources, setSources] = useState<string[]>([]);
   const [browse, setBrowse] = useState<BrowseAnswer | null>(null);
   const browseAbort = useRef<AbortController | null>(null);
+  // The provisioning flow's own signal. Closing the window mid-download must
+  // stop the download: the pull route drops its Ollama connection when the
+  // client goes away, precisely so a model is never fetched with nothing in
+  // the UI showing it, and a fetch left running here would defeat that.
+  const provisionAbort = useRef<AbortController | null>(null);
 
   const loadSources = useCallback(async () => {
     try {
@@ -53,7 +58,10 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
     }
   }, []);
   useEffect(() => { void loadSources(); }, [loadSources]);
-  useEffect(() => () => browseAbort.current?.abort(), []);
+  useEffect(() => () => {
+    browseAbort.current?.abort();
+    provisionAbort.current?.abort();
+  }, []);
 
   const openBrowse = useCallback(async (dir?: string) => {
     browseAbort.current?.abort();
@@ -112,13 +120,17 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   const [time, setTime] = useState("03:00");
   const [dayOfWeek, setDayOfWeek] = useState(0);
 
-  const saveSchedule = async () => {
+  const saveSchedule = async (signal: AbortSignal) => {
     const res = await fetch("/setup-api/clawkeep/memory/schedule", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      // The whole object: this route replaces rather than merges, so an absent
-      // field would be reset to its default.
-      body: JSON.stringify({ enabled: true, frequency, time, dayOfWeek }),
+      // The whole object, under the route's own names (`timeOfDay`,
+      // `weekday` — see MemoryIndexSchedule): this route replaces rather than
+      // merges, and a field it does not recognise is reset to its default
+      // just like an absent one, which is how the chosen time and day were
+      // once quietly saved as 03:00 on Sunday.
+      body: JSON.stringify({ enabled: true, frequency, timeOfDay: time, weekday: dayOfWeek }),
+      signal,
     });
     if (!res.ok) {
       const out = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -141,14 +153,20 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
    * every scheduled pass after the ten-minute idle stop.
    */
   const provision = async () => {
+    provisionAbort.current?.abort();
+    const ctl = new AbortController();
+    provisionAbort.current = ctl;
+    const { signal } = ctl;
     setBusy("provision");
     setError(null);
     try {
       setPhase("checking");
       setDetail(null);
-      const status = await fetch("/setup-api/ollama/status", { cache: "no-store" })
+      const status = await fetch("/setup-api/ollama/status", { cache: "no-store", signal })
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null) as { running?: boolean; models?: { name: string }[] } | null;
+      // The probe swallows its own failure; an abort is the one it must not.
+      if (signal.aborted) return;
 
       const have = (status?.models ?? []).some((m) => m.name.startsWith(LOCAL_EMBEDDING_MODEL.split(":")[0]));
 
@@ -157,6 +175,7 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: "ollama", enabled: true }),
+        signal,
       });
       if (!enabled.ok) throw new Error(t("clawkeep.memory.setup.ollamaFailed"));
 
@@ -167,6 +186,7 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ model: LOCAL_EMBEDDING_MODEL }),
+          signal,
         });
         if (!pull.ok || !pull.body) throw new Error(t("clawkeep.memory.setup.pullFailed"));
         // NDJSON, one object per line, carrying Ollama's own byte counts — so
@@ -176,35 +196,43 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
         const reader = pull.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            let parsed: PullLine;
-            try { parsed = JSON.parse(line) as PullLine; } catch { continue; }
-            if (parsed.error) throw new Error(parsed.error);
-            if (typeof parsed.completed === "number" && typeof parsed.total === "number" && parsed.total > 0) {
-              setProgress(parsed.completed / parsed.total);
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() ?? "";
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              let parsed: PullLine;
+              try { parsed = JSON.parse(line) as PullLine; } catch { continue; }
+              if (parsed.error) throw new Error(parsed.error);
+              if (typeof parsed.completed === "number" && typeof parsed.total === "number" && parsed.total > 0) {
+                setProgress(parsed.completed / parsed.total);
+              }
+              if (parsed.status) setDetail(parsed.status);
             }
-            if (parsed.status) setDetail(parsed.status);
           }
+        } finally {
+          // Leaving the loop on an error line releases the body rather than
+          // holding a locked reader on it until garbage collection; on a
+          // stream that has not ended, cancelling is what tells the pull route
+          // its client is gone.
+          await reader.cancel().catch(() => {});
         }
         setProgress(1);
       }
 
       setPhase("switching-provider");
       setDetail(null);
-      const provider = await fetch("/setup-api/clawkeep/memory/provider", { method: "POST" });
+      const provider = await fetch("/setup-api/clawkeep/memory/provider", { method: "POST", signal });
       if (!provider.ok) {
         const out = (await provider.json().catch(() => null)) as { error?: string } | null;
         throw new Error(out?.error || t("clawkeep.memory.setup.providerFailed"));
       }
 
-      await saveSchedule();
+      await saveSchedule(signal);
 
       // The switch and the completion flag together, at the very end: a flag
       // that landed earlier would drop the owner on the home page mid-wizard.
@@ -212,24 +240,32 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: true, setupComplete: true }),
+        signal,
       });
       if (!done.ok) throw new Error(t("clawkeep.memory.setup.enableFailed"));
 
       // The first pass. A box with no index yet needs a full one; the route
-      // resolves that itself, so "incremental" is honest here.
-      await fetch("/setup-api/clawkeep/memory/index", {
+      // resolves that itself, so "incremental" is honest here. A 409 means a
+      // pass is already going — the box IS indexing, which is all this asked
+      // for. Anything else is said here, in the wizard the owner is watching:
+      // the card that replaces it would only show "never ran", with no reason.
+      const index = await fetch("/setup-api/clawkeep/memory/index", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode: "incremental" }),
+        signal,
       });
+      if (!index.ok && index.status !== 409) throw new Error(t("clawkeep.memory.startFailed"));
 
       setPhase("ready");
       onDone();
     } catch (err) {
+      // The window closed: there is nobody left to tell.
+      if (signal.aborted) return;
       setPhase("failed");
       setError(err instanceof Error ? err.message : t("clawkeep.memory.setup.provisionFailed"));
     } finally {
-      setBusy(null);
+      if (!signal.aborted) setBusy(null);
     }
   };
 

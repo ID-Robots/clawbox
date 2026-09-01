@@ -79,11 +79,14 @@ import {
   decideMerge,
   emptyChecks,
   isPrPending,
+  isPrPhase,
   mergePullRequest,
   openPullRequest,
   POLL_INTERVAL_MS,
   readPullRequest,
+  runBranchName,
   startRunBranch,
+  type PrChecks,
   type PrState,
 } from "@/lib/coding-pr";
 import { commitRunWork, lastCommit, type LastCommit } from "@/lib/coding-git";
@@ -703,12 +706,41 @@ export function suggestedDefaultDirectory(): string {
 async function ensureDirectoryInsideHome(directory: string): Promise<void> {
   const home = path.resolve(homeDir());
   const target = path.resolve(directory);
-  if (target !== home && !target.startsWith(home + path.sep)) return;
+  // The lexical fence, on the very value mkdir is given — a resolved absolute
+  // path tested against the home, which is the shape a static analyser
+  // recognises as contained. The home itself is out too: it exists, and it is
+  // never a working folder (resolveWorkingDirectory refuses it).
+  if (!target.startsWith(home + path.sep)) return;
+  // The fence that holds on disk: a symlink under the home may lead anywhere
+  // (~/scratch → /), the lexical test cannot see it, and mkdir follows it —
+  // ~/scratch/Projects would have created /Projects. So the nearest ancestor
+  // that exists has to be inside the REAL home as well; what is missing above
+  // it cannot be a link, and is what mkdir makes.
+  if (!(await existingAncestorInside(target, home))) return;
   try {
     await fs.promises.mkdir(target, { recursive: true });
   } catch {
     // Leave it to resolveWorkingDirectory below to answer "does not exist" in
     // the owner's words; a failure here is not a different fact.
+  }
+}
+
+/**
+ * True when the deepest part of `target` that exists — the path itself, or
+ * the nearest ancestor of it — really lies inside `home`, symlinks resolved on
+ * both sides. Walks up until realpath answers; the root always does.
+ */
+async function existingAncestorInside(target: string, home: string): Promise<boolean> {
+  const realHome = await fs.promises.realpath(home).catch(() => home);
+  let probe = target;
+  for (;;) {
+    try {
+      return isInside(await fs.promises.realpath(probe), realHome);
+    } catch {
+      const parent = path.dirname(probe);
+      if (parent === probe) return false;
+      probe = parent;
+    }
   }
 }
 
@@ -1305,18 +1337,38 @@ function isCodingRun(value: unknown): value is CodingRun {
   );
 }
 
-/** Fill in fields an older on-disk record may lack, so readers never see undefined. */
-/** A stored `pr` blob that is shaped like one. Anything else is dropped, the
- *  same way every other persisted field is re-validated on read. */
-function isPrState(value: unknown): value is PrState {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value as Partial<PrState>;
-  return typeof v.phase === "string"
-    && ["opening", "waiting", "merged", "blocked", "failed"].includes(v.phase)
-    && typeof v.startedAt === "number"
-    && typeof v.checks === "object" && v.checks !== null;
+/**
+ * A stored `pr` blob, rebuilt field by field the way normalizeRun rebuilds
+ * the run around it. One without a phase or a start is not a pull request and
+ * is dropped; anything else wrong in it is repaired to its default rather
+ * than trusted — a `number` that is not a number reached `gh pr view` as an
+ * argument, and a count that was not a count reached the owner as
+ * "undefined of undefined checks".
+ */
+function normalizePr(raw: unknown): PrState | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const v = raw as Partial<Record<keyof PrState, unknown>>;
+  if (!isPrPhase(v.phase) || typeof v.startedAt !== "number") return null;
+  const checks = (typeof v.checks === "object" && v.checks !== null ? v.checks : {}) as Partial<Record<keyof PrChecks, unknown>>;
+  const count = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) && n >= 0 ? Math.round(n) : 0);
+  return {
+    phase: v.phase,
+    number: typeof v.number === "number" && Number.isInteger(v.number) && v.number > 0 ? v.number : null,
+    url: typeof v.url === "string" ? v.url : null,
+    branch: typeof v.branch === "string" ? v.branch : null,
+    base: typeof v.base === "string" ? v.base : null,
+    checks: { total: count(checks.total), passed: count(checks.passed), failed: count(checks.failed), pending: count(checks.pending) },
+    detail: typeof v.detail === "string" ? v.detail : null,
+    startedAt: v.startedAt,
+    endedAt: typeof v.endedAt === "number" ? v.endedAt : null,
+    // A verdict the record does not carry is not a pass: only `true` written
+    // by this code counts, so a record from before the field merges nothing
+    // on its own.
+    reviewOk: v.reviewOk === true,
+  };
 }
 
+/** Fill in fields an older on-disk record may lack, so readers never see undefined. */
 function normalizeRun(raw: CodingRun): CodingRun {
   return {
     id: raw.id,
@@ -1361,7 +1413,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // Every field must be reconstructed here: normalizeRun builds a fresh
     // object field by field, so anything omitted survives in memory and
     // disappears the next time the file is read.
-    pr: isPrState(raw.pr) ? raw.pr : null,
+    pr: normalizePr(raw.pr),
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
     todos: parseTodos(raw.todos) ?? [],
     exitCode: typeof raw.exitCode === "number" ? raw.exitCode : null,
@@ -2481,40 +2533,72 @@ async function recordRunWork(run: CodingRun): Promise<void> {
  * automatic follow-up seconds after they pressed Stop would be the box
  * overruling them.
  */
-async function recordAndReview(run: CodingRun, ownerEnded: boolean): Promise<void> {
+async function recordAndReview(run: CodingRun, ended: "stop" | "pause" | null): Promise<void> {
   await recordRunWork(run);
-  if (ownerEnded) return;
-  await maybeStartReviewPass(run);
+  const review = ended !== null ? "skipped" : await maybeStartReviewPass(run);
   // After the review pass is decided, not before: when one is starting, the
   // pull request waits for it, because the review's own commits belong in it.
-  await maybeOpenPullRequest(run);
+  // Reached after the owner's Stop too — not to open anything then, but so the
+  // pull request that was being prepared is settled rather than left pending.
+  await maybeOpenPullRequest(run, ended, review);
 }
 
 /**
  * Open the pull request for a finished chain of runs, and start watching its
- * checks.
+ * checks — or settle the pull request as never opened, when the chain did not
+ * finish. Every way a chain can end through finishRun comes through here, and
+ * the ways that do not (a spawn that failed, Stop on a paused run, a restart)
+ * settle the phase themselves: a pull request left "opening" is pending for
+ * good, which keeps its run out of the history sweeps and the desktop polling
+ * for a change that is never coming.
  *
  * "Chain", not "run": with the review pass on, the LAST run to settle is the
  * review, and the branch and the work belong to the run it reviewed. So the
  * pull request is always attributed to the origin run, and this defers while a
- * review pass is still to come.
+ * review pass is running.
  */
-async function maybeOpenPullRequest(finished: CodingRun): Promise<void> {
+async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause" | null, review: ReviewPassOutcome): Promise<void> {
   try {
-    if (finished.status !== "completed") return;
-    if (!(await getAutoPr())) return;
+    // A review pass is running for this run — wait for it, and let the
+    // review's own settle bring us back here. Only when one actually STARTED:
+    // maybeStartReviewPass swallows its refusals (the switch off, the slot
+    // taken, the harness gone), and deferring on the conditions alone left the
+    // pull request waiting for a review that was never going to happen.
+    if (review === "started") return;
 
-    // A review pass is about to start for this run — wait for it, and let the
-    // review's own settle bring us back here. These are exactly
-    // maybeStartReviewPass's conditions; if they hold, a review IS coming.
-    const reviewComing = finished.reviewOf === null
-      && finished.filesTouched.length > 0
-      && (await getReviewPass());
-    if (reviewComing) return;
+    const origin = finished.reviewOf === null ? finished : loadRuns().find((r) => r.id === finished.reviewOf);
+    if (!origin?.pr || origin.pr.phase !== "opening") return;
+    const branch = origin.pr.branch ?? runBranchName(origin.id);
 
-    const originId = finished.reviewOf ?? finished.id;
-    const origin = loadRuns().find((r) => r.id === originId);
-    if (!origin?.pr || origin.pr.phase !== "opening" || !origin.pr.branch || !origin.pr.base) return;
+    // A pause is not the end of the chain: the run resumes IN PLACE — the
+    // same record, the same branch — and its settle comes back here, so the
+    // pull request stays "opening" through it. Settling it here closed the
+    // pull request for good on the first pause, and the resumed run's
+    // completion then found nothing left to open. A paused run is held, not
+    // history (see isHeld), so this is not the pending-forever the sweeps
+    // suffer from; the one way a paused run ends without coming back here —
+    // Stop on it — settles the pull request in stopRun.
+    if (finished.status === "paused") return;
+    // The owner's Stop means no more of this — pushing their code to GitHub
+    // seconds after they pressed it would be the box overruling them. A run
+    // that completed under the gesture (the result raced the kill) is kept
+    // "completed", but still not pushed.
+    if (ended !== null) {
+      settlePr(origin, "failed", `${ended === "pause" ? "Paused" : "Stopped"} before a pull request was opened. The work stays on ${branch}.`);
+      return;
+    }
+    if (origin.status !== "completed") {
+      settlePr(origin, "failed", `The run did not finish (${origin.status}), so no pull request was opened. The work stays on ${branch}.`);
+      return;
+    }
+    if (!(await getAutoPr())) {
+      settlePr(origin, "failed", `Pull requests were switched off while the run worked, so none was opened. The work stays on ${branch}.`);
+      return;
+    }
+    if (!origin.pr.branch || !origin.pr.base) {
+      settlePr(origin, "failed", "The run's branch was not recorded, so no pull request was opened.");
+      return;
+    }
 
     // Nothing was committed anywhere in the chain: there is no diff to review
     // and nothing to merge.
@@ -2535,21 +2619,24 @@ async function maybeOpenPullRequest(finished: CodingRun): Promise<void> {
       return;
     }
 
+    // The review's verdict gates the merge as well as the checks: they answer
+    // different questions, and a green suite over a review that failed is not
+    // consent to merge. A review that was due and could not start is no
+    // verdict either. Written on the record — see PrState.reviewOk.
+    const reviewOk = finished.reviewOf !== null ? finished.status === "completed" : review !== "refused";
     origin.pr = {
       ...origin.pr,
       phase: "waiting",
       number: opened.number,
       url: opened.url,
       startedAt: Date.now(),
+      reviewOk,
     };
     pushProgress(origin, `Opened pull request #${opened.number} into ${origin.pr.base}`);
     persist(true);
     console.error(`[coding-agent] ${origin.id} opened PR #${opened.number}`);
 
-    // The review's verdict gates the merge as well as the checks: they answer
-    // different questions, and a green suite over a review that failed is not
-    // consent to merge.
-    watchPullRequest(origin.id, finished.reviewOf !== null ? finished.status === "completed" : true);
+    watchPullRequest(origin.id);
   } catch (err) {
     console.error(`[coding-agent] pull request for ${finished.id} not opened:`, err instanceof Error ? err.message : err);
   }
@@ -2592,15 +2679,24 @@ const prWatchers = new Set<string>();
  *
  * A timer in the web server, which CLAUDE.md calls the one long-lived ClawBox
  * process — so it is unref()'d (it must never hold the process open), capped by
- * MAX_WAIT_MS through decideMerge, and single-instance per run.
+ * MAX_WAIT_MS through decideMerge, and single-instance per run. Everything it
+ * decides on is read from the record each tick, the review verdict included,
+ * so a watcher rebuilt after a restart decides exactly as the first one did.
  */
-function watchPullRequest(runId: string, reviewOk: boolean): void {
+function watchPullRequest(runId: string): void {
   if (prWatchers.has(runId)) return;
   prWatchers.add(runId);
 
   const tick = async (): Promise<void> => {
     const run = loadRuns().find((r) => r.id === runId);
-    if (!run?.pr || run.pr.phase !== "waiting" || run.pr.number === null) {
+    if (!run?.pr || run.pr.phase !== "waiting") {
+      prWatchers.delete(runId);
+      return;
+    }
+    if (run.pr.number === null) {
+      // A waiting pull request whose number is gone (a hand-edited or damaged
+      // record) can never be read; settled, not left pending for good.
+      settlePr(run, "failed", "The pull request's number was lost, so its checks cannot be read.");
       prWatchers.delete(runId);
       return;
     }
@@ -2616,7 +2712,7 @@ function watchPullRequest(runId: string, reviewOk: boolean): void {
     run.pr = { ...run.pr, checks: snapshot.checks };
     persist(true);
 
-    const verdict = decideMerge({ snapshot, waitedMs: Date.now() - run.pr.startedAt, reviewOk });
+    const verdict = decideMerge({ snapshot, waitedMs: Date.now() - run.pr.startedAt, reviewOk: run.pr.reviewOk });
     if (verdict.action === "wait") { schedule(); return; }
     if (verdict.action === "block") {
       settlePr(run, "blocked", verdict.detail);
@@ -2638,15 +2734,29 @@ function watchPullRequest(runId: string, reviewOk: boolean): void {
 }
 
 /**
- * Pick up pull requests left waiting by a restart.
+ * Pick up pull requests left pending by a restart.
  *
  * Same reason the email approval poller is restarted at boot: a box that
  * reboots mid-wait would otherwise leave the run showing "waiting for checks"
- * forever, with nothing polling.
+ * forever, with nothing polling. One left "opening" on a run the restart
+ * ended has no future at all — the settle that would have opened it died
+ * with the previous server, and reconcileAfterRestart has already marked the
+ * run that was still working failed — so it is settled here the way that run
+ * was, with the branch named for the owner to push themselves. A paused
+ * run's is left alone: the run is kept, and its resume opens it.
  */
 export function resumePullRequestWatches(): void {
   for (const run of loadRuns()) {
-    if (isPrPending(run.pr) && run.pr?.phase === "waiting") watchPullRequest(run.id, true);
+    if (!isPrPending(run.pr) || !run.pr) continue;
+    if (run.pr.phase === "waiting") {
+      watchPullRequest(run.id);
+    } else if (!isHeld(run.status)) {
+      // Held, not live: a paused run survives the restart with its record
+      // (see the restart reconciliation) and resumes in place, so its
+      // "opening" pull request is still coming — settling it here meant the
+      // resumed run completed with nothing left to open.
+      settlePr(run, "failed", `The ClawBox web server restarted before the pull request was opened. The work stays on ${run.pr.branch ?? runBranchName(run.id)}.`);
+    }
   }
 }
 
@@ -2664,6 +2774,15 @@ const REVIEW_PASS_TASK =
   + " line and finish. Update report.md in your evidence folder with what you checked, found, and fixed.";
 
 /**
+ * What became of the review pass after a run settled: a review run is now
+ * working ("started"), none was due ("skipped"), or one was due and could not
+ * start ("refused"). The pull request step needs the difference — it waits
+ * only for a review that exists, and treats one that could not run as no
+ * verdict rather than a pass.
+ */
+type ReviewPassOutcome = "started" | "skipped" | "refused";
+
+/**
  * One automatic follow-up run when the owner has switched the review pass on.
  *
  * The guards make it a pass and never a loop: only after a run that COMPLETED
@@ -2672,12 +2791,16 @@ const REVIEW_PASS_TASK =
  * one-run-at-a-time slot, so this can refuse for the same reasons any start
  * can — and a refusal is a logged line, never an error the settled run feels.
  */
-async function maybeStartReviewPass(finished: CodingRun): Promise<void> {
+async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutcome> {
+  if (finished.status !== "completed") return "skipped";
+  if (finished.reviewOf !== null) return "skipped";
+  if (finished.filesTouched.length === 0) return "skipped";
   try {
-    if (finished.status !== "completed") return;
-    if (finished.reviewOf !== null) return;
-    if (finished.filesTouched.length === 0) return;
-    if (!(await getReviewPass())) return;
+    if (!(await getReviewPass())) return "skipped";
+  } catch {
+    return "skipped";
+  }
+  try {
     const review = await startRun({
       task: REVIEW_PASS_TASK,
       resumeRunId: finished.id,
@@ -2685,8 +2808,10 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<void> {
       reviewOf: finished.id,
     });
     console.error(`[coding-agent] ${review.id} started as the automatic review pass of ${finished.id}`);
+    return "started";
   } catch (err) {
     console.error(`[coding-agent] review pass of ${finished.id} not started:`, err instanceof Error ? err.message : err);
+    return "refused";
   }
 }
 
@@ -2825,7 +2950,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   console.error(`[coding-agent] ${run.id} ${run.status} after ${Math.round((run.completedAt - run.startedAt) / 1000)}s (${run.numTurns} turns)`);
   // History first, then the notice: by the time the owner is told a run
   // finished, its work is already recoverable.
-  void recordAndReview(run, state.endRequested !== null);
+  void recordAndReview(run, state.endRequested);
   // A pause is the owner's own gesture — no finish notice for it.
   if (run.status !== "paused") void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
     console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
@@ -3049,6 +3174,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
         detail: null,
         startedAt: Date.now(),
         endedAt: null,
+        // No verdict yet; the one that counts is written when the pull
+        // request opens, which is the only way into "waiting".
+        reviewOk: true,
       };
       pushProgress(run, `Working on ${branched.branch}, for a pull request into ${branched.base}`);
     } else {
@@ -3064,6 +3192,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
         detail: branched.detail,
         startedAt: Date.now(),
         endedAt: Date.now(),
+        reviewOk: false,
       };
       pushProgress(run, `No pull request: ${branched.detail}`);
     }
@@ -3189,6 +3318,12 @@ export function stopRun(id: string): CodingRun {
     run.status = "stopped";
     run.error = "Stopped.";
     run.completedAt = run.completedAt ?? Date.now();
+    // The pull request the pause kept "opening" (see maybeOpenPullRequest)
+    // ends here with the run: this path never reaches finishRun, so nothing
+    // else would settle it.
+    if (isPrPending(run.pr)) {
+      settlePr(run, "failed", `Stopped before a pull request was opened. The work stays on ${run.pr?.branch ?? runBranchName(run.id)}.`);
+    }
     persist(true);
     wakeWaiters(id);
     return cloneRun(run);
@@ -3412,6 +3547,12 @@ function spawnOrSettle(
     run.status = "failed";
     run.error = `Could not start ${CODING_HARNESS_COMMAND}: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
     run.completedAt = Date.now();
+    // The branch made for its pull request is already on the record. Nothing
+    // settles the run through finishRun on this path, so the pull request is
+    // ended here too, or it stays "opening" — pending — for good.
+    if (isPrPending(run.pr)) {
+      settlePr(run, "failed", `The run could not start, so no pull request was opened. Its branch ${run.pr?.branch ?? runBranchName(run.id)} is checked out.`);
+    }
     persist(true);
     wakeWaiters(run.id);
     console.error(`[coding-agent] ${run.id} failed to spawn:`, err instanceof Error ? err.message : err);

@@ -588,6 +588,7 @@ export const ja: Record<string, string> = {
   "codingAgent.harnessTestTitle": "動作テスト",
   "codingAgent.harnessTestHint": "使い捨てプロジェクトで小さな実行を 1 回行い、委任シェルが最初から最後まで動くことを確認します。Claude Code が起動してファイルを書き、ブラウザーを操作し、結果を報告します。通常の実行と同じ費用がかかり、エージェントが有効で準備できている必要があります。",
   "codingAgent.harnessTestFailed": "ハーネステストを開始できませんでした",
+  "codingAgent.harnessTestNoFolder": "先にプロジェクトフォルダーを選んでください。",
   "codingAgent.deniedHelp": "コーディングエージェントは自分のフォルダー内で決められたコマンドしか実行できません。これは安全のための制限が働いた結果であり、不具合ではありません。多くの場合、実行は別の方法を見つけます。",
   "codingAgent.stop": "停止",
   "codingAgent.back": "戻る",
@@ -662,7 +663,7 @@ export const ja: Record<string, string> = {
   "codingAgent.reviewPassTitle": "{id} の自動レビュー",
 
   "codingAgent.wizardTitle": "コーディングエージェントの設定",
-  "codingAgent.wizardIntro": "コーディングエージェントを使うと、アシスタントがタスク全体をこのボックス上の Claude Code に任せられます。指定した 1 つのフォルダー内でファイルを読み書きし、コマンドを実行して、結果を報告します。設定は 2 ステップです。",
+  "codingAgent.wizardIntro": "コーディングエージェントを使うと、アシスタントがタスク全体をこのボックス上の Claude Code に任せられます。指定した 1 つのフォルダー内でファイルを読み書きし、コマンドを実行して、結果を報告します。設定は 3 ステップです。",
   "codingAgent.wizardEnable": "有効にする",
   "codingAgent.wizardStepOf": "ステップ {n} / {total}",
   "codingAgent.wizardNext": "次へ",

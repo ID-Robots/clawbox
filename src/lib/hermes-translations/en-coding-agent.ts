@@ -135,6 +135,9 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.harnessTestTitle": "Test harness",
   "codingAgent.harnessTestHint": "Starts one small, real run in a scratch project to prove the delegated shell works end to end: Claude Code launches, writes a file, drives the browser and reports back. It costs a run like any other, and it needs the agent switched on and ready.",
   "codingAgent.harnessTestFailed": "Could not start the harness test",
+  // The test runs in a folder inside the owner's project folder, so it has
+  // nowhere to go until one is chosen (src/lib/coding-agent-harness-test.ts).
+  "codingAgent.harnessTestNoFolder": "Choose a project folder first.",
   "codingAgent.deniedHelp":
     "The coding agent may only run a fixed set of commands inside its own folder. This is the safety limit working, not a fault — the run usually finds another way.",
   "codingAgent.stop": "Stop",
@@ -230,7 +233,7 @@ export const codingAgentEn: Record<string, string> = {
   // it works in. Settings keeps every one of these controls — this is an
   // onboarding path, not the only way in.
   "codingAgent.wizardTitle": "Set up the coding agent",
-  "codingAgent.wizardIntro": "The coding agent lets your assistant hand a whole task to Claude Code running on this box: it reads and writes files in one folder, runs commands there, and reports back. Setting it up takes two steps.",
+  "codingAgent.wizardIntro": "The coding agent lets your assistant hand a whole task to Claude Code running on this box: it reads and writes files in one folder, runs commands there, and reports back. Setting it up takes three steps.",
   "codingAgent.wizardEnable": "Enable",
   "codingAgent.wizardStepOf": "Step {n} of {total}",
   "codingAgent.wizardNext": "Next",

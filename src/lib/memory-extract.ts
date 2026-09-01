@@ -50,8 +50,17 @@ const EXTRACT_ENV = {
 /** How deep into a source folder to walk. */
 const MAX_DEPTH = 6;
 
-/** Files per source, so one enormous folder cannot stall the wizard. */
+/** Documents per source, so one enormous folder cannot stall the wizard. */
 const MAX_FILES = 500;
+
+/**
+ * Directory entries walked per source — files of any kind and folders alike.
+ * MAX_FILES bounds the extraction, not the walk that finds the documents: a
+ * code checkout under a chosen folder has a node_modules of hundreds of
+ * thousands of entries, none of them extractable, and the walk read every one
+ * of them on a six-core Jetson before the count above could say stop.
+ */
+const MAX_ENTRIES = 20_000;
 
 export interface ExtractionResult {
   /** The derived folder, or null when the source held nothing to extract. */
@@ -68,7 +77,14 @@ export function derivedFolderFor(source: string): string {
   return path.join(EXTRACT_ROOT, `${path.basename(source).replace(/[^A-Za-z0-9._-]/g, "-")}-${digest}`);
 }
 
-async function* walk(dir: string, depth = 0): AsyncGenerator<string> {
+/** The walk's budget, shared across every level of the recursion. */
+interface WalkBudget {
+  left: number;
+  /** Set once the budget ran out with entries still unread. */
+  truncated: boolean;
+}
+
+async function* walk(dir: string, budget: WalkBudget, depth = 0): AsyncGenerator<string> {
   if (depth > MAX_DEPTH) return;
   let entries;
   try {
@@ -77,11 +93,18 @@ async function* walk(dir: string, depth = 0): AsyncGenerator<string> {
     return;
   }
   for (const entry of entries) {
+    // Every entry costs one, whatever it is: the budget bounds the work of
+    // looking, and an unsupported file took just as long to find.
+    if (budget.left <= 0) {
+      budget.truncated = true;
+      return;
+    }
+    budget.left -= 1;
     if (entry.name.startsWith(".")) continue;
     const full = path.join(dir, entry.name);
     // isDirectory() is false for a symlink, which is what keeps a link loop out
     // of the walk — the same reason the folder picker reads it this way.
-    if (entry.isDirectory()) yield* walk(full, depth + 1);
+    if (entry.isDirectory()) yield* walk(full, budget, depth + 1);
     else if (entry.isFile()) yield full;
   }
 }
@@ -135,8 +158,9 @@ export async function extractDocuments(source: string): Promise<ExtractionResult
   const notes: string[] = [];
   let seen = 0;
   let sawExtractable = false;
+  const budget: WalkBudget = { left: MAX_ENTRIES, truncated: false };
 
-  for await (const file of walk(path.resolve(source))) {
+  for await (const file of walk(path.resolve(source), budget)) {
     if (seen >= MAX_FILES) {
       notes.push(`Only the first ${MAX_FILES} files in this folder were read.`);
       break;
@@ -159,8 +183,14 @@ export async function extractDocuments(source: string): Promise<ExtractionResult
       continue;
     }
 
-    const rel = path.relative(path.resolve(source), file).replace(/[\\/]/g, "__");
-    const out = path.join(derived, `${rel}.md`);
+    // The derived name keeps the relative path readable AND unique: `a/b.pdf`
+    // and `a__b.pdf` flatten to the same name, and with only that name the
+    // second document was skipped as already current — silently missing from
+    // the index. The digest of the real relative path tells them apart.
+    const relativePath = path.relative(path.resolve(source), file);
+    const flat = relativePath.replace(/[\\/]/g, "__");
+    const suffix = crypto.createHash("sha256").update(relativePath).digest("hex").slice(0, 12);
+    const out = path.join(derived, `${flat}-${suffix}.md`);
     try {
       const previous = await fs.stat(out);
       // Already extracted and still current.
@@ -175,6 +205,13 @@ export async function extractDocuments(source: string): Promise<ExtractionResult
       skipped += 1;
       notes.push(`${path.basename(file)} could not be read.`);
     }
+  }
+
+  // The note belongs to the folder rather than to a file, and goes FIRST so
+  // the cut to three below keeps it: the owner should hear that the scan
+  // stopped short before hearing which single file could not be read.
+  if (budget.truncated) {
+    notes.unshift(`This folder holds more than ${MAX_ENTRIES} entries; only the first were scanned.`);
   }
 
   return {

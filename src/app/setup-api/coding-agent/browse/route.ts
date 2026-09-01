@@ -53,21 +53,29 @@ async function resolveDir(asked: string): Promise<
   } catch {
     root = configured;
   }
-  const within = (p: string) => p === root || p.startsWith(root + path.sep);
-
   // ABSOLUTE stays absolute. The picker posts back the absolute `path` from a
   // previous listing, so reading it as root-relative would look for
   // <root>/home/clawbox/Projects and answer "not found" for the folder the
   // owner just tapped. Containment — not the spelling — is what keeps this in
   // the tree, and `path.resolve` normalises `..` away before that check.
+  //
+  // The check is written as relative-then-join rather than a `startsWith`
+  // helper, on purpose: it is the same rule, but a scanner can only tie a
+  // guard to the sink when the guard is inline on the very value that reaches
+  // it (the chat media route learned this the same way — js/path-injection
+  // stayed open at high severity behind a closure). `rel` is empty for the
+  // root itself, so the root still resolves.
   const requested = path.isAbsolute(asked) ? path.resolve(asked) : path.resolve(root, asked);
-  if (!within(requested)) return { ok: false, status: 404 };
+  const rel = path.relative(root, requested);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return { ok: false, status: 404 };
+  const candidate = path.join(root, rel);
 
   try {
     // Checked AGAIN after resolving links: the lexical check above cannot see
     // that a folder inside the root is a symlink pointing out of it.
-    const real = await fs.realpath(requested);
-    if (!within(real)) return { ok: false, status: 404 };
+    const real = await fs.realpath(candidate);
+    const realRel = path.relative(root, real);
+    if (realRel.startsWith("..") || path.isAbsolute(realRel)) return { ok: false, status: 404 };
     if (isProtectedFilePath(real)) return { ok: false, status: 404 };
     const stat = await fs.stat(real);
     if (!stat.isDirectory()) return { ok: false, status: 404 };
@@ -80,21 +88,25 @@ async function resolveDir(asked: string): Promise<
 
 async function listing(root: string, target: string) {
   const dirents = await fs.readdir(target, { withFileTypes: true });
-  const entries = dirents
+  const folders = dirents
     // `isDirectory()` is false for a symlink, which is what keeps a link loop
     // out of the picker — the same reason the Files app walks it this way.
     .filter((d) => d.isDirectory() && !d.name.startsWith("."))
     .map((d) => ({ name: d.name, path: path.join(target, d.name) }))
     .filter((e) => !isProtectedFilePath(e.path))
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .slice(0, MAX_ENTRIES);
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const entries = folders.slice(0, MAX_ENTRIES);
   return {
     root,
     path: target,
     // Null at the root, so the picker knows not to offer "up".
     parent: target === root ? null : path.dirname(target),
     entries,
-    truncated: dirents.length > MAX_ENTRIES,
+    // Counted from the folders the picker would have shown, not from every
+    // dirent: a home directory with 600 files and 3 folders omits nothing, and
+    // a "more folders than shown" note there would warn about a cut that was
+    // never made.
+    truncated: folders.length > MAX_ENTRIES,
   };
 }
 
@@ -163,7 +175,19 @@ export async function POST(request: NextRequest) {
       : NextResponse.json({ error: "Folder not found", kind: "not_found" }, { status: 404 });
   }
 
-  const target = path.join(resolved.dir, name);
+  // The name passed the regex, so `path.relative` of the resolved child gives
+  // the name straight back — the comparison is defence in depth, and the
+  // `startsWith("..")` form is the shape a scanner can follow from this guard
+  // to the `mkdir` below (see `resolveDir`). Anything else is a name the regex
+  // should have refused, and is answered as one.
+  const childRel = path.relative(resolved.dir, path.resolve(resolved.dir, name));
+  if (childRel.startsWith("..") || path.isAbsolute(childRel) || childRel !== name) {
+    return NextResponse.json(
+      { error: "Use letters, digits, spaces, dots, dashes or underscores — and no slashes.", kind: "invalid" },
+      { status: 400 },
+    );
+  }
+  const target = path.join(resolved.dir, childRel);
   try {
     // `mkdir` without `recursive`, so an existing name is an error rather than
     // a silent success that would tell the owner they created something they

@@ -586,6 +586,7 @@ export const nl: Record<string, string> = {
   "codingAgent.harnessTestTitle": "Testrun",
   "codingAgent.harnessTestHint": "Start één kleine, echte run in een kladproject om te bewijzen dat de gedelegeerde shell van begin tot eind werkt: Claude Code start, schrijft een bestand, bestuurt de browser en rapporteert terug. Het kost een run zoals elke andere en vereist dat de agent aan en gereed is.",
   "codingAgent.harnessTestFailed": "Kon de harnesstest niet starten",
+  "codingAgent.harnessTestNoFolder": "Kies eerst een projectmap.",
   "codingAgent.deniedHelp": "De coding agent mag alleen een vaste set opdrachten in zijn eigen map uitvoeren. Dit is de veiligheidsgrens die werkt, geen fout — de run vindt meestal een andere weg.",
   "codingAgent.stop": "Stoppen",
   "codingAgent.back": "Terug",
@@ -660,7 +661,7 @@ export const nl: Record<string, string> = {
   "codingAgent.reviewPassTitle": "Automatische controlerun van {id}",
 
   "codingAgent.wizardTitle": "Codeagent instellen",
-  "codingAgent.wizardIntro": "Met de codeagent geeft uw assistent een hele taak door aan Claude Code op deze box: hij leest en schrijft bestanden in één map, voert daar opdrachten uit en rapporteert terug. Instellen kost twee stappen.",
+  "codingAgent.wizardIntro": "Met de codeagent geeft uw assistent een hele taak door aan Claude Code op deze box: hij leest en schrijft bestanden in één map, voert daar opdrachten uit en rapporteert terug. Instellen kost drie stappen.",
   "codingAgent.wizardEnable": "Inschakelen",
   "codingAgent.wizardStepOf": "Stap {n} van {total}",
   "codingAgent.wizardNext": "Volgende",
