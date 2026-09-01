@@ -80,7 +80,7 @@ message actions are covered with mocks unless explicitly marked live.
 | QA-035 | P1 | Open | VNC “Install / Repair & Reboot” is a single impactful action with no confirmation. |
 | QA-036 | P2 | Open | The System Update beta control and several Chat icon controls have incomplete accessible names. |
 | QA-037 | P1 | Open | Files rows require pointer double-click and mutation/discard dialogs are incomplete for keyboard-only users. |
-| QA-038 | P0 | Fixed | A Codex plugin migrated from v1 can be default-enabled without a config entry and live outside the managed-home layouts; that state bypassed package health and v2 capability consent, crash-looping the gateway even when a non-Codex model was primary. |
+| QA-038 | P0 | Fixed | A migrated OpenAI model can declare the Codex agent runtime, which makes v2 auto-enable Codex despite a missing/stale-disabled plugin entry; that state bypassed package health and capability consent and crash-looped the gateway. |
 | QA-039 | P1 | Fixed | Telegram readiness recovery could hang behind a stalled configure/health request, restart when inline callbacks changed, and leave Connect disabled despite telling the owner to retry. |
 
 ## False-green tests to harden

@@ -39,6 +39,17 @@ function extractPolicy(): string {
 
 const POLICY = hasPython3 ? extractPolicy() : "";
 
+/** Pull the configured/runtime Codex demand probe out of the shell heredoc. */
+function extractNeedsProbe(): string {
+  const startMarker = 'NEEDS_CODEX_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<\'PY\'\n';
+  const start = SCRIPT_SOURCE.indexOf(startMarker);
+  const end = SCRIPT_SOURCE.indexOf('\nPY\n)"', start);
+  if (start < 0 || end < 0) throw new Error("Codex demand probe not found");
+  return SCRIPT_SOURCE.slice(start + startMarker.length, end);
+}
+
+const NEEDS_PROBE = hasPython3 ? extractNeedsProbe() : "";
+
 /** Pull the enabled-plugin consent probe out of the shell heredoc verbatim. */
 function extractEnabledProbe(): string {
   const startMarker = 'CODEX_PLUGIN_ENABLED="$(python3 - "$OPENCLAW_CONFIG" <<\'PY\'\n';
@@ -111,6 +122,13 @@ function probeCodexEnabled(config: Record<string, unknown>): string {
   const file = path.join(dir, "enabled-config.json");
   writeFileSync(file, JSON.stringify(config));
   return execFileSync("python3", ["-c", ENABLED_PROBE, file], { encoding: "utf-8" }).trim();
+}
+
+/** Run the exact probe that decides whether Codex must be repaired/enabled. */
+function probeNeedsCodex(config: Record<string, unknown>): string {
+  const file = path.join(dir, "needs-config.json");
+  writeFileSync(file, JSON.stringify(config));
+  return execFileSync("python3", ["-c", NEEDS_PROBE, file], { encoding: "utf-8" }).trim();
 }
 
 interface PluginFlowOptions {
@@ -231,6 +249,30 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
 
   it("resolves a historical Codex package that only OpenClaw's registry can see", () => {
     expect(resolveRegistryOnlyPlugin()).toBe(path.join(dir, "global-plugins", "codex"));
+  });
+
+  it("detects OpenClaw v2's migrated OpenAI model with a Codex agent runtime", () => {
+    const migratedConfig = {
+      agents: {
+        defaults: {
+          model: { primary: "openai/gpt-5.6-sol" },
+          models: {
+            "openai/gpt-5.6-sol": { agentRuntime: { id: "codex" } },
+          },
+        },
+      },
+      plugins: { entries: { codex: { enabled: false } } },
+    };
+
+    expect(probeNeedsCodex(migratedConfig)).toBe("1");
+    expect(probeCodexEnabled(migratedConfig)).toBe("0");
+    expect(runPluginFlow({
+      v2: true,
+      needsCodex: probeNeedsCodex(migratedConfig) === "1",
+      enabledByConfig: probeCodexEnabled(migratedConfig) === "1",
+      installedVersion: "2026.8.1",
+      peerHealthy: true,
+    })).toEqual(["plugins enable codex --accept-capabilities"]);
   });
 
   it("repairs a stale default-enabled v2 plugin at the pinned version", () => {

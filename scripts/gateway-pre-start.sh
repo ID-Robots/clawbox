@@ -1560,7 +1560,12 @@ try:
         cfg = json.load(f)
 except (FileNotFoundError, json.JSONDecodeError):
     print("0"); sys.exit(0)
-primary = (cfg.get("agents", {}).get("defaults", {}).get("model", {}) or {}).get("primary") or ""
+agents = cfg.get("agents")
+defaults = agents.get("defaults", {}) if isinstance(agents, dict) else {}
+model_selection = defaults.get("model", {}) if isinstance(defaults, dict) else {}
+primary = model_selection.get("primary") if isinstance(model_selection, dict) else ""
+models_raw = defaults.get("models", {}) if isinstance(defaults, dict) else {}
+models = models_raw if isinstance(models_raw, dict) else {}
 # Defensive: `cfg["auth"]` may be missing, `None`, or a corrupted
 # scalar on a hand-edited config. Match the same isinstance pattern
 # used at line 131 for openrouter so a malformed auth block doesn't
@@ -1571,6 +1576,11 @@ profiles = profiles_raw if isinstance(profiles_raw, dict) else {}
 uses_codex = (
     isinstance(primary, str)
     and (primary.lower().startswith("codex/") or primary.lower().startswith("openai-codex/"))
+) or any(
+    isinstance(settings, dict)
+    and isinstance(settings.get("agentRuntime"), dict)
+    and str(settings["agentRuntime"].get("id", "")).lower() == "codex"
+    for settings in models.values()
 ) or any(
     (isinstance(k, str)
      and (k.lower().startswith("codex:") or k.lower().startswith("openai-codex:"))) or
