@@ -1,7 +1,11 @@
 import { promises as fsp } from "fs";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
-import { subscriptionSurfaceLabel, subscriptionSurfaceProvider } from "@/lib/provider-models";
+import {
+  getProviderCatalog,
+  subscriptionSurfaceLabel,
+  subscriptionSurfaceProvider,
+} from "@/lib/provider-models";
 
 /**
  * Server-side reads of the SUBSCRIPTION facts the UI already gets stamped into
@@ -62,7 +66,23 @@ export async function readSubscriptionSurfaceIds(
     const ids = parsed.models
       .map((m) => m?.id)
       .filter((id): id is string => typeof id === "string" && id.length > 0);
-    return ids.length > 0 ? new Set(ids) : null;
+    if (ids.length === 0) return null;
+    // Union the CURATED catalogue for the surface provider, because the
+    // catalog route serves its cached payload through `buildPayload` ->
+    // `augmentWithStaticCatalog`, which appends exactly these ids to whatever
+    // the live enumeration returned. Reading the raw file without them asks a
+    // different question than the picker answered: a ClawBox release that adds
+    // a model to PROVIDER_CATALOGS ships a picker offering it on day one,
+    // while the on-disk cache keeps the previous list for up to the route's
+    // 6h refresh interval — and in that window this guard refused the very row
+    // the customer had just been shown. `augmentWithStaticCatalog` is a no-op
+    // for a provider with no curated catalogue (a NARROWER named surface such
+    // as claude-cli), and so is this, which is what keeps a narrowed surface
+    // narrow.
+    for (const model of getProviderCatalog(surfaceProvider)?.models ?? []) {
+      ids.push(model.id);
+    }
+    return new Set(ids);
   } catch {
     // Missing, unreadable, or half-written cache. Unknown, not "no".
     return null;

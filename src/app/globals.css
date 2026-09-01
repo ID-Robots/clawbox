@@ -415,6 +415,63 @@ h6 {
   border-color: rgba(255, 230, 203, 0.15);
 }
 
+/* The Coding Agent's delegation diagram (CodingAgentDelegationArt).
+ *
+ * Two motions: a dash travelling OUTWARD along each connector — the task going
+ * to a sub-agent — and a soft pulse arriving at the node a beat later. Both are
+ * defined only under `prefers-reduced-motion: no-preference`, so an owner who
+ * turned animation off gets the same static diagram rather than a still frame
+ * of a broken one.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes ca-art-flow {
+    to { stroke-dashoffset: -22; }
+  }
+  @keyframes ca-art-node {
+    0%, 100% { opacity: 0.55; }
+    50%      { opacity: 1; }
+  }
+  @keyframes ca-art-hub {
+    0%, 100% { opacity: 0.85; }
+    50%      { opacity: 1; }
+  }
+  .ca-art-flow { animation: ca-art-flow 1.6s linear infinite; }
+  .ca-art-node { animation: ca-art-node 2.6s ease-in-out infinite; }
+  .ca-art-hub  { animation: ca-art-hub 2.6s ease-in-out infinite; }
+}
+
+/* Memory Shard's accumulation diagram (MemoryShardArt).
+ *
+ * Three motions: the lanes flow INWARD (the mirror of the Coding Agent's
+ * outward dash — that one fans out, this one converges), the fragments drift
+ * along and fade as they are absorbed, and the shard pulses as it takes each
+ * one in. Guarded exactly like ca-art-*: with motion turned off the diagram is
+ * still drawn, it simply holds still.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes ms-art-lane {
+    to { stroke-dashoffset: -22; }
+  }
+  @keyframes ms-art-fragment {
+    0%   { opacity: 0; transform: translateX(0); }
+    15%  { opacity: 1; }
+    75%  { opacity: 0.9; }
+    100% { opacity: 0; transform: translateX(150px); }
+  }
+  @keyframes ms-art-shard {
+    0%, 100% { opacity: 0.85; }
+    50%      { opacity: 1; }
+  }
+  .ms-art-lane { animation: ms-art-lane 1.8s linear infinite; }
+  /* transform-box/origin so translateX moves the rect in USER units, not in
+     the SVG's own percentage-of-viewport reading of a bare transform. */
+  .ms-art-fragment {
+    transform-box: fill-box;
+    animation: ms-art-fragment 4s ease-in-out infinite;
+  }
+  .ms-art-shard { animation: ms-art-shard 2.4s ease-in-out infinite; }
+}
+
 /* Native <select> popups.
  *
  * The closed control is styled per component, but the OPEN list is drawn by the

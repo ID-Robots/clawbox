@@ -13,7 +13,7 @@ import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-ut
 import { translations } from "@/lib/translations";
 import CodingAgentApp, { installedAppId, NEW_APP_NAME_MAX } from "@/components/CodingAgentApp";
 import { MAX_PROJECT_NAME_LENGTH } from "@/lib/code-projects";
-import { buildNewAppPrompt, CHAT_MESSAGE_EVENT, CODING_AGENT_CHANGED_EVENT, CODING_RUN_STARTED_EVENT } from "@/lib/ui-events";
+import { CHAT_MESSAGE_EVENT, CODING_AGENT_CHANGED_EVENT, CODING_RUN_STARTED_EVENT, NEW_APP_EVENT } from "@/lib/ui-events";
 
 // One stable `t`, as the real hook provides (it is memoised on the locale
 // table) — a fresh function per render would be a different contract.
@@ -103,7 +103,11 @@ function stubFetch(
     running: 0,
     harnessCommand: "claude-ds",
     maxTaskChars: 4000,
-    defaultDirectory: null,
+    // The harness self-test now runs in the owner's OWN project folder, so a
+    // fixture with no default folder is a box that legitimately refuses to
+    // start it. Mirrors the projects payload above, and the tests that mean
+    // "nothing is set" pass projectsDir: null and get that here too.
+    defaultDirectory: opts.projectsDir === undefined ? "/home/clawbox/Projects" : opts.projectsDir,
     setupComplete: setupCompletePosted ?? status.setupComplete ?? true,
     effort: "ultracode",
     effortLevels: ["low", "xhigh", "max", "ultracode"],
@@ -157,6 +161,10 @@ function stubFetch(
     if (url === "/setup-api/code" && init?.method === "POST") {
       posts.push({ url, body: JSON.parse(String(init.body)) });
       return json({ success: true });
+    }
+    if (url === "/setup-api/coding-agent/browse" && init?.method === "POST") {
+      posts.push({ url, body: JSON.parse(String(init.body)) });
+      return json({ root: "/home/clawbox", path: "/home/clawbox/Projects/harness-test", parent: "/home/clawbox/Projects", entries: [] });
     }
     if (url === "/setup-api/coding-agent/enable" && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -259,13 +267,17 @@ describe("CodingAgentApp", () => {
       await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/enable")).toBe(true));
       const post = posts.find((p) => p.url === "/setup-api/coding-agent/enable");
       // The switch goes on here so the offered test run has an agent to run
-      // on — but NOT setupComplete: the owner has one step left, and marking
-      // it done would drop them on the home page before they saw it.
+      // on — and setup is declared UNFINISHED in the same post. Without that
+      // explicit false the box has no flag, `enabled` stands in for one, and
+      // the app decides setup is complete the moment the switch goes on: the
+      // last step appeared for about a second and was replaced by the home
+      // page.
       expect(post!.body).toEqual({
         defaultDirectory: "/home/clawbox/Projects",
         effort: "ultracode",
         reviewPass: false,
         enabled: true,
+        setupComplete: false,
       });
       expect(await screen.findByTestId("coding-agent-wizard-harness-run")).toBeInTheDocument();
     });
@@ -296,7 +308,9 @@ describe("CodingAgentApp", () => {
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-harness-run"));
       await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(true));
       const run = posts.find((p) => p.url === "/setup-api/coding-agent/run");
-      expect((run!.body as { projectId: string }).projectId).toBe("harness-test");
+      // A bare folder name, resolved inside the folder the owner just chose on
+      // the previous step — not a code project under data/.
+      expect((run!.body as { directory: string }).directory).toBe("harness-test");
       // ...and setup completes, so the owner lands on the home page with the
       // run already in flight — which is where its progress is shown.
       await waitFor(() => expect(posts.at(-1)!.body).toEqual({ setupComplete: true }));
@@ -506,7 +520,10 @@ describe("CodingAgentApp", () => {
       render(<CodingAgentApp />);
       fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
       await screen.findByTestId("coding-agent-embedded-settings");
-      expect(screen.queryByTestId("coding-agent-clear")).not.toBeInTheDocument();
+      // Disabled rather than removed: the owner-tools row is three equal
+      // columns, and a button that vanishes leaves a hole in it. A confirmed
+      // tap still cannot answer with nothing, which is what this pins.
+      expect(await screen.findByTestId("coding-agent-clear")).toBeDisabled();
     });
 
     it("offers nothing to clear when only drafts and paused runs are left — the route keeps every one of them", async () => {
@@ -519,7 +536,9 @@ describe("CodingAgentApp", () => {
       render(<CodingAgentApp />);
       fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
       await screen.findByTestId("coding-agent-embedded-settings");
-      expect(screen.queryByTestId("coding-agent-clear")).not.toBeInTheDocument();
+      // Held runs are not history: the route keeps every one of them, so the
+      // button is disabled rather than offering a tap that clears nothing.
+      expect(await screen.findByTestId("coding-agent-clear")).toBeDisabled();
     });
 
     it("takes the armed Clear back after a few seconds, and whenever the settings page is left", async () => {
@@ -669,10 +688,16 @@ describe("the harness self-test", () => {
       fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
       fireEvent.click(await screen.findByTestId("coding-agent-harness-test"));
       await waitFor(() => {
-        expect(posts.some((p) => p.url === "/setup-api/code"
-          && (p.body as { projectId?: string }).projectId === "harness-test")).toBe(true);
+        // The folder is made inside the owner's OWN project folder — it used
+        // to be scaffolded as a code project under data/code-projects, which
+        // is a ClawBox-internal directory they never browse.
+        expect(posts.some((p) => p.url === "/setup-api/coding-agent/browse"
+          && (p.body as { name?: string }).name === "harness-test")).toBe(true);
+        // A BARE NAME, which the run resolver reads as "inside the default
+        // project folder" — so the default stays the one place that decides
+        // where "inside" is.
         expect(posts.some((p) => p.url === "/setup-api/coding-agent/run"
-          && (p.body as { projectId?: string }).projectId === "harness-test")).toBe(true);
+          && (p.body as { directory?: string }).directory === "harness-test")).toBe(true);
       });
       const runPost = posts.find((p) => p.url === "/setup-api/coding-agent/run");
       // The task names itself a smoke test, so the brief's "complete, polished
@@ -1005,116 +1030,25 @@ describe("projects", () => {
   });
 });
 
-describe("the New app wizard", () => {
-  let messages: string[];
-  const onMessage = (e: Event) => messages.push((e as CustomEvent<{ text: string }>).detail.text);
-
-  beforeEach(() => {
-    messages = [];
-    window.addEventListener(CHAT_MESSAGE_EVENT, onMessage);
-  });
-  afterEach(() => {
-    window.removeEventListener(CHAT_MESSAGE_EVENT, onMessage);
-  });
-
-  async function openWizard() {
-    render(<CodingAgentApp />);
-    fireEvent.click(await screen.findByTestId("coding-agent-new"));
-    return screen.getByTestId("coding-agent-new-card");
-  }
-
-  it("holds the name to the same bound the project library enforces", () => {
-    expect(NEW_APP_NAME_MAX).toBe(MAX_PROJECT_NAME_LENGTH);
-  });
-
-  it("asks for a name and a description before it will hand anything over", async () => {
+describe("the New app hand-off", () => {
+  it("opens the chat with the New app card instead of hosting a second form", async () => {
+    // The card composes ONE message for the assistant, so it belongs in the
+    // conversation that carries the reply. The same form used to live here as
+    // well, so two windows asked for a new app and only one could show what
+    // came back. (The card's own behaviour is covered by
+    // new-app-wizard-card.test.tsx.)
     stubFetch({ enabled: true, readiness: READY });
-    await openWizard();
-    fireEvent.click(screen.getByTestId("coding-agent-new-create"));
-    expect(screen.getByTestId("coding-agent-new-error").textContent).toBe(translations.en["codingAgent.newNameRequired"]);
-    expect(messages).toEqual([]);
-
-    fireEvent.change(screen.getByTestId("coding-agent-new-name"), { target: { value: "Pomodoro timer" } });
-    fireEvent.click(screen.getByTestId("coding-agent-new-create"));
-    expect(screen.getByTestId("coding-agent-new-error").textContent).toBe(translations.en["codingAgent.newWhatRequired"]);
-    expect(messages).toEqual([]);
-
-    // A description longer than the run route would accept is refused
-    // here, with the route's own ceiling in the message.
-    fireEvent.change(screen.getByTestId("coding-agent-new-what"), { target: { value: "x".repeat(4001) } });
-    fireEvent.click(screen.getByTestId("coding-agent-new-create"));
-    expect(screen.getByTestId("coding-agent-new-error").textContent).toBe(t("codingAgent.newWhatTooLong", { max: 4000 }));
-    expect(messages).toEqual([]);
-    expect(posts).toEqual([]);
-  });
-
-  it("composes the one message, hands it to the chat, closes, and says so", async () => {
-    stubFetch({ enabled: true, readiness: READY });
-    await openWizard();
-    fireEvent.change(screen.getByTestId("coding-agent-new-name"), { target: { value: "  Pomodoro timer " } });
-    fireEvent.change(screen.getByTestId("coding-agent-new-what"), {
-      target: { value: "A timer with 25-minute work blocks and 5-minute breaks." },
-    });
-    fireEvent.change(screen.getByTestId("coding-agent-new-template"), { target: { value: "blank" } });
-    fireEvent.click(screen.getByTestId("coding-agent-new-create"));
-
-    expect(messages).toEqual([
-      buildNewAppPrompt({
-        name: "Pomodoro timer",
-        description: "A timer with 25-minute work blocks and 5-minute breaks.",
-        template: "blank",
-      }),
-    ]);
-    expect(messages[0]).toBe(
-      'Create a new ClawBox app called "Pomodoro timer": A timer with 25-minute work blocks and 5-minute breaks.\n'
-      + 'Scaffold it as a code project from the "blank" template, build it with the coding agent, verify it in the browser, and put it on my desktop.',
-    );
-    // The wizard never calls the run route itself: the assistant does, with
-    // the project it has just scaffolded.
-    expect(posts).toEqual([]);
-    expect(screen.queryByTestId("coding-agent-new-card")).not.toBeInTheDocument();
-    expect(screen.getByTestId("coding-agent-new-handed").textContent).toBe(translations.en["codingAgent.newHanded"]);
-  });
-
-  it("starts from the Next.js full-stack starter by default, and offers React", async () => {
-    stubFetch({ enabled: true, readiness: READY });
-    await openWizard();
-    const select = screen.getByTestId("coding-agent-new-template") as HTMLSelectElement;
-    expect(select.value).toBe("nextjs");
-    expect(Array.from(select.options).map((o) => o.value)).toEqual(["nextjs", "react", "app", "blank"]);
-    fireEvent.change(screen.getByTestId("coding-agent-new-name"), { target: { value: "Bookings" } });
-    fireEvent.change(screen.getByTestId("coding-agent-new-what"), { target: { value: "A booking page for my salon" } });
-    fireEvent.click(screen.getByTestId("coding-agent-new-create"));
-    expect(messages[0]).toBe(
-      'Create a new ClawBox app called "Bookings": A booking page for my salon.\n'
-      + "Scaffold it as a Next.js full-stack app (App Router, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, run it on a free local port, verify it in the browser, and register it on my desktop as a web app pointing at that address.",
-    );
-  });
-
-  it("is not offered on the standalone page, which mounts no chat to hand the message to", async () => {
-    // "Open in new tab" renders the app at /app/coding, without ChatPopup:
-    // a message dispatched there would reach nothing, while the card said
-    // it had been handed over.
-    window.history.pushState({}, "", "/app/coding");
+    const events: string[] = [];
+    const onNewApp = () => events.push(NEW_APP_EVENT);
+    window.addEventListener(NEW_APP_EVENT, onNewApp);
     try {
-      stubFetch({ enabled: true, readiness: READY }, [], { projects: [PROJECT] });
       render(<CodingAgentApp />);
-      await screen.findByTestId("coding-agent-project-site");
-      expect(screen.queryByTestId("coding-agent-new")).not.toBeInTheDocument();
-      expect(screen.getByTestId("coding-agent-new-needs-desktop").textContent).toBe(translations.en["codingAgent.newNeedsDesktop"]);
-      expect(messages).toEqual([]);
+      fireEvent.click(await screen.findByTestId("coding-agent-new"));
+      expect(events).toEqual([NEW_APP_EVENT]);
+      expect(screen.queryByTestId("coding-agent-new-card")).toBeNull();
+      expect(screen.queryByTestId("coding-agent-new-name")).toBeNull();
     } finally {
-      window.history.pushState({}, "", "/");
+      window.removeEventListener(NEW_APP_EVENT, onNewApp);
     }
-  });
-
-  it("can be cancelled without saying anything to the chat", async () => {
-    stubFetch({ enabled: true, readiness: READY });
-    await openWizard();
-    fireEvent.change(screen.getByTestId("coding-agent-new-name"), { target: { value: "Half typed" } });
-    fireEvent.click(screen.getByTestId("coding-agent-new-cancel"));
-    expect(screen.queryByTestId("coding-agent-new-card")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("coding-agent-new-handed")).not.toBeInTheDocument();
-    expect(messages).toEqual([]);
   });
 });

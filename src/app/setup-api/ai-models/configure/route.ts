@@ -129,7 +129,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     profileKey: CLAWBOX_AI_PROFILE_KEY,
   },
   anthropic: {
-    defaultModel: "anthropic/claude-sonnet-4-6",
+    defaultModel: "anthropic/claude-sonnet-5",
     profileKey: "anthropic:default",
   },
   openai: {

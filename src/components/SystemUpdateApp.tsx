@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
-import { BuildDriftBanner, useBuildIdentity } from "@/components/BuildIdentityPanel";
+import { useBuildIdentity } from "@/components/BuildIdentityPanel";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
@@ -313,10 +313,17 @@ export default function SystemUpdateApp() {
           tone: "good" as const,
         };
       case "drift":
+        // Offered, not alarmed about. Versions cannot see this case —
+        // package.json does not change commit-to-commit — so a box serving a
+        // build from another commit reports `target: null` and this screen,
+        // whose whole job is "should I update?", would otherwise say "You're up
+        // to date" and give the owner no button at all. It says what is true
+        // and offers the rebuild; the amber "this box is not running its own
+        // code" alarm this used to raise is gone.
         return {
-          icon: "sync_problem", iconClass: "text-amber-300",
+          icon: "system_update", iconClass: "text-emerald-300",
           headline: t("update.driftHeadline"), subhead: t("update.driftSubhead"),
-          tone: "warn" as const,
+          tone: "available" as const,
         };
       case "available": {
         const updates: string[] = [];
@@ -432,15 +439,6 @@ export default function SystemUpdateApp() {
               </button>
             )}
           </div>
-
-          {/* WHY the update is being offered. The same banner, from the same
-              endpoint, as Settings → About — so the screen that says "run
-              Update to realign" and the screen that runs it say the same
-              thing, in the same words, in every locale. Hidden while an update
-              is running: the drift it describes is the one being fixed. */}
-          {driftDetected && status !== "updating" && status !== "completed" && (
-            <BuildDriftBanner identity={identity} />
-          )}
 
           {/* COMPONENTS
               Only ClawBox is exposed as a standalone update target. OpenClaw

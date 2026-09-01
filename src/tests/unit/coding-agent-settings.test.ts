@@ -278,6 +278,17 @@ describe("the setup wizard flag", () => {
     expect((await lib.getCodingAgentStatus()).setupComplete).toBe(true);
   });
 
+  it("lets the wizard switch the agent ON without declaring setup finished", async () => {
+    // The wizard enables the agent at step 2 so its last step has something to
+    // test on. An explicit false must beat the `enabled` fallback, or the app
+    // swaps the last step for the home page a second after it appears.
+    configGetAll.mockResolvedValue({ coding_agent_enabled: true, coding_agent_setup_complete: false });
+    const lib = await import("@/lib/coding-agent");
+    const status = await lib.getCodingAgentStatus();
+    expect(status.enabled).toBe(true);
+    expect(status.setupComplete).toBe(false);
+  });
+
   it("stays done after the owner switches the agent off again", async () => {
     configGetAll.mockResolvedValue({ coding_agent_enabled: false, coding_agent_setup_complete: true });
     const lib = await import("@/lib/coding-agent");

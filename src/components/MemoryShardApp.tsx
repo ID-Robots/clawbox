@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
+import MemoryShardWizard from "./MemoryShardWizard";
+import { BTN_PRIMARY, BTN_SECONDARY } from "./coding-agent-ui";
 import type {
   ClawKeepMemoryStatus,
   MemoryIndexMode,
@@ -207,7 +209,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
   const schedule = draft ?? status.schedule;
   const health = status.health;
   const healthTone =
-    health === "healthy" ? "text-emerald-300 border-emerald-500/40 bg-emerald-500/10"
+    health === "healthy" ? "text-emerald-400 border-emerald-400/30 bg-emerald-400/[0.07]"
     : health === "degraded" ? "text-amber-200 border-amber-500/40 bg-amber-500/10"
     : health === "unavailable" ? "text-red-300 border-red-500/40 bg-red-500/10"
     : "text-[var(--text-secondary)] border-[var(--border-subtle)] bg-white/5";
@@ -251,7 +253,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
               text being embedded left the box. */}
           <span className={`px-2 py-0.5 rounded-md border text-[11px] font-medium ${
             status.location === "local"
-              ? "text-emerald-300 border-emerald-500/40 bg-emerald-500/10"
+              ? "text-emerald-400 border-emerald-400/30 bg-emerald-400/[0.07]"
               : status.location === "cloud"
               ? "text-sky-300 border-sky-500/40 bg-sky-500/10"
               : "text-[var(--text-secondary)] border-[var(--border-subtle)] bg-white/5"
@@ -308,7 +310,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
           type="button"
           disabled={busy !== null || running}
           onClick={() => void startIndex("incremental")}
-          className="flex-1 px-3 py-2 rounded-md bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+          className={`${BTN_PRIMARY} flex-1`}
         >
           {busy !== null || running ? t("clawkeep.memory.indexing") : t("clawkeep.memory.indexNow")}
         </button>
@@ -316,7 +318,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
           type="button"
           disabled={busy !== null || running}
           onClick={() => setConfirmFull(true)}
-          className="flex-1 px-3 py-2 rounded-md border border-[var(--border-subtle)] bg-white/[0.03] text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+          className={`${BTN_SECONDARY} flex-1`}
         >
           {t("clawkeep.memory.fullReindex")}
         </button>
@@ -342,8 +344,8 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
             />
             {/* The checkbox itself is off-screen, so the track is what has to
                 show the keyboard focus — the desktop's coral, not the track's
-                own emerald, which would vanish on the switched-on state. */}
-            <span className="w-10 h-6 bg-white/10 rounded-full peer-checked:bg-emerald-500 transition-colors peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[var(--coral-bright)]" />
+                own accent, which would vanish on the switched-on state. */}
+            <span className="w-10 h-6 bg-white/10 rounded-full peer-checked:bg-[var(--coral-bright)] transition-colors peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[var(--coral-bright)]" />
             <span className="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-4" />
           </label>
         </div>
@@ -358,7 +360,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
                   onClick={() => void saveSchedule({ ...schedule, frequency: freq })}
                   className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
                     schedule.frequency === freq
-                      ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
+                      ? "bg-[var(--fill-3)] border-transparent text-[var(--text-primary)]"
                       : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-white/5"
                   }`}
                 >
@@ -385,7 +387,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
                   else setTimeText(next);
                 }}
                 onBlur={() => setTimeText(null)}
-                className="px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-[var(--border-subtle)] text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+                className="px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-[var(--border-subtle)] text-sm text-gray-200 focus:outline-none focus:border-[var(--coral-bright)]/50"
               />
               <span className="text-xs text-[var(--text-muted)]">{t("clawkeep.schedule.deviceLocal")}</span>
             </div>
@@ -403,7 +405,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
                       onClick={() => void saveSchedule({ ...schedule, weekday: idx })}
                       className={`px-2.5 py-1 rounded-md text-xs border cursor-pointer ${
                         schedule.weekday === idx
-                          ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
+                          ? "bg-[var(--fill-3)] border-transparent text-[var(--text-primary)]"
                           : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-white/5"
                       }`}
                     >
@@ -437,28 +439,110 @@ export default function MemoryShardApp() {
   const { t } = useT();
   // The card reports failures up rather than painting its own banner, exactly
   // as it did inside ClawKeep, so a declined run or a schedule that would not
-  // save reads the same in both windows. Dismissable here because this window
-  // has no status refresh of its own to clear it the way ClawKeep's did.
+  // save reads the same in both windows.
   const [error, setError] = useState<string | null>(null);
+
+  /**
+   * The owner's switch and the wizard flag.
+   *
+   * Read from the memory STATUS, which is the payload that already describes
+   * this feature — rather than by poking the write route with an empty body,
+   * which was the first shape of this and both ugly and a lint error (a
+   * setState reachable synchronously from an effect).
+   */
+  const [state, setState] = useState<{ enabled: boolean; setupComplete: boolean } | null>(null);
+  /** The first read has answered — however it answered. Without this a fresh
+   *  box paints the index card for a moment and then swaps it for the wizard. */
+  const [resolved, setResolved] = useState(false);
+
+  const loadState = useCallback(async () => {
+    try {
+      const res = await fetch("/setup-api/clawkeep/memory", { cache: "no-store" });
+      if (!res.ok) throw new Error("status");
+      const status = await res.json() as { enabled?: boolean; setupComplete?: boolean };
+      // ONLY an explicit boolean opens the wizard.
+      //
+      // A status this app cannot recognise — the e2e mock answers `{}` with a
+      // 200 for any unrecognised /setup-api path, and a server mid-restart can
+      // too — must not be read as "this box has never been set up". That would
+      // put a configured owner in front of onboarding because one poll came
+      // back oddly. Leaving the state unknown keeps the index card up, and the
+      // card already knows how to say it is still loading.
+      if (typeof status.setupComplete !== "boolean") return;
+      setState({ enabled: status.enabled === true, setupComplete: status.setupComplete });
+    } catch {
+      // Same rule: an unreachable status says nothing about setup.
+    } finally {
+      setResolved(true);
+    }
+  }, []);
+
+  useEffect(() => { void loadState(); }, [loadState]);
+
+  const showWizard = state !== null && !state.setupComplete;
+
   return (
-    <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200" data-testid="memory-shard-app">
-      <div className="min-h-full w-full flex items-center justify-center p-6 bg-[var(--bg-deep)]">
-        <div className="w-full max-w-2xl space-y-4">
-          {error && (
-            <div role="alert" className="flex items-start justify-between gap-3 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
-              <span>⚠️ {error}</span>
-              <button
-                type="button"
-                onClick={() => setError(null)}
-                aria-label={t("clawkeep.memory.dismiss")}
-                className="shrink-0 rounded-md p-0.5 text-red-200/70 hover:text-red-100 hover:bg-red-500/15 cursor-pointer"
+    // Same shell as the Coding Agent: a window that fills its frame, one
+    // content column, and `data-help-bounds` so a HelpTip measures against the
+    // WINDOW rather than the screen.
+    <div
+      className="h-full flex flex-col bg-[var(--bg-deep)] text-white overflow-y-auto @container"
+      data-testid="memory-shard-app"
+      data-help-bounds
+    >
+      <div className="mx-auto w-full max-w-2xl px-5 py-4 flex-1 flex flex-col min-h-0">
+        <div className="flex items-center justify-between gap-4 pb-3 mb-1 border-b border-white/[0.06]">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }} aria-hidden="true">
+              database
+            </span>
+            <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">
+              {t("clawkeep.memory.title")}
+            </h1>
+            {state && (
+              // emerald-400 is the product's SEMANTIC "on" tone — the same chip
+              // the Coding Agent shows, and the same tone RunProgressBar gives a
+              // completed run. The accent green this app used for buttons,
+              // toggles and selected segments is gone; this is not that.
+              <span
+                data-testid="memory-shard-state"
+                className={`inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider border rounded-full pl-1.5 pr-2 py-0.5 ${
+                  state.enabled
+                    ? "text-emerald-400 border-emerald-400/30 bg-emerald-400/[0.07]"
+                    : "text-[var(--text-muted)] border-white/15"
+                }`}
               >
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">close</span>
-              </button>
-            </div>
-          )}
-          <MemoryIndexCard onError={setError} />
+                <span
+                  aria-hidden="true"
+                  className={`w-1.5 h-1.5 rounded-full ${state.enabled ? "bg-emerald-400" : "bg-[var(--text-muted)]"}`}
+                />
+                {state.enabled ? t("codingAgent.stateOn") : t("codingAgent.stateOff")}
+              </span>
+            )}
+          </div>
         </div>
+
+        {error && (
+          <div role="alert" className="mt-3 flex items-start justify-between gap-3 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">
+            <span>{error}</span>
+            <button
+              type="button"
+              onClick={() => setError(null)}
+              aria-label={t("clawkeep.memory.dismiss")}
+              className="shrink-0 rounded-md p-0.5 text-red-200/70 hover:text-red-100 hover:bg-red-500/15 cursor-pointer"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">close</span>
+            </button>
+          </div>
+        )}
+
+        {!resolved
+          // Nothing until the first read answers, so a fresh box does not paint
+          // the index card and then replace it with the wizard.
+          ? null
+          : showWizard
+            ? <MemoryShardWizard onDone={() => { void loadState(); }} />
+            : <div className="mt-4"><MemoryIndexCard onError={setError} /></div>}
       </div>
     </div>
   );

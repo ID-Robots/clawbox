@@ -5,8 +5,9 @@ import { useT } from "@/lib/i18n";
 import { notifyCodingAgentChanged, notifyCodingRunStarted } from "@/lib/ui-events";
 import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
+import CodingAgentDelegationArt from "./CodingAgentDelegationArt";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
-import { HARNESS_TEST_PROJECT, HARNESS_TEST_TASK } from "@/lib/coding-agent-harness-test";
+import { startHarnessTest } from "@/lib/coding-agent-harness-test";
 import {
   devicePollSeconds,
   type AgentStatus,
@@ -227,6 +228,10 @@ export default function CodingAgentSetupWizard({
           effort,
           reviewPass,
           enabled: true,
+          // Explicitly NOT finished: there is one step left. Without this the
+          // box has no flag, `enabled` stands in for one, and the app decides
+          // setup is complete the moment the switch goes on.
+          setupComplete: false,
         }),
       });
       if (!res.ok) {
@@ -278,20 +283,10 @@ export default function CodingAgentSetupWizard({
     setBusy("harness");
     setError(null);
     try {
-      await fetch("/setup-api/code", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "init", projectId: HARNESS_TEST_PROJECT, name: "Harness Test" }),
-      }).catch(() => { /* the run request below reports anything that matters */ });
-      const res = await fetch("/setup-api/coding-agent/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId: HARNESS_TEST_PROJECT, task: HARNESS_TEST_TASK }),
-      });
-      if (!res.ok) {
-        const out = (await res.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(out?.error || t("codingAgent.harnessTestFailed"));
-      }
+      // The folder the owner just chose, not a ClawBox-internal one. It is
+      // saved by now: this step runs after saveAndTest().
+      const started = await startHarnessTest(folder.trim() || null);
+      if (!started.ok) throw new Error(started.error);
       notifyCodingRunStarted();
       await finish();
     } catch (err) {
@@ -304,7 +299,10 @@ export default function CodingAgentSetupWizard({
   const TOTAL_STEPS = 3;
 
   return (
-    <div className={`${CARD} mt-4`} data-testid="coding-agent-wizard">
+    <div
+      className={step === "intro" ? "mt-4 flex-1 flex flex-col" : `${CARD} mt-4`}
+      data-testid="coding-agent-wizard"
+    >
       {step !== "intro" && (
         <p className="text-[11px] uppercase tracking-wider text-[var(--text-muted)]">
           {t("codingAgent.wizardStepOf", { n: stepNumber, total: TOTAL_STEPS })}
@@ -313,21 +311,39 @@ export default function CodingAgentSetupWizard({
 
       {/* ── The front door: what this is, and one button that starts it. ── */}
       {step === "intro" && (
-        <>
-          <h2 className="text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.wizardTitle")}</h2>
-          <p className="mt-2 text-xs leading-relaxed text-[var(--text-secondary)]">
-            {t("codingAgent.wizardIntro")}
-          </p>
+        // No card around this one: it is the first thing in an otherwise empty
+        // window, and a box drawn around a single paragraph made it look like a
+        // notice rather than a front door. Centred, with the diagram carrying
+        // the top of the screen.
+        // The BLOCK is centred in the window; the TEXT inside it is not.
+        //
+        // Centred body copy makes the eye hunt for the start of every line,
+        // because no two lines begin in the same place — fine for one line, bad
+        // for three. So the column is centred and everything inside it hangs
+        // off one left edge: the diagram, the heading, the paragraph and the
+        // button all start at the same x.
+        <div className="flex-1 flex flex-col items-center justify-center px-4 pb-8">
+          <div className="w-full max-w-[26rem] text-left">
+            <CodingAgentDelegationArt className="mb-7" />
+            <h2 className="text-base font-semibold tracking-[-0.01em] text-[var(--text-primary)]">
+              {t("codingAgent.wizardTitle")}
+            </h2>
+            {/* ~46 characters a line: long enough not to fragment the sentence,
+                short enough to keep the return sweep easy. */}
+            <p className="mt-2.5 text-xs leading-[1.7] text-[var(--text-secondary)]">
+              {t("codingAgent.wizardIntro")}
+            </p>
           <button
             type="button"
             onClick={() => setStep("github")}
             data-testid="coding-agent-wizard-enable"
-            className={`${PRIMARY} mt-4 inline-flex items-center gap-2`}
+            className={`${PRIMARY} mt-7`}
           >
-            <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">rocket_launch</span>
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">rocket_launch</span>
             {t("codingAgent.wizardEnable")}
           </button>
-        </>
+          </div>
+        </div>
       )}
 
       {/* ── Step 1: the GitHub account a run pushes with. ── */}

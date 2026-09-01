@@ -123,9 +123,9 @@ describe("Voice panel", () => {
     expect(screen.getByTestId("voice-language")).toHaveValue("de");
     expect(screen.getByTestId("voice-voice")).toHaveValue("alloy");
     expect(screen.getByTestId("voice-sample-text")).toHaveValue(sampleSentence("de"));
-    // The privacy notice rides with the cloud source, worded by the panel
-    // from the fact the box sent.
-    await waitFor(() => expect(screen.getByTestId("voice-cloud-warning")).toHaveTextContent(/Voice uses ClawBox AI cloud TTS.*leaves this ClawBox/));
+    // No privacy notice: the panel used to carry one on every cloud source and
+    // it was removed.
+    expect(screen.queryByTestId("voice-cloud-warning")).toBeNull();
     // And the labels are the translated ones, not keys.
     expect(await screen.findByText("Speak from")).toBeInTheDocument();
   });
@@ -136,9 +136,8 @@ describe("Voice panel", () => {
     fireEvent.change(await screen.findByTestId("voice-source"), { target: { value: "local" } });
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "select", choice: "local" } }));
     await waitFor(() => expect(screen.getByTestId("voice-source")).toHaveValue("local"));
-    // The voice list follows the source, and so does the cloud notice.
+    // The voice list follows the source.
     expect(screen.getByTestId("voice-voice")).toHaveValue("af_heart");
-    expect(screen.queryByTestId("voice-cloud-warning")).toBeNull();
   });
 
   it("names the wait while the box writes, instead of flipping the select early", async () => {
@@ -154,10 +153,11 @@ describe("Voice panel", () => {
     expect(screen.queryByTestId("voice-saving")).toBeNull();
   });
 
-  it("tells the owner the cloud still speaks when the box's own voice cannot", async () => {
-    // Picking "This box" does not take the cloud out of the chain — the
-    // gateway falls through to it — so the text can still leave the box.
-    // One muted line, not the amber notice the cloud-first case gets.
+  it("shows no privacy notice, in either direction of the fall-through", async () => {
+    // The panel used to draw two: an amber one where the cloud speaks first,
+    // and a muted line where the box's own voice leads and the cloud stands
+    // behind it. Both are gone. The box still SENDS the fact — `disclosure` and
+    // `warning` are untouched on the wire — so this pins the UI, not the API.
     mockFetch(status({
       choice: "local", activeProviderId: "tts-local-cli", activeEngine: "local", preferredEngine: "local",
       warning: "Privacy notice: If local speech is unavailable, voice may use ClawBox AI cloud TTS. Text sent for speech may leave this ClawBox.",
@@ -165,8 +165,9 @@ describe("Voice panel", () => {
     }));
     render(<VoiceOutputPanel active />);
     expect(await screen.findByTestId("voice-source")).toHaveValue("local");
-    await waitFor(() => expect(screen.getByTestId("voice-cloud-fallback-note")).toHaveTextContent(/ClawBox AI cloud TTS speaks instead/));
+    expect(screen.queryByTestId("voice-cloud-fallback-note")).toBeNull();
     expect(screen.queryByTestId("voice-cloud-warning")).toBeNull();
+    expect(screen.queryByText(/Privacy notice/i)).toBeNull();
   });
 
   it("cannot pick an engine the box does not have", async () => {

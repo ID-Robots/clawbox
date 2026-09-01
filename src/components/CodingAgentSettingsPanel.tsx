@@ -5,7 +5,8 @@ import { useT } from "@/lib/i18n";
 import { notifyCodingAgentChanged } from "@/lib/ui-events";
 import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
-import { BTN_DANGER, BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
+import HelpTip from "./HelpTip";
+import { BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 
 /**
  * Settings → Coding Agent: everything the owner DECIDES about delegated
@@ -61,6 +62,9 @@ export interface AgentStatus {
   /** False until the owner finishes the setup wizard; the app shows the
    *  wizard instead of its home page while it is. */
   setupComplete: boolean;
+  /** The owner's switch for branch -> pull request -> wait for checks ->
+   *  merge. Optional: an older server does not answer with it. */
+  autoPr?: boolean;
   /** The folder the device proposes when none is chosen: ~/Projects. The
    *  wizard pre-fills it, and saving it creates it. */
   suggestedDirectory?: string;
@@ -212,20 +216,6 @@ export default function CodingAgentSettingsPanel({
   };
   useEffect(() => () => { if (confirmSignOutTimer.current) clearTimeout(confirmSignOutTimer.current); }, []);
 
-  // Reset: two taps, like Sign out, and for a stronger reason — it switches the
-  // agent off, forgets the folder and the ceilings, and puts the owner back in
-  // the setup wizard. Everything it clears is re-enterable, but not by accident.
-  const [confirmReset, setConfirmReset] = useState(false);
-  const confirmResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const armReset = () => {
-    if (confirmResetTimer.current) clearTimeout(confirmResetTimer.current);
-    confirmResetTimer.current = setTimeout(() => {
-      confirmResetTimer.current = null;
-      setConfirmReset(false);
-    }, CONFIRM_MS);
-    setConfirmReset(true);
-  };
-  useEffect(() => () => { if (confirmResetTimer.current) clearTimeout(confirmResetTimer.current); }, []);
   /** A device-flow login in flight: the code the card shows and how often to
    *  ask github.com whether it was entered. */
   const [deviceLogin, setDeviceLogin] = useState<{ userCode: string; verificationUri: string; interval: number } | null>(null);
@@ -506,38 +496,6 @@ export default function CodingAgentSettingsPanel({
   /** Disconnect GitHub. Two taps, like clearing history (see `armSignOut`):
    *  it is not destructive — pushed repositories stay — but it is not what
    *  anyone means to do by brushing a button. */
-  /**
-   * Put every coding-agent setting back to factory and return to the wizard.
-   *
-   * The panel does not re-read itself afterwards: the status it gets back says
-   * `setupComplete: false`, and the window that hosts this page swaps in the
-   * wizard on the change event — a refresh here would only paint a settings
-   * page nobody is looking at any more.
-   */
-  const resetAgent = async () => {
-    if (!confirmReset) { armReset(); return; }
-    if (confirmResetTimer.current) clearTimeout(confirmResetTimer.current);
-    confirmResetTimer.current = null;
-    setConfirmReset(false);
-    setBusy("reset");
-    setError(null);
-    try {
-      const res = await fetch("/setup-api/coding-agent/reset", { method: "POST" });
-      if (!res.ok) throw new Error(await readError(res, t("codingAgent.resetFailed")));
-      setStatus(await res.json() as AgentStatus);
-      notifyCodingAgentChanged();
-      // Leave this page with the settings it was showing: they are gone, and
-      // the window's front door is the wizard now. Without this the owner sat
-      // on a settings page describing a configuration that no longer exists
-      // and had to find Back on their own.
-      onReset?.();
-    } catch (err) {
-      setError({ slot: "settings", message: err instanceof Error ? err.message : t("codingAgent.resetFailed") });
-    } finally {
-      setBusy(null);
-    }
-  };
-
   const disconnectGithub = async () => {
     setBusy("gh-out");
     setError(null);
@@ -627,7 +585,7 @@ export default function CodingAgentSettingsPanel({
               type="button"
               onClick={() => void saveDirectory()}
               disabled={saving || (dirDraft ?? "") === (status?.defaultDirectory ?? "")}
-              className="px-3 py-1.5 rounded-lg border border-white/10 text-xs text-[var(--text-primary)] hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+              className={BTN_SECONDARY}
             >
               {t("codingAgent.folderSave")}
             </button>
@@ -640,7 +598,7 @@ export default function CodingAgentSettingsPanel({
           <label className="text-xs font-medium text-[var(--text-secondary)]">
             {t("codingAgent.effortLabel")}
           </label>
-          <div className="flex gap-1 mt-1.5" data-testid="coding-agent-effort">
+          <div className={`${SEGMENTED_TRACK} mt-1.5`} data-testid="coding-agent-effort">
             {(status?.effortLevels ?? []).map((level) => {
               const active = status?.effort === level;
               return (
@@ -651,11 +609,7 @@ export default function CodingAgentSettingsPanel({
                   disabled={saving}
                   aria-pressed={active}
                   data-testid={`coding-agent-effort-${level}`}
-                  className={`flex-1 px-2 py-1.5 rounded-lg border text-[11px] capitalize transition-colors disabled:opacity-50 ${
-                    active
-                      ? "border-[var(--coral-bright)]/60 bg-[var(--coral-bright)]/10 text-[var(--text-primary)]"
-                      : "border-white/[0.08] text-[var(--text-muted)] hover:bg-white/5"
-                  }`}
+                  className={active ? SEGMENT_ON : SEGMENT_OFF}
                 >
                   {t(`codingAgent.effort.${level}`)}
                 </button>
@@ -716,11 +670,15 @@ export default function CodingAgentSettingsPanel({
             only by POSTing the field — an owner could neither find it nor
             see that it was on. Not optimistic, like the main switch. */}
         <div className="flex items-start justify-between gap-4 mt-4">
-          <div className="min-w-0">
+          <div className="min-w-0 flex items-center gap-1.5">
             <label className="text-xs font-medium text-[var(--text-secondary)]">
               {t("codingAgent.reviewPassLabel")}
             </label>
-            <p className="text-[11px] text-[var(--text-muted)] mt-1 leading-relaxed">{t("codingAgent.reviewPassHint")}</p>
+            <HelpTip
+              text={t("codingAgent.reviewPassHint")}
+              label={t("codingAgent.reviewPassLabel")}
+              testId="coding-agent-review-pass-help"
+            />
           </div>
           <Switch
             checked={status?.reviewPass ?? false}
@@ -729,6 +687,30 @@ export default function CodingAgentSettingsPanel({
             label={t("codingAgent.reviewPassLabel")}
             testId="coding-agent-review-pass"
             onChange={(next) => void saveSetting({ reviewPass: next }, "review", t("codingAgent.reviewPassFailed"))}
+          />
+        </div>
+
+        {/* Branch -> pull request -> wait for Actions -> merge. Under the
+            review pass because it runs after it, and the review's verdict is
+            one of the things that gates the merge. */}
+        <div className="flex items-start justify-between gap-4 mt-4">
+          <div className="min-w-0 flex items-center gap-1.5">
+            <label className="text-xs font-medium text-[var(--text-secondary)]">
+              {t("codingAgent.autoPrLabel")}
+            </label>
+            <HelpTip
+              text={t("codingAgent.autoPrHint")}
+              label={t("codingAgent.autoPrLabel")}
+              testId="coding-agent-auto-pr-help"
+            />
+          </div>
+          <Switch
+            checked={status?.autoPr ?? false}
+            busy={busy === "autoPr"}
+            disabled={!status || saving}
+            label={t("codingAgent.autoPrLabel")}
+            testId="coding-agent-auto-pr"
+            onChange={(next) => void saveSetting({ autoPr: next }, "autoPr", t("codingAgent.autoPrFailed"))}
           />
         </div>
 
@@ -839,23 +821,6 @@ export default function CodingAgentSettingsPanel({
           {errorIn("github")}
         </div>
       )}
-
-      {/* Start over. Last on the page because it undoes everything above it,
-          and the old controls stay exactly where they were — an owner who only
-          wants to change the folder never has to come near this. */}
-      <div className={`${CARD} mt-4`} data-testid="coding-agent-reset-card">
-        <h3 className="text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.resetTitle")}</h3>
-        <p className="mt-1.5 text-[11px] leading-relaxed text-[var(--text-muted)]">{t("codingAgent.resetHint")}</p>
-        <button
-          type="button"
-          onClick={() => void resetAgent()}
-          disabled={busy === "reset"}
-          data-testid="coding-agent-reset"
-          className={`${confirmReset ? BTN_DANGER : BTN_SECONDARY} mt-3`}
-        >
-          {confirmReset ? t("codingAgent.resetConfirm") : t("codingAgent.resetButton")}
-        </button>
-      </div>
     </div>
   );
 }

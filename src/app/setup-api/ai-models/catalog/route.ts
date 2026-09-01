@@ -71,7 +71,7 @@ const refreshing = new Set<string>();
 
 const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
   clawai: "deepseek-v4-flash",
-  anthropic: "claude-sonnet-4-6",
+  anthropic: "claude-sonnet-5",
   openai: "gpt-5.4",
   // Newest model on every ChatGPT tier including Free; gpt-5.6 is plan-gated.
   codex: "gpt-5.5",
@@ -363,6 +363,9 @@ const ALLOW_CUSTOM_BY_PROVIDER: Record<string, boolean> = {
 // when the live catalog includes the same id its real contextWindow wins.
 const STATIC_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   // Anthropic — https://platform.claude.com/docs/en/about-claude/models
+  "claude-opus-5": 1_000_000,
+  "claude-sonnet-5": 1_000_000,
+  "claude-opus-4-8": 1_000_000,
   "claude-opus-4-7": 1_000_000,
   "claude-opus-4-6": 1_000_000,
   "claude-sonnet-4-6": 1_000_000,
@@ -377,7 +380,7 @@ const STATIC_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
 // entries with ids the live list doesn't include get appended — this
 // covers the case where a provider's OAuth scope returns a single
 // deprecated model (Anthropic Claude.ai consumer OAuth is the live
-// example: 2025-11 docs list claude-opus-4-7 / claude-sonnet-4-6 /
+// example: the docs list claude-opus-5 / claude-sonnet-5 /
 // claude-haiku-4-5 as current, but `openclaw models list --provider
 // anthropic` on a Claude.ai-OAuth device only returns the deprecated
 // claude-sonnet-4-20250514). The picker would otherwise force the

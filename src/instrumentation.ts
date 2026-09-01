@@ -98,6 +98,10 @@ export async function register() {
     const codingAgent = require('./lib/coding-agent')
     const stale: number = codingAgent.reconcileAfterRestart()
     if (stale > 0) console.log(`[instrumentation] ${stale} coding run(s) left running by the previous server were marked failed`)
+    // Pull requests left mid-wait by the restart. Same reason the approval
+    // poller is restarted below: nothing else polls them, so without this a run
+    // shows "waiting for checks" forever and is never merged.
+    codingAgent.resumePullRequestWatches()
   } catch (err) {
     console.error('[instrumentation] Could not reconcile coding runs:', err instanceof Error ? err.message : err)
   }

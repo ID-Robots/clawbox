@@ -3,13 +3,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
 import { isLive, isSettled, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { isPrPending, type PrState } from "@/lib/coding-pr-state";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
 import CodingAgentReportPreview from "./CodingAgentReportPreview";
 import CodingAgentSettingsPanel from "./CodingAgentSettingsPanel";
+import CodingAgentResetCard from "./CodingAgentResetCard";
+import HelpTip from "./HelpTip";
 import CodingAgentSetupWizard from "./CodingAgentSetupWizard";
 import { BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, CARD, SECTION_LABEL } from "./coding-agent-ui";
-import { HARNESS_TEST_PROJECT, HARNESS_TEST_TASK } from "@/lib/coding-agent-harness-test";
+import { startHarnessTest } from "@/lib/coding-agent-harness-test";
+import { openNewAppCard } from "@/lib/ui-events";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 // The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
 // keys, translated in every locale, rather than a second English-only one.
@@ -86,6 +90,9 @@ interface Run {
   transcriptPath?: string | null;
   /** The run this one is the automatic review pass of, when it is one. */
   reviewOf?: string | null;
+  /** The pull request this run's work went into, while the auto-PR switch is
+   *  on. Optional: a run recorded before the feature has none. */
+  pr?: PrState | null;
   /** The run's evidence folder — screenshots, test output and its report.md.
    *  `markdown` is the kind that opens rendered in the app; every other
    *  non-image opens as the plain text the route serves it as. */
@@ -277,8 +284,6 @@ export default function CodingAgentApp() {
   // The New app wizard: an inline card, closed by Cancel, by Create, and
   // never by a poll. `handed` is the line left behind once the message is
   // in the chat — the card is gone by then, and the chat is where to look.
-  const [showNew, setShowNew] = useState(false);
-  const [handed, setHanded] = useState(false);
   // Clearing is two taps, not a browser confirm(): the second tap is the
   // confirmation. The offer is taken back on its own after CONFIRM_MS, and
   // whenever the settings page is left or entered — an armed red button
@@ -380,7 +385,11 @@ export default function CodingAgentApp() {
   // record BEFORE it commits the work and starts the automatic review pass,
   // so the poll that saw the finish saw a folder with no new commit and no
   // follow-up run — and would otherwise have been the last.
-  const anyRunning = runs.some((r) => isLive(r.status));
+  // Live OR waiting on GitHub Actions. The CI wait begins exactly when the run
+  // stops being live, so a gate on isLive alone would stop polling at the
+  // moment the checks chip starts changing — it would freeze at whatever the
+  // last poll happened to see, clock included.
+  const anyRunning = runs.some((r) => isLive(r.status) || isPrPending(r.pr));
   const sawRunning = useRef(false);
   useEffect(() => {
     if (anyRunning) {
@@ -450,20 +459,13 @@ export default function CodingAgentApp() {
     try {
       // Scaffold the scratch project; an "already exists" answer is fine and
       // the run below is where a real failure would surface.
-      await fetch("/setup-api/code", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "init", projectId: HARNESS_TEST_PROJECT, name: "Harness Test" }),
-      }).catch(() => { /* the run request reports anything that matters */ });
-      const res = await fetch("/setup-api/coding-agent/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId: HARNESS_TEST_PROJECT, task: HARNESS_TEST_TASK }),
-      });
-      if (!res.ok) throw new Error(await readError(res, t("codingAgent.harnessTestFailed")));
-      const data = await res.json() as { run?: { id?: string } };
+      // In the owner's own project folder, not a ClawBox-internal one — see
+      // startHarnessTest.
+      const started = await startHarnessTest(status?.defaultDirectory ?? null);
+      if (!started.ok) throw new Error(started.error);
       setShowRuns(true);
-      pendingLiveOpen.current = data.run?.id ?? null;
+      // The live view opens on the run as soon as its transcript exists.
+      pendingLiveOpen.current = started.runId;
       // The chat's run card only probes when told: an open chat would
       // otherwise miss a run started from here.
       notifyCodingRunStarted();
@@ -591,22 +593,15 @@ export default function CodingAgentApp() {
     setTimeout(() => setCopiedFolder((f) => (f === folder ? null : f)), 2_000);
   };
 
-  const openNew = () => {
-    setShowNew(true);
-    setHanded(false);
-  };
-
-  const closeNew = () => setShowNew(false);
-
   /**
-   * The card composed the one message and handed it to the chat (it never
-   * calls the run route — the assistant does, with the project it has just
-   * scaffolded). All that is left here is the line saying where to look.
+   * Hand "Create app" to the mascot chat.
+   *
+   * The same form used to live here as well, so two windows asked for a new
+   * app and only one of them could show what the assistant said back — the
+   * card composes ONE message and hands it to the conversation, and the reply
+   * lands there. This opens the chat with the card in it instead.
    */
-  const onHanded = () => {
-    setShowNew(false);
-    setHanded(true);
-  };
+  const openNew = () => openNewAppCard();
 
   const openProject = useMemo(
     () => (openProjectDir ? projects.find((pr) => pr.directory === openProjectDir) ?? null : null),
@@ -678,8 +673,10 @@ export default function CodingAgentApp() {
   return (
     // @container so the panel sizes to its WINDOW, not the viewport — this is
     // a desktop window the owner can resize independently of the screen.
-    <div className="h-full flex flex-col bg-[var(--bg-deep)] text-white overflow-y-auto @container" data-testid="coding-agent-panel">
-      <div className="mx-auto w-full max-w-2xl px-5 py-4">
+    <div className="h-full flex flex-col bg-[var(--bg-deep)] text-white overflow-y-auto @container" data-testid="coding-agent-panel" data-help-bounds>
+      {/* flex-1 so a face can ask for the remaining height — the wizard's
+          intro centres itself in it. min-h-0 keeps the scroll on the parent. */}
+      <div className="mx-auto w-full max-w-2xl px-5 py-4 flex-1 flex flex-col min-h-0">
 
         {/* One row: what this is, whether it is on, and everything you can do
             from here. The primary action used to sit on its own line below,
@@ -709,7 +706,7 @@ export default function CodingAgentApp() {
                 it, instead of as a lone banner-ish button under the header.
                 Home face only: on the settings and wizard faces there is
                 nothing for it to create into yet. */}
-            {view.face === "home" && !standalone && !showNew && (
+            {view.face === "home" && !standalone && (
               <button
                 type="button"
                 onClick={openNew}
@@ -744,44 +741,57 @@ export default function CodingAgentApp() {
 
         {view.face === "settings" && (
           <div className="mt-3" data-testid="coding-agent-embedded-settings">
-            <CodingAgentSettingsPanel
-              // Start over lands on the front door, not on a settings page for
-              // a configuration that was just erased.
-              onReset={() => { disarmClear(); setPage("home"); }}
-            />
-            {/* Owner tools that used to sit on the runs list. The harness test
-                gets the same card treatment as Start over: a bare button
-                labelled "Test harness" told nobody what tapping it would do —
-                and what it does is start a real, billed run. */}
-            <div className={`${CARD} mt-4`}>
-              <h3 className="text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.harnessTestTitle")}</h3>
-              <p className="mt-1.5 text-[11px] leading-relaxed text-[var(--text-muted)]">{t("codingAgent.harnessTestHint")}</p>
-              <button
-                type="button"
-                onClick={() => void testHarness()}
-                disabled={busy === "harness-test" || anyRunning || !status?.enabled || !status?.ready}
-                data-testid="coding-agent-harness-test"
-                className={`${BTN_SECONDARY} mt-3`}
-              >
-                {t("codingAgent.harnessTest")}
-              </button>
-            </div>
-            <div className="flex items-center justify-end mt-3">
-              {/* Only with something to clear: the route keeps every held
-                  run — live, paused, drafted — so a list of those alone
-                  would answer a confirmed tap with nothing at all. */}
-              {runs.some((r) => isSettled(r.status)) && (
+            <CodingAgentSettingsPanel />
+            {/* Three owner tools, one row, symmetric: equal columns, so the
+                buttons are the same width whatever their labels say, each with
+                its explanation on the question mark beside it. The headings
+                above them were saying the button's own words twice. */}
+            <div className={`${CARD} mt-4 grid gap-4 grid-cols-1 @md:grid-cols-3`} data-testid="coding-agent-owner-tools">
+              <div className="flex items-center gap-2" data-testid="coding-agent-reset-card">
+                <CodingAgentResetCard
+                  // Start over lands on the front door, not on a settings page
+                  // for a configuration that was just erased.
+                  onReset={() => { disarmClear(); setPage("home"); }}
+                />
+              </div>
+
+              <div className="flex items-center gap-2" data-testid="coding-agent-harness-card">
+                <button
+                  type="button"
+                  onClick={() => void testHarness()}
+                  disabled={busy === "harness-test" || anyRunning || !status?.enabled || !status?.ready}
+                  data-testid="coding-agent-harness-test"
+                  className={`${BTN_SECONDARY} flex-1`}
+                >
+                  {t("codingAgent.harnessTest")}
+                </button>
+                <HelpTip
+                  text={t("codingAgent.harnessTestHint")}
+                  label={t("codingAgent.harnessTestTitle")}
+                  testId="coding-agent-harness-help"
+                />
+              </div>
+
+              <div className="flex items-center gap-2" data-testid="coding-agent-clear-card">
+                {/* Disabled rather than hidden when there is nothing to clear:
+                    the row stays symmetric, and a confirmed tap still cannot
+                    answer with nothing. */}
                 <button
                   type="button"
                   onClick={() => { if (confirmClear) { disarmClear(); void clearRuns(); } else armClear(); }}
                   onBlur={disarmClear}
-                  disabled={busy === "clear"}
+                  disabled={busy === "clear" || !runs.some((r) => isSettled(r.status))}
                   data-testid="coding-agent-clear"
-                  className={confirmClear ? BTN_DANGER : BTN_QUIET}
+                  className={`${confirmClear ? BTN_DANGER : BTN_SECONDARY} flex-1`}
                 >
                   {confirmClear ? t("codingAgent.clearConfirm") : t("codingAgent.clearRuns")}
                 </button>
-              )}
+                <HelpTip
+                  text={t("codingAgent.clearRunsHint")}
+                  label={t("codingAgent.clearRuns")}
+                  testId="coding-agent-clear-help"
+                />
+              </div>
             </div>
           </div>
         )}
@@ -838,20 +848,7 @@ export default function CodingAgentApp() {
             </p>
           )}
 
-          {showNew && (
-            <NewAppWizardCard
-              className="mt-2"
-              maxTaskChars={status?.maxTaskChars ?? DEFAULT_MAX_TASK_CHARS}
-              onClose={closeNew}
-              onHanded={onHanded}
-            />
-          )}
 
-          {handed && !showNew && (
-            <p className="mt-2 px-1 text-xs text-emerald-400" role="status" data-testid="coding-agent-new-handed">
-              {t("codingAgent.newHanded")}
-            </p>
-          )}
 
           {projects.length === 0 ? (
             // The window is mostly empty at this point in a box's life, and a
@@ -872,7 +869,7 @@ export default function CodingAgentApp() {
               >
                 {projectsDir ? t("codingAgent.noProjects", { folder: projectsDir }) : t("codingAgent.projectFolderUnset")}
               </p>
-              {!standalone && !showNew && (
+              {!standalone && (
                 <button type="button" onClick={openNew} className={`${BTN_PRIMARY} mt-4`}>
                   <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">add</span>
                   {t("codingAgent.createNewProject")}
@@ -1091,6 +1088,32 @@ export default function CodingAgentApp() {
                   const open = expanded === run.id;
                   const tone = RUN_TONE[run.status];
                   const action = RUN_ACTION[run.status];
+                  // Only once there is something to open — see openInTerminal:
+                  // a live tail needs only the transcript (which lands before
+                  // the session id on a fresh run), --resume needs the session.
+                  const canOpenTerminal = Boolean(
+                    run.sessionId || (run.status === "running" && run.transcriptPath),
+                  );
+                  const terminalLabel = run.status === "running"
+                    ? t("codingAgent.openLive")
+                    : t("codingAgent.openResume");
+                  // Watching a run is a RUN control, so it sits in the same row
+                  // as Pause and Stop rather than under them: the owner clicks a
+                  // working run to see what it is doing, and hunting for that
+                  // button a line below the two that stop it read as unrelated.
+                  const terminalButton = canOpenTerminal ? (
+                    <button
+                      type="button"
+                      onClick={() => openInTerminal(run)}
+                      data-testid={`coding-agent-terminal-${run.id}`}
+                      title={terminalLabel}
+                      className={action
+                        ? `${RUN_BUTTON} border-white/10 text-[var(--text-primary)] hover:bg-white/5`
+                        : BTN_SECONDARY}
+                    >
+                      {terminalLabel}
+                    </button>
+                  ) : null;
                   // A draft has not run: its startedAt is when it was drafted
                   // (the runner overwrites it at start), so a duration would
                   // be time-since-drafting, which the "updated" line already
@@ -1147,6 +1170,37 @@ export default function CodingAgentApp() {
                                 task reads like any other run otherwise, and
                                 with several runs on a page the pair could
                                 not be told apart. */}
+                            {run.pr && run.pr.phase !== "failed" && (
+                              // The pull request as one chip: its phase, and
+                              // while checks run, how many have answered. A
+                              // link once GitHub has given us one.
+                              <a
+                                href={run.pr.url ?? undefined}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                data-testid={`coding-agent-pr-${run.id}`}
+                                title={run.pr.detail ?? undefined}
+                                className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 no-underline inline-flex items-center gap-1 ${
+                                  run.pr.phase === "merged"
+                                    ? "text-emerald-400 border-emerald-400/40"
+                                    : run.pr.phase === "blocked"
+                                      ? "text-amber-400 border-amber-400/40"
+                                      : "text-sky-300 border-sky-400/40"
+                                } ${run.pr.url ? "hover:bg-white/5" : "pointer-events-none"}`}
+                              >
+                                {run.pr.phase === "waiting" && (
+                                  <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-sky-300 motion-safe:animate-pulse" />
+                                )}
+                                {run.pr.phase === "waiting"
+                                  ? t("codingAgent.prWaiting", { done: run.pr.checks.passed + run.pr.checks.failed, total: run.pr.checks.total })
+                                  : run.pr.phase === "merged"
+                                    ? t("codingAgent.prMerged")
+                                    : run.pr.phase === "blocked"
+                                      ? t("codingAgent.prBlocked")
+                                      : t("codingAgent.prOpening")}
+                              </a>
+                            )}
                             {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
                             {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
                             {run.projectId && <span className="text-[11px] text-[var(--text-muted)]">{run.projectId}</span>}
@@ -1220,6 +1274,7 @@ export default function CodingAgentApp() {
                                   {t("codingAgent.stop")}
                                 </button>
                               )}
+                              {terminalButton}
                             </div>
                           )}
                           {/* Straight into the session: a live tail while it
@@ -1235,21 +1290,9 @@ export default function CodingAgentApp() {
                               {busy === `backup-${run.id}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
                             </button>
                           )}
-                          {/* Only once there is something to open — see
-                              openInTerminal: a live tail needs only the
-                              transcript (which lands before the session id on
-                              a fresh run), --resume needs the session. */}
-                          {(run.sessionId || (run.status === "running" && run.transcriptPath)) && (
-                          <button
-                            type="button"
-                            onClick={() => openInTerminal(run)}
-                            data-testid={`coding-agent-terminal-${run.id}`}
-                            title={run.status === "running" ? t("codingAgent.openLive") : t("codingAgent.openResume")}
-                            className={BTN_SECONDARY}
-                          >
-                            {run.status === "running" ? t("codingAgent.openLive") : t("codingAgent.openResume")}
-                          </button>
-                          )}
+                          {/* A settled run has no Pause/Stop row to sit in,
+                              so its Resume button stands on its own here. */}
+                          {!action && terminalButton}
                           {(details || artifacts.length > 0) && (
                             <button
                               type="button"

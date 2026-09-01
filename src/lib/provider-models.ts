@@ -62,8 +62,8 @@ export interface ProviderCatalog {
 // that's the catalog route's job.
 export const ANTHROPIC_MODELS: readonly ProviderModelOption[] = [
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest, near-frontier." },
-  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", hint: "Default. Speed + intelligence." },
-  { id: "claude-opus-4-7", label: "Claude Opus 4.7", hint: "Most capable." },
+  { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Default. Speed + intelligence." },
+  { id: "claude-opus-5", label: "Claude Opus 5", hint: "Most capable." },
 ] as const;
 
 // OpenAI API key models. Curated to the 5.4 + 5.5 generations only —
@@ -279,7 +279,7 @@ export const PROVIDER_CATALOGS = Object.freeze({
   anthropic: {
     provider: "anthropic",
     models: ANTHROPIC_MODELS,
-    defaultModelId: "claude-sonnet-4-6",
+    defaultModelId: "claude-sonnet-5",
     allowCustom: true,
   },
   openai: {

@@ -366,6 +366,11 @@ describe("the automatic review pass", () => {
     expect(toggle).toHaveAttribute("aria-checked", "false");
     expect(toggle).toHaveAttribute("data-testid", "coding-agent-review-pass");
     expect(screen.getByRole("switch", { name: SWITCH })).toHaveAttribute("data-testid", "coding-agent-switch");
+    // The paragraph moved behind a question mark: three of these stacked down
+    // the page pushed the controls they explain off the screen. It is still
+    // exactly one tap away, and still the same words.
+    expect(screen.queryByText(translations.en["codingAgent.reviewPassHint"])).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-review-pass-help"));
     expect(screen.getByText(translations.en["codingAgent.reviewPassHint"])).toBeInTheDocument();
 
     fireEvent.click(toggle);

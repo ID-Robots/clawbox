@@ -181,6 +181,40 @@ export async function initProject(
   };
   await fs.writeFile(metaPath(projectId), JSON.stringify(meta, null, 2), "utf-8");
 
+  // A check for the pull-request flow to wait on.
+  //
+  // The auto-PR switch (src/lib/coding-pr.ts) refuses to merge a pull request
+  // that has NO checks — "every check passed" is trivially true of zero checks,
+  // and merging on that would merge everything on sight. So a project scaffolded
+  // here ships one real check: without it the flow would open pull requests that
+  // can never satisfy their own guardrail, and the harness self-test could never
+  // exercise the PR -> merge path it exists to prove.
+  //
+  // Deliberately trivial and dependency-free: it asserts the entry point exists
+  // and is not empty, which is exactly the property a scaffold can promise.
+  await fs.mkdir(path.join(dir, ".github", "workflows"), { recursive: true });
+  await fs.writeFile(
+    path.join(dir, ".github", "workflows", "check.yml"),
+    `name: check
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - "clawbox/**"
+
+jobs:
+  entry-point:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: index.html exists and is not empty
+        run: |
+          test -s index.html
+          echo "index.html is $(wc -c < index.html) bytes"
+`,
+    "utf-8",
+  );
+
   const template = opts?.template || "app";
 
   // Both scaffolds carry the KV bridge (src/lib/webapp-sandbox.ts): the built
@@ -627,25 +661,17 @@ export async function deployWebapp(
     JSON.stringify({ name, color: meta.color || "#f97316", icon: meta.icon || "" }),
     "utf-8",
   );
+  // The icon is drawn inside `registerWebappInPreferences`, for every app that
+  // reaches the desktop rather than only the ones built from HTML here — hence
+  // the description: it is the icon prompt's only clue about what the app does,
+  // and `htmlHint` is the best one available on this path. An app that supplied
+  // an icon of its own is left alone there.
   await registerWebappInPreferences(appId, name, {
     color: meta.color,
     iconUrl: meta.icon,
     webappUrl: `/setup-api/webapps?app=${appId}`,
+    description: meta.description || htmlHint(html),
   });
-  // An app that arrived without an icon gets one drawn by ClawBox AI, AFTER
-  // this returns: generation takes 5–15 s and the tool reply behind this call
-  // must not wait for a picture. Fire-and-forget by design — the app is
-  // created and registered either way, and `ensureWebappIcon` never rejects;
-  // the `.catch` is belt and braces against an unhandled rejection ever taking
-  // the server down over a missing icon. A create that supplied its own icon
-  // is left alone.
-  if (!meta.icon) {
-    void ensureWebappIcon(appId, {
-      name,
-      color: meta.color,
-      description: meta.description || htmlHint(html),
-    }).catch(() => {});
-  }
 }
 
 /** Is this deployed app's meta.json still without an icon of its own? */

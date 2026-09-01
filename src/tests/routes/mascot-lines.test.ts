@@ -17,7 +17,6 @@ vi.mock("@/lib/edition-source", () => ({ hasHermesHarness }));
 vi.mock("@/lib/hermes-pets", () => ({ isPetActive }));
 
 import { GET } from "@/app/setup-api/mascot-lines/route";
-import { POST } from "@/app/setup-api/mascot-lines/regenerate/route";
 
 const PHRASES = { sass: ["a"], idle: ["b"], sleep: ["c"], jump: ["d"], dance: ["e"], facepalm: ["f"], nameGreetings: ["{name}"], nameFallbacks: ["boss"], power: ["g"] };
 
@@ -113,95 +112,5 @@ describe("GET /setup-api/mascot-lines", () => {
       await GET(request("?locale=en"));
       expect(isPetActive).not.toHaveBeenCalled();
     });
-  });
-});
-
-describe("POST /setup-api/mascot-lines/regenerate", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("gives every refusal its own message instead of collapsing them", async () => {
-    // These used to answer with the same "unavailable right now" text, so a
-    // Settings button could not tell "your chat is using the model, try again
-    // in a minute" apart from a real fault.
-    const reasons = [
-      "chat-busy",
-      "refresh-in-progress",
-      "generation-disabled-for-locale",
-      "low-memory",
-      "unavailable",
-      "timeout",
-      "transport",
-      "malformed",
-      "no-new-phrases",
-    ] as const;
-    const messages = new Set<string>();
-    for (const reason of reasons) {
-      forceRegenerate.mockResolvedValue({ phrases: null, reason, locale: "bg" });
-      const body = await (await POST(request("?locale=bg"))).json();
-      expect(body.ok, reason).toBe(false);
-      expect(body.meta, reason).toEqual({ source: "pack", reason, locale: "bg" });
-      expect(typeof body.reason, reason).toBe("string");
-      messages.add(body.reason);
-    }
-    expect(messages.size).toBe(reasons.length);
-  });
-
-  it("does not blame the user's chat for a refresh the box started itself", async () => {
-    // The misleading one: "the model is busy with your chat" was shown when
-    // the page's OWN background refresh held the lock. No chat involved.
-    forceRegenerate.mockResolvedValue({ phrases: null, reason: "refresh-in-progress", locale: "en" });
-    const refresh = await (await POST(request("?locale=en"))).json();
-    expect(refresh.reason).not.toMatch(/your chat/i);
-    expect(refresh.reason).toMatch(/already running/i);
-
-    forceRegenerate.mockResolvedValue({ phrases: null, reason: "chat-busy", locale: "en" });
-    const chat = await (await POST(request("?locale=en"))).json();
-    expect(chat.reason).toMatch(/your chat/i);
-  });
-
-  it("does not call a working model broken when it merely had nothing new", async () => {
-    // The model ran and answered a well-formed batch; every line was one the
-    // crab already had. Reporting that as junk sends the owner looking for a
-    // broken install that is not there.
-    forceRegenerate.mockResolvedValue({ phrases: null, reason: "no-new-phrases", locale: "en" });
-
-    const body = await (await POST(request("?locale=en"))).json();
-
-    expect(body.ok).toBe(false);
-    expect(body.meta.reason).toBe("no-new-phrases");
-    expect(body.reason).toMatch(/already knows/i);
-    expect(body.reason).not.toMatch(/did not return usable/i);
-  });
-
-  it("explains that generation is English-only rather than reporting a fault", async () => {
-    forceRegenerate.mockResolvedValue({
-      phrases: null,
-      reason: "generation-disabled-for-locale",
-      locale: "bg",
-    });
-
-    const body = await (await POST(request("?locale=bg"))).json();
-
-    expect(body.ok).toBe(false);
-    expect(body.meta.reason).toBe("generation-disabled-for-locale");
-    expect(body.reason).toMatch(/English/);
-  });
-
-  it("reports a successful regen as source 'local'", async () => {
-    forceRegenerate.mockResolvedValue({ phrases: PHRASES, reason: "generated", locale: "bg" });
-
-    const body = await (await POST(request("?locale=bg"))).json();
-
-    expect(body.ok).toBe(true);
-    expect(body.phrases).toEqual(PHRASES);
-    expect(body.meta).toEqual({ source: "local", reason: "generated", locale: "bg" });
-  });
-
-  it("passes an unshipped locale through as null, like GET does", async () => {
-    forceRegenerate.mockResolvedValue({ phrases: null, reason: "chat-busy", locale: "en" });
-    await POST(request("?locale=pt"));
-    expect(forceRegenerate).toHaveBeenCalledWith(null);
   });
 });

@@ -264,153 +264,6 @@ describe("SettingsApp factory reset overlay", () => {
 
 });
 
-/**
- * The regenerate endpoint shipped with no caller: nothing in the UI, the CLI
- * or the MCP surface ever POSTed to it, so the on-device generator could only
- * be triggered by the cache ageing out on its own. These cover the button that
- * now calls it, and — the part that matters — that its refusals do not all
- * read as "your chat is using the model".
- */
-describe("SettingsApp mascot phrase refresh", () => {
-  let regenerateResponse: { ok: boolean; body: unknown };
-
-  beforeEach(() => {
-    regenerateResponse = {
-      ok: true,
-      body: { ok: true, phrases: {}, meta: { source: "local", reason: "generated", locale: "en" } },
-    };
-    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
-      const url = input.toString();
-      if (url.startsWith("/setup-api/mascot-lines/regenerate") && init?.method === "POST") {
-        return Promise.resolve({
-          ok: regenerateResponse.ok,
-          json: () => Promise.resolve(regenerateResponse.body),
-        });
-      }
-      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
-      return jsonResponse({});
-    }));
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  const clickRefresh = async () => {
-    // Settings opens on AI Models; the phrase refresh lives in Appearance.
-    fireEvent.click(screen.getByRole("button", { name: /settings\.appearance/ }));
-    const button = await screen.findByRole("button", { name: /settings\.mascotRefresh$/ });
-    fireEvent.click(button);
-    return button;
-  };
-
-  it("POSTs to the regenerate endpoint with the current locale", async () => {
-    render(<SettingsApp ui={defaultUi} />);
-
-    await clickRefresh();
-
-    await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith(
-        "/setup-api/mascot-lines/regenerate?locale=en",
-        expect.objectContaining({ method: "POST" }),
-      );
-    });
-  });
-
-  it("shows a spinner while the run is in flight and confirms when it lands", async () => {
-    let resolveRun: ((value: unknown) => void) | null = null;
-    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
-      const url = input.toString();
-      if (url.startsWith("/setup-api/mascot-lines/regenerate") && init?.method === "POST") {
-        return new Promise((resolve) => { resolveRun = resolve; });
-      }
-      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
-      return jsonResponse({});
-    }));
-
-    render(<SettingsApp ui={defaultUi} />);
-    const button = await clickRefresh();
-
-    // A local run is up to 180 seconds. Without this the button looks dead.
-    await waitFor(() => expect(button).toHaveAttribute("aria-busy", "true"));
-    expect(button).toBeDisabled();
-    expect(within(button).getByText("settings.mascotRefreshing")).toBeInTheDocument();
-
-    resolveRun!({
-      ok: true,
-      json: () => Promise.resolve({ ok: true, meta: { source: "local", reason: "generated", locale: "en" } }),
-    });
-
-    expect(await screen.findByText("settings.mascotRefreshed")).toBeInTheDocument();
-    await waitFor(() => expect(button).toHaveAttribute("aria-busy", "false"));
-  });
-
-  it("tells a background refresh apart from the user's own chat", async () => {
-    // The misleading message this fixes: "busy with your chat" was shown when
-    // the box's OWN phrase refresh held the model.
-    regenerateResponse = {
-      ok: true,
-      body: { ok: false, reason: "…", meta: { source: "pack", reason: "refresh-in-progress", locale: "en" } },
-    };
-    render(<SettingsApp ui={defaultUi} />);
-    await clickRefresh();
-    expect(await screen.findByText("settings.mascotRefreshInProgress")).toBeInTheDocument();
-    expect(screen.queryByText("settings.mascotRefreshChatBusy")).not.toBeInTheDocument();
-  });
-
-  it("names the user's chat only when the chat really is the holder", async () => {
-    regenerateResponse = {
-      ok: true,
-      body: { ok: false, reason: "…", meta: { source: "pack", reason: "chat-busy", locale: "en" } },
-    };
-    render(<SettingsApp ui={defaultUi} />);
-    await clickRefresh();
-    expect(await screen.findByText("settings.mascotRefreshChatBusy")).toBeInTheDocument();
-  });
-
-  it("maps every refusal to its own message and falls back for an unknown one", async () => {
-    const cases: [string, string][] = [
-      ["low-memory", "settings.mascotRefreshLowMemory"],
-      ["unavailable", "settings.mascotRefreshUnavailable"],
-      ["timeout", "settings.mascotRefreshFailed"],
-      ["transport", "settings.mascotRefreshFailed"],
-      ["malformed", "settings.mascotRefreshFailed"],
-      // Its own message, NOT the generic failure one: the model worked and
-      // simply had nothing to add, which is not a fault to go debugging.
-      ["no-new-phrases", "settings.mascotRefreshNothingNew"],
-      // A reason a future server adds must not render blank.
-      ["something-new", "settings.mascotRefreshFailed"],
-    ];
-    for (const [reason, key] of cases) {
-      regenerateResponse = {
-        ok: true,
-        body: { ok: false, reason: "…", meta: { source: "pack", reason, locale: "en" } },
-      };
-      const { unmount } = render(<SettingsApp ui={defaultUi} />);
-      await clickRefresh();
-      expect(await screen.findByText(key), reason).toBeInTheDocument();
-      unmount();
-    }
-  });
-
-  it("reports a transport failure instead of leaving the spinner running", async () => {
-    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
-      const url = input.toString();
-      if (url.startsWith("/setup-api/mascot-lines/regenerate") && init?.method === "POST") {
-        return Promise.reject(new Error("network down"));
-      }
-      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
-      return jsonResponse({});
-    }));
-
-    render(<SettingsApp ui={defaultUi} />);
-    const button = await clickRefresh();
-
-    expect(await screen.findByText("settings.mascotRefreshFailed")).toBeInTheDocument();
-    await waitFor(() => expect(button).not.toBeDisabled());
-  });
-});
-
 describe("SettingsApp desktop nav overflow contract", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn((input: string | URL) => {
@@ -693,8 +546,22 @@ describe("SettingsApp providers and Local AI pages", () => {
     expect(screen.queryByTestId("coding-agent-settings-panel")).toBeNull();
   });
 
-  it("opens on Providers with the provider list, and Local AI shows the grouped on-device page", async () => {
+  it("opens on Appearance, not on the list of AI credentials", async () => {
+    // Settings used to land on Providers, so the first thing it showed was a
+    // list of AI credentials. Appearance is both the first sidebar row and the
+    // page an owner actually comes here for — wallpaper, mascot, language.
     const { container } = render(<SettingsApp ui={defaultUi} />);
+    const appearance = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.appearance"));
+    if (!appearance) throw new Error("Appearance nav entry did not render");
+    expect(appearance.className).toContain("coral-bright");
+    expect(screen.queryByTestId("ai-provider-list")).toBeNull();
+  });
+
+  it("shows the provider list on Providers, and the grouped on-device page on Local AI", async () => {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const providers = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.providers"));
+    if (!providers) throw new Error("Providers nav entry did not render");
+    fireEvent.click(providers);
     expect(await screen.findByTestId("ai-provider-list")).toBeInTheDocument();
 
     const local = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.localAi"));

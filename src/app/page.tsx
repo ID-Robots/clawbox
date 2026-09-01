@@ -7,7 +7,8 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
-import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, notifyCodingRunStarted } from "@/lib/ui-events";
+import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT,
+  NEW_APP_EVENT, notifyCodingRunStarted } from "@/lib/ui-events";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
 import ChromeLauncher from "@/components/ChromeLauncher";
@@ -27,7 +28,7 @@ import CodingAgentApp from "@/components/CodingAgentApp";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
-import ChatPopup from "@/components/ChatPopup";
+import ChatPopup, { CHAT_PANEL_GAP } from "@/components/ChatPopup";
 import ToastHost from "@/components/ToastHost";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 import SetupWizard from "@/components/SetupWizard";
@@ -85,10 +86,11 @@ const apps: AppDef[] = [
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
   { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
   // The memory index — health, "Index now", the schedule — as its own window.
-  // It used to be a card inside ClawKeep; it sits next to ClawKeep here and
-  // borrows its green because the two are one family (what the box remembers,
-  // what the box keeps). Sized for the single card it shows.
-  { id: "memory-shard", name: "app.memoryShard", color: "#166534", type: "memory_shard", pinned: true, defaultWidth: 720, defaultHeight: 640 },
+  // It used to be a card inside ClawKeep and borrowed its green; it has its own
+  // tile colour now, because the app was rebuilt on the Coding Agent's pattern
+  // and green is reserved there for a STATE (on, healthy) rather than for an
+  // identity. Sized for the single card it shows.
+  { id: "memory-shard", name: "app.memoryShard", color: "#2f2a52", type: "memory_shard", pinned: true, defaultWidth: 720, defaultHeight: 640 },
   { id: "system_update", name: "app.systemUpdate", color: "#0ea5e9", type: "system_update", pinned: false, defaultWidth: 900, defaultHeight: 720 },
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
@@ -678,6 +680,14 @@ function ChromeDesktopInner() {
   const [mascotX, setMascotX] = useState(85);
   const handleChatPanelModeChange = useCallback((panelWidth: number) => setChatPanelWidth(panelWidth), []);
 
+  // What the docked chat actually occupies: its width PLUS the gap it floats
+  // in, so a maximized window stops at the gap instead of sliding under the
+  // panel and showing through it. Derived rather than folded into
+  // `chatPanelWidth`, because that value is persisted and handed straight back
+  // to the chat as `initialPanelWidth` — adding the gap there would widen the
+  // panel by 12px on every reload.
+  const chatPanelInset = chatPanelWidth > 0 ? chatPanelWidth + CHAT_PANEL_GAP : 0;
+
   // Open chat on skill-install, fix-error or handed-over-message events so
   // the user can watch the agent's response.
   useEffect(() => {
@@ -685,10 +695,14 @@ function ChromeDesktopInner() {
     window.addEventListener('clawbox-skill-installed', handler);
     window.addEventListener(FIX_ERROR_EVENT, handler);
     window.addEventListener(CHAT_MESSAGE_EVENT, handler);
+    // The Coding Agent's "Create app" button: the chat has to be open before
+    // the card inside it can be seen.
+    window.addEventListener(NEW_APP_EVENT, handler);
     return () => {
       window.removeEventListener('clawbox-skill-installed', handler);
       window.removeEventListener(FIX_ERROR_EVENT, handler);
       window.removeEventListener(CHAT_MESSAGE_EVENT, handler);
+      window.removeEventListener(NEW_APP_EVENT, handler);
     };
   }, []);
 
@@ -2421,7 +2435,7 @@ function ChromeDesktopInner() {
           mascotX for a frame right after opening, flashing the popup to the wrong
           corner before it settled. */}
       {!isMobile && (
-        <Mascot frozen={chatOpen} rightInset={chatPanelWidth} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} />
+        <Mascot frozen={chatOpen} rightInset={chatPanelInset} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} />
       )}
       <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onOpenSettingsSection={openSettingsSection} onPanelModeChange={handleChatPanelModeChange} initialPanelWidth={chatPanelWidth} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} mobile={isMobile} />
 
@@ -2516,7 +2530,7 @@ function ChromeDesktopInner() {
               onMinimize={() => minimizeWindow(window.id)}
               onGeometryChange={(geo) => updateWindowGeometry(window.id, geo)}
               minimized={window.minimized}
-              rightInset={chatPanelWidth}
+              rightInset={chatPanelInset}
             >
               {renderWindowContent(window.appId, window.meta)}
             </ChromeWindow>

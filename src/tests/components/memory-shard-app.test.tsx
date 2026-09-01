@@ -34,6 +34,13 @@ const LOCAL_MEMORY = {
   run: { status: "idle", mode: "", trigger: "", startedAtMs: 0, finishedAtMs: 0, durationMs: 0, error: "" },
   schedule: { enabled: false, frequency: "daily", timeOfDay: "03:00", weekday: 0 },
   nextRunAtMs: 0,
+  // The app shows the SETUP WIZARD until the owner has been through it, so a
+  // fixture describing an already-configured box has to say so — otherwise
+  // every test below would be looking at the wizard rather than the index card
+  // it means to exercise. The wizard's own behaviour is covered by
+  // memory-shard-wizard.test.tsx.
+  enabled: true,
+  setupComplete: true,
 };
 
 let memory: Record<string, unknown> = { ...LOCAL_MEMORY };

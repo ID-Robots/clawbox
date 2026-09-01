@@ -75,6 +75,17 @@ import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/codin
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
 import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, WEBAPPS_DIR } from "@/lib/code-projects";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
+import {
+  decideMerge,
+  emptyChecks,
+  isPrPending,
+  mergePullRequest,
+  openPullRequest,
+  POLL_INTERVAL_MS,
+  readPullRequest,
+  startRunBranch,
+  type PrState,
+} from "@/lib/coding-pr";
 import { commitRunWork, lastCommit, type LastCommit } from "@/lib/coding-git";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
@@ -211,6 +222,18 @@ export const CODING_AGENT_REVIEW_CONFIG_KEY = "coding_agent_review_pass";
  * true. Reset clears it, which is the ONLY way back to the wizard — a run
  * failing, or the switch going off, must not restart onboarding.
  */
+/**
+ * Branch, open a pull request, wait for GitHub Actions, and merge when the
+ * checks actually say so.
+ *
+ * Off by default, and owner-only like every other switch here: it is standing
+ * consent for the box to push the agent's work to GitHub and merge it. The
+ * guardrails that decide "actually say so" live in @/lib/coding-pr —
+ * notably that a pull request with NO checks is never merged, because "every
+ * check passed" is trivially true of zero checks.
+ */
+export const CODING_AGENT_AUTO_PR_CONFIG_KEY = "coding_agent_auto_pr";
+
 export const CODING_AGENT_SETUP_CONFIG_KEY = "coding_agent_setup_complete";
 
 /** Every key the reset clears. The switch is last: it is the consent, and a
@@ -222,6 +245,7 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_TURNS_CONFIG_KEY,
   CODING_AGENT_TOKENS_CONFIG_KEY,
   CODING_AGENT_REVIEW_CONFIG_KEY,
+  CODING_AGENT_AUTO_PR_CONFIG_KEY,
   CODING_AGENT_SETUP_CONFIG_KEY,
   CODING_AGENT_CONFIG_KEY,
 ] as const;
@@ -420,6 +444,17 @@ export interface CodingRun {
   commandsRun: number;
   /** Set on an automatic review pass: the id of the run it reviews. */
   reviewOf: string | null;
+  /**
+   * The pull request this run's work went into, once the auto-PR switch is on.
+   *
+   * A FIELD and not a new run status, on purpose. RUN_STATUSES is the persisted
+   * allow-list, and readAll() drops any record whose status is not in it before
+   * the next writeAll() rewrites the file — so an unrecognised status is a
+   * silent DELETE of the run, not a hidden row. A field is forward- and
+   * backward-compatible: normalizeRun gives an older record the default below,
+   * and an older build ignores a field it does not know.
+   */
+  pr: PrState | null;
   /** Things Claude Code wanted to do and was not allowed to. */
   permissionDenials: number;
   /**
@@ -548,6 +583,8 @@ export interface CodingAgentStatus {
   running: number;
   /** The owner's switch for the automatic review pass after a completed run. */
   reviewPass: boolean;
+  /** The owner's switch for branch -> pull request -> wait for checks -> merge. */
+  autoPr: boolean;
   harnessCommand: string;
   maxTaskChars: number;
   /** How hard a run thinks per turn. */
@@ -752,6 +789,18 @@ export async function getReviewPass(): Promise<boolean> {
 export async function setReviewPass(on: unknown): Promise<boolean> {
   if (typeof on !== "boolean") throw new CodingAgentError("invalid", "The review pass switch must be true or false.");
   await configSet(CODING_AGENT_REVIEW_CONFIG_KEY, on);
+  return on;
+}
+
+export async function getAutoPr(): Promise<boolean> {
+  return (await configGet(CODING_AGENT_AUTO_PR_CONFIG_KEY)) === true;
+}
+
+export async function setAutoPr(on: unknown): Promise<boolean> {
+  if (typeof on !== "boolean") {
+    throw new CodingAgentError("invalid", "The pull-request switch must be true or false.");
+  }
+  await configSet(CODING_AGENT_AUTO_PR_CONFIG_KEY, on);
   return on;
 }
 
@@ -1199,6 +1248,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     readiness,
     running: runningCount(),
     reviewPass: config[CODING_AGENT_REVIEW_CONFIG_KEY] === true,
+    autoPr: config[CODING_AGENT_AUTO_PR_CONFIG_KEY] === true,
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
     effort,
@@ -1215,10 +1265,18 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     tokenLimit: tokenLimitFrom(config[CODING_AGENT_TOKENS_CONFIG_KEY]),
     minTokenLimit: MIN_TOKEN_LIMIT,
     runIdleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
-    // A box configured before the wizard existed has no flag, and its owner
-    // must not be sent back through onboarding: the switch being ON is the
-    // same consent the wizard collects, so it counts as done.
-    setupComplete: config[CODING_AGENT_SETUP_CONFIG_KEY] === true || enabled,
+    // An EXPLICIT flag always wins; `enabled` only stands in when there is no
+    // flag at all.
+    //
+    // The fallback exists for a box configured before the wizard did, whose
+    // owner must not be sent back through onboarding. But `flag === true ||
+    // enabled` made the switch itself mean "finished", and the wizard turns the
+    // switch on at step 2 so its last step has an agent to test — so the app
+    // decided setup was complete mid-wizard and swapped the last step for the
+    // home page about a second after it appeared.
+    setupComplete: typeof config[CODING_AGENT_SETUP_CONFIG_KEY] === "boolean"
+      ? config[CODING_AGENT_SETUP_CONFIG_KEY] === true
+      : enabled,
   };
 }
 
@@ -1248,6 +1306,17 @@ function isCodingRun(value: unknown): value is CodingRun {
 }
 
 /** Fill in fields an older on-disk record may lack, so readers never see undefined. */
+/** A stored `pr` blob that is shaped like one. Anything else is dropped, the
+ *  same way every other persisted field is re-validated on read. */
+function isPrState(value: unknown): value is PrState {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Partial<PrState>;
+  return typeof v.phase === "string"
+    && ["opening", "waiting", "merged", "blocked", "failed"].includes(v.phase)
+    && typeof v.startedAt === "number"
+    && typeof v.checks === "object" && v.checks !== null;
+}
+
 function normalizeRun(raw: CodingRun): CodingRun {
   return {
     id: raw.id,
@@ -1289,6 +1358,10 @@ function normalizeRun(raw: CodingRun): CodingRun {
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
     resumable: raw.resumable === true,
     reviewOf: typeof raw.reviewOf === "string" ? raw.reviewOf : null,
+    // Every field must be reconstructed here: normalizeRun builds a fresh
+    // object field by field, so anything omitted survives in memory and
+    // disappears the next time the file is read.
+    pr: isPrState(raw.pr) ? raw.pr : null,
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
     todos: parseTodos(raw.todos) ?? [],
     exitCode: typeof raw.exitCode === "number" ? raw.exitCode : null,
@@ -1470,6 +1543,9 @@ function cloneRun(run: CodingRun): CodingRun {
     subagentsByType: { ...run.subagentsByType },
     modelsUsed: [...run.modelsUsed],
     todos: run.todos.map((t) => ({ ...t })),
+    // Nested, so it needs its own copy: a shared object here would let a route
+    // holding a clone see the watcher's later writes — and mutate them.
+    pr: run.pr ? { ...run.pr, checks: { ...run.pr.checks } } : null,
   };
 }
 
@@ -1497,12 +1573,15 @@ export function listRuns(limit = MAX_RUNS_KEPT): CodingRun[] {
 export function clearFinishedRuns(): number {
   const list = loadRuns();
   // Paused runs hold a resumable session and drafts never ran — neither is
-  // "finished", so the owner's clear-history sweep leaves them alone.
-  const keep = list.filter((r) => isHeld(r.status));
+  // "finished", so the owner's clear-history sweep leaves them alone. A run
+  // whose pull request is still being watched is not finished either: it has
+  // SETTLED, but deleting it would take its evidence folder and leave a
+  // watcher polling a record that no longer exists.
+  const keep = list.filter((r) => isHeld(r.status) || isPrPending(r.pr));
   const removed = list.length - keep.length;
   if (removed === 0) return 0;
   for (const r of list) {
-    if (!isHeld(r.status)) removeArtifacts(r.id);
+    if (!isHeld(r.status) && !isPrPending(r.pr)) removeArtifacts(r.id);
   }
   // Mutate the array the module hands out rather than replacing the binding,
   // so every existing reader sees the same list.
@@ -2404,7 +2483,171 @@ async function recordRunWork(run: CodingRun): Promise<void> {
  */
 async function recordAndReview(run: CodingRun, ownerEnded: boolean): Promise<void> {
   await recordRunWork(run);
-  if (!ownerEnded) await maybeStartReviewPass(run);
+  if (ownerEnded) return;
+  await maybeStartReviewPass(run);
+  // After the review pass is decided, not before: when one is starting, the
+  // pull request waits for it, because the review's own commits belong in it.
+  await maybeOpenPullRequest(run);
+}
+
+/**
+ * Open the pull request for a finished chain of runs, and start watching its
+ * checks.
+ *
+ * "Chain", not "run": with the review pass on, the LAST run to settle is the
+ * review, and the branch and the work belong to the run it reviewed. So the
+ * pull request is always attributed to the origin run, and this defers while a
+ * review pass is still to come.
+ */
+async function maybeOpenPullRequest(finished: CodingRun): Promise<void> {
+  try {
+    if (finished.status !== "completed") return;
+    if (!(await getAutoPr())) return;
+
+    // A review pass is about to start for this run — wait for it, and let the
+    // review's own settle bring us back here. These are exactly
+    // maybeStartReviewPass's conditions; if they hold, a review IS coming.
+    const reviewComing = finished.reviewOf === null
+      && finished.filesTouched.length > 0
+      && (await getReviewPass());
+    if (reviewComing) return;
+
+    const originId = finished.reviewOf ?? finished.id;
+    const origin = loadRuns().find((r) => r.id === originId);
+    if (!origin?.pr || origin.pr.phase !== "opening" || !origin.pr.branch || !origin.pr.base) return;
+
+    // Nothing was committed anywhere in the chain: there is no diff to review
+    // and nothing to merge.
+    if (!origin.commit && !finished.commit) {
+      settlePr(origin, "blocked", "Nothing was committed, so there is no pull request to open.");
+      return;
+    }
+
+    const opened = await openPullRequest({
+      directory: origin.directory,
+      branch: origin.pr.branch,
+      base: origin.pr.base,
+      title: firstLineOf(origin.task),
+      body: prBody(origin, finished),
+    });
+    if (!opened.ok) {
+      settlePr(origin, "failed", opened.detail);
+      return;
+    }
+
+    origin.pr = {
+      ...origin.pr,
+      phase: "waiting",
+      number: opened.number,
+      url: opened.url,
+      startedAt: Date.now(),
+    };
+    pushProgress(origin, `Opened pull request #${opened.number} into ${origin.pr.base}`);
+    persist(true);
+    console.error(`[coding-agent] ${origin.id} opened PR #${opened.number}`);
+
+    // The review's verdict gates the merge as well as the checks: they answer
+    // different questions, and a green suite over a review that failed is not
+    // consent to merge.
+    watchPullRequest(origin.id, finished.reviewOf !== null ? finished.status === "completed" : true);
+  } catch (err) {
+    console.error(`[coding-agent] pull request for ${finished.id} not opened:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/** First line of the task, trimmed to something a PR title can hold. */
+function firstLineOf(task: string): string {
+  const line = task.split("\n")[0].trim();
+  return line.length > 72 ? `${line.slice(0, 69)}...` : line || "ClawBox coding agent";
+}
+
+function prBody(origin: CodingRun, last: CodingRun): string {
+  const lines = [
+    "Opened by the ClawBox coding agent.",
+    "",
+    `**Task**`,
+    origin.task,
+    "",
+    `Run \`${origin.id}\`${origin.commit ? ` · commit \`${origin.commit}\`` : ""}`,
+  ];
+  if (last.reviewOf) lines.push(`Reviewed by run \`${last.id}\` (automatic review pass).`);
+  if (origin.summary) lines.push("", "**Summary**", origin.summary);
+  return lines.join("\n");
+}
+
+/** Record a terminal PR phase on the run and persist it. */
+function settlePr(run: CodingRun, phase: "merged" | "blocked" | "failed", detail: string | null): void {
+  if (!run.pr) return;
+  run.pr = { ...run.pr, phase, detail, endedAt: Date.now() };
+  pushProgress(run, phase === "merged" ? "Merged into the base branch" : `Not merged: ${detail ?? phase}`);
+  persist(true);
+}
+
+/** Runs whose checks are being polled right now, so a restart or a second
+ *  settle cannot start two watchers for one pull request. */
+const prWatchers = new Set<string>();
+
+/**
+ * Poll a pull request's checks until they decide something.
+ *
+ * A timer in the web server, which CLAUDE.md calls the one long-lived ClawBox
+ * process — so it is unref()'d (it must never hold the process open), capped by
+ * MAX_WAIT_MS through decideMerge, and single-instance per run.
+ */
+function watchPullRequest(runId: string, reviewOk: boolean): void {
+  if (prWatchers.has(runId)) return;
+  prWatchers.add(runId);
+
+  const tick = async (): Promise<void> => {
+    const run = loadRuns().find((r) => r.id === runId);
+    if (!run?.pr || run.pr.phase !== "waiting" || run.pr.number === null) {
+      prWatchers.delete(runId);
+      return;
+    }
+    // Captured before the record is reassigned below — the assignment is what
+    // loses the null-narrowing TypeScript did on the guard above.
+    const prNumber = run.pr.number;
+    const snapshot = await readPullRequest(run.directory, prNumber);
+    if ("error" in snapshot) {
+      // A transient read says nothing; keep waiting until the ceiling does.
+      schedule();
+      return;
+    }
+    run.pr = { ...run.pr, checks: snapshot.checks };
+    persist(true);
+
+    const verdict = decideMerge({ snapshot, waitedMs: Date.now() - run.pr.startedAt, reviewOk });
+    if (verdict.action === "wait") { schedule(); return; }
+    if (verdict.action === "block") {
+      settlePr(run, "blocked", verdict.detail);
+      prWatchers.delete(runId);
+      return;
+    }
+    const merged = await mergePullRequest(run.directory, prNumber);
+    settlePr(run, merged.ok ? "merged" : "blocked", merged.ok ? null : merged.detail);
+    prWatchers.delete(runId);
+  };
+
+  const schedule = () => {
+    const timer = setTimeout(() => { void tick(); }, POLL_INTERVAL_MS);
+    // Never hold the process open for a pull request.
+    timer.unref?.();
+  };
+
+  schedule();
+}
+
+/**
+ * Pick up pull requests left waiting by a restart.
+ *
+ * Same reason the email approval poller is restarted at boot: a box that
+ * reboots mid-wait would otherwise leave the run showing "waiting for checks"
+ * forever, with nothing polling.
+ */
+export function resumePullRequestWatches(): void {
+  for (const run of loadRuns()) {
+    if (isPrPending(run.pr) && run.pr?.phase === "waiting") watchPullRequest(run.id, true);
+  }
 }
 
 /**
@@ -2780,6 +3023,52 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   else if (resumeSessionId) pushProgress(run, "Resuming the previous session");
   else if (resumeRunId) pushProgress(run, `Starting fresh: ${resumeRunId} did not fail in a way a resume can fix`);
 
+  // The run's own branch, made BEFORE any work happens.
+  //
+  // This is the only simple moment for it: commitRunWork commits to whatever
+  // branch is checked out, so branching first puts the commits where a pull
+  // request needs them and no history has to be rewritten afterwards. A review
+  // pass is deliberately excluded — it resumes in the same folder and belongs
+  // on the same branch, which it is already on.
+  if (!run.reviewOf && (await getAutoPr())) {
+    const branched = await startRunBranch({
+      directory: run.directory,
+      runId: run.id,
+      // DATA_DIR is <clawbox>/data, so its parent is the checkout a run must
+      // never branch — see startRunBranch.
+      protectedRoot: path.dirname(DATA_DIR),
+    });
+    if (branched.ok) {
+      run.pr = {
+        phase: "opening",
+        number: null,
+        url: null,
+        branch: branched.branch,
+        base: branched.base,
+        checks: emptyChecks(),
+        detail: null,
+        startedAt: Date.now(),
+        endedAt: null,
+      };
+      pushProgress(run, `Working on ${branched.branch}, for a pull request into ${branched.base}`);
+    } else {
+      // Not fatal: the work is worth doing on whatever branch this is. The
+      // owner is told why there will be no pull request.
+      run.pr = {
+        phase: "failed",
+        number: null,
+        url: null,
+        branch: null,
+        base: null,
+        checks: emptyChecks(),
+        detail: branched.detail,
+        startedAt: Date.now(),
+        endedAt: Date.now(),
+      };
+      pushProgress(run, `No pull request: ${branched.detail}`);
+    }
+  }
+
   insertRun(loadRuns(), run);
   persist(true);
   console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
@@ -2843,6 +3132,8 @@ function newRunRecord(fields: {
     retries: 0,
     resumable: false,
     reviewOf: fields.reviewOf ?? null,
+    // No pull request until the aftermath opens one.
+    pr: null,
     progress: [],
     todos: [],
     exitCode: null,
@@ -2865,10 +3156,11 @@ function insertRun(list: CodingRun[], run: CodingRun): void {
   }
 }
 
-/** The oldest run that is history — see isHeld for what is not. */
+/** The oldest run that is history — see isHeld for what is not, and
+ *  isPrPending for the run that has settled but is still being watched. */
 function findLastFinished(list: CodingRun[]): number {
   for (let i = list.length - 1; i >= 0; i -= 1) {
-    if (!isHeld(list[i].status)) return i;
+    if (!isHeld(list[i].status) && !isPrPending(list[i].pr)) return i;
   }
   return -1;
 }

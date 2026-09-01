@@ -74,7 +74,7 @@ const OPENAI_COMPAT_PROVIDERS = new Set<string>(["openrouter", "google", "anthro
 const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   clawai: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
   deepseek: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
-  anthropic: "anthropic/claude-sonnet-4-6",
+  anthropic: "anthropic/claude-sonnet-5",
   openai: "openai/gpt-5.4",
   // Newest model on every ChatGPT tier including Free; gpt-5.6 is plan-gated.
   codex: "codex/gpt-5.5",

@@ -1004,7 +1004,14 @@ wait_for_apt() {
 step_apt_update() {
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 gh build-essential cmake ninja-build pkg-config
+  # poppler-utils is `pdftotext`, and it is the ONLY reason Memory Shard can
+  # index a PDF: OpenClaw's memory indexer reads `.md` and nothing else, so
+  # ClawBox extracts documents itself (src/lib/memory-extract.ts). Without it a
+  # folder of PDFs added as a source would be walked and every file silently
+  # skipped, while the panel reported the folder as indexed. It was already on
+  # the dev box by accident of another package; naming it here is what makes the
+  # feature true on a fresh flash.
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 gh build-essential cmake ninja-build pkg-config poppler-utils
   # Node.js for production server and OpenClaw. OpenClaw 2026.8.1 tightened
   # its engines to >=22.22.3; older ClawBox images may have v22.22.2, which
   # looks like "Node 22" but crashes the OpenClaw CLI after npm install.

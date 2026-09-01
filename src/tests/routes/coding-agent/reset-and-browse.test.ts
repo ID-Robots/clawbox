@@ -160,6 +160,9 @@ describe("POST /setup-api/coding-agent/reset", () => {
       "coding_agent_max_turns",
       "coding_agent_token_limit",
       "coding_agent_review_pass",
+      // The auto-PR switch is standing consent for the box to push and merge
+      // the agent's work, so "start over" must take it back too.
+      "coding_agent_auto_pr",
       "coding_agent_setup_complete",
       "coding_agent_enabled",
     ]);
