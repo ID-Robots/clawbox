@@ -1522,6 +1522,37 @@ if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ]; then
   CODEX_PLUGIN_DIR_FOUND="$(ls -d "$OPENCLAW_HOME_DIR"/npm/projects/*/node_modules/@openclaw/codex 2>/dev/null | head -1 || true)"
   [ -n "$CODEX_PLUGIN_DIR_FOUND" ] && CODEX_PLUGIN_DIR="$CODEX_PLUGIN_DIR_FOUND"
 fi
+# A historical/global install can be visible to OpenClaw's registry without
+# living in either managed-home layout above. That is the main→v2 upgrade
+# shape: the gateway loads Codex and requires consent, while a filesystem-only
+# check sees no package and silently skips the entire repair path. Ask the
+# pinned CLI for the root it will actually load, time-bounded because this is
+# ExecStartPre, and accept it only when it contains the expected package file.
+if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+  CODEX_PLUGIN_DIR_FOUND="$(
+    timeout 20 "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
+      python3 -c 'import json, os, sys
+try:
+    data = json.load(sys.stdin)
+except (json.JSONDecodeError, OSError):
+    raise SystemExit(0)
+plugins = data.get("plugins", []) if isinstance(data, dict) else []
+for plugin in plugins:
+    if not isinstance(plugin, dict) or plugin.get("id") != "codex":
+        continue
+    root = plugin.get("rootDir")
+    source = plugin.get("source")
+    if not isinstance(root, str) and isinstance(source, str):
+        parent = os.path.dirname(source)
+        root = os.path.dirname(parent) if os.path.basename(parent) == "dist" else parent
+    if isinstance(root, str):
+        print(root)
+    break'
+  )" || CODEX_PLUGIN_DIR_FOUND=""
+  if [ -n "$CODEX_PLUGIN_DIR_FOUND" ] && [ -f "$CODEX_PLUGIN_DIR_FOUND/package.json" ]; then
+    CODEX_PLUGIN_DIR="$CODEX_PLUGIN_DIR_FOUND"
+  fi
+fi
 NEEDS_CODEX_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, sys
 try:

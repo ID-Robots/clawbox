@@ -50,6 +50,18 @@ function extractEnabledProbe(): string {
 
 const ENABLED_PROBE = hasPython3 ? extractEnabledProbe() : "";
 
+/** Pull the cross-layout plugin-root resolver out of the script verbatim. */
+function extractPluginResolver(): string {
+  const start = SCRIPT_SOURCE.indexOf(
+    'CODEX_PLUGIN_DIR="$OPENCLAW_HOME_DIR/npm/node_modules/@openclaw/codex"',
+  );
+  const end = SCRIPT_SOURCE.indexOf('NEEDS_CODEX_PLUGIN="$(python3', start);
+  if (start < 0 || end < 0) throw new Error("Codex plugin resolver not found");
+  return SCRIPT_SOURCE.slice(start, end);
+}
+
+const PLUGIN_RESOLVER = extractPluginResolver();
+
 /** Pull the package-health/repair/consent command flow out verbatim. */
 function extractPluginFlow(): string {
   const start = SCRIPT_SOURCE.indexOf('CODEX_SHOULD_LOAD="$NEEDS_CODEX_PLUGIN"');
@@ -149,6 +161,37 @@ function runPluginFlow(options: PluginFlowOptions): string[] {
     : [];
 }
 
+/** Resolve a plugin exposed only through OpenClaw's own global registry. */
+function resolveRegistryOnlyPlugin(): string {
+  const openclawHome = path.join(dir, "openclaw-home");
+  const registryRoot = path.join(dir, "global-plugins", "codex");
+  mkdirSync(registryRoot, { recursive: true });
+  writeFileSync(path.join(registryRoot, "package.json"), JSON.stringify({ version: "2026.8.1" }));
+
+  const fakeOpenClaw = path.join(dir, "registry-openclaw");
+  const registryJson = JSON.stringify({
+    plugins: [{ id: "codex", rootDir: registryRoot, source: path.join(registryRoot, "dist", "index.js") }],
+  });
+  writeFileSync(
+    fakeOpenClaw,
+    `#!/usr/bin/env bash\nprintf '%s\\n' '${registryJson}'\n`,
+  );
+  chmodSync(fakeOpenClaw, 0o755);
+
+  return execFileSync(
+    "bash",
+    ["-c", `set -euo pipefail\n${PLUGIN_RESOLVER}\nprintf '%s\\n' "$CODEX_PLUGIN_DIR"`],
+    {
+      env: {
+        ...process.env,
+        OPENCLAW_HOME_DIR: openclawHome,
+        OPENCLAW_BIN: fakeOpenClaw,
+      },
+      encoding: "utf-8",
+    },
+  ).trim();
+}
+
 describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
   it("accepts declared capabilities when repairing the Codex plugin", () => {
     expect(SCRIPT_SOURCE).toContain('if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then');
@@ -184,6 +227,10 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
     })).toBe("1");
     expect(probeCodexEnabled({})).toBe("1");
     expect(probeCodexEnabled({ plugins: { entries: { codex: { enabled: false } } } })).toBe("0");
+  });
+
+  it("resolves a historical Codex package that only OpenClaw's registry can see", () => {
+    expect(resolveRegistryOnlyPlugin()).toBe(path.join(dir, "global-plugins", "codex"));
   });
 
   it("repairs a stale default-enabled v2 plugin at the pinned version", () => {
