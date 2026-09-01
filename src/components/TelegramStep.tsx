@@ -195,6 +195,8 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
             waitFor={configurePromise}
             onDone={onNext}
             onTimeout={() => {
+              saveControllerRef.current?.abort();
+              setSaving(false);
               setConfiguring(false);
               setConfigurePromise(undefined);
               setStatus({ type: "error", message: t("telegram.readinessTimeout") });
