@@ -1519,9 +1519,13 @@ OPENCLAW_HOME_DIR="$(dirname "$OPENCLAW_CONFIG")"
 # layout actually holds the package.json; keep the flat path as the default so
 # a first-time install still has a well-known destination.
 CODEX_PLUGIN_DIR="$OPENCLAW_HOME_DIR/npm/node_modules/@openclaw/codex"
+CODEX_PLUGIN_LAYOUT="flat-managed"
 if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ]; then
   CODEX_PLUGIN_DIR_FOUND="$(ls -d "$OPENCLAW_HOME_DIR"/npm/projects/*/node_modules/@openclaw/codex 2>/dev/null | head -1 || true)"
-  [ -n "$CODEX_PLUGIN_DIR_FOUND" ] && CODEX_PLUGIN_DIR="$CODEX_PLUGIN_DIR_FOUND"
+  if [ -n "$CODEX_PLUGIN_DIR_FOUND" ]; then
+    CODEX_PLUGIN_DIR="$CODEX_PLUGIN_DIR_FOUND"
+    CODEX_PLUGIN_LAYOUT="project-managed"
+  fi
 fi
 # A historical/global install can be visible to OpenClaw's registry without
 # living in either managed-home layout above. That is the main→v2 upgrade
@@ -1552,6 +1556,7 @@ for plugin in plugins:
   )" || CODEX_PLUGIN_DIR_FOUND=""
   if [ -n "$CODEX_PLUGIN_DIR_FOUND" ] && [ -f "$CODEX_PLUGIN_DIR_FOUND/package.json" ]; then
     CODEX_PLUGIN_DIR="$CODEX_PLUGIN_DIR_FOUND"
+    CODEX_PLUGIN_LAYOUT="registry"
   fi
 fi
 NEEDS_CODEX_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
@@ -1632,7 +1637,14 @@ CODEX_PEER_DEP="$CODEX_PLUGIN_DIR/node_modules/openclaw/package.json"
 CODEX_NEEDS_INSTALL=0
 CODEX_INSTALL_REASON=""
 if [ "$CODEX_SHOULD_LOAD" = "1" ]; then
-  if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] || [ ! -e "$CODEX_PEER_DEP" ]; then
+  # The nested peer symlink is a managed-home install invariant. A plugin root
+  # returned by OpenClaw's registry may be global and legitimately omit it;
+  # the registry already resolved that package for the running core. Treating
+  # that layout as broken launches a needless reinstall in ExecStartPre, which
+  # an updater restart can kill mid-transaction and leave SQLite locked.
+  if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] || {
+    [ "$CODEX_PLUGIN_LAYOUT" != "registry" ] && [ ! -e "$CODEX_PEER_DEP" ];
+  }; then
     CODEX_NEEDS_INSTALL=1
     CODEX_INSTALL_REASON="missing or peer-dep broken"
   elif [ -n "$OPENCLAW_TARGET" ]; then

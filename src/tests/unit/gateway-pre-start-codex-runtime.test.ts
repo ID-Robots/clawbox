@@ -141,6 +141,7 @@ interface PluginFlowOptions {
   enabledByConfig: boolean;
   installedVersion?: string;
   peerHealthy?: boolean;
+  layout?: "flat-managed" | "project-managed" | "registry";
 }
 
 /** Execute the shipped shell command flow against a fake OpenClaw binary. */
@@ -171,6 +172,7 @@ function runPluginFlow(options: PluginFlowOptions): string[] {
       NEEDS_CODEX_PLUGIN: options.needsCodex ? "1" : "0",
       CODEX_PLUGIN_ENABLED: options.enabledByConfig ? "1" : "0",
       CODEX_PLUGIN_DIR: pluginDir,
+      CODEX_PLUGIN_LAYOUT: options.layout ?? "project-managed",
       OPENCLAW_TARGET: "2026.8.1",
       OPENCLAW_BIN: fakeOpenClaw,
       CODEX_TEST_LOG: log,
@@ -202,7 +204,7 @@ function resolveRegistryOnlyPlugin(): string {
 
   return execFileSync(
     "bash",
-    ["-c", `set -euo pipefail\n${PLUGIN_RESOLVER}\nprintf '%s\\n' "$CODEX_PLUGIN_DIR"`],
+    ["-c", `set -euo pipefail\n${PLUGIN_RESOLVER}\nprintf '%s|%s\\n' "$CODEX_PLUGIN_LAYOUT" "$CODEX_PLUGIN_DIR"`],
     {
       env: {
         ...process.env,
@@ -252,7 +254,9 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
   });
 
   it("resolves a historical Codex package that only OpenClaw's registry can see", () => {
-    expect(resolveRegistryOnlyPlugin()).toBe(path.join(dir, "global-plugins", "codex"));
+    expect(resolveRegistryOnlyPlugin()).toBe(
+      `registry|${path.join(dir, "global-plugins", "codex")}`,
+    );
   });
 
   it("detects OpenClaw v2's migrated OpenAI model with a Codex agent runtime", () => {
@@ -312,6 +316,17 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
     })).toEqual([
       "plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities",
     ]);
+  });
+
+  it("does not apply the managed nested-peer heuristic to a registry plugin", () => {
+    expect(runPluginFlow({
+      v2: true,
+      needsCodex: true,
+      enabledByConfig: false,
+      installedVersion: "2026.8.1",
+      peerHealthy: false,
+      layout: "registry",
+    })).toEqual(["plugins enable codex --accept-capabilities"]);
   });
 
   it("consents a healthy default-enabled v2 plugin without reinstalling it", () => {
