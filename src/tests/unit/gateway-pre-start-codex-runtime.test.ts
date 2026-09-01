@@ -31,6 +31,17 @@ function extractPolicy(): string {
 
 const POLICY = hasPython3 ? extractPolicy() : "";
 
+/** Pull the enabled-plugin consent probe out of the shell heredoc verbatim. */
+function extractEnabledProbe(): string {
+  const startMarker = 'CODEX_PLUGIN_ENABLED="$(python3 - "$OPENCLAW_CONFIG" <<\'PY\'\n';
+  const start = SCRIPT_SOURCE.indexOf(startMarker);
+  const end = SCRIPT_SOURCE.indexOf('\nPY\n)"', start);
+  if (start < 0 || end < 0) throw new Error("Codex enabled-plugin probe not found");
+  return SCRIPT_SOURCE.slice(start + startMarker.length, end);
+}
+
+const ENABLED_PROBE = hasPython3 ? extractEnabledProbe() : "";
+
 let dir: string;
 
 beforeEach(() => {
@@ -59,11 +70,43 @@ function applyPolicy(config: Record<string, any>): Record<string, any> {
   );
 }
 
+/** Run the exact shell-embedded probe that decides whether consent is needed. */
+function probeCodexEnabled(config: Record<string, any>): string {
+  const file = path.join(dir, "enabled-config.json");
+  writeFileSync(file, JSON.stringify(config));
+  return execFileSync("python3", ["-c", ENABLED_PROBE, file], { encoding: "utf-8" }).trim();
+}
+
 describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
   it("accepts declared capabilities when repairing the Codex plugin", () => {
+    expect(SCRIPT_SOURCE).toContain('if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then');
+    expect(SCRIPT_SOURCE).toContain('CODEX_CAPABILITY_ARGS=(--accept-capabilities)');
     expect(SCRIPT_SOURCE).toContain(
-      'plugins install "$CODEX_SPEC" --force --accept-capabilities',
+      'plugins install "$CODEX_SPEC" --force "${CODEX_CAPABILITY_ARGS[@]}"',
     );
+  });
+
+  it("accepts declared capabilities when the migrated plugin needs no reinstall", () => {
+    const healthyV2Branch =
+      'elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]';
+    expect(SCRIPT_SOURCE).toContain(healthyV2Branch);
+    expect(SCRIPT_SOURCE).toContain('CODEX_PLUGIN_ENABLED="$(python3 - "$OPENCLAW_CONFIG"');
+    expect(SCRIPT_SOURCE).toContain(
+      '[ "$NEEDS_CODEX_PLUGIN" = "1" ] || [ "$CODEX_PLUGIN_ENABLED" = "1" ]',
+    );
+    expect(SCRIPT_SOURCE).toContain(
+      'plugins enable codex --accept-capabilities',
+    );
+    expect(SCRIPT_SOURCE.indexOf('plugins enable codex --accept-capabilities'))
+      .toBeGreaterThan(SCRIPT_SOURCE.indexOf(healthyV2Branch));
+  });
+
+  it("detects an enabled migrated Codex plugin even when no Codex model is selected", () => {
+    expect(probeCodexEnabled({
+      agents: { defaults: { model: { primary: "openai/gpt-5.6-sol" } } },
+      plugins: { entries: { codex: { enabled: true } } },
+    })).toBe("1");
+    expect(probeCodexEnabled({ plugins: { entries: { codex: { enabled: false } } } })).toBe("0");
   });
 
   it("sets agentRuntime on the configured codex primary", () => {

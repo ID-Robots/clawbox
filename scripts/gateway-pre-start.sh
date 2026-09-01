@@ -1602,6 +1602,10 @@ if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
   # bare alias only when the pin is unknown, so a needed repair still happens.
   CODEX_SPEC="codex"
   [ -n "$OPENCLAW_TARGET" ] && CODEX_SPEC="@openclaw/codex@$OPENCLAW_TARGET"
+  CODEX_CAPABILITY_ARGS=()
+  if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+    CODEX_CAPABILITY_ARGS=(--accept-capabilities)
+  fi
   # Hard time-box this install. gateway-pre-start.sh runs as a BLOCKING
   # ExecStartPre for clawbox-gateway.service, so an npm install that hangs
   # (slow/blocked/offline registry on a Jetson) would keep the gateway from
@@ -1610,10 +1614,44 @@ if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
   # log a warning and let the gateway start anyway. Codex is one provider;
   # a degraded Codex is far better than a dead box, and the next boot (or a
   # manual `openclaw plugins install`) can still repair it.
-  if timeout 120 "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force --accept-capabilities >/dev/null 2>&1; then
+  if timeout 120 "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force "${CODEX_CAPABILITY_ARGS[@]}" >/dev/null 2>&1; then
     echo "  Codex runtime plugin installed/repaired ($CODEX_SPEC)"
   else
     echo "  WARN: 'openclaw plugins install $CODEX_SPEC' failed or timed out; Codex chats will fail until resolved (gateway will still start)"
+  fi
+elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+  # OpenClaw 2 added declared-capability consent to managed plugins. A plugin
+  # migrated from 2026.7 may already have the right package, peer dependency,
+  # and version — so every repair check above passes — while its install record
+  # has no accepted surface hash. The gateway then refuses readiness with
+  # "Plugin codex requires capability consent" forever. `enable` is the
+  # idempotent local operation for this exact state: it records the current
+  # reviewed surface when needed and otherwise leaves an already-enabled,
+  # already-consented plugin unchanged. Time-box because this is ExecStartPre.
+  # Check explicit enablement too, not only NEEDS_CODEX_PLUGIN: a v1 install
+  # can leave Codex enabled even after the owner switches primary/auth to plain
+  # OpenAI. V2 verifies every ENABLED plugin before opening its port, so that
+  # stale-but-enabled record can brick a box even though no Codex model is in
+  # use (the main→v2 e2e upgrade caught exactly this shape).
+  CODEX_PLUGIN_ENABLED="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    print("0"); sys.exit(0)
+plugins = cfg.get("plugins")
+entries = plugins.get("entries", {}) if isinstance(plugins, dict) else {}
+codex = entries.get("codex") if isinstance(entries, dict) else None
+print("1" if isinstance(codex, dict) and codex.get("enabled") is True else "0")
+PY
+)"
+  if [ "$NEEDS_CODEX_PLUGIN" = "1" ] || [ "$CODEX_PLUGIN_ENABLED" = "1" ]; then
+    if timeout 60 "$OPENCLAW_BIN" plugins enable codex --accept-capabilities </dev/null >/dev/null 2>&1; then
+      echo "  Codex runtime plugin capabilities accepted/current"
+    else
+      echo "  WARN: could not confirm Codex plugin capabilities; gateway readiness may remain blocked"
+    fi
   fi
 fi
 

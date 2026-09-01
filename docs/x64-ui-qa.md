@@ -80,6 +80,7 @@ message actions are covered with mocks unless explicitly marked live.
 | QA-035 | P1 | Open | VNC “Install / Repair & Reboot” is a single impactful action with no confirmation. |
 | QA-036 | P2 | Open | The System Update beta control and several Chat icon controls have incomplete accessible names. |
 | QA-037 | P1 | Open | Files rows require pointer double-click and mutation/discard dialogs are incomplete for keyboard-only users. |
+| QA-038 | P0 | Fixed | A healthy Codex plugin migrated from OpenClaw v1 could remain enabled without v2 capability consent, crash-looping the gateway even when a non-Codex model was primary. |
 
 ## False-green tests to harden
 
