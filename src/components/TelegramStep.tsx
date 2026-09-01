@@ -197,7 +197,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
             onTimeout={() => {
               setConfiguring(false);
               setConfigurePromise(undefined);
-              setStatus({ type: "error", message: t("settings.connectionFailed") });
+              setStatus({ type: "error", message: t("telegram.readinessTimeout") });
             }}
           />
         )}

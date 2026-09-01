@@ -173,7 +173,10 @@ test.describe("fresh-install setup wizard (UI)", () => {
       // readiness-timeout message is accepted here.
       const telegramOutcome = await Promise.race([
         page.waitForURL("/", { timeout: 110_000 }).then(() => "connected" as const),
-        telegramStep.getByText("Connection failed", { exact: true })
+        telegramStep.getByText(
+          "Telegram was saved, but its messaging service did not become ready in time. Retry or skip for now.",
+          { exact: true },
+        )
           .waitFor({ state: "visible", timeout: 110_000 })
           .then(() => "readiness-timeout" as const),
       ]);
