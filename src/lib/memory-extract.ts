@@ -86,26 +86,36 @@ interface WalkBudget {
 
 async function* walk(dir: string, budget: WalkBudget, depth = 0): AsyncGenerator<string> {
   if (depth > MAX_DEPTH) return;
-  let entries;
+  // opendir, not readdir: readdir hands back the WHOLE listing as one array
+  // before a single entry can be charged, so a directory of a million files
+  // was read — and held in memory — in full whatever the budget said. The
+  // handle reads a page at a time, and closes itself when the loop below is
+  // left early.
+  let handle;
   try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
+    handle = await fs.opendir(dir);
   } catch {
     return;
   }
-  for (const entry of entries) {
-    // Every entry costs one, whatever it is: the budget bounds the work of
-    // looking, and an unsupported file took just as long to find.
-    if (budget.left <= 0) {
-      budget.truncated = true;
-      return;
+  try {
+    for await (const entry of handle) {
+      // Every entry costs one, whatever it is: the budget bounds the work of
+      // looking, and an unsupported file took just as long to find.
+      if (budget.left <= 0) {
+        budget.truncated = true;
+        return;
+      }
+      budget.left -= 1;
+      if (entry.name.startsWith(".")) continue;
+      const full = path.join(dir, entry.name);
+      // isDirectory() is false for a symlink, which is what keeps a link loop out
+      // of the walk — the same reason the folder picker reads it this way.
+      if (entry.isDirectory()) yield* walk(full, budget, depth + 1);
+      else if (entry.isFile()) yield full;
     }
-    budget.left -= 1;
-    if (entry.name.startsWith(".")) continue;
-    const full = path.join(dir, entry.name);
-    // isDirectory() is false for a symlink, which is what keeps a link loop out
-    // of the walk — the same reason the folder picker reads it this way.
-    if (entry.isDirectory()) yield* walk(full, budget, depth + 1);
-    else if (entry.isFile()) yield full;
+  } catch {
+    // A directory that stopped being readable mid-walk ends here, the way one
+    // that could not be opened ended above: what was found before stands.
   }
 }
 
@@ -211,7 +221,7 @@ export async function extractDocuments(source: string): Promise<ExtractionResult
   // the cut to three below keeps it: the owner should hear that the scan
   // stopped short before hearing which single file could not be read.
   if (budget.truncated) {
-    notes.unshift(`This folder holds more than ${MAX_ENTRIES} entries; only the first were scanned.`);
+    notes.unshift(`This folder holds more than ${MAX_ENTRIES} entries; only the first ${MAX_ENTRIES} were scanned.`);
   }
 
   return {

@@ -82,6 +82,9 @@ import {
   isPrPhase,
   mergePullRequest,
   openPullRequest,
+  // Aliased: this module's own MAX_WAIT_MS is the 120-second status-request
+  // limit, a different ceiling for a different wait.
+  MAX_WAIT_MS as PR_MAX_WAIT_MS,
   POLL_INTERVAL_MS,
   readPullRequest,
   runBranchName,
@@ -2679,9 +2682,10 @@ const prWatchers = new Set<string>();
  *
  * A timer in the web server, which CLAUDE.md calls the one long-lived ClawBox
  * process — so it is unref()'d (it must never hold the process open), capped by
- * MAX_WAIT_MS through decideMerge, and single-instance per run. Everything it
- * decides on is read from the record each tick, the review verdict included,
- * so a watcher rebuilt after a restart decides exactly as the first one did.
+ * PR_MAX_WAIT_MS (through decideMerge when the pull request can be read, and
+ * here when it cannot), and single-instance per run. Everything it decides on
+ * is read from the record each tick, the review verdict included, so a watcher
+ * rebuilt after a restart decides exactly as the first one did.
  */
 function watchPullRequest(runId: string): void {
   if (prWatchers.has(runId)) return;
@@ -2705,7 +2709,17 @@ function watchPullRequest(runId: string): void {
     const prNumber = run.pr.number;
     const snapshot = await readPullRequest(run.directory, prNumber);
     if ("error" in snapshot) {
-      // A transient read says nothing; keep waiting until the ceiling does.
+      // A transient read says nothing, so the wait goes on — but under the
+      // same ceiling a check that never completes gets. decideMerge, which
+      // holds that ceiling, is never reached from here, and without this one
+      // a `gh` that kept failing (a sign-in that expired, a box offline for
+      // the evening) left the pull request "waiting" for good: pending in the
+      // history, and polled again after every restart by the boot sweep.
+      if (Date.now() - run.pr.startedAt >= PR_MAX_WAIT_MS) {
+        settlePr(run, "blocked", `Gave up waiting: the pull request could not be read from GitHub. It may still be open. ${snapshot.error}`);
+        prWatchers.delete(runId);
+        return;
+      }
       schedule();
       return;
     }

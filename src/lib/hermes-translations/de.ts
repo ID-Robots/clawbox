@@ -575,7 +575,7 @@ export const de: Record<string, string> = {
   "codingAgent.reportFailed": "{name} konnte nicht geladen werden.",
   "codingAgent.reportOpenText": "Als Text öffnen",
   "codingAgent.reportClose": "Schließen",
-  "codingAgent.githubDeviceIntro": "Gib diesen Code auf github.com ein, um dein Konto zu verbinden:",
+  "codingAgent.githubDeviceIntro": "Geben Sie diesen Code auf github.com ein, um Ihr Konto zu verbinden:",
   "codingAgent.githubDeviceOpen": "github.com/login/device öffnen",
   "codingAgent.githubDeviceWaiting": "Warte auf die Eingabe des Codes…",
   "codingAgent.githubDeviceCancel": "Abbrechen",

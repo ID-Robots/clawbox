@@ -23,7 +23,7 @@ import path from "node:path";
  * kind that needs neither, which is what every test here uses.
  */
 
-const { dataDir, runChild } = vi.hoisted(() => {
+const { dataDir, runChild, opendirOverride } = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const nodeFs = require("node:fs") as typeof import("node:fs");
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -33,6 +33,8 @@ const { dataDir, runChild } = vi.hoisted(() => {
   return {
     dataDir: nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "memory-extract-data-")),
     runChild: vi.fn(),
+    /** When set, what the walk's opendir answers instead of the real listing. */
+    opendirOverride: { fn: null as null | ((dir: string) => unknown) },
   };
 });
 
@@ -41,6 +43,12 @@ vi.mock("@/lib/child-run", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/child-run")>();
   return { ...actual, runChild };
 });
+vi.mock("fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs/promises")>();
+  const opendir = ((dir: string, options?: unknown) =>
+    opendirOverride.fn ? opendirOverride.fn(dir) : actual.opendir(dir, options as never)) as typeof actual.opendir;
+  return { ...actual, opendir, default: { ...actual, opendir } };
+});
 
 import { EXTRACT_ROOT, derivedFolderFor, extractDocuments } from "@/lib/memory-extract";
 
@@ -48,10 +56,12 @@ let source: string;
 
 beforeEach(() => {
   runChild.mockReset();
+  opendirOverride.fn = null;
   source = fs.mkdtempSync(path.join(os.tmpdir(), "memory-extract-src-"));
 });
 
 afterEach(() => {
+  opendirOverride.fn = null;
   fs.rmSync(source, { recursive: true, force: true });
 });
 
@@ -109,7 +119,7 @@ describe("the walk's entry budget", () => {
 
     const result = await extractDocuments(source);
 
-    expect(result.notes[0]).toBe("This folder holds more than 20000 entries; only the first were scanned.");
+    expect(result.notes[0]).toBe("This folder holds more than 20000 entries; only the first 20000 were scanned.");
     expect(result.derived).toBeNull();
     expect(result.extracted).toBe(0);
     expect(runChild).not.toHaveBeenCalled();
@@ -127,9 +137,43 @@ describe("the walk's entry budget", () => {
 
     const result = await extractDocuments(source);
 
-    expect(result.notes[0]).toBe("This folder holds more than 20000 entries; only the first were scanned.");
+    expect(result.notes[0]).toBe("This folder holds more than 20000 entries; only the first 20000 were scanned.");
     expect(result.derived).toBeNull();
   }, 30_000);
+
+  it("bounds the listing itself, not only what is done with it", async () => {
+    // A directory whose listing never ends. readdir() handed the WHOLE listing
+    // back as one array before the first entry could be charged, so the
+    // budget bounded the looking but not the reading — and this walk would
+    // never have returned. Read a page at a time, it stops one entry past the
+    // budget and closes the handle it left early.
+    let pulled = 0;
+    let closed = false;
+    const endless = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => {
+            pulled += 1;
+            return { done: false, value: { name: `${pulled}.bin`, isDirectory: () => false, isFile: () => true } };
+          },
+          return: async () => {
+            closed = true;
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
+    opendirOverride.fn = () => Promise.resolve(endless);
+
+    const result = await extractDocuments(source);
+
+    // The budget is charged per entry read: the 20001st is the one that
+    // finds it spent.
+    expect(pulled).toBe(20_001);
+    expect(closed).toBe(true);
+    expect(result.notes[0]).toBe("This folder holds more than 20000 entries; only the first 20000 were scanned.");
+    expect(result.derived).toBeNull();
+  });
 
   it("says nothing about the budget when the folder fits inside it", async () => {
     fs.writeFileSync(path.join(source, "a.txt"), "a\n");
