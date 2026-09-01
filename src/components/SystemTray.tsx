@@ -46,13 +46,16 @@ export default function SystemTray({
     return () => { alive = false; clearInterval(id); };
   }, [isOpen]);
   const [rebootState, setRebootState] = useState<RebootState>(null);
+  const [powerError, setPowerError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const dotsRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       setClosing(false);
       setConfirmAction(null);
+      setPowerError(null);
     }
   }, [isOpen]);
 
@@ -85,6 +88,8 @@ export default function SystemTray({
         if (res.ok) {
           // Device is back online
           if (pollRef.current) clearInterval(pollRef.current);
+          if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = null;
           setRebootState({ phase: "restoring" });
           setTimeout(() => {
             setRebootState(null);
@@ -96,14 +101,22 @@ export default function SystemTray({
       }
     }, 3000);
 
+    reconnectTimeoutRef.current = setTimeout(() => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = null;
+      setRebootState(null);
+      setPowerError(t("tray.powerFailed"));
+    }, 5 * 60 * 1000);
+
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, []);
+  }, [t]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
       if (dotsRef.current) clearInterval(dotsRef.current);
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
     };
   }, []);
 
@@ -124,14 +137,24 @@ export default function SystemTray({
 
     // Show the waiting overlay
     setRebootState({ phase: "waiting", action, dots: 0 });
+    setPowerError(null);
 
     try {
-      await fetch("/setup-api/system/power", {
+      const res = await fetch("/setup-api/system/power", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action }),
       });
-    } catch {}
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(typeof data.error === "string" ? data.error : `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      setRebootState(null);
+      setConfirmAction(null);
+      setPowerError(err instanceof Error && err.message ? err.message : t("tray.powerFailed"));
+      return;
+    }
 
     if (action === "restart") {
       // Wait for the device to go down, then start reconnecting
@@ -273,6 +296,7 @@ export default function SystemTray({
 
           {/* Bottom actions */}
           <div className="p-4 flex flex-col gap-2">
+            {powerError && <p role="alert" className="text-xs text-red-400">{powerError}</p>}
             <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => handlePower("restart")}

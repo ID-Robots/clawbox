@@ -71,23 +71,41 @@ test.describe("desktop UI happy path", () => {
     await expect(launcher.getByRole("button", { name: /settings/i })).toBeVisible();
   });
 
-  test("opening Settings from launcher renders a window", async ({ page }) => {
+  test("opening Files, Settings, and Terminal from the launcher renders each window", async ({ page }) => {
     await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });
     if (page.url().includes("/login")) {
       await page.fill('input[type="password"]', SETUP_PASSWORD);
       await page.click('button[type="submit"]');
       await page.waitForURL((url) => !url.pathname.startsWith("/login"));
     }
-    await page
-      .locator('[data-testid="shelf-launcher-button"]')
-      .filter({ visible: true })
-      .click();
-    await page
-      .getByTestId("app-launcher")
-      .getByRole("button", { name: /settings/i })
-      .click();
-    const settingsWindow = page.getByTestId("chrome-window-settings");
-    await expect(settingsWindow).toBeVisible({ timeout: 10_000 });
+
+    // A prior install flow can leave its contextual chat prompt open above
+    // the desktop. Close it through the visible control before exercising
+    // the windows underneath, just as a user must do in the real UI.
+    const chatPopup = page.getByTestId("chat-popup");
+    if (await chatPopup.isVisible()) {
+      await chatPopup.getByTestId("chat-popup-close").click();
+      await expect(chatPopup).toHaveCount(0);
+    }
+
+    for (const app of [
+      { name: /files/i, id: "files" },
+      { name: /settings/i, id: "settings" },
+      { name: /terminal/i, id: "terminal" },
+    ]) {
+      await page
+        .locator('[data-testid="shelf-launcher-button"]')
+        .filter({ visible: true })
+        .click();
+      await page
+        .getByTestId("app-launcher")
+        .getByRole("button", { name: app.name })
+        .click();
+      const appWindow = page.getByTestId(`chrome-window-${app.id}`);
+      await expect(appWindow).toBeVisible({ timeout: 10_000 });
+      await appWindow.getByRole("button", { name: "Close" }).click();
+      await expect(appWindow).toHaveCount(0);
+    }
   });
 
   test("system tray opens and closes via the shelf power button", async ({

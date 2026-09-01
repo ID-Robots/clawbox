@@ -41,3 +41,32 @@ test("system tray restart flow reaches reconnecting and restores the desktop", a
   await expect(page.getByText("Back Online")).toBeVisible();
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 });
+
+test("system tray reports a refused restart instead of pretending the device rebooted", async ({ page }) => {
+  await installClawboxMocks(page, {
+    initialSetup: {
+      setup_complete: true,
+      wifi_configured: true,
+      update_completed: true,
+      password_configured: true,
+      ai_model_configured: true,
+      telegram_configured: true,
+    },
+  });
+  await page.route("**/setup-api/system/power", (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "power request denied" }),
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByTestId("shelf-power-button").click();
+  await page.getByRole("button", { name: "Restart" }).click();
+  await page.getByRole("button", { name: "Confirm" }).click();
+
+  await expect(page.getByText("power request denied", { exact: true })).toBeVisible();
+  await expect(page.getByText("Restarting")).toHaveCount(0);
+  await expect(page.getByTestId("system-tray")).toBeVisible();
+});

@@ -86,6 +86,33 @@ describe("BrowserApp", () => {
     expect(onOpenApp).toHaveBeenCalledWith("vnc");
   });
 
+  it("does not offer Chromium installation when status cannot be read", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/setup-api/harness/active")) {
+        return { ok: true, json: async () => ({ active: "openclaw", edition: "openclaw" }) };
+      }
+      return { ok: false, status: 503, json: async () => ({ error: "offline" }) };
+    }));
+
+    const { findByText, queryByRole, queryByText } = render(<BrowserApp />);
+
+    expect(await findByText("Failed to fetch status")).toBeInTheDocument();
+    expect(queryByRole("button", { name: /Install Chromium/i })).toBeNull();
+    expect(queryByText("Chromium is required.")).toBeNull();
+  });
+
+  it("offers Chromium installation only after status explicitly reports it absent", async () => {
+    stubDevice({
+      ...READY_STATUS,
+      chromium: { installed: false },
+      enabled: false,
+    });
+
+    const { findByRole } = render(<BrowserApp />);
+
+    expect(await findByRole("button", { name: /Install Chromium/i })).toBeInTheDocument();
+  });
+
   describe("when the integration is a switch", () => {
     it("offers the toggle", async () => {
       const { getByRole } = render(<BrowserApp />);

@@ -52,6 +52,10 @@ interface BrowserAppProps {
 export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   const { t } = useT();
   const [status, setStatus] = useState<BrowserStatus | null>(null);
+  // The latest request must explicitly prove Chromium is absent before the UI
+  // offers installation. A null/unreadable response is an availability error,
+  // not `installed: false` (and a prior stale payload does not change that).
+  const [statusReadable, setStatusReadable] = useState(false);
   // Which agent actually drives this browser. The copy used to say "OpenClaw"
   // on every device — wrong, and confusing, on a Hermes box where the OpenClaw
   // gateway isn't even installed. Defaults to OpenClaw (the native SKU) and is
@@ -80,15 +84,20 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
     try {
       const res = await fetch("/setup-api/browser/manage");
       if (!res.ok) throw new Error("Failed to fetch status");
-      const data: BrowserStatus = await res.json();
+      const data = await res.json() as BrowserStatus | null;
+      if (!data?.chromium || typeof data.chromium.installed !== "boolean") {
+        throw new Error("Failed to fetch status");
+      }
       // Only update state if data actually changed to avoid unnecessary re-renders
       const json = JSON.stringify(data);
       if (json !== lastStatusJson.current) {
         lastStatusJson.current = json;
         setStatus(data);
       }
+      setStatusReadable(true);
       if (!actionErrorRef.current) setError(null);
     } catch (err) {
+      setStatusReadable(false);
       if (!actionErrorRef.current) setError(err instanceof Error ? err.message : "Failed to connect");
     } finally {
       setLoading(false);
@@ -225,13 +234,13 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                     <p className="text-xs text-white/30 mt-0.5 font-mono truncate">{status.chromium.path}</p>
                   )}
                 </div>
-              ) : (
+              ) : statusReadable ? (
                 <p className="text-xs text-white/50 mt-1">
                   {t("browser.chromiumRequired")}
                 </p>
-              )}
+              ) : null}
             </div>
-            {!chromiumInstalled && (
+            {statusReadable && !chromiumInstalled && (
               <button
                 onClick={() => doAction("install-chromium", "Installing Chromium...", "Chromium installed")}
                 disabled={!!actionLoading}

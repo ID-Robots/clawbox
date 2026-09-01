@@ -3932,8 +3932,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   if (!isOpen) return null
 
-  // Default position: above mascot (desktop only)
-  const defaultLeft = Math.max(8, Math.min((mascotX ?? 15) / 100 * (typeof window !== 'undefined' ? window.innerWidth : 1000) - 200, (typeof window !== 'undefined' ? window.innerWidth : 1000) - size.w - 8))
+  // Default position: centred above the mascot when there is room, clamped to
+  // an 8px viewport gutter when the mascot is near an edge. This must follow
+  // the live/remembered width: the old fixed `- 200` was the half-width of the
+  // original 400px popup and became a 60px offset when the default grew to
+  // 520px (and was wrong for every user-resized width too).
+  const winW = typeof window !== 'undefined' ? window.innerWidth : 1000
+  const mascotCenterPx = ((mascotX ?? 85) / 100) * winW
+  const defaultLeft = Math.max(8, Math.min(mascotCenterPx - size.w / 2, winW - size.w - 8))
   const posStyle: React.CSSProperties = panelMode
     ? { right: 0, top: 0, bottom: 56 }
     : mobile
@@ -3948,8 +3954,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // is pinned to the popup's bottom edge, horizontally aligned with the
   // mascot, so the scale animation emanates from where the user tapped
   // instead of from the popup's centre.
-  const winW = typeof window !== 'undefined' ? window.innerWidth : 1000
-  const mascotCenterPx = ((mascotX ?? 85) / 100) * winW
   const anchorLeft = pos ? pos.x : (trayMode ? winW - size.w - 8 : defaultLeft)
   const originX = Math.max(20, Math.min(mascotCenterPx - anchorLeft, size.w - 20))
   const transformOrigin = panelMode ? 'right center' : mobile ? 'center bottom' : `${originX}px bottom`
@@ -4247,6 +4251,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           </button>
         )}
         <button
+          data-testid="chat-popup-close"
           onPointerDown={stopHeaderDrag}
           onClick={onClose}
           aria-label={t("window.close")}

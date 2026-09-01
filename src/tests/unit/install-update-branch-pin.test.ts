@@ -536,7 +536,7 @@ describe("the pin outlives the things updater.ts says it outlives", () => {
     // install.sh writes $PROJECT_DIR/.update-branch; updater.ts and the
     // Settings route read PROJECT_DIR + ".update-branch". A drift between them
     // would leave a device pinned in a file nothing consults.
-    expect(UPDATER_TS).toContain('const PROJECT_DIR = "/home/clawbox/clawbox"');
+    expect(UPDATER_TS).toContain('const PROJECT_DIR = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox"');
     expect(UPDATER_TS).toContain('path.join(PROJECT_DIR, ".update-branch")');
     expect(INSTALL_SH).toContain('PROJECT_DIR="/home/clawbox/clawbox"');
     expect(PERSIST_FN).toContain('"$PROJECT_DIR/.update-branch"');

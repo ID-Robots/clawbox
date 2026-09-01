@@ -154,6 +154,7 @@ test("chat popup connects, streams a reply, and supports panel docking", async (
   await chatInput.fill("What changed?");
   await page.getByTitle("Send").click();
   await expect(page.getByText("What changed?")).toBeVisible();
+  await expect(page.getByText("Hello from the fake gateway", { exact: true })).toBeVisible();
 
   await page.getByTitle("Dock to right").click();
   await expect(page.getByTitle("Undock panel")).toBeVisible();

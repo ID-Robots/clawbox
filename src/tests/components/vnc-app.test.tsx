@@ -63,7 +63,7 @@ vi.mock("@/lib/i18n", () => ({
   I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
 
-vi.mock("@novnc/novnc/lib/rfb", () => ({
+vi.mock("@novnc/novnc", () => ({
   default: MockRFB,
 }));
 
@@ -257,10 +257,17 @@ describe("VNCApp", () => {
     });
   });
 
-  it("maps non-Latin printable keys to X11 keysyms for VNC text entry", () => {
+  it("maps non-Latin printable keys to standard Unicode X11 keysyms", () => {
     expect(getTrackedVncKey({ key: "\u044f", code: "KeyZ" })).toEqual({
       code: "KeyZ",
-      keysym: 0x06d1,
+      keysym: 0x0100044f,
+    });
+  });
+
+  it("maps one astral Unicode code point instead of rejecting its surrogate pair", () => {
+    expect(getTrackedVncKey({ key: "😀", code: "Unidentified" })).toEqual({
+      code: null,
+      keysym: 0x0101f600,
     });
   });
 
