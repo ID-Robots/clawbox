@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAll } from "@/lib/config-store";
-import { redirectToSetup, serveGatewayHTML } from "@/lib/gateway-proxy";
+import { proxyGatewayRequest, redirectToSetup, serveGatewayHTML } from "@/lib/gateway-proxy";
+import { isGatewayStaticPath } from "@/lib/gateway-static";
 import { readEdition } from "@/lib/edition-source";
 
 export const dynamic = "force-dynamic";
@@ -25,6 +26,34 @@ export async function GET(request: NextRequest) {
         status: 404,
         headers: { "Content-Type": "text/plain" },
       });
+    }
+    // A STATIC path is served as bytes, not as the SPA shell. The Control UI
+    // keeps whole trees outside /assets — /themes/*.css, /fonts/*.css,
+    // /provider-icons, /file-icons, /app-art — and this route answers every
+    // path Next did not match. So `<link href="/fonts/geist.css">` was being
+    // answered 200 text/html with the 19 KB app shell, which is precisely the
+    // "Styles failed to load, so the page may look broken." banner: a
+    // stylesheet that parses as nothing.
+    if (isGatewayStaticPath(request.nextUrl.pathname)) {
+      return proxyGatewayRequest(request);
+    }
+
+    // Only a NAVIGATION gets the SPA shell. This route exists so a deep link
+    // like /chat/main renders the app — but it was answering EVERY unmatched
+    // path that way, including the resources the app then fetches for itself:
+    //   /control-ui-config.json  (twice per page load; JSON.parse fails)
+    //   /__openclaw__/plugin-icon/…, /__openclaw__/catalog-icon/…, and 11 more
+    //   /avatar/<agent>, /avatar/<agent>?meta=1
+    //   /health, /healthz        (an uptime monitor got HTML that parses as nothing)
+    // Every one of those is fetched by script or by an <img>, never navigated
+    // to, so the fetch metadata separates them from a real page load exactly.
+    // `Sec-Fetch-Mode` is sent by every current browser; the Accept sniff is
+    // the fallback for anything that does not send it (curl asks for */*, and
+    // gets the real resource, which is what a monitor needs).
+    const navigating = request.headers.get("sec-fetch-mode") === "navigate"
+      || (request.headers.get("accept") ?? "").includes("text/html");
+    if (!navigating) {
+      return proxyGatewayRequest(request);
     }
     return serveGatewayHTML(request);
   } catch (err) {

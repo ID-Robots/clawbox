@@ -4834,6 +4834,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           <NewAppWizardCard
             maxTaskChars={newAppMaxChars ?? DEFAULT_MAX_TASK_CHARS}
             onClose={() => setShowNewApp(false)}
+            // In the chat it floats over the composer like a popover, so it
+            // behaves like one: click away (or Escape) and it goes.
+            closeOnOutsideClick
           />
         </div>
       )}

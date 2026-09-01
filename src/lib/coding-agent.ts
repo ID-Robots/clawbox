@@ -202,6 +202,29 @@ export const CODING_AGENT_TOKENS_CONFIG_KEY = "coding_agent_token_limit";
  * owner's plan on every completed run.
  */
 export const CODING_AGENT_REVIEW_CONFIG_KEY = "coding_agent_review_pass";
+
+/**
+ * Has the owner been through the setup wizard?
+ *
+ * The wizard is what collects the consent and the two settings a delegated
+ * shell needs, so the app shows it instead of the home page until this is
+ * true. Reset clears it, which is the ONLY way back to the wizard — a run
+ * failing, or the switch going off, must not restart onboarding.
+ */
+export const CODING_AGENT_SETUP_CONFIG_KEY = "coding_agent_setup_complete";
+
+/** Every key the reset clears. The switch is last: it is the consent, and a
+ *  half-cleared box that is still switched on would be the one state where the
+ *  wizard shows over a live delegated shell. */
+export const CODING_AGENT_RESET_KEYS = [
+  CODING_AGENT_DIR_CONFIG_KEY,
+  CODING_AGENT_EFFORT_CONFIG_KEY,
+  CODING_AGENT_TURNS_CONFIG_KEY,
+  CODING_AGENT_TOKENS_CONFIG_KEY,
+  CODING_AGENT_REVIEW_CONFIG_KEY,
+  CODING_AGENT_SETUP_CONFIG_KEY,
+  CODING_AGENT_CONFIG_KEY,
+] as const;
 export const MIN_TOKEN_LIMIT = 10_000;
 export const MAX_TASK_CHARS = 4_000;
 export const MAX_DIRECTORY_CHARS = 512;
@@ -517,6 +540,8 @@ export interface CodingAgentStatus {
   enabled: boolean;
   /** The owner's default working folder, or null when they have not set one. */
   defaultDirectory: string | null;
+  /** What the device proposes when they have not chosen one: ~/Projects. */
+  suggestedDirectory: string;
   /** enabled AND the harness is installed and connected — i.e. a run can start. */
   ready: boolean;
   readiness: CodingHarnessReadiness;
@@ -541,6 +566,9 @@ export interface CodingAgentStatus {
   minTokenLimit: number;
   /** Silence, not total time, is what ends a run. */
   runIdleTimeoutMs: number;
+  /** False until the owner finishes the setup wizard — the app shows the
+   *  wizard instead of the home page while it is. */
+  setupComplete: boolean;
 }
 
 export interface StartRunInput {
@@ -612,6 +640,41 @@ export async function setCodingAgentEnabled(enabled: boolean): Promise<void> {
 }
 
 /** The owner's default working folder, or null when they have not set one. */
+/**
+ * The folder this device proposes for a run's work: ~/Projects.
+ *
+ * It is a SUGGESTION, not a default that silently takes effect — the wizard
+ * pre-fills its field with this so the common case is one tap, and the owner
+ * can browse to anything else before saving.
+ */
+export function suggestedDefaultDirectory(): string {
+  return path.join(homeDir(), "Projects");
+}
+
+/**
+ * Create the suggested folder if it is not there yet.
+ *
+ * A fresh box has no ~/Projects, so a wizard that pre-filled the path would
+ * have saved a folder that does not exist and been refused. Called when the
+ * owner actually saves a folder inside their own home — never for a path
+ * outside it, where creating directories on someone's behalf is not this
+ * feature's business.
+ *
+ * `recursive: true` also makes it a no-op when the folder already exists,
+ * which is the usual case.
+ */
+async function ensureDirectoryInsideHome(directory: string): Promise<void> {
+  const home = path.resolve(homeDir());
+  const target = path.resolve(directory);
+  if (target !== home && !target.startsWith(home + path.sep)) return;
+  try {
+    await fs.promises.mkdir(target, { recursive: true });
+  } catch {
+    // Leave it to resolveWorkingDirectory below to answer "does not exist" in
+    // the owner's words; a failure here is not a different fact.
+  }
+}
+
 export async function getDefaultDirectory(): Promise<string | null> {
   return defaultDirectoryFrom(await configGet(CODING_AGENT_DIR_CONFIG_KEY));
 }
@@ -638,6 +701,11 @@ export async function setDefaultDirectory(directory: string | null): Promise<str
   if (!path.isAbsolute(directory.trim())) {
     throw new CodingAgentError("invalid", `Give an absolute path, e.g. ${path.join(homeDir(), "Projects")}.`);
   }
+  // Make it real before resolving. The wizard pre-fills ~/Projects, which a
+  // fresh box does not have, and "that folder does not exist" is a strange
+  // thing to tell someone who just accepted the folder the device proposed.
+  // Fenced to the owner's home: outside it, a missing folder is still an error.
+  await ensureDirectoryInsideHome(directory.trim());
   const { directory: resolved } = await resolveWorkingDirectory({ directory });
   await configSet(CODING_AGENT_DIR_CONFIG_KEY, resolved);
   return resolved;
@@ -685,6 +753,41 @@ export async function setReviewPass(on: unknown): Promise<boolean> {
   if (typeof on !== "boolean") throw new CodingAgentError("invalid", "The review pass switch must be true or false.");
   await configSet(CODING_AGENT_REVIEW_CONFIG_KEY, on);
   return on;
+}
+
+/** Record that the owner finished (or re-entered) the setup wizard. */
+export async function setSetupComplete(done: unknown): Promise<boolean> {
+  if (typeof done !== "boolean") {
+    throw new CodingAgentError("invalid", "The setup flag must be true or false.");
+  }
+  await configSet(CODING_AGENT_SETUP_CONFIG_KEY, done);
+  return done;
+}
+
+/**
+ * Put every coding-agent setting back to factory and send the owner to the
+ * wizard: the switch off, no default folder, effort/ceilings/review back to
+ * their defaults.
+ *
+ * The run history goes too. It was left alone at first — an audit trail is not
+ * a setting — but "start over" that leaves last week's runs listed under a
+ * freshly-configured agent is not starting over: the owner finished the wizard
+ * and was met by the run they had just reset away. Finished runs and their
+ * evidence folders are dropped, exactly as the runs list's own Clear does;
+ * anything HELD (live, paused, drafted) is kept, because those hold a
+ * resumable session and are not history yet.
+ *
+ * Deliberately NOT included: the GitHub credential. It is a login the owner
+ * made against another service, not a setting of this device, and Settings has
+ * its own two-tap Sign out for it.
+ *
+ * @returns how many finished runs were cleared, so the caller can say so.
+ */
+export async function resetCodingAgentSetup(): Promise<number> {
+  for (const key of CODING_AGENT_RESET_KEYS) {
+    await configSet(key, undefined);
+  }
+  return clearFinishedRuns();
 }
 
 /** The owner's turn ceiling, clamped to something the CLI will accept. */
@@ -1091,6 +1194,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
   return {
     enabled,
     defaultDirectory,
+    suggestedDirectory: suggestedDefaultDirectory(),
     ready: enabled && readiness.ready,
     readiness,
     running: runningCount(),
@@ -1111,6 +1215,10 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     tokenLimit: tokenLimitFrom(config[CODING_AGENT_TOKENS_CONFIG_KEY]),
     minTokenLimit: MIN_TOKEN_LIMIT,
     runIdleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
+    // A box configured before the wizard existed has no flag, and its owner
+    // must not be sent back through onboarding: the switch being ON is the
+    // same consent the wizard collects, so it counts as done.
+    setupComplete: config[CODING_AGENT_SETUP_CONFIG_KEY] === true || enabled,
   };
 }
 

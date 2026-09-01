@@ -61,37 +61,20 @@ const nextConfig: NextConfig = {
   },
   async rewrites() {
     return {
-      // Run before filesystem/pages check — proxy gateway paths.
+      // /api/*, /assets/* and the two gateway favicons are NOT rewritten here
+      // any more. Next's rewrite proxy stamps its own x-forwarded-* headers on
+      // the hop, and OpenClaw 2 answers 403 proxy_attribution_required to
+      // forwarded attribution from an address it was not told to trust — which
+      // 403'd every Control UI asset and left the OpenClaw app a blank dark
+      // panel. They are route handlers now (src/app/api, src/app/assets,
+      // src/app/favicon.svg, src/app/favicon-32.png) which proxy through
+      // proxyGatewayRequest() with that header family stripped, the same way
+      // production-server.js already handled WebSocket upgrades.
       //
-      // These are NOT edition-aware on purpose: rewrites are compiled into
-      // .next/routes-manifest.json at BUILD time, but the edition is an
-      // INSTALL-time property (install.sh builds via `su - clawbox`, which drops
-      // CLAWBOX_EDITION from the environment, and it builds before the edition
-      // lock is baked). A build-time gate would therefore bake the wrong answer
-      // on a Hermes flash. The runtime gate lives in src/middleware.ts, which
-      // runs *before* beforeFiles rewrites and 404s these paths on the Hermes
-      // SKU (where the OpenClaw gateway is disabled+masked and would 502).
-      beforeFiles: [
-        // Gateway API (must come before Next.js page resolution)
-        {
-          source: "/api/:path*",
-          destination: `${GATEWAY_URL}/api/:path*`,
-        },
-        // Gateway static assets
-        {
-          source: "/assets/:path*",
-          destination: `${GATEWAY_URL}/assets/:path*`,
-        },
-        // Gateway favicons
-        {
-          source: "/favicon.svg",
-          destination: `${GATEWAY_URL}/favicon.svg`,
-        },
-        {
-          source: "/favicon-32.png",
-          destination: `${GATEWAY_URL}/favicon-32.png`,
-        },
-      ],
+      // Middleware still runs first either way (it precedes beforeFiles
+      // rewrites AND route handlers), so the Hermes 404 gate and the auth gate
+      // on these paths are unchanged.
+      beforeFiles: [],
       afterFiles: [],
       // Fallback: anything not matched by Next.js → proxy to gateway
       fallback: [

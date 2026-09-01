@@ -69,7 +69,10 @@ let gitReads: string[];
 
 /** The device, as far as this component can tell. */
 function stubFetch(
-  status: { enabled: boolean; readiness: typeof READY | typeof NOT_READY },
+  // `setupComplete` defaults to true: every test below is about a box whose
+  // owner has been through the wizard, which is also what the route answers
+  // for any box with the switch on. Pass false to get the wizard itself.
+  status: { enabled: boolean; readiness: typeof READY | typeof NOT_READY; setupComplete?: boolean },
   runsArg: unknown[] = [],
   opts: {
     artifacts?: Record<string, string>; projects?: unknown[]; projectsDir?: string | null; transcriptPath?: string;
@@ -85,14 +88,26 @@ function stubFetch(
     directory: opts.projectsDir === undefined ? "/home/clawbox/Projects" : opts.projectsDir,
     projects: opts.projects ?? [],
   };
+  // POST enable moves the device on — a fixture where finishing the wizard
+  // left `setupComplete` false would keep the wizard on screen and could never
+  // show that the home page comes back. Held as OVERRIDES rather than copies
+  // so a test that mutates the object it passed in (as the CODING_AGENT_CHANGED
+  // one does) still steers the answer.
+  let enabledPosted: boolean | null = null;
+  let setupCompletePosted: boolean | null = null;
+  const isEnabled = () => enabledPosted ?? status.enabled;
   const payload = () => ({
-    enabled: status.enabled,
-    ready: status.enabled && status.readiness.ready,
+    enabled: isEnabled(),
+    ready: isEnabled() && status.readiness.ready,
     readiness: status.readiness,
     running: 0,
     harnessCommand: "claude-ds",
     maxTaskChars: 4000,
     defaultDirectory: null,
+    setupComplete: setupCompletePosted ?? status.setupComplete ?? true,
+    effort: "ultracode",
+    effortLevels: ["low", "xhigh", "max", "ultracode"],
+    reviewPass: false,
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -143,6 +158,14 @@ function stubFetch(
       posts.push({ url, body: JSON.parse(String(init.body)) });
       return json({ success: true });
     }
+    if (url === "/setup-api/coding-agent/enable" && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      posts.push({ url, body });
+      if (typeof body.enabled === "boolean") enabledPosted = body.enabled;
+      if (typeof body.setupComplete === "boolean") setupCompletePosted = body.setupComplete;
+      // The route answers the whole status, re-read after the change.
+      return json({ ...payload(), defaultDirectory: body.defaultDirectory ?? null });
+    }
     if (url === "/setup-api/coding-agent/run" && init?.method === "POST") {
       posts.push({ url, body: JSON.parse(String(init.body)) });
       // The started run is in the listing from the next poll on, as the
@@ -189,6 +212,95 @@ describe("CodingAgentApp", () => {
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     expect(screen.queryByTestId("coding-agent-folder")).not.toBeInTheDocument();
     expect(screen.queryByTestId("coding-agent-effort")).not.toBeInTheDocument();
+  });
+
+  describe("first-run setup", () => {
+    it("shows the wizard instead of the home page until setup is finished", async () => {
+      // A box with no folder and no consent has nothing the home page can
+      // offer — every button on it would name something that cannot happen.
+      stubFetch({ enabled: false, readiness: READY, setupComplete: false });
+      render(<CodingAgentApp />);
+      expect(await screen.findByTestId("coding-agent-wizard")).toBeInTheDocument();
+      expect(screen.queryByTestId("coding-agent-projects-section")).toBeNull();
+      expect(screen.queryByTestId("coding-agent-new")).toBeNull();
+    });
+
+    it("starts the steps from the Enable button, GitHub first", async () => {
+      stubFetch({ enabled: false, readiness: READY, setupComplete: false });
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-enable"));
+      expect(screen.getByTestId("coding-agent-wizard-github")).toBeInTheDocument();
+      // GitHub is what a run pushes with, not what it needs to start, so the
+      // step can be passed without an account.
+      fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+      expect(screen.getByTestId("coding-agent-wizard-folder")).toBeInTheDocument();
+      expect(screen.getByTestId("coding-agent-wizard-browse")).toBeInTheDocument();
+    });
+
+    it("proposes Ultracode and says what it costs", async () => {
+      stubFetch({ enabled: false, readiness: READY, setupComplete: false });
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-enable"));
+      fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+      expect(screen.getByTestId("coding-agent-wizard-effort-ultracode")).toHaveAttribute("aria-checked", "true");
+      expect(screen.getByTestId("coding-agent-wizard-effort-low")).toHaveAttribute("aria-checked", "false");
+      // The owner is told before they choose, not by a bill afterwards.
+      expect(screen.getByTestId("coding-agent-wizard-cost").textContent)
+        .toBe(translations.en["codingAgent.wizardEffortCost"]);
+    });
+
+    it("saves the folder, the effort and the switch in ONE post, and marks setup done", async () => {
+      stubFetch({ enabled: false, readiness: READY, setupComplete: false });
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-enable"));
+      fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+      fireEvent.change(screen.getByTestId("coding-agent-wizard-folder"), { target: { value: "/home/clawbox/Projects" } });
+      fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
+      await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/enable")).toBe(true));
+      const post = posts.find((p) => p.url === "/setup-api/coding-agent/enable");
+      // The switch goes on here so the offered test run has an agent to run
+      // on — but NOT setupComplete: the owner has one step left, and marking
+      // it done would drop them on the home page before they saw it.
+      expect(post!.body).toEqual({
+        defaultDirectory: "/home/clawbox/Projects",
+        effort: "ultracode",
+        reviewPass: false,
+        enabled: true,
+      });
+      expect(await screen.findByTestId("coding-agent-wizard-harness-run")).toBeInTheDocument();
+    });
+
+    it("finishes on Skip without starting a run", async () => {
+      stubFetch({ enabled: false, readiness: READY, setupComplete: false });
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-enable"));
+      fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+      fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-harness-skip"));
+      await waitFor(() => expect(
+        posts.filter((p) => p.url === "/setup-api/coding-agent/enable").length,
+      ).toBe(2));
+      // The test is an offer, not a gate: skipping completes setup and starts
+      // nothing.
+      expect(posts.find((p) => p.url === "/setup-api/coding-agent/run")).toBeUndefined();
+      expect(posts.at(-1)!.body).toEqual({ setupComplete: true });
+      expect(await screen.findByTestId("coding-agent-projects-section")).toBeInTheDocument();
+    });
+
+    it("runs the harness test and finishes when the owner asks for it", async () => {
+      stubFetch({ enabled: false, readiness: READY, setupComplete: false });
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-enable"));
+      fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+      fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-harness-run"));
+      await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(true));
+      const run = posts.find((p) => p.url === "/setup-api/coding-agent/run");
+      expect((run!.body as { projectId: string }).projectId).toBe("harness-test");
+      // ...and setup completes, so the owner lands on the home page with the
+      // run already in flight — which is where its progress is shown.
+      await waitFor(() => expect(posts.at(-1)!.body).toEqual({ setupComplete: true }));
+    });
   });
 
   it("opens its own embedded settings page from the Settings button, and comes back", async () => {

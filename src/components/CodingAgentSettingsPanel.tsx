@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { notifyCodingAgentChanged } from "@/lib/ui-events";
 import StatusMessage from "./StatusMessage";
+import DeviceCodeCard from "./DeviceCodeCard";
+import { BTN_DANGER, BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
 
 /**
  * Settings → Coding Agent: everything the owner DECIDES about delegated
@@ -56,6 +58,12 @@ export interface GitHubState {
 }
 
 export interface AgentStatus {
+  /** False until the owner finishes the setup wizard; the app shows the
+   *  wizard instead of its home page while it is. */
+  setupComplete: boolean;
+  /** The folder the device proposes when none is chosen: ~/Projects. The
+   *  wizard pre-fills it, and saving it creates it. */
+  suggestedDirectory?: string;
   enabled: boolean;
   ready: boolean;
   readiness: Readiness;
@@ -107,9 +115,10 @@ export function devicePollSeconds(raw: unknown): number {
   return Math.max(DEVICE_POLL_FLOOR_S, Number.isFinite(n) && n > 0 ? n : DEVICE_POLL_FLOOR_S);
 }
 
-const CARD = "rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5";
-const FIELD = "rounded-lg bg-white/[0.04] border border-white/[0.08] px-3 py-1.5 font-mono text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50";
-const SMALL_BUTTON = "text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50";
+// The app, this page and the wizard share one button system — see
+// ./coding-agent-ui. SMALL_BUTTON is kept as the local name for the secondary
+// role so the many call sites below read unchanged.
+const SMALL_BUTTON = BTN_SECONDARY;
 
 function Switch({
   checked, busy, disabled, label, onChange, testId = "coding-agent-switch",
@@ -156,8 +165,13 @@ function Switch({
 }
 
 export default function CodingAgentSettingsPanel({
+  onReset,
   onStatus,
 }: {
+  /** Called after a successful reset, so the host can leave this page: the
+   *  settings it describes no longer exist and the window's front door is the
+   *  setup wizard again. */
+  onReset?: () => void;
   /** Every status the route answers with, as it arrives — the sidebar's
    *  "On · Max effort" subtitle is read off the same payload this panel
    *  renders, so the two can never disagree. */
@@ -197,6 +211,21 @@ export default function CodingAgentSettingsPanel({
     setConfirmSignOut(true);
   };
   useEffect(() => () => { if (confirmSignOutTimer.current) clearTimeout(confirmSignOutTimer.current); }, []);
+
+  // Reset: two taps, like Sign out, and for a stronger reason — it switches the
+  // agent off, forgets the folder and the ceilings, and puts the owner back in
+  // the setup wizard. Everything it clears is re-enterable, but not by accident.
+  const [confirmReset, setConfirmReset] = useState(false);
+  const confirmResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const armReset = () => {
+    if (confirmResetTimer.current) clearTimeout(confirmResetTimer.current);
+    confirmResetTimer.current = setTimeout(() => {
+      confirmResetTimer.current = null;
+      setConfirmReset(false);
+    }, CONFIRM_MS);
+    setConfirmReset(true);
+  };
+  useEffect(() => () => { if (confirmResetTimer.current) clearTimeout(confirmResetTimer.current); }, []);
   /** A device-flow login in flight: the code the card shows and how often to
    *  ask github.com whether it was entered. */
   const [deviceLogin, setDeviceLogin] = useState<{ userCode: string; verificationUri: string; interval: number } | null>(null);
@@ -477,6 +506,38 @@ export default function CodingAgentSettingsPanel({
   /** Disconnect GitHub. Two taps, like clearing history (see `armSignOut`):
    *  it is not destructive — pushed repositories stay — but it is not what
    *  anyone means to do by brushing a button. */
+  /**
+   * Put every coding-agent setting back to factory and return to the wizard.
+   *
+   * The panel does not re-read itself afterwards: the status it gets back says
+   * `setupComplete: false`, and the window that hosts this page swaps in the
+   * wizard on the change event — a refresh here would only paint a settings
+   * page nobody is looking at any more.
+   */
+  const resetAgent = async () => {
+    if (!confirmReset) { armReset(); return; }
+    if (confirmResetTimer.current) clearTimeout(confirmResetTimer.current);
+    confirmResetTimer.current = null;
+    setConfirmReset(false);
+    setBusy("reset");
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/reset", { method: "POST" });
+      if (!res.ok) throw new Error(await readError(res, t("codingAgent.resetFailed")));
+      setStatus(await res.json() as AgentStatus);
+      notifyCodingAgentChanged();
+      // Leave this page with the settings it was showing: they are gone, and
+      // the window's front door is the wizard now. Without this the owner sat
+      // on a settings page describing a configuration that no longer exists
+      // and had to find Back on their own.
+      onReset?.();
+    } catch (err) {
+      setError({ slot: "settings", message: err instanceof Error ? err.message : t("codingAgent.resetFailed") });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const disconnectGithub = async () => {
     setBusy("gh-out");
     setError(null);
@@ -497,7 +558,7 @@ export default function CodingAgentSettingsPanel({
 
   if (loading) {
     return (
-      <div className="max-w-xl" data-testid="coding-agent-settings-panel">
+      <div className="w-full" data-testid="coding-agent-settings-panel">
         <div className={`${CARD} h-24 motion-safe:animate-pulse`} data-testid="coding-agent-settings-loading" />
       </div>
     );
@@ -511,7 +572,7 @@ export default function CodingAgentSettingsPanel({
   );
 
   return (
-    <div className="max-w-xl space-y-5" data-testid="coding-agent-settings-panel">
+    <div className="w-full space-y-5" data-testid="coding-agent-settings-panel">
       <div className={CARD}>
         {/* One row: what this is, and whether it is on. */}
         <div className="flex items-start justify-between gap-4">
@@ -742,44 +803,59 @@ export default function CodingAgentSettingsPanel({
               terminal on a phone tries xdg-open on the box and buries the URL.
               The card polls; nothing else to type on this device. */}
           {deviceLogin && (
-            <div className="mt-3 rounded-xl border border-sky-400/30 bg-sky-400/[0.06] px-3 py-3" data-testid="coding-agent-github-device">
-              <p className="text-[11px] text-[var(--text-secondary)]">{t("codingAgent.githubDeviceIntro")}</p>
-              <p className="mt-2 text-center font-mono text-xl tracking-[0.3em] text-white select-all" data-testid="coding-agent-github-code">
-                {deviceLogin.userCode}
-              </p>
-              <a
-                href={deviceLogin.verificationUri}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-3 block w-full text-center text-xs font-semibold px-3 py-2 rounded-lg bg-[var(--coral-bright)] text-white hover:opacity-90"
-              >
-                {t("codingAgent.githubDeviceOpen")}
-              </a>
-              <p className="mt-2 text-center text-[11px] text-[var(--text-muted)] motion-safe:animate-pulse" data-testid="coding-agent-github-device-waiting">
-                {t("codingAgent.githubDeviceWaiting")}
-              </p>
-              <div className="mt-1.5 flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={cancelGithubLogin}
-                  data-testid="coding-agent-github-device-cancel"
-                  className="text-[11px] text-[var(--text-muted)] underline decoration-white/20 hover:text-white"
-                >
-                  {t("codingAgent.githubDeviceCancel")}
-                </button>
-                <button
-                  type="button"
-                  onClick={connectGithubTerminal}
-                  className="text-[11px] text-[var(--text-muted)] underline decoration-white/20 hover:text-white"
-                >
-                  {t("codingAgent.githubDeviceTerminal")}
-                </button>
-              </div>
+            <div className="mt-3" data-testid="coding-agent-github-device">
+              <p className="text-[11px] text-[var(--text-secondary)] mb-2">{t("codingAgent.githubDeviceIntro")}</p>
+              {/* The same card the ClawBox AI subscription shows. It used to be
+                  its own smaller look with no Copy button at all, so the owner
+                  hand-selected eight characters on a touch screen. */}
+              <DeviceCodeCard
+                code={deviceLogin.userCode}
+                verificationUrl={deviceLogin.verificationUri}
+                polling
+                onNewCode={() => void connectGithub()}
+                testId="coding-agent-github-device-code"
+                actions={
+                  <>
+                    <button
+                      type="button"
+                      onClick={cancelGithubLogin}
+                      data-testid="coding-agent-github-device-cancel"
+                      className="text-[11px] text-[var(--text-muted)] underline decoration-white/20 hover:text-white"
+                    >
+                      {t("codingAgent.githubDeviceCancel")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={connectGithubTerminal}
+                      className="text-[11px] text-[var(--text-muted)] underline decoration-white/20 hover:text-white"
+                    >
+                      {t("codingAgent.githubDeviceTerminal")}
+                    </button>
+                  </>
+                }
+              />
             </div>
           )}
           {errorIn("github")}
         </div>
       )}
+
+      {/* Start over. Last on the page because it undoes everything above it,
+          and the old controls stay exactly where they were — an owner who only
+          wants to change the folder never has to come near this. */}
+      <div className={`${CARD} mt-4`} data-testid="coding-agent-reset-card">
+        <h3 className="text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.resetTitle")}</h3>
+        <p className="mt-1.5 text-[11px] leading-relaxed text-[var(--text-muted)]">{t("codingAgent.resetHint")}</p>
+        <button
+          type="button"
+          onClick={() => void resetAgent()}
+          disabled={busy === "reset"}
+          data-testid="coding-agent-reset"
+          className={`${confirmReset ? BTN_DANGER : BTN_SECONDARY} mt-3`}
+        >
+          {confirmReset ? t("codingAgent.resetConfirm") : t("codingAgent.resetButton")}
+        </button>
+      </div>
     </div>
   );
 }

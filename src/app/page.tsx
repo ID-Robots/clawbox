@@ -94,7 +94,22 @@ const apps: AppDef[] = [
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
 ];
-const DEFAULT_DESKTOP_APPS = apps.map(a => a.id);
+// Every built-in id. This is the VALIDITY filter for a saved desktop list —
+// an id naming no built-in reserves an empty grid slot — and it is deliberately
+// wider than the default set below, so an icon the owner added from the
+// launcher survives a reload.
+const BUILT_IN_APP_IDS = apps.map(a => a.id);
+
+// Built-ins that ship OFF the desktop. They stay in the launcher, and "Add to
+// desktop" puts them back permanently; a fresh box just doesn't spend a grid
+// slot on them out of the box.
+//
+// Remote Desktop (`vnc`) is the one: it shows the box's own X session, which is
+// a diagnostic tool on a headless appliance, and it was the least-opened icon
+// on the default grid.
+const OFF_DESKTOP_BY_DEFAULT = new Set(["vnc"]);
+
+const DEFAULT_DESKTOP_APPS = BUILT_IN_APP_IDS.filter(id => !OFF_DESKTOP_BY_DEFAULT.has(id));
 
 // Desktop icon grid metrics. Module-level so the resize listener can derive
 // `rowsPerColumn` without reaching into the component.
@@ -112,7 +127,7 @@ const TASKBAR_RESERVE = 72; // px kept clear at the bottom for the taskbar
  * differed from load to load.
  */
 function canonicalIconOrder(installedAppIds: readonly string[]): string[] {
-  return [...installedAppIds, ...DEFAULT_DESKTOP_APPS.map((id) => `desktop-${id}`)];
+  return [...installedAppIds, ...BUILT_IN_APP_IDS.map((id) => `desktop-${id}`)];
 }
 
 // Apps that only make sense on ONE harness. The other harness's backend isn't
@@ -265,11 +280,21 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     return <MIcon name="extension" className="text-white" size={px} />;
   }
 
+  if (id === "coding") {
+    return (
+      <svg className={size} viewBox="0 0 120 120" fill="none">
+        <path d="M48 36 L26 60 L48 84" stroke="#f97316" strokeWidth="11" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M72 36 L94 60 L72 84" stroke="#f97316" strokeWidth="11" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M70 32 L50 88" stroke="#f97316" strokeWidth="11" strokeLinecap="round" />
+        <path d="M94 14 C95.5 22 100 26.5 108 28 C100 29.5 95.5 34 94 42 C92.5 34 88 29.5 80 28 C88 26.5 92.5 22 94 14 Z" fill="#ffffff" />
+      </svg>
+    );
+  }
+
   const iconMap: Record<string, string> = {
     settings: "settings",
     setup: "construction",
     terminal: "terminal",
-    coding: "code",
     files: "folder",
     clawkeep: "shield_lock",
     "memory-shard": "memory",
@@ -518,7 +543,11 @@ function ChromeDesktopInner() {
           // Built-in ids only. An older launcher pushed `installed-*` ids here
           // (see handleAddToDesktop); an id that names no built-in reserves an
           // empty grid slot, so a box that already saved one sheds it on load.
-          const saved = (data.desktop_apps as string[]).filter(id => DEFAULT_DESKTOP_APPS.includes(id));
+          // Validated against every built-in, not just the default set: an
+          // owner who added Remote Desktop from the launcher keeps it.
+          const saved = (data.desktop_apps as string[]).filter(id => BUILT_IN_APP_IDS.includes(id));
+          // ...but only default-set built-ins are auto-added, so an app that
+          // ships off the desktop never appears on a box that never had it.
           const missingNewBuiltins = DEFAULT_DESKTOP_APPS.filter(id => !saved.includes(id));
           setDesktopApps(missingNewBuiltins.length > 0 ? [...saved, ...missingNewBuiltins] : saved);
         }

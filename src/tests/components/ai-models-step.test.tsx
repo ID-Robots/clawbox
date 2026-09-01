@@ -31,6 +31,17 @@ vi.mock("@/lib/i18n", () => ({
         "settings.connect": "Connect",
         "settings.aiProvider": "AI Provider",
         "settings.providers.radioGroupLabel": "AI Provider",
+        // The device-code card is shared with the coding agent's GitHub login
+        // now (src/components/DeviceCodeCard.tsx) and speaks through t(),
+        // where it used to carry hardcoded English. Same strings, from the
+        // real catalogue.
+        "ai.openAuthPage": "Open authorization page",
+        "ai.thenEnterCode": "Then enter this code:",
+        "ai.codeExpires": "Code expires in 15 minutes",
+        "ai.waitingAuth": "Waiting for authorization...",
+        "ai.getNewCode": "Get a new code",
+        copy: "Copy",
+        copied: "Copied!",
       };
       return translations[key] ?? key;
     },

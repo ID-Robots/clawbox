@@ -619,9 +619,13 @@ describe("motion", () => {
     await waitFor(() => expect(screen.queryByTestId("coding-agent-switch-busy")).not.toBeInTheDocument());
 
     fireEvent.click(screen.getByTestId("coding-agent-github-connect"));
-    const waiting = await screen.findByTestId("coding-agent-github-device-waiting");
-    expect(waiting.textContent).toBe(translations.en["codingAgent.githubDeviceWaiting"]);
-    expect(waiting.className.split(/\s+/)).toContain("motion-safe:animate-pulse");
-    expect(waiting.className.split(/\s+/)).not.toContain("animate-pulse");
+    // The GitHub card shares the ClawBox AI subscription card's markup now:
+    // the wait is a spinner beside "Waiting for authorization…", and it is the
+    // spinner that must stay still when motion is not welcome.
+    const waiting = await screen.findByTestId("coding-agent-github-device-code-waiting");
+    expect(waiting.textContent).toBe(translations.en["ai.waitingAuth"]);
+    const waitSpinner = screen.getByTestId("coding-agent-github-device-code-spinner");
+    expect(waitSpinner.className.split(/\s+/)).toContain("motion-safe:animate-spin");
+    expect(waitSpinner.className.split(/\s+/)).not.toContain("animate-spin");
   });
 });

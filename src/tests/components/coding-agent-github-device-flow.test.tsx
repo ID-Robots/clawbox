@@ -68,7 +68,7 @@ async function openDeviceLogin() {
   await advance(50);
   fireEvent.click(screen.getByTestId("coding-agent-github-connect"));
   await advance(50);
-  expect(screen.getByTestId("coding-agent-github-code").textContent).toBe("8A5B-0396");
+  expect(screen.getByTestId("coding-agent-github-device-code-value").textContent).toBe("8A5B-0396");
 }
 
 beforeEach(() => {

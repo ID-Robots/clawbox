@@ -415,6 +415,22 @@ h6 {
   border-color: rgba(255, 230, 203, 0.15);
 }
 
+/* Native <select> popups.
+ *
+ * The closed control is styled per component, but the OPEN list is drawn by the
+ * OS with its own default background — white — while the options inherit the
+ * control's `color`, which on this dark UI is near-white. That is white text on
+ * a white sheet: the "Start from" picker in the New app card was unreadable, and
+ * every other select on the box had the same latent bug (AppStore had patched
+ * its three options by hand). One rule, so it cannot recur in the next select
+ * anyone adds.
+ */
+select option,
+select optgroup {
+  background-color: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
 /* Custom popover dropdown — replaces native <select> for the chat
  * header pills so we can keep the trigger compact (truncating with
  * "...") while the open menu shows full labels + hints in a wider
