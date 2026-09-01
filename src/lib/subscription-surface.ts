@@ -1,7 +1,11 @@
 import { promises as fsp } from "fs";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
-import { subscriptionSurfaceLabel, subscriptionSurfaceProvider } from "@/lib/provider-models";
+import {
+  getProviderCatalog,
+  subscriptionSurfaceLabel,
+  subscriptionSurfaceProvider,
+} from "@/lib/provider-models";
 
 /**
  * Server-side reads of the SUBSCRIPTION facts the UI already gets stamped into
@@ -27,9 +31,16 @@ interface CachedSurface {
  * could not be determined.
  *
  * Null means UNKNOWN and every caller must treat it as "do not refuse" — the
- * same rule `isModelUsableOnSubscription` applies in the pickers. An empty
- * cache is unknown too: treating it as authoritative would refuse the entire
- * catalogue on a box whose enumeration simply has not run yet.
+ * same rule `isModelUsableOnSubscription` applies in the pickers. A missing
+ * cache is unknown: treating it as authoritative would refuse the entire
+ * catalogue on a box whose enumeration simply has not run yet. A cache that
+ * EXISTS but enumerated nothing is judged by the curated catalogue alone —
+ * that is exactly what the catalog route serves for the same file, so the
+ * picker on that box offers the curated rows and nothing else. Answering
+ * UNKNOWN there would let a typed id the picker never offered through the
+ * very write this guard exists to refuse. Only when neither list has an id
+ * (a NARROWER named surface with no curated catalogue, enumerated empty) is
+ * there nothing to judge against.
  *
  * No age check and no memo. Both are deliberate:
  *
@@ -62,7 +73,28 @@ export async function readSubscriptionSurfaceIds(
     const ids = parsed.models
       .map((m) => m?.id)
       .filter((id): id is string => typeof id === "string" && id.length > 0);
-    return ids.length > 0 ? new Set(ids) : null;
+    // Union the CURATED catalogue for the surface provider, because the
+    // catalog route serves its cached payload through `buildPayload` ->
+    // `augmentWithStaticCatalog`, which appends exactly these ids to whatever
+    // the live enumeration returned. Reading the raw file without them asks a
+    // different question than the picker answered: a ClawBox release that adds
+    // a model to PROVIDER_CATALOGS ships a picker offering it on day one,
+    // while the on-disk cache keeps the previous list for up to the route's
+    // 6h refresh interval — and in that window this guard refused the very row
+    // the customer had just been shown. `augmentWithStaticCatalog` is a no-op
+    // for a provider with no curated catalogue (a NARROWER named surface such
+    // as claude-cli), and so is this, which is what keeps a narrowed surface
+    // narrow.
+    //
+    // The curated ids count BEFORE the empty check, for the same reason: a
+    // file holding `models: []` is served to the picker through that same
+    // augmentation, so the customer was shown the curated list, not nothing.
+    const curated = getProviderCatalog(surfaceProvider)?.models ?? [];
+    if (ids.length === 0 && curated.length === 0) return null;
+    for (const model of curated) {
+      ids.push(model.id);
+    }
+    return new Set(ids);
   } catch {
     // Missing, unreadable, or half-written cache. Unknown, not "no".
     return null;

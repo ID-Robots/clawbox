@@ -105,6 +105,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.recentRuns": "Recent runs",
   "codingAgent.more": "Show more",
   "codingAgent.clearRuns": "Clear history",
+  "codingAgent.clearRunsHint": "Removes finished runs and their evidence folders from the list. Runs that are live, paused or drafted are kept — they still hold a session you can resume.",
   "codingAgent.clearConfirm": "Clear — tap again",
   "codingAgent.clearFailed": "Could not clear the run history.",
   "codingAgent.noRuns": "No runs yet. Ask your assistant to build or change something in a code project.",
@@ -131,7 +132,12 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.githubDeviceTerminal": "Use the Terminal instead",
   "codingAgent.githubStartFailed": "Could not start the GitHub login",
   "codingAgent.harnessTest": "Test harness",
+  "codingAgent.harnessTestTitle": "Test harness",
+  "codingAgent.harnessTestHint": "Starts one small, real run in a scratch project to prove the delegated shell works end to end: Claude Code launches, writes a file, drives the browser and reports back. It costs a run like any other, and it needs the agent switched on and ready.",
   "codingAgent.harnessTestFailed": "Could not start the harness test",
+  // The test runs in a folder inside the owner's project folder, so it has
+  // nowhere to go until one is chosen (src/lib/coding-agent-harness-test.ts).
+  "codingAgent.harnessTestNoFolder": "Choose a project folder first.",
   "codingAgent.deniedHelp":
     "The coding agent may only run a fixed set of commands inside its own folder. This is the safety limit working, not a fault — the run usually finds another way.",
   "codingAgent.stop": "Stop",
@@ -208,7 +214,69 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.reviewPassLabel": "Review each finished run",
   "codingAgent.reviewPassHint": "After a run that changed files finishes, one more run in the same session hunts for defects and fixes what it confirms. It costs a second, smaller run and takes the run slot while it works; never after Stop or Pause.",
   "codingAgent.reviewPassFailed": "Could not change the review pass setting.",
+  "codingAgent.autoPrLabel": "Open a pull request and merge it when checks pass",
+  "codingAgent.autoPrHint": "Each run works on its own branch, opens a pull request into the project's default branch, and waits for GitHub Actions. It merges only when at least one check actually ran and every one passed — a pull request with no checks is never merged. Needs a GitHub remote.",
+  "codingAgent.autoPrFailed": "Could not change the pull-request setting.",
+  "codingAgent.prOpening": "Opening PR",
+  "codingAgent.prWaiting": "Checks {done}/{total}",
+  "codingAgent.prMerged": "Merged",
+  "codingAgent.prBlocked": "Needs you",
   "codingAgent.reviewOf": "review of {id}",
   "codingAgent.reviewedBy": "reviewed by {id}",
   "codingAgent.reviewPassTitle": "Automatic review pass of {id}",
+
+  // ── First-run setup wizard ────────────────────────────────────────────────
+  //
+  // Switching the coding agent on is consent for a delegated shell, so the
+  // wizard says what it is before it asks for anything, then collects the two
+  // settings a run actually needs: the account it pushes with, and the folder
+  // it works in. Settings keeps every one of these controls — this is an
+  // onboarding path, not the only way in.
+  "codingAgent.wizardTitle": "Set up the coding agent",
+  "codingAgent.wizardIntro": "The coding agent lets your assistant hand a whole task to Claude Code running on this box: it reads and writes files in one folder, runs commands there, and reports back. Setting it up takes three steps.",
+  "codingAgent.wizardEnable": "Enable",
+  "codingAgent.wizardStepOf": "Step {n} of {total}",
+  "codingAgent.wizardNext": "Next",
+  "codingAgent.wizardBack": "Back",
+  "codingAgent.wizardSkip": "Skip for now",
+  "codingAgent.wizardFinish": "Finish setup",
+  "codingAgent.wizardFinishing": "Saving…",
+  "codingAgent.wizardFinishFailed": "Could not save the setup.",
+
+  "codingAgent.wizardGithubTitle": "Connect GitHub",
+  "codingAgent.wizardGithubHint": "A run pushes its work to GitHub with this account. You can skip this and connect later in Settings — a run still works without it, it just has nowhere to push.",
+  "codingAgent.wizardGithubConnect": "Sign in with GitHub",
+  "codingAgent.wizardGithubConnected": "GitHub connected",
+
+  "codingAgent.wizardProjectTitle": "Project folder and effort",
+  "codingAgent.wizardProjectHint": "The folder a run works in when the assistant names no project. Browse to pick one, or type an absolute path.",
+  "codingAgent.wizardBrowse": "Browse",
+  "codingAgent.wizardBrowseFailed": "Could not read that folder.",
+  "codingAgent.wizardPickerUp": "Up one folder",
+  "codingAgent.wizardPickerUse": "Use this folder",
+  "codingAgent.wizardPickerClose": "Close",
+  "codingAgent.wizardPickerEmpty": "No folders here.",
+  "codingAgent.wizardCreateFolder": "Create folder",
+  "codingAgent.wizardCreateFolderPlaceholder": "New folder name",
+  "codingAgent.wizardCreateFolderSave": "Create",
+  "codingAgent.wizardCreateFolderFailed": "Could not create the folder.",
+  // Said plainly and up front: Ultracode is the best answer this box can give
+  // and the most expensive one, and an owner who finds that out from a bill
+  // was told too late.
+  "codingAgent.wizardEffortCost": "Ultracode gives the best results and consumes a lot of tokens — it thinks longer and can run several agents for one task. A Business plan is recommended if you use it often. Lower effort costs less and finishes sooner.",
+  "codingAgent.wizardHarnessTitle": "Try it once",
+  "codingAgent.wizardHarnessHint": "Run a small, real task in a scratch project to prove the whole chain works: Claude Code starts, writes a file, drives the browser and reports back. It costs one run. You can skip this and start it any time from the Test harness card in Settings.",
+  "codingAgent.wizardHarnessRun": "Run the test",
+  "codingAgent.wizardHarnessStarting": "Starting…",
+  "codingAgent.wizardHarnessSkip": "Skip and finish",
+
+  // ── Reset ─────────────────────────────────────────────────────────────────
+  "codingAgent.resetTitle": "Start over",
+  "codingAgent.resetHint": "Switches the coding agent off and clears the folder, effort and ceilings, then runs the setup wizard again. Your GitHub sign-in and your run history are kept.",
+  "codingAgent.resetButton": "Reset",
+  "codingAgent.artCoder": "Coder",
+  "codingAgent.artReviewer": "Reviewer",
+  "codingAgent.artBrowser": "Browser",
+  "codingAgent.resetConfirm": "Reset everything — tap again",
+  "codingAgent.resetFailed": "Could not reset the coding agent.",
 };

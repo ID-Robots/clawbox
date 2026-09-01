@@ -4,6 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { notifyCodingAgentChanged } from "@/lib/ui-events";
 import StatusMessage from "./StatusMessage";
+import DeviceCodeCard from "./DeviceCodeCard";
+import HelpTip from "./HelpTip";
+import { BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 
 /**
  * Settings → Coding Agent: everything the owner DECIDES about delegated
@@ -56,6 +59,15 @@ export interface GitHubState {
 }
 
 export interface AgentStatus {
+  /** False until the owner finishes the setup wizard; the app shows the
+   *  wizard instead of its home page while it is. */
+  setupComplete: boolean;
+  /** The owner's switch for branch -> pull request -> wait for checks ->
+   *  merge. Optional: an older server does not answer with it. */
+  autoPr?: boolean;
+  /** The folder the device proposes when none is chosen: ~/Projects. The
+   *  wizard pre-fills it, and saving it creates it. */
+  suggestedDirectory?: string;
   enabled: boolean;
   ready: boolean;
   readiness: Readiness;
@@ -107,9 +119,10 @@ export function devicePollSeconds(raw: unknown): number {
   return Math.max(DEVICE_POLL_FLOOR_S, Number.isFinite(n) && n > 0 ? n : DEVICE_POLL_FLOOR_S);
 }
 
-const CARD = "rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5";
-const FIELD = "rounded-lg bg-white/[0.04] border border-white/[0.08] px-3 py-1.5 font-mono text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50";
-const SMALL_BUTTON = "text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50";
+// The app, this page and the wizard share one button system — see
+// ./coding-agent-ui. SMALL_BUTTON is kept as the local name for the secondary
+// role so the many call sites below read unchanged.
+const SMALL_BUTTON = BTN_SECONDARY;
 
 function Switch({
   checked, busy, disabled, label, onChange, testId = "coding-agent-switch",
@@ -156,8 +169,13 @@ function Switch({
 }
 
 export default function CodingAgentSettingsPanel({
+  onReset,
   onStatus,
 }: {
+  /** Called after a successful reset, so the host can leave this page: the
+   *  settings it describes no longer exist and the window's front door is the
+   *  setup wizard again. */
+  onReset?: () => void;
   /** Every status the route answers with, as it arrives — the sidebar's
    *  "On · Max effort" subtitle is read off the same payload this panel
    *  renders, so the two can never disagree. */
@@ -197,6 +215,7 @@ export default function CodingAgentSettingsPanel({
     setConfirmSignOut(true);
   };
   useEffect(() => () => { if (confirmSignOutTimer.current) clearTimeout(confirmSignOutTimer.current); }, []);
+
   /** A device-flow login in flight: the code the card shows and how often to
    *  ask github.com whether it was entered. */
   const [deviceLogin, setDeviceLogin] = useState<{ userCode: string; verificationUri: string; interval: number } | null>(null);
@@ -497,7 +516,7 @@ export default function CodingAgentSettingsPanel({
 
   if (loading) {
     return (
-      <div className="max-w-xl" data-testid="coding-agent-settings-panel">
+      <div className="w-full" data-testid="coding-agent-settings-panel">
         <div className={`${CARD} h-24 motion-safe:animate-pulse`} data-testid="coding-agent-settings-loading" />
       </div>
     );
@@ -511,7 +530,7 @@ export default function CodingAgentSettingsPanel({
   );
 
   return (
-    <div className="max-w-xl space-y-5" data-testid="coding-agent-settings-panel">
+    <div className="w-full space-y-5" data-testid="coding-agent-settings-panel">
       <div className={CARD}>
         {/* One row: what this is, and whether it is on. */}
         <div className="flex items-start justify-between gap-4">
@@ -566,7 +585,7 @@ export default function CodingAgentSettingsPanel({
               type="button"
               onClick={() => void saveDirectory()}
               disabled={saving || (dirDraft ?? "") === (status?.defaultDirectory ?? "")}
-              className="px-3 py-1.5 rounded-lg border border-white/10 text-xs text-[var(--text-primary)] hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+              className={BTN_SECONDARY}
             >
               {t("codingAgent.folderSave")}
             </button>
@@ -579,7 +598,7 @@ export default function CodingAgentSettingsPanel({
           <label className="text-xs font-medium text-[var(--text-secondary)]">
             {t("codingAgent.effortLabel")}
           </label>
-          <div className="flex gap-1 mt-1.5" data-testid="coding-agent-effort">
+          <div className={`${SEGMENTED_TRACK} mt-1.5`} data-testid="coding-agent-effort">
             {(status?.effortLevels ?? []).map((level) => {
               const active = status?.effort === level;
               return (
@@ -590,11 +609,7 @@ export default function CodingAgentSettingsPanel({
                   disabled={saving}
                   aria-pressed={active}
                   data-testid={`coding-agent-effort-${level}`}
-                  className={`flex-1 px-2 py-1.5 rounded-lg border text-[11px] capitalize transition-colors disabled:opacity-50 ${
-                    active
-                      ? "border-[var(--coral-bright)]/60 bg-[var(--coral-bright)]/10 text-[var(--text-primary)]"
-                      : "border-white/[0.08] text-[var(--text-muted)] hover:bg-white/5"
-                  }`}
+                  className={active ? SEGMENT_ON : SEGMENT_OFF}
                 >
                   {t(`codingAgent.effort.${level}`)}
                 </button>
@@ -655,11 +670,17 @@ export default function CodingAgentSettingsPanel({
             only by POSTing the field — an owner could neither find it nor
             see that it was on. Not optimistic, like the main switch. */}
         <div className="flex items-start justify-between gap-4 mt-4">
-          <div className="min-w-0">
-            <label className="text-xs font-medium text-[var(--text-secondary)]">
+          <div className="min-w-0 flex items-center gap-1.5">
+            {/* A span, not a label: the switch is a button, which no label can
+                name, and it carries its own aria-label. */}
+            <span className="text-xs font-medium text-[var(--text-secondary)]">
               {t("codingAgent.reviewPassLabel")}
-            </label>
-            <p className="text-[11px] text-[var(--text-muted)] mt-1 leading-relaxed">{t("codingAgent.reviewPassHint")}</p>
+            </span>
+            <HelpTip
+              text={t("codingAgent.reviewPassHint")}
+              label={t("codingAgent.reviewPassLabel")}
+              testId="coding-agent-review-pass-help"
+            />
           </div>
           <Switch
             checked={status?.reviewPass ?? false}
@@ -668,6 +689,30 @@ export default function CodingAgentSettingsPanel({
             label={t("codingAgent.reviewPassLabel")}
             testId="coding-agent-review-pass"
             onChange={(next) => void saveSetting({ reviewPass: next }, "review", t("codingAgent.reviewPassFailed"))}
+          />
+        </div>
+
+        {/* Branch -> pull request -> wait for Actions -> merge. Under the
+            review pass because it runs after it, and the review's verdict is
+            one of the things that gates the merge. */}
+        <div className="flex items-start justify-between gap-4 mt-4">
+          <div className="min-w-0 flex items-center gap-1.5">
+            <span className="text-xs font-medium text-[var(--text-secondary)]">
+              {t("codingAgent.autoPrLabel")}
+            </span>
+            <HelpTip
+              text={t("codingAgent.autoPrHint")}
+              label={t("codingAgent.autoPrLabel")}
+              testId="coding-agent-auto-pr-help"
+            />
+          </div>
+          <Switch
+            checked={status?.autoPr ?? false}
+            busy={busy === "autoPr"}
+            disabled={!status || saving}
+            label={t("codingAgent.autoPrLabel")}
+            testId="coding-agent-auto-pr"
+            onChange={(next) => void saveSetting({ autoPr: next }, "autoPr", t("codingAgent.autoPrFailed"))}
           />
         </div>
 
@@ -742,39 +787,37 @@ export default function CodingAgentSettingsPanel({
               terminal on a phone tries xdg-open on the box and buries the URL.
               The card polls; nothing else to type on this device. */}
           {deviceLogin && (
-            <div className="mt-3 rounded-xl border border-sky-400/30 bg-sky-400/[0.06] px-3 py-3" data-testid="coding-agent-github-device">
-              <p className="text-[11px] text-[var(--text-secondary)]">{t("codingAgent.githubDeviceIntro")}</p>
-              <p className="mt-2 text-center font-mono text-xl tracking-[0.3em] text-white select-all" data-testid="coding-agent-github-code">
-                {deviceLogin.userCode}
-              </p>
-              <a
-                href={deviceLogin.verificationUri}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-3 block w-full text-center text-xs font-semibold px-3 py-2 rounded-lg bg-[var(--coral-bright)] text-white hover:opacity-90"
-              >
-                {t("codingAgent.githubDeviceOpen")}
-              </a>
-              <p className="mt-2 text-center text-[11px] text-[var(--text-muted)] motion-safe:animate-pulse" data-testid="coding-agent-github-device-waiting">
-                {t("codingAgent.githubDeviceWaiting")}
-              </p>
-              <div className="mt-1.5 flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={cancelGithubLogin}
-                  data-testid="coding-agent-github-device-cancel"
-                  className="text-[11px] text-[var(--text-muted)] underline decoration-white/20 hover:text-white"
-                >
-                  {t("codingAgent.githubDeviceCancel")}
-                </button>
-                <button
-                  type="button"
-                  onClick={connectGithubTerminal}
-                  className="text-[11px] text-[var(--text-muted)] underline decoration-white/20 hover:text-white"
-                >
-                  {t("codingAgent.githubDeviceTerminal")}
-                </button>
-              </div>
+            <div className="mt-3" data-testid="coding-agent-github-device">
+              <p className="text-[11px] text-[var(--text-secondary)] mb-2">{t("codingAgent.githubDeviceIntro")}</p>
+              {/* The same card the ClawBox AI subscription shows. It used to be
+                  its own smaller look with no Copy button at all, so the owner
+                  hand-selected eight characters on a touch screen. */}
+              <DeviceCodeCard
+                code={deviceLogin.userCode}
+                verificationUrl={deviceLogin.verificationUri}
+                polling
+                onNewCode={() => void connectGithub()}
+                testId="coding-agent-github-device-code"
+                actions={
+                  <>
+                    <button
+                      type="button"
+                      onClick={cancelGithubLogin}
+                      data-testid="coding-agent-github-device-cancel"
+                      className="text-[11px] text-[var(--text-muted)] underline decoration-white/20 hover:text-white"
+                    >
+                      {t("codingAgent.githubDeviceCancel")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={connectGithubTerminal}
+                      className="text-[11px] text-[var(--text-muted)] underline decoration-white/20 hover:text-white"
+                    >
+                      {t("codingAgent.githubDeviceTerminal")}
+                    </button>
+                  </>
+                }
+              />
             </div>
           )}
           {errorIn("github")}

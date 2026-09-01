@@ -157,8 +157,13 @@ describe("code-projects", () => {
       expect(meta.name).toBe("Test App");
       expect(meta.color).toBe("#f97316");
       expect(mockMkdir).toHaveBeenCalled();
-      // Should write index.html, style.css, app.js, project.json
-      expect(mockWriteFile).toHaveBeenCalledTimes(4);
+      // index.html, style.css, app.js, project.json — and .github/workflows/
+      // check.yml, which exists so the auto-PR flow has a real check to wait
+      // on: it refuses to merge a pull request with NO checks, so a project
+      // without one could open pull requests that can never satisfy their own
+      // guardrail.
+      expect(mockWriteFile).toHaveBeenCalledTimes(5);
+      expect(mockWriteFile.mock.calls.some(([file]) => String(file).endsWith(".github/workflows/check.yml"))).toBe(true);
       // The built app runs in a sandboxed frame; the KV bridge is its only
       // way to persist anything, and the field guide assumes it is there.
       const index = [...writtenFiles.entries()].find(([p]) => p.endsWith("index.html"))?.[1];
@@ -170,7 +175,7 @@ describe("code-projects", () => {
       const meta = await initProject("blank-app", "Blank", { template: "blank" });
       expect(meta.projectId).toBe("blank-app");
       // Should write index.html and project.json only
-      expect(mockWriteFile).toHaveBeenCalledTimes(2);
+      expect(mockWriteFile).toHaveBeenCalledTimes(3);
       const index = [...writtenFiles.entries()].find(([p]) => p.endsWith("index.html"))?.[1];
       expect(index).toContain("window.clawboxKv");
     });

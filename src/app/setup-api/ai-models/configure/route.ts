@@ -86,6 +86,7 @@ import {
 // quotes the command it ran. Bound every such field before logging it — see
 // src/lib/log-safe.ts.
 import { logSafe } from "@/lib/log-safe";
+import { installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_HOME_DIR =
@@ -131,7 +132,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     profileKey: CLAWBOX_AI_PROFILE_KEY,
   },
   anthropic: {
-    defaultModel: "anthropic/claude-sonnet-4-6",
+    defaultModel: "anthropic/claude-sonnet-5",
     profileKey: "anthropic:default",
   },
   openai: {
@@ -2028,25 +2029,23 @@ export async function POST(request: Request) {
     // e2e container reproduced exactly that). gateway-pre-start heals this on
     // boot, but only once a deepseek provider already exists in the config —
     // which is what THIS route is in the middle of creating — so the first
-    // configure has to bring the plugin itself. Best effort: a failed
-    // install falls through to the direct primary write below and the
-    // gateway's own readiness report names the missing plugin loudly.
+    // configure has to bring the plugin itself, pinned to the running core
+    // the same way (src/lib/openclaw-deepseek-plugin.ts says why). Best
+    // effort: a failed install falls through to the direct primary write
+    // below and the gateway's own readiness report names the missing plugin
+    // loudly.
     if (isClawAI) {
       try {
         await fs.access(path.join(OPENCLAW_HOME_DIR, "extensions", "deepseek", "openclaw.plugin.json"));
       } catch {
-        try {
-          console.log("[AI Config] Installing @openclaw/deepseek-provider (OpenClaw 2 unbundled it)...");
-          await spawnOpenclawCli(
-            ["plugins", "install", "clawhub:@openclaw/deepseek-provider", "--accept-capabilities"],
-            // Registry fetch + install runs well past the 30s default (the
-            // e2e container measured it; gateway-pre-start allows 180s too).
-            { timeoutMs: 180_000 },
-          );
-        } catch (pluginErr) {
+        console.log("[AI Config] Installing @openclaw/deepseek-provider (OpenClaw 2 unbundled it)...");
+        const plugin = await installDeepseekProviderPlugin();
+        if (plugin.installed) {
+          console.log(`[AI Config] deepseek provider plugin installed (${plugin.installed})`);
+        } else {
           console.warn(
             "[AI Config] deepseek provider plugin install did not complete:",
-            pluginErr instanceof Error ? JSON.stringify(logSafe(pluginErr.message)) : pluginErr,
+            JSON.stringify(logSafe(plugin.failures.join("; "))),
           );
         }
       }

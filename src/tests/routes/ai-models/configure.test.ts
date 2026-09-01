@@ -1109,7 +1109,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands.some((command) => command.includes("config set models.providers.anthropic"))).toBe(true);
-    expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-sonnet-4-6");
+    expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-sonnet-5");
 
     const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.anthropic");
     const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
@@ -1117,7 +1117,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(providerDef.api).toBe("openai-completions");
     expect(providerDef.apiKey).toBe("sk-ant-test123");
     const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
-    expect(modelIds).toContain("claude-sonnet-4-6");
+    expect(modelIds).toContain("claude-sonnet-5");
 
     expect(pasteStdin("anthropic:default")).toContain("sk-ant-test123");
   });
@@ -1158,7 +1158,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     // ...and the rest of the save is unchanged: the subscription still becomes
     // the primary, in merge mode, with an oauth auth profile.
-    expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-sonnet-4-6");
+    expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-sonnet-5");
     expect(commands).toContain("config set models.mode merge");
 
     const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);

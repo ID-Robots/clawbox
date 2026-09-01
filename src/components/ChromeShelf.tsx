@@ -154,10 +154,13 @@ export default function ChromeShelf({
       pulseDelayed: "bg-red-500/20",
       tooltip: baseTitle,
     },
+    // Never paired. It blinks so the invitation is noticed on a shelf the owner
+    // is not looking at — but ORANGE, not the red a genuinely missed backup
+    // earns: nothing is wrong yet, there is just something to set up.
     setup: {
-      icon: "text-sky-300",
-      pulse: "",
-      pulseDelayed: "",
+      icon: "text-orange-300 clawkeep-shelf-glow-orange",
+      pulse: "bg-orange-400/25",
+      pulseDelayed: "bg-orange-400/20",
       tooltip: baseTitle,
     },
     ok: {
@@ -293,7 +296,7 @@ export default function ChromeShelf({
                 title={t("shelf.chat")}
                 aria-label={t("shelf.chat")}
               >
-                <img src="/clawbox-crab.png" alt="Chat" className="w-10 h-10 object-contain" />
+                <img src="/clawbox-crab.png" alt="Chat" className="w-[21px] h-[21px] object-contain" />
               </button>
             )}
             <div className="absolute right-2 flex items-center gap-1">
@@ -385,7 +388,7 @@ export default function ChromeShelf({
               title={t("shelf.chat")}
               aria-label={t("shelf.chat")}
             >
-              <img src="/clawbox-crab.png" alt="Chat" className="w-10 h-10 object-contain" />
+              <img src="/clawbox-crab.png" alt="Chat" className="w-[21px] h-[21px] object-contain" />
             </button>
           )}
           {renderShieldButton()}

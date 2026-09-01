@@ -84,7 +84,7 @@ describe("SystemUpdateApp — drift is not 'up to date'", () => {
     vi.unstubAllGlobals();
   });
 
-  it("does not claim the box is up to date while it is not running its own code", async () => {
+  it("does not claim the box is up to date while its build is from another commit", async () => {
     mountWith(DRIFT_IDENTITY);
     const { queryByText, findByText } = render(<SystemUpdateApp />);
 
@@ -93,12 +93,17 @@ describe("SystemUpdateApp — drift is not 'up to date'", () => {
     expect(queryByText("Every component is on the latest release.")).toBeNull();
   });
 
-  it("says which drift, in the same words the About screen uses", async () => {
+  it("raises no warning banner about it", async () => {
+    // The amber "this box is not running its own code" banner — and the
+    // per-code lines under it — were removed from every screen that drew them.
+    // What survives is the OFFER: this screen still notices the drift and hands
+    // the owner the Update button, which is the only part they can act on.
     mountWith(DRIFT_IDENTITY);
-    const { findByText } = render(<SystemUpdateApp />);
+    const { findByText, queryByRole, queryByText } = render(<SystemUpdateApp />);
 
-    await findByText(translations.en["settings.driftTitle"]);
-    await findByText(/running a build from 1dc29ef but the code on disk is d285cfd/);
+    await findByText(translations.en["update.driftHeadline"]);
+    expect(queryByRole("status")).toBeNull();
+    expect(queryByText(/running a build from 1dc29ef/)).toBeNull();
   });
 
   it("offers the update, and running it starts the real update", async () => {
@@ -119,6 +124,5 @@ describe("SystemUpdateApp — drift is not 'up to date'", () => {
 
     await findByText("You're up to date");
     expect(queryByText(translations.en["update.driftHeadline"])).toBeNull();
-    expect(queryByText(translations.en["settings.driftTitle"])).toBeNull();
   });
 });

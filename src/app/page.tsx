@@ -7,7 +7,8 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
-import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, notifyCodingRunStarted } from "@/lib/ui-events";
+import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT,
+  NEW_APP_EVENT, notifyCodingRunStarted } from "@/lib/ui-events";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
 import ChromeLauncher from "@/components/ChromeLauncher";
@@ -27,7 +28,7 @@ import CodingAgentApp from "@/components/CodingAgentApp";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
-import ChatPopup from "@/components/ChatPopup";
+import ChatPopup, { CHAT_PANEL_GAP } from "@/components/ChatPopup";
 import ToastHost from "@/components/ToastHost";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 import SetupWizard from "@/components/SetupWizard";
@@ -85,16 +86,32 @@ const apps: AppDef[] = [
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
   { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
   // The memory index — health, "Index now", the schedule — as its own window.
-  // It used to be a card inside ClawKeep; it sits next to ClawKeep here and
-  // borrows its green because the two are one family (what the box remembers,
-  // what the box keeps). Sized for the single card it shows.
-  { id: "memory-shard", name: "app.memoryShard", color: "#166534", type: "memory_shard", pinned: true, defaultWidth: 720, defaultHeight: 640 },
+  // It used to be a card inside ClawKeep and borrowed its green; it has its own
+  // tile colour now, because the app was rebuilt on the Coding Agent's pattern
+  // and green is reserved there for a STATE (on, healthy) rather than for an
+  // identity. Sized for the single card it shows.
+  { id: "memory-shard", name: "app.memoryShard", color: "#2f2a52", type: "memory_shard", pinned: true, defaultWidth: 720, defaultHeight: 640 },
   { id: "system_update", name: "app.systemUpdate", color: "#0ea5e9", type: "system_update", pinned: false, defaultWidth: 900, defaultHeight: 720 },
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
 ];
-const DEFAULT_DESKTOP_APPS = apps.map(a => a.id);
+// Every built-in id. This is the VALIDITY filter for a saved desktop list —
+// an id naming no built-in reserves an empty grid slot — and it is deliberately
+// wider than the default set below, so an icon the owner added from the
+// launcher survives a reload.
+const BUILT_IN_APP_IDS = apps.map(a => a.id);
+
+// Built-ins that ship OFF the desktop. They stay in the launcher, and "Add to
+// desktop" puts them back permanently; a fresh box just doesn't spend a grid
+// slot on them out of the box.
+//
+// Remote Desktop (`vnc`) is the one: it shows the box's own X session, which is
+// a diagnostic tool on a headless appliance, and it was the least-opened icon
+// on the default grid.
+const OFF_DESKTOP_BY_DEFAULT = new Set(["vnc"]);
+
+const DEFAULT_DESKTOP_APPS = BUILT_IN_APP_IDS.filter(id => !OFF_DESKTOP_BY_DEFAULT.has(id));
 
 // Desktop icon grid metrics. Module-level so the resize listener can derive
 // `rowsPerColumn` without reaching into the component.
@@ -112,7 +129,7 @@ const TASKBAR_RESERVE = 72; // px kept clear at the bottom for the taskbar
  * differed from load to load.
  */
 function canonicalIconOrder(installedAppIds: readonly string[]): string[] {
-  return [...installedAppIds, ...DEFAULT_DESKTOP_APPS.map((id) => `desktop-${id}`)];
+  return [...installedAppIds, ...BUILT_IN_APP_IDS.map((id) => `desktop-${id}`)];
 }
 
 // Apps that only make sense on ONE harness. The other harness's backend isn't
@@ -227,9 +244,10 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
   }
 
   if (id === "clawbox") {
-    // PNG ships with transparent padding, so a 1× render looks shrunk inside
-    // the tile. Scale up and let the flex parent center the overflow.
-    const scaled = Math.round(px * 2.5);
+    // The crab fills its square except for a little headroom above the
+    // claws, so a 1.3× render is exactly tile-high and overhangs the sides a
+    // touch; the flex parent centres the overflow.
+    const scaled = Math.round(px * 1.3);
     return (
       <img
         src="/clawbox-crab.png"
@@ -265,11 +283,21 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     return <MIcon name="extension" className="text-white" size={px} />;
   }
 
+  if (id === "coding") {
+    return (
+      <svg className={size} viewBox="0 0 120 120" fill="none">
+        <path d="M48 36 L26 60 L48 84" stroke="#f97316" strokeWidth="11" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M72 36 L94 60 L72 84" stroke="#f97316" strokeWidth="11" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M70 32 L50 88" stroke="#f97316" strokeWidth="11" strokeLinecap="round" />
+        <path d="M94 14 C95.5 22 100 26.5 108 28 C100 29.5 95.5 34 94 42 C92.5 34 88 29.5 80 28 C88 26.5 92.5 22 94 14 Z" fill="#ffffff" />
+      </svg>
+    );
+  }
+
   const iconMap: Record<string, string> = {
     settings: "settings",
     setup: "construction",
     terminal: "terminal",
-    coding: "code",
     files: "folder",
     clawkeep: "shield_lock",
     "memory-shard": "memory",
@@ -518,7 +546,11 @@ function ChromeDesktopInner() {
           // Built-in ids only. An older launcher pushed `installed-*` ids here
           // (see handleAddToDesktop); an id that names no built-in reserves an
           // empty grid slot, so a box that already saved one sheds it on load.
-          const saved = (data.desktop_apps as string[]).filter(id => DEFAULT_DESKTOP_APPS.includes(id));
+          // Validated against every built-in, not just the default set: an
+          // owner who added Remote Desktop from the launcher keeps it.
+          const saved = (data.desktop_apps as string[]).filter(id => BUILT_IN_APP_IDS.includes(id));
+          // ...but only default-set built-ins are auto-added, so an app that
+          // ships off the desktop never appears on a box that never had it.
           const missingNewBuiltins = DEFAULT_DESKTOP_APPS.filter(id => !saved.includes(id));
           setDesktopApps(missingNewBuiltins.length > 0 ? [...saved, ...missingNewBuiltins] : saved);
         }
@@ -649,6 +681,14 @@ function ChromeDesktopInner() {
   const [mascotX, setMascotX] = useState(85);
   const handleChatPanelModeChange = useCallback((panelWidth: number) => setChatPanelWidth(panelWidth), []);
 
+  // What the docked chat actually occupies: its width PLUS the gap it floats
+  // in, so a maximized window stops at the gap instead of sliding under the
+  // panel and showing through it. Derived rather than folded into
+  // `chatPanelWidth`, because that value is persisted and handed straight back
+  // to the chat as `initialPanelWidth` — adding the gap there would widen the
+  // panel by 12px on every reload.
+  const chatPanelInset = chatPanelWidth > 0 ? chatPanelWidth + CHAT_PANEL_GAP : 0;
+
   // Open chat on skill-install, fix-error or handed-over-message events so
   // the user can watch the agent's response.
   useEffect(() => {
@@ -656,10 +696,14 @@ function ChromeDesktopInner() {
     window.addEventListener('clawbox-skill-installed', handler);
     window.addEventListener(FIX_ERROR_EVENT, handler);
     window.addEventListener(CHAT_MESSAGE_EVENT, handler);
+    // The Coding Agent's "Create app" button: the chat has to be open before
+    // the card inside it can be seen.
+    window.addEventListener(NEW_APP_EVENT, handler);
     return () => {
       window.removeEventListener('clawbox-skill-installed', handler);
       window.removeEventListener(FIX_ERROR_EVENT, handler);
       window.removeEventListener(CHAT_MESSAGE_EVENT, handler);
+      window.removeEventListener(NEW_APP_EVENT, handler);
     };
   }, []);
 
@@ -2392,7 +2436,7 @@ function ChromeDesktopInner() {
           mascotX for a frame right after opening, flashing the popup to the wrong
           corner before it settled. */}
       {!isMobile && (
-        <Mascot frozen={chatOpen} rightInset={chatPanelWidth} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} />
+        <Mascot frozen={chatOpen} rightInset={chatPanelInset} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} />
       )}
       <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onOpenSettingsSection={openSettingsSection} onPanelModeChange={handleChatPanelModeChange} initialPanelWidth={chatPanelWidth} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} mobile={isMobile} />
 
@@ -2487,7 +2531,7 @@ function ChromeDesktopInner() {
               onMinimize={() => minimizeWindow(window.id)}
               onGeometryChange={(geo) => updateWindowGeometry(window.id, geo)}
               minimized={window.minimized}
-              rightInset={chatPanelWidth}
+              rightInset={chatPanelInset}
             >
               {renderWindowContent(window.appId, window.meta)}
             </ChromeWindow>

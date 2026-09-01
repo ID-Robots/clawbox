@@ -31,34 +31,10 @@ import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
-import { BuildDriftBanner, BuildIdentityRows, useBuildIdentity } from "./BuildIdentityPanel";
+import { BuildIdentityRows, useBuildIdentity } from "./BuildIdentityPanel";
 import { useReconnect } from "@/hooks/useReconnect";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { DISCORD_INVITE_URL } from "@/lib/community";
-import { isGenerationLocale } from "@/lib/mascot-phrases";
-
-/**
- * `meta.reason` from `POST /setup-api/mascot-lines/regenerate` -> the
- * translation key to show for it.
- *
- * The route's own `reason` field is a human-readable ENGLISH string, so it
- * cannot be shown to a user running the UI in Bulgarian. The machine-readable
- * `meta.reason` is the one to branch on — and these must stay distinct, which
- * is the whole point of the route reporting them separately: "your chat has
- * the model" and "the box is already refreshing" call for different reactions
- * from the user, and only one of them mentions their chat.
- */
-const MASCOT_REGEN_MESSAGE_KEYS: Record<string, string> = {
-  "chat-busy": "settings.mascotRefreshChatBusy",
-  "refresh-in-progress": "settings.mascotRefreshInProgress",
-  "generation-disabled-for-locale": "settings.mascotRefreshEnglishOnly",
-  "low-memory": "settings.mascotRefreshLowMemory",
-  unavailable: "settings.mascotRefreshUnavailable",
-  timeout: "settings.mascotRefreshFailed",
-  transport: "settings.mascotRefreshFailed",
-  malformed: "settings.mascotRefreshFailed",
-  "no-new-phrases": "settings.mascotRefreshNothingNew",
-};
 
 /* ── Types ── */
 
@@ -257,7 +233,7 @@ interface WhatsappPairSnapshot {
 /* ── Sidebar nav items ── */
 const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   // Appearance leads because it is the page a new owner reaches for first
-  // (wallpaper, mascot, language); Settings still opens on Providers — see
+  // (wallpaper, mascot, language), and it is where Settings opens — see
   // DEFAULT_SECTION. After that, ordered by how often an owner comes here,
   // not by history: the brain and the ways to reach it first, the box's own
   // machinery next, the once-a-year pages last.
@@ -282,10 +258,11 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   { id: "about", icon: "info", labelKey: "settings.about" },
 ];
 
-// Where Settings opens when no deep link asks for a page: the providers, not
-// the first sidebar row, so putting Appearance on top did not move the
-// landing page.
-const DEFAULT_SECTION: Section = "ai";
+// Where Settings opens when no deep link asks for a page. Appearance, which is
+// both the first sidebar row and the page an owner actually comes here for —
+// wallpaper, mascot, language. It used to open on Providers, so the first thing
+// Settings showed was a list of AI credentials.
+const DEFAULT_SECTION: Section = "appearance";
 
 /** A deep-link value as a Section, or null. The old Local Models section is
  *  part of Local AI now. */
@@ -911,56 +888,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         .catch(() => { /* keep local edit; next save attempt will retry */ });
     }, 600);
   }, []);
-
-  /* ── Mascot phrase refresh ── */
-  // `POST /setup-api/mascot-lines/regenerate` shipped with no caller at all —
-  // the on-device generator could only ever be triggered by the cache going
-  // stale on its own schedule, so nobody could ask the crab for new lines.
-  const [mascotRegenBusy, setMascotRegenBusy] = useState(false);
-  const [mascotRegenStatus, setMascotRegenStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
-  const mascotRegenAbortRef = useRef<AbortController | null>(null);
-  const mascotGenerationAllowed = isGenerationLocale(locale);
-  // A local run is up to 180 s of Jetson, so the request must survive the user
-  // switching sections — but not the whole panel unmounting.
-  useEffect(() => () => mascotRegenAbortRef.current?.abort(), []);
-
-  const regenerateMascotPhrases = useCallback(async () => {
-    mascotRegenAbortRef.current?.abort();
-    const controller = new AbortController();
-    mascotRegenAbortRef.current = controller;
-    setMascotRegenBusy(true);
-    setMascotRegenStatus(null);
-    try {
-      const res = await fetch(
-        `/setup-api/mascot-lines/regenerate?locale=${encodeURIComponent(locale)}`,
-        { method: "POST", signal: controller.signal },
-      );
-      const data = await res.json().catch(() => null);
-      const reason = typeof data?.meta?.reason === "string" ? data.meta.reason : null;
-      if (data?.ok === true) {
-        setMascotRegenStatus({ type: "success", message: t("settings.mascotRefreshed") });
-        // The crab caches its phrases per day+locale in the browser; tell it
-        // to drop that and refetch, or the new lines only appear tomorrow.
-        window.dispatchEvent(new Event("clawbox-mascot-phrases-changed"));
-        return;
-      }
-      // Map the machine-readable outcome to a translated string. The route's
-      // own `reason` text is English-only, so it is a last resort rather than
-      // the thing we show.
-      setMascotRegenStatus({
-        type: "error",
-        message: MASCOT_REGEN_MESSAGE_KEYS[reason ?? ""]
-          ? t(MASCOT_REGEN_MESSAGE_KEYS[reason ?? ""])
-          : t("settings.mascotRefreshFailed"),
-      });
-    } catch (err) {
-      // An abort is the component going away, not a failure to report.
-      if (err instanceof DOMException && err.name === "AbortError") return;
-      setMascotRegenStatus({ type: "error", message: t("settings.mascotRefreshFailed") });
-    } finally {
-      if (!controller.signal.aborted) setMascotRegenBusy(false);
-    }
-  }, [locale, t]);
 
   /* ── Local URL (mDNS hostname) ── */
   const [hostname, setHostname] = useState<string>("");
@@ -2767,9 +2694,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <Image
                   src="/clawbox-crab.png"
                   alt="ClawBox"
-                  width={96}
-                  height={96}
-                  className="w-24 h-24 object-contain animate-welcome-powerup relative z-10"
+                  width={50}
+                  height={50}
+                  className="w-[50px] h-[50px] object-contain animate-welcome-powerup relative z-10"
                 />
               </div>
             )}
@@ -3097,36 +3024,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 window.dispatchEvent(new Event(hidden ? "clawbox-hide-mascot" : "clawbox-show-mascot"));
               }} label={t("settings.showMascot")} />
 
-              {/* Ask the on-device model for a fresh batch of mascot lines.
-                  Disabled outside the generation allowlist, with the reason
-                  spelled out rather than a dead button. */}
-              <div className="mt-4 pt-4 border-t border-[var(--border-subtle)]">
-                <p className="text-xs text-[var(--text-muted)] mb-3">{t("settings.mascotRefreshHelper")}</p>
-                <button
-                  type="button"
-                  onClick={() => { void regenerateMascotPhrases(); }}
-                  disabled={mascotRegenBusy || !mascotGenerationAllowed}
-                  aria-busy={mascotRegenBusy}
-                  className="flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm bg-white/[0.04] border border-[var(--border-subtle)] text-[var(--text-primary)] hover:border-white/20 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <span
-                    className={`material-symbols-rounded${mascotRegenBusy ? " animate-spin" : ""}`}
-                    style={{ fontSize: 18 }}
-                    aria-hidden="true"
-                  >
-                    {mascotRegenBusy ? "progress_activity" : "refresh"}
-                  </span>
-                  <span>{mascotRegenBusy ? t("settings.mascotRefreshing") : t("settings.mascotRefresh")}</span>
-                </button>
-                {!mascotGenerationAllowed && (
-                  <p className="mt-2 text-xs text-[var(--text-muted)]">{t("settings.mascotRefreshEnglishOnly")}</p>
-                )}
-                {mascotRegenStatus && (
-                  <div className="mt-2">
-                    <StatusMessage type={mascotRegenStatus.type} message={mascotRegenStatus.message} />
-                  </div>
-                )}
-              </div>
             </div>
 
             {/* Mascot pet — Hermes editions only; renders nothing on OpenClaw. */}
@@ -5203,11 +5100,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {activeSection === "system" && (
           <div className="max-w-xl space-y-5">
 
-            {/* Above everything else on the System page: if the box is not
-                running its own code, that changes what every reading below
-                it means. */}
-            <BuildDriftBanner identity={buildIdentity} />
-
             <HarnessPicker />
 
             {/* Desktop environment + Performance mode. Above the read-only
@@ -5472,8 +5364,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {activeSection === "about" && (<>
           <div className="max-w-xl space-y-6">
             <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">{t("settings.aboutClawBox")}</h2>
-
-            <BuildDriftBanner identity={buildIdentity} />
 
             <div className="bg-white/5 rounded-xl p-5 space-y-4">
               <div className="flex items-center gap-4">
@@ -6159,7 +6049,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <img
                 src="/clawbox-crab.png"
                 alt="ClawBox"
-                className="w-24 h-24 object-contain relative z-10"
+                className="w-[50px] h-[50px] object-contain relative z-10"
                 style={updateState?.phase === "completed" || updateError || updateState?.phase === "failed" ? {} : { animation: "update-float 3s ease-in-out infinite" }}
               />
             </div>
@@ -6253,8 +6143,8 @@ function RemoteLoginPlaceholder({ onSignIn }: { onSignIn: () => void }) {
         <img
           src="/clawbox-crab.png"
           alt=""
-          width={64}
-          height={64}
+          width={48}
+          height={48}
           className="select-none pointer-events-none drop-shadow-[0_0_12px_rgba(249,115,22,0.5)]"
         />
         <div>

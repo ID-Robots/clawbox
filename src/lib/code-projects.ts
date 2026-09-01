@@ -22,6 +22,9 @@ export const WEBAPPS_DIR = path.join(DATA_DIR, "webapps");
 
 /** Shared app/project ID validation — alphanumeric, hyphens, underscores, 1-64 chars. */
 export const APP_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+/** The same rule spelled as an alphabet and a length, for safeProjectId. */
+const PROJECT_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+const MAX_PROJECT_ID_CHARS = 64;
 const MAX_FILE_SIZE = 512 * 1024; // 512 KB per file
 const MAX_PROJECT_FILES = 200;
 
@@ -129,9 +132,40 @@ function assertMutableTarget(projectId: string, absPath: string): void {
   }
 }
 
+/**
+ * The project id an on-disk path may be joined from, or null.
+ *
+ * validateProjectId's rule, applied the way webapp-icon's safeAppId applies
+ * it: rather than testing the id and then joining the ORIGINAL string, the
+ * value that reaches `path.join` is assembled one character at a time out of
+ * the alphabet — whatever the caller sent, the path is made of these
+ * characters and no more than this many of them. A `.test()` guard leaves the
+ * caller's string in play, and a static analyser rightly keeps flagging every
+ * path built from it. Its own copy because this module owns the id rule
+ * (APP_ID_RE) and must not lean on the icon module for its directories.
+ */
+function safeProjectId(projectId: unknown): string | null {
+  if (typeof projectId !== "string" || projectId.length < 1 || projectId.length > MAX_PROJECT_ID_CHARS) {
+    return null;
+  }
+  let safe = "";
+  for (const ch of projectId) {
+    const at = PROJECT_ID_ALPHABET.indexOf(ch);
+    if (at < 0) return null;
+    safe += PROJECT_ID_ALPHABET[at];
+  }
+  return safe;
+}
+
+/**
+ * The directory every project path is joined under — the scaffold initProject
+ * writes, including the workflow it now ships, starts here — built from the
+ * rebuilt id (safeProjectId), not the one that passed the test.
+ */
 function projectDir(projectId: string): string {
-  if (!validateProjectId(projectId)) throw new ValidationError("Invalid project ID");
-  return path.join(PROJECTS_DIR, projectId);
+  const id = safeProjectId(projectId);
+  if (!id) throw new ValidationError("Invalid project ID");
+  return path.join(PROJECTS_DIR, id);
 }
 
 /**
@@ -180,6 +214,40 @@ export async function initProject(
     updated: now,
   };
   await fs.writeFile(metaPath(projectId), JSON.stringify(meta, null, 2), "utf-8");
+
+  // A check for the pull-request flow to wait on.
+  //
+  // The auto-PR switch (src/lib/coding-pr.ts) refuses to merge a pull request
+  // that has NO checks — "every check passed" is trivially true of zero checks,
+  // and merging on that would merge everything on sight. So a project scaffolded
+  // here ships one real check: without it the flow would open pull requests that
+  // can never satisfy their own guardrail, and the harness self-test could never
+  // exercise the PR -> merge path it exists to prove.
+  //
+  // Deliberately trivial and dependency-free: it asserts the entry point exists
+  // and is not empty, which is exactly the property a scaffold can promise.
+  await fs.mkdir(path.join(dir, ".github", "workflows"), { recursive: true });
+  await fs.writeFile(
+    path.join(dir, ".github", "workflows", "check.yml"),
+    `name: check
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - "clawbox/**"
+
+jobs:
+  entry-point:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: index.html exists and is not empty
+        run: |
+          test -s index.html
+          echo "index.html is $(wc -c < index.html) bytes"
+`,
+    "utf-8",
+  );
 
   const template = opts?.template || "app";
 
@@ -627,25 +695,17 @@ export async function deployWebapp(
     JSON.stringify({ name, color: meta.color || "#f97316", icon: meta.icon || "" }),
     "utf-8",
   );
+  // The icon is drawn inside `registerWebappInPreferences`, for every app that
+  // reaches the desktop rather than only the ones built from HTML here — hence
+  // the description: it is the icon prompt's only clue about what the app does,
+  // and `htmlHint` is the best one available on this path. An app that supplied
+  // an icon of its own is left alone there.
   await registerWebappInPreferences(appId, name, {
     color: meta.color,
     iconUrl: meta.icon,
     webappUrl: `/setup-api/webapps?app=${appId}`,
+    description: meta.description || htmlHint(html),
   });
-  // An app that arrived without an icon gets one drawn by ClawBox AI, AFTER
-  // this returns: generation takes 5–15 s and the tool reply behind this call
-  // must not wait for a picture. Fire-and-forget by design — the app is
-  // created and registered either way, and `ensureWebappIcon` never rejects;
-  // the `.catch` is belt and braces against an unhandled rejection ever taking
-  // the server down over a missing icon. A create that supplied its own icon
-  // is left alone.
-  if (!meta.icon) {
-    void ensureWebappIcon(appId, {
-      name,
-      color: meta.color,
-      description: meta.description || htmlHint(html),
-    }).catch(() => {});
-  }
 }
 
 /** Is this deployed app's meta.json still without an icon of its own? */

@@ -98,13 +98,31 @@ function TerminalInner({ initialCommand }: TerminalAppProps) {
           brightCyan: "#67e8f9",
           brightWhite: "#f9fafb",
         },
-        fontFamily: '"Cascadia Code", "JetBrains Mono", "Fira Code", "Consolas", "Courier New", monospace',
+        // Box-drawing first. Claude Code's whole UI is drawn with `╭─╮ │ ╰─╯`,
+        // and NONE of the four fonts the old stack named (Cascadia, JetBrains
+        // Mono, Fira Code, Consolas — nor its Courier New fallback) exists on
+        // this image: `fc-list` has none of them, so every session fell through
+        // to the generic `monospace` alias and the glyphs were whatever the
+        // viewing device's fontconfig happened to resolve. DejaVu and Liberation
+        // DO ship here, so naming them makes the result the same on the box's
+        // own Chromium and on a phone that has neither.
+        fontFamily: '"Cascadia Code", "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", "Liberation Mono", "Ubuntu Mono", Menlo, Consolas, monospace',
         fontSize: 13,
-        lineHeight: 1.4,
+        // 1.0, not 1.4. Line height is leading BETWEEN rows, and a full-screen
+        // TUI draws its vertical borders as one glyph per row — at 1.4 every
+        // `│` was separated from the one below it by 40% of a line, so every box
+        // in Claude Code rendered as a dotted column. Prose scrollback can
+        // afford leading; a TUI cannot.
+        lineHeight: 1.0,
         cursorBlink: true,
         cursorStyle: "block",
         scrollback: 5000,
-        allowTransparency: true,
+        // The background is opaque, so transparency bought nothing and cost the
+        // renderer its fast path — on a redraw-heavy TUI that showed as tearing.
+        allowTransparency: false,
+        // Claude Code marks emphasis with bold. Remapping bold onto the BRIGHT
+        // palette (xterm's default) recoloured its text instead of weighting it.
+        drawBoldTextInBrightColors: false,
         macOptionIsMeta: true,
       });
 

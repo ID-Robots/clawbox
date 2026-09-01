@@ -59,7 +59,7 @@ function FixButton({ onClick, label }: { onClick: () => void; label: string }) {
       title={label}
       aria-label={label}
     >
-      <img src="/clawbox-crab.png" alt="" className="w-4 h-4 object-contain" />
+      <img src="/clawbox-crab.png" alt="" className="w-3 h-3 object-contain" />
       <span>{label}</span>
     </button>
   );

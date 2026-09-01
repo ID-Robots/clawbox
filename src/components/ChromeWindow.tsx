@@ -4,6 +4,16 @@ import { useState, useRef, useCallback, useEffect, useLayoutEffect, ReactNode } 
 import { useT } from "@/lib/i18n";
 import { createPortal } from "react-dom";
 import * as kv from "@/lib/client-kv";
+import SnapPreviewOverlay from "@/components/SnapPreviewOverlay";
+import {
+  getSnapRect,
+  getSnapZone,
+  shelfHeight,
+  type SnapZone,
+} from "@/lib/window-snap";
+
+/** Flat fallback for the CSS `calc()` that maximizes a window. */
+const SHELF_HEIGHT = 56;
 
 interface ChromeWindowProps {
   title: string;
@@ -29,62 +39,6 @@ function getSavedSize(appId: string | undefined, defaultWidth: number, defaultHe
   const saved = kv.getJSON<{ width: number; height: number }>(`clawbox-winsize-${appId}`);
   if (saved && saved.width >= 300 && saved.height >= 200) return saved;
   return { width: defaultWidth, height: defaultHeight };
-}
-
-type SnapZone = "left" | "right" | "top" | "top-left" | "top-right" | "bottom-left" | "bottom-right" | null;
-
-const SNAP_THRESHOLD = 12; // pixels from edge to trigger snap
-const SHELF_HEIGHT = 56;
-
-/**
- * The shelf's real height, safe-area inset included.
- *
- * ChromeShelf is `calc(56px + env(safe-area-inset-bottom))`; this file assumed
- * a flat 56, so on a device WITH an inset a maximized window overlapped the
- * bar — and the mascot standing on it. The inset is a device property that
- * cannot be read from JS, so the live element is measured (it marks itself
- * `data-mascot-ground` for the mascot already) and 56 stays the fallback for
- * a surface that has no shelf mounted.
- */
-function shelfHeight(): number {
-  if (typeof document === "undefined") return SHELF_HEIGHT;
-  const el = document.querySelector("[data-mascot-ground]") as HTMLElement | null;
-  const h = el?.getBoundingClientRect().height ?? 0;
-  return h > 0 ? h : SHELF_HEIGHT;
-}
-
-function getSnapZone(clientX: number, clientY: number, rInset = 0): SnapZone {
-  const w = window.innerWidth - rInset;
-  const h = window.innerHeight - shelfHeight();
-  const nearLeft = clientX <= SNAP_THRESHOLD;
-  const nearRight = clientX >= w - SNAP_THRESHOLD;
-  const nearTop = clientY <= SNAP_THRESHOLD;
-  const nearBottom = clientY >= h - SNAP_THRESHOLD;
-
-  if (nearTop && nearLeft) return "top-left";
-  if (nearTop && nearRight) return "top-right";
-  if (nearBottom && nearLeft) return "bottom-left";
-  if (nearBottom && nearRight) return "bottom-right";
-  if (nearLeft) return "left";
-  if (nearRight) return "right";
-  if (nearTop) return "top";
-  return null;
-}
-
-function getSnapRect(zone: SnapZone, rInset = 0): { x: number; y: number; width: number; height: number } | null {
-  if (!zone) return null;
-  const w = window.innerWidth - rInset;
-  const h = window.innerHeight - shelfHeight();
-  switch (zone) {
-    case "left": return { x: 0, y: 0, width: w / 2, height: h };
-    case "right": return { x: w / 2, y: 0, width: w / 2, height: h };
-    case "top": return { x: 0, y: 0, width: w, height: h };
-    case "top-left": return { x: 0, y: 0, width: w / 2, height: h / 2 };
-    case "top-right": return { x: w / 2, y: 0, width: w / 2, height: h / 2 };
-    case "bottom-left": return { x: 0, y: h / 2, width: w / 2, height: h / 2 };
-    case "bottom-right": return { x: w / 2, y: h / 2, width: w / 2, height: h / 2 };
-    default: return null;
-  }
 }
 
 // Calculate initial centered position within available space
@@ -515,24 +469,3 @@ export default function ChromeWindow({
   );
 }
 
-function SnapPreviewOverlay({ zone, rightInset = 0 }: { zone: SnapZone; rightInset?: number }) {
-  const rect = getSnapRect(zone, rightInset);
-  if (!rect) return null;
-  return (
-    <div
-      style={{
-        position: "fixed",
-        left: rect.x,
-        top: rect.y,
-        width: rect.width,
-        height: rect.height,
-        background: "rgba(59, 130, 246, 0.15)",
-        border: "2px solid rgba(59, 130, 246, 0.5)",
-        borderRadius: 8,
-        zIndex: 99999,
-        pointerEvents: "none",
-        transition: "all 0.15s ease-out",
-      }}
-    />
-  );
-}

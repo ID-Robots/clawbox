@@ -50,20 +50,27 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   const nav = settingsWindow.getByRole("navigation");
   const section = (label: RegExp) => nav.getByRole("button", { name: label });
 
-  // ── Providers: the window opens here, on the connection overview and the
-  // embedded provider panel. ClawBox AI is linked, so the sidebar names it.
+  // ── Providers: the connection overview and the embedded provider panel.
+  // Settings opens on Appearance (the page an owner comes here for), so the
+  // row is clicked first — its status subtitle is only read once the section
+  // is open. ClawBox AI is linked, so the sidebar names it.
+  await section(/Providers/).click();
   await expect(section(/Providers/)).toContainText("ClawBox AI");
   await expect(settingsWindow.getByTestId("ai-provider-list")).toBeVisible();
   await expect(settingsWindow.getByRole("radiogroup", { name: "AI Provider" })).toBeVisible();
   await expect(settingsWindow.getByRole("radio", { name: /ClawBox AI/ })).toBeChecked();
 
   // ── Local AI: one grouped inventory, friendly names only, the actions
-  // behind a per-row menu. No provider radiogroup lives here any more.
+  // behind a per-row menu. No provider radiogroup lives here any more — the
+  // only radiogroup on the page is the Ollama library's "Download a model"
+  // picker, which moved in from the setup wizard so an owner past setup can
+  // add a model without the Terminal.
   await section(/Local AI/).click();
   const localAi = settingsWindow.getByTestId("local-ai-panel");
   await expect(localAi).toBeVisible();
   await expect(localAi).toContainText("AI that runs on this box, and what each part is doing right now.");
-  await expect(localAi.getByRole("radiogroup")).toHaveCount(0);
+  await expect(localAi.getByRole("radiogroup", { name: "AI Provider" })).toHaveCount(0);
+  await expect(localAi.getByTestId("local-ai-ollama").getByRole("radiogroup", { name: "Download a model" })).toBeVisible();
   await expect(localAi.getByText("gemma4-e2b-it-q4_0")).toHaveCount(0);
 
   await expect(localAi.getByTestId("local-ai-group-llm").getByRole("heading", { name: "AI agent model" })).toBeVisible();
@@ -125,7 +132,10 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   await expect(source).toHaveValue("cloud");
   await expect(source.locator("option[value=cloud]")).toHaveJSProperty("disabled", false);
   await expect(source.locator("option[value=local]")).toHaveJSProperty("disabled", false);
-  await expect(voice.getByTestId("voice-cloud-warning")).toContainText("cloud TTS");
+  // The privacy notice the panel used to draw under a cloud-first source is
+  // gone (src/tests/components/voice-output-panel.test.tsx pins its absence);
+  // the box still sends the fact, the settings page just no longer nags.
+  await expect(voice.getByTestId("voice-cloud-warning")).toHaveCount(0);
   await expect(voice.getByTestId("voice-voice")).toHaveValue("alloy");
   await expect(voice.getByTestId("voice-language")).toHaveValue("en");
 
@@ -256,6 +266,7 @@ test("settings reads an unlinked box's cloud voice as unavailable", async ({ pag
   const nav = settingsWindow.getByRole("navigation");
   const section = (label: RegExp) => nav.getByRole("button", { name: label });
 
+  await section(/Providers/).click();
   await expect(section(/Providers/)).toContainText("Not configured");
 
   await section(/Local AI/).click();
@@ -312,6 +323,7 @@ test("settings names the local engine the box actually runs", async ({ page }) =
   await page.getByTestId("shelf-app-settings").click();
   const settingsWindow = page.getByTestId("chrome-window-settings");
   await expect(settingsWindow).toBeVisible();
+  await settingsWindow.getByRole("navigation").getByRole("button", { name: /Providers/ }).click();
 
   const hero = settingsWindow.getByTestId("provider-default-hero");
   await expect(hero).toContainText("Ollama Local");

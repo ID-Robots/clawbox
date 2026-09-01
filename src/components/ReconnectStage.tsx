@@ -147,9 +147,9 @@ export default function ReconnectStage({
               <img
                 src={CLAWBOX_CRAB_DATA_URI}
                 alt="ClawBox"
-                width={100}
-                height={100}
-                className="h-[100px] w-[100px] object-contain"
+                width={52}
+                height={52}
+                className="h-[52px] w-[52px] object-contain"
                 data-testid="reconnect-logo"
               />
             </div>

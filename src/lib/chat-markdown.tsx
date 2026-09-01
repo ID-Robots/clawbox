@@ -9,6 +9,93 @@ function isSafeHref(url: string): boolean {
   }
 }
 
+/**
+ * A bare URL the owner (or the model) typed without markdown around it.
+ *
+ * `[label](url)` was already a link; a pasted `https://…` was not, and the
+ * mascot chat is where the agent hands over tunnel links, PR urls and docs.
+ * Deliberately narrow: http/https, plus `www.`-prefixed hosts. Bare domains
+ * are NOT matched, because chat is full of `index.js`, `page.tsx` and
+ * `config.json`, and linkifying those would turn ordinary filenames into
+ * broken links.
+ */
+const BARE_URL_RE = /(https?:\/\/[^\s<>"'`]+|www\.[^\s<>"'`]+)/g;
+
+/**
+ * Trailing punctuation belongs to the SENTENCE, not the URL — "see https://x.dev."
+ * must not link the full stop. Closing brackets are only trimmed when the URL
+ * carries no matching opener, so a real `…/Foo_(bar)` wiki-style path survives.
+ */
+function trimUrlTail(url: string): string {
+  let end = url.length;
+  while (end > 0) {
+    const ch = url[end - 1];
+    if (".,;:!?".includes(ch)) { end--; continue; }
+    if (ch === ")" || ch === "]") {
+      const open = ch === ")" ? "(" : "[";
+      const slice = url.slice(0, end);
+      const opens = slice.split(open).length - 1;
+      const closes = slice.split(ch).length - 1;
+      if (closes > opens) { end--; continue; }
+    }
+    break;
+  }
+  return url.slice(0, end);
+}
+
+/**
+ * Plain text with its bare URLs turned into anchors.
+ *
+ * The attribute is the parsed URL's own `href`, not the matched text: the
+ * parser settles the scheme (only http/https get through), and its output is
+ * a fresh string the message text never reaches, which is why neither XSS
+ * query (js/xss, js/xss-through-dom) tracks the chat input into the
+ * attribute — `isSafeHref` answers the same question, but as a boolean about
+ * a COPY, and the value it vouched for would still be the text itself.
+ * Parsing normalises a little (a bare host gains its trailing slash,
+ * non-ASCII path characters are percent-encoded); the browser does exactly
+ * that at navigation anyway, and the visible link stays what was pasted.
+ */
+function linkifyPlain(text: string, keyPrefix: string): React.ReactNode {
+  if (!text) return text;
+  BARE_URL_RE.lastIndex = 0;
+  if (!BARE_URL_RE.test(text)) return text;
+  BARE_URL_RE.lastIndex = 0;
+  const out: React.ReactNode[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = BARE_URL_RE.exec(text)) !== null) {
+    const raw = trimUrlTail(m[0]);
+    if (!raw) continue;
+    const candidate = raw.startsWith("www.") ? `https://${raw}` : raw;
+    let href: string;
+    try {
+      const parsed = new URL(candidate);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") continue;
+      href = parsed.href;
+    } catch {
+      // `https://` with nothing behind it, or a host the parser refuses: not
+      // a link. The text stays in the sentence as it was.
+      continue;
+    }
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(
+      <a
+        key={`${keyPrefix}-url-${m.index}`}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-[#f97316] underline break-all"
+      >
+        {raw}
+      </a>,
+    );
+    last = m.index + raw.length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
 export function renderInline(text: string, keyPrefix: string) {
   const parts = text.split(/(```[\s\S]*?```|`[^`\n]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g);
   return parts.map((seg, j) => {
@@ -26,7 +113,7 @@ export function renderInline(text: string, keyPrefix: string) {
       const href = isSafeHref(linkMatch[2]) ? linkMatch[2] : "#";
       return <a key={`${keyPrefix}-${j}`} href={href} target="_blank" rel="noopener noreferrer" className="text-[#f97316] underline">{linkMatch[1]}</a>;
     }
-    return <span key={`${keyPrefix}-${j}`}>{seg}</span>;
+    return <span key={`${keyPrefix}-${j}`}>{linkifyPlain(seg, `${keyPrefix}-${j}`)}</span>;
   });
 }
 

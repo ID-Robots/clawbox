@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { useT } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/useModalDialog";
+import { CARD as KIT_CARD } from "./coding-agent-ui";
 
 // The pieces ClawKeep and Memory Shard draw with in common.
 //
@@ -15,7 +16,10 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 // than exported off ClawKeepApp so that opening Memory Shard does not mean
 // importing the whole backup app.
 
-export const CARD = "rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4";
+// The Coding Agent's card, so the three windows an owner reads as the box's
+// housekeeping — backups, memory, delegated runs — sit on the same surface.
+// ClawKeep used to draw its own, slightly darker and tighter one.
+export const CARD = KIT_CARD;
 
 export type Translator = (key: string, params?: Record<string, string | number>) => string;
 

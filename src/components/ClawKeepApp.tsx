@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { backupSourceFor } from "@/lib/harness/backup-source";
-import { dispatchOpenApp } from "@/lib/ui-events";
+import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, FIELD } from "./coding-agent-ui";
 import {
   CARD,
   ConfirmDialog,
@@ -514,7 +514,7 @@ export default function ClawKeepApp() {
           <button
             type="button"
             onClick={refresh}
-            className="mt-3 px-3 py-1.5 rounded-md bg-orange-500 text-white text-xs font-semibold"
+            className={`${BTN_PRIMARY} mt-3`}
           >
             {t("clawkeep.retry")}
           </button>
@@ -525,9 +525,53 @@ export default function ClawKeepApp() {
 
   return (
     <AgentLabelContext.Provider value={agent}>
-    <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
-      <div className="min-h-full w-full flex items-center justify-center p-6 bg-[var(--bg-deep)]">
-        <div className="w-full max-w-2xl space-y-4">
+    {/* The Coding Agent's frame: top-anchored, one header row that says what
+        this is and whether it is paired, with everything you can do from here
+        beside it, and the cards below starting clean. It used to centre
+        itself vertically in the window and put Portal / Unpair as two
+        full-width buttons between the cards. */}
+    <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-deep)] text-gray-200 @container" data-testid="clawkeep-panel">
+      <div className="mx-auto w-full max-w-2xl px-5 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pb-3 mb-4 border-b border-white/[0.06]">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20, fontVariationSettings: "'FILL' 1" }} aria-hidden="true">shield_lock</span>
+            <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">ClawKeep</h1>
+            <span
+              data-testid="clawkeep-state"
+              className={`inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider border rounded-full pl-1.5 pr-2 py-0.5 ${
+                status.paired ? "text-emerald-400 border-emerald-400/30 bg-emerald-400/[0.07]" : "text-[var(--text-muted)] border-white/15"
+              }`}
+            >
+              <span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full ${status.paired ? "bg-emerald-400" : "bg-[var(--text-muted)]"}`} />
+              {status.paired ? t("clawkeep.state.paired") : t("clawkeep.state.unpaired")}
+            </span>
+          </div>
+          {status.paired && !pairChallenge && (
+            <div className="flex items-center gap-2 shrink-0">
+              <a
+                href={`${status.server}/portal/clawkeep`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={BTN_SECONDARY}
+                title={t("clawkeep.portalTitle")}
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">dashboard</span>
+                {t("clawkeep.portal")}
+                <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 12 }} aria-hidden="true">open_in_new</span>
+              </a>
+              <button
+                type="button"
+                disabled={busy === "unpair"}
+                onClick={onUnpair}
+                className={BTN_DANGER}
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">link_off</span>
+                {busy === "unpair" ? t("clawkeep.unpairing") : t("clawkeep.unpairButton")}
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="space-y-4">
           {error && (
             <div className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
               ⚠️ {error}
@@ -570,45 +614,10 @@ export default function ClawKeepApp() {
                 }}
                 onError={setError}
               />
-              <div className="flex gap-2">
-                <a
-                  href={`${status.server}/portal/clawkeep`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-[var(--border-subtle)] bg-white/[0.03] text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] hover:border-[var(--border-strong)] transition-colors cursor-pointer"
-                  title={t("clawkeep.portalTitle")}
-                >
-                  <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">dashboard</span>
-                  <span className="font-medium">{t("clawkeep.portal")}</span>
-                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
-                </a>
-                <button
-                  type="button"
-                  disabled={busy === "unpair"}
-                  onClick={onUnpair}
-                  className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-red-500/20 bg-red-500/[0.06] text-sm text-red-300/80 hover:text-red-200 hover:bg-red-500/10 hover:border-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
-                >
-                  <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">link_off</span>
-                  <span className="font-medium">{busy === "unpair" ? t("clawkeep.unpairing") : t("clawkeep.unpairButton")}</span>
-                </button>
-              </div>
             </>
           ) : (
             <PairCard onPair={onPair} busy={busy === "pair"} />
           )}
-
-          {/* Not inside the `paired` branch above on purpose: the memory index
-              is entirely on-device, so it is just as relevant on a box that
-              has never been paired for cloud backups. */}
-          {/* The memory index IS OpenClaw's — its own store and its own
-              embedding provider (`clawkeep-memory.ts`). Hermes has no
-              equivalent, so this stays keyed to the OpenClaw CLI even now that
-              the backup itself works on both. The ACTIVE harness matters too:
-              the desktop hides Memory Shard while Hermes runs the box, even
-              when the openclaw CLI is still installed, and a button that opens
-              an app the desktop will not show is a dead button. Same policy as
-              OPENCLAW_ONLY_APP_IDS in page.tsx. */}
-          {status.openclawInstalled && status.agent !== "hermes" && <MemoryShardCard />}
 
           <BackupContentsCard status={status} />
 
@@ -732,7 +741,7 @@ function ScheduleCard({
     <div className={`${CARD} space-y-4`}>
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-gray-100">{t("clawkeep.schedule.title")}</h3>
+          <h3 className="text-sm font-semibold text-[var(--text-primary)]">{t("clawkeep.schedule.title")}</h3>
           <p className="text-xs text-[var(--text-muted)] mt-0.5">
             {draft.enabled
               ? t("clawkeep.schedule.nextRun", { when: formatNextRun(nextRunAtMs, t) })
@@ -781,7 +790,7 @@ function ScheduleCard({
               type="time"
               value={draft.timeOfDay}
               onChange={(e) => setDraft((d) => ({ ...d, timeOfDay: e.target.value }))}
-              className="px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-[var(--border-subtle)] text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+              className={`${FIELD} text-sm`}
             />
             <span className="text-xs text-[var(--text-muted)]">{t("clawkeep.schedule.deviceLocal")}</span>
           </div>
@@ -827,7 +836,7 @@ function ScheduleCard({
               const n = Math.max(0, Math.floor(Number(e.target.value)));
               setDraft((d) => ({ ...d, retentionKeepLast: Number.isFinite(n) ? n : 0 }));
             }}
-            className="w-20 px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-[var(--border-subtle)] text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+            className={`${FIELD} w-20 text-sm`}
           />
           <span className="text-xs text-[var(--text-muted)]">
             {t("clawkeep.schedule.keepLastUnit")}
@@ -846,7 +855,7 @@ function ScheduleCard({
             type="button"
             disabled={saving}
             onClick={() => save()}
-            className="px-3 py-1.5 rounded-md bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold disabled:opacity-50 cursor-pointer"
+            className={BTN_PRIMARY}
           >
             {saving ? t("clawkeep.schedule.saving") : t("clawkeep.schedule.save")}
           </button>
@@ -856,74 +865,25 @@ function ScheduleCard({
   );
 }
 
-/**
- * Where the memory index went.
- *
- * The index panel used to be a card in this window (TASK-398). It is now the
- * Memory Shard app, because an owner who is reindexing after a model change
- * is not thinking about backups, and a window that mixed the two kept getting
- * scrolled past. This card stays so that the place people learned to look
- * still leads there in one click.
- */
-function MemoryShardCard() {
-  const { t } = useT();
-  return (
-    <div className={`${CARD} flex items-center justify-between gap-3`} data-testid="clawkeep-memory-shard-card">
-      <p className="text-sm text-[var(--text-secondary)]">
-        🧠 {t("clawkeep.memory.movedTo", { app: t("app.memoryShard") })}
-      </p>
-      <button
-        type="button"
-        onClick={() => dispatchOpenApp("memory-shard")}
-        className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-[var(--border-subtle)] bg-white/[0.03] text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] hover:border-[var(--border-strong)] transition-colors cursor-pointer"
-      >
-        <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">memory</span>
-        {t("clawkeep.memory.openShard", { app: t("app.memoryShard") })}
-      </button>
-    </div>
-  );
-}
-
 function PairCard({ onPair, busy }: { onPair: () => void; busy: boolean }) {
   const { t } = useT();
   const agent = useAgentLabel();
   return (
-    <div
-      className={`${CARD} relative overflow-hidden flex flex-col items-center text-center px-6 pt-12 pb-8`}
-    >
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute top-0 left-1/2 -translate-x-1/2 w-80 h-80 bg-[radial-gradient(circle,rgba(249,115,22,0.4),transparent_70%)] blur-3xl opacity-70"
-      />
-      <div className="relative w-44 h-44 flex items-center justify-center mb-4">
-        <div
+    <div className={`${CARD} flex flex-col items-center text-center py-8`}>
+      <div className="w-16 h-16 rounded-full flex items-center justify-center bg-gradient-to-br from-orange-400 via-orange-500 to-amber-600 shadow-[0_0_28px_rgba(249,115,22,0.35)]">
+        <span
+          className="material-symbols-rounded text-white"
+          style={{ fontSize: 36, fontVariationSettings: "'FILL' 1, 'wght' 600" }}
           aria-hidden="true"
-          className="clawkeep-shield-ring absolute inset-0 rounded-full border-2 border-orange-400/60 bg-orange-500/10"
-        />
-        <div
-          aria-hidden="true"
-          className="clawkeep-shield-ring-delayed absolute inset-0 rounded-full border-2 border-orange-400/60 bg-orange-500/10"
-        />
-        <div className="clawkeep-shield-breathe relative w-32 h-32 rounded-full flex items-center justify-center bg-gradient-to-br from-orange-400 via-orange-500 to-amber-600 shadow-[0_0_60px_rgba(249,115,22,0.45)]">
-          <span
-            className="material-symbols-rounded text-white drop-shadow-[0_0_10px_rgba(249,115,22,0.55)]"
-            style={{ fontSize: 76, fontVariationSettings: "'FILL' 1, 'wght' 600" }}
-            aria-hidden="true"
-          >
-            shield_lock
-          </span>
-        </div>
+        >
+          shield_lock
+        </span>
       </div>
-      <h2 className="relative text-3xl font-bold font-display">{t("clawkeep.pair.title")}</h2>
-      <p className="relative mt-1.5 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
+      <h2 className="mt-4 text-lg font-semibold text-[var(--text-primary)]">{t("clawkeep.pair.title")}</h2>
+      <p className="mt-1 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
         {t("clawkeep.pair.description", { agent })}
       </p>
-      <button
-        type="button"
-        onClick={onPair}
-        disabled={busy}
-        className="relative mt-7 px-6 py-2.5 rounded-full bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white text-sm font-semibold shadow-lg cursor-pointer"
-      >
+      <button type="button" onClick={onPair} disabled={busy} className={`${BTN_PRIMARY} mt-5`}>
         {busy ? t("clawkeep.pair.connecting") : t("clawkeep.pair.button")}
       </button>
     </div>
@@ -1221,23 +1181,17 @@ interface ProtectionCopy {
   badgeKey: string;
   iconName: string;
   badgeClass: string;
-  haloClass: string;
-  ringClass: string;
   discClass: string;
   iconClass: string;
-  primaryClass: string;
 }
 
 // Lapsed and unprotected share an "at-risk" red palette; only headline/
 // subhead/icon/badge differ. Spread a single base into both.
 const RED_PALETTE = {
   badgeClass: "bg-red-500/15 text-red-300 border-red-500/30",
-  haloClass: "bg-[radial-gradient(circle,rgba(239,68,68,0.45),transparent_70%)]",
-  ringClass: "border-red-400/60 bg-red-500/10",
   discClass:
-    "bg-gradient-to-br from-red-400 via-red-500 to-rose-600 shadow-[0_0_60px_rgba(239,68,68,0.45)]",
+    "bg-gradient-to-br from-red-400 via-red-500 to-rose-600 shadow-[0_0_28px_rgba(239,68,68,0.35)]",
   iconClass: "text-white drop-shadow-[0_0_10px_rgba(239,68,68,0.55)]",
-  primaryClass: "bg-red-500 hover:bg-red-400",
 } as const;
 
 const COPY_BY_STATE: Record<ProtectionState, ProtectionCopy> = {
@@ -1247,12 +1201,9 @@ const COPY_BY_STATE: Record<ProtectionState, ProtectionCopy> = {
     badgeKey: "clawkeep.badge.protected",
     iconName: "verified_user",
     badgeClass: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
-    haloClass: "bg-[radial-gradient(circle,rgba(16,185,129,0.45),transparent_70%)]",
-    ringClass: "border-emerald-400/60 bg-emerald-500/10",
     discClass:
-      "bg-gradient-to-br from-emerald-400 via-emerald-500 to-teal-600 shadow-[0_0_60px_rgba(16,185,129,0.45)]",
+      "bg-gradient-to-br from-emerald-400 via-emerald-500 to-teal-600 shadow-[0_0_28px_rgba(16,185,129,0.35)]",
     iconClass: "text-white drop-shadow-[0_0_10px_rgba(16,185,129,0.55)]",
-    primaryClass: "bg-emerald-500 hover:bg-emerald-400",
   },
   lapsed: {
     ...RED_PALETTE,
@@ -1312,9 +1263,7 @@ function DashboardCard({
   const copy = COPY_BY_STATE[state];
 
   return (
-    <div
-      className={`${CARD} relative overflow-hidden flex flex-col items-center text-center px-6 pt-12 pb-8`}
-    >
+    <div className={`${CARD} relative flex flex-col items-center text-center pt-8 pb-6`}>
       {/* Status badge top-right — small, clean, antivirus-style */}
       <div
         className={`absolute top-3 right-3 px-2 py-0.5 rounded-full border text-[10px] font-semibold tracking-wider ${copy.badgeClass}`}
@@ -1322,44 +1271,28 @@ function DashboardCard({
         {t(copy.badgeKey)}
       </div>
 
-      {/* Halo glow behind the shield */}
+      {/* The shield itself — one disc with a slow breathe; the halo and the
+          radiating rings that used to surround it were the only decoration of
+          their kind on the desktop. */}
       <div
-        aria-hidden="true"
-        className={`pointer-events-none absolute top-0 left-1/2 -translate-x-1/2 w-80 h-80 ${copy.haloClass} blur-3xl opacity-70`}
-      />
-
-      {/* The shield itself */}
-      <div className="relative w-44 h-44 flex items-center justify-center mb-4">
-        {/* Two outward-radiating rings — staggered so a wave is always mid-flight */}
-        <div
+        className={`clawkeep-shield-breathe relative w-20 h-20 rounded-full flex items-center justify-center ${copy.discClass}`}
+      >
+        <span
+          className={`material-symbols-rounded ${copy.iconClass}`}
+          style={{ fontSize: 44, fontVariationSettings: "'FILL' 1, 'wght' 600, 'GRAD' 0" }}
           aria-hidden="true"
-          className={`clawkeep-shield-ring absolute inset-0 rounded-full border-2 ${copy.ringClass}`}
-        />
-        <div
-          aria-hidden="true"
-          className={`clawkeep-shield-ring-delayed absolute inset-0 rounded-full border-2 ${copy.ringClass}`}
-        />
-        {/* Solid disc with a slow breathe */}
-        <div
-          className={`clawkeep-shield-breathe relative w-32 h-32 rounded-full flex items-center justify-center ${copy.discClass}`}
         >
-          <span
-            className={`material-symbols-rounded ${copy.iconClass}`}
-            style={{ fontSize: 76, fontVariationSettings: "'FILL' 1, 'wght' 600, 'GRAD' 0" }}
-            aria-hidden="true"
-          >
-            {copy.iconName}
-          </span>
-        </div>
+          {copy.iconName}
+        </span>
       </div>
 
-      <h2 className="relative text-3xl font-bold font-display mt-2">{t(copy.headlineKey)}</h2>
-      <p className="relative mt-1.5 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
+      <h2 className="relative text-lg font-semibold text-[var(--text-primary)] mt-4">{t(copy.headlineKey)}</h2>
+      <p className="relative mt-1 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
         {t(copy.subheadKey, { agent })}
       </p>
 
       {/* Stats strip — compact, equal-width, no card chrome to keep the eye on the shield */}
-      <div className="relative mt-6 grid grid-cols-3 gap-6 w-full max-w-md text-center">
+      <div className="relative mt-5 grid grid-cols-3 gap-6 w-full max-w-md text-center">
         <Stat label={t("clawkeep.stat.lastBackup")} value={timeAgo(status.lastBackupAtMs, t)} />
         <Stat label={t("clawkeep.stat.cloudUsage")} value={formatBytes(status.cloudBytes)} />
         <Stat label={t("clawkeep.stat.snapshots")} value={status.snapshotCount.toString()} />
@@ -1367,7 +1300,7 @@ function DashboardCard({
 
       {/* Optional name for this backup → becomes the snapshot's label */}
       {!disabled && (
-        <div className="relative mt-6 w-full max-w-xs">
+        <div className="relative mt-5 w-full max-w-xs">
           <label
             htmlFor="clawkeep-backup-name"
             className="block text-[10px] uppercase tracking-wider text-[var(--text-muted)] mb-1"
@@ -1381,18 +1314,18 @@ function DashboardCard({
             maxLength={120}
             onChange={(e) => setBackupName(e.target.value)}
             placeholder={t("clawkeep.backup.namePlaceholder")}
-            className="w-full px-3 py-2 rounded-lg bg-[var(--bg-app)] border border-[var(--border-subtle)] text-sm text-gray-200 placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-emerald-500/50"
+            className={`${FIELD} w-full text-sm placeholder:text-[var(--text-muted)]/60`}
           />
         </div>
       )}
 
       {/* Action row */}
-      <div className="relative mt-5 flex flex-wrap items-center justify-center gap-3">
+      <div className="relative mt-4 flex flex-wrap items-center justify-center gap-2">
         <button
           type="button"
           onClick={() => onBackup(backupName)}
           disabled={disabled}
-          className={`px-6 py-2.5 rounded-full ${copy.primaryClass} disabled:opacity-50 text-white text-sm font-semibold shadow-lg transition-colors cursor-pointer`}
+          className={BTN_PRIMARY}
         >
           {state === "protected" ? t("clawkeep.backupNow") : t("clawkeep.protectMyOpenclaw", { agent })}
         </button>
@@ -1400,9 +1333,9 @@ function DashboardCard({
           <button
             type="button"
             onClick={onOpenRestore}
-            className="px-6 py-2.5 rounded-full border border-[var(--border-subtle)] bg-white/[0.04] text-sm font-semibold text-gray-200 hover:bg-white/[0.08] hover:border-[var(--border-strong)] transition-colors cursor-pointer flex items-center gap-1.5"
+            className={BTN_SECONDARY}
           >
-            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
               cloud_download
             </span>
             {t("clawkeep.restoreFromSnapshot")}
@@ -1429,10 +1362,10 @@ function BackupContentsCard({ status }: { status: ClawKeepStatus }) {
   return (
     <div className={`${CARD} space-y-2`}>
       <div className="flex items-center gap-2">
-        <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }} aria-hidden="true">
+        <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
           inventory_2
         </span>
-        <h2 className="font-semibold text-[var(--text-primary)]">
+        <h2 className="text-sm font-semibold text-[var(--text-primary)]">
           {t("clawkeep.contents.title")}
         </h2>
       </div>
@@ -1458,7 +1391,7 @@ function SystemCard({ status }: { status: ClawKeepStatus }) {
   const { t } = useT();
   return (
     <div className={`${CARD} space-y-2 border-amber-500/20 bg-amber-500/5`}>
-      <h2 className="font-semibold text-amber-200">⚙️ {t("clawkeep.system.setupNeeded")}</h2>
+      <h2 className="text-sm font-semibold text-amber-200">⚙️ {t("clawkeep.system.setupNeeded")}</h2>
       <ul className="text-sm text-amber-100 space-y-1">
         {/* Only on the edition that HAS a separate CLI. On Hermes the archiver
             ships inside the daemon, so telling the owner to

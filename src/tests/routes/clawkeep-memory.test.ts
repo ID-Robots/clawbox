@@ -25,6 +25,16 @@ vi.mock("@/lib/clawkeep-memory-scheduler", () => ({
   nextRunAtMs: vi.fn(() => 0),
 }));
 
+// Starting a run and rewriting the schedule are OWNER-ONLY: middleware admits
+// the MCP bearer on every /setup-api route, so without that gate the assistant
+// could kick off an hours-long full reindex, or change how often one happens.
+// These cases are about what the OWNER gets, so the session answers yes; the
+// refusal itself is asserted in its own block below.
+const { ownerSession } = vi.hoisted(() => ({ ownerSession: { value: true } }));
+vi.mock("@/lib/owner-session", () => ({
+  hasOwnerSession: vi.fn(async () => ownerSession.value),
+}));
+
 let statusGET: typeof import("@/app/setup-api/clawkeep/memory/route").GET;
 let indexPOST: typeof import("@/app/setup-api/clawkeep/memory/index/route").POST;
 let scheduleGET: typeof import("@/app/setup-api/clawkeep/memory/schedule/route").GET;
@@ -53,6 +63,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  ownerSession.value = true;
   await fs.rm(path.join(DATA_DIR, "memory-index-schedule.json"), { force: true });
   await fs.rm(path.join(DATA_DIR, "memory-index-state.json"), { force: true });
   await fs.rm(path.join(DATA_DIR, "memory-index.lock"), { recursive: true, force: true });
@@ -171,5 +182,35 @@ describe("POST /setup-api/clawkeep/memory/index", () => {
       method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
     }));
     expect(JSON.stringify(await res.json())).not.toContain(String(process.pid));
+  });
+});
+
+describe("the owner gate on the two routes that spend the box's time", () => {
+  // Middleware admits the MCP bearer on every /setup-api route, so "signed in"
+  // is not the same question as "the PERSON asked". Reading the status stays
+  // open to the agent; starting an hours-long re-embed, or moving when one
+  // happens unattended, does not.
+  beforeEach(() => { ownerSession.value = false; });
+
+  it("refuses to start an index run without an owner session", async () => {
+    const res = await indexPOST(new NextRequest("http://localhost/x", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).kind).toBe("owner_only");
+  });
+
+  it("refuses to rewrite the schedule without an owner session", async () => {
+    const res = await schedulePUT(put({
+      enabled: true, frequency: "daily", timeOfDay: "04:15", weekday: 0,
+    }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).kind).toBe("owner_only");
+    // Refused BEFORE it wrote: a gate that persists and then complains is not
+    // a gate. The scheduler must not have been re-armed either.
+    expect(
+      await fs.access(path.join(DATA_DIR, "memory-index-schedule.json")).then(() => true, () => false),
+    ).toBe(false);
+    expect(scheduler.refresh).not.toHaveBeenCalled();
   });
 });

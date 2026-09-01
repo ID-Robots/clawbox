@@ -28,7 +28,7 @@ import {
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
-import { CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext } from '@/lib/ui-events'
+import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
@@ -199,6 +199,8 @@ function getProviderPillText(option: ChatModelState['options'][number]): string 
 }
 
 import { renderText, plainTextForLabel } from '@/lib/chat-markdown'
+import SnapPreviewOverlay from '@/components/SnapPreviewOverlay'
+import { getSnapRect, getSnapZone, type SnapZone } from '@/lib/window-snap'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import {
   attachmentAcceptAttribute,
@@ -439,6 +441,25 @@ const MIN_CHAT_HEIGHT = 250
 // The docked panel keeps the old default width: it sits beside the desktop,
 // where every extra pixel comes out of the windows next to it.
 const DEFAULT_PANEL_WIDTH = 420
+
+/**
+ * The breathing room the DOCKED (expanded) chat keeps from the screen edges.
+ *
+ * Docked used to mean flush: `right/top: 0`, `bottom: 56`, square corners and a
+ * one-pixel seam for a left border — a full-height slab that read as a
+ * different component from the chat the owner had just been using. It is the
+ * same chat, only wider, so it keeps the popup's radius and shadow and floats
+ * clear of the edges instead.
+ *
+ * Exported because the desktop reserves this strip: `page.tsx` passes the
+ * reserved width to windows and to the mascot as `rightInset`, and that
+ * reservation has to include the gap or a maximized window slides under it and
+ * shows through.
+ */
+export const CHAT_PANEL_GAP = 12
+
+/** ChromeShelf's height — what the docked chat sits above. */
+const SHELF_HEIGHT_PX = 56
 // The floating popup's size survives a refresh and a close. Position does
 // not: it is re-anchored to the mascot on every open, which is where the
 // owner looks for it. The docked panel's width is the desktop's preference
@@ -814,9 +835,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setShowNewApp(open => !open)
   }, [showNewApp, newAppMaxChars])
 
+  // The Coding Agent hands "Create app" over to here: the card composes one
+  // message for the assistant, so it belongs in the conversation that will
+  // carry the reply, not in a second window that cannot show it.
+  useEffect(() => {
+    const onNewApp = () => { if (!showNewApp) toggleNewApp() }
+    window.addEventListener(NEW_APP_EVENT, onNewApp)
+    return () => window.removeEventListener(NEW_APP_EVENT, onNewApp)
+  }, [showNewApp, toggleNewApp])
+
   // ── Drag + resize state ──
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
   const [size, setSize] = useState<{ w: number; h: number }>(DEFAULT_SIZE)
+  // Drag-to-edge snapping, the same zones the app windows use — the chat is a
+  // draggable surface on the same desktop, and landing it against an edge had
+  // no effect at all before.
+  const [snapPreview, setSnapPreview] = useState<SnapZone>(null)
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null)
   const popupRef = useRef<HTMLDivElement>(null)
 
@@ -1107,11 +1141,24 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const d = dragRef.current
       if (!d) return
       setPos({ x: d.origX + (ev.clientX - d.startX), y: d.origY + (ev.clientY - d.startY) })
+      setSnapPreview(getSnapZone(ev.clientX, ev.clientY))
     }
-    const onUp = () => {
+    const onUp = (ev: PointerEvent) => {
       dragRef.current = null
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
+      // Read the zone from the RELEASE point, not from the preview state: a
+      // pointerup can arrive without a preceding pointermove (a click that
+      // barely moved), and reusing a stale preview would snap on a drag that
+      // never reached an edge.
+      const zone = getSnapZone(ev.clientX, ev.clientY)
+      setSnapPreview(null)
+      const rect = getSnapRect(zone)
+      if (!rect) return
+      // Honour the chat's own floor. `getSnapRect` divides the screen, and half
+      // of a narrow window is narrower than the chat can render.
+      setPos({ x: rect.x, y: rect.y })
+      setSize({ w: Math.max(MIN_CHAT_WIDTH, rect.width), h: Math.max(MIN_CHAT_HEIGHT, rect.height) })
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
@@ -1185,21 +1232,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // its running one. Restored when the tab is shown again, so text typed for
   // one conversation is never sent into another.
   const tabStashRef = useRef<Map<string, { input: string; queuedSends: { id: string; text: string; attachments: ChatAttachment[] }[]; attachments: ChatAttachment[] }>>(new Map())
-  // Closing a tab DELETES its gateway session — irreversible, so the ✕ arms
-  // on the first tap and only a second tap within the window closes. Same
-  // two-tap pattern as the Coding Agent's Clear (a browser confirm() has no
-  // reliable focus story on the phones this ships to).
-  const [armedCloseKey, setArmedCloseKey] = useState<string | null>(null)
-  const armedCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const armCloseTab = useCallback((key: string) => {
-    if (armedCloseTimerRef.current) clearTimeout(armedCloseTimerRef.current)
-    armedCloseTimerRef.current = setTimeout(() => {
-      armedCloseTimerRef.current = null
-      setArmedCloseKey(null)
-    }, 3500)
-    setArmedCloseKey(key)
-  }, [])
-  useEffect(() => () => { if (armedCloseTimerRef.current) clearTimeout(armedCloseTimerRef.current) }, [])
   // A run that died in a background tab leaves NOTHING in the transcript to
   // explain itself — the error line is client-side only. It is kept here when
   // the terminal event goes by and handed over when the tab is next shown.
@@ -3941,7 +3973,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const mascotCenterPx = ((mascotX ?? 85) / 100) * winW
   const defaultLeft = Math.max(8, Math.min(mascotCenterPx - size.w / 2, winW - size.w - 8))
   const posStyle: React.CSSProperties = panelMode
-    ? { right: 0, top: 0, bottom: 56 }
+    ? { right: CHAT_PANEL_GAP, top: CHAT_PANEL_GAP, bottom: SHELF_HEIGHT_PX + CHAT_PANEL_GAP }
     : mobile
       ? { left: 0, top: 0, right: 0, bottom: 0 }
       : pos
@@ -3968,7 +4000,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         position: 'fixed',
         ...posStyle,
         ...(panelMode
-          ? { width: panelWidth, minWidth: MIN_CHAT_WIDTH, height: 'auto', maxHeight: 'none', borderRadius: 0 }
+          ? { width: panelWidth, minWidth: MIN_CHAT_WIDTH, height: 'auto', maxHeight: 'none', borderRadius: 16 }
           : mobile
             ? { width: 'auto', height: 'auto', maxHeight: 'none', borderRadius: 0 }
             : {
@@ -3990,7 +4022,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }),
         zIndex: 10010,
         overflow: 'hidden',
-        boxShadow: panelMode ? '-4px 0 20px rgba(0,0,0,0.4), -1px 0 0 rgba(255,255,255,0.08)' : mobile ? 'none' : '0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.08)',
+        boxShadow: mobile ? 'none' : '0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.08)',
         background: '#0d1117',
         display: 'flex',
         flexDirection: 'column',
@@ -4039,8 +4071,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         50%      { opacity: 0.35; }
       }
       .claw-tab-hover-close { opacity: 0; transition: opacity 0.12s ease; }
-      [role="tab"]:hover .claw-tab-hover-close,
-      [role="tab"]:focus-within .claw-tab-hover-close { opacity: 1; }`}</style>
+      .claw-tab-plate:hover .claw-tab-hover-close,
+      .claw-tab-plate:focus-within .claw-tab-hover-close { opacity: 1; }`}</style>
       {/* Header — drag handle (desktop) / simple bar (mobile).
           A real bar in the flow, not a strip floating over the transcript.
           The floating version faded from the shell colour to transparent
@@ -4102,13 +4134,34 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 const unread = !!tab.key && !active && unreadKeys.has(tab.key)
                 const switchable = status === 'connected' && !active && !!tab.key
                 const select = () => { if (switchable) void switchSession(tab.key) }
-                const armed = !tab.main && armedCloseKey === tab.key
                 return (
-                  /* The wrapper groups the tab with its own control BESIDE it —
-                     a button nested inside role="tab" is one opaque element to
-                     assistive tech, and 16px inside a padded row was below the
-                     24px minimum target. */
-                  <div key={tab.main ? 'main' : tab.key} style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+                  /* The plate is the WRAPPER, and the tab and its control are
+                     siblings inside it. role="tab" makes its descendants
+                     presentational, so a close button nested in it was one opaque
+                     element to assistive tech and, at tabIndex -1, unreachable
+                     from the keyboard. Putting the background and hover on the
+                     wrapper keeps what the owner asked for — one plate, the ✕ part
+                     of it, not a separate control that happens to sit beside it —
+                     while each action keeps its own semantics and focus stop. */
+                  <div
+                    key={tab.main ? 'main' : tab.key}
+                    className="claw-tab-plate"
+                    data-active={active || undefined}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
+                      // minWidth so a short auto-label ("Chat 2") makes the same
+                      // plate as a long one: without it every tab was exactly as
+                      // wide as its text, and the whole strip re-flowed the moment
+                      // a tab was renamed from the owner's first message.
+                      padding: '4px 8px', borderRadius: 8, minWidth: 92, maxWidth: 150, minHeight: 24,
+                      background: active && tabs.length > 0 ? 'rgba(255,255,255,0.08)' : 'transparent',
+                      color: active ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.5)',
+                      fontSize: 12, fontWeight: 600, letterSpacing: 0.2,
+                      userSelect: 'none', transition: 'background 0.15s, color 0.15s',
+                    }}
+                    onMouseEnter={(e) => { if (switchable) { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = 'rgba(255,255,255,0.8)' } }}
+                    onMouseLeave={(e) => { if (!active) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.5)' } }}
+                  >
                     <div
                       role="tab"
                       tabIndex={0}
@@ -4120,16 +4173,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       onClick={select}
                       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select() } }}
                       style={{
-                        display: 'flex', alignItems: 'center', gap: 6,
-                        padding: '4px 8px', borderRadius: 8, maxWidth: 150, minHeight: 24,
-                        background: active && tabs.length > 0 ? 'rgba(255,255,255,0.08)' : 'transparent',
-                        color: active ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.5)',
+                        display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1,
                         cursor: switchable ? 'pointer' : 'default',
-                        fontSize: 12, fontWeight: 600, letterSpacing: 0.2,
-                        userSelect: 'none', transition: 'background 0.15s, color 0.15s',
+                        // The plate's padding is on the wrapper, so push the focus
+                        // ring out to the plate's edge rather than hugging the text.
+                        outlineOffset: 4,
                       }}
-                      onMouseEnter={(e) => { if (switchable) { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = 'rgba(255,255,255,0.8)' } }}
-                      onMouseLeave={(e) => { if (!active) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.5)' } }}
                     >
                       {busy && (
                         <span data-testid="chat-tab-busy" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: '#f97316', flexShrink: 0, animation: 'clawHeaderPulse 1.2s ease-in-out infinite' }} />
@@ -4137,10 +4186,48 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       {!busy && unread && (
                         <span data-testid="chat-tab-unread" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', flexShrink: 0 }} />
                       )}
-                      <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{tab.label}</span>
+                      <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, flex: 1 }}>{tab.label}</span>
                     </div>
-                    {tab.main && active && (
+                    {!tab.main && active && (
+                      /* ONE click closes — the old first tap only armed a red
+                         "Close tab?" in place, which is the confirmation the owner
+                         was seeing and did not want. Neutral, on the plate's own
+                         hover ladder rather than a raw red tint. A native button:
+                         focusable in the tab order, Enter and Space for free. */
                       <button
+                        type="button"
+                        onPointerDown={stopHeaderDrag}
+                        onClick={(e) => { e.stopPropagation(); closeTab(tab.key) }}
+                        aria-label={t('chat.tabClose')}
+                        title={t('chat.tabClose')}
+                        data-testid="chat-tab-close"
+                        style={{
+                          background: 'none', border: 'none', padding: 0,
+                          marginLeft: 2, marginRight: -2, width: 18, height: 18, borderRadius: 5,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                          color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
+                          transition: 'background 0.15s, color 0.15s',
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.9)'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'transparent' }}
+                      >
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                          <path d="M18 6L6 18M6 6l12 12" />
+                        </svg>
+                      </button>
+                    )}
+                    {tab.main && active && (
+                      /* Revealed on hover of the PLATE (`.claw-tab-plate:hover`),
+                         which is the fix for a dead style: the reveal rule used
+                         to be `[role="tab"]:hover .claw-tab-hover-close` while the
+                         button sat beside role="tab", so the descendant selector
+                         never matched and the button stayed at opacity 0 —
+                         invisible, still clickable, and invisible to jsdom too,
+                         which is why the test passed. Scoping the rule to the
+                         wrapper keeps the button a sibling of the tab with its
+                         own focus stop; :focus-within shows it to the keyboard. */
+                      <button
+                        type="button"
                         onPointerDown={stopHeaderDrag}
                         onClick={(e) => { e.stopPropagation(); if (!startingSession) void startNewSession() }}
                         aria-label={t('chat.tabRestart')}
@@ -4148,38 +4235,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                         data-testid="chat-tab-restart"
                         className="claw-tab-hover-close"
                         style={{
-                          background: 'none', border: 'none', color: 'rgba(255,255,255,0.45)',
-                          cursor: 'pointer', padding: 0, width: 24, height: 24, borderRadius: 6,
+                          background: 'none', border: 'none', padding: 0,
+                          marginLeft: 2, marginRight: -2, width: 18, height: 18, borderRadius: 5,
                           display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                          color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
+                          transition: 'background 0.15s, color 0.15s',
                         }}
-                        onMouseEnter={(e) => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
-                        onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'none' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.9)'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'transparent' }}
                       >
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
-                          <path d="M18 6L6 18M6 6l12 12" />
-                        </svg>
-                      </button>
-                    )}
-                    {!tab.main && active && (
-                      /* First tap arms (the button turns red and says so);
-                         only the second tap within the window deletes. */
-                      <button
-                        onPointerDown={stopHeaderDrag}
-                        onClick={(e) => { e.stopPropagation(); if (armed) { setArmedCloseKey(null); closeTab(tab.key) } else { armCloseTab(tab.key) } }}
-                        aria-label={armed ? `${t('chat.tabClose')}?` : t('chat.tabClose')}
-                        title={armed ? `${t('chat.tabClose')}?` : t('chat.tabClose')}
-                        data-testid="chat-tab-close"
-                        data-armed={armed || undefined}
-                        style={{
-                          background: armed ? 'rgba(239,68,68,0.25)' : 'none',
-                          border: 'none', color: armed ? '#ef4444' : 'rgba(255,255,255,0.45)',
-                          cursor: 'pointer', padding: 0, width: 24, height: 24, borderRadius: 6,
-                          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-                        }}
-                        onMouseEnter={(e) => { if (!armed) { e.currentTarget.style.color = '#fff'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' } }}
-                        onMouseLeave={(e) => { if (!armed) { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'none' } }}
-                      >
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
                           <path d="M18 6L6 18M6 6l12 12" />
                         </svg>
                       </button>
@@ -4334,7 +4399,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
         {status === 'connected' && !reloadingSkill && messages.length === 0 && !streaming && !sending && !isBootstrappingHistory && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 8, color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>
-            <img src="/clawbox-crab.png" alt="" style={{ width: 48, height: 48, objectFit: 'contain', opacity: 0.4 }} />
+            <img src="/clawbox-crab.png" alt="" style={{ width: 25, height: 25, objectFit: 'contain', opacity: 0.4 }} />
             <span>{t("chat.saySomething")}</span>
           </div>
         )}
@@ -4541,7 +4606,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             report the outcome — a badge that vanished with the run was gone
             before the owner had read the message above it, since runs here
             take 9-15 seconds. See src/lib/use-coding-agent-activity.ts. */}
-        {codingRuns.map(codingAgentCard)}
+        {/* MAIN TAB ONLY. A run record carries no session key — the hook adopts
+            runs by START TIME, not by conversation — so a card drawn in every
+            tab claimed the run belonged to whichever chat happened to be open,
+            and survived a tab switch because switchSession blanks `messages`
+            and not `codingRuns`. `activeTabKey === null` is the predicate the
+            strip itself already uses for "main is selected" (the main session's
+            key is stored as null), so this is the same test, not a new one. */}
+        {activeTabKey === null && codingRuns.map(codingAgentCard)}
 
         {/* Attached to the IN-FLIGHT turn, next to the pills, and never to a
             message: see the note on `clarifies` above for why this is the one
@@ -4839,6 +4911,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           <NewAppWizardCard
             maxTaskChars={newAppMaxChars ?? DEFAULT_MAX_TASK_CHARS}
             onClose={() => setShowNewApp(false)}
+            // In the chat it floats over the composer like a popover, so it
+            // behaves like one: click away (or Escape) and it goes.
+            closeOnOutsideClick
           />
         </div>
       )}
@@ -5303,6 +5378,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         )}
         </div>
       </div>
+
+      {/* Where a drop against an edge would land the chat — the same plate the
+          app windows draw, portalled so the popup's own overflow cannot clip
+          it. */}
+      {!mobile && !panelMode && snapPreview && createPortal(
+        <SnapPreviewOverlay zone={snapPreview} />,
+        document.body,
+      )}
 
       {/* Left-edge resize for panel mode */}
       {!mobile && panelMode && (

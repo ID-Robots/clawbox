@@ -64,6 +64,23 @@ const CRAB_WALK_RANGE = { min: 5, max: 88 }
 const CRAB_BOUNDS = { min: 2, max: 92 }
 /** The crab's own body box. A pet's is `PET_BODY_PX`, which is smaller. */
 const CRAB_BODY_PX = 150
+/**
+ * How the crab ART sits inside that box.
+ *
+ * Every offset in this file — the bubble at `bottom: 155`, the thinking dots,
+ * the ZZZ cluster, the 60px drag hit-box, the ground line the feet stand on —
+ * was measured against the original artwork, whose PNG carried a third of its
+ * height as transparent padding below the crab: drawn `contain` into the
+ * 150px box, the visible crab was ~73px wide and ~61px tall with its feet
+ * 50px above the box's bottom edge (i.e. standing on the shelf's top edge,
+ * the box overlapping the bar). `public/clawbox-crab.png` is now a tight
+ * square (186x146 px of crab in 192x192), so the same footprint is reproduced
+ * explicitly: a 78px square whose art lands ~76px wide, ~59px tall, with its
+ * feet 42 + 8.5 ≈ 50px up. Change these together with the artwork, never one
+ * without the other.
+ */
+const CRAB_ART_PX = 78
+const CRAB_ART_BOTTOM_PX = 42
 
 /**
  * Clearance between the top of the pet's VISIBLE ART and its bubble.
@@ -1746,7 +1763,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
             </>
           ) : (
             <img src="/clawbox-crab.png" alt="" style={{
-              width: CRAB_BODY_PX, height: CRAB_BODY_PX, objectFit: 'contain',
+              position: 'absolute', bottom: CRAB_ART_BOTTOM_PX, left: (CRAB_BODY_PX - CRAB_ART_PX) / 2,
+              width: CRAB_ART_PX, height: CRAB_ART_PX, objectFit: 'contain',
             }} />
           )}
           {/* FRENZY MODE — money rain + shockwaves */}

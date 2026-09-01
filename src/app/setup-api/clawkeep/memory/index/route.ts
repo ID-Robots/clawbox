@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { hasOwnerSession } from "@/lib/owner-session";
 import { startMemoryIndex } from "@/lib/clawkeep-memory";
 
 export const dynamic = "force-dynamic";
@@ -12,8 +13,20 @@ export const dynamic = "force-dynamic";
  * declined because one is already going answers 409 rather than pretending to
  * have started a second one — single-flight lives in `startMemoryIndex`, and
  * this route must not paper over its answer.
+ *
+ * OWNER ONLY. Middleware admits the MCP bearer on every /setup-api route and
+ * the agent holds it, so until this check existed the assistant could start a
+ * full reindex of the owner's memory on its own — an expensive, hours-long pass
+ * that re-embeds everything. Reading the status stays open; starting work does
+ * not.
  */
 export async function POST(request: NextRequest) {
+  if (!(await hasOwnerSession(request))) {
+    return NextResponse.json(
+      { error: "Starting an index run needs a signed-in browser session.", kind: "owner_only" },
+      { status: 403, headers: { "Cache-Control": "no-store" } },
+    );
+  }
   const body = await request.json().catch(() => ({}));
   // `request.json()` resolves a literal `null` body to null, which the cast
   // does not change — reading `.mode` off it threw and the outer catch turned

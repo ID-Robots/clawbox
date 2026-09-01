@@ -10,7 +10,9 @@ import {
   setDefaultDirectory,
   setEffort,
   setMaxTurns,
+  setAutoPr,
   setReviewPass,
+  setSetupComplete,
   setTokenLimit,
 } from "@/lib/coding-agent";
 
@@ -45,6 +47,12 @@ function forbidden() {
  * POST { effort: "low"|"medium"|"high"|"xhigh"|"max"|"ultracode" } → how hard a run thinks.
  * POST { maxTurns: number } → how many steps a run gets.
  * POST { tokenLimit: number | null } → token ceiling, or null for none.
+ * POST { autoPr: boolean } → branch, open a pull request into the repo's
+ * default branch, wait for GitHub Actions, and merge when at least one real
+ * check has passed. See @/lib/coding-pr for the guardrails.
+ * POST { setupComplete: boolean } → mark the setup wizard finished (the app
+ * shows the wizard instead of its home page until this is true; the reset
+ * route is what puts it back to false).
  * POST { reviewPass: boolean } → the automatic review pass: one extra run in
  * the same session after every completed run that changed project files
  * (the status payload reports it as `reviewPass`; a review run carries
@@ -87,9 +95,13 @@ export async function POST(request: Request) {
     maxTurns?: unknown;
     tokenLimit?: unknown;
     reviewPass?: unknown;
+    autoPr?: unknown;
+    setupComplete?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
   const hasReviewPass = typeof fields.reviewPass === "boolean";
+  const hasSetupComplete = typeof fields.setupComplete === "boolean";
+  const hasAutoPr = typeof fields.autoPr === "boolean";
   const hasEffort = typeof fields.effort === "string";
   const hasTurns = typeof fields.maxTurns === "number";
   // null is meaningful — it CLEARS the ceiling — so presence decides.
@@ -99,13 +111,14 @@ export async function POST(request: Request) {
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasTurns && !hasTokens && !hasReviewPass) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr) {
     return NextResponse.json(
       {
         error:
           "Invalid body. Expected { enabled: boolean }, { defaultDirectory: string | null }, "
           + "{ effort: string }, { maxTurns: number }, "
-          + "{ tokenLimit: number | null } or { reviewPass: boolean }.",
+          + "{ tokenLimit: number | null }, { reviewPass: boolean } or "
+          + "{ setupComplete: boolean } or { autoPr: boolean }.",
       },
       { status: 400 },
     );
@@ -143,6 +156,14 @@ export async function POST(request: Request) {
     if (hasReviewPass) {
       const saved = await setReviewPass(fields.reviewPass);
       console.error(`[coding-agent] review pass switched ${saved ? "on" : "off"} by the owner`);
+    }
+    if (hasAutoPr) {
+      const saved = await setAutoPr(fields.autoPr);
+      console.error(`[coding-agent] auto pull requests switched ${saved ? "on" : "off"} by the owner`);
+    }
+    if (hasSetupComplete) {
+      const saved = await setSetupComplete(fields.setupComplete);
+      console.error(`[coding-agent] setup wizard marked ${saved ? "finished" : "unfinished"} by the owner`);
     }
     if (hasTokens) {
       const saved = await setTokenLimit(fields.tokenLimit as number | null);

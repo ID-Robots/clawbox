@@ -184,7 +184,7 @@ describe("/setup-api/chat/model", () => {
     expect(body.options.map((option: { model: string | null }) => option.model)).toEqual([
       "deepseek/deepseek-v4-flash",
       "openai/gpt-5.4",
-      "anthropic/claude-sonnet-4-6",
+      "anthropic/claude-sonnet-5",
       "llamacpp/gemma4-e2b-it-q4_0",
     ]);
   });
@@ -619,7 +619,7 @@ describe("/setup-api/chat/model", () => {
       const response = await POST(new Request("http://localhost/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "anthropic/claude-sonnet-4-6" }),
+        body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
       }));
 
       expect(response.status).toBe(409);

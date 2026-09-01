@@ -53,8 +53,8 @@ export default function FreeTierUpgradeCard({ featureName, description }: FreeTi
         <img
           src="/clawbox-crab.png"
           alt=""
-          width={64}
-          height={64}
+          width={48}
+          height={48}
           className="select-none pointer-events-none drop-shadow-[0_0_12px_rgba(249,115,22,0.5)]"
         />
         <div>

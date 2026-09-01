@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
+import HelpTip from "./HelpTip";
 
 /**
  * Settings → System → Desktop environment + Performance mode (TASK-455).
@@ -161,10 +162,17 @@ export default function SystemProfilePanel() {
       {/* Desktop environment */}
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <p className="text-sm text-[var(--text-primary)]">{t("systemProfile.desktopLabel")}</p>
-          <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
-            {t("systemProfile.desktopHelp")}
-          </p>
+          {/* The paragraph under each switch is accurate and long enough that
+              the controls were hard to find among them. Same treatment the
+              Coding Agent settings got: label on the row, prose one tap away. */}
+          <div className="flex items-center gap-1.5">
+            <p className="text-sm text-[var(--text-primary)]">{t("systemProfile.desktopLabel")}</p>
+            <HelpTip
+              text={t("systemProfile.desktopHelp")}
+              label={t("systemProfile.desktopLabel")}
+              testId="system-profile-desktop-help"
+            />
+          </div>
           {desktop && !desktop.supported && (
             <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1">{t("systemProfile.unsupported")}</p>
           )}
@@ -189,10 +197,14 @@ export default function SystemProfilePanel() {
       {/* Performance mode */}
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <p className="text-sm text-[var(--text-primary)]">{t("systemProfile.performanceLabel")}</p>
-          <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
-            {t("systemProfile.performanceHelp")}
-          </p>
+          <div className="flex items-center gap-1.5">
+            <p className="text-sm text-[var(--text-primary)]">{t("systemProfile.performanceLabel")}</p>
+            <HelpTip
+              text={t("systemProfile.performanceHelp")}
+              label={t("systemProfile.performanceLabel")}
+              testId="system-profile-performance-help"
+            />
+          </div>
           {power && !power.supported && (
             <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1">{t("systemProfile.unsupported")}</p>
           )}
@@ -217,14 +229,19 @@ export default function SystemProfilePanel() {
       {power?.limits && (
         <>
           <div className="h-px bg-white/[0.06] my-4" />
-          <p className="text-[11px] text-[var(--text-muted)] opacity-60 leading-relaxed">
-            {t("systemProfile.memoryGuards", {
-              ollama: power.limits.ollama.memoryMax,
-              browser: power.limits.browser.memoryMax,
-              desktop: power.limits.desktop.memoryMax,
-              parallel: String(power.limits.ollamaNumParallel),
-            })}
-          </p>
+          <div className="flex items-center gap-1.5">
+            <p className="text-[11px] text-[var(--text-muted)]">{t("systemProfile.memoryGuardsLabel")}</p>
+            <HelpTip
+              text={t("systemProfile.memoryGuards", {
+                ollama: power.limits.ollama.memoryMax,
+                browser: power.limits.browser.memoryMax,
+                desktop: power.limits.desktop.memoryMax,
+                parallel: String(power.limits.ollamaNumParallel),
+              })}
+              label={t("systemProfile.memoryGuardsLabel")}
+              testId="system-profile-memory-guards-help"
+            />
+          </div>
         </>
       )}
 

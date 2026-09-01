@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import {
   buildNewAppPrompt,
@@ -50,7 +50,30 @@ const NEW_APP_TEMPLATE_LABEL: Record<NewAppTemplate, string> = {
   blank: "codingAgent.newTemplateBlank",
 };
 
+/**
+ * The card's field vocabulary.
+ *
+ * It used to run on `px-2.5 py-1.5 text-xs` inputs — smaller than every other
+ * form on the box, and on a phone the 16px/12px split meant the same control
+ * changed size across the breakpoint. One size, matched to the Coding Agent's
+ * own controls and to the Settings forms: text-sm, py-2, and a focus ring in
+ * the product's coral rather than a bare border change.
+ */
+const FIELD =
+  "w-full rounded-lg bg-black/25 border border-white/[0.10] px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)]/60 outline-none transition-colors focus:border-[var(--coral-bright)]/60 focus:ring-1 focus:ring-[var(--coral-bright)]/25";
+
+const LABEL = "block text-xs font-medium text-[var(--text-secondary)]";
+
 export interface NewAppWizardCardProps {
+  /**
+   * Close when a click lands outside the card.
+   *
+   * On the Coding Agent's home page the card is part of the page, and a stray
+   * click on the page must not throw away what was typed. In the mascot chat it
+   * floats over the composer like a popover, and there the expectation is the
+   * popover one: click away and it goes.
+   */
+  closeOnOutsideClick?: boolean;
   /** The run route's `maxTaskChars`, when the caller has read it. */
   maxTaskChars?: number;
   /** Cancel, and Create once the message is in the chat. */
@@ -66,12 +89,43 @@ export default function NewAppWizardCard({
   onClose,
   onHanded,
   className = "",
+  closeOnOutsideClick = false,
 }: NewAppWizardCardProps) {
   const { t } = useT();
+  const cardRef = useRef<HTMLFormElement | null>(null);
   const [name, setName] = useState("");
   const [what, setWhat] = useState("");
   const [template, setTemplate] = useState<NewAppTemplate>(DEFAULT_NEW_APP_TEMPLATE);
   const [error, setError] = useState<string | null>(null);
+
+  /**
+   * Close on a click outside the card, when the host asked for popover
+   * behaviour.
+   *
+   * `pointerdown`, not `click`: a click that starts inside the card and ends
+   * outside it (a drag from the textarea's resize handle, or selecting text and
+   * releasing past the edge) is not a click away, and `click` fires on the
+   * common ancestor for exactly that gesture. Escape closes it too, which is
+   * the other half of what a popover owes the keyboard.
+   */
+  useEffect(() => {
+    if (!closeOnOutsideClick || !onClose) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const card = cardRef.current;
+      if (!card) return;
+      const target = event.target as Node | null;
+      if (target && !card.contains(target)) onClose();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [closeOnOutsideClick, onClose]);
 
   /**
    * Create: check what the assistant would refuse, compose the one message,
@@ -92,12 +146,13 @@ export default function NewAppWizardCard({
 
   return (
     <form
+      ref={cardRef}
       onSubmit={(e) => { e.preventDefault(); create(); }}
       data-testid="coding-agent-new-card"
-      className={`rounded-xl bg-white/[0.03] border border-[var(--coral-bright)]/30 px-3 py-3 space-y-2.5 ${className}`}
+      className={`rounded-2xl bg-white/[0.03] border border-[var(--coral-bright)]/30 px-4 py-4 space-y-3.5 ${className}`}
     >
-      <p className="text-xs font-medium text-[var(--text-primary)]">{t("codingAgent.newTitle")}</p>
-      <label className="block text-[11px] text-[var(--text-muted)]">
+      <p className="text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.newTitle")}</p>
+      <label className={LABEL}>
         {t("codingAgent.newNameLabel")}
         <input
           type="text"
@@ -107,10 +162,10 @@ export default function NewAppWizardCard({
           placeholder={t("codingAgent.newNamePlaceholder")}
           autoFocus
           data-testid="coding-agent-new-name"
-          className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-base sm:text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-[var(--coral-bright)]/60"
+          className={`${FIELD} mt-1.5`}
         />
       </label>
-      <label className="block text-[11px] text-[var(--text-muted)]">
+      <label className={LABEL}>
         {t("codingAgent.newWhatLabel")}
         <textarea
           value={what}
@@ -119,16 +174,16 @@ export default function NewAppWizardCard({
           rows={3}
           placeholder={t("codingAgent.newWhatPlaceholder")}
           data-testid="coding-agent-new-what"
-          className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-base sm:text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-[var(--coral-bright)]/60 resize-y"
+          className={`${FIELD} mt-1.5 resize-y min-h-[5.5rem]`}
         />
       </label>
-      <label className="block text-[11px] text-[var(--text-muted)]">
+      <label className={LABEL}>
         {t("codingAgent.newTemplateLabel")}
         <select
           value={template}
           onChange={(e) => setTemplate(e.target.value as NewAppTemplate)}
           data-testid="coding-agent-new-template"
-          className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-base sm:text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--coral-bright)]/60"
+          className={`${FIELD} mt-1.5 appearance-none bg-[var(--bg-elevated)] pr-9`}
         >
           {NEW_APP_TEMPLATES.map((tpl) => (
             <option key={tpl} value={tpl}>

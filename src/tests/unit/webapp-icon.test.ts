@@ -102,9 +102,25 @@ beforeEach(async () => {
   process.env.CLAWBOX_ROOT = tmpRoot;
   mocks.hasToken.mockResolvedValue(true);
   mocks.kvGet.mockReturnValue(null);
-  mocks.register.mockResolvedValue(undefined);
+  // The registry is where the icon is drawn now — for EVERY app that reaches
+  // the desktop, not only the ones built from HTML on this box. The stub keeps
+  // the preference write out of this suite while behaving like the real one, so
+  // `deployWebapp` is still covered end to end: deploy -> register -> picture.
+  mocks.register.mockImplementation(async (
+    appId: string,
+    name: string,
+    opts: { color?: string; iconUrl?: string; description?: string } = {},
+  ) => {
+    if (opts.iconUrl) return;
+    void mod.ensureWebappIcon(appId, {
+      name,
+      color: opts.color,
+      description: opts.description,
+    }).catch(() => {});
+  });
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   mod = await import("@/lib/webapp-icon");
+
   installApp("todo-list");
 });
 

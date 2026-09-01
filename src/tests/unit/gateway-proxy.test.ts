@@ -2,6 +2,15 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import fsp from "fs/promises";
 import { NextRequest } from "next/server";
 
+// serveGatewayHTML injects the gateway token ONLY for a caller with an owner
+// session — the page is the one place a gateway credential leaves the device,
+// and several unauthenticated paths used to reach it. Mocked here so each test
+// states which caller it is.
+const ownerSession = vi.fn<() => Promise<boolean>>();
+vi.mock("@/lib/owner-session", () => ({
+  hasOwnerSession: () => ownerSession(),
+}));
+
 vi.mock("fs/promises", () => ({
   default: {
     readFile: vi.fn(),
@@ -23,6 +32,7 @@ describe("gateway-proxy", () => {
     vi.resetModules();
     vi.clearAllMocks();
 
+    ownerSession.mockResolvedValue(true);
     mockFs.readFile.mockResolvedValue(JSON.stringify({
       gateway: { auth: { token: "test-token" } },
     }));
@@ -218,6 +228,31 @@ describe("gateway-proxy", () => {
       const html = await response.text();
 
       expect(html).toContain("my-secret-token");
+    });
+
+    it("withholds the token from a caller with no owner session", async () => {
+      // The security property, not a style choice. `/fonts/zzz`, `/Login`,
+      // `/Manifest.json` and `/SW.JS` all reached this function without a
+      // session — `/fonts/` is an unconditional public prefix and middleware
+      // matched a lower-cased path while the router used the raw one — and each
+      // handed a full gateway credential to the open internet through the
+      // tunnel. The shell is still served; it just carries no token.
+      ownerSession.mockResolvedValue(false);
+      mockFs.readFile.mockResolvedValue(JSON.stringify({
+        gateway: { auth: { token: "my-secret-token" } },
+      }));
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve("<html><body></body></html>"),
+      }));
+
+      const response = await gatewayProxy.serveGatewayHTML(createRequest("http://clawbox.local/fonts/zzz"));
+      const html = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(html).not.toContain("my-secret-token");
+      // Still the app shell, so first boot and the login redirect keep working.
+      expect(html).toContain("clawbox-bar");
     });
 
     it("redirects to setup when gateway returns error", async () => {
