@@ -226,4 +226,51 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
     expect(changed).toBe(false);
     expect(llamacppProvider(cfg)).toEqual({});
   });
+
+  // --- CodeRabbit round on #562 ------------------------------------------
+
+  it("repairs a primary carrying stray whitespace", () => {
+    // The runtime trims before it checks the prefix, so "  llamacpp/x  " starts
+    // the local runtime; without trimming here the repair is skipped and the box
+    // stays mute for a reason nothing reports.
+    writeToken(TOKEN);
+    const { cfg, changed } = migrate({
+      models: { providers: {} },
+      agents: { defaults: { model: { primary: "  llamacpp/gemma4-e2b-it-q4_0  " } } },
+    });
+
+    expect(changed).toBe(true);
+    expect(llamacppProvider(cfg).models?.[0]?.id).toBe("gemma4-e2b-it-q4_0");
+  });
+
+  it("preserves an existing but EMPTY llamacpp provider entry", () => {
+    // {} is falsy, so a .get() check would silently overwrite an operator's
+    // deliberate empty entry, contrary to the migration's preservation contract.
+    writeToken(TOKEN);
+    const { cfg, changed } = migrate({
+      models: { providers: { llamacpp: {} } },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(changed).toBe(false);
+    expect(llamacppProvider(cfg)).toEqual({});
+  });
+
+  it("survives a non-numeric LLAMACPP_CONTEXT_WINDOW instead of aborting pre-start", () => {
+    // int("banana") raised ValueError and took gateway pre-start down with it,
+    // turning a bad env var into a box that never starts at all.
+    writeToken(TOKEN);
+    const { cfg, changed } = migrate(
+      {
+        models: { providers: {} },
+        agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+      },
+      { LLAMACPP_CONTEXT_WINDOW: "banana" },
+    );
+
+    expect(changed).toBe(true);
+    const ctx = llamacppProvider(cfg).models?.[0]?.contextWindow;
+    expect(typeof ctx).toBe("number");
+    expect(ctx).toBeGreaterThan(0);
+  });
 });

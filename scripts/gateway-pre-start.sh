@@ -254,10 +254,14 @@ if isinstance(_primary_now, str):
 _fallbacks_now = model_defaults.get("fallbacks")
 if isinstance(_fallbacks_now, list):
     _llamacpp_refs.extend([f for f in _fallbacks_now if isinstance(f, str)])
-_wants_llamacpp = [r for r in _llamacpp_refs if r.startswith("llamacpp/")]
+# The runtime trims the ref before it checks the prefix, so " llamacpp/x " starts
+# the local runtime but would skip this repair and still fail model resolution.
+_wants_llamacpp = [r.strip() for r in _llamacpp_refs if r.strip().startswith("llamacpp/")]
 
 _mp = cfg.setdefault("models", {}).setdefault("providers", {})
-if _wants_llamacpp and not _mp.get("llamacpp"):
+# Key presence, not truthiness: an existing but empty {} entry is a deliberate
+# operator choice and must be preserved, which .get() would silently overwrite.
+if _wants_llamacpp and "llamacpp" not in _mp:
     # The proxy authenticates openclaw -> Next.js with a per-install bearer
     # (src/lib/local-ai-token.ts). Writing the entry WITHOUT it would trade
     # "Unknown model" for a 401 on every turn, which is not an improvement, so
@@ -281,7 +285,13 @@ if _wants_llamacpp and not _mp.get("llamacpp"):
         )
     else:
         _model_id = _wants_llamacpp[0][len("llamacpp/"):]
-        _ctx = int(os.environ.get("LLAMACPP_CONTEXT_WINDOW") or 0)
+        # A non-numeric override must not abort gateway pre-start: this migration
+        # runs on the path that repairs a mute box, so raising here would turn a
+        # bad env var into a box that never starts at all.
+        try:
+            _ctx = int(os.environ.get("LLAMACPP_CONTEXT_WINDOW") or 0)
+        except ValueError:
+            _ctx = 0
         if _ctx < 16384:
             _ctx = 131072
         _proxy_root = (
