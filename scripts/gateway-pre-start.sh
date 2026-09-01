@@ -292,6 +292,97 @@ if isinstance(primary_model, str) and primary_model.lower() in (
     model_defaults["primary"] = "llamacpp/gemma4-e2b-it-q4_0"
     changed = True
 
+# Migration: a primary (or fallback) that names `llamacpp/<model>` while
+# `models.providers.llamacpp` is absent. OpenClaw ships an `ollama` plugin but
+# NO llamacpp one, so `llamacpp/*` resolves ONLY through an explicit provider
+# entry. Without it every chat turn dies before the agent can reply:
+#
+#   [model-fallback/decision] decision=candidate_failed
+#       requested=llamacpp/gemma4-e2b-it-q4_0 reason=model_not_found next=none
+#   Embedded agent failed before reply: Unknown model: llamacpp/gemma4-e2b-it-q4_0
+#
+# Measured on a freshly-provisioned Orin Nano: `models.providers` was `{}` from
+# the install onward, and the dead-Anthropic migration directly above then moved
+# `primary` onto the local model — swapping one unresolvable id for another and
+# leaving the box just as mute. The device's OWN status route reports the model
+# `available: true` the whole time (it reads the llamacpp runtime, which is
+# genuinely installed and answers on its proxy), so nothing surfaces the gap.
+#
+# `ai-models/configure` writes this entry on the local-AI path, but a box that
+# reaches llamacpp through the migration above — or through an image that
+# pre-set `primary` — never runs that route. Same shape, and the same fix, as
+# the OpenRouter provider-def migration further down.
+#
+# Keep in step with the isLlamaCpp branch of
+# src/app/setup-api/ai-models/configure/route.ts and the constants in
+# src/lib/llamacpp.ts; a shell migration cannot import them.
+_llamacpp_refs = []
+_primary_now = model_defaults.get("primary")
+if isinstance(_primary_now, str):
+    _llamacpp_refs.append(_primary_now)
+_fallbacks_now = model_defaults.get("fallbacks")
+if isinstance(_fallbacks_now, list):
+    _llamacpp_refs.extend([f for f in _fallbacks_now if isinstance(f, str)])
+# The runtime trims the ref before it checks the prefix, so " llamacpp/x " starts
+# the local runtime but would skip this repair and still fail model resolution.
+_wants_llamacpp = [r.strip() for r in _llamacpp_refs if r.strip().startswith("llamacpp/")]
+
+_mp = cfg.setdefault("models", {}).setdefault("providers", {})
+# Key presence, not truthiness: an existing but empty {} entry is a deliberate
+# operator choice and must be preserved, which .get() would silently overwrite.
+if _wants_llamacpp and "llamacpp" not in _mp:
+    # The proxy authenticates openclaw -> Next.js with a per-install bearer
+    # (src/lib/local-ai-token.ts). Writing the entry WITHOUT it would trade
+    # "Unknown model" for a 401 on every turn, which is not an improvement, so
+    # a box with no token file is left alone and told why.
+    _token_path = os.path.join(
+        os.environ.get("CLAWBOX_ROOT", "/home/clawbox/clawbox"), "data", ".local-ai-token"
+    )
+    try:
+        with open(_token_path) as _tf:
+            _local_ai_token = _tf.read().strip()
+    except OSError:
+        _local_ai_token = ""
+
+    if len(_local_ai_token) < 16:
+        print(
+            "  Skipped llamacpp provider repair: "
+            + _wants_llamacpp[0]
+            + " is configured but "
+            + _token_path
+            + " is missing or too short, so the proxy would reject every call."
+        )
+    else:
+        _model_id = _wants_llamacpp[0][len("llamacpp/"):]
+        # A non-numeric override must not abort gateway pre-start: this migration
+        # runs on the path that repairs a mute box, so raising here would turn a
+        # bad env var into a box that never starts at all.
+        try:
+            _ctx = int(os.environ.get("LLAMACPP_CONTEXT_WINDOW") or 0)
+        except ValueError:
+            _ctx = 0
+        if _ctx < 16384:
+            _ctx = 131072
+        _proxy_root = (
+            os.environ.get("CLAWBOX_LOCAL_AI_PROXY_BASE_URL") or "http://127.0.0.1"
+        ).strip().rstrip("/")
+        _mp["llamacpp"] = {
+            "baseUrl": _proxy_root + "/setup-api/local-ai/llamacpp/v1",
+            "api": "openai-completions",
+            "apiKey": _local_ai_token,
+            "models": [{
+                "id": _model_id,
+                "name": _model_id,
+                "reasoning": False,
+                "input": ["text"],
+                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                "contextWindow": _ctx,
+                "maxTokens": _ctx,
+            }],
+        }
+        changed = True
+        print("  Repaired models.providers.llamacpp for " + _wants_llamacpp[0])
+
 # Model migration: legacy ChatGPT-subscription devices can have their active
 # model — or a fallback — stored as `openai/<gpt>` from before the setup UI
 # routed ChatGPT picks through Codex. On a device with ChatGPT (Codex OAuth)
