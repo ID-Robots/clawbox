@@ -379,6 +379,45 @@ describe("updater", () => {
       );
     });
 
+    it("fails when an overrun post_update later settles with a systemd error result", async () => {
+      const timeoutErr = Object.assign(new Error("Command failed"), { killed: true });
+      setupExecFileMock({
+        "start clawbox-root-update@post_update.service": timeoutErr,
+        "show clawbox-root-update@post_update.service -p ActiveState": {
+          stdout: "failed\n",
+          stderr: "",
+        },
+        "show clawbox-root-update@post_update.service -p Result": {
+          stdout: "exit-code\n",
+          stderr: "",
+        },
+        "/usr/bin/journalctl -u clawbox-root-update@post_update.service": {
+          stdout: "post_update exited with status 1\n",
+          stderr: "",
+        },
+        "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: "", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
+      expect(postStep?.status).toBe("failed");
+      expect(postStep?.error).toBe("post_update exited with status 1");
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
     it("fails the continuation when gateway verification still finds no known recovery path", async () => {
       setupExecFileMock({
         "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
@@ -496,11 +535,11 @@ describe("updater", () => {
       expect(restartIndexes[0]).toBeGreaterThan(unmaskIndexes[1]);
     });
 
-    it("does not consent an unrelated plugin when the gateway reported no Codex blocker", async () => {
+    it("does not re-enable an explicitly disabled unused Codex plugin from a stale journal line", async () => {
       setupExecFileMock({
         "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
         "/usr/bin/journalctl -u clawbox-gateway.service": {
-          stdout: "gateway stopped for updater maintenance\n",
+          stdout: "Plugin \"codex\" requires capability consent\n",
           stderr: "",
         },
         ping: { stdout: "", stderr: "" },
@@ -512,7 +551,15 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockReadFile.mockImplementation(async (file) => {
+        if (String(file).endsWith("/openclaw.json")) {
+          return JSON.stringify({
+            agents: { defaults: { model: { primary: "openai/gpt-5.6-sol" } } },
+            plugins: { entries: { codex: { enabled: false } } },
+          });
+        }
+        throw new Error("ENOENT");
+      });
       mockIsPortOpen.mockImplementation(async () =>
         mockExecFile.mock.calls.some(([cmd, args]) =>
           cmd === "/usr/bin/sudo"

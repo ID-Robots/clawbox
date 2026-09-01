@@ -168,6 +168,10 @@ async function getRootStepResult(stepId: string): Promise<string | null> {
   }
 }
 
+function rootStepResultFailed(result: string | null): boolean {
+  return result !== null && result !== "success";
+}
+
 /** Read .next/BUILD_ID — regenerated on every successful `next build`. */
 async function readBuildId(): Promise<string> {
   try {
@@ -192,7 +196,7 @@ async function waitForRebuildToTakeOver(): Promise<never> {
   let message = "Rebuild did not restart the device within the expected window";
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5_000));
-    if ((await getRootStepResult(REBUILD_ROOT_STEP)) === "failed") {
+    if (rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP))) {
       const lastLog = await readRootStepFailure(REBUILD_ROOT_STEP);
       message = lastLog
         ? `Rebuild failed: ${lastLog}`
@@ -871,6 +875,7 @@ async function runCurrentGatewayPreStart(): Promise<void> {
 /** Accept only the ClawBox-managed plugin named by a concrete gateway error. */
 async function repairCodexCapabilityConsent(journal: string): Promise<void> {
   if (!CODEX_CAPABILITY_CONSENT_RE.test(journal)) return;
+  if (!(await codexCapabilityRepairIsAllowed())) return;
   await execFile(
     OPENCLAW_BIN,
     ["plugins", "enable", "codex", "--accept-capabilities"],
@@ -878,11 +883,75 @@ async function repairCodexCapabilityConsent(journal: string): Promise<void> {
   );
 }
 
+/** Respect an owner-disabled unused Codex plugin even if old logs mention it. */
+async function codexCapabilityRepairIsAllowed(): Promise<boolean> {
+  const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
+  const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
+    || process.env.OPENCLAW_HOME
+    || path.join(home, ".openclaw");
+  const configPath = process.env.OPENCLAW_CONFIG || path.join(openclawHome, "openclaw.json");
+  try {
+    const cfg = JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>;
+    const plugins = cfg.plugins && typeof cfg.plugins === "object"
+      ? cfg.plugins as Record<string, unknown>
+      : {};
+    const entries = plugins.entries && typeof plugins.entries === "object"
+      ? plugins.entries as Record<string, unknown>
+      : {};
+    const codex = entries.codex && typeof entries.codex === "object"
+      ? entries.codex as Record<string, unknown>
+      : null;
+    if (codex?.enabled !== false) return true;
+
+    const agents = cfg.agents && typeof cfg.agents === "object"
+      ? cfg.agents as Record<string, unknown>
+      : {};
+    const defaults = agents.defaults && typeof agents.defaults === "object"
+      ? agents.defaults as Record<string, unknown>
+      : {};
+    const model = defaults.model && typeof defaults.model === "object"
+      ? defaults.model as Record<string, unknown>
+      : {};
+    const modelRefs = [model.primary, ...(Array.isArray(model.fallbacks) ? model.fallbacks : [])];
+    if (modelRefs.some((ref) =>
+      typeof ref === "string" && /^(?:codex|openai-codex)\//i.test(ref.trim()),
+    )) return true;
+
+    const models = defaults.models && typeof defaults.models === "object"
+      ? defaults.models as Record<string, unknown>
+      : {};
+    if (Object.values(models).some((settings) => {
+      if (!settings || typeof settings !== "object") return false;
+      const runtime = (settings as Record<string, unknown>).agentRuntime;
+      return !!runtime && typeof runtime === "object"
+        && String((runtime as Record<string, unknown>).id || "").toLowerCase() === "codex";
+    })) return true;
+
+    const auth = cfg.auth && typeof cfg.auth === "object"
+      ? cfg.auth as Record<string, unknown>
+      : {};
+    const profiles = auth.profiles && typeof auth.profiles === "object"
+      ? auth.profiles as Record<string, unknown>
+      : {};
+    return Object.entries(profiles).some(([id, profile]) =>
+      /^(?:codex|openai-codex):/i.test(id)
+        || (!!profile && typeof profile === "object"
+          && /^(?:codex|openai-codex)$/i.test(
+            String((profile as Record<string, unknown>).provider || ""),
+          )),
+    );
+  } catch {
+    // Missing/malformed config has no explicit opt-out. The concrete current-
+    // boot gateway refusal remains the authority in that recovery case.
+    return true;
+  }
+}
+
 async function readGatewayJournalTail(): Promise<string> {
   try {
     const { stdout } = await execFile(
       "/usr/bin/journalctl",
-      ["-u", "clawbox-gateway.service", "-n", "160", "--no-pager"],
+      ["-u", "clawbox-gateway.service", "-b", "-n", "160", "--no-pager"],
       { timeout: 10_000, maxBuffer: 2 * 1024 * 1024 },
     );
     return stdout;
@@ -1201,7 +1270,7 @@ async function execAsRootWithGatewayQuiesced(stepId: string, timeoutMs: number):
       // runtime mask in place until the unit truly exits, otherwise the
       // advisory-overrun path would launch gateway_verify against it.
       await waitForRootStepToSettle(stepId);
-      if ((await getRootStepResult(stepId)) === "failed") {
+      if (rootStepResultFailed(await getRootStepResult(stepId))) {
         throw new Error(
           (await readRootStepFailure(stepId)) ?? `${stepId} failed after exceeding its wait budget`,
         );
@@ -1552,7 +1621,7 @@ export async function checkContinuation(): Promise<boolean> {
   // power cycle; the BUILD_ID can't). Legacy boolean flags (written by the
   // previous updater version) carry no build identity — for those only the
   // unit check applies.
-  const unitFailed = (await getRootStepResult(REBUILD_ROOT_STEP)) === "failed";
+  const unitFailed = rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP));
   const recordedBuildId = typeof needsContinuation === "string" ? needsContinuation : null;
   const buildUnchanged = recordedBuildId !== null && recordedBuildId === (await readBuildId());
   if (unitFailed || buildUnchanged) {
@@ -1730,7 +1799,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       // Only let the unit's journal override the error when the unit actually
       // FAILED — on a generic budget overrun its last journal line can still
       // be whatever fixup happened to finish most recently.
-      if (step.requiresRoot && (await getRootStepResult(step.id)) === "failed") {
+      if (step.requiresRoot && rootStepResultFailed(await getRootStepResult(step.id))) {
         const rootFailure = await readRootStepFailure(step.id);
         if (rootFailure) message = rootFailure;
       }
