@@ -18,12 +18,14 @@ import {
   tailLlamaCppLog,
   writeLlamaCppPid,
 } from "@/lib/llamacpp-server";
+import { startRootStep } from "@/lib/root-step-runner";
 
 const MODEL_ID_RE = /^[a-zA-Z0-9._:-]+$/;
 const encoder = new TextEncoder();
 const execFile = promisify(execFileCb);
 const CLAWBOX_HOME_DIR = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
 const LLAMACPP_INSTALL_SERVICE = "clawbox-root-update@llamacpp_install.service";
+const LLAMACPP_INSTALL_STEP = "llamacpp_install";
 // Must stay >= TimeoutStartSec in config/clawbox-root-update@.service so
 // systemd, not us, owns the kill. A cold box builds llama.cpp from source with
 // CUDA and downloads a multi-GB GGUF; 30 min was not enough and the install
@@ -121,15 +123,10 @@ function isUnitRunning(active: string): boolean {
 async function repairLlamaCppRuntime(
   onStatus: (line: string) => void,
 ): Promise<{ ok: boolean; error?: string }> {
-  await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", LLAMACPP_INSTALL_SERVICE], {
-    timeout: 10_000,
-  }).catch(() => {});
-
   try {
-    await execFile(
-      "/usr/bin/sudo",
-      ["/usr/bin/systemctl", "start", "--no-block", LLAMACPP_INSTALL_SERVICE],
-      { timeout: SYSTEMCTL_QUERY_TIMEOUT_MS },
+    await startRootStep(
+      LLAMACPP_INSTALL_STEP,
+      { noBlock: true, timeoutMs: SYSTEMCTL_QUERY_TIMEOUT_MS },
     );
   } catch (err) {
     const failureLine = await readLlamaCppInstallFailure();

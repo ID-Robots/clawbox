@@ -292,7 +292,7 @@ d("check-sudoers-coverage", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/GRANTS \(\d+\):/);
     expect(r.stdout).toContain("/usr/local/libexec/clawbox/optimize-ollama.sh");
-    expect(r.stdout).toContain("/usr/bin/systemctl start clawbox-root-update@chpasswd.service");
+    expect(r.stdout).toContain("/usr/local/libexec/clawbox/clawbox-run-root-step.sh");
     expect(r.stdout).toMatch(/RESOLVED CALL SITES:/);
   });
 
@@ -318,10 +318,9 @@ describe("the call sites the allow-list has to cover", () => {
   it.runIf(CAN_RUN)("covers the wizard, updater, power, wifi, desktop and factory-reset paths", async () => {
     const out = (await shipped).list.stdout;
     for (const expected of [
-      // setup wizard: hostname + hotspot hand-off, and the chpasswd hand-off
-      "sudo /usr/bin/systemctl start clawbox-root-update@set_hostname.service",
-      "sudo /usr/bin/systemctl start clawbox-root-update@restart_ap.service",
-      "sudo /usr/bin/systemctl start clawbox-root-update@chpasswd.service",
+      // setup wizard hand-offs, the updater and the UI install buttons all go
+      // through the one root-owned launcher now (TASK-539).
+      "sudo /usr/local/libexec/clawbox/clawbox-run-root-step.sh",
       // power menu
       "sudo /usr/bin/systemctl reboot",
       "sudo /usr/bin/systemctl poweroff",

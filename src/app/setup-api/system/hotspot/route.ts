@@ -5,6 +5,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { get, setMany, getAll } from "@/lib/config-store";
 import { parseNmcliTerseLine } from "@/lib/network";
+import { startRootStep } from "@/lib/root-step-runner";
 
 const execFileAsync = promisify(execFile);
 
@@ -160,17 +161,7 @@ export async function POST(request: Request) {
             "[hotspot] Box is a WiFi client; deferring AP restart to avoid severing the connection"
           );
         } else {
-          // reset-failed first — see the note in system/hostname/route.ts.
-          await execFileAsync("/usr/bin/sudo", [
-            "/usr/bin/systemctl",
-            "reset-failed",
-            "clawbox-root-update@restart_ap.service",
-          ]).catch(() => {});
-          await execFileAsync("/usr/bin/sudo", [
-            "/usr/bin/systemctl",
-            "start",
-            "clawbox-root-update@restart_ap.service",
-          ]);
+          await startRootStep("restart_ap");
           apAction = "restarted";
         }
       } else {

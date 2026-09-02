@@ -3,6 +3,11 @@ import { installSessionFixture, type SessionFixture } from "@/tests/helpers/sess
 import * as childProcess from "child_process";
 import fs from "fs/promises";
 
+vi.mock("@/lib/root-step-runner", () => ({
+  ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
+  startRootStep: vi.fn(async () => {}),
+}));
+
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
 }));
@@ -52,6 +57,7 @@ vi.mock("@/lib/login-rate-limit", () => ({
 import { resetUpdateState } from "@/lib/updater";
 import { getSystemUsername } from "@/lib/auth";
 import { startOllamaService } from "@/lib/local-ai-runtime";
+import { startRootStep } from "@/lib/root-step-runner";
 
 type ReaddirResult = Awaited<ReturnType<typeof fs.readdir>>;
 
@@ -355,27 +361,18 @@ describe("POST /setup-api/setup/reset", () => {
     expect(chpasswdCall![1]).toBe("clawbox:clawbox\n");
     expect((chpasswdCall![2] as { mode: number }).mode).toBe(0o600);
 
-    // The root systemd service must have been started — without it, the
-    // file we just wrote is just an inert text file.
-    const startCall = mockExecFile.mock.calls.find(
-      ([cmd, args]) =>
-        cmd === "/usr/bin/sudo" &&
-        args?.[0] === "/usr/bin/systemctl" &&
-        args?.[1] === "start" &&
-        args?.[2] === "clawbox-root-update@chpasswd.service",
-    );
-    expect(startCall).toBeDefined();
+    // The root step must have been started — without it, the file we just
+    // wrote is just an inert text file. Through the root-owned launcher now:
+    // the unprivileged systemctl call this replaced only worked because of the
+    // unscoped polkit `manage-units` grant. TASK-539.
+    expect(vi.mocked(startRootStep)).toHaveBeenCalledWith("chpasswd", expect.anything());
   });
 
   it("continues the reset when the password reset fails (non-fatal)", async () => {
     // chpasswd service failure must not strand the user on a half-reset box;
     // the wizard's CredentialsStep on first boot re-prompts and overwrites.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    setupExecFileMock({
-      "systemctl start clawbox-root-update@chpasswd": new Error("polkit denied"),
-      systemctl: { stdout: "", stderr: "" },
-      nmcli: { stdout: "", stderr: "" },
-    });
+    vi.mocked(startRootStep).mockRejectedValueOnce(new Error("not permitted"));
 
     const res = await resetPost();
     const body = await res.json();
@@ -466,11 +463,7 @@ describe("POST /setup-api/setup/reset", () => {
     // writeFile succeeds but the service start fails: the plaintext credential
     // must be unlinked so it isn't left readable on disk.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    setupExecFileMock({
-      "systemctl start clawbox-root-update@chpasswd": new Error("polkit denied"),
-      systemctl: { stdout: "", stderr: "" },
-      nmcli: { stdout: "", stderr: "" },
-    });
+    vi.mocked(startRootStep).mockRejectedValueOnce(new Error("not permitted"));
 
     await resetPost();
     errSpy.mockRestore();
@@ -708,7 +701,9 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     expect(res.status).toBe(500);
     const calls = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[])?.join(" ")}`);
     expect(calls.some((c) => c.includes("connection delete"))).toBe(false);
-    expect(calls.some((c) => c.includes("clawbox-root-update@chpasswd"))).toBe(false);
+    // The password reset goes through the mocked root-step launcher, never
+    // execFile — asserting on the exec transcript here would always pass.
+    expect(vi.mocked(startRootStep)).not.toHaveBeenCalledWith("chpasswd", expect.anything());
     expect(calls.some((c) => c.includes("systemctl reboot"))).toBe(false);
   });
 });

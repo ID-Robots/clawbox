@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { startRootStep } from "@/lib/root-step-runner";
 
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-hostname-tests-${process.pid}-${Date.now()}`);
 const HOSTNAME_ENV_PATH = path.join(TEST_ROOT, "data", "hostname.env");
@@ -11,6 +12,11 @@ const setControlUiAllowedOriginsMock = vi.fn();
 const restartGatewayMock = vi.fn();
 const getMock = vi.fn();
 const setMock = vi.fn();
+
+vi.mock("@/lib/root-step-runner", () => ({
+  ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
+  startRootStep: vi.fn(async () => {}),
+}));
 
 vi.mock("child_process", () => ({
   execFile: (
@@ -145,8 +151,9 @@ describe("/setup-api/system/hostname POST", () => {
     expect(body.fqdn).toBe("happy.local");
   });
 
-  it("returns 500 when systemd command fails (but persists state)", async () => {
-    execFileMock.mockReturnValue({ error: new Error("Failed to start unit") });
+  it("returns 500 when the root step fails (but persists state)", async () => {
+    execFileMock.mockReturnValue({ stdout: "" });
+    vi.mocked(startRootStep).mockRejectedValueOnce(new Error("Failed to start unit"));
     const mod = await import("@/app/setup-api/system/hostname/route");
     const res = await mod.POST(makeRequest({ hostname: "stillpersisted" }));
     expect(res.status).toBe(500);

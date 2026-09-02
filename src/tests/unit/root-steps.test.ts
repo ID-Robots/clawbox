@@ -1,7 +1,13 @@
 import fs from "fs";
 import path from "path";
 import { describe, expect, it } from "vitest";
-import { SELF_UPDATING_ROOT_STEPS, UI_ROOT_STEPS, isUiRootStep, maySelfUpdate } from "@/lib/root-steps";
+import {
+  SELF_UPDATING_ROOT_STEPS,
+  UI_ROOT_STEPS,
+  WEB_ROOT_STEPS,
+  isUiRootStep,
+  maySelfUpdate,
+} from "@/lib/root-steps";
 
 /**
  * The root-privilege boundary is: clawbox-setup (User=clawbox) →
@@ -12,6 +18,7 @@ import { SELF_UPDATING_ROOT_STEPS, UI_ROOT_STEPS, isUiRootStep, maySelfUpdate } 
 
 const REPO = path.resolve(__dirname, "../../..");
 const DISPATCHER = path.join(REPO, "config", "clawbox-root-step.sh");
+const LAUNCHER = path.join(REPO, "config", "clawbox-run-root-step.sh");
 const UNIT = path.join(REPO, "config", "clawbox-root-update@.service");
 const INSTALL_SH = path.join(REPO, "install.sh");
 const SUDOERS = [
@@ -128,16 +135,38 @@ describe("root-executed paths are outside clawbox's write access", () => {
       }
     }
 
-    // The instances the web server really starts, spelled out.
-    const primary = read(SUDOERS[0]);
-    for (const step of ["chpasswd", "set_hostname", "restart_ap", "llamacpp_install"]) {
-      expect(primary).toContain(`clawbox-root-update@${step}.service`);
+    // And no rule names a systemd UNIT for the root-step template at all: the
+    // web server reaches those through the root-owned launcher, which builds the
+    // unit name itself from a step it has checked. TASK-539.
+    const primary = grantsIn(SUDOERS[0]);
+    for (const grant of primary) {
+      expect(grant, `a root-step unit is still named in a grant: ${grant}`)
+        .not.toContain("clawbox-root-update@");
     }
-    // The update family runs through the updater's own root chain, not through
-    // a sudo grant the web server can reach.
-    for (const step of SELF_UPDATING_ROOT_STEPS) {
-      expect(primary, `${step} must not be startable through sudo`)
-        .not.toContain(`clawbox-root-update@${step}.service`);
+    expect(primary).toContain("/usr/local/libexec/clawbox/clawbox-run-root-step.sh");
+  });
+
+  it("keeps the launcher's list identical to the TypeScript one", () => {
+    // The launcher is the outer bound on what the WEB SERVER may start as root,
+    // and it is the only thing config/clawbox-sudoers grants for that purpose.
+    // If the two lists drift, either a product feature stops working or a step
+    // becomes startable that nobody reviewed.
+    const shell = shellList(read(LAUNCHER), "WEB_ROOT_STEPS");
+    expect([...shell].sort()).toEqual([...WEB_ROOT_STEPS].sort());
+  });
+
+  it("keeps the web-startable list inside the dispatcher's own allow-list", () => {
+    const allowed = new Set(shellList(read(DISPATCHER), "ALLOWED_STEPS"));
+    for (const step of WEB_ROOT_STEPS) {
+      expect(allowed.has(step), `${step} is web-startable but the dispatcher refuses it`).toBe(true);
+    }
+    // ...and strictly narrower: the dispatcher also covers operator-only steps.
+    expect(WEB_ROOT_STEPS.length).toBeLessThan(allowed.size);
+  });
+
+  it("offers every UI step through the launcher", () => {
+    for (const step of UI_ROOT_STEPS) {
+      expect(WEB_ROOT_STEPS.includes(step), `${step} is a UI button with no way to start`).toBe(true);
     }
   });
 

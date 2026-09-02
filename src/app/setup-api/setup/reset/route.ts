@@ -10,7 +10,7 @@ import { resetUpdateState } from "@/lib/updater";
 import { DATA_DIR } from "@/lib/config-store";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { getSystemUsername } from "@/lib/auth";
-import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, chpasswdRecord } from "@/lib/chpasswd";
+import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, CHPASSWD_STEP, chpasswdRecord } from "@/lib/chpasswd";
 import { FACTORY_DEFAULT_PASSWORD } from "@/lib/system-password";
 import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
 import { readEdition } from "@/lib/edition-source";
@@ -20,6 +20,7 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
+import { startRootStep } from "@/lib/root-step-runner";
 
 const execFile = promisify(execFileCb);
 
@@ -372,12 +373,7 @@ async function resetSystemPasswordToDefault(): Promise<void> {
       chpasswdRecord(getSystemUsername(), FACTORY_DEFAULT_PASSWORD),
       { mode: 0o600 },
     );
-    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", CHPASSWD_SERVICE_NAME], {
-      timeout: 10_000,
-    }).catch(() => {});
-    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", CHPASSWD_SERVICE_NAME], {
-      timeout: 30_000,
-    });
+    await startRootStep(CHPASSWD_STEP, { timeoutMs: 30_000 });
     console.log("[Reset] System password reset to factory default");
   } catch (err) {
     // The input file carries a plaintext credential — scrub it on failure.
@@ -555,18 +551,8 @@ export async function POST(request: Request) {
     // 6b. Reset mDNS hostname to "clawbox" (avahi + hostnamectl). Data dir is
     // already wiped, so clawbox-root-update@set_hostname.service will read the
     // default and apply it before the reboot.
-    // reset-failed first — see the same note in system/hostname/route.ts.
-    await execFile("/usr/bin/sudo", [
-      "/usr/bin/systemctl",
-      "reset-failed",
-      "clawbox-root-update@set_hostname.service",
-    ], { timeout: 10_000 }).catch(() => {});
     try {
-      await execFile("/usr/bin/sudo", [
-        "/usr/bin/systemctl",
-        "start",
-        "clawbox-root-update@set_hostname.service",
-      ], { timeout: 10_000 });
+      await startRootStep("set_hostname", { timeoutMs: 10_000 });
     } catch (err) {
       console.warn("[Reset] Failed to reset hostname:", err instanceof Error ? err.message : err);
     }

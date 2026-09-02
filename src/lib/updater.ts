@@ -15,6 +15,7 @@ import { runHermesCli } from "./hermes-cli";
 import { isPortOpen } from "./port-probe";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
+import { startRootStep } from "./root-step-runner";
 import { collectBuildIdentity } from "./build-identity";
 
 const PROJECT_DIR = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
@@ -236,13 +237,7 @@ async function readRootStepFailure(stepId: string): Promise<string | null> {
  * Used for steps that will kill the current process (rebuild, reboot).
  */
 async function startRootServiceFireAndForget(stepId: string): Promise<void> {
-  const service = `clawbox-root-update@${stepId}.service`;
-  execFile("/usr/bin/systemctl", ["reset-failed", service], {
-    timeout: 10_000,
-  }).catch(() => {});
-  await execFile("/usr/bin/systemctl", ["start", "--no-block", service], {
-    timeout: 10_000,
-  });
+  await startRootStep(stepId, { noBlock: true, timeoutMs: 10_000 });
 }
 
 /**
@@ -1271,20 +1266,19 @@ function applicableSteps(): UpdateStepDef[] {
 
 /**
  * Runs a root-privileged step via the clawbox-root-update@ systemd template
- * service. The main service runs as clawbox with NoNewPrivileges=true, so
- * privilege escalation is handled by systemd: the template service runs as
- * root, and polkit authorizes the clawbox user to start it.
+ * service. The main service runs as clawbox with NoNewPrivileges=true, so the
+ * escalation is systemd's: the template service runs as root.
+ *
+ * Through the root-owned launcher, not `systemctl start` directly. This used to
+ * be an unprivileged systemctl call authorised by the unscoped polkit
+ * `manage-units` grant -- the same action that authorises `systemd-run`, i.e.
+ * arbitrary root with no password. TASK-539.
  */
 async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
   const serviceName = `clawbox-root-update@${stepId}.service`;
-  await execFile("/usr/bin/systemctl", ["reset-failed", serviceName], {
-    timeout: 10_000,
-  }).catch(() => {});
   const startedAt = Date.now();
   try {
-    await execFile("/usr/bin/systemctl", ["start", serviceName], {
-      timeout: timeoutMs + 30_000,
-    });
+    await startRootStep(stepId, { timeoutMs: timeoutMs + 30_000 });
   } catch (err) {
     // When OUR timeout kills the blocking `systemctl start`, the unit itself
     // usually keeps running (it has its own much larger TimeoutStartSec) and

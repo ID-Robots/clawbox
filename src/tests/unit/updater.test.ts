@@ -260,7 +260,7 @@ describe("updater", () => {
 
     it("uses the root step journal output when a root update step fails", async () => {
       setupExecFileMock({
-        "start clawbox-root-update@apt_update.service": new Error("systemctl failed"),
+        "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
         // The journal only overrides the error when the unit reports failed.
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
         "/usr/bin/journalctl": {
@@ -300,7 +300,7 @@ describe("updater", () => {
       // most recently and must NOT be presented as the failure.
       const timeoutErr = Object.assign(new Error("Command failed"), { killed: true });
       setupExecFileMock({
-        "start clawbox-root-update@apt_update.service": timeoutErr,
+        "clawbox-run-root-step.sh apt_update": timeoutErr,
         "show clawbox-root-update@apt_update.service": { stdout: "success\n", stderr: "" },
         "/usr/bin/journalctl": {
           stdout: "Linkdown routing sysctl installed\n",
@@ -338,7 +338,7 @@ describe("updater", () => {
       // re-runs everything) on a successful update.
       const timeoutErr = Object.assign(new Error("Command failed"), { killed: true });
       setupExecFileMock({
-        "start clawbox-root-update@post_update.service": timeoutErr,
+        "clawbox-run-root-step.sh post_update": timeoutErr,
         "show clawbox-root-update@post_update.service -p ActiveState": { stdout: "inactive\n", stderr: "" },
         "show clawbox-root-update@post_update.service -p Result": { stdout: "success\n", stderr: "" },
         ping: { stdout: "", stderr: "" },
@@ -383,7 +383,10 @@ describe("updater", () => {
     it("fails when an overrun post_update later settles with a systemd error result", async () => {
       const timeoutErr = Object.assign(new Error("Command failed"), { killed: true });
       setupExecFileMock({
-        "start clawbox-root-update@post_update.service": timeoutErr,
+        // The root step goes through the sudo launcher now (TASK-539), so the
+        // simulated client timeout has to land on that call — an injection at
+        // `systemctl start clawbox-root-update@…` would never fire.
+        "clawbox-run-root-step.sh post_update": timeoutErr,
         "show clawbox-root-update@post_update.service -p ActiveState": {
           stdout: "failed\n",
           stderr: "",
@@ -424,7 +427,7 @@ describe("updater", () => {
 
     it("fails the continuation when gateway verification still finds no known recovery path", async () => {
       setupExecFileMock({
-        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         "/usr/bin/journalctl -u clawbox-gateway.service": {
           stdout: "gateway crashed for an unrelated reason\n",
           stderr: "",
@@ -455,7 +458,7 @@ describe("updater", () => {
 
     it("serializes post_update and repairs reported Codex consent before one recovery restart", async () => {
       setupExecFileMock({
-        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         "/usr/bin/journalctl -u clawbox-gateway.service": {
           stdout: "Plugin \"codex\" requires capability consent\n[sqlite/transaction] SQLite transaction lock wait failed\n",
           stderr: "",
@@ -501,7 +504,7 @@ describe("updater", () => {
         `${cmd} ${(args as string[]).join(" ")}`,
       );
       const postUpdateIndex = calls.findIndex((call) =>
-        call.includes("systemctl start clawbox-root-update@post_update.service"),
+        call.includes("/usr/bin/sudo -n /usr/local/libexec/clawbox/clawbox-run-root-step.sh post_update"),
       );
       const preStartIndex = calls.findIndex((call) =>
         call.includes("/bin/bash") && call.includes("scripts/gateway-pre-start.sh"),
@@ -550,7 +553,7 @@ describe("updater", () => {
         "plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities": new Error(
           "Codex repair timed out",
         ),
-        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         "/usr/bin/journalctl -u clawbox-gateway.service": {
           stdout: "Plugin \"codex\" requires capability consent\n",
           stderr: "",
@@ -595,7 +598,7 @@ describe("updater", () => {
     it("retries a failed maintenance unmask and surfaces the cleanup failure", async () => {
       setupExecFileMock({
         "systemctl --runtime unmask clawbox-gateway.service": new Error("unmask failed"),
-        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -628,7 +631,7 @@ describe("updater", () => {
 
     it("does not re-enable an explicitly disabled unused Codex plugin from a stale journal line", async () => {
       setupExecFileMock({
-        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         "/usr/bin/journalctl -u clawbox-gateway.service": {
           stdout: "Plugin \"codex\" requires capability consent\n",
           stderr: "",
@@ -673,7 +676,7 @@ describe("updater", () => {
 
     it("records explicit consent but does not restart when current pre-start fails", async () => {
       setupExecFileMock({
-        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         "/usr/bin/journalctl -u clawbox-gateway.service": {
           stdout: "Plugin \"codex\" requires capability consent\n",
           stderr: "",
@@ -717,7 +720,7 @@ describe("updater", () => {
 
     it("quarantines known legacy gateway blockers and completes when the gateway recovers", async () => {
       setupExecFileMock({
-        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         "/usr/bin/journalctl -u clawbox-gateway.service": {
           stdout: "conflicting plugin install metadata\nopenclaw-agent.sqlite belongs to agent piper; requested agent carl_pir\n",
           stderr: "",
@@ -761,7 +764,7 @@ describe("updater", () => {
 
     it("stops the update sequence when bootstrap_updater fails", async () => {
       setupExecFileMock({
-        "start clawbox-root-update@bootstrap_updater.service": new Error("systemctl failed"),
+        "clawbox-run-root-step.sh bootstrap_updater": new Error("systemctl failed"),
         "show clawbox-root-update@bootstrap_updater.service": { stdout: "failed\n", stderr: "" },
         "/usr/bin/journalctl": {
           stdout: "fatal: invalid branch name in .update-branch\n",
@@ -806,7 +809,7 @@ describe("updater", () => {
         `${cmd} ${(args as string[]).join(" ")}`,
       );
       const installIndex = calls.findIndex((call) =>
-        call.includes("systemctl start clawbox-root-update@openclaw_install.service"),
+        call.includes("/usr/bin/sudo -n /usr/local/libexec/clawbox/clawbox-run-root-step.sh openclaw_install"),
       );
       const firstMaskIndex = calls.findIndex((call) =>
         call.includes("systemctl --runtime mask clawbox-gateway.service"),

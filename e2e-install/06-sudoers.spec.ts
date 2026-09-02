@@ -118,10 +118,8 @@ test.describe("root escalation surface", () => {
     for (const [what, needle] of [
       ["factory reset / power menu", "/usr/bin/systemctl reboot"],
       ["power menu", "/usr/bin/systemctl poweroff"],
-      ["password change", "/usr/bin/systemctl start clawbox-root-update@chpasswd.service"],
-      ["hostname change", "/usr/bin/systemctl start clawbox-root-update@set_hostname.service"],
-      ["hotspot restart", "/usr/bin/systemctl start clawbox-root-update@restart_ap.service"],
-      ["llama.cpp installer hand-off", "/usr/bin/systemctl start --no-block clawbox-root-update@llamacpp_install.service"],
+      ["every root step: password, hostname, hotspot, updater, install buttons",
+        "/usr/local/libexec/clawbox/clawbox-run-root-step.sh"],
       ["gateway restart after a config write", "/usr/bin/systemctl restart clawbox-gateway.service"],
       ["web server restart (force-update.sh)", "/usr/bin/systemctl restart clawbox-setup.service"],
       ["Settings → Local Models", "/usr/bin/systemctl disable --now ollama.service"],
@@ -204,26 +202,48 @@ test.describe("root escalation surface", () => {
     // matches again this test fails without having started anything real.
     const PAD = "e2e-nonexistent-probe.service";
     const probes: Record<string, string> = {
-      [`reset-failed clawbox-root-update@chpasswd.service ${PAD}`]: "DENIED",
-      [`reset-failed clawbox-root-update@llamacpp_install.service ${PAD}`]: "DENIED",
-      [`start clawbox-root-update@chpasswd.service ${PAD}`]: "DENIED",
-      [`start --no-block clawbox-setup.service ${PAD}`]: "DENIED",
-      // No grant names an instance outside the four the product issues, so the
-      // template is no longer a way to run an arbitrary step as root. (Those
-      // instances stay reachable through the unscoped polkit `manage-units`
-      // grant until TASK-539 removes it — this asserts the allow-list, not the
-      // whole surface.)
-      "start clawbox-root-update@e2e-not-a-step.service": "DENIED",
-      "start --no-block clawbox-root-update@e2e-not-a-step.service": "DENIED",
-      // Control: something the product really issues still runs without a
-      // password, so a pass above cannot just be "sudo denies everything".
-      // reset-failed on a unit that never ran is a no-op.
-      "reset-failed clawbox-root-update@chpasswd.service": "ALLOWED",
+      [`/usr/bin/systemctl start --no-block clawbox-setup.service ${PAD}`]: "DENIED",
+      [`/usr/bin/systemctl start clawbox-root-update@chpasswd.service ${PAD}`]: "DENIED",
+      // No rule names a root-step UNIT at all any more: those go through the
+      // launcher, which takes a STEP and builds the unit itself. TASK-539.
+      "/usr/bin/systemctl start clawbox-root-update@chpasswd.service": "DENIED",
+      "/usr/bin/systemctl start clawbox-root-update@git_pull.service": "DENIED",
+      // Control: the launcher is granted, and a step it refuses still exits
+      // non-zero from ITS check rather than from sudo's. `--help` is neither, so
+      // it proves the grant matches without starting anything.
+      "/usr/local/libexec/clawbox/clawbox-run-root-step.sh --help": "ALLOWED",
     };
-    const answers = await sudoCovers(Object.keys(probes).map((c) => `/usr/bin/systemctl ${c}`));
+    const answers = await sudoCovers(Object.keys(probes));
     for (const [cmd, want] of Object.entries(probes)) {
-      expect(answers[`/usr/bin/systemctl ${cmd}`], `sudo -n /usr/bin/systemctl ${cmd}`).toBe(want);
+      expect(answers[cmd], `sudo -n ${cmd}`).toBe(want);
     }
+  });
+
+  test("the unscoped polkit grant is gone (GAP 1 / TASK-539)", async () => {
+    // `org.freedesktop.systemd1.manage-units` is the action systemd checks for
+    // StartTransientUnit, so authorising it with no unit condition — which is
+    // all a .pkla can do on polkit 0.105 — is `systemd-run /bin/sh -c …`:
+    // arbitrary root, no password, for the account the web server runs as. It
+    // made the whole sudoers allow-list bypassable.
+    const probe = async (action: string) =>
+      (await dockerExec(
+        ["bash", "-lc", `pkcheck --action-id ${action} --process $$ >/dev/null 2>&1 && echo AUTHORIZED || echo NOT-AUTHORIZED`],
+        { user: "clawbox" },
+      )).trim();
+
+    expect(await probe("org.freedesktop.systemd1.manage-units")).toBe("NOT-AUTHORIZED");
+    // Controls, so a pass above cannot be "polkit answers no to everything
+    // because pkcheck is missing or the session is not what we think".
+    expect(await probe("org.freedesktop.systemd1.manage-unit-files")).toBe("NOT-AUTHORIZED");
+    expect(await probe("org.freedesktop.NetworkManager.wifi.scan")).toBe("AUTHORIZED");
+
+    const pkla = await dockerExec([
+      "bash", "-lc",
+      "cat /etc/polkit-1/localauthority/50-local.d/49-clawbox-updates.pkla 2>&1 || true",
+    ]);
+    expect(pkla).not.toContain("systemd1.manage-units");
+    expect(pkla, "the NetworkManager grant is scoped and still needed by nmcli")
+      .toContain("NetworkManager.wifi.scan");
   });
 
   test("root records the code it is allowed to run (GAP 2)", async () => {

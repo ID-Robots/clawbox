@@ -2,6 +2,11 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
 import fs from "fs/promises";
 
+vi.mock("@/lib/root-step-runner", () => ({
+  ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
+  startRootStep: vi.fn(async () => {}),
+}));
+
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
 }));
@@ -20,11 +25,13 @@ vi.mock("@/lib/config-store", () => ({
 }));
 
 import { get, setMany, getAll } from "@/lib/config-store";
+import { startRootStep } from "@/lib/root-step-runner";
 
 const mockGet = vi.mocked(get);
 const mockSetMany = vi.mocked(setMany);
 const mockGetAll = vi.mocked(getAll);
 const mockExecFile = vi.mocked(childProcess.execFile);
+const mockStartRootStep = vi.mocked(startRootStep);
 const mockFs = vi.mocked(fs);
 
 function setupExecFileMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
@@ -249,6 +256,10 @@ describe("/setup-api/system/hotspot", () => {
     });
 
     it("continues even if AP toggle fails", async () => {
+      // The restart runs through the root-step launcher now, so that is where
+      // the failure has to be injected — a throwing systemctl no longer
+      // reaches this path at all.
+      mockStartRootStep.mockRejectedValueOnce(new Error("Service failed"));
       setupExecFileMock({
         systemctl: new Error("Service failed"),
         bash: new Error("Script failed"),
@@ -289,6 +300,7 @@ describe("/setup-api/system/hotspot", () => {
       });
 
       it("names a failed AP restart as failed, and says why", async () => {
+        mockStartRootStep.mockRejectedValueOnce(new Error("Service failed"));
         setupExecFileMock({
           systemctl: new Error("Service failed"),
           bash: new Error("Script failed"),
