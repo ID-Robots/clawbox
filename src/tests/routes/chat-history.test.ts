@@ -90,6 +90,20 @@ describe("/setup-api/chat/history", () => {
     expect(row.idempotencyKey).toBe("run-1");
   });
 
+  it("hands back which model and provider served a reply", async () => {
+    // HERMES-05: the store had carried these since the switch fix, and this
+    // route dropped them on the floor — so the bubble could never show them.
+    writeTranscript([
+      { role: "assistant", text: "Hi.", timestamp: 1, model: "deepseek-v4-flash", provider: "clawai" },
+      { role: "assistant", text: "Older.", timestamp: 2 },
+    ]);
+    const { GET } = await load();
+    const [served, older] = (await (await GET(request())).json()).messages;
+    expect(served).toMatchObject({ model: "deepseek-v4-flash", provider: "clawai" });
+    expect(older).not.toHaveProperty("model");
+    expect(older).not.toHaveProperty("provider");
+  });
+
   it("is an empty conversation, not an error, on a box that has said nothing", async () => {
     const { GET } = await load();
     const res = await GET(request());

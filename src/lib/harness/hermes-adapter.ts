@@ -490,6 +490,12 @@ export class HermesAdapter implements HarnessAdapter {
         audio: reply.audio,
         ...(thinking ? { reasoning: thinking } : {}),
         ...(toolCalls.length ? { toolCalls } : {}),
+        // What answered, as the route recorded it — the dashboard's own
+        // session info after any switch, or the argv the CLI ran with. Not
+        // `req.model`: that is what was ASKED for, and the two disagreeing is
+        // the whole reason the record exists.
+        ...(typeof data.model === "string" && data.model ? { model: data.model } : {}),
+        ...(typeof data.provider === "string" && data.provider ? { provider: data.provider } : {}),
       };
     } catch (err) {
       throw asHarnessError(err, "upstream");

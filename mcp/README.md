@@ -74,7 +74,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 ### Orientation — call these first
 | Tool | What it does |
 |---|---|
-| `device_status` | Edition, agent, AI provider/model, configured context/output limits, thinking level, free disk, update waiting. One call, independent timeouts, dead legs report `"unknown"`. |
+| `device_status` | Edition, agent, the device's **default** AI provider/model/thinking (`ai.device_default` — a chat may run a per-session override, and `ai.current_chat` says the tool cannot see it), configured context/output limits, free disk, update waiting. One call, independent timeouts, dead legs report `"unknown"`. |
 | `clawbox_health` | Is the device API reachable and is our token accepted. Separates auth from connectivity. |
 | `clawbox_context` | The device field guide plus the webapp storage/styling rules. |
 
@@ -112,6 +112,16 @@ prompt-injection payload with a financial outcome. The plan is reported by
 `device_status`; changing it is one click in Settings → AI.
 
 There is also no thinking/reasoning setter yet — see "Work owned by others".
+
+Everything here reads and writes the **device default** (`~/.hermes/config.yaml`),
+and says so: `ai_list_models` reports it as `device_default`, never `in_use`,
+and `ai_set_provider` / `ai_set_model` answer "device default is now …". The chat
+a tool call arrives from may be running a per-session override chosen in its
+header, and this server cannot see it — it is one stdio child shared by every
+Hermes session, started with a filtered environment (`mcp/lib/profile.ts`) and
+called with no session id. The model that served each reply is printed under
+that reply in the ClawBox chat; the payloads point there in `current_chat`, so
+the agent never answers "which model are you" from a tool.
 
 ### Pictures
 

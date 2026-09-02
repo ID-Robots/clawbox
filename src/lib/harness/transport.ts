@@ -291,6 +291,9 @@ export interface TurnResult {
   readonly reasoning?: string;
   /** The steps the agent took to answer, in call order. */
   readonly toolCalls?: readonly ChatToolSummary[];
+  /** What actually served this turn (not what was asked for), as the harness reports it. */
+  readonly model?: string;
+  readonly provider?: string;
   /**
    * True when the harness merely ACKNOWLEDGED the turn and the answer will
    * arrive by another route (the gateway's own event stream). The caller must

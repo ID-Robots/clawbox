@@ -6,11 +6,18 @@ import { join } from "path";
 import { apiTry, apiToken, API_BASE, authHeader } from "../lib/api";
 import { DEFAULT_CWD } from "../lib/guard";
 import { json, text, type Registrar } from "../lib/register";
-import { reported } from "../lib/report";
+import { CURRENT_CHAT_MODEL_NOTE, hermesDeviceDefault, reported } from "../lib/report";
 import type { McpContext } from "../lib/context";
 import { WEBAPP_KV_CLIENT_SNIPPET } from "../../src/lib/webapp-sandbox";
 
 const FIELD_GUIDE_PATH = join(DEFAULT_CWD, "Clawbox.md");
+
+// The OpenClaw edition's hedge on CURRENT_CHAT_MODEL_NOTE. The chat header's
+// pick is POSTed to /setup-api/chat/model, which writes the box default AND
+// applies it to every agent session, so the two normally agree — but a session
+// can still carry an override, and this process cannot see one either way.
+const OPENCLAW_CURRENT_CHAT_NOTE =
+  "not visible here; on this edition the chat header writes device_default, so they normally agree, but a session can still carry an override this tool cannot see.";
 
 // Moved wholesale out of webapp_create / code_project_init: those descriptions
 // were 700+ chars of tutorial that a small model had to read on every
@@ -146,7 +153,7 @@ function rootDisk(stats: StatsPayload | null) {
 export function registerOrientationTools(reg: Registrar, ctx: McpContext): void {
   reg.tool(
     "device_status",
-    "Report what this ClawBox is: edition, active agent, AI provider and model, the active model's configured context/output limits, thinking level, free disk space, and whether a software update is waiting. Call this before answering any question about the device itself or its model limits. Any part that cannot be read reports \"unknown\" instead of failing the whole call.",
+    "Report what this ClawBox is: edition, active agent, the device's default AI provider and model (not necessarily the one answering this chat), the default model's configured context/output limits, thinking level, free disk space, and whether a software update is waiting. Call this before answering any question about the device itself or its model limits. Any part that cannot be read reports \"unknown\" instead of failing the whole call.",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core" },
     async () => {
@@ -170,11 +177,14 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
       // surface the server's instructions tell every model to call FIRST, so a
       // blank here is the likeliest of all of them to be filled in with a
       // plausible-sounding model name.
+      //
+      // `device_default`, not bare `provider`/`model`: the bare keys were read
+      // as "the model I am" on a live box — see CURRENT_CHAT_MODEL_NOTE.
       const ai =
         ctx.edition === "hermes"
           ? {
-              provider: reported(hermesModels?.provider),
-              model: reported(hermesModels?.current),
+              device_default: hermesDeviceDefault(hermesModels),
+              current_chat: CURRENT_CHAT_MODEL_NOTE,
               // The instructions tell the model to read `ai.limits` before
               // stating any context/output limit. Hermes has no configured-limit
               // source to read (readConfiguredModelLimits() parses the OpenClaw
@@ -183,19 +193,23 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
               // key is the one answer that sends the model back to its training
               // memory for a number.
               limits: "unknown",
-              thinking: reported(hermesModels?.reasoning),
               // READ ONLY. Changing the plan changes what the customer is
               // billed, so there is deliberately no tool that switches it:
-              // point the user at Settings -> AI instead.
+              // point the user at Settings -> AI instead. `is_device_default`,
+              // not `in_use`: `active` is whether config.yaml's provider is
+              // ClawBox AI — the same default, one key down.
               clawbox_ai: clawai
-                ? { signed_in: clawai.hasToken === true, tier: reported(clawai.tier), in_use: clawai.active === true }
+                ? { signed_in: clawai.hasToken === true, tier: reported(clawai.tier), is_device_default: clawai.active === true }
                 : "unknown",
             }
           : {
-              provider: reported(chatModel?.selected?.provider),
-              model: reported(chatModel?.selected?.model ?? chatModel?.current),
+              device_default: {
+                provider: reported(chatModel?.selected?.provider),
+                model: reported(chatModel?.selected?.model ?? chatModel?.current),
+                thinking: "unknown",
+              },
+              current_chat: OPENCLAW_CURRENT_CHAT_NOTE,
               limits: readConfiguredModelLimits(),
-              thinking: "unknown",
             };
 
       return json({

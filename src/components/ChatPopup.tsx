@@ -259,7 +259,7 @@ import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS } from '@/components/NewAppWizardCard' 
 import { CloudTtsWarning } from '@/components/CloudTtsWarning'
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
-import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
+import { shortModelPillLabel, lastModelSegment, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
 
 // ── Waiting for a generated picture ─────────────────────────────────────────
 //
@@ -3350,6 +3350,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // replayed from the transcript have to be the same bubble.
       ...(result.reasoning ? { reasoning: result.reasoning } : {}),
       ...(result.toolCalls?.length ? { toolCalls: [...result.toolCalls] } : {}),
+      // What answered, as the harness recorded it — kept on the message so the
+      // live bubble and the one replayed from the transcript say the same.
+      ...(result.model ? { model: result.model } : {}),
+      ...(result.provider ? { provider: result.provider } : {}),
     }])
     // Pair the synchronous guard with the state on EVERY completion path, not
     // just the failing one: the drain effect and both send handlers decide from
@@ -4538,6 +4542,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const shownText = isLongUser && !userExpanded
             ? `${bodyText.slice(0, USER_CLAMP_CHARS).trimEnd()}…`
             : bodyText;
+          // Which model actually answered, as the turn recorded it. The header
+          // pills are a request; this is the record — the one thing on screen
+          // that settles "which model are you" after a mid-conversation
+          // switch. Provider by its full display name, model by its last
+          // segment (the full id is the title); nothing when not recorded.
+          const served = msg.role === 'assistant' && msg.model
+            ? `${msg.provider ? `${hermesProviderName(msg.provider)} · ` : ''}${lastModelSegment(msg.model)}`
+            : null;
           return (
             <div key={i} style={{
               display: 'flex',
@@ -4706,6 +4718,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 )}
                 {msg.role === 'assistant' && msg.reasoning && (
                   <ReasoningDisclosure reasoning={msg.reasoning} label={t("chat.reasoning")} />
+                )}
+                {served && (
+                  <div
+                    data-testid="chat-served-model"
+                    title={msg.model}
+                    style={{ marginTop: 4, fontSize: 10.5, lineHeight: 1.3, color: 'rgba(255,255,255,0.35)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                  >
+                    {served}
+                  </div>
                 )}
               </div>
             </div>

@@ -411,15 +411,16 @@ describe("ai_list_models — what is in use, and what fits", () => {
     if (out.isError) throw new Error("ai_list_models failed");
     const body = JSON.parse(out.text);
     expect(body.asked_about).toBe("zai");
-    expect(JSON.stringify(body.in_use)).not.toMatch(/"provider"\s*:\s*"zai"/);
-    expect(String(body.in_use)).toMatch(/ai_list_models with no arguments/);
+    expect(JSON.stringify(body.device_default)).not.toMatch(/"provider"\s*:\s*"zai"/);
+    expect(String(body.device_default)).toMatch(/ai_list_models with no arguments/);
   });
 
   it("reports the real provider and model on an unfiltered call", async () => {
     apiGet.mockResolvedValue(CATALOGUE);
     const out = await ai().call("ai_list_models", {});
     if (out.isError) throw new Error("ai_list_models failed");
-    expect(JSON.parse(out.text).in_use).toEqual({ provider: "clawlocal", model: "llama3.2:3b" });
+    // Under `device_default`, never `in_use` — HERMES-05, mcp-served-model-honesty.test.ts.
+    expect(JSON.parse(out.text).device_default).toEqual({ provider: "clawlocal", model: "llama3.2:3b", thinking: "minimal" });
   });
 
   /**
@@ -442,15 +443,14 @@ describe("ai_list_models — what is in use, and what fits", () => {
     const out = await ai().call("ai_list_models", {});
     if (out.isError) throw new Error("ai_list_models failed");
     const body = JSON.parse(out.text);
-    expect(body.in_use).toEqual({ provider: "unknown", model: "unknown" });
-    expect(body.thinking).toBe("unknown");
+    expect(body.device_default).toEqual({ provider: "unknown", model: "unknown", thinking: "unknown" });
   });
 
   it("treats a whitespace-only field as unreported too", async () => {
     apiGet.mockResolvedValue({ provider: "  ", current: "\t", reasoning: " ", models: [], providers: [] });
     const out = await ai().call("ai_list_models", {});
     if (out.isError) throw new Error("ai_list_models failed");
-    expect(JSON.parse(out.text).in_use).toEqual({ provider: "unknown", model: "unknown" });
+    expect(JSON.parse(out.text).device_default).toEqual({ provider: "unknown", model: "unknown", thinking: "unknown" });
   });
 
   /**
@@ -1078,9 +1078,7 @@ describe("device_status — nothing read is reported as unknown", () => {
 
     const { ai } = await body("hermes");
 
-    expect(ai.provider).toBe("unknown");
-    expect(ai.model).toBe("unknown");
-    expect(ai.thinking).toBe("unknown");
+    expect(ai.device_default).toEqual({ provider: "unknown", model: "unknown", thinking: "unknown" });
   });
 
   it("emits ai.limits on Hermes, because the server's instructions tell the model to read it", async () => {
@@ -1099,7 +1097,7 @@ describe("device_status — nothing read is reported as unknown", () => {
 
     const { ai } = await body("hermes");
 
-    expect(ai).toMatchObject({ provider: "clawlocal", model: "llama3.2:3b", thinking: "minimal" });
+    expect(ai.device_default).toEqual({ provider: "clawlocal", model: "llama3.2:3b", thinking: "minimal" });
   });
 
   it("applies the same guard to the OpenClaw branch, which reads the same shape", async () => {
@@ -1107,7 +1105,6 @@ describe("device_status — nothing read is reported as unknown", () => {
 
     const { ai } = await body("openclaw");
 
-    expect(ai.provider).toBe("unknown");
-    expect(ai.model).toBe("unknown");
+    expect(ai.device_default).toMatchObject({ provider: "unknown", model: "unknown" });
   });
 });
