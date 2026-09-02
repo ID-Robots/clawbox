@@ -175,9 +175,32 @@ function hasOpenAiApiKeyProfile(config: OpenClawConfig): boolean {
   });
 }
 
-/** A ChatGPT sign-in the INSTALLED core can route — see src/lib/chatgpt-subscription.ts. */
-function hasCodexOauthProfile(config: OpenClawConfig): boolean {
-  return hasChatgptOauthProfile(config.auth?.profiles);
+/**
+ * The OpenAI credential facts every routing decision in POST turns on, read
+ * ONCE and before any branch a request-supplied value chooses. A check that
+ * only runs on one side of a user-chosen condition reads as a check the user
+ * can skip (CodeQL js/user-controlled-bypass), and it costs one config read
+ * the request was going to make for any OpenAI pick anyway.
+ */
+interface OpenAiCredentials {
+  /** An OpenAI API-key profile: `openai/*` is a keyed route on this box. */
+  hasApiKey: boolean;
+  /** A ChatGPT sign-in the core can route — see src/lib/chatgpt-subscription.ts. */
+  hasChatgptSignIn: boolean;
+  /** A ChatGPT sign-in filed the OpenClaw 1 way, which the core never consults. */
+  hasStaleChatgptProfile: boolean;
+}
+
+async function readOpenAiCredentials(
+  getConfig: () => Promise<OpenClawConfig | null>,
+): Promise<OpenAiCredentials> {
+  const config = await getConfig();
+  const profiles = config?.auth?.profiles;
+  return {
+    hasApiKey: !!config && hasOpenAiApiKeyProfile(config),
+    hasChatgptSignIn: hasChatgptOauthProfile(profiles),
+    hasStaleChatgptProfile: hasLegacyChatgptProfile(profiles),
+  };
 }
 
 /**
@@ -187,7 +210,7 @@ function hasCodexOauthProfile(config: OpenClawConfig): boolean {
  * it where the core looks; nothing else does (doctor leaves a bare `codex:*`
  * id alone). Same shape as the other refusals so the popup can act on `kind`.
  */
-function refuseLegacyChatgptSignIn(): NextResponse {
+function refuseStaleChatgptProfile(): NextResponse {
   return NextResponse.json(
     {
       error: "Your ChatGPT sign-in predates this OpenClaw version and cannot be used for chat any more. "
@@ -197,6 +220,45 @@ function refuseLegacyChatgptSignIn(): NextResponse {
     },
     { status: 409 },
   );
+}
+
+/**
+ * Where a pick that names OpenAI goes, or null when it is not the
+ * subscription's business (a keyed `openai/*` on an API-key box, any other
+ * provider). `codex/<id>` is a stale tab or an old stored primary — OpenClaw 2
+ * has no such namespace, the same model is `openai/<id>`; an `openai/<id>` on
+ * a box whose only OpenAI credential is the sign-in IS the subscription
+ * (sending it to api.openai.com 401s "Missing bearer"). Both are written as
+ * `openai/<id>` with the Codex runtime armed on it; the ChatGPT surface rule
+ * judges the id afterwards, on the reference that will be written.
+ *
+ * Applied at every door the primary write has — the custom-model branch, an
+ * id already in `state.options`, and {"source":"primary"} — with the facts
+ * read up front, so no door reaches the write with the retired namespace.
+ */
+function resolveChatgptPick(
+  ref: string,
+  parsed: { provider: string; modelId: string },
+  credentials: OpenAiCredentials,
+): { model: string } | { refusal: NextResponse } | null {
+  const legacy = isLegacyCodexRef(ref);
+  if (!legacy && !(parsed.provider === "openai" && !credentials.hasApiKey)) return null;
+  if (!credentials.hasChatgptSignIn) {
+    if (credentials.hasStaleChatgptProfile) return { refusal: refuseStaleChatgptProfile() };
+    // No sign-in at all: a legacy ref falls to the provider-configured check,
+    // a keyless `openai/*` pick is the API-key case the message names.
+    if (legacy) return null;
+    return { refusal: refuseKeylessOpenAiModel(parsed.modelId) };
+  }
+  if (legacy) return { model: canonicalChatgptModelRef(ref) };
+  if (CODEX_SUPPORTED_MODEL_RE.test(parsed.modelId)) return { model: chatgptModelRef(parsed.modelId) };
+  return { refusal: refuseKeylessOpenAiModel(parsed.modelId) };
+}
+
+function refuseKeylessOpenAiModel(modelId: string): NextResponse {
+  return NextResponse.json({
+    error: `${modelId} requires OpenAI API-key mode. ChatGPT subscription auth supports GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, and GPT-5.4 Mini.`,
+  }, { status: 400 });
 }
 
 /**
@@ -302,10 +364,14 @@ function sortPrimaryOptions(options: ChatModelOption[]) {
   });
 }
 
-async function loadChatModelState() {
+/**
+ * `preloaded` is the config POST has already read for its own routing facts,
+ * so one request reads openclaw.json once; GET reads it here.
+ */
+async function loadChatModelState(preloaded?: OpenClawConfig) {
   const [configStore, openclawConfig, storedPrimaryModel] = await Promise.all([
     getAll(),
-    readConfig().catch(() => ({} as OpenClawConfig)),
+    preloaded ?? readConfig().catch(() => ({} as OpenClawConfig)),
     sqliteGet(PRIMARY_MODEL_KEY).catch(() => null),
   ]);
   const authProfiles = openclawConfig.auth?.profiles ?? {};
@@ -578,7 +644,10 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const state = await loadChatModelState();
+    // One read of openclaw.json for the request: the state below and every
+    // credential fact the routing turns on come from the same snapshot.
+    const preloadedConfig = await readConfig().catch(() => null);
+    const state = await loadChatModelState(preloadedConfig ?? {});
     // Set wherever a pick is resolved onto the ChatGPT subscription: that
     // route is written under `openai/`, so the namespace cannot say so and
     // the runtime arm below has to be told.
@@ -598,7 +667,7 @@ export async function POST(request: Request) {
     if (disabledRefusal) return disabledRefusal;
 
     let targetModel: string | null = null;
-    let authConfig: OpenClawConfig | null | undefined;
+    let authConfig: OpenClawConfig | null | undefined = preloadedConfig;
     const getAuthConfig = async () => {
       if (authConfig === undefined) {
         authConfig = await readConfig().catch(() => null);
@@ -622,6 +691,7 @@ export async function POST(request: Request) {
       }
       return surfaceIds;
     };
+    const openAiCredentials = await readOpenAiCredentials(getAuthConfig);
 
     if (typeof body.model === "string" && body.model.trim()) {
       const requestedModel = body.model.trim();
@@ -641,41 +711,13 @@ export async function POST(request: Request) {
         }
         let effectiveModel = requestedModel;
         let effectiveProvider = parsed.provider;
-        let effectiveModelId = parsed.modelId;
-        if (isLegacyCodexRef(requestedModel)) {
-          // A `codex/<id>` from a stale tab or an old stored pick. OpenClaw 2
-          // has no such namespace: the same model is `openai/<id>` — when the
-          // box holds a sign-in the core can use. When it only holds the
-          // OpenClaw 1 one, the honest answer is the re-sign-in, not a write
-          // the core refuses with a CLI sentence.
-          const openclawConfig = await getAuthConfig();
-          if (!openclawConfig || !hasCodexOauthProfile(openclawConfig)) {
-            return refuseLegacyChatgptSignIn();
-          }
+        const effectiveModelId = parsed.modelId;
+        const chatgptPick = resolveChatgptPick(requestedModel, parsed, openAiCredentials);
+        if (chatgptPick && "refusal" in chatgptPick) return chatgptPick.refusal;
+        if (chatgptPick) {
           chatgptRouted = true;
           effectiveProvider = "openai";
-          effectiveModel = canonicalChatgptModelRef(requestedModel);
-        } else if (parsed.provider === "openai") {
-          const openclawConfig = await getAuthConfig();
-          const hasOpenAiKey = !!openclawConfig && hasOpenAiApiKeyProfile(openclawConfig);
-          const hasCodexOauth = !!openclawConfig && hasCodexOauthProfile(openclawConfig);
-          if (!hasOpenAiKey && hasCodexOauth && CODEX_SUPPORTED_MODEL_RE.test(parsed.modelId)) {
-            // Legacy/pre-hotfix UI state sometimes submits openai/gpt-5.5
-            // even though the device is configured with ChatGPT subscription
-            // auth. Sending that to api.openai.com 401s with "Missing bearer"
-            // because there is no OpenAI API key. Route the same visible GPT
-            // choice through the ChatGPT account: the same `openai/<id>`, with
-            // the Codex runtime armed on it below.
-            chatgptRouted = true;
-            effectiveModelId = parsed.modelId;
-            effectiveModel = chatgptModelRef(parsed.modelId);
-          } else if (!hasOpenAiKey && hasLegacyChatgptProfile(openclawConfig?.auth?.profiles)) {
-            return refuseLegacyChatgptSignIn();
-          } else if (!hasOpenAiKey) {
-            return NextResponse.json({
-              error: `${parsed.modelId} requires OpenAI API-key mode. ChatGPT subscription auth supports GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, and GPT-5.4 Mini.`,
-            }, { status: 400 });
-          }
+          effectiveModel = chatgptPick.model;
         }
         // Both surface rules judge the EFFECTIVE id — the one this request
         // will actually write — not the one that arrived: the openai block
@@ -813,31 +855,15 @@ export async function POST(request: Request) {
       );
     }
 
+    // The other two doors — an id already in `state.options`, and a pick
+    // restored through {"source":"primary"} — get the same rule as the
+    // custom-model branch, on the resolved target.
     const targetParsed = parseModelSlug(targetModel);
-    if (isLegacyCodexRef(targetModel)) {
-      // The other two doors — an id already in `state.options`, and a pick
-      // restored through {"source":"primary"} — can carry a `codex/<id>` stored
-      // before the core upgrade. Same rule as the custom-model branch.
-      const openclawConfig = await getAuthConfig();
-      if (!openclawConfig || !hasCodexOauthProfile(openclawConfig)) {
-        return refuseLegacyChatgptSignIn();
-      }
+    const targetChatgptPick = targetParsed ? resolveChatgptPick(targetModel, targetParsed, openAiCredentials) : null;
+    if (targetChatgptPick && "refusal" in targetChatgptPick) return targetChatgptPick.refusal;
+    if (targetChatgptPick) {
       chatgptRouted = true;
-      targetModel = canonicalChatgptModelRef(targetModel);
-    } else if (targetParsed?.provider === "openai") {
-      const openclawConfig = await getAuthConfig();
-      const hasOpenAiKey = !!openclawConfig && hasOpenAiApiKeyProfile(openclawConfig);
-      const hasCodexOauth = !!openclawConfig && hasCodexOauthProfile(openclawConfig);
-      if (!hasOpenAiKey && hasCodexOauth && CODEX_SUPPORTED_MODEL_RE.test(targetParsed.modelId)) {
-        chatgptRouted = true;
-        targetModel = chatgptModelRef(targetParsed.modelId);
-      } else if (!hasOpenAiKey && hasLegacyChatgptProfile(openclawConfig?.auth?.profiles)) {
-        return refuseLegacyChatgptSignIn();
-      } else if (!hasOpenAiKey) {
-        return NextResponse.json({
-          error: `${targetParsed.modelId} requires OpenAI API-key mode. ChatGPT subscription auth supports GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, and GPT-5.4 Mini.`,
-        }, { status: 400 });
-      }
+      targetModel = targetChatgptPick.model;
     }
 
     // Second site, on the RESOLVED target — the openai guard above is applied
