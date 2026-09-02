@@ -838,6 +838,21 @@ describe("/setup-api/chat/model", () => {
       expect(row).toMatchObject({ available: false, reauthRequired: true, model: "openai/gpt-5.5" });
     });
 
+    it("greys the row even when the primary is still written as codex/<id> — the sign-in cannot run it", async () => {
+      // The active model registers its row available before the profile loop
+      // runs; a box upgraded with `codex/gpt-5.5` as primary AND only the old
+      // sign-in showed an available row with no reason, and the pick then 409ed.
+      vi.mocked(readConfig).mockResolvedValue({
+        ...LEGACY_BOX,
+        agents: { defaults: { model: { primary: "codex/gpt-5.5" } } },
+      } as never);
+
+      const body = await (await GET()).json();
+
+      const row = body.options.find((option: { provider: string }) => option.provider === "codex");
+      expect(row).toMatchObject({ available: false, reauthRequired: true, model: "codex/gpt-5.5" });
+    });
+
     it("refuses a pick on a sign-in the core cannot use with the next step, before any write", async () => {
       vi.mocked(readConfig).mockResolvedValue(LEGACY_BOX as never);
 

@@ -495,14 +495,17 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
   }
 
   // A ChatGPT sign-in OpenClaw 2 cannot use (filed as `codex:default` by an
-  // older ClawBox) still gets its row — greyed, with the reason — rather than
-  // an available row whose pick the core then refuses, and rather than
-  // vanishing, which reads as "never connected".
-  if (!configuredPrimaryOptions.has(CHATGPT_UI_PROVIDER) && hasLegacyChatgptProfile(authProfiles)) {
+  // older ClawBox) gets its row greyed, with the reason — whether the row was
+  // missing or was registered available above from a primary still written
+  // as `codex/<id>` — rather than an available row whose pick the core then
+  // refuses, and rather than vanishing, which reads as "never connected".
+  if (hasLegacyChatgptProfile(authProfiles) && !hasChatgptOauthProfile(authProfiles)) {
+    const existing = configuredPrimaryOptions.get(CHATGPT_UI_PROVIDER);
+    const model = existing?.model ?? chatgptModelRef(CHATGPT_DEFAULT_MODEL_ID);
     configuredPrimaryOptions.set(CHATGPT_UI_PROVIDER, {
-      id: chatgptModelRef(CHATGPT_DEFAULT_MODEL_ID),
+      id: existing?.id ?? model,
       label: labelForProvider(CHATGPT_UI_PROVIDER, "AI Provider"),
-      model: chatgptModelRef(CHATGPT_DEFAULT_MODEL_ID),
+      model,
       provider: CHATGPT_UI_PROVIDER,
       available: false,
       reauthRequired: true,
