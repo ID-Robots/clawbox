@@ -22,6 +22,7 @@ vi.mock("fs/promises", () => ({
     mkdir: vi.fn(),
     rm: vi.fn(),
     unlink: vi.fn(),
+    readdir: vi.fn(),
   },
 }));
 
@@ -119,6 +120,7 @@ import {
   restartGateway,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
+  runOpenclawDoctorFix,
   applyModelOverrideToAllAgentSessions,
   inferConfiguredLocalModel,
   setProviderPlugins,
@@ -205,6 +207,16 @@ function jsonRequest(body: unknown): Request {
   });
 }
 
+/** The wizard's Claude sign-in save, with `body` overriding its fields. */
+function subscribe(body: Record<string, unknown> = {}) {
+  return jsonRequest({
+    provider: "anthropic",
+    apiKey: "oauth-access-token",
+    authMode: "subscription",
+    ...body,
+  });
+}
+
 /**
  * Every mock this route needs, back to its happy-path default, plus a freshly
  * imported handler. Module-level because BOTH subscription surfaces are tested
@@ -221,6 +233,7 @@ async function primeConfigureRoute(): Promise<(request: Request) => Promise<Resp
   mockFs.mkdir.mockResolvedValue(undefined);
   mockFs.rm.mockResolvedValue(undefined);
   mockFs.unlink.mockResolvedValue(undefined);
+  mockFs.readdir.mockResolvedValue([]);
   mockSurfaceRead.mockImplementation(
     ((filePath: string) => Promise.resolve(cacheFileFor(String(filePath)))) as never,
   );
@@ -262,16 +275,6 @@ function expectNoSideEffects() {
  */
 describe("POST /setup-api/ai-models/configure and the Claude subscription surface", () => {
   let configurePost: (request: Request) => Promise<Response>;
-
-  /** The wizard's Claude sign-in save, with `body` overriding its fields. */
-  function subscribe(body: Record<string, unknown> = {}) {
-    return jsonRequest({
-      provider: "anthropic",
-      apiKey: "oauth-access-token",
-      authMode: "subscription",
-      ...body,
-    });
-  }
 
   beforeEach(async () => {
     configurePost = await primeConfigureRoute();
@@ -555,5 +558,119 @@ describe("POST /setup-api/ai-models/configure and the ChatGPT subscription surfa
     const res = await configurePost(chatgptSignIn());
 
     expect(res.status).toBe(200);
+  });
+});
+
+/**
+ * F-07. `runOpenclawDoctorFix` STOPS clawbox-gateway before `doctor --fix`
+ * migrates the auth store the gateway holds open, and the route's only restart
+ * was step 9 at the very end. Every error exit in between — the 502 rollback
+ * when doctor fails, the 400 profile-key refusal, any 500 from the config-set
+ * batch — answered with the unit still stopped, and systemd does not start a
+ * unit again after an explicit `stop`. Chat and every channel stayed dead
+ * until a reboot or a later save that happened to succeed.
+ */
+describe("POST /setup-api/ai-models/configure and the gateway doctor --fix stopped", () => {
+  let configurePost: (request: Request) => Promise<Response>;
+
+  /** What `doctor --fix` leaves behind once it has migrated an OpenClaw 2 store. */
+  const MIGRATED_SIBLING = "auth-profiles.json.migrated-2026-09-01T00-00-00-000Z";
+
+  beforeEach(async () => {
+    configurePost = await primeConfigureRoute();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("restarts the gateway when doctor --fix fails and the sign-in is rolled back", async () => {
+    vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("doctor exited 1"));
+    // A migrated sibling proves an OpenClaw 2 store: the route archives the
+    // legacy file and answers 502 — the exit the owner actually hit.
+    mockFs.readdir.mockResolvedValueOnce([MIGRATED_SIBLING] as never);
+
+    const res = await configurePost(subscribe());
+
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toMatch(/rolled back/);
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("restarts the gateway when a later step throws after doctor --fix stopped it", async () => {
+    vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(
+      new Error("config set --batch-json exited 1"),
+    );
+
+    const res = await configurePost(subscribe());
+
+    expect(res.status).toBe(500);
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("restarts the gateway when the route's own error handling throws", async () => {
+    // The handler's catch classifies the failure and logs `logSafe(err.message)`,
+    // which reads `.length` — an Error carrying a null message makes the catch
+    // itself throw, so nothing returns a Response and the restore that hangs off
+    // the return value never runs. Contrived on purpose: it is the one shape that
+    // reaches past the catch today, and without it any future await added to that
+    // block would silently re-open F-07 with the gateway left down.
+    const poisoned = new Error("boom") as unknown as { message: unknown };
+    poisoned.message = null;
+    vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(poisoned);
+
+    await expect(configurePost(subscribe())).rejects.toThrow();
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("tells the owner the assistant is offline when that restart fails too", async () => {
+    vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("doctor exited 1"));
+    mockFs.readdir.mockResolvedValueOnce([MIGRATED_SIBLING] as never);
+    // An updater holds a runtime mask on the unit: restart is refused and this
+    // route must not unmask it.
+    vi.mocked(restartGateway).mockRejectedValueOnce(
+      new Error("Unit clawbox-gateway.service is masked."),
+    );
+
+    const res = await configurePost(subscribe());
+
+    expect(res.status).toBe(502);
+    const { error } = await res.json();
+    expect(error).toMatch(/rolled back/);
+    expect(error).toMatch(/offline until the gateway restarts/);
+  });
+
+  it("restarts the gateway exactly once on a save that lands", async () => {
+    // The restore must not add a second full gateway cycle (pre-start script
+    // plus boot, 30 s+ on a Jetson) to every successful subscription save.
+    const res = await configurePost(subscribe());
+
+    expect(res.status).toBe(200);
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a restart that step 9 already reported as failed", async () => {
+    vi.mocked(restartGateway).mockRejectedValueOnce(new Error("Start request repeated too quickly"));
+
+    const res = await configurePost(subscribe());
+
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toMatch(/failed to restart/);
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the gateway alone when an API-key save fails — nothing stopped it", async () => {
+    // The API-key path pastes through the CLI and never runs doctor, so a
+    // failure there has no stopped unit to restore.
+    vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(
+      new Error("config set --batch-json exited 1"),
+    );
+
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-test" }));
+
+    expect(res.status).toBe(500);
+    expect(runOpenclawDoctorFix).not.toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
   });
 });
