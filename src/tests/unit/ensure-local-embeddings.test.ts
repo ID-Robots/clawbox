@@ -74,6 +74,11 @@ beforeEach(() => {
       'if [ "${OPENCLAW_RC:-0}" != "0" ]; then exit "$OPENCLAW_RC"; fi',
       '# FAIL_ON matches against the whole argv so a test can fail exactly one call.',
       'if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then exit 1; fi',
+      '# OpenClaw 2 refuses the retired key outright, exactly like the real CLI',
+      '# (its owner rule for agents.defaults.memorySearch, verified in 2026.8.1).',
+      'if [ "${STUB_OPENCLAW_V2:-0}" = "1" ] && [ "${1:-}" = "config" ] && [ "${2:-}" = "set" ] && [[ "${3:-}" == agents.defaults.memorySearch* ]]; then',
+      '  echo "agents.defaults.memorySearch moved to memory.search. Run \\"openclaw doctor --fix\\"." >&2; exit 1',
+      'fi',
       'if [ "${1:-}" = "config" ] && [ "${2:-}" = "set" ]; then',
       '  CFG_KEY="$3" CFG_VALUE="$4" python3 - "$TEST_CONFIG" <<\'PY\'',
       "import json, os, sys",
@@ -107,7 +112,21 @@ type RunOpts = {
   failOn?: string;
   flockBin?: string;
   stateFile?: string;
+  /** What gateway-pre-start.sh exports: "1" on OpenClaw 2, "0" before it, unset from install.sh. */
+  v2Env?: "1" | "0";
+  /** Where the fixture keeps provider/model: OpenClaw 2's memory.search or the legacy path. */
+  keys?: "v2" | "legacy";
+  /** Version of the installed core's package.json next to the binary (install.sh path: no env). */
+  installedVersion?: string;
+  /** Whether the stub CLI behaves like OpenClaw 2 (refuses the retired key). */
+  stubV2?: boolean;
 };
+
+/** The real CLI's rule: memory.search from 2026.8 on. */
+function isV2Release(version: string): boolean {
+  const [year, month] = version.split(".").map(Number);
+  return year > 2026 || (year === 2026 && month >= 8);
+}
 
 function run(opts: RunOpts = {}) {
   // Each run starts from a clean call log so a second run in the same test
@@ -116,10 +135,18 @@ function run(opts: RunOpts = {}) {
   const cfg: Record<string, unknown> = {};
   if (opts.provider !== undefined) cfg.provider = opts.provider;
   if (opts.model !== undefined) cfg.model = opts.model;
-  writeFileSync(
-    configPath,
-    JSON.stringify({ agents: { defaults: Object.keys(cfg).length ? { memorySearch: cfg } : {} } }),
-  );
+  const home = opts.keys === "v2" ? { memory: { search: cfg } } : { agents: { defaults: { memorySearch: cfg } } };
+  writeFileSync(configPath, JSON.stringify(Object.keys(cfg).length ? home : { agents: { defaults: {} } }));
+  // The binary lives in bin/ and the core's package.json in ../lib/node_modules/openclaw,
+  // the npm --prefix layout of /home/clawbox/.npm-global on the box.
+  let openclawBin = "openclaw";
+  if (opts.installedVersion !== undefined) {
+    const pkgDir = path.join(dir, "lib", "node_modules", "openclaw");
+    mkdirSync(pkgDir, { recursive: true });
+    writeFileSync(path.join(pkgDir, "package.json"), JSON.stringify({ name: "openclaw", version: opts.installedVersion }));
+    openclawBin = path.join(binDir, "openclaw");
+  }
+  const stubV2 = opts.stubV2 ?? (opts.v2Env === "1" || (opts.installedVersion !== undefined && isV2Release(opts.installedVersion)));
   writeFileSync(tagsPath, opts.unreachable ? "" : opts.present ? tags([MODEL]) : tags(["llama3:8b"]));
   if (opts.state !== undefined) {
     mkdirSync(path.dirname(statePath), { recursive: true });
@@ -130,8 +157,10 @@ function run(opts: RunOpts = {}) {
     env: {
       ...process.env,
       PATH: `${binDir}:${process.env.PATH}`,
-      OPENCLAW_BIN: "openclaw",
+      OPENCLAW_BIN: openclawBin,
       OPENCLAW_CONFIG: configPath,
+      CLAWBOX_OPENCLAW_V2: opts.v2Env ?? "",
+      STUB_OPENCLAW_V2: stubV2 ? "1" : "0",
       TEST_CONFIG: configPath,
       OLLAMA_TAGS_URL: "http://stub/api/tags",
       TAGS_FIXTURE: tagsPath,
@@ -152,6 +181,8 @@ function run(opts: RunOpts = {}) {
     stderr: res.stderr ?? "",
     calls,
     memorySearch: (config.agents?.defaults?.memorySearch ?? {}) as Record<string, string>,
+    /** OpenClaw 2's home for the same choice. */
+    search: (config.memory?.search ?? {}) as Record<string, string>,
     state: existsSync(opts.stateFile ?? statePath) ? readFileSync(opts.stateFile ?? statePath, "utf-8") : "",
   };
 }
@@ -338,6 +369,105 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
   });
 });
 
+// OpenClaw 2 (2026.8+) moved the embedding choice from
+// agents.defaults.memorySearch.* to memory.search.* and its CLI refuses the old
+// path ("moved to memory.search. Run openclaw doctor --fix"). Measured on a
+// 2026.8.1 box: openclaw.json already carried memory.search.provider=ollama, the
+// script read the retired path, saw "unset", tried the retired write, and logged
+// "WARN: could not set the local embedding model" on every gateway boot — so
+// no v2 box could ever be pointed at local embeddings, and a correctly
+// configured one was told nothing changed.
+describe.skipIf(!canRun)("ensure-local-embeddings.sh on OpenClaw 2", () => {
+  it("sees a box already on local embeddings under memory.search and leaves it alone", () => {
+    const r = run({ v2Env: "1", keys: "v2", provider: "ollama", model: MODEL, present: true });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("already runs on local embeddings");
+    expect(configSets(r.calls)).toEqual([]);
+    expect(reindexes(r.calls)).toEqual([]);
+    expect(r.search).toEqual({ provider: "ollama", model: MODEL });
+  });
+
+  it("writes memory.search.* (model first, provider last) when pre-start says OpenClaw 2", () => {
+    const r = run({ v2Env: "1", present: true });
+    expect(r.status).toBe(0);
+    expect(configSets(r.calls)).toEqual([
+      `openclaw config set memory.search.model ${MODEL}`,
+      "openclaw config set memory.search.provider ollama",
+    ]);
+    expect(reindexes(r.calls)).toHaveLength(1);
+    expect(r.search).toMatchObject({ provider: "ollama", model: MODEL });
+    // The retired path is never written on a v2 box — the CLI would refuse it anyway.
+    expect(r.memorySearch).toEqual({});
+  });
+
+  it("respects a deliberate remote provider chosen under memory.search", () => {
+    const r = run({ v2Env: "1", keys: "v2", provider: "openai", model: "text-embedding-3-large", present: true });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("deliberate choice");
+    expect(configSets(r.calls)).toEqual([]);
+    expect(pulls(r.calls)).toEqual([]);
+    expect(r.search.provider).toBe("openai");
+  });
+
+  it("leaves a remote provider alone even when it is still recorded under the legacy home", () => {
+    // The upgrade case: memory.search is empty, the owner's OpenAI choice sits
+    // in agents.defaults.memorySearch from the box's OpenClaw 1 days, and
+    // `doctor --fix` has not migrated it yet. Reading only the live home saw
+    // "unset" and pointed the box at ollama over the owner's head.
+    const r = run({ v2Env: "1", keys: "legacy", provider: "openai", model: "text-embedding-3-large", present: true });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("deliberate choice");
+    expect(configSets(r.calls)).toEqual([]);
+    expect(pulls(r.calls)).toEqual([]);
+    expect(r.search).toEqual({});
+    expect(r.memorySearch.provider).toBe("openai");
+  });
+
+  it("still migrates a legacy \"ollama\" onto memory.search — the guard reads both homes, the write does not", () => {
+    const r = run({ v2Env: "1", keys: "legacy", provider: "ollama", model: MODEL, present: true });
+    expect(r.status).toBe(0);
+    expect(configSets(r.calls)).toEqual([
+      `openclaw config set memory.search.model ${MODEL}`,
+      "openclaw config set memory.search.provider ollama",
+    ]);
+    expect(r.search).toMatchObject({ provider: "ollama", model: MODEL });
+  });
+
+  it("derives the generation from the installed core when install.sh calls it with no env", () => {
+    const r = run({ installedVersion: "2026.8.1", present: true });
+    expect(r.status).toBe(0);
+    expect(configSets(r.calls)).toEqual([
+      `openclaw config set memory.search.model ${MODEL}`,
+      "openclaw config set memory.search.provider ollama",
+    ]);
+    expect(r.search).toMatchObject({ provider: "ollama", model: MODEL });
+  });
+
+  it("keeps the legacy keys for a core older than 2026.8", () => {
+    const r = run({ installedVersion: "2026.7.3", present: true });
+    expect(r.status).toBe(0);
+    expect(configSets(r.calls)).toEqual([
+      `openclaw config set agents.defaults.memorySearch.model ${MODEL}`,
+      "openclaw config set agents.defaults.memorySearch.provider ollama",
+    ]);
+    expect(r.search).toEqual({});
+  });
+
+  it("lets the generation gateway-pre-start.sh exported win over the package on disk", () => {
+    // Pre-start asked the binary itself; a package.json that disagrees is the
+    // mid-update case, and the binary is the process that parses the write.
+    const r = run({ installedVersion: "2026.8.1", v2Env: "0", stubV2: false, present: true });
+    expect(r.status).toBe(0);
+    expect(configSets(r.calls)[0]).toBe(`openclaw config set agents.defaults.memorySearch.model ${MODEL}`);
+  });
+
+  it("never calls `openclaw --version` to find out — it costs ~10 s on a Jetson", () => {
+    const r = run({ installedVersion: "2026.8.1", present: true });
+    expect(r.calls.filter((c) => c.includes("--version"))).toEqual([]);
+    expect(readFileSync(SCRIPT, "utf-8")).not.toMatch(/"\$OPENCLAW_BIN" --version/);
+  });
+});
+
 describe("gateway-pre-start.sh local embeddings hand-off", () => {
   const src = readFileSync(PRE_START, "utf-8");
 
@@ -352,5 +482,60 @@ describe("gateway-pre-start.sh local embeddings hand-off", () => {
 
   it("no longer flips memorySearch inline — that lives in one place now", () => {
     expect(src).not.toMatch(/config set agents\.defaults\.memorySearch/);
+    expect(src).not.toMatch(/config set memory\.search/);
+  });
+
+  it("exports the generation it decided on, so the script cannot disagree with it", () => {
+    expect(src).toMatch(/^export CLAWBOX_OPENCLAW_V2$/m);
+    expect(src.indexOf("export CLAWBOX_OPENCLAW_V2")).toBeLessThan(src.indexOf('setsid nohup "$LOCAL_EMBEDDINGS"'));
+  });
+});
+
+// install.sh runs the script synchronously and then reads openclaw.json to
+// report the outcome (the script exits 0 on every soft failure by design). That
+// check must accept the key the installed core actually uses, or a v2 install
+// prints "WARN: local embeddings are not configured yet" over a configured box.
+describe.skipIf(!hasPython3)("install.sh local embeddings post-run check", () => {
+  const INSTALL_SH = readFileSync(path.resolve(process.cwd(), "install.sh"), "utf-8");
+  const HEAD = "python3 - /home/clawbox/.openclaw/openclaw.json <<'PY'";
+  const start = INSTALL_SH.indexOf(HEAD);
+  const end = start < 0 ? -1 : INSTALL_SH.indexOf("\nPY\n", start);
+  const program = start < 0 || end < 0 ? "" : INSTALL_SH.slice(INSTALL_SH.indexOf("\n", start) + 1, end);
+
+  function configured(cfg: unknown): boolean {
+    if (!program) throw new Error("install.sh post-run check not found — the heredoc test above names it");
+    const file = path.join(dir, "post-run.json");
+    writeFileSync(file, JSON.stringify(cfg));
+    return spawnSync("python3", ["-c", program, file], { encoding: "utf-8" }).status === 0;
+  }
+
+  it("ships the check as a heredoc this test can run verbatim", () => {
+    expect(program).toContain("import json");
+  });
+
+  it("accepts OpenClaw 2's memory.search home", () => {
+    expect(configured({ memory: { search: { provider: "ollama", model: MODEL } } })).toBe(true);
+  });
+
+  it("still accepts the legacy agents.defaults.memorySearch home", () => {
+    expect(configured({ agents: { defaults: { memorySearch: { provider: "ollama", model: MODEL } } } })).toBe(true);
+  });
+
+  it("does not report a box that is on a remote provider, or not configured, as ready", () => {
+    expect(configured({ memory: { search: { provider: "openai", model: "text-embedding-3-large" } } })).toBe(false);
+    expect(configured({ agents: { defaults: {} } })).toBe(false);
+    expect(configured({ memory: { search: { model: MODEL } } })).toBe(false);
+  });
+
+  it("reads only the active home — a stale legacy block cannot vouch for a box OpenClaw 2 has on the cloud", () => {
+    // The upgrade case: agents.defaults.memorySearch still says ollama from
+    // the box's OpenClaw 1 days, and the owner has since picked OpenAI under
+    // memory.search, the only home the running core reads. Every note is
+    // being sent to OpenAI; "needs no API key" would be a false claim.
+    const stale = { provider: "ollama", model: MODEL };
+    const remote = { provider: "openai", model: "text-embedding-3-large" };
+    expect(configured({ memory: { search: remote }, agents: { defaults: { memorySearch: stale } } })).toBe(false);
+    // The mirror image is ready: the active home is local, whatever the stale one says.
+    expect(configured({ memory: { search: stale }, agents: { defaults: { memorySearch: remote } } })).toBe(true);
   });
 });
