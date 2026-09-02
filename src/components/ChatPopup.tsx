@@ -490,6 +490,35 @@ interface ChatTab {
 const TABS_STORAGE_KEY = 'clawbox-chat-tabs'
 const TAB_LABEL_MAX = 24
 
+/**
+ * The ✕ on a tab plate — it closes a side tab, and restarts main. One control
+ * in two places, so its box, its hover ladder and its glyph are written once.
+ *
+ * 24x24 is the WCAG 2.5.8 floor, and the spacing exception does not apply: the
+ * tab beside it is itself an activation target. So the BOX is the target and
+ * the 10px glyph inside it is only the ink.
+ */
+const TAB_CONTROL_STYLE: React.CSSProperties = {
+  background: 'none', border: 'none', padding: 0,
+  marginLeft: 2, marginRight: -2, width: 24, height: 24, borderRadius: 5,
+  display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+  color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
+  transition: 'background 0.15s, color 0.15s',
+}
+const onTabControlEnter = (e: React.MouseEvent<HTMLButtonElement>) => {
+  e.currentTarget.style.color = 'rgba(255,255,255,0.9)'
+  e.currentTarget.style.background = 'rgba(255,255,255,0.12)'
+}
+const onTabControlLeave = (e: React.MouseEvent<HTMLButtonElement>) => {
+  e.currentTarget.style.color = 'rgba(255,255,255,0.45)'
+  e.currentTarget.style.background = 'transparent'
+}
+const TabControlGlyph = () => (
+  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+    <path d="M18 6L6 18M6 6l12 12" />
+  </svg>
+)
+
 function readStoredTabs(): { tabs: ChatTab[]; active: string | null } {
   if (typeof window === 'undefined') return { tabs: [], active: null }
   try {
@@ -4253,23 +4282,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       aria-label={t('chat.tabClose')}
                       title={t('chat.tabClose')}
                       data-testid="chat-tab-close"
-                      style={{
-                        background: 'none', border: 'none', padding: 0,
-                        // 24x24 is the WCAG 2.5.8 floor, and the spacing
-                        // exception does not apply: the tab beside this is
-                        // itself a target. The glyph below stays 10px — this
-                        // grows the hit area, not the ink.
-                        marginLeft: 2, marginRight: -2, width: 24, height: 24, borderRadius: 5,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-                        color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
-                        transition: 'background 0.15s, color 0.15s',
-                      }}
-                      onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.9)'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
-                      onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'transparent' }}
+                      style={TAB_CONTROL_STYLE}
+                      onMouseEnter={onTabControlEnter}
+                      onMouseLeave={onTabControlLeave}
                     >
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
-                        <path d="M18 6L6 18M6 6l12 12" />
-                      </svg>
+                      <TabControlGlyph />
                     </button>
                   )}
                   {tab.main && active && (
@@ -4293,23 +4310,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       title={t('chat.tabRestart')}
                       data-testid="chat-tab-restart"
                       className="claw-tab-hover-close"
-                      style={{
-                        background: 'none', border: 'none', padding: 0,
-                        // 24x24 is the WCAG 2.5.8 floor, and the spacing
-                        // exception does not apply: the tab beside this is
-                        // itself a target. The glyph below stays 10px — this
-                        // grows the hit area, not the ink.
-                        marginLeft: 2, marginRight: -2, width: 24, height: 24, borderRadius: 5,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-                        color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
-                        transition: 'background 0.15s, color 0.15s',
-                      }}
-                      onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.9)'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
-                      onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'transparent' }}
+                      style={TAB_CONTROL_STYLE}
+                      onMouseEnter={onTabControlEnter}
+                      onMouseLeave={onTabControlLeave}
                     >
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
-                        <path d="M18 6L6 18M6 6l12 12" />
-                      </svg>
+                      <TabControlGlyph />
                     </button>
                   )}
                 </div>
