@@ -2775,9 +2775,16 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //     "openai", "codex", "google", "deepseek"). The catalog uses
     //     "clawai" for ClawBox AI rather than "deepseek", so map that case.
     //     Skip providers that aren't part of the catalog (local-only, llamacpp).
+    //
+    //     `providerChanged` because that is precisely what just happened: the
+    //     plugin was switched on and the credential written one step above, so
+    //     the failed-refresh backoff any earlier pre-auth enumeration recorded
+    //     describes a box that no longer exists. Without it this call is
+    //     silently dropped on exactly the devices this comment is about — the
+    //     ones whose pre-auth snapshot was empty.
     const catalogProvider = ocProvider === "deepseek" ? "clawai" : ocProvider;
     if (isCatalogProvider(catalogProvider)) {
-      refreshCatalogInBackground(catalogProvider);
+      refreshCatalogInBackground(catalogProvider, { providerChanged: true });
     }
 
     // Codex 2026.6.x reads its ChatGPT session from the Codex CLI's own

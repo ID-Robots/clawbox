@@ -4,6 +4,7 @@ import { promises as fsp } from "fs";
 import path from "path";
 import { findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
 import { DATA_DIR } from "@/lib/config-store";
+import { CODEX_SUPPORTED_MODEL_RE } from "@/lib/subscription-surface";
 import {
   CATALOG_PROVIDERS,
   getProviderCatalog,
@@ -60,6 +61,17 @@ interface CatalogModel {
   /** Whether the provider's SUBSCRIPTION surface carries this model. See
    * SUBSCRIPTION_SURFACE in provider-models.ts; `undefined` = not determined. */
   availableOnSubscription?: boolean;
+  /**
+   * The harness tagged this row `default` for its provider.
+   *
+   * Carried rather than dropped because it is the box's own answer to the same
+   * question `DEFAULT_MODEL_BY_PROVIDER` answers by hand, and a hand-written
+   * default is the identical defect to a hand-written list: on a 2026.8.1 host
+   * `openclaw models list --provider openai` tags `gpt-5.6-sol`, while the map
+   * says `gpt-5.4`. Only a live enumeration ever sets it — the curated
+   * cold-start rows carry no such claim.
+   */
+  isDefault?: boolean;
 }
 
 interface CatalogResponse {
@@ -77,10 +89,17 @@ interface CatalogResponse {
    */
   warming?: boolean;
   /**
-   * Where these models came from. `"live"` means a device enumeration
-   * answered — `openclaw models list --provider <p> --all --json`, or
-   * OpenRouter's own /api/v1/models — and ONLY such a payload is ever written
-   * to the disk cache.
+   * Where these models came from. `"live"` means THE BOX ANSWERED — the
+   * enumeration this route performs for that provider returned rows, and ONLY
+   * such a payload is ever written to the disk cache.
+   *
+   * For every CLI provider that is `openclaw models list --provider <p> --all
+   * --json`, and for openrouter it is that catalogue's own /api/v1/models. For
+   * `clawai` the enumeration IS a literal (`CLAWAI_STATIC_MODELS`), and it is
+   * stamped all the same, deliberately: Mike's gateway routes exactly the two
+   * device tiers, so those two rows are the routing table rather than a
+   * stand-in for one nobody asked. The rule this field carries is "not a
+   * placeholder for an answer", not "a subprocess ran".
    *
    * Absent is not a synonym for "old": a payload persisted by a build before
    * this field existed is indistinguishable from one built out of the curated
@@ -123,8 +142,16 @@ const refreshing = new Set<string>();
  * means a provider that CANNOT enumerate — plugin disabled, provider id gone,
  * an edition with no CLI — forks `openclaw models list` on every request
  * forever, ~3 minutes and ~2 cores of a Jetson each, and the single-flight set
- * only collapses the concurrent ones. `?refresh=1` does NOT bypass it: the
- * client retry is the thing being rate-limited.
+ * only collapses the concurrent ones.
+ *
+ * What it rate-limits is a client ASKING AGAIN. It must not survive the box
+ * CHANGING, and the two are different events: a provider connect enables the
+ * plugin and writes the credential, which is the moment a provider that could
+ * not enumerate starts being able to. Blocking there recreates the reported
+ * symptom through this very brake — no fork, therefore no `warming`, therefore
+ * nothing polling, therefore the curated list stands until some unrelated
+ * request happens along after the deadline. So `providerChanged` clears the
+ * entry (see `refreshInBackground`), and only the poll path is held.
  *
  * Per-process on purpose. It limits THIS process's forks, it sits beside
  * `memCache` and `refreshing` which are already per-process, and a restart is
@@ -159,6 +186,18 @@ function recordFailedRefresh(provider: string): void {
 }
 
 function recordSuccessfulRefresh(provider: string): void {
+  failedRefreshes.delete(provider);
+}
+
+/**
+ * "The box changed, so the last failure says nothing about the next attempt."
+ *
+ * Separate from `recordSuccessfulRefresh` because nothing succeeded — this is
+ * the credential/plugin write that makes the next enumeration worth spending,
+ * and it also drops the doubling back to the floor, which is right: the reason
+ * the previous attempts failed has just been removed.
+ */
+function clearFailedRefresh(provider: string): void {
   failedRefreshes.delete(provider);
 }
 
@@ -299,7 +338,7 @@ interface OpenRouterListResponse {
     name?: string;
     description?: string;
     context_length?: number;
-    architecture?: { input_modalities?: string[] };
+    architecture?: { input_modalities?: string[]; output_modalities?: string[] };
     deprecated?: boolean;
   }>;
 }
@@ -345,14 +384,18 @@ const DEPRECATED_MODEL_IDS: ReadonlySet<string> = new Set([
 // generation is called; the harness's catalogue can, and the whole point of
 // this route is to ask it.
 const ALLOWED_MODEL_RE_BY_PROVIDER: Record<string, RegExp> = {
-  // Explicit alternation, not /^gpt-5\.[45](-mini)?$/ — that would also
-  // accept gpt-5.5-mini (which doesn't exist on the Codex auth path
-  // and would 400 the same way gpt-5.4-pro did). Per
-  // developers.openai.com/codex/models the supported set under
-  // ChatGPT-account auth is gpt-5.4, gpt-5.4-mini, gpt-5.5, plus the
-  // gpt-5.6-{sol,terra,luna} models (plan-gated upstream, so they only
-  // appear in the live catalog for accounts entitled to them).
-  codex: /^(?:gpt-5\.5|gpt-5\.4(?:-mini)?|gpt-5\.6-(?:sol|terra|luna))$/,
+  // IMPORTED, not spelled again. `CODEX_SUPPORTED_MODEL_RE` is the same
+  // alternation, and its own doc says it lives there so that "a second copy in
+  // the second route is a copy that can drift" — this route was that second
+  // copy. It is the rule the write path enforces, so the picker must offer
+  // exactly it: a row this list shows and that guard refuses is a dead button,
+  // and the reverse is a model the customer cannot reach.
+  //
+  // `scripts/gateway-pre-start.sh` keeps a third, hand-maintained mirror in
+  // `_CODEX_SUPPORTED` (it runs before node exists), pinned by
+  // src/tests/unit/gateway-pre-start-codex-models.test.ts. That one cannot
+  // import; this one could, and now does.
+  codex: CODEX_SUPPORTED_MODEL_RE,
 };
 
 // Newest-first ordering: bigger context generally means newer model on
@@ -390,26 +433,39 @@ async function fetchSubscriptionSurfaceIds(provider: string): Promise<Set<string
     memCache.set(surfaceProvider, cached);
     return new Set(cached.models.map((m) => m.id));
   }
+  // The SAME single-flight guard the main path takes. This function publishes
+  // to `<surfaceProvider>.json` like any other refresh, so without it a
+  // `refreshInBackground(surfaceProvider)` arriving from a picker open could
+  // run a second `openclaw models list` for that provider beside this one —
+  // two multi-minute forks on a Jetson for one catalogue. Released in the
+  // `finally` below, including on the error path.
+  if (refreshing.has(surfaceProvider)) return null;
+  refreshing.add(surfaceProvider);
   try {
     const { models } = await fetchOpenclawCatalog(surfaceProvider);
     if (models.length === 0) return null;
+    // Through `buildPayload`, not hand-assembled beside it. The hand-built
+    // version skipped `sanitizeCatalogModels`, `DEFAULT_MODEL_BY_PROVIDER` and
+    // `ALLOW_CUSTOM_BY_PROVIDER` while writing to the very file the picker and
+    // the server-side guard read back — a second, quieter way for this route to
+    // persist something no other path would have produced.
     const payload: CatalogResponse = {
-      provider: surfaceProvider,
-      models,
-      defaultModelId: models[0].id,
-      allowCustom: false,
-      fetchedAt: Date.now(),
+      ...buildPayload(surfaceProvider, models, null, Date.now()),
       source: "live",
     };
     memCache.set(surfaceProvider, payload);
+    recordSuccessfulRefresh(surfaceProvider);
     await writeDiskCache(surfaceProvider, payload);
-    return new Set(models.map((m) => m.id));
+    return new Set(payload.models.map((m) => m.id));
   } catch (err) {
     console.warn(
       `[catalog] subscription surface (${surfaceProvider}) unavailable for ${provider}:`,
       err instanceof Error ? err.message : err,
     );
+    recordFailedRefresh(surfaceProvider);
     return null;
+  } finally {
+    refreshing.delete(surfaceProvider);
   }
 }
 
@@ -446,6 +502,7 @@ function transformOpenclawEntries(
       label: typeof entry.name === "string" && entry.name.trim() ? entry.name : id,
       contextWindow: typeof entry.contextWindow === "number" ? entry.contextWindow : 0,
       input: typeof entry.input === "string" ? entry.input : undefined,
+      ...(entry.tags?.includes("default") ? { isDefault: true } : {}),
       // The live `name` is the label, and there is no live hint. Inventing one
       // is how a picker ends up describing a model nobody measured, so a hint
       // only survives where the curated entry for the SAME id already carried
@@ -466,11 +523,20 @@ function transformOpenclawEntries(
  * differ between the path that publishes and the path that serves. They were
  * two hand-maintained copies, and every new rule had to be added to both.
  */
+/**
+ * Catalogues that publish a capability field, so the name-shaped modality guess
+ * must not be applied to them: the field is the answer, and the guess can only
+ * disagree with it. OpenRouter's `architecture.output_modalities` is read in
+ * `outputIsRenderableChat` at transform time; every other catalogue this route
+ * serves reports nothing of the sort.
+ */
+const MODALITY_REPORTING_PROVIDERS: ReadonlySet<string> = new Set(["openrouter"]);
+
 function isOfferableModelId(provider: string, id: string): boolean {
   if (!id) return false;
   const allowed = ALLOWED_MODEL_RE_BY_PROVIDER[provider];
   if (allowed && !allowed.test(id)) return false;
-  if (isNonChatModelId(id)) return false;
+  if (!MODALITY_REPORTING_PROVIDERS.has(provider) && isNonChatModelId(id)) return false;
   if (DEPRECATED_MODEL_IDS.has(id)) return false;
   return true;
 }
@@ -479,11 +545,51 @@ function sanitizeCatalogModels(provider: string, models: CatalogModel[]): Catalo
   return models.filter((model) => isOfferableModelId(provider, model.id));
 }
 
+/**
+ * OpenRouter's own namespace — `openrouter/auto`, `openrouter/auto-beta` and
+ * the other meta entries. A row here is a ROUTER, not a model, and the
+ * modalities it declares are the union over everything it can route to: both
+ * `auto` rows report `["image","text"]` output for that reason while routing
+ * text prompts to text models. So the modality test below, which is a fact
+ * about one model, does not apply to them.
+ */
+function isOpenRouterMetaModel(id: string): boolean {
+  return id.startsWith("openrouter/");
+}
+
+/**
+ * Is this row's OUTPUT something a chat picker can render?
+ *
+ * This is the capability answer the harness cannot give us: `openclaw models
+ * list` publishes no capability field, so those catalogues fall back to the
+ * name-shaped `isNonChatModelId`. OpenRouter DOES publish one, so it is read
+ * here and the guess is not used at all for this catalogue.
+ *
+ * Measured against the live endpoint this route fetches (2026-09-02, 423 rows):
+ * every row carries `output_modalities`; 408 are `["text"]`, 11 are
+ * `["image","text"]` and 4 are `["audio","text"]`. Of the 15 non-text rows, 13
+ * are real image/audio SKUs (`google/gemini-2.5-flash-image`,
+ * `openai/gpt-5-image`, `google/lyria-3-pro-preview`, `openai/gpt-audio`, …)
+ * that the name-shaped rule let through, and the other 2 are the meta routers
+ * above. A row whose output includes image or audio is not something this chat
+ * surface can show, so it is not offered.
+ *
+ * A row with no field at all is KEPT — absent is not "no", the same rule the
+ * per-row `available` tristate follows.
+ */
+function outputIsRenderableChat(entry: OpenRouterListResponse["data"][number]): boolean {
+  const outputs = entry.architecture?.output_modalities;
+  if (!Array.isArray(outputs) || outputs.length === 0) return true;
+  if (isOpenRouterMetaModel(entry.id)) return true;
+  return outputs.every((modality) => modality === "text");
+}
+
 function transformOpenRouterEntries(entries: OpenRouterListResponse["data"]): CatalogModel[] {
   const out: CatalogModel[] = [];
   for (const entry of entries) {
     if (typeof entry.id !== "string" || !entry.id) continue;
     if (entry.deprecated) continue;
+    if (!outputIsRenderableChat(entry)) continue;
     const inputs = entry.architecture?.input_modalities ?? [];
     const inputMode = inputs.length > 0 ? inputs.join("+") : undefined;
     out.push({
@@ -590,8 +696,15 @@ function buildPayload(
     // that route accepts.
     merged = merged.map((m) => ({ ...m, availableOnSubscription: true }));
   }
+  // The BOX's answer first. `openclaw models list` tags one row `default` per
+  // provider, and preferring the hand-written map over it is the same defect
+  // this change exists to fix, pointed at the default instead of the list: on a
+  // stock 2026.8.1 host the map picks `gpt-5.4` while the box says
+  // `gpt-5.6-sol`. The map stays as the fallback for a catalogue that tags
+  // nothing and for the curated cold-start rows, which carry no tag at all.
   const fallbackDefault = DEFAULT_MODEL_BY_PROVIDER[provider];
-  const defaultModelId = merged.find((m) => m.id === fallbackDefault)?.id
+  const defaultModelId = merged.find((m) => m.isDefault)?.id
+    ?? merged.find((m) => m.id === fallbackDefault)?.id
     ?? merged[0]?.id
     ?? fallbackDefault
     ?? "";
@@ -784,8 +897,26 @@ async function fetchOpenRouterCatalog(): Promise<CatalogFetchResult> {
 // refresh right after the user adds an API key — otherwise the
 // catalog stays on the pre-auth snapshot from boot warmup until the
 // next service restart.
-export function refreshInBackground(provider: string): void {
+export function refreshInBackground(
+  provider: string,
+  opts: {
+    /**
+     * The PROVIDER SET changed — a connect, a plugin switched on, a credential
+     * written — as opposed to a client polling for an answer. Clears the
+     * failed-refresh backoff, because the condition that produced those
+     * failures is the one that just changed.
+     *
+     * The fork rate stays bounded without the backoff here: `refreshing` admits
+     * one enumeration per provider at a time, and the only two callers that set
+     * this are `configure`'s post-save refresh and a `?refresh=1` GET, which
+     * `useProviderCatalog` now sends once per provider-set signal and never on
+     * its warming polls.
+     */
+    providerChanged?: boolean;
+  } = {},
+): void {
   if (refreshing.has(provider)) return;
+  if (opts.providerChanged) clearFailedRefresh(provider);
   // A provider that just failed to answer waits before it is asked again. This
   // is the only brake on the "not live -> re-enumerate" rule, so it comes
   // before every other check — including the edition guard below, whose log
@@ -971,7 +1102,11 @@ export async function GET(req: NextRequest) {
   // on an upgraded box those files hold the curated list a failed enumeration
   // left behind, and nothing else would ever dislodge them.
   if (force || isStale || !isLivePayload(cached)) {
-    refreshInBackground(provider);
+    // `?refresh=1` is the provider-set signal reaching the route: since the
+    // hook stopped sending it on warming polls it arrives once per connect,
+    // enable or removal, which is exactly the event the backoff must not
+    // outlive. A plain poll passes nothing and stays behind the brake.
+    refreshInBackground(provider, { providerChanged: force });
   }
 
   // "An answer is actually on its way" — the ONE thing that tells a client

@@ -310,14 +310,41 @@ describe("catalog — the ChatGPT surface has no enumeration on this core", () =
         { key: "openai/gpt-5.5-pro", name: "GPT-5.5 Pro", contextWindow: 400_000, available: true, tags: [] },
         { key: "openai/gpt-5.4", name: "GPT-5.4", contextWindow: 1_000_000, available: true, tags: [] },
         // Listed by the same command, unusable by a chat picker, and the
-        // harness offers no capability filter to ask it apart.
+        // harness offers no capability filter to ask it apart. All four id
+        // SHAPES are taken from the live OpenRouter catalogue (2026-09-02),
+        // which is the one catalogue that states the modality next to the name:
+        // a prefix family, the `-image` suffix family that the earlier pattern
+        // missed entirely, and google's image/video engines.
         { key: "openai/gpt-image-1-mini", name: "GPT Image 1 Mini", contextWindow: 0, available: true, tags: [] },
+        { key: "openai/gpt-5-image", name: "GPT-5 Image", contextWindow: 0, available: true, tags: [] },
+        { key: "openai/gpt-5.4-image-2", name: "GPT-5.4 Image 2", contextWindow: 0, available: true, tags: [] },
+        { key: "google/imagen-4", name: "Imagen 4", contextWindow: 0, available: true, tags: [] },
       ],
     });
 
     refreshInBackground("openai");
     const ids = await publishedIds("openai", 3);
     expect(ids.sort()).toEqual(["gpt-5.4", "gpt-5.5-pro", "gpt-5.6-sol"]);
+  });
+
+  // Finding 3 of the review pass: the harness answers "which of these is the
+  // default" and the route threw it away for a hand-written map. That is the
+  // same defect as the hard-coded list, pointed at the default.
+  it("takes the default the box tags, not the one the map remembers", async () => {
+    mockList({
+      count: 2,
+      models: [
+        { key: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", contextWindow: 400_000, available: true, tags: ["default"] },
+        // The id DEFAULT_MODEL_BY_PROVIDER carries for openai. It is in the
+        // catalogue, so the old lookup found it and stopped.
+        { key: "openai/gpt-5.4", name: "GPT-5.4", contextWindow: 1_000_000, available: true, tags: [] },
+      ],
+    });
+
+    refreshInBackground("openai");
+    await publishedIds("openai", 2);
+    const body = await get("openai");
+    expect(body.defaultModelId).toBe("gpt-5.6-sol");
   });
 
   it("drops a row the harness itself reports as unavailable, and keeps an undetermined one", async () => {
@@ -416,5 +443,98 @@ describe("catalog — a provider that cannot answer is not asked on every reques
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // The brake rate-limits a client ASKING AGAIN. It must not survive the box
+  // CHANGING — a connect enables the plugin and writes the credential, which is
+  // the moment a provider that could not enumerate starts being able to. Held
+  // there, this fix recreates the very symptom it exists to remove: no fork, so
+  // no `warming`, so the picker stops polling and keeps the curated list.
+  it("lets a provider-set change through the backoff, and says an answer is coming", async () => {
+    // google is under a backoff from the empty-enumeration test above, and has
+    // no cached payload of its own — the state a box is in when the customer
+    // connects the provider whose pre-auth enumeration came back empty.
+    mockList({
+      count: 2,
+      models: [
+        { key: "google/gemini-3-pro", name: "Gemini 3 Pro", contextWindow: 1_000_000, available: true, tags: ["default"] },
+        { key: "google/gemini-2.5-flash", name: "Gemini 2.5 Flash", contextWindow: 1_000_000, available: true, tags: [] },
+      ],
+    });
+
+    mockSpawn.mockClear();
+    refreshInBackground("google");
+    await settle();
+    // A plain ask is still held. That part of the brake is the point of it.
+    expect(spawnedProviders()).not.toContain("google");
+
+    const body = await get("google", "&refresh=1");
+    // Two things, and the second is the one that was missing: the fork starts,
+    // AND the response tells the picker an answer is on its way, so something
+    // is left asking for it.
+    await vi.waitFor(() => expect(spawnedProviders()).toContain("google"), { timeout: 2000 });
+    expect(body.warming).toBe(true);
+    expect(body.source).toBeUndefined();
+
+    // And the live rows land, replacing the curated ones.
+    const ids = await publishedIds("google", 2);
+    expect(ids.sort()).toEqual(["gemini-2.5-flash", "gemini-3-pro"]);
+  });
+});
+
+describe("catalog — OpenRouter publishes the capability, so the guess is not used", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fs.rmSync(path.join(DATA_DIR, "catalog-cache"), { recursive: true, force: true });
+  });
+
+  /**
+   * Rows and modalities as `https://openrouter.ai/api/v1/models` reported them
+   * on 2026-09-02 (423 rows; every one carries `output_modalities` — 408
+   * `["text"]`, 11 `["image","text"]`, 4 `["audio","text"]`).
+   */
+  const OPENROUTER_LIVE = {
+    data: [
+      { id: "anthropic/claude-opus-5", name: "Claude Opus 5", context_length: 1_000_000,
+        architecture: { input_modalities: ["text"], output_modalities: ["text"] } },
+      // Image SKUs. NONE of these matched the original name pattern — the
+      // measurement that sent this PR back.
+      { id: "google/gemini-2.5-flash-image", name: "Gemini 2.5 Flash Image", context_length: 32_768,
+        architecture: { input_modalities: ["text", "image"], output_modalities: ["image", "text"] } },
+      { id: "openai/gpt-5-image", name: "GPT-5 Image", context_length: 400_000,
+        architecture: { input_modalities: ["text"], output_modalities: ["image", "text"] } },
+      // Audio out. It is not a text-output chat model, whatever its name reads
+      // like: `openai/gpt-audio` reports `["audio","text"]` out.
+      { id: "openai/gpt-audio", name: "GPT Audio", context_length: 128_000,
+        architecture: { input_modalities: ["text", "audio"], output_modalities: ["audio", "text"] } },
+      // The meta ROUTER. Its modalities are the union over everything it can
+      // route to, not a claim about one model, so the modality test does not
+      // apply to it and it stays in the picker.
+      { id: "openrouter/auto", name: "Auto Router", context_length: 2_000_000,
+        architecture: { input_modalities: ["text", "image"], output_modalities: ["image", "text"] } },
+      // A text-output model whose NAME matches the fallback pattern. The field
+      // is the answer for this catalogue, so the guess never runs on it.
+      { id: "some-lab/chat-image-2", name: "Chat Image 2", context_length: 128_000,
+        architecture: { input_modalities: ["text"], output_modalities: ["text"] } },
+    ],
+  };
+
+  it("drops what the field calls non-text, keeps the router, and keeps a text model the name rule would hide", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => OPENROUTER_LIVE,
+    })));
+
+    refreshInBackground("openrouter");
+    const ids = await publishedIds("openrouter", 3);
+
+    expect(ids.sort()).toEqual([
+      "anthropic/claude-opus-5",
+      "openrouter/auto",
+      "some-lab/chat-image-2",
+    ]);
+    expect(ids).not.toContain("google/gemini-2.5-flash-image");
+    expect(ids).not.toContain("openai/gpt-5-image");
+    expect(ids).not.toContain("openai/gpt-audio");
   });
 });

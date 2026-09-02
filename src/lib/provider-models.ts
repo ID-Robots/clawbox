@@ -28,15 +28,21 @@ import {
 // route without dragging `spawn`/`fs` in, so a rule parked there would simply
 // be copied.
 //
+// It is a GUESS, and only for catalogues that leave us no alternative.
 // `openclaw models list` enumerates a provider's whole catalogue and offers no
 // capability filter to ask for the chat ones (`--all`, `--local`, `--provider`
 // and nothing else on 2026.8.1), and its rows carry no capability field: an
 // image SKU comes back shaped exactly like a chat model —
 // `openai/gpt-image-1-mini` beside `openai/gpt-5.6-sol`, `input` reported as
-// "-" for both on a stock host. That gap is worth reporting upstream; until it
-// closes this is the honest stopgap, and a catalogue that DOES publish the
-// capability (OpenRouter's `architecture.output_modalities`) is read instead of
-// being matched against this list.
+// "-" for both on a stock host. That gap is worth reporting upstream.
+//
+// Where a catalogue DOES publish the capability this list is not consulted at
+// all: OpenRouter's `architecture.output_modalities` is read directly by the
+// catalog route (`outputIsRenderableChat`), and `MODALITY_REPORTING_PROVIDERS`
+// keeps this pattern off that provider so a guess can never disagree with an
+// answer. An earlier revision of this comment claimed the field was already
+// read while nothing in the tree referenced it; the measurement below is what
+// closed that gap.
 //
 // A MODALITY exclusion, deliberately not a generation allowlist: it can only
 // hide SKUs a chat picker has no way to talk to, never a chat model the box has
@@ -45,12 +51,24 @@ import {
 // which is the defect this change exists to fix. Older chat generations the box
 // lists are shown: the device's own catalogue decides, and an older model the
 // box can route is not a dead button.
+//
+// The families are measured, not guessed at twice: run against the 423 rows of
+// the live OpenRouter catalogue (2026-09-02), which is the only catalogue that
+// states the truth alongside the name, this pattern drops 13 of the 15 rows
+// whose output is not text-only — the `-image` family (`gpt-5-image`,
+// `gemini-2.5-flash-image`, `gpt-5.4-image-2`), `imagen-*`, `veo-*`, `lyria-*`,
+// `gpt-audio` — and produces ZERO false failures: no text-output row matches
+// it. The two it misses are `openrouter/auto` and `openrouter/auto-beta`, which
+// the field-based rule deliberately keeps too. `vision` is NOT a family here
+// for the same measured reason: `deepseek/deepseek-v4-flash-vision-exp` is a
+// text-output chat model.
 const NON_CHAT_MODEL_RE = new RegExp([
   "^(?:gpt-image|dall-e|whisper|tts-|text-embedding|omni-moderation|sora",
-  "|davinci|babbage|codex-mini)",
+  "|davinci|babbage|codex-mini|imagen|veo|lyria)",
   // Suffix families: gpt-4o-audio-preview, gpt-4o-realtime-preview,
-  // gpt-4o-transcribe, gpt-4o-mini-tts.
-  "|(?:-audio|-realtime|-transcribe|-tts)(?:-|$)",
+  // gpt-4o-transcribe, gpt-4o-mini-tts, gemini-2.5-flash-image,
+  // gpt-5.4-image-2.
+  "|(?:-audio|-realtime|-transcribe|-tts|-image)(?:-|$)",
 ].join(""));
 
 /**

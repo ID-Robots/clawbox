@@ -157,6 +157,7 @@ import { configSetCalls, configSetCommands, failConfigSetsMatching, findConfigSe
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
 import { getLocalAiToken } from "@/lib/local-ai-token";
+import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockGetAll = vi.mocked(getAll);
@@ -342,6 +343,23 @@ describe("POST /setup-api/ai-models/configure", () => {
         ai_model_configured: true,
         ai_model_provider: "anthropic",
       })
+    );
+  });
+
+  // The one thing this file DOES assert about the out-of-band refresh (see the
+  // mock's note above): the flag it is called with. Step 8c runs one statement
+  // after the plugin is switched on and the credential written, i.e. at the
+  // moment a provider that could not enumerate starts being able to. Called
+  // without `providerChanged` it is silently dropped whenever the pre-auth
+  // enumeration failed — which is exactly the "single fallback entry or empty"
+  // snapshot that comment was written about, so the call would go missing on
+  // the devices it exists for.
+  it("tells the catalog the PROVIDER SET changed, not that a client asked again", async () => {
+    await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test-key" }));
+
+    expect(vi.mocked(refreshCatalogInBackground)).toHaveBeenCalledWith(
+      "anthropic",
+      { providerChanged: true },
     );
   });
 
