@@ -55,6 +55,7 @@ const OWNER_ID = "1234567890";
 let tmpHome: string;
 const origHome = process.env.OPENCLAW_HOME;
 const origStateDir = process.env.OPENCLAW_STATE_DIR;
+const origUserHome = process.env.HOME;
 
 function statePath(root = tmpHome): string {
   return path.join(root, "state", "openclaw.sqlite");
@@ -136,6 +137,8 @@ afterEach(async () => {
   else process.env.OPENCLAW_HOME = origHome;
   if (origStateDir === undefined) delete process.env.OPENCLAW_STATE_DIR;
   else process.env.OPENCLAW_STATE_DIR = origStateDir;
+  if (origUserHome === undefined) delete process.env.HOME;
+  else process.env.HOME = origUserHome;
   await fs.rm(tmpHome, { recursive: true, force: true });
 });
 
@@ -190,6 +193,22 @@ describe("readTelegramAllowFrom on an OpenClaw 2 box", () => {
     }
   });
 
+  it("expands a leading ~ in OPENCLAW_STATE_DIR the way OpenClaw does", async () => {
+    // OpenClaw resolves the override through resolveUserPath, so `~/x` is the
+    // user's home; statting the literal `~/x` would miss the store the gateway
+    // writes and silently fall back to the (empty) legacy file.
+    const userHome = await fs.mkdtemp(path.join(os.tmpdir(), "oc-user-home-"));
+    try {
+      process.env.HOME = userHome;
+      process.env.OPENCLAW_STATE_DIR = "~/oc-state";
+      await makeStateDb([["telegram", "default", OWNER_ID]], [], path.join(userHome, "oc-state"));
+      const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
+      expect(await readTelegramAllowFrom()).toEqual([OWNER_ID]);
+    } finally {
+      await fs.rm(userHome, { recursive: true, force: true });
+    }
+  });
+
   it("still reads the legacy file on a box without the v2 store", async () => {
     await writeLegacyAllow(["555"]);
     const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
@@ -203,6 +222,28 @@ describe("readTelegramAllowFrom on an OpenClaw 2 box", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
     await expect(readTelegramAllowFrom()).resolves.toEqual(["555"]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it("logs a store that stays unreadable once, not on every poll, and again after it recovers", async () => {
+    await fs.mkdir(path.dirname(statePath()), { recursive: true });
+    await fs.writeFile(statePath(), "this is not a database", "utf-8");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { readTelegramAllowFrom } = await import("@/lib/openclaw-config");
+    await readTelegramAllowFrom();
+    await readTelegramAllowFrom();
+    await readTelegramAllowFrom();
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    // Recovery (the store rewritten as a real database) wipes the slate...
+    await fs.rm(statePath());
+    await makeStateDb([["telegram", "default", OWNER_ID]]);
+    expect(await readTelegramAllowFrom()).toEqual([OWNER_ID]);
+    // ...so a relapse is reported again.
+    await fs.writeFile(statePath(), "this is not a database", "utf-8");
+    await readTelegramAllowFrom();
+    expect(warn).toHaveBeenCalledTimes(2);
     warn.mockRestore();
   });
 });

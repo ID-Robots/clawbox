@@ -41,6 +41,12 @@ export default defineConfig({
       // file; the suite must see the same nothing everywhere. Tests that need
       // an openclaw.json point OPENCLAW_HOME at their own fixture dir.
       OPENCLAW_HOME: path.join(os.tmpdir(), `clawbox-test-openclaw-${process.pid}`),
+      // And for the override OpenClaw honours above its home: with
+      // OPENCLAW_STATE_DIR exported on the runner, openclaw-state-store.ts
+      // would read that machine's real state/openclaw.sqlite (the Telegram
+      // allowlist) instead of the fixture under OPENCLAW_HOME. Empty means
+      // "no override", so the store follows the floored home above.
+      OPENCLAW_STATE_DIR: "",
     },
     projects: [
       {

@@ -61,10 +61,11 @@ async function buildApproved(
   return ids.map((id) => ({ id, name: nameMap[id] }));
 }
 
-// GET — list approved senders (fast: a single file read). With `?pending=1` it
-// also runs the harness's `pairing list` CLI, which on OpenClaw is a ~10-12 s
-// cold start on a Jetson, so pending stays opt-in rather than being fetched on
-// every status refresh.
+// GET — list approved senders (fast: one read of OpenClaw's state store, or
+// of the legacy allowFrom file on a v1 box). With `?pending=1` it also runs
+// the harness's `pairing list` CLI, which on OpenClaw is a ~10-12 s cold start
+// on a Jetson, so pending stays opt-in rather than being fetched on every
+// status refresh.
 export async function GET(request: Request) {
   try {
     if (!(await isConfigured())) {
@@ -76,7 +77,8 @@ export async function GET(request: Request) {
     const harness = await getActiveHarness();
     const params = new URL(request.url).searchParams;
     const approved = await buildApproved(harness);
-    // `?poll=1` reads the pairing-store file (fast — safe for the desktop poller);
+    // `?poll=1` reads the pairing store directly — the state database, or the
+    // legacy file on a v1 box (fast — safe for the desktop poller);
     // `?pending=1` uses the authoritative CLI (the Settings "Check" button).
     const wantsPoll = params.get("poll") === "1";
     const wantsPending = params.get("pending") === "1";

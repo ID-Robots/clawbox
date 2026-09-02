@@ -26,19 +26,47 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { OPENCLAW_HOME_DEFAULT, openSqlite } from "./openclaw-session-store";
 
+/**
+ * The state directory the way OpenClaw resolves it (`resolveStateDir`): an
+ * `OPENCLAW_STATE_DIR` override is trimmed, a leading `~` is the user's home
+ * and a relative path is taken from the cwd; without one it is the OpenClaw
+ * home. A literal `~/...` here would stat a path the gateway never writes.
+ */
+function stateDir(home: string): string {
+  const override = process.env.OPENCLAW_STATE_DIR?.trim();
+  if (!override) return home;
+  return path.resolve(override.replace(/^~(?=$|[\\/])/, () => process.env.HOME || os.homedir()));
+}
+
 /** The gateway-wide SQLite store, or null when this OpenClaw has not migrated to it. */
 export function statePath(home: string = OPENCLAW_HOME_DEFAULT): string | null {
-  const stateDir = process.env.OPENCLAW_STATE_DIR?.trim() || home;
-  const p = path.join(stateDir, "state", "openclaw.sqlite");
+  const p = path.join(stateDir(home), "state", "openclaw.sqlite");
   try {
     return fs.statSync(p).isFile() ? p : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * The last failure logged per operation. The desktop polls the pairing store
+ * every 20 s, so a store that stays unreadable (schema drift, corruption)
+ * would otherwise repeat the same line ~4000 times a day and bury the one
+ * that matters; a failure is logged when it first appears or changes, and the
+ * slate is wiped by the next success so a relapse is logged again.
+ */
+const lastFailure = new Map<string, string>();
+
+function logOnce(readOnly: boolean, what: string, line: string, err: unknown): void {
+  const message = `${line}: ${err instanceof Error ? err.message : String(err)}`;
+  if (lastFailure.get(what) === message) return;
+  lastFailure.set(what, message);
+  (readOnly ? console.warn : console.error)(`[state-store] ${line}:`, err);
 }
 
 /**
@@ -49,18 +77,19 @@ export function statePath(home: string = OPENCLAW_HOME_DEFAULT): string | null {
 function withStateDb<T>(readOnly: boolean, what: string, fn: (db: DatabaseSyncType) => T): T | null {
   const dbPath = statePath();
   if (!dbPath) return null;
-  const log = readOnly ? console.warn : console.error;
   let db: DatabaseSyncType;
   try {
     db = openSqlite(dbPath, readOnly);
   } catch (err) {
-    log(`[state-store] could not open ${dbPath} for ${what}:`, err);
+    logOnce(readOnly, what, `could not open ${dbPath} for ${what}`, err);
     return null;
   }
   try {
-    return fn(db);
+    const result = fn(db);
+    lastFailure.delete(what);
+    return result;
   } catch (err) {
-    log(`[state-store] ${what} failed:`, err);
+    logOnce(readOnly, what, `${what} failed`, err);
     return null;
   } finally {
     db.close();
