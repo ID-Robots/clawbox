@@ -103,19 +103,32 @@ function accountIdFromAccessToken(accessToken) {
 // live file.
 const PROFILE_KEYS = ["openai:chatgpt", "codex:default", "openai-codex:default"];
 
+/**
+ * The ONE profile this box's ChatGPT credential lives in — for reading it and
+ * for writing a rotation back.
+ *
+ * The first entry that actually carries `access`, because a canonical entry
+ * left half-written by an interrupted sign-in must not hide a legacy one that
+ * still works; the first entry that merely EXISTS only as a last resort, so a
+ * rotation still lands somewhere when nothing is credentialed yet.
+ *
+ * One rule for both directions, deliberately. Reading by "has a credential"
+ * while writing back by "exists" is how a box ends up reading `codex:default`
+ * and writing the rotated token into `openai:chatgpt`, leaving the entry it
+ * reads next holding a refresh token that has already been spent — the exact
+ * split this list exists to prevent.
+ */
 function profileKeyIn(profiles) {
-  return PROFILE_KEYS.find((key) => profiles && profiles[key]) || null;
+  if (!profiles) return null;
+  return PROFILE_KEYS.find((key) => profiles[key] && profiles[key].access)
+    || PROFILE_KEYS.find((key) => profiles[key])
+    || null;
 }
 
 function credentialFromProfiles(agentDir) {
   const profiles = readProfiles(agentDir);
-  // For READING, the first profile that actually carries a credential: a
-  // canonical entry without `access` beside a legacy one that has it must not
-  // hide the working sign-in. Write-back keeps `profileKeyIn`'s first-present
-  // rule so a rotation lands in the entry the core will read next.
-  const profile = profiles
-    ? PROFILE_KEYS.map((key) => profiles[key]).find((entry) => entry && entry.access) || null
-    : null;
+  const key = profileKeyIn(profiles);
+  const profile = key && profiles[key] && profiles[key].access ? profiles[key] : null;
   if (!profile) return null;
   return {
     accessToken: profile.access,

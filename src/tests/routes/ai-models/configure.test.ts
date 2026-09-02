@@ -676,10 +676,88 @@ describe("POST /setup-api/ai-models/configure", () => {
     const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
     expect(written.profiles["openai:chatgpt"]).toEqual(expect.objectContaining({ type: "oauth", provider: "openai" }));
     expect(written.profiles["codex:default"]).toBeUndefined();
+    // One openai profile on this box, so there is nothing to disambiguate and
+    // an explicit order would only hide the credential the owner adds next —
+    // the core already selects a usable profile over the
+    // `models.providers.openai.apiKey` fallback. Any order an earlier ClawBox
+    // left behind is cleared instead.
     expect(vi.mocked(spawnOpenclawCli)).toHaveBeenCalledWith(
-      ["models", "auth", "order", "set", "--provider", "openai", "openai:chatgpt"],
+      ["models", "auth", "order", "clear", "--agent", "main", "--provider", "openai"],
       expect.anything(),
     );
+  });
+
+  // The order write and the credential write must address the SAME agent
+  // store. `models auth order` resolves its own target when `--agent` is
+  // omitted (resolveSoleAgentId), which throws on a box with more than one
+  // configured agent and otherwise resolves whichever sole agent is declared
+  // — not necessarily `main`, the directory the credential was written into.
+  it("addresses the same agent store the credential was written to", async () => {
+    await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+
+    const orderCall = vi.mocked(spawnOpenclawCli).mock.calls.find(
+      ([args]) => Array.isArray(args) && args[2] === "order",
+    );
+    expect(orderCall?.[0]).toEqual(expect.arrayContaining(["--agent", "main"]));
+  });
+
+  it("names both OpenAI profiles, the sign-in first, when the box holds an API key too", async () => {
+    // An explicit order REPLACES the core's candidate list rather than
+    // reordering it, so a one-entry order written here made a later
+    // `openai:default` invisible — the turn kept going to the ChatGPT account
+    // and 400d on the API-only models the owner switched modes to reach.
+    mockReadOpenClawConfig.mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+    } as never);
+
+    await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+
+    expect(vi.mocked(spawnOpenclawCli)).toHaveBeenCalledWith(
+      ["models", "auth", "order", "set", "--agent", "main", "--provider", "openai",
+        "openai:chatgpt", "openai:default"],
+      expect.anything(),
+    );
+  });
+
+  it("revises the preference to the API key when THAT is the save", async () => {
+    // The owner switches OpenAI to API-key mode to reach gpt-5.4-pro. Nothing
+    // used to revisit the order, so the core still picked the sign-in.
+    mockReadOpenClawConfig.mockResolvedValue({
+      auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
+    } as never);
+
+    await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "sk-openai-key",
+    }));
+
+    expect(vi.mocked(spawnOpenclawCli)).toHaveBeenCalledWith(
+      ["models", "auth", "order", "set", "--agent", "main", "--provider", "openai",
+        "openai:default", "openai:chatgpt"],
+      expect.anything(),
+    );
+  });
+
+  it("leaves the order alone for a provider that is not OpenAI", async () => {
+    await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant" }));
+
+    expect(vi.mocked(spawnOpenclawCli).mock.calls.some(
+      ([args]) => Array.isArray(args) && args[2] === "order",
+    )).toBe(false);
   });
 
   it("names a failed auth-order preference in the answer instead of hiding it", async () => {
@@ -702,7 +780,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
-    expect(body.warning).toMatch(/models auth order set --provider openai openai:chatgpt/);
+    expect(body.warning).toMatch(/models auth order clear --agent main --provider openai/);
   });
 
   // A Pro account used to land on gpt-5.5 after sign-in and had to know to

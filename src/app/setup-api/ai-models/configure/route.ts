@@ -69,7 +69,8 @@ import {
   CHATGPT_PROFILE_KEY,
   CHATGPT_PROVIDER,
   chatgptModelRef,
-  chatgptRuntimeConfigPath,
+  chatgptRuntimeArmOp,
+  openaiAuthOrder,
 } from "@/lib/chatgpt-subscription";
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import {
@@ -102,10 +103,23 @@ const OPENCLAW_HOME_DIR =
   || process.env.OPENCLAW_HOME
   || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
 const CLAWBOX_HOME_DIR = process.env.HOME ?? "/home/clawbox";
+/**
+ * The agent whose store ClawBox owns.
+ *
+ * Named once and used for BOTH the credential path below and every `models
+ * auth …` call, because the CLI resolves its own target when `--agent` is
+ * omitted: `resolveModelsTargetAgent` → `resolveSoleAgentId`, which throws
+ * "Pass --agent <id>." on a box with more than one configured agent and
+ * otherwise resolves whichever sole agent is declared. Either way the order
+ * write could address a different store than this path — and did, silently.
+ * `main` is the core's own implicit agent id (LEGACY_IMPLICIT_AGENT_ID) and
+ * the directory it resolves for a config with no agent roster.
+ */
+const CLAWBOX_AGENT_ID = "main";
 const AUTH_PROFILES_PATH = path.join(
   OPENCLAW_HOME_DIR,
   "agents",
-  "main",
+  CLAWBOX_AGENT_ID,
   "agent",
   "auth-profiles.json",
 );
@@ -361,6 +375,56 @@ async function pasteAuthApiKey(provider: string, profileId: string, key: string)
     ["models", "auth", "paste-api-key", "--provider", provider, "--profile-id", profileId],
     { stdinData: key + "\n", timeoutMs: 60_000 },
   );
+}
+
+/**
+ * Record the box's OpenAI auth preference with the core's own per-provider
+ * order (`openclaw models auth order`, docs/cli/models.md) — or clear it.
+ *
+ * The order is only ever set when there is something to disambiguate: TWO
+ * openai profiles, the ChatGPT sign-in and an API key. With one profile the
+ * core already selects it (a usable profile outranks the
+ * `models.providers.openai.apiKey` fallback), while a one-entry explicit order
+ * is a trap — the core REPLACES the candidate list with it
+ * (`baseOrder = explicitOrder ?? …`), so the next credential the owner adds is
+ * invisible, and when the named profile is present but ineligible (an expired
+ * OAuth credential) every openai turn is refused with "Explicit auth order for
+ * openai has no usable profiles" over a working key in the same store.
+ *
+ * So: two profiles → name both, preferred first, and the preference is
+ * revised by whichever save happened last. Fewer → clear, which also undoes a
+ * one-entry order an earlier ClawBox left behind.
+ *
+ * Best effort, and the failure is NAMED in the answer rather than swallowed:
+ * the credential is stored either way, and the chat route arms the Codex
+ * runtime on the model, which only an OAuth profile satisfies.
+ *
+ * `preferred` is taken as present without looking for it — this save wrote it.
+ * Only the OTHER openai profiles come from the config, and `readConfig`
+ * answers `{}` rather than throwing for an unreadable or half-written file, so
+ * a bad read looks like "one profile" and CLEARS. That is the deliberate
+ * fail-safe direction: clearing hands selection back to the core, which still
+ * has both credentials as candidates, while the alternative — writing the
+ * one-entry order — is the trap described above.
+ */
+async function applyOpenAiAuthOrder(preferred: string): Promise<string | undefined> {
+  const config = await readOpenClawConfig().catch(() => null);
+  const order = openaiAuthOrder(config?.auth?.profiles, preferred);
+  const args = order.length > 1
+    ? ["models", "auth", "order", "set", "--agent", CLAWBOX_AGENT_ID, "--provider", CHATGPT_PROVIDER, ...order]
+    : ["models", "auth", "order", "clear", "--agent", CLAWBOX_AGENT_ID, "--provider", CHATGPT_PROVIDER];
+  try {
+    await spawnOpenclawCli(args, { timeoutMs: 60_000 });
+    return undefined;
+  } catch (orderErr) {
+    console.warn(
+      "[configure] models auth order failed for the OpenAI profiles:",
+      orderErr instanceof Error ? JSON.stringify(logSafe(orderErr.message)) : orderErr,
+    );
+    return "Saved, but OpenClaw did not record which OpenAI credential to prefer; "
+      + "if chat answers with an authentication error, run "
+      + `'openclaw ${args.join(" ")}' from the Terminal.`;
+  }
 }
 
 /**
@@ -2044,39 +2108,27 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       }
     }
 
-    // 1b. The ChatGPT profile now sits beside `openai:default`, the API-key
-    //     profile the same provider carries for the ClawBox AI image token
-    //     (`models.providers.openai.apiKey`). Chat has to prefer the sign-in:
-    //     `openclaw models auth order set` is the core's own per-provider
-    //     preference (docs/cli/models.md), stored in the agent's auth store
-    //     with precedence over config — so it is asked, not re-implemented.
-    //     Best effort: the profile is stored either way, and the chat route
-    //     arms the Codex runtime on the model, which only an OAuth profile
-    //     satisfies; a failed order is still named in the answer.
-    let chatgptOrderWarning: string | undefined;
-    if (isChatgptSubscription) {
-      try {
-        await spawnOpenclawCli(
-          ["models", "auth", "order", "set", "--provider", CHATGPT_PROVIDER, config.profileKey],
-          { timeoutMs: 60_000 },
-        );
-      } catch (orderErr) {
-        chatgptOrderWarning = "Signed in, but OpenClaw did not record the ChatGPT profile as preferred; "
-          + "if chat answers with an authentication error, run 'openclaw models auth order set --provider openai "
-          + `${config.profileKey}' from the Terminal.`;
-        console.warn(
-          "[configure] models auth order set failed for the ChatGPT profile:",
-          orderErr instanceof Error ? JSON.stringify(logSafe(orderErr.message)) : orderErr,
-        );
-      }
-    }
-
     // 2. Validate profileKey before interpolating into config path
     if (!PROFILE_KEY_RE.test(config.profileKey)) {
       return NextResponse.json(
         { error: "Invalid profile key format" },
         { status: 400 }
       );
+    }
+
+    // 2b. The ChatGPT sign-in and the OpenAI API key are two profiles of ONE
+    //     provider on OpenClaw 2, and whichever the owner saved last is the
+    //     one chat must prefer. That preference is the core's own
+    //     `models auth order` (docs/cli/models.md), stored in the agent's auth
+    //     store with precedence over config — asked, not re-implemented — and
+    //     it is revised on BOTH saves. Set once and never revisited, it hid
+    //     the credential the owner added afterwards.
+    //
+    //     After the validation above, not before it: the profile ids reach the
+    //     CLI as argv.
+    let chatgptOrderWarning: string | undefined;
+    if (ocProvider === CHATGPT_PROVIDER) {
+      chatgptOrderWarning = await applyOpenAiAuthOrder(config.profileKey);
     }
 
     // 3. Auth profile, primary model, compaction reserve and the local-access
@@ -2113,7 +2165,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // Codex app-server — the key the core itself keeps when it migrates a
       // `codex/*` reference (src/lib/chatgpt-subscription.ts).
       if (isChatgptSubscription) {
-        baseOps.push([chatgptRuntimeConfigPath(config.defaultModel), "codex"]);
+        baseOps.push(chatgptRuntimeArmOp(config.defaultModel));
       }
       if (shouldPromoteLocalToPrimary) {
         console.log(`[AI Config] Promoted local model to active primary: ${logSafe(config.defaultModel)}`);

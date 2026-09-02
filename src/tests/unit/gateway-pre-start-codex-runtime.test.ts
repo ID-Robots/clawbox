@@ -39,6 +39,20 @@ function extractPolicy(): string {
 
 const POLICY = hasPython3 ? extractPolicy() : "";
 
+/**
+ * Pull the auth-profile helpers the policy block calls out of the .sh verbatim.
+ * The policy asks them which OpenAI credentials the box holds, and running a
+ * hand-written stand-in here would test a copy of the rule, not the rule.
+ */
+function extractProfileHelpers(): string {
+  const start = SCRIPT_SOURCE.indexOf("def _auth_profiles():");
+  const end = SCRIPT_SOURCE.indexOf("def _openai_gpt_to_codex(", start);
+  if (start < 0 || end < 0) throw new Error("auth profile helpers not found");
+  return SCRIPT_SOURCE.slice(start, end);
+}
+
+const PROFILE_HELPERS = hasPython3 ? extractProfileHelpers() : "";
+
 /** Pull the configured/runtime Codex demand probe out of the shell heredoc. */
 function extractNeedsProbe(): string {
   const startMarker = 'NEEDS_CODEX_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<\'PY\'\n';
@@ -112,6 +126,7 @@ function applyPolicy(
     "changed = False",
     "agents_defaults = cfg.setdefault('agents', {}).setdefault('defaults', {})",
     "model_defaults = agents_defaults.setdefault('model', {})",
+    PROFILE_HELPERS,
     `_clawbox_v2_codex = ${openclawV2 ? "True" : "False"}`,
     POLICY,
     "print(json.dumps(agents_defaults.get('models') or {}))",
@@ -454,5 +469,81 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
       agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
     });
     expect(models).toEqual({});
+  });
+});
+
+// OpenClaw 2 references the ChatGPT subscription as `openai/<id>` and keeps
+// the Codex runtime on that entry. The boot seed above only ever recognised
+// the retired `codex/` namespace, so on the core ClawBox pins it repaired
+// nothing — and the arm is what keeps a ChatGPT turn off the browser endpoint
+// Cloudflare challenges.
+describe.runIf(hasPython3)("the boot seed on OpenClaw 2", () => {
+  const CHATGPT_ONLY = {
+    auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
+    agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
+  };
+
+  it("seeds the runtime arm for an openai/<id> primary on a ChatGPT box", () => {
+    const models = applyPolicy(structuredClone(CHATGPT_ONLY), true);
+    expect(models["openai/gpt-5.5"]).toEqual({ agentRuntime: { id: "codex" } });
+  });
+
+  it("seeds it for the fallbacks too", () => {
+    const models = applyPolicy({
+      ...structuredClone(CHATGPT_ONLY),
+      agents: {
+        defaults: {
+          model: { primary: "openai/gpt-5.5", fallbacks: ["openai/gpt-5.4", "deepseek/deepseek-v4-flash"] },
+        },
+      },
+    }, true);
+    expect(models["openai/gpt-5.4"]).toEqual({ agentRuntime: { id: "codex" } });
+    expect(models["deepseek/deepseek-v4-flash"]).toBeUndefined();
+  });
+
+  it("leaves an openai/<id> alone on a box that also holds an API key", () => {
+    // Ambiguous at boot: the same reference is the API-key route there, and
+    // arming it would push those turns through the Codex app-server with no
+    // ChatGPT account behind them. The chat route decides that one, from the
+    // row the owner picked.
+    const models = applyPolicy({
+      auth: {
+        profiles: {
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
+          "openai:default": { provider: "openai", mode: "api_key" },
+        },
+      },
+      agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
+    }, true);
+    expect(models["openai/gpt-5.5"]).toBeUndefined();
+  });
+
+  it("leaves an openai/<id> alone on a box with no ChatGPT sign-in at all", () => {
+    const models = applyPolicy({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
+    }, true);
+    expect(models["openai/gpt-5.5"]).toBeUndefined();
+  });
+
+  it("does not widen the seed on OpenClaw 1, where openai/<id> is a keyed route", () => {
+    const models = applyPolicy(structuredClone(CHATGPT_ONLY), false);
+    expect(models["openai/gpt-5.5"]).toBeUndefined();
+  });
+});
+
+// The `openai-codex/` -> `codex/` boot migration writes a namespace OpenClaw 2
+// refuses. Its sibling — the `openai/<gpt>` -> `codex/<gpt>` rewrite — is
+// v1-gated for exactly that reason; this one was not, so a v2 box ran a
+// `config set` the core rejected on every boot and printed a WARN pointing at
+// a retired namespace.
+describe("the openai-codex primary migration", () => {
+  it("runs only on OpenClaw 1", () => {
+    const start = SCRIPT_SOURCE.indexOf(
+      "# One-time config migration for devices updating from OpenClaw <=2026.5.x:",
+    );
+    expect(start).toBeGreaterThan(-1);
+    const block = SCRIPT_SOURCE.slice(start, SCRIPT_SOURCE.indexOf("LEGACY_CODEX_PRIMARY=", start));
+    expect(block).toContain('if [ "$CLAWBOX_OPENCLAW_V2" != "1" ]; then');
   });
 });

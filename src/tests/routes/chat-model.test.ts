@@ -810,23 +810,98 @@ describe("/setup-api/chat/model", () => {
       expect(body.subscriptionProviders).toContain("codex");
     });
 
-    it("keeps the API-key row separate when the box holds both", async () => {
-      vi.mocked(readConfig).mockResolvedValue({
-        auth: {
-          profiles: {
-            "openai:default": { provider: "openai", mode: "api_key" },
-            "openai:chatgpt": { provider: "openai", mode: "oauth" },
-          },
+    // A box holding BOTH OpenAI credentials — the ChatGPT sign-in and an API
+    // key — is the state the namespace used to disambiguate for free. Under
+    // `openai/<id>` the reference says nothing, so every one of these
+    // decisions has to come from the ROW the pick was made on.
+    const DUAL_BOX = {
+      auth: {
+        profiles: {
+          "openai:default": { provider: "openai", mode: "api_key" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
         },
-        agents: { defaults: { model: { primary: "openai/gpt-5.4" } } },
-      } as never);
+      },
+      agents: { defaults: { model: { primary: "openai/gpt-5.4" } } },
+    };
+
+    it("keeps the API-key row separate when the box holds both", async () => {
+      vi.mocked(readConfig).mockResolvedValue(DUAL_BOX as never);
 
       const body = await (await GET()).json();
 
       const providers = body.options.map((option: { provider: string }) => option.provider);
       expect(providers).toContain("openai");
       expect(providers).toContain("codex");
-      expect(body.subscriptionProviders).not.toContain("codex");
+      // The API-key row is NOT subscription-routed — its `-pro` tiers work.
+      expect(body.subscriptionProviders).not.toContain("openai");
+      // The ChatGPT row is, whatever else the box holds: a turn on it goes to
+      // the ChatGPT account, which refuses the API-only tiers.
+      expect(body.subscriptionProviders).toContain("codex");
+    });
+
+    it("arms the runtime for a pick made on the ChatGPT row of a dual box", async () => {
+      vi.mocked(readConfig).mockResolvedValue(DUAL_BOX as never);
+
+      const response = await post({ model: "openai/gpt-5.5", provider: "codex" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith(["agents.defaults.model.primary", "openai/gpt-5.5"]);
+      // Without this entry the turn leaves the ChatGPT account for
+      // api.openai.com and the box silently spends the API key instead.
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+        "agents.defaults.models.openai/gpt-5.5.agentRuntime.id",
+        "codex",
+      ]);
+    });
+
+    it("attributes an armed openai/<id> to the ChatGPT row, not the API-key one", async () => {
+      // The pill flipped to "OpenAI GPT" the moment the owner picked ChatGPT,
+      // because the GET could only read the namespace back.
+      vi.mocked(readConfig).mockResolvedValue({
+        ...DUAL_BOX,
+        agents: {
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } },
+          },
+        },
+      } as never);
+
+      const body = await (await GET()).json();
+
+      expect(body.activeLabel).toBe("OpenAI Codex");
+      const codexRow = body.options.find((option: { provider: string }) => option.provider === "codex");
+      expect(codexRow.model).toBe("openai/gpt-5.5");
+      const openaiRow = body.options.find((option: { provider: string }) => option.provider === "openai");
+      expect(openaiRow.model).not.toBe("openai/gpt-5.5");
+    });
+
+    it("refuses an API-only tier picked on the ChatGPT row of a dual box", async () => {
+      vi.mocked(readConfig).mockResolvedValue(DUAL_BOX as never);
+
+      const response = await post({ model: "openai/gpt-5.5-pro", provider: "codex" });
+
+      expect(response.status).toBe(400);
+      const refusal = await response.json();
+      // Names the lever the owner has: the same box's API-key row runs it.
+      expect(refusal.error).toContain("requires OpenAI API-key mode");
+      // The supported list is built from the catalogue, so the GPT-5.6
+      // generation the allowlist accepts cannot fall out of the sentence.
+      expect(refusal.error).toContain("GPT-5.6 Sol");
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    });
+
+    it("still lets the API-key row run an API-only tier on the same box", async () => {
+      vi.mocked(readConfig).mockResolvedValue(DUAL_BOX as never);
+
+      const response = await post({ model: "openai/gpt-5.5-pro", provider: "openai" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith(["agents.defaults.model.primary", "openai/gpt-5.5-pro"]);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalledWith([
+        "agents.defaults.models.openai/gpt-5.5-pro.agentRuntime.id",
+        "codex",
+      ]);
     });
 
     it("offers a sign-in the core cannot use greyed, with the reason, instead of a pick that fails", async () => {

@@ -165,6 +165,41 @@ describe("codex-auth-mirror.js", () => {
     expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.account_id).toBe("acct-legacy");
   });
 
+  it("writes a rotation back into the profile it READ, not into a half-written canonical one", () => {
+    // A sign-in interrupted after the entry was created but before the
+    // credential landed: `openai:chatgpt` exists with no `access`, beside a
+    // legacy `codex:default` that still works. The mirror reads the legacy
+    // one — and used to write the rotated token into the empty canonical one,
+    // leaving the entry it reads NEXT holding a refresh token already spent.
+    mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
+    writeFileSync(
+      codexHomeAuthPath,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: accessToken("acct-legacy", "rotated"),
+          refresh_token: "refresh-rotated-by-appserver",
+          account_id: "acct-legacy",
+        },
+      }),
+    );
+    writeFileSync(
+      path.join(agentDir, "auth-profiles.json"),
+      JSON.stringify({
+        profiles: {
+          "openai:chatgpt": { provider: "openai", type: "oauth" },
+          "codex:default": { access: accessToken("acct-legacy", "old"), refresh: "refresh-spent", id: "id-token" },
+        },
+      }),
+    );
+
+    run();
+
+    const store = JSON.parse(readFileSync(path.join(agentDir, "auth-profiles.json"), "utf-8"));
+    expect(store.profiles["codex:default"].refresh).toBe("refresh-rotated-by-appserver");
+    expect(store.profiles["openai:chatgpt"].refresh).toBeUndefined();
+  });
+
   it("writes an adopted rotation back into the openai:chatgpt profile in the SQLite store too", () => {
     // The route above seeds the legacy JSON file, which the mirror reads
     // first; a 2026.8 box holds the store in SQLite only, and the write-back

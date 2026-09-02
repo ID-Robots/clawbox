@@ -10,6 +10,7 @@ import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
 // Portal tier resolution lives in @/lib/clawbox-ai-portal-tier so the
 // configure route can reach the same answer from the same cache (TASK-481).
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
+import { profileProviderId } from "@/lib/chatgpt-subscription";
 
 export const dynamic = "force-dynamic";
 
@@ -87,8 +88,7 @@ async function resolveOpenclawAiState(): Promise<ResolvedAiState> {
   let activeKey: string | undefined;
   if (primaryProviderHint) {
     activeKey = profileKeys.find((key) => {
-      const entry = profiles[key];
-      const entryProvider = normalizeProvider(entry?.provider ?? key.split(":")[0]);
+      const entryProvider = normalizeProvider(profileProviderId(key, profiles[key]));
       return entryProvider === primaryProviderHint;
     });
   }
@@ -106,11 +106,9 @@ async function resolveOpenclawAiState(): Promise<ResolvedAiState> {
   const clawaiToken = typeof clawaiTokenCandidate === "string" && clawaiTokenCandidate.startsWith("claw_")
     ? clawaiTokenCandidate
     : null;
-  const hasClawaiProfile = profileKeys.some((key) => {
-    const entry = profiles[key];
-    const entryProvider = normalizeProvider(entry?.provider ?? key.split(":")[0]);
-    return entryProvider === "clawai";
-  });
+  const hasClawaiProfile = profileKeys.some(
+    (key) => normalizeProvider(profileProviderId(key, profiles[key])) === "clawai",
+  );
 
   return { provider, mode, model, hasClawaiProfile, clawaiToken };
 }

@@ -25,6 +25,7 @@ import {
   isModelUsableOnSubscription,
   SUBSCRIPTION_SURFACE,
 } from "@/lib/provider-models";
+import { chatgptReferenceProvider } from "@/lib/chatgpt-subscription";
 import { useProviderCatalog } from "@/hooks/useProviderCatalog";
 import { HeaderDropdown, type HeaderDropdownOption } from "./HeaderDropdown";
 import { ButtonSpinner } from "./ButtonSpinner";
@@ -551,9 +552,17 @@ export default function AIModelsStep({
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<{
-    type: "success" | "error";
+    type: "success" | "error" | "info";
     message: string;
   } | null>(null);
+  /**
+   * A save that SUCCEEDED but did not achieve all of it — today only the
+   * OpenAI auth-order preference, which the configure route reports in
+   * `warning` because the credential is stored either way. Held here rather
+   * than shown immediately: the success overlay is still running, and a notice
+   * painted underneath it is a notice nobody reads.
+   */
+  const [saveWarning, setSaveWarning] = useState<string | null>(null);
 
   const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
   const [selectedLlamaCppModel, setSelectedLlamaCppModel] = useState("");
@@ -662,10 +671,17 @@ export default function AIModelsStep({
       return;
     }
     if (modelTouched) return;
-    // Extract modelId under the catalog's namespace, NOT the selected
-    // provider's name — for openai+subscription these differ
-    // (codex vs openai).
-    const currentModelId = extractProviderModelId(currentModel, activeCatalog.provider);
+    // Extract modelId under the namespace the model is REFERENCED by, which is
+    // not the catalogue's id for the ChatGPT subscription: its catalogue is
+    // `codex` while OpenClaw 2 writes `openai/<id>`
+    // (src/lib/chatgpt-subscription.ts). Comparing against the catalogue id
+    // read every configured ChatGPT model as "not ours" and reset the picker
+    // to the catalogue default — which the next save on this screen then
+    // wrote over the model the owner had chosen.
+    const currentModelId = extractProviderModelId(
+      currentModel,
+      chatgptReferenceProvider(activeCatalog.provider),
+    );
     if (!currentModelId) {
       setSelectedModelId(activeCatalog.defaultModelId);
       setCustomModelId("");
@@ -850,10 +866,13 @@ export default function AIModelsStep({
 
   const showError = useCallback((message: string) => {
     setConfiguringState(null);
+    // A failure never inherits the previous save's warning.
+    setSaveWarning(null);
     setStatus({ type: "error", message });
   }, []);
 
   const showConfiguring = useCallback((kind: ConfiguringKind = "generic") => {
+    setSaveWarning(null);
     tryCloseOAuthWindow(oauthWindowRef);
     setSaving(false);
     setExchanging(false);
@@ -886,7 +905,8 @@ export default function AIModelsStep({
     });
   }, [getStepsForKind, selectedProvider]);
 
-  const showSuccessAndContinue = useCallback(() => {
+  const showSuccessAndContinue = useCallback((warning?: unknown) => {
+    setSaveWarning(typeof warning === "string" && warning.trim() ? warning : null);
     tryCloseOAuthWindow(oauthWindowRef);
     resetClawaiLogin();
     // Dispatch the gateway-restart signal as soon as we know the configure
@@ -1188,7 +1208,7 @@ export default function AIModelsStep({
       const data = await res.json();
       if (controller.signal.aborted) return;
       if (data.success) {
-        showSuccessAndContinue();
+        showSuccessAndContinue(data.warning);
       } else {
         showError(data.error || "Failed to configure");
       }
@@ -1413,7 +1433,7 @@ export default function AIModelsStep({
       const saveData = await saveRes.json();
       if (controller.signal.aborted) return;
       if (saveData.success) {
-        showSuccessAndContinue();
+        showSuccessAndContinue(saveData.warning);
       } else {
         showError(saveData.error || "Failed to save token");
       }
@@ -1968,17 +1988,31 @@ export default function AIModelsStep({
   );
 
   const handleConfiguringDone = useCallback(() => {
+    // A warning REPLACES the "Configured" line rather than joining it: the
+    // save did land, and repeating that while withholding the part that did
+    // not is how a non-fatal failure stays invisible. Amber, not green.
+    const settled: { type: "success" | "info"; message: string } = saveWarning
+      ? { type: "info", message: saveWarning }
+      : { type: "success", message: t("ai.configured") };
     if (embedded) {
       setConfiguringState(null);
-      setStatus({ type: "success", message: t("ai.configured") });
+      setStatus(settled);
       onConfigured?.();
     } else if (onNext) {
+      // The wizard advances off this step, so nothing rendered here survives
+      // the transition. The device-auth card it lands on has no manual
+      // continue control, so HOLDING here would strand a first-run owner
+      // behind a link labelled "Skip — use local only". The warning is logged
+      // for the journal and the same notice appears on the Settings panel,
+      // which is where a second OpenAI credential — the only state that
+      // produces it — is ever added.
+      if (saveWarning) console.warn("[ai-models] configure warning:", saveWarning);
       onNext();
     } else {
       setConfiguringState(null);
-      setStatus({ type: "success", message: t("ai.configured") });
+      setStatus(settled);
     }
-  }, [embedded, onNext, onConfigured, t]);
+  }, [embedded, onNext, onConfigured, saveWarning, t]);
 
   useEffect(() => {
     if (!configuringState?.completed) return;

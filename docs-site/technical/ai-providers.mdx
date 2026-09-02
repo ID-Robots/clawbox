@@ -22,14 +22,16 @@ For choosing a provider as a user, see [Choose Your AI Provider](/setup/choose-a
 | **ClawBox AI** | Portal device-pairing token | `deepseek/…` | `deepseek-v4-flash` | DeepSeek-backed, proxied via the portal. Tiers: Free/Pro → `v4-flash`, Max → `v4-pro` (1.6T) |
 | **Anthropic (Claude)** | API key | `anthropic/…` | `claude-sonnet-4-6` | Routed via Anthropic's OpenAI-compatible endpoint |
 | **OpenAI (API key)** | `sk-…` API key | `openai/…` | `gpt-5.4` | Direct `api.openai.com`, per-token billing |
-| **ChatGPT subscription** | ChatGPT OAuth sign-in | `codex/…` | `codex/gpt-5.4` | Uses your ChatGPT plan. Models: `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` only (no `-pro` variants) |
+| **ChatGPT subscription** | ChatGPT OAuth sign-in | `openai/…` + Codex runtime | `openai/gpt-5.5` | Uses your ChatGPT plan. Models: `gpt-5.6-sol/terra/luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` only (no `-pro` variants) |
 | **Google Gemini** | API key | `google/…` | `gemini-2.5-flash` | Routed via Google's OpenAI-compat endpoint |
 | **OpenRouter** | API key | `openrouter/<org>/<model>` | (curated) | Explicit provider definition required — written automatically |
 | **Ollama** (local) | none (per-install bearer) | `ollama/…` | `llama3.2:3b` | Context capped 32k / 8k output for Jetson RAM |
 | **llama.cpp** (local) | none (per-install bearer) | `llamacpp/…` | (bundled model) | OpenAI-compat local server |
 
 <Warning>
-**OpenAI has two distinct lanes.** The API-key lane (`openai/…`) and the ChatGPT-subscription lane (`codex/…`) have **different model catalogs and different credentials**. `gpt-5` exists only on the API lane; the subscription serves `gpt-5.5 / gpt-5.4 / gpt-5.4-mini`. Mixing them up is the root of most "Incorrect API key" tickets — see self-healing below.
+**OpenAI has two distinct lanes, and since OpenClaw 2 they share one namespace.** Both are `openai/…`; what separates them is the *credential* and one config key. The API key is the auth profile `openai:default`; the ChatGPT subscription is the OAuth profile `openai:chatgpt`, and its models carry `agents.defaults.models."openai/<id>".agentRuntime.id = "codex"`, which is what routes the turn through the Codex app-server and your ChatGPT plan. The catalogs still differ: `gpt-5` and the `-pro` tiers exist only on the API lane; the subscription serves `gpt-5.6-sol/terra/luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`. Mixing them up is the root of most "Incorrect API key" tickets — see self-healing below.
+
+The older `codex/…` and `openai-codex/…` namespaces are **retired**: the core answers `Unknown model` for them and `openclaw doctor --fix` rewrites them to `openai/…` while keeping the runtime key. The setup UI still calls the row "OpenAI Codex" — that is a label, not a namespace. A box that signed in before the upgrade holds a `codex:default` profile the core never consults, and the chat model list shows that row greyed with "Sign in again in Settings"; reconnecting OpenAI in Settings files it where the core looks.
 </Warning>
 
 ## Where credentials actually go
@@ -41,7 +43,9 @@ Configuring a provider writes up to four places:
 3. **`openclaw.json → models.providers.<provider>`** — the provider *definition* (baseUrl, API dialect, model list) for lanes that need one (ClawBox AI, Anthropic, Google, OpenRouter, Ollama, llama.cpp).
 4. **`~/.openclaw/agents/<agent>/agent/codex-home/auth.json`** (+ `~/.codex/auth.json`) — the ChatGPT-subscription session, synthesized from the auth profile on every gateway start.
 
-The active model is `agents.defaults.model.primary` (e.g. `codex/gpt-5.4`), with `agents.defaults.model.fallbacks` behind it (typically ClawBox AI or a local model).
+The active model is `agents.defaults.model.primary` (e.g. `openai/gpt-5.5`), with `agents.defaults.model.fallbacks` behind it (typically ClawBox AI or a local model).
+
+Per-provider credential preference, when a box holds both OpenAI credentials, is the core's own `openclaw models auth order set --agent main --provider openai <profileIds…>` — stored in the agent's auth store, revised by whichever OpenAI save happened last, and cleared when only one OpenAI profile is left.
 
 ## Compatibility routing (why some lanes use "OpenAI-compat")
 
@@ -66,7 +70,8 @@ Some native OpenClaw provider plugins expect auth stores ClawBox doesn't populat
 | Heal | Broken state it fixes |
 |---|---|
 | **Codex session sync** | After switching OpenAI from API-key to ChatGPT subscription, a stale key-only `codex-home/auth.json` kept sending a dead `sk-proj-…` key → `401` on every reply, returning after each restart. Now every agent's session file is validated (full OAuth set, JWT id-token) and rewritten if stale/partial/corrupt. |
-| **openai→codex migration** | Device has a *working* ChatGPT subscription but the primary model still points at the dead `openai/…` API lane → repointed to the `codex/…` equivalent, stale key and fallbacks purged. |
+| **Codex runtime arm** | Device has a *working* ChatGPT subscription and an `openai/…` primary, but the `agentRuntime.id` entry that routes it through the Codex app-server is missing (interrupted save, hand-edited config) → seeded on boot, so the turn does not fall through to the browser endpoint Cloudflare challenges. Only on a box whose ONLY OpenAI credential is the sign-in; where both exist the reference is ambiguous and the chat model picker decides it. |
+| **openai→codex migration (OpenClaw 1 only)** | On the retired namespace, a device with a working subscription whose primary still pointed at the keyless `openai/…` lane was repointed to `codex/…`. Skipped on OpenClaw 2, where `openai/…` *is* the subscription's reference and `doctor --fix` owns the migration in the other direction. |
 | **OpenRouter definition backfill** | Legacy devices configured before the provider-definition fix (symptom: replies with `usage 0/0/0`) get the definition written. |
 | **DeepSeek reasoning-effort backfill** | Older configs missing `supportedReasoningEfforts` made the gateway reject X-High. |
 | **Gateway token strength** | Any weak/legacy token is rotated to a strong per-device value. |

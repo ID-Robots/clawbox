@@ -1,3 +1,5 @@
+import { parseModelSlug } from "@/lib/provider-models";
+import type { OpenclawConfigSetArgs } from "@/lib/openclaw-config";
 import type { AuthProfileEntries } from "@/lib/subscription-surface";
 
 /**
@@ -68,31 +70,82 @@ export const CHATGPT_PROFILE_KEY = "openai:chatgpt";
 /** Newest model on every ChatGPT tier including Free; gpt-5.6 is plan-gated. */
 export const CHATGPT_DEFAULT_MODEL_ID = "gpt-5.5";
 
+/**
+ * The `agentRuntime.id` that sends a turn through the Codex app-server. Named
+ * once because five sites write or read it — the configure batch, both chat
+ * arm sites, the same-model repair, and `scripts/gateway-pre-start.sh`'s boot
+ * seed — and a typo in any one of them is a silent HTML-challenge failure.
+ */
+export const CHATGPT_AGENT_RUNTIME_ID = "codex";
+
+/**
+ * Provider ids an OpenClaw 1 ChatGPT sign-in was filed under: `openai-codex`
+ * up to 2026.5, `codex` in 2026.6/2026.7. Both are LEGACY on the pinned core —
+ * for a profile (never consulted for an `openai/*` route) and for a model
+ * reference (`Unknown model`) alike. The pair used to be spelled out at six
+ * call sites; ask the predicate below instead.
+ */
+const LEGACY_CHATGPT_PROVIDERS: ReadonlySet<string> = new Set(["codex", "openai-codex"]);
+
+/** Is `provider` one of the retired ChatGPT provider ids? */
+export function isLegacyChatgptProvider(provider: string | null | undefined): boolean {
+  return typeof provider === "string" && LEGACY_CHATGPT_PROVIDERS.has(provider.trim().toLowerCase());
+}
+
+/**
+ * The provider a model reference is WRITTEN under for a row the UI calls
+ * `uiProvider`. `codex` is a label, not a namespace, on OpenClaw 2: the row's
+ * models are `openai/<id>`. Every surface that turns a row into a reference —
+ * or a reference back into a row's model id — has to go through this, or it
+ * compares the UI id against a reference that never carries it.
+ */
+export function chatgptReferenceProvider(uiProvider: string | null | undefined): string {
+  const normalized = typeof uiProvider === "string" ? uiProvider.trim().toLowerCase() : "";
+  return isLegacyChatgptProvider(normalized) ? CHATGPT_PROVIDER : normalized;
+}
+
 /** `openai/<id>` — the only reference OpenClaw 2 resolves for the subscription. */
 export function chatgptModelRef(modelId: string): string {
   return `${CHATGPT_PROVIDER}/${modelId}`;
 }
 
 /** The config path that arms the Codex app-server runtime for `modelRef`. */
-export function chatgptRuntimeConfigPath(modelRef: string): string {
+function chatgptRuntimeConfigPath(modelRef: string): string {
   return `agents.defaults.models.${modelRef}.agentRuntime.id`;
 }
 
-function profileProvider(profileKey: string, entry: { provider?: string } | undefined): string {
+/** The whole `config set` op that arms the Codex runtime on `modelRef`. */
+export function chatgptRuntimeArmOp(modelRef: string): OpenclawConfigSetArgs {
+  return [chatgptRuntimeConfigPath(modelRef), CHATGPT_AGENT_RUNTIME_ID];
+}
+
+/**
+ * The provider an auth profile belongs to: its own `provider` field, or the
+ * key prefix when the entry does not carry one.
+ *
+ * Exported because four call sites derived it inline and one of them read the
+ * key prefix first, which answers `openai` for a `openai:chatgpt` entry filed
+ * under any other provider.
+ */
+export function profileProviderId(
+  profileKey: string,
+  entry: { provider?: string } | undefined,
+): string {
   const raw = typeof entry?.provider === "string" && entry.provider.trim()
     ? entry.provider
     : profileKey.split(":")[0];
   return raw.trim().toLowerCase();
 }
 
-function isOauth(entry: { mode?: string } | undefined): boolean {
+/** Is this auth profile an OAuth (subscription) credential? */
+export function isOauthProfile(entry: { mode?: string } | undefined): boolean {
   return typeof entry?.mode === "string" && entry.mode.trim().toLowerCase() === "oauth";
 }
 
 /** Does this box hold a ChatGPT sign-in the core can route — an openai OAuth profile? */
 export function hasChatgptOauthProfile(profiles: AuthProfileEntries): boolean {
   return Object.entries(profiles ?? {}).some(
-    ([key, entry]) => isOauth(entry) && profileProvider(key, entry) === CHATGPT_PROVIDER,
+    ([key, entry]) => isOauthProfile(entry) && profileProviderId(key, entry) === CHATGPT_PROVIDER,
   );
 }
 
@@ -103,19 +156,51 @@ export function hasChatgptOauthProfile(profiles: AuthProfileEntries): boolean {
  * offers and the write refuses.
  */
 export function hasLegacyChatgptProfile(profiles: AuthProfileEntries): boolean {
-  return Object.entries(profiles ?? {}).some(([key, entry]) => {
-    const provider = profileProvider(key, entry);
-    return isOauth(entry) && (provider === "codex" || provider === "openai-codex");
-  });
+  return Object.entries(profiles ?? {}).some(
+    ([key, entry]) => isOauthProfile(entry) && isLegacyChatgptProvider(profileProviderId(key, entry)),
+  );
 }
 
 /** Is `ref` in the retired `codex/` or `openai-codex/` namespace? */
 export function isLegacyCodexRef(ref: string | null | undefined): boolean {
-  const provider = typeof ref === "string" ? ref.split("/", 1)[0].trim().toLowerCase() : "";
-  return provider === "codex" || provider === "openai-codex";
+  return isLegacyChatgptProvider(parseModelSlug(ref)?.provider);
 }
 
 /** `codex/<id>` → `openai/<id>`: the same model, where OpenClaw 2 resolves it. */
 export function canonicalChatgptModelRef(legacyRef: string): string {
-  return chatgptModelRef(legacyRef.slice(legacyRef.indexOf("/") + 1));
+  const parsed = parseModelSlug(legacyRef);
+  return chatgptModelRef(parsed?.modelId ?? legacyRef);
+}
+
+/**
+ * Every openai auth profile on this box, `preferred` first — the argument list
+ * for `openclaw models auth order set --provider openai`.
+ *
+ * A list, never the single preferred id, for two reasons the core's own
+ * ordering makes concrete (dist/order-*.js `resolveAuthProfileOrderWithMetadata`):
+ *
+ *  * An explicit order REPLACES the candidate list rather than reordering it
+ *    (`baseOrder = explicitOrder ?? …`). A one-entry order written at ChatGPT
+ *    sign-in therefore hides an `openai:default` API key saved afterwards —
+ *    the turn keeps going to the ChatGPT account and 400s on the API-only
+ *    models the owner switched modes to reach.
+ *  * When every profile in an explicit order is present but INELIGIBLE (an
+ *    expired OAuth credential is the ordinary case), the plan is
+ *    `{kind: "empty", explicitOrder: true}` and the core refuses every turn on
+ *    the provider with "Explicit auth order for openai has no usable
+ *    profiles" — with a working API key in the same store. The core's own
+ *    repair (`allBaseProfilesMissing`) only covers profiles that are GONE.
+ *
+ * Naming both profiles keeps the preference and leaves the other credential
+ * reachable. The ids come from openclaw.json's `auth.profiles`, which the CLI
+ * itself maintains beside the store; if that drifts and names a profile the
+ * store lacks, `order set` rejects the whole call and the caller says so in
+ * its answer rather than reporting a preference it did not record.
+ */
+export function openaiAuthOrder(profiles: AuthProfileEntries, preferred: string): string[] {
+  const others = Object.entries(profiles ?? {})
+    .filter(([key, entry]) => key !== preferred && profileProviderId(key, entry) === CHATGPT_PROVIDER)
+    .map(([key]) => key)
+    .sort();
+  return [preferred, ...others];
 }
