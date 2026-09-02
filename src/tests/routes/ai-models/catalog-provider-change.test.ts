@@ -134,7 +134,9 @@ describe("catalog — a connect on a provider that already has a live catalogue"
     mockSpawn.mockImplementation(
       () => fakeChild(LINKED) as unknown as ReturnType<typeof childProcess.spawn>,
     );
-    const body = await get("openai", "&refresh=1");
+    // The connect, counted by the write that made it — not by the client.
+    refreshInBackground("openai", { providerChanged: true });
+    const body = await get("openai");
 
     // It serves the rows it has — they are a device's — and still says a better
     // answer is on its way, which is the only thing that keeps the picker asking.
@@ -272,7 +274,7 @@ describe("catalog — the change generation, not a one-shot flag", () => {
   // ~3-minute `openclaw models list` — ~2 cores of a Jetson, at the wizard's
   // most latency-sensitive moment, for a question the fork already out is
   // answering post-credential.
-  it("costs one enumeration when the same change reaches the route twice", async () => {
+  it("costs one enumeration when the client echoes a change the write already counted", async () => {
     const held = heldChild({
       count: 2,
       models: [
@@ -296,9 +298,13 @@ describe("catalog — the change generation, not a one-shot flag", () => {
     await settle();
     expect(googleSpawns).toBe(1);
 
-    // The same change arriving again as the client's `?refresh=1`. The fork out
-    // there was started BY this change and is reading the box it reports.
-    refreshInBackground("google", { providerChanged: true });
+    // The same change arriving again as the client's `?refresh=1`, which is now
+    // a NUDGE: "does the current generation have an answer?". A fork for that
+    // generation is out, so there is nothing to start and nothing to count.
+    // This is what removes the duplicate ~3-minute enumeration per connect —
+    // and, unlike the predicate it replaces, it cannot swallow a real second
+    // change, because a real one comes from a write and says so.
+    refreshInBackground("google", { serveCurrent: true });
     await settle();
     expect(googleSpawns).toBe(1);
 
@@ -311,5 +317,66 @@ describe("catalog — the change generation, not a one-shot flag", () => {
     // No replacement scheduled: nothing was superseded.
     await settle();
     expect(googleSpawns).toBe(1);
+  });
+
+  // The predicate this replaces read the SHAPE of the fork in flight —
+  // change-started, current generation — rather than the identity of the
+  // signal, so it could not tell `configure`'s echo from a second, genuinely
+  // different change 30 seconds later. Both landed on the same branch, and the
+  // real one was dropped: no bump, no re-entry, and the PRE-change fork then
+  // published as the CURRENT generation — live, unstale, no `warming`, backoff
+  // cleared — so nothing re-enumerated for six hours. Two clicks reach it: a
+  // mistyped key corrected, or a provider switched off and back on.
+  it("answers a second, different change that lands inside the first enumeration", async () => {
+    const first = heldChild(PRE_KEY);
+    const second = heldChild(LINKED);
+    let spawns = 0;
+    mockSpawn.mockImplementation((_bin, args) => {
+      const argv = args as string[];
+      const target = argv[argv.indexOf("--provider") + 1];
+      if (target !== "openai") {
+        return fakeChild({ count: 0, models: [] }) as unknown as ReturnType<typeof childProcess.spawn>;
+      }
+      spawns += 1;
+      const child = spawns === 1 ? first.child : second.child;
+      return child as unknown as ReturnType<typeof childProcess.spawn>;
+    });
+
+    // Key A saved. Generation 1, fork F1.
+    refreshInBackground("openai", { providerChanged: true });
+    await settle();
+    expect(spawns).toBe(1);
+
+    // The client's echo of that same change. Correctly nothing: it is a nudge,
+    // and the generation it asks about already has a fork.
+    refreshInBackground("openai", { serveCurrent: true });
+    await settle();
+    expect(spawns).toBe(1);
+
+    // ~30s later the owner does a SECOND thing to this provider — corrects the
+    // key and saves again, or flips the Settings switch off and back on. A
+    // different write, so a different generation.
+    refreshInBackground("openai", { providerChanged: true });
+    await settle();
+    // Still collapsed while F1 runs; single-flight is right.
+    expect(spawns).toBe(1);
+
+    // F1 answers for the box as it was two changes ago, so it is discarded and
+    // the current generation is enumerated instead.
+    first.release();
+    await vi.waitFor(() => expect(spawns).toBe(2), { timeout: 4000, interval: 25 });
+    expect(fs.existsSync(cacheFile("openai"))).toBe(false);
+
+    second.release();
+    await vi.waitFor(() => {
+      expect(readCache("openai").models.map((m) => m.id).sort())
+        .toEqual(["gpt-5.4", "gpt-5.5", "gpt-5.6-sol"]);
+    }, { timeout: 4000, interval: 25 });
+    expect(spawns).toBe(2);
+
+    // And once the current generation is answered, the asking stops.
+    const settled = await get("openai");
+    expect(settled.warming).toBeUndefined();
+    expect(settled.source).toBe("live");
   });
 });

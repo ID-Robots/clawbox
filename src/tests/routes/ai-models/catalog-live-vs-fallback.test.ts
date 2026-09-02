@@ -483,11 +483,15 @@ describe("catalog — a provider that cannot answer is not asked on every reques
     // A plain ask is still held. That part of the brake is the point of it.
     expect(spawnedProviders()).not.toContain("google");
 
-    const body = await get("google", "&refresh=1");
-    // Two things, and the second is the one that was missing: the fork starts,
-    // AND the response tells the picker an answer is on its way, so something
-    // is left asking for it.
+    // The connect, counted server-side — `notifyProviderSetChanged` is the one
+    // caller shape that says "the provider set changed". A client's
+    // `?refresh=1` deliberately cannot do this any more.
+    refreshInBackground("google", { providerChanged: true });
     await vi.waitFor(() => expect(spawnedProviders()).toContain("google"), { timeout: 2000 });
+
+    // And the response tells the picker an answer is on its way, so something
+    // is left asking for it.
+    const body = await get("google");
     expect(body.warming).toBe(true);
     expect(body.source).toBeUndefined();
 

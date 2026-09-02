@@ -16,6 +16,11 @@ vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({ readConfig: vi.fn() }));
 vi.mock("@/lib/hermes-model-options", () => ({ getModelOptions: vi.fn() }));
+// The catalogue is told out-of-band; the real one forks `openclaw models list`.
+vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
+  notifyProviderSetChanged: vi.fn(),
+  refreshInBackground: vi.fn(),
+}));
 // An in-memory store behind the real module's constants, so the round trip is
 // what a device would see: the write the route makes is the read the next
 // status makes. (The cookie verifier reads `DATA_DIR` at import.)
@@ -42,6 +47,7 @@ let readConfig: Mock;
 let getModelOptions: Mock;
 let configSet: Mock;
 let setProviderEnabled: Mock;
+let notifyProviderSetChanged: Mock;
 
 function ownerCookie(): string {
   return `clawbox_session=${createSessionCookie(3600, SESSION_SECRET)}`;
@@ -91,6 +97,8 @@ beforeEach(async () => {
     models: { providers: { openrouter: { apiKey: "sk-or-secret" } } },
     agents: { defaults: { model: { primary: "anthropic/claude-sonnet-4-6" } } },
   });
+
+  ({ notifyProviderSetChanged } = (await import("@/app/setup-api/ai-models/catalog/route")) as unknown as { notifyProviderSetChanged: Mock });
 
   ({ POST } = await import("@/app/setup-api/providers/enabled/route"));
 });
@@ -177,6 +185,30 @@ describe("the round trip", () => {
     expect(on.status).toBe(200);
     expect(rowFor(await on.json(), "openrouter")!.enabled).toBe(true);
     expect(store.get("ai_disabled_providers")).toEqual([]);
+  });
+
+  // A switch flip IS a provider-set change, and this route used to make one
+  // without telling the catalogue at all: the client's `?refresh=1` was its
+  // only signal, and a non-browser caller had none. Switching a provider off
+  // empties its `openclaw models list`; switching it back on is what makes it
+  // enumerable again. Only a server-side write can COUNT that — the client's
+  // nudge deliberately cannot — so the catalogue would otherwise sit on the
+  // pre-flip enumeration for the whole 6h refresh interval.
+  it("tells the catalogue the provider set changed, both ways", async () => {
+    setProviderEnabled.mockResolvedValue({ ok: true, provider: "openrouter" });
+
+    await asOwner({ provider: "openrouter", enabled: false });
+    expect(notifyProviderSetChanged).toHaveBeenCalledWith("openrouter");
+
+    notifyProviderSetChanged.mockClear();
+    await asOwner({ provider: "openrouter", enabled: true });
+    expect(notifyProviderSetChanged).toHaveBeenCalledWith("openrouter");
+  });
+
+  it("does not tell the catalogue about a flip the rule refused", async () => {
+    // 409/404 return before the write; nothing changed, so nothing is counted.
+    await asOwner({ provider: "anthropic", enabled: false });
+    expect(notifyProviderSetChanged).not.toHaveBeenCalled();
   });
 
   it("stores the canonical id whatever spelling the caller used", async () => {

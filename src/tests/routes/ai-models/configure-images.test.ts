@@ -50,6 +50,7 @@ vi.mock("@/lib/clawkeep", () => ({
 // note in configure.test.ts.
 vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
   refreshInBackground: vi.fn(),
+  notifyProviderSetChanged: vi.fn(),
 }));
 
 const { parseFullyQualifiedModelImpl, LLAMACPP_PROXY_BASE_URL } = vi.hoisted(() => ({

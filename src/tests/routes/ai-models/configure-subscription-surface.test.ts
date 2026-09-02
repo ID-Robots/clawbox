@@ -59,6 +59,7 @@ vi.mock("@/lib/provider-models", async () => {
 // after the test that triggered it has finished.
 vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
   refreshInBackground: vi.fn(),
+  notifyProviderSetChanged: vi.fn(),
 }));
 
 const { parseFullyQualifiedModelImpl } = vi.hoisted(() => ({
@@ -247,7 +248,7 @@ async function primeConfigureRoute(): Promise<(request: Request) => Promise<Resp
   vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
   vi.mocked(runOpenclawConfigSetBatch).mockResolvedValue(undefined);
   vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 0 });
-  vi.mocked(setProviderPlugins).mockResolvedValue(undefined);
+  vi.mocked(setProviderPlugins).mockResolvedValue(null);
   vi.mocked(unpairLocal).mockResolvedValue(undefined);
   mockSpawn.mockImplementation(() => successfulChild());
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network disabled in tests")));

@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { logSafe } from "@/lib/log-safe";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { setProviderEnabled } from "@/lib/provider-enablement";
+import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { readProviderStatus } from "@/lib/provider-status";
 
 /**
@@ -60,6 +61,14 @@ export async function POST(request: Request) {
   // The id is one the rule just matched to a row, but it is still the body's
   // spelling of it: one line per flip, whatever the body carried.
   console.error(`[providers] ${logSafe(provider)} switched ${fields.enabled ? "on" : "off"} by the owner`);
+
+  // A switch flip IS a provider-set change, and this route is one of the two
+  // that used to make one without telling the catalogue — the client's
+  // `?refresh=1` was its only signal, and a non-browser caller had none at all.
+  // Switching a provider off empties its `openclaw models list`; switching it
+  // back on is what makes it enumerable again. Out-of-band, not awaited: the
+  // strip repaints from the status read below, not from the catalogue.
+  notifyProviderSetChanged(provider);
 
   const summary = await readProviderStatus();
   return NextResponse.json(summary, { headers: { "Cache-Control": "no-store" } });

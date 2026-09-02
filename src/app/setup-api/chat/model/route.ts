@@ -13,6 +13,7 @@ import {
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
 import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
+import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import {
   CLAWBOX_AI_MODEL_BY_TIER,
@@ -1204,7 +1205,17 @@ export async function POST(request: Request) {
       //    when nothing on the box could use it — the primary is elsewhere
       //    AND no usable Anthropic credential remains (see setProviderPlugins).
       //    Other plugins stay where they are.
-      await setProviderPlugins(parsed.provider);
+      const flippedProvider = await setProviderPlugins(parsed.provider);
+      // A flipped plugin IS a provider-set change: switching anthropic off is
+      // precisely what empties `openclaw models list --provider anthropic`.
+      // Neither this route nor ChatPopup emitted anything for it, and the
+      // catalogue hook deliberately ignores the model-SELECTION event, so the
+      // enumeration taken while the plugin was on stood as `source: "live"` for
+      // six hours. `setProviderPlugins` returns the id it changed, or null when
+      // it changed nothing, so this cannot announce a change that did not
+      // happen. It is also the path `POST /setup-api/providers/default`
+      // delegates to on OpenClaw, so counting it here covers that route too.
+      if (flippedProvider) notifyProviderSetChanged(flippedProvider);
     }
 
     await restartGateway();

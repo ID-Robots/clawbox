@@ -16,6 +16,12 @@ vi.mock("@/lib/config-store", () => ({
 
 const { configSetMock } = vi.hoisted(() => ({ configSetMock: vi.fn() }));
 
+// The catalogue is told out-of-band when the plugin gate changes the provider
+// set; the real module forks `openclaw models list`.
+vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
+  notifyProviderSetChanged: vi.fn(),
+  refreshInBackground: vi.fn(),
+}));
 vi.mock("@/lib/openclaw-config", () => ({
   inferConfiguredLocalModel: vi.fn(),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
