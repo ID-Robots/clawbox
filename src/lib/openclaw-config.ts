@@ -1930,13 +1930,19 @@ export async function readTelegramAllowFrom(account = "default"): Promise<string
  * Wipe the per-account Telegram allowlist + pending stores. Used when the bot
  * token changes: previously-approved senders belong to the old bot, so a new
  * bot should start with a fresh allowlist. Clears the v2 state database rows
- * when the store exists, and always the legacy files, so no copy survives for
- * a later migration to carry back in. Best-effort — a missing store or file
- * is fine; the caller restarts the gateway right after, so nothing cached
- * outlives the wipe.
+ * when the store exists, then the legacy files, so no copy survives for a
+ * later migration to carry back in. A missing store or file is fine. A store
+ * that exists but could not be cleared is not: its approvals are still what
+ * the gateway enforces, so this throws — before the legacy files are touched,
+ * leaving the state exactly as it was — and the caller must not report a
+ * reset that did not happen.
  */
 export async function clearTelegramPairingState(account = "default"): Promise<void> {
-  clearPairingState("telegram", account);
+  if (!clearPairingState("telegram", account)) {
+    throw new Error(
+      "Could not clear the previous Telegram approvals from OpenClaw's state store; they are still in force",
+    );
+  }
   const files = [
     path.join(CREDENTIALS_DIR, `telegram-${account}-allowFrom.json`),
     path.join(CREDENTIALS_DIR, account === "default" ? "telegram-pairing.json" : `telegram-${account}-pairing.json`),

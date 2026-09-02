@@ -14,7 +14,10 @@
  * not (a v1 box, a Hermes-only box) — the callers keep their legacy-file path
  * for that case. A store that exists but cannot be opened or read also yields
  * null: the caller's fallback then finds nothing (the migration emptied the
- * legacy files), which is the same answer the gateway would give.
+ * legacy files), which is the same answer the gateway would give. The one
+ * writer, `clearPairingState`, reports such a store instead of yielding null:
+ * a reset that silently did nothing would leave the approvals in force behind
+ * a success.
  *
  * The database is never created here: an absent file means an OpenClaw that
  * has not migrated yet, and creating an empty store would make the doctor
@@ -70,13 +73,16 @@ function logOnce(readOnly: boolean, what: string, line: string, err: unknown): v
 }
 
 /**
- * Run `fn` against the state store; null when there is no store, or when it
- * cannot be opened or queried (logged — a corrupt or locked store must fall
- * through to the caller's fallback, never escape as a 500).
+ * Run `fn` against the store at `dbPath`; null when it cannot be opened or
+ * queried (logged — a corrupt or locked store must never escape as a 500: a
+ * reader falls through to its fallback, a writer reports the failure).
  */
-function withStateDb<T>(readOnly: boolean, what: string, fn: (db: DatabaseSyncType) => T): T | null {
-  const dbPath = statePath();
-  if (!dbPath) return null;
+function withOpenStore<T>(
+  dbPath: string,
+  readOnly: boolean,
+  what: string,
+  fn: (db: DatabaseSyncType) => T,
+): T | null {
   let db: DatabaseSyncType;
   try {
     db = openSqlite(dbPath, readOnly);
@@ -94,6 +100,12 @@ function withStateDb<T>(readOnly: boolean, what: string, fn: (db: DatabaseSyncTy
   } finally {
     db.close();
   }
+}
+
+/** Run `fn` against the state store; null when there is no store, or when it cannot be used. */
+function withStateDb<T>(readOnly: boolean, what: string, fn: (db: DatabaseSyncType) => T): T | null {
+  const dbPath = statePath();
+  return dbPath ? withOpenStore(dbPath, readOnly, what, fn) : null;
 }
 
 /** OpenClaw stores account ids lowercased, and the default account as "default". */
@@ -169,16 +181,22 @@ export function readPairingRequests(channel: string, account = "default"): Pairi
 /**
  * Drop one channel account's approvals and pending requests — the two tables
  * OpenClaw itself always rewrites together — in one IMMEDIATE transaction.
- * A no-op without a v2 store; a failed write is logged, not thrown.
+ * True when the account's rows are gone: cleared, or there is no v2 store to
+ * hold them. False when a store exists and could not be cleared (logged): a
+ * locked, corrupt or read-only store keeps every approved sender, so the
+ * caller has to report that rather than carry on as if the reset happened.
  */
-export function clearPairingState(channel: string, account = "default"): void {
+export function clearPairingState(channel: string, account = "default"): boolean {
+  const dbPath = statePath();
+  if (!dbPath) return true;
   const key = accountKey(account);
-  withStateDb(false, `${channel} pairing reset`, (db) => {
+  const done = withOpenStore(dbPath, false, `${channel} pairing reset`, (db) => {
     db.exec("BEGIN IMMEDIATE");
     try {
       db.prepare("DELETE FROM channel_pairing_allow_entries WHERE channel_key = ? AND account_id = ?").run(channel, key);
       db.prepare("DELETE FROM channel_pairing_requests WHERE channel_key = ? AND account_id = ?").run(channel, key);
       db.exec("COMMIT");
+      return true;
     } catch (err) {
       try {
         db.exec("ROLLBACK");
@@ -188,4 +206,5 @@ export function clearPairingState(channel: string, account = "default"): void {
       throw err;
     }
   });
+  return done === true;
 }

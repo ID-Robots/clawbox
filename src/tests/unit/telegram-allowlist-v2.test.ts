@@ -318,15 +318,53 @@ describe("clearTelegramPairingState on an OpenClaw 2 box", () => {
     expect(countRows("channel_pairing_allow_entries", "telegram", "default")).toBe(0);
   });
 
-  it("does not throw when the store cannot be opened for writing", async () => {
+  it("rejects when the store cannot be opened for writing, and leaves the legacy files alone", async () => {
+    // A store that exists but cannot be used still holds whatever it held and
+    // the gateway keeps answering those senders, so the reset has to say so
+    // instead of resolving the way the no-store case does.
     await fs.mkdir(path.dirname(statePath()), { recursive: true });
     await fs.writeFile(statePath(), "this is not a database", "utf-8");
+    const allowFile = path.join(tmpHome, "credentials", "telegram-default-allowFrom.json");
+    await writeLegacyAllow(["555"]);
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { clearTelegramPairingState } = await import("@/lib/openclaw-config");
-    await expect(clearTelegramPairingState()).resolves.toBeUndefined();
+    await expect(clearTelegramPairingState()).rejects.toThrow(/approvals/);
+    expect(err).toHaveBeenCalledTimes(1);
+    // Nothing else was touched: the legacy copy is not deleted behind a failed reset.
+    await expect(fs.access(allowFile)).resolves.toBeUndefined();
     err.mockRestore();
-    warn.mockRestore();
+  });
+
+  it("rejects when the delete fails, leaving every row the reset could not remove", async () => {
+    await makeStateDb(
+      [
+        ["telegram", "default", OWNER_ID],
+        ["telegram", "default", "222"],
+      ],
+      [{ id: "42", code: "ABCD2345", createdAt: "2026-09-01T10:00:00.000Z" }],
+    );
+    // The transaction's second DELETE is made to fail (a locked or read-only
+    // store fails the same way, only earlier), which also proves the first
+    // DELETE is rolled back rather than left half-applied.
+    withDb((db) =>
+      db.exec(
+        "CREATE TRIGGER refuse BEFORE DELETE ON channel_pairing_requests BEGIN SELECT RAISE(ABORT, 'refused'); END",
+      ),
+    );
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { clearTelegramPairingState, readTelegramAllowFrom } = await import("@/lib/openclaw-config");
+    const { clearPairingState } = await import("@/lib/openclaw-state-store");
+    await expect(clearTelegramPairingState()).rejects.toThrow(/approvals/);
+    expect(clearPairingState("telegram")).toBe(false);
+    expect(countRows("channel_pairing_allow_entries", "telegram", "default")).toBe(2);
+    expect(countRows("channel_pairing_requests", "telegram", "default")).toBe(1);
+    expect(await readTelegramAllowFrom()).toEqual([OWNER_ID, "222"]);
+    err.mockRestore();
+  });
+
+  it("reports the rows gone on a box without the v2 store, where the legacy files are the store", async () => {
+    const { clearPairingState } = await import("@/lib/openclaw-state-store");
+    expect(clearPairingState("telegram")).toBe(true);
   });
 });
 
