@@ -97,26 +97,6 @@ export const MASCOT_KEYFRAMES = `
   0% { transform: translateY(0) scale(1); opacity: 1; }
   100% { transform: translateY(-40px) scale(0); opacity: 0; }
 }
-@keyframes box-idle {
-  0%, 100% { transform: translateY(0) rotate(0deg); }
-  50% { transform: translateY(-2px) rotate(1deg); }
-}
-@keyframes box-bump-right {
-  0% { transform: translateX(-75px) translateY(0) rotate(0deg); }
-  20% { transform: translateX(-50px) translateY(-20px) rotate(90deg); }
-  40% { transform: translateX(-25px) translateY(-30px) rotate(200deg); }
-  60% { transform: translateX(-10px) translateY(-15px) rotate(300deg); }
-  80% { transform: translateX(-3px) translateY(-5px) rotate(345deg); }
-  100% { transform: translateX(0) translateY(0) rotate(360deg); }
-}
-@keyframes box-bump-left {
-  0% { transform: translateX(75px) translateY(0) rotate(0deg); }
-  20% { transform: translateX(50px) translateY(-20px) rotate(-90deg); }
-  40% { transform: translateX(25px) translateY(-30px) rotate(-200deg); }
-  60% { transform: translateX(10px) translateY(-15px) rotate(-300deg); }
-  80% { transform: translateX(3px) translateY(-5px) rotate(-345deg); }
-  100% { transform: translateX(0) translateY(0) rotate(-360deg); }
-}
 @keyframes damage-float {
   0% { transform: translateY(0) scale(0.5); opacity: 1; }
   20% { transform: translateY(-20px) scale(1.2); opacity: 1; }

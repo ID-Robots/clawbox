@@ -179,16 +179,19 @@ describe("edition gating", () => {
     // which is the same answer OpenClaw gives — an OpenClaw desktop that lost
     // the route for a moment must not sprout a Hermes egg.
     expect(container.querySelector('[data-mascot="egg"]')).toBeNull();
+    // Nor the cube: the fallback is the crab on its own, like OpenClaw's.
+    expect(container.querySelector('img[src="/clawbox-box.png"]')).toBeNull();
   });
 
-  it("keeps the ClawBox prop for the crab and takes it away from a pet", async () => {
-    // The little ClawBox is the CRAB's: it kicks it, climbs it and drags it
-    // about. A Hermes pet is not ClawBox's mascot and does not carry our
-    // hardware around, so the prop is not rendered at all for one.
+  it("renders no ClawBox cube beside either body", async () => {
+    // The little isometric ClawBox used to sit on the OpenClaw desktop as the
+    // crab's prop — a 40px cube parked just above the taskbar that the crab
+    // kicked and climbed. The owner wants the crab on its own, and a Hermes
+    // pet never carried it, so no body renders the cube.
     stubPetsRoute({ supported: false, edition: "openclaw", enabled: false, active: null });
     const crab = render(<Mascot />);
     await waitFor(() => expect(crab.container.querySelector('img[src="/clawbox-crab.png"]')).toBeTruthy());
-    expect(crab.container.querySelector('img[src="/clawbox-box.png"]')).toBeTruthy();
+    expect(crab.container.querySelector('img[src="/clawbox-box.png"]')).toBeNull();
 
     cleanup();
     invalidatePetStatus();

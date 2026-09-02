@@ -19,10 +19,11 @@ test("mascot tap opens the chat popup", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
-  const boxImage = page.locator('img[src="/clawbox-box.png"]').first();
-  await expect(boxImage).toBeVisible();
   const mascotImg = page.locator('img[src="/clawbox-crab.png"][alt=""]').first();
   await expect(mascotImg).toBeVisible();
+  // Only meaningful once the crab is on screen: Mascot renders null until the
+  // pet status resolves, so asserting absence any earlier passes vacuously.
+  await expect(page.locator('img[src="/clawbox-box.png"]')).toHaveCount(0);
 
   const chatPopup = page.getByTestId("chat-popup");
   // Tap the crab with a real pointer, not a synthetic PointerEvent: the handler
