@@ -517,17 +517,21 @@ const COMMAND_SAFE_ID = /^[A-Za-z0-9_./:-]+$/;
  * detected off the catalogue's own flag, carried on the request as
  * `providerIsUserDefined`; a request whose flag is unknown is given the
  * benefit of the doubt.
+ *
+ * A report with NO provider in it resolves to nothing. The request cannot
+ * stand in: the route validated that the requested PAIR is installable, not
+ * that this session is on it — a resumed session holding the requested model
+ * id needs no switch, so it keeps whatever provider it was created with. The
+ * only two places the request IS the provider are a session this turn built
+ * and one it switched, and neither reaches this function (see
+ * `providerFromRequest`).
  */
 const DASHBOARD_PROVIDER_KIND = "custom";
 function servedProviderSlug(reported: string, req: DashboardTurnRequest, onRequestedModel: boolean): string {
   const requested = req.provider;
   const reportedIsKind = reported === DASHBOARD_PROVIDER_KIND;
   if (reported && !reportedIsKind && (isHermesCliProvider(reported) || reported === requested)) return reported;
-  if (!onRequestedModel || !requested) return "";
-  // Nothing reported at all — the SESSION-level call, where the dashboard had
-  // its chance to name one. A completion frame that names none defers to what
-  // the session was resolved to instead (see the messageComplete handler).
-  if (!reported) return requested;
+  if (!reported || !onRequestedModel || !requested) return "";
   // The kind and the literal slug are the same word; nothing here can say
   // which the session is on.
   if (requested === DASHBOARD_PROVIDER_KIND) return "";
@@ -1281,11 +1285,16 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                 // A completion's `provider` is the same field with the same
                 // kind-not-slug problem, resolved the same way. A frame that
                 // names none defers to what the session was settled on above —
-                // NOT to the request, which the session may have contradicted.
+                // NOT to the request, which the session may have contradicted —
+                // and only while it is still talking about that model: a frame
+                // naming a DIFFERENT model describes a pairing this turn never
+                // established, and the settled provider is not that model's.
                 const completionProvider = typeof payload.provider === "string" ? payload.provider : "";
                 const servedProvider = completionProvider
                   ? servedProviderSlug(completionProvider, req, servedModel === req.model)
-                  : activeProvider;
+                  : servedModel === activeModel
+                    ? activeProvider
+                    : "";
                 return {
                   text: truncated ? `${finalText}\n\n[Reply truncated — it was too long to hold.]` : finalText,
                   reasoning: finalReasoning,

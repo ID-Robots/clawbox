@@ -552,6 +552,34 @@ describe("the provider a turn reports as having served it", () => {
     expect(final.provider ?? "").toBe("");
   });
 
+  it("names no provider for a resumed session the dashboard described without one", async () => {
+    // The route validated that the requested PAIR is installable; it did not
+    // establish what THIS session is on. The session holds the requested model
+    // id, so no switch was issued and it is still on whatever provider it was
+    // created with — which a report carrying no provider does not name.
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "deepseek-v4-flash", provider: "clawai" },
+      { model: "deepseek-v4-flash" },
+    );
+    expect(socket.method("slash.exec")).toBeUndefined();
+    expect(turn?.model).toBe("deepseek-v4-flash");
+    expect(turn?.provider ?? "").toBe("");
+  });
+
+  it("drops the provider when the completion names a model the session was not settled on", async () => {
+    // The settled provider belongs to the settled MODEL. A frame that changes
+    // the model without naming a provider describes a pairing this turn never
+    // established, and carrying the old slug onto it invents one.
+    const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5" });
+    expect(turn?.provider).toBe("clawai");
+    const running = turn!.run(() => {});
+    await Promise.resolve();
+    socket.event("message.complete", { text: "one", status: "complete", model: "gpt-5.6-sol" });
+    const final = await running;
+    expect(final.model).toBe("gpt-5.6-sol");
+    expect(final.provider ?? "").toBe("");
+  });
+
   it("does not let a completion's own kind overwrite the resolved slug", async () => {
     const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5" });
     const running = turn!.run(() => {});
