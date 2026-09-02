@@ -5,6 +5,7 @@ import path from "path";
 import { findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
 import { DATA_DIR } from "@/lib/config-store";
 import { CODEX_SUPPORTED_MODEL_RE } from "@/lib/subscription-surface";
+import { lastModelSegment } from "@/lib/chat-header-pills";
 import {
   CATALOG_PROVIDERS,
   getProviderCatalog,
@@ -167,29 +168,75 @@ const failedRefreshes = new Map<string, FailedRefresh>();
 const FAILED_REFRESH_BACKOFF_MS = 2 * 60_000;
 
 /**
- * "A provider-set change arrived while this provider was already enumerating,
- * and the answer in flight predates it."
+ * PER-PROVIDER CHANGE GENERATION — "how many times has the box changed for this
+ * provider", and which generation each answer is about.
  *
- * The single-flight guard is right to collapse two overlapping enumerations —
- * but only when they would ask the same question. A connect changes the
- * question: the fork already running was started before the credential existed
- * and will answer for a box that no longer exists. Dropped, it does worse than
- * lose the refresh, because that pre-credential answer is then PUBLISHED with
- * `source: "live"` and a fresh `fetchedAt` — one openai row on a stock host
- * where a linked box lists ten — and `force || isStale || !isLivePayload` is
- * false against it for the next six hours. The marker this route exists to
- * introduce would be vouching for the very thing it was introduced to catch.
+ * A boolean cannot express this, and two rounds of review found the two halves
+ * it gets wrong. What has to be answerable is: *is the catalogue we are serving
+ * the answer for the box as it is now?* Three facts give that:
  *
- * The wizard's own timing makes this the common case rather than a race:
- * `bootWarmup` starts on the FIRST picker GET, not at boot, and staggers the
- * providers 5s apart at ~3 minutes each on a Jetson, so a key saved a minute
- * after the AI-models step opens lands inside its provider's window.
+ *  * `changeSeq` — bumped by every accepted provider-set change (a connect, a
+ *    plugin switched on, a credential written).
+ *  * `inFlight` — the generation the running fork will answer for, and whether
+ *    a change is what started it. Captured when the fork STARTS, because that
+ *    is when the box it reads is fixed.
+ *  * `publishedSeq` — the generation of the payload currently in `memCache`
+ *    and on disk.
  *
- * So the change is remembered here and re-entered from the `.finally` that
- * releases the guard. Bounded: the entry is deleted before the re-entry, and
- * the re-entry is serialised by `refreshing` like any other.
+ * Everything follows:
+ *
+ *  * A fork whose generation is behind `changeSeq` by the time it answers is
+ *    describing a box that no longer exists. Its result is NOT published —
+ *    not to memCache, not to disk, and above all not stamped `source: "live"`.
+ *    Publishing it was a false success the width of the replacement fork
+ *    (~3 minutes on a Jetson): every GET in that window — a reload, the chat
+ *    picker, a second tab — was handed the PRE-credential list marked live and
+ *    unstale, one line before the `.finally` scheduled its replacement.
+ *  * `publishedSeq < changeSeq` IS the warming condition. It stays true for
+ *    every poll until the current-generation fork lands, where the previous
+ *    `|| force` was true for exactly one response — the single `?refresh=1` —
+ *    and the hook's next poll two seconds later saw `warming: false` with three
+ *    minutes still to run, so a picker open across a connect settled on the
+ *    pre-change rows.
+ *  * A change arriving while a fork of the CURRENT generation is already out,
+ *    started by a change, is the same signal reaching the route twice —
+ *    `configure` step 8c and then the client's `?refresh=1`, which are ordered
+ *    by awaits, not racing. It is ignored, because the fork out there already
+ *    answers for the box as it now is. Bumping again cost every connect a
+ *    second full ~3-minute `openclaw models list` at the wizard's most
+ *    latency-sensitive moment. `fromChange` is what keeps that distinct from a
+ *    warmup or poll fork, which started before the change and must NOT absorb
+ *    it.
+ *
+ * Per-process, like `memCache`, `refreshing` and `failedRefreshes` beside it. A
+ * restart re-enumerates through `bootWarmup` anyway.
+ */
+const changeSeq = new Map<string, number>();
+const publishedSeq = new Map<string, number>();
+interface InFlightFork {
+  /** The generation this fork's answer describes. */
+  seq: number;
+  /** Was it started BY a provider-set change, rather than a warmup or poll? */
+  fromChange: boolean;
+}
+const inFlight = new Map<string, InFlightFork>();
+
+/**
+ * Providers with a change no fork has answered yet, re-entered from the
+ * `.finally` that releases the single-flight guard. A Set: several signals
+ * arriving during one fork collapse to one re-entry, which is what keeps the
+ * replacement bounded at one extra enumeration per provider.
  */
 const pendingProviderChange = new Set<string>();
+
+function currentSeq(provider: string): number {
+  return changeSeq.get(provider) ?? 0;
+}
+
+/** Is the payload we would serve the answer for the box as it is now? */
+function publishedIsCurrent(provider: string): boolean {
+  return (publishedSeq.get(provider) ?? -1) >= currentSeq(provider);
+}
 
 function refreshIsBlocked(provider: string): boolean {
   const failure = failedRefreshes.get(provider);
@@ -491,6 +538,17 @@ async function fetchSubscriptionSurfaceIds(provider: string): Promise<Set<string
     return null;
   } finally {
     refreshing.delete(surfaceProvider);
+    inFlight.delete(surfaceProvider);
+    // The SECOND place that releases the guard, so the second place a pending
+    // change would otherwise sit unclaimed: a `providerChanged` for a provider
+    // that is in `refreshing` only because it is somebody else's subscription
+    // surface was recorded and never re-entered, then fired against whatever
+    // unrelated fork happened to finish next. Unreachable while
+    // SUBSCRIPTION_SURFACE names no `surfaceProvider`, which is why it is
+    // closed here rather than left for the day one is added.
+    if (pendingProviderChange.delete(surfaceProvider)) {
+      refreshInBackground(surfaceProvider, { providerChanged: true, alreadyCounted: true });
+    }
   }
 }
 
@@ -562,7 +620,13 @@ function isOfferableModelId(provider: string, id: string): boolean {
   const allowed = ALLOWED_MODEL_RE_BY_PROVIDER[provider];
   if (allowed && !allowed.test(id)) return false;
   if (!MODALITY_REPORTING_PROVIDERS.has(provider) && isNonChatModelId(id)) return false;
-  if (DEPRECATED_MODEL_IDS.has(id)) return false;
+  // Matched on the last path segment, like `isNonChatModelId`, because
+  // OpenRouter ids keep their `<org>/` slug: tested against the whole id this
+  // set could never fire for the largest catalogue we serve. Measured on the
+  // live endpoint (423 rows, 2026-09-02) it changes nothing today — no row's
+  // segment is one of these two, and none carries `deprecated: true` — so this
+  // is the set doing what it says rather than a change in what is offered.
+  if (DEPRECATED_MODEL_IDS.has(lastModelSegment(id))) return false;
   return true;
 }
 
@@ -949,6 +1013,14 @@ export function refreshInBackground(
      * its warming polls.
      */
     providerChanged?: boolean;
+    /**
+     * Internal: this change has already been counted, it is only now being
+     * served. Set solely by the re-entry in the `.finally` below, which drains
+     * a change that arrived while a fork was out. Without it the re-entry would
+     * bump the generation a second time for one change, and the next genuine
+     * change would then look like a duplicate of it.
+     */
+    alreadyCounted?: boolean;
   } = {},
 ): void {
   // Providers that never touch the CLI (see NO_CLI_ENUMERATION_PROVIDERS);
@@ -965,15 +1037,33 @@ export function refreshInBackground(
   // the property that log line's own comment claims.
   const changeCouldMakeItEnumerable = !hasNoEnumerationOnThisCore(provider) && !cliMissing;
 
+  const changeAccepted = opts.providerChanged === true && changeCouldMakeItEnumerable;
+  const countsAsNewChange = changeAccepted && opts.alreadyCounted !== true;
+  const running = inFlight.get(provider);
+
+  // The SAME change reaching the route a second time. `configure` step 8c fires
+  // one statement after the credential write, the client's `?refresh=1` follows
+  // when the response lands — ordered by awaits, not racing — and both say
+  // `providerChanged`. The fork already out was started by the first of them,
+  // so it is reading the box this second signal is reporting. Bumping again
+  // bought a duplicate ~3-minute `openclaw models list` on every connect.
+  const alreadyAnswering = running !== undefined
+    && running.fromChange
+    && running.seq === currentSeq(provider);
+
+  if (countsAsNewChange && !alreadyAnswering) {
+    changeSeq.set(provider, currentSeq(provider) + 1);
+  }
+
   if (refreshing.has(provider)) {
-    // Collapsed, but NOT forgotten — see `pendingProviderChange`. The fork in
+    // Collapsed, but NOT forgotten — see the generation note above. The fork in
     // flight was started before this change and answers for the box as it was.
-    if (opts.providerChanged && changeCouldMakeItEnumerable) {
+    if (countsAsNewChange && !alreadyAnswering) {
       pendingProviderChange.add(provider);
     }
     return;
   }
-  if (opts.providerChanged && changeCouldMakeItEnumerable) {
+  if (changeAccepted) {
     clearFailedRefresh(provider);
   }
   // A provider that just failed to answer waits before it is asked again. This
@@ -996,6 +1086,9 @@ export function refreshInBackground(
   }
 
   refreshing.add(provider);
+  // Captured at START, because that is when the box this fork reads is fixed.
+  const forkSeq = currentSeq(provider);
+  inFlight.set(provider, { seq: forkSeq, fromChange: changeAccepted });
 
   if (hasNoEnumerationOnThisCore(provider)) {
     // Documented above: this core has no ChatGPT-surface enumeration, and the
@@ -1006,6 +1099,7 @@ export function refreshInBackground(
     console.log(`[catalog] ${provider}: no enumeration on this core, serving the curated list`);
     recordFailedRefresh(provider);
     refreshing.delete(provider);
+    inFlight.delete(provider);
     return;
   }
 
@@ -1034,12 +1128,32 @@ export function refreshInBackground(
   const surface = fetchSubscriptionSurfaceIds(provider);
 
   const publish = async (models: CatalogModel[], surfaceIds: Set<string> | null) => {
+    // The CLI answered, so the provider is enumerable — that much is true
+    // whatever generation this is, and it is what the backoff tracks.
+    recordSuccessfulRefresh(provider);
+
+    if (forkSeq < currentSeq(provider)) {
+      // The box changed after this fork started. What it is holding is the
+      // answer for a box that no longer exists — on the connect path, the
+      // PRE-credential list: one openai row where the linked box lists ten.
+      // Serving it would be this route's own false success, and stamping it
+      // `source: "live"` with a fresh `fetchedAt` is what made the previous
+      // build sit on it. The replacement is already scheduled: the same change
+      // that superseded this fork put the provider in `pendingProviderChange`,
+      // which the `.finally` below drains.
+      console.log(
+        `[catalog] discarding ${provider}: ${models.length} models from before the provider changed`
+        + ` (generation ${forkSeq} < ${currentSeq(provider)}), re-enumerating`,
+      );
+      return;
+    }
+
     const payload: CatalogResponse = {
       ...buildPayload(provider, models, surfaceIds, Date.now()),
       source: "live",
     };
     memCache.set(provider, payload);
-    recordSuccessfulRefresh(provider);
+    publishedSeq.set(provider, forkSeq);
     await writeDiskCache(provider, payload);
     console.log(
       `[catalog] refreshed ${provider}: ${models.length} models`
@@ -1099,12 +1213,13 @@ export function refreshInBackground(
       // handled by the `.catch` above.
       await surface.catch(() => {});
       refreshing.delete(provider);
+      inFlight.delete(provider);
       // A provider-set change that arrived while the fork above was running was
       // collapsed into it, and that fork answered for the box as it was BEFORE
       // the change. Serve it now, against the box as it is. Deleted first, so
       // this can re-enter at most once per signal.
       if (pendingProviderChange.delete(provider)) {
-        refreshInBackground(provider, { providerChanged: true });
+        refreshInBackground(provider, { providerChanged: true, alreadyCounted: true });
       }
     });
 }
@@ -1171,7 +1286,10 @@ export async function GET(req: NextRequest) {
   const isStale = ageMs > REFRESH_INTERVAL_MS
     || cached?.stale === true
     || refreshFailedLast(provider)
-    || servedEmpty;
+    || servedEmpty
+    // The box changed after the payload we hold was enumerated. Age says
+    // nothing about that: the pre-connect answer is seconds old and wrong.
+    || !publishedIsCurrent(provider);
   // A payload no device produced is a reason to ask AGAIN, not a reason to
   // wait six hours. That includes a cache written before `source` existed —
   // on an upgraded box those files hold the curated list a failed enumeration
@@ -1200,16 +1318,19 @@ export async function GET(req: NextRequest) {
       // whenever a fork is out there AND what this response carries is not the
       // answer that fork will bring:
       //  * the payload is not a device's (cold start, upgraded cache);
-      //  * `force` — the provider set just changed, so even a LIVE payload is
-      //    the pre-change one. Without this clause a connect on a provider that
-      //    already had a live catalogue was invisible: the hook polls only on
-      //    `warming`, so it read once, settled, and the post-credential list
-      //    landed three minutes later with nobody asking;
       //  * the sanitiser emptied it, so the client is about to render the
-      //    curated rows instead.
-      // The plain 6h refresh still passes none of these, which is what keeps
-      // every mounted picker from polling through it.
-      ...(enumerating && (!isLivePayload(cached) || force || servedEmpty)
+      //    curated rows instead;
+      //  * the box has CHANGED since this payload was enumerated — even a live
+      //    one is then the pre-change answer. Read from the generation rather
+      //    than from `force`, which was true for exactly one response (the
+      //    single `?refresh=1` the hook sends per signal); its next poll two
+      //    seconds later saw `warming: false` with three minutes of enumeration
+      //    still to run, so a picker open across a connect settled on the
+      //    pre-change rows. The generation stays behind until the fork that
+      //    answers for the new box actually publishes.
+      // The plain 6h refresh passes none of these, which is what keeps every
+      // mounted picker from polling through it.
+      ...(enumerating && (!isLivePayload(cached) || servedEmpty || !publishedIsCurrent(provider))
         ? { warming: true }
         : {}),
     };

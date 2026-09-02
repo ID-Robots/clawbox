@@ -195,3 +195,121 @@ describe("catalog — a connect while an enumeration is already in flight", () =
     expect(readCache("openai").source).toBe("live");
   });
 });
+
+
+describe("catalog — the change generation, not a one-shot flag", () => {
+  // Scenario (a). `|| force` made exactly ONE response say `warming` — the
+  // single `?refresh=1` the hook sends per provider-set signal. Its next poll
+  // is `load(false)` two seconds later, and got `warming: false` while the
+  // enumeration still had ~3 minutes to run, so a picker open across a connect
+  // settled on the pre-change rows. And the superseded PRE-credential fork was
+  // still published with `source: "live"` and a fresh `fetchedAt` one line
+  // before its replacement was scheduled, so every client arriving in that
+  // window was handed it as final: the same false success, shortened rather
+  // than removed.
+  it("keeps saying an answer is coming on every poll, and never publishes the superseded fork", async () => {
+    const preKey = heldChild(PRE_KEY);
+    const postKey = heldChild(LINKED);
+    let openaiSpawns = 0;
+    mockSpawn.mockImplementation((_bin, args) => {
+      const argv = args as string[];
+      const target = argv[argv.indexOf("--provider") + 1];
+      if (target !== "openai") {
+        return fakeChild({ count: 0, models: [] }) as unknown as ReturnType<typeof childProcess.spawn>;
+      }
+      openaiSpawns += 1;
+      const child = openaiSpawns === 1 ? preKey.child : postKey.child;
+      return child as unknown as ReturnType<typeof childProcess.spawn>;
+    });
+
+    // The warmup fork, started when the customer opened the AI models step.
+    refreshInBackground("openai");
+    await settle();
+    expect(openaiSpawns).toBe(1);
+
+    // The key is saved while it is still out.
+    refreshInBackground("openai", { providerChanged: true });
+    await settle();
+    expect(openaiSpawns).toBe(1);
+
+    // The pre-credential fork answers. Its rows describe a box that no longer
+    // exists, so nothing is published — not to disk, and above all not stamped
+    // live. The replacement starts instead.
+    preKey.release();
+    await vi.waitFor(() => expect(openaiSpawns).toBe(2), { timeout: 4000, interval: 25 });
+    expect(fs.existsSync(cacheFile("openai"))).toBe(false);
+
+    // Now the window the hook lives in. EVERY poll — none of them carrying
+    // `refresh=1`, which the hook sends once per signal — has to say an answer
+    // is coming, or the picker stops asking and keeps what it has.
+    for (let poll = 0; poll < 3; poll += 1) {
+      const body = await get("openai");
+      expect(body.warming).toBe(true);
+      // And the pre-credential list is never what it is holding. A payload from
+      // an EARLIER generation may still be served — it is a device's answer,
+      // which is why `warming` above is the thing that has to stay true — but
+      // the superseded fork's own rows never became one: nothing was written.
+      expect((body.models as Array<{ id: string }>).map((m) => m.id)).not.toEqual(["gpt-5.6-sol"]);
+      expect(fs.existsSync(cacheFile("openai"))).toBe(false);
+    }
+
+    // The post-credential answer lands, and only then does the asking stop.
+    postKey.release();
+    await vi.waitFor(() => {
+      expect(readCache("openai").models.map((m) => m.id).sort())
+        .toEqual(["gpt-5.4", "gpt-5.5", "gpt-5.6-sol"]);
+    }, { timeout: 4000, interval: 25 });
+    expect(readCache("openai").source).toBe("live");
+
+    const settled = await get("openai");
+    expect(settled.warming).toBeUndefined();
+    expect(settled.source).toBe("live");
+  });
+
+  // Scenario (b). `configure` step 8c and the client's `?refresh=1` are the
+  // SAME provider-set change reaching the route twice, ordered by awaits rather
+  // than racing. Treating the second as news cost every connect a duplicate
+  // ~3-minute `openclaw models list` — ~2 cores of a Jetson, at the wizard's
+  // most latency-sensitive moment, for a question the fork already out is
+  // answering post-credential.
+  it("costs one enumeration when the same change reaches the route twice", async () => {
+    const held = heldChild({
+      count: 2,
+      models: [
+        { key: "google/gemini-3-pro", name: "Gemini 3 Pro", contextWindow: 1_000_000, available: true, tags: ["default"] },
+        { key: "google/gemini-2.5-flash", name: "Gemini 2.5 Flash", contextWindow: 1_000_000, available: true, tags: [] },
+      ],
+    });
+    let googleSpawns = 0;
+    mockSpawn.mockImplementation((_bin, args) => {
+      const argv = args as string[];
+      const target = argv[argv.indexOf("--provider") + 1];
+      if (target !== "google") {
+        return fakeChild({ count: 0, models: [] }) as unknown as ReturnType<typeof childProcess.spawn>;
+      }
+      googleSpawns += 1;
+      return held.child as unknown as ReturnType<typeof childProcess.spawn>;
+    });
+
+    // Step 8c, one statement after the credential write and the plugin switch.
+    refreshInBackground("google", { providerChanged: true });
+    await settle();
+    expect(googleSpawns).toBe(1);
+
+    // The same change arriving again as the client's `?refresh=1`. The fork out
+    // there was started BY this change and is reading the box it reports.
+    refreshInBackground("google", { providerChanged: true });
+    await settle();
+    expect(googleSpawns).toBe(1);
+
+    held.release();
+    await vi.waitFor(() => {
+      expect(readCache("google").models.map((m) => m.id).sort())
+        .toEqual(["gemini-2.5-flash", "gemini-3-pro"]);
+    }, { timeout: 4000, interval: 25 });
+
+    // No replacement scheduled: nothing was superseded.
+    await settle();
+    expect(googleSpawns).toBe(1);
+  });
+});
