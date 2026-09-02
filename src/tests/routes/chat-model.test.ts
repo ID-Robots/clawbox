@@ -29,6 +29,10 @@ vi.mock("@/lib/openclaw-config", () => ({
   runOpenclawConfigSetBatch: vi.fn(async (ops: string[][]) => {
     for (const op of ops) await configSetMock(op);
   }),
+  // The disarm half of the Codex runtime arm. A batch entry carries only
+  // value/ref/provider — there is no delete — and a null value is refused by
+  // the schema, so removing the key is its own `config unset` spawn.
+  runOpenclawConfigUnset: vi.fn(),
   applyModelOverrideToAllAgentSessions: vi.fn(),
   parseFullyQualifiedModel: vi.fn(),
   // Plugin gating: the route switches the plugin the new primary needs ON
@@ -44,7 +48,7 @@ vi.mock("@/lib/sqlite-store", () => ({
 }));
 
 import { getAll } from "@/lib/config-store";
-import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { promisify } from "util";
 
@@ -442,6 +446,10 @@ describe("/setup-api/chat/model", () => {
   });
 
   it("rejects ChatGPT subscription Pro/API-only Codex models before gateway restart", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
+      agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
+    } as never);
     const response = await POST(new Request("http://localhost/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -459,7 +467,7 @@ describe("/setup-api/chat/model", () => {
     vi.mocked(readConfig).mockResolvedValue({
       auth: {
         profiles: {
-          "codex:default": { provider: "codex", mode: "oauth" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
         },
       },
       agents: {
@@ -488,13 +496,13 @@ describe("/setup-api/chat/model", () => {
     vi.mocked(readConfig).mockResolvedValue({
       auth: {
         profiles: {
-          "codex:default": { provider: "codex", mode: "oauth" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
         },
       },
       agents: {
         defaults: {
           model: {
-            primary: "codex/gpt-5.4",
+            primary: "openai/gpt-5.4",
           },
         },
       },
@@ -509,11 +517,17 @@ describe("/setup-api/chat/model", () => {
     expect(response.status).toBe(200);
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
       "agents.defaults.model.primary",
-      "codex/gpt-5.5",
+      "openai/gpt-5.5",
+    ]);
+    // ...and it is the ChatGPT account, not an API key, that runs it: the
+    // Codex runtime is armed on the canonical reference.
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      'agents.defaults.models["openai/gpt-5.5"].agentRuntime.id',
+      "codex",
     ]);
     expect(applyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
       {
-        provider: "codex",
+        provider: "openai",
         modelId: "gpt-5.5",
         source: "user",
       },
@@ -528,13 +542,13 @@ describe("/setup-api/chat/model", () => {
       vi.mocked(readConfig).mockResolvedValue({
         auth: {
           profiles: {
-            "codex:default": { provider: "codex", mode: "oauth" },
+            "openai:chatgpt": { provider: "openai", mode: "oauth" },
           },
         },
         agents: {
           defaults: {
             model: {
-              primary: "codex/gpt-5.4",
+              primary: "openai/gpt-5.4",
             },
           },
         },
@@ -547,9 +561,11 @@ describe("/setup-api/chat/model", () => {
       }));
 
       expect(response.status).toBe(200);
+      // Posted under the retired `codex/` namespace (a stale tab); written
+      // where OpenClaw 2 resolves it.
       expect(runOpenclawConfigSet).toHaveBeenCalledWith([
         "agents.defaults.model.primary",
-        `codex/${modelId}`,
+        `openai/${modelId}`,
       ]);
       expect(restartGateway).toHaveBeenCalled();
     },
@@ -559,13 +575,13 @@ describe("/setup-api/chat/model", () => {
     vi.mocked(readConfig).mockResolvedValue({
       auth: {
         profiles: {
-          "codex:default": { provider: "codex", mode: "oauth" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
         },
       },
       agents: {
         defaults: {
           model: {
-            primary: "codex/gpt-5.4",
+            primary: "openai/gpt-5.4",
           },
         },
       },
@@ -580,7 +596,11 @@ describe("/setup-api/chat/model", () => {
     expect(response.status).toBe(200);
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
       "agents.defaults.model.primary",
-      "codex/gpt-5.6-sol",
+      "openai/gpt-5.6-sol",
+    ]);
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      'agents.defaults.models["openai/gpt-5.6-sol"].agentRuntime.id',
+      "codex",
     ]);
     expect(restartGateway).toHaveBeenCalled();
   });
@@ -724,11 +744,34 @@ describe("/setup-api/chat/model", () => {
       }));
       const body = await response.json();
 
-      expect(response.status).toBe(500);
-      expect(body.error).toContain("Unknown model: anthropic/claude-sonnet-5");
+      // The batch is #589's and the 409 is #584's, and BOTH have to survive the
+      // merge: the plugin enable rides in the batch this wraps, and the owner
+      // still gets the model-unresolvable answer instead of the CLI's sentence.
+      expect(response.status).toBe(409);
+      expect(body.kind).toBe("model_unresolvable");
+      expect(body.error).not.toMatch(/openclaw models list|Cannot set model reference/);
       expect(runOpenclawConfigSet).not.toHaveBeenCalledWith(expect.arrayContaining([ENABLE_OP[0]]));
       expect(setProviderPlugins).not.toHaveBeenCalled();
       expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("carries the plugin enable inside the try that answers the 409", async () => {
+      // Pins the merge shape itself: one batch, enable ahead of the primary,
+      // and the refusal converted. Taking either side wholesale loses one of
+      // the two — silently, because each side's own tests still pass.
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(new Error(UNKNOWN_MODEL));
+
+      await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+      }));
+
+      const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls.at(-1)?.[0] as string[][];
+      expect(batch[0]).toEqual(ENABLE_OP);
+      expect(batch.some((op) => op[0] === "agents.defaults.model.primary")).toBe(true);
+      expect(batch.findIndex((op) => op[0] === ENABLE_OP[0]))
+        .toBeLessThan(batch.findIndex((op) => op[0] === "agents.defaults.model.primary"));
     });
 
     it("keeps the OFF half of the gate AFTER the write when the new primary is not Anthropic", async () => {
@@ -746,6 +789,336 @@ describe("/setup-api/chat/model", () => {
       const gatedAt = orderOf(vi.mocked(setProviderPlugins), (args) => args[0] === "llamacpp");
       expect(writtenAt).toBeLessThan(gatedAt);
       expect(gatedAt).toBeLessThan(orderOf(vi.mocked(restartGateway)));
+    });
+  });
+
+  // OpenClaw 2 has no `codex/` model namespace: the ChatGPT subscription is an
+  // OAuth profile of the openai provider and the model is `openai/<id>` with
+  // the Codex runtime armed on it (src/lib/chatgpt-subscription.ts). The
+  // picker used to offer `codex/gpt-5.5` and the write was refused with the
+  // CLI's own sentence; a box signed in before the upgrade holds a
+  // `codex:default` the core never consults.
+  describe("the ChatGPT subscription on OpenClaw 2", () => {
+    const CHATGPT_BOX = {
+      auth: {
+        profiles: {
+          "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
+        },
+      },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+    };
+    const LEGACY_BOX = {
+      auth: {
+        profiles: {
+          "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          "codex:default": { provider: "codex", mode: "oauth" },
+        },
+      },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+    };
+    const post = (body: unknown) => POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }));
+
+    it("offers the ChatGPT row as openai/<id>, never in the retired namespace", async () => {
+      vi.mocked(readConfig).mockResolvedValue(CHATGPT_BOX as never);
+
+      const body = await (await GET()).json();
+
+      const row = body.options.find((option: { provider: string }) => option.provider === "codex");
+      expect(row).toMatchObject({ label: "OpenAI Codex", model: "openai/gpt-5.5", available: true });
+      expect(body.options.some((option: { model: string | null }) => option.model?.startsWith("codex/"))).toBe(false);
+      // No API key on this box, so `openai/*` IS the subscription: no second
+      // "OpenAI GPT" row, and the header pill knows it is on a subscription.
+      expect(body.options.some((option: { provider: string }) => option.provider === "openai")).toBe(false);
+      expect(body.subscriptionProviders).toContain("codex");
+    });
+
+    // A box holding BOTH OpenAI credentials — the ChatGPT sign-in and an API
+    // key — is the state the namespace used to disambiguate for free. Under
+    // `openai/<id>` the reference says nothing, so every one of these
+    // decisions has to come from the ROW the pick was made on.
+    const DUAL_BOX = {
+      auth: {
+        profiles: {
+          "openai:default": { provider: "openai", mode: "api_key" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
+        },
+      },
+      agents: { defaults: { model: { primary: "openai/gpt-5.4" } } },
+    };
+
+    it("keeps the API-key row separate when the box holds both", async () => {
+      vi.mocked(readConfig).mockResolvedValue(DUAL_BOX as never);
+
+      const body = await (await GET()).json();
+
+      const providers = body.options.map((option: { provider: string }) => option.provider);
+      expect(providers).toContain("openai");
+      expect(providers).toContain("codex");
+      // The API-key row is NOT subscription-routed — its `-pro` tiers work.
+      expect(body.subscriptionProviders).not.toContain("openai");
+      // The ChatGPT row is, whatever else the box holds: a turn on it goes to
+      // the ChatGPT account, which refuses the API-only tiers.
+      expect(body.subscriptionProviders).toContain("codex");
+    });
+
+    it("arms the runtime for a pick made on the ChatGPT row of a dual box", async () => {
+      vi.mocked(readConfig).mockResolvedValue(DUAL_BOX as never);
+
+      const response = await post({ model: "openai/gpt-5.5", provider: "codex" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith(["agents.defaults.model.primary", "openai/gpt-5.5"]);
+      // Without this entry the turn leaves the ChatGPT account for
+      // api.openai.com and the box silently spends the API key instead.
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+        'agents.defaults.models["openai/gpt-5.5"].agentRuntime.id',
+        "codex",
+      ]);
+    });
+
+    // The arm was WRITE-ONLY: two routes added it and the only remover is
+    // gateway-pre-start's v1-gated cleanup, so on the pinned core nothing on
+    // the box cleared it. Harmless while it could only sit on a `codex/<id>`
+    // key no other lane could name — not harmless now that both OpenAI lanes
+    // write `openai/<id>`, because the leftover keeps sending the SAME
+    // reference through the ChatGPT account after the owner picks the API-key
+    // row, and the header pill flips back on the next GET.
+    const ARMED_DUAL_BOX = {
+      ...DUAL_BOX,
+      agents: {
+        defaults: {
+          model: { primary: "openai/gpt-5.4" },
+          models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } },
+        },
+      },
+    };
+
+    it("clears the runtime arm when the same model is picked on the API-key row", async () => {
+      vi.mocked(readConfig).mockResolvedValue(ARMED_DUAL_BOX as never);
+
+      const response = await post({ model: "openai/gpt-5.5", provider: "openai" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigUnset).toHaveBeenCalledWith(
+        'agents.defaults.models["openai/gpt-5.5"].agentRuntime',
+      );
+    });
+
+    it("clears it on the same-model no-op door too", async () => {
+      // Already the primary AND armed: the old repair was one-sided, so this
+      // returned 200 having changed nothing while the turn stayed on the
+      // subscription.
+      const armedNow = {
+        ...DUAL_BOX,
+        agents: {
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } },
+          },
+        },
+      };
+      // The disarm changes the file, so the answer's re-read sees it gone —
+      // the request must not report the row it just moved the owner off.
+      vi.mocked(readConfig)
+        .mockResolvedValueOnce(armedNow as never)
+        .mockResolvedValue({
+          ...DUAL_BOX,
+          agents: { defaults: { model: { primary: "openai/gpt-5.5" }, models: {} } },
+        } as never);
+
+      const response = await post({ model: "openai/gpt-5.5", provider: "openai" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigUnset).toHaveBeenCalledWith(
+        'agents.defaults.models["openai/gpt-5.5"].agentRuntime',
+      );
+      await expect(response.json()).resolves.toMatchObject({ activeLabel: "OpenAI GPT" });
+    });
+
+    it("says so instead of answering clean when the disarm fails", async () => {
+      // A 200 that looks like a switch, over a box still routing that model to
+      // the ChatGPT account, is the false success this whole finding is about.
+      vi.mocked(readConfig).mockResolvedValue(ARMED_DUAL_BOX as never);
+      vi.mocked(runOpenclawConfigUnset).mockRejectedValue(new Error("config unset failed"));
+
+      const response = await post({ model: "openai/gpt-5.5", provider: "openai" });
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.warning).toMatch(/still routes it through your ChatGPT account/);
+    });
+
+    it("leaves the arm alone when the pick IS the subscription's", async () => {
+      vi.mocked(readConfig).mockResolvedValue(ARMED_DUAL_BOX as never);
+
+      await post({ model: "openai/gpt-5.5", provider: "codex" });
+
+      expect(runOpenclawConfigUnset).not.toHaveBeenCalled();
+    });
+
+    it("writes the arm on a config path the CLI can actually parse", async () => {
+      // The CLI's path grammar splits an unquoted segment on `.`, and every
+      // ChatGPT model id carries one, so the dotted form is read as
+      // `models -> "openai/gpt-5" -> "5"` and answers
+      // `Config validation failed: ... Unrecognized key: "5"` — taking the
+      // whole batch, primary included, with it. Bracket-quoted is the form the
+      // CLI itself echoes back. Measured on the pinned 2026.8.1 core.
+      vi.mocked(readConfig).mockResolvedValue(CHATGPT_BOX as never);
+
+      await post({ model: "openai/gpt-5.4-mini" });
+
+      const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls.at(-1)?.[0] as string[][];
+      const arm = batch.find((op) => op[0].includes("agentRuntime"));
+      expect(arm?.[0]).toBe('agents.defaults.models["openai/gpt-5.4-mini"].agentRuntime.id');
+      expect(arm?.[0]).not.toContain("models.openai/");
+    });
+
+    it("attributes an armed openai/<id> to the ChatGPT row, not the API-key one", async () => {
+      // The pill flipped to "OpenAI GPT" the moment the owner picked ChatGPT,
+      // because the GET could only read the namespace back.
+      vi.mocked(readConfig).mockResolvedValue({
+        ...DUAL_BOX,
+        agents: {
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } },
+          },
+        },
+      } as never);
+
+      const body = await (await GET()).json();
+
+      expect(body.activeLabel).toBe("OpenAI Codex");
+      const codexRow = body.options.find((option: { provider: string }) => option.provider === "codex");
+      expect(codexRow.model).toBe("openai/gpt-5.5");
+      const openaiRow = body.options.find((option: { provider: string }) => option.provider === "openai");
+      expect(openaiRow.model).not.toBe("openai/gpt-5.5");
+    });
+
+    it("refuses an API-only tier picked on the ChatGPT row of a dual box", async () => {
+      vi.mocked(readConfig).mockResolvedValue(DUAL_BOX as never);
+
+      const response = await post({ model: "openai/gpt-5.5-pro", provider: "codex" });
+
+      expect(response.status).toBe(400);
+      const refusal = await response.json();
+      // Names the lever the owner has NOT pulled. This box HOLDS an API key,
+      // so "switch to API-key mode" would name one they already have; the
+      // actionable step is the other row, which routes this very model.
+      expect(refusal.error).toContain("Pick it on the OpenAI GPT row instead");
+      expect(refusal.error).not.toContain("requires OpenAI API-key mode");
+      // The supported list is built from the catalogue, so the GPT-5.6
+      // generation the allowlist accepts cannot fall out of the sentence.
+      expect(refusal.error).toContain("GPT-5.6 Sol");
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    });
+
+    it("still lets the API-key row run an API-only tier on the same box", async () => {
+      vi.mocked(readConfig).mockResolvedValue(DUAL_BOX as never);
+
+      const response = await post({ model: "openai/gpt-5.5-pro", provider: "openai" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith(["agents.defaults.model.primary", "openai/gpt-5.5-pro"]);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalledWith([
+        'agents.defaults.models["openai/gpt-5.5-pro"].agentRuntime.id',
+        "codex",
+      ]);
+    });
+
+    it("offers a sign-in the core cannot use greyed, with the reason, instead of a pick that fails", async () => {
+      vi.mocked(readConfig).mockResolvedValue(LEGACY_BOX as never);
+
+      const body = await (await GET()).json();
+
+      const row = body.options.find((option: { provider: string }) => option.provider === "codex");
+      expect(row).toMatchObject({ available: false, reauthRequired: true, model: "openai/gpt-5.5" });
+    });
+
+    it("greys the row even when the primary is still written as codex/<id> — the sign-in cannot run it", async () => {
+      // The active model registers its row available before the profile loop
+      // runs; a box upgraded with `codex/gpt-5.5` as primary AND only the old
+      // sign-in showed an available row with no reason, and the pick then 409ed.
+      vi.mocked(readConfig).mockResolvedValue({
+        ...LEGACY_BOX,
+        agents: { defaults: { model: { primary: "codex/gpt-5.5" } } },
+      } as never);
+
+      const body = await (await GET()).json();
+
+      const row = body.options.find((option: { provider: string }) => option.provider === "codex");
+      expect(row).toMatchObject({ available: false, reauthRequired: true, model: "codex/gpt-5.5" });
+    });
+
+    it("refuses a pick on a sign-in the core cannot use with the next step, before any write", async () => {
+      vi.mocked(readConfig).mockResolvedValue(LEGACY_BOX as never);
+
+      const response = await post({ model: "codex/gpt-5.5" });
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ kind: "chatgpt_reauth_required", provider: "codex" });
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("arms the Codex runtime on a same-model pick when the entry is missing — the only repair short of a reboot", async () => {
+      // A stale tab posts `codex/gpt-5.5`; the primary IS `openai/gpt-5.5`
+      // already, but nothing armed its runtime (an older ClawBox wrote the
+      // primary, or the entry was lost). The remap made this a no-op answer
+      // that left every turn failing.
+      vi.mocked(readConfig).mockResolvedValue({
+        ...CHATGPT_BOX,
+        agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
+      } as never);
+
+      const response = await post({ model: "codex/gpt-5.5" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+        'agents.defaults.models["openai/gpt-5.5"].agentRuntime.id',
+        "codex",
+      ]);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalledWith(expect.arrayContaining(["agents.defaults.model.primary"]));
+    });
+
+    it("leaves an armed same-model pick free of any write", async () => {
+      vi.mocked(readConfig).mockResolvedValue({
+        ...CHATGPT_BOX,
+        agents: {
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } },
+          },
+        },
+      } as never);
+
+      const response = await post({ model: "openai/gpt-5.5" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("answers a reference the core refuses with the provider and a next step, not the CLI's sentence", async () => {
+      vi.mocked(readConfig).mockResolvedValue(CHATGPT_BOX as never);
+      vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error(
+        'Cannot set model reference "openai/gpt-5.5" at agents.defaults.model.primary: '
+        + "Unknown model: openai/gpt-5.5. Run openclaw models list to list available models.",
+      ));
+
+      const response = await post({ model: "openai/gpt-5.5" });
+      const body = await response.json();
+
+      expect(response.status).toBe(409);
+      expect(body.kind).toBe("model_unresolvable");
+      expect(body.error).not.toMatch(/openclaw models list|Cannot set model reference/);
+      expect(body.error).toMatch(/OpenAI Codex does not list gpt-5.5/);
+      expect(restartGateway).not.toHaveBeenCalled();
     });
   });
 });

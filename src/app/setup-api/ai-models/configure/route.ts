@@ -64,6 +64,16 @@ import {
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
+import {
+  CHATGPT_AGENT_RUNTIME_ID,
+  CHATGPT_DEFAULT_MODEL_ID,
+  CHATGPT_PROFILE_KEY,
+  CHATGPT_PROVIDER,
+  chatgptModelRef,
+  chatgptRuntimeArmOp,
+  chatgptRuntimeEntryPath,
+  openaiAuthOrder,
+} from "@/lib/chatgpt-subscription";
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import {
   isValidModelId,
@@ -95,10 +105,23 @@ const OPENCLAW_HOME_DIR =
   || process.env.OPENCLAW_HOME
   || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
 const CLAWBOX_HOME_DIR = process.env.HOME ?? "/home/clawbox";
+/**
+ * The agent whose store ClawBox owns.
+ *
+ * Named once and used for BOTH the credential path below and every `models
+ * auth …` call, because the CLI resolves its own target when `--agent` is
+ * omitted: `resolveModelsTargetAgent` → `resolveSoleAgentId`, which throws
+ * "Pass --agent <id>." on a box with more than one configured agent and
+ * otherwise resolves whichever sole agent is declared. Either way the order
+ * write could address a different store than this path — and did, silently.
+ * `main` is the core's own implicit agent id (LEGACY_IMPLICIT_AGENT_ID) and
+ * the directory it resolves for a config with no agent roster.
+ */
+const CLAWBOX_AGENT_ID = "main";
 const AUTH_PROFILES_PATH = path.join(
   OPENCLAW_HOME_DIR,
   "agents",
-  "main",
+  CLAWBOX_AGENT_ID,
   "agent",
   "auth-profiles.json",
 );
@@ -108,6 +131,12 @@ const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https:
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
 const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
 const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
+/**
+ * Config-store marker: ClawBox has written an explicit OpenAI auth order that
+ * a later save may need to clear. Without it the clear is a CLI cold start
+ * spent against a store that has no order — see `applyOpenAiAuthOrder`.
+ */
+const OPENAI_AUTH_ORDER_KEY = "openai_auth_order_written";
 const CLAWBOX_AI_MODEL = CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER];
 
 // Ollama pre-allocates KV cache for the full context window. The default 128K
@@ -140,10 +169,15 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     defaultModel: "openai/gpt-5",
     profileKey: "openai:default",
     subscriptionOverride: {
-      // Newest model every ChatGPT tier can run, Free included. Entitled
-      // accounts are moved up to gpt-5.6 by the sign-in probe below.
-      defaultModel: "codex/gpt-5.5",
-      profileKey: "codex:default",
+      // The ChatGPT sign-in is an OAuth profile of the SAME provider, under a
+      // key of its own so it coexists with the API-key one, and the model is
+      // `openai/<id>` — OpenClaw 2 has no `codex/` namespace and never
+      // consults a `codex:*` profile for an openai route. Evidence in
+      // src/lib/chatgpt-subscription.ts. Newest model every ChatGPT tier can
+      // run, Free included; entitled accounts are moved up to gpt-5.6 by the
+      // sign-in probe below.
+      defaultModel: chatgptModelRef(CHATGPT_DEFAULT_MODEL_ID),
+      profileKey: CHATGPT_PROFILE_KEY,
     },
   },
   google: {
@@ -349,6 +383,118 @@ async function pasteAuthApiKey(provider: string, profileId: string, key: string)
     ["models", "auth", "paste-api-key", "--provider", provider, "--profile-id", profileId],
     { stdinData: key + "\n", timeoutMs: 60_000 },
   );
+}
+
+/**
+ * Record the box's OpenAI auth preference with the core's own per-provider
+ * order (`openclaw models auth order`, docs/cli/models.md) — or clear it.
+ *
+ * The order is only ever set when there is something to disambiguate: TWO
+ * openai profiles, the ChatGPT sign-in and an API key. With one profile the
+ * core already selects it (a usable profile outranks the
+ * `models.providers.openai.apiKey` fallback), while a one-entry explicit order
+ * is a trap — the core REPLACES the candidate list with it
+ * (`baseOrder = explicitOrder ?? …`), so the next credential the owner adds is
+ * invisible, and when the named profile is present but ineligible (an expired
+ * OAuth credential) every openai turn is refused with "Explicit auth order for
+ * openai has no usable profiles" over a working key in the same store.
+ *
+ * So: two profiles → name both, preferred first, and the preference is
+ * revised by whichever save happened last. Fewer → clear, which also undoes a
+ * one-entry order an earlier ClawBox left behind.
+ *
+ * Best effort, and the failure is NAMED in the answer rather than swallowed:
+ * the credential is stored either way, and the chat route arms the Codex
+ * runtime on the model, which only an OAuth profile satisfies.
+ *
+ * The `clear` is skipped entirely unless ClawBox itself has written an order
+ * (a marker in the config store, set beside every `set`). On the ordinary
+ * single-profile box — a ChatGPT sign-in only, or an API key only — the clear
+ * would be a no-op against a store that has no order, and this codebase prices
+ * a CLI cold start at about ten seconds on a Jetson, on the wizard's critical
+ * path behind the sign-in overlay. It also leaves an order the OWNER set by
+ * hand from the Terminal alone, which is the better default anyway.
+ *
+ * `preferred` is taken as present without looking for it — this save wrote it.
+ * Only the OTHER openai profiles come from the config, and `readConfig`
+ * answers `{}` rather than throwing for an unreadable or half-written file, so
+ * a bad read looks like "one profile" and CLEARS. That is the deliberate
+ * fail-safe direction: clearing hands selection back to the core, which still
+ * has both credentials as candidates, while the alternative — writing the
+ * one-entry order — is the trap described above.
+ */
+async function applyOpenAiAuthOrder(
+  preferred: string,
+  config: OpenClawConfig | null,
+  clawboxWroteOrder: boolean,
+): Promise<string | undefined> {
+  const order = openaiAuthOrder(
+    config?.auth?.profiles,
+    preferred,
+    (key) => PROFILE_KEY_RE.test(key),
+  );
+  const shouldSet = order.length > 1;
+  if (!shouldSet && !clawboxWroteOrder) return undefined;
+  const args = shouldSet
+    ? ["models", "auth", "order", "set", "--agent", CLAWBOX_AGENT_ID, "--provider", CHATGPT_PROVIDER, ...order]
+    : ["models", "auth", "order", "clear", "--agent", CLAWBOX_AGENT_ID, "--provider", CHATGPT_PROVIDER];
+  try {
+    await spawnOpenclawCli(args, { timeoutMs: 60_000 });
+    // The marker follows the write that succeeded, so a later save knows
+    // whether there is anything of ours to clear.
+    await setMany({ [OPENAI_AUTH_ORDER_KEY]: shouldSet ? true : undefined });
+    return undefined;
+  } catch (orderErr) {
+    console.warn(
+      "[configure] models auth order failed for the OpenAI profiles:",
+      orderErr instanceof Error ? JSON.stringify(logSafe(orderErr.message)) : orderErr,
+    );
+    return "Saved, but OpenClaw did not record which OpenAI credential to prefer; "
+      + "if chat answers with an authentication error, run "
+      + `'openclaw ${args.join(" ")}' from the Terminal.`;
+  }
+}
+
+/**
+ * Take the Codex runtime OFF `modelRef` when the save is the API-key lane, or
+ * return the sentence that says it is still on.
+ *
+ * The arm used to be write-only — two routes added it, and the only remover is
+ * `gateway-pre-start.sh`'s v1-gated cleanup, so on the pinned core nothing on
+ * the box ever cleared it. Harmless while it could only sit on a `codex/<id>`
+ * key no other lane could name; not harmless now that both OpenAI lanes write
+ * `openai/<id>`. Without this, an owner who signs in with ChatGPT, later
+ * switches OpenAI to API-key mode and saves the SAME model keeps every turn on
+ * the ChatGPT account while Settings says "Configured" — and once the sign-in
+ * is removed, the app-server has no credential and every turn dies on the
+ * Cloudflare challenge with no ClawBox surface that can undo it.
+ *
+ * `config unset` rather than a `null` in the batch: batch entries carry only
+ * `value`/`ref`/`provider` (no delete), and a null is refused by the schema —
+ * `Invalid input: expected object, received null`, measured on 2026.8.1. Its
+ * own spawn, and only when the entry is actually there, so the ordinary save
+ * costs nothing.
+ */
+async function clearChatgptRuntimeArm(
+  modelRef: string,
+  config: OpenClawConfig | null,
+): Promise<string | undefined> {
+  const models = (config?.agents?.defaults as
+    { models?: Record<string, { agentRuntime?: { id?: unknown } }> } | undefined)?.models;
+  if (models?.[modelRef]?.agentRuntime?.id !== CHATGPT_AGENT_RUNTIME_ID) return undefined;
+  const path = chatgptRuntimeEntryPath(modelRef);
+  try {
+    await runOpenclawConfigUnset(path, { uid: CLAWBOX_UID, gid: CLAWBOX_GID });
+    return undefined;
+  } catch (unsetErr) {
+    console.error(
+      "[configure] failed to clear the Codex runtime entry:",
+      unsetErr instanceof Error ? JSON.stringify(logSafe(unsetErr.message)) : unsetErr,
+    );
+    return `Saved, but this box still routes ${modelRef} through your ChatGPT account: `
+      + `clearing the Codex runtime setting failed. Run 'openclaw config unset ${path}' `
+      + "from the Terminal, or chat may answer on the subscription instead of the API key.";
+  }
 }
 
 /**
@@ -1508,6 +1654,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const llamaCppContextWindow = getLlamaCppContextWindow();
     const llamaCppMaxTokens = getLlamaCppMaxTokens();
     const ocProvider = config.profileKey.split(":")[0];
+    // The ChatGPT subscription shares `ocProvider === "openai"` with the API
+    // key; the auth mode is what tells the two apart from here on.
+    const isChatgptSubscription = authMode === "subscription" && ocProvider === CHATGPT_PROVIDER;
 
     // Codex (OpenAI subscription) authenticates with a JWT id_token, and the
     // gateway synthesizes ~/.codex/auth.json from `id` (falling back to
@@ -1516,11 +1665,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // the save here so the failure surfaces at config time, not in the chat.
     const normalizedIdToken = typeof idToken === "string" ? idToken.trim() : "";
     const isJwtLike = (value: string) => value.split(".").length === 3;
-    if (
-      authMode === "subscription" &&
-      ocProvider === "codex" &&
-      !isJwtLike(normalizedIdToken || normalizedApiKey)
-    ) {
+    if (isChatgptSubscription && !isJwtLike(normalizedIdToken || normalizedApiKey)) {
       return NextResponse.json(
         {
           error:
@@ -1685,11 +1830,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       config.defaultModel = `llamacpp/${modelName}`;
     } else if (isClawAI && resolvedClawboxTier) {
       config.defaultModel = CLAWBOX_AI_MODEL_BY_TIER[resolvedClawboxTier];
-    } else if (
-      authMode === "subscription"
-      && ocProvider === "codex"
-      && !normalizedModel
-    ) {
+    } else if (isChatgptSubscription && !normalizedModel) {
       // ChatGPT sign-in with no explicit pick. The hardcoded default is
       // gpt-5.5, so a Pro account used to land a generation behind and had
       // to know to change it. We can't read entitlement from a catalog — the
@@ -1707,7 +1848,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           onDiagnostic: (message) => console.log(`[configure] ${message}`),
         });
         if (entitled) {
-          config.defaultModel = `codex/${entitled}`;
+          config.defaultModel = chatgptModelRef(entitled);
         }
       } catch (err) {
         // Never let model selection break sign-in.
@@ -1720,21 +1861,16 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // the curated list — users can type newer model IDs we haven't
       // added yet.
       //
-      // Provider namespace differs between auth modes:
-      //   openai + token        → openai/<id>       (api.openai.com)
-      //   openai + subscription → codex/<id>        (chatgpt.com backend)
-      // The two catalogs are NOT the same — `gpt-5.4` only exists on
-      // codex; `gpt-5` only exists on openai direct. The
-      // `config.defaultModel` was already set to the correct namespace
-      // above by applying subscriptionOverride, so we derive the
-      // target provider from the existing default instead of `provider`.
+      // Both OpenAI auth modes write `openai/<id>`; which catalogue applies
+      // is the subscription surface's business (offSurfaceCodexModelMessage
+      // below), not the namespace's. `config.defaultModel` already carries
+      // the provider the override chose, so derive the target from it.
       const requestedModel = normalizedModel;
       const targetProvider = config.defaultModel.split("/", 1)[0];
       const supportedProviders = new Set([
         "openrouter",
         "anthropic",
         "openai",
-        "codex",
         "google",
       ]);
       if (supportedProviders.has(targetProvider)) {
@@ -1861,20 +1997,20 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const settledModelId = config.defaultModel.slice(settledSlash + 1);
 
     // ChatGPT: the same gap as the Claude one below, on the other
-    // subscription — and the one that ARMS it, because an off-surface
-    // `codex/*` id has to reach `agents.defaults.model.primary` before the
-    // chat header can restore it, and this save is the only way in.
-    // `isValidModelId` above checks SHAPE only and `resolveEntitledCodexModel`
-    // runs solely in the nothing-was-typed branch, so `gpt-5.4-pro` typed into
-    // the custom-model field was written as `codex/gpt-5.4-pro` — precisely
-    // the id /setup-api/chat/model has refused since it was written. Every
-    // turn afterwards fails upstream.
+    // subscription — and the one that ARMS it, because an off-surface id has
+    // to reach `agents.defaults.model.primary` before the chat header can
+    // restore it, and this save is the only way in. `isValidModelId` above
+    // checks SHAPE only and `resolveEntitledCodexModel` runs solely in the
+    // nothing-was-typed branch, so `gpt-5.4-pro` typed into the custom-model
+    // field was written as the subscription's primary — precisely the id
+    // /setup-api/chat/model has refused since it was written. Every turn
+    // afterwards fails upstream.
     //
-    // Not gated on `authMode`, because the NAMESPACE is the gate: ClawBox
-    // writes `codex/` only for an OpenAI save in subscription mode, and an
-    // API-key save writes `openai/`, where the -pro tiers route fine — which
-    // is exactly the switch the refusal recommends.
-    const offSurfaceCodex = offSurfaceCodexModelMessage(settledProvider, settledModelId);
+    // Gated on the auth MODE: both OpenAI modes write `openai/<id>`, and only
+    // the subscription is confined to the ChatGPT surface — an API-key save
+    // routes the -pro tiers fine, which is exactly the switch the refusal
+    // recommends.
+    const offSurfaceCodex = offSurfaceCodexModelMessage(settledProvider, settledModelId, isChatgptSubscription);
     if (offSurfaceCodex) {
       return NextResponse.json({ error: offSurfaceCodex }, { status: 400 });
     }
@@ -1934,7 +2070,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //
     //   * anthropic     → --auth-choice apiKey --anthropic-api-key
     //   * openai (api)  → --auth-choice openai-api-key --openai-api-key
-    //   * codex         → ChatGPT app-server auth (~/.codex/auth.json, written by gateway-pre-start.sh)
+    //   * openai (ChatGPT) → `models auth login --provider openai` (the OAuth bundle below is its output)
     //   * google        → --auth-choice gemini-api-key --gemini-api-key
     //   * openrouter    → --auth-choice openrouter-api-key --openrouter-api-key
     //   * deepseek      → no canonical onboard equivalent today; we use
@@ -2050,6 +2186,33 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       );
     }
 
+    // 2b. The ChatGPT sign-in and the OpenAI API key are two profiles of ONE
+    //     provider on OpenClaw 2, and whichever the owner saved last is the
+    //     one chat must prefer. That preference is the core's own
+    //     `models auth order` (docs/cli/models.md), stored in the agent's auth
+    //     store with precedence over config — asked, not re-implemented — and
+    //     it is revised on BOTH saves. Set once and never revisited, it hid
+    //     the credential the owner added afterwards.
+    //
+    //     After the validation above, not before it: the profile ids reach the
+    //     CLI as argv.
+    let chatgptOrderWarning: string | undefined;
+    if (ocProvider === CHATGPT_PROVIDER) {
+      // ONE config read for both OpenAI decisions this save makes: which
+      // credential to prefer, and whether the previous lane left the Codex
+      // runtime armed on the reference this lane is about to write.
+      const openAiConfig = await readOpenClawConfig().catch(() => null);
+      chatgptOrderWarning = await applyOpenAiAuthOrder(
+        config.profileKey,
+        openAiConfig,
+        configStore[OPENAI_AUTH_ORDER_KEY] === true,
+      );
+      if (!isChatgptSubscription && (!isLocalScope || shouldPromoteLocalToPrimary)) {
+        chatgptOrderWarning = await clearChatgptRuntimeArm(config.defaultModel, openAiConfig)
+          ?? chatgptOrderWarning;
+      }
+    }
+
     // 3. Auth profile, primary model, compaction reserve and the local-access
     //    gateway settings. These are seven independent leaf writes with no
     //    reads between them, so they go out as ONE `config set --batch-json`.
@@ -2079,6 +2242,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // (src/lib/provider-plugin-ops.ts).
       baseOps.unshift(...enableProviderPluginOps([config.defaultModel]));
       baseOps.push(["agents.defaults.model.primary", config.defaultModel]);
+      // The reference is `openai/<id>` for both OpenAI auth modes; this entry
+      // is what says the turn belongs to the ChatGPT account and runs on the
+      // Codex app-server — the key the core itself keeps when it migrates a
+      // `codex/*` reference (src/lib/chatgpt-subscription.ts).
+      if (isChatgptSubscription) {
+        baseOps.push(chatgptRuntimeArmOp(config.defaultModel));
+      }
       if (shouldPromoteLocalToPrimary) {
         console.log(`[AI Config] Promoted local model to active primary: ${logSafe(config.defaultModel)}`);
       }
@@ -2499,7 +2669,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // stale file so the restart below regenerates it with the fresh token —
     // afterward the Codex app-server owns its own refresh, so we don't touch
     // it again.
-    if (ocProvider === "codex") {
+    if (isChatgptSubscription) {
       await fs
         .rm(path.join(CLAWBOX_HOME_DIR, ".codex", "auth.json"), { force: true })
         .catch(() => {});
@@ -2528,7 +2698,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       await fs.unlink(pendingHandoffTokensPath).catch(() => {});
     }
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, ...(chatgptOrderWarning ? { warning: chatgptOrderWarning } : {}) });
   } catch (err) {
     // Never surface the raw error: it can carry CLI internals and filesystem
     // paths. Log it server-side for diagnosis and return a generic, actionable

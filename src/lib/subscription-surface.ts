@@ -6,6 +6,11 @@ import {
   subscriptionSurfaceLabel,
   subscriptionSurfaceProvider,
 } from "@/lib/provider-models";
+import {
+  CHATGPT_UI_PROVIDER,
+  isOauthProfile,
+  profileProviderId,
+} from "@/lib/chatgpt-subscription";
 
 /**
  * Server-side reads of the SUBSCRIPTION facts the UI already gets stamped into
@@ -118,21 +123,49 @@ export async function readSubscriptionSurfaceIds(
  * second copy in the second route is a copy that can drift.
  * `scripts/gateway-pre-start.sh` keeps a hand-maintained mirror of this list
  * in `_CODEX_SUPPORTED`, pinned by
- * `src/tests/unit/gateway-pre-start-codex-models.test.ts`.
+ * `src/tests/unit/gateway-pre-start-codex-models.test.ts`. That mirror is
+ * OpenClaw 1 ONLY — its single consumer, `_openai_gpt_to_codex`, rewrites
+ * `openai/<id>` into the retired namespace and is skipped on
+ * `CLAWBOX_OPENCLAW_V2`. It stays because a box mid-update still runs the v1
+ * branch; nothing on the pinned core reads it.
  */
 export const CODEX_SUPPORTED_MODEL_RE = /^(?:gpt-5\.6-(?:sol|terra|luna)|gpt-5\.5|gpt-5\.4(?:-mini)?)$/;
+
+/**
+ * The models this box can name when it refuses one, as a sentence fragment.
+ *
+ * Built from the ChatGPT catalogue filtered by the allowlist above rather than
+ * hand-written, because the same list was spelled in three places and had
+ * already drifted: the chat route's keyless refusal omitted the GPT-5.6
+ * generation the allowlist accepts. A model added to the catalogue and to the
+ * regex now reaches every refusal by itself.
+ */
+export function chatgptSupportedModelsSentence(): string {
+  const labels = (getProviderCatalog(CHATGPT_UI_PROVIDER)?.models ?? [])
+    .filter((model) => CODEX_SUPPORTED_MODEL_RE.test(model.id))
+    .map((model) => model.label);
+  // Never an empty fragment: the callers embed this mid-sentence, and "Use ,
+  // or switch OpenAI to API-key mode" is worse than naming the surface
+  // generically. Unreachable while the catalogue is the static CODEX_MODELS,
+  // which is exactly why it is cheap to make impossible.
+  if (labels.length === 0) return "a model the ChatGPT subscription supports";
+  if (labels.length === 1) return labels[0];
+  return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+}
 
 /**
  * The refusal for a model id the ChatGPT subscription cannot run, as a
  * message — or null when the target is fine, or is not on the ChatGPT surface
  * at all.
  *
- * The `codex/` NAMESPACE is the subscription test, which is why this takes no
- * config and no getter: ClawBox writes that namespace only for an OpenAI save
- * in subscription mode (`PROVIDERS.openai.subscriptionOverride`), while an
- * API-key save writes `openai/`, where the `-pro` tiers route perfectly well.
- * So "provider is codex" already means "this box reaches OpenAI through a
- * ChatGPT account", with no profile inspection needed.
+ * `chatgptSubscription` is REQUIRED, and it is the whole test. It used to be
+ * derivable here, from `provider === "codex"`: ClawBox wrote that namespace
+ * only for an OpenAI save in subscription mode, so the namespace already said
+ * "this box reaches OpenAI through a ChatGPT account". OpenClaw 2 retired the
+ * namespace — the subscription and the API key are both `openai/<id>` — so
+ * only the caller, which knows which credential the pick resolved onto, can
+ * answer it. Defaulting it would hand a caller that forgot the flag the
+ * behaviour this PR retired instead of a type error.
  *
  * Unlike the Claude surface this is a static allowlist rather than a cache
  * read, so there is no UNKNOWN case: the ChatGPT route catalogue is fixed by
@@ -141,16 +174,26 @@ export const CODEX_SUPPORTED_MODEL_RE = /^(?:gpt-5\.6-(?:sol|terra|luna)|gpt-5\.
 export function offSurfaceCodexModelMessage(
   provider: string | null | undefined,
   modelId: string,
+  chatgptSubscription: boolean,
 ): string | null {
-  if (provider !== "codex") return null;
+  if (!chatgptSubscription) return null;
   if (CODEX_SUPPORTED_MODEL_RE.test(modelId)) return null;
   return `${modelId} is not supported with ChatGPT subscription auth. `
-    + "Use GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, or GPT-5.4 Mini, "
+    + `Use ${chatgptSupportedModelsSentence()}, `
     + "or switch OpenAI to API-key mode for Pro/API-only models.";
 }
 
 /** Auth-profile modes that mean "this provider has a bearer key of its own". */
-const KEY_MODES = new Set(["token", "api_key", "api-key"]);
+const KEY_MODES: ReadonlySet<string> = new Set(["token", "api_key", "api-key"]);
+
+/**
+ * Does this auth profile carry a key/token of its own (as opposed to OAuth)?
+ * Exported because the chat route asks the same question of the openai
+ * profiles and had its own hard-coded copy of the mode set.
+ */
+export function isKeyModeProfile(entry: { mode?: string } | undefined): boolean {
+  return typeof entry?.mode === "string" && KEY_MODES.has(entry.mode.trim().toLowerCase());
+}
 
 /**
  * Providers this box authenticates to by SUBSCRIPTION only — an OAuth profile
@@ -178,14 +221,10 @@ export function subscriptionOnlyProviders(
   const oauth = new Set<string>();
   const keyed = new Set<string>();
   for (const [profileKey, entry] of Object.entries(profiles ?? {})) {
-    const rawProvider = typeof entry?.provider === "string" && entry.provider.trim()
-      ? entry.provider
-      : profileKey.split(":")[0];
-    const provider = normalize(rawProvider.trim().toLowerCase()) ?? "";
+    const provider = normalize(profileProviderId(profileKey, entry)) ?? "";
     if (!provider) continue;
-    const mode = typeof entry?.mode === "string" ? entry.mode.trim().toLowerCase() : "";
-    if (mode === "oauth") oauth.add(provider);
-    else if (KEY_MODES.has(mode)) keyed.add(provider);
+    if (isOauthProfile(entry)) oauth.add(provider);
+    else if (isKeyModeProfile(entry)) keyed.add(provider);
   }
   return [...oauth].filter((provider) => !keyed.has(provider)).sort();
 }

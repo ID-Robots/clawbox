@@ -505,7 +505,7 @@ describe("POST /setup-api/ai-models/configure and the ChatGPT subscription surfa
         vi.mocked(runOpenclawConfigSetBatch),
         "agents.defaults.model.primary",
       )?.value,
-    ).toBe(`codex/${ON_SURFACE}`);
+    ).toBe(`openai/${ON_SURFACE}`);
   });
 
   it("leaves an OpenAI API-key save alone", async () => {
@@ -553,7 +553,7 @@ describe("POST /setup-api/ai-models/configure and the ChatGPT subscription surfa
   });
 
   it("lets the ChatGPT default through when nothing is typed", async () => {
-    // The PROVIDERS-table subscription override is `codex/gpt-5.5`, which is
+    // The PROVIDERS-table subscription override is `openai/gpt-5.5`, which is
     // on-surface — the guard must not turn a plain sign-in into a 400.
     const res = await configurePost(chatgptSignIn());
 

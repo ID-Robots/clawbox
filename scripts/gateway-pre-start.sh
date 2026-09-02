@@ -455,6 +455,18 @@ def _has_openai_api_key_profile():
             return True
     return False
 
+def _has_openai_oauth_profile():
+    # The OpenClaw 2 shape: the ChatGPT sign-in is an OAuth profile of the
+    # OPENAI provider (src/lib/chatgpt-subscription.ts), beside the API-key one.
+    for _entry in _auth_profiles():
+        if not isinstance(_entry, dict):
+            continue
+        _p = str(_entry.get("provider", "")).strip().lower()
+        _m = str(_entry.get("mode", "")).strip().lower()
+        if _p == "openai" and _m == "oauth":
+            return True
+    return False
+
 def _has_codex_oauth_profile():
     for _entry in _auth_profiles():
         if not isinstance(_entry, dict):
@@ -521,20 +533,85 @@ if not isinstance(agents_models, dict):
 def _is_codex_ref(model_id):
     return isinstance(model_id, str) and model_id.strip().lower().startswith("codex/")
 
+# OpenClaw 2 references the ChatGPT subscription as `openai/<id>` and keeps the
+# Codex runtime on THAT entry (src/lib/chatgpt-subscription.ts), so a seed that
+# only recognises the retired namespace restores nothing on the core ClawBox
+# pins — and the arm is the one thing standing between a ChatGPT turn and the
+# Cloudflare-challenged browser endpoint.
+#
+# Widened, but only where the reference cannot be anything else: a box holding
+# the sign-in and NO OpenAI API key. On a box with both credentials an
+# `openai/<id>` is ambiguous at boot, and arming it would push an API-key turn
+# through the Codex app-server with no ChatGPT account behind it. That one is
+# decided by the chat route, which knows the row the owner picked.
+_v2_chatgpt_only = (
+    _clawbox_v2_codex
+    and _has_openai_oauth_profile()
+    and not _has_openai_api_key_profile()
+)
+
+def _needs_codex_runtime(model_id):
+    if _is_codex_ref(model_id):
+        return True
+    return (
+        _v2_chatgpt_only
+        and isinstance(model_id, str)
+        and model_id.strip().lower().startswith("openai/")
+    )
+
 _codex_refs = set()
-if _is_codex_ref(model_defaults.get("primary")):
+if _needs_codex_runtime(model_defaults.get("primary")):
     _codex_refs.add(model_defaults["primary"].strip())
 for _fb in model_defaults.get("fallbacks") or []:
-    if _is_codex_ref(_fb):
+    if _needs_codex_runtime(_fb):
         _codex_refs.add(_fb.strip())
 for _model_key in list(agents_models.keys()):
-    if _is_codex_ref(_model_key):
+    if _needs_codex_runtime(_model_key):
         _codex_refs.add(_model_key)
+
+# The OTHER side of the seed, and the only remover on the box. On v1 the rule
+# was "an agentRuntime outside the codex/ namespace is stale", which the
+# namespace made safe. On v2 the namespace says nothing — both OpenAI lanes are
+# `openai/<id>` — so this fires only on POSITIVE evidence that the arm is
+# stale: the box holds an OpenAI API key and NO ChatGPT sign-in of any kind.
+# There is then no account for the arm to route to and every turn on that model
+# dies on the Cloudflare-challenged browser endpoint — the recovery for a box
+# whose sign-in was removed while the arm stayed.
+#
+# Absence of evidence is not evidence: a config with no auth block at all is an
+# unconfigured or half-read box, and `doctor --fix` writes exactly this arm
+# when it migrates a `codex/<id>` reference, so stripping there would fight the
+# core's own migration. And where a sign-in DOES exist the reference is
+# ambiguous at boot — the chat and configure routes own that one, and both now
+# write AND clear it from the row the owner picked.
+def _has_any_chatgpt_signin():
+    for _entry in _auth_profiles():
+        if not isinstance(_entry, dict):
+            continue
+        _p = str(_entry.get("provider", "")).strip().lower()
+        _m = str(_entry.get("mode", "")).strip().lower()
+        if _m == "oauth" and _p in ("openai", "codex", "openai-codex"):
+            return True
+    return False
+
+_v2_no_chatgpt = (
+    _clawbox_v2_codex
+    and _has_openai_api_key_profile()
+    and not _has_any_chatgpt_signin()
+)
+
+def _armed_codex(entry):
+    _rt = entry.get("agentRuntime")
+    if not isinstance(_rt, dict):
+        return False
+    return str(_rt.get("id", "")).strip().lower() == "codex"
 
 for _model_key, _model_val in list(agents_models.items()):
     if not isinstance(_model_val, dict):
         continue
-    if (not _clawbox_v2_codex) and not _is_codex_ref(_model_key) and "agentRuntime" in _model_val:
+    _stale_v1 = (not _clawbox_v2_codex) and not _is_codex_ref(_model_key)
+    _stale_v2 = _v2_no_chatgpt and _armed_codex(_model_val)
+    if (_stale_v1 or _stale_v2) and "agentRuntime" in _model_val:
         del _model_val["agentRuntime"]
         changed = True
 
@@ -1599,6 +1676,14 @@ fi
 # the stored primary to `codex/<model>` so the update self-heals (the auth side
 # is covered by the ~/.codex synthesis below, which reads the legacy
 # openai-codex:default profile).
+#
+# OpenClaw 2 ONLY, gated like its sibling above (`_clawbox_v2_codex`): on the
+# pinned core BOTH `openai-codex/*` and `codex/*` are retired and the canonical
+# reference is `openai/<id>`, which `doctor --fix` writes itself. Unguarded,
+# this ran `config set ... codex/<id>` on every boot of a v2 box, the core
+# refused it, and the WARN below steered the owner at a namespace that no
+# longer exists.
+if [ "$CLAWBOX_OPENCLAW_V2" != "1" ]; then
 LEGACY_CODEX_PRIMARY="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, sys
 try:
@@ -1616,6 +1701,7 @@ if [ -n "$LEGACY_CODEX_PRIMARY" ]; then
   else
     echo "  WARN: failed to migrate $LEGACY_CODEX_PRIMARY -> $NEW_CODEX_PRIMARY; Codex chats may fail with 'Unknown model'"
   fi
+fi
 fi
 
 # Ensure @openclaw/codex runtime plugin is installed if any agent uses

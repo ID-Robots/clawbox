@@ -140,6 +140,11 @@ interface ChatModelState {
     available: boolean
     settingsSection: 'ai' | 'localAi'
     isLocal: boolean
+    /** The ChatGPT sign-in on this box predates the installed OpenClaw: the
+     * credential is intact, the core just cannot route it. Signing in again is
+     * the only fix, so the row must not say "set up in Settings" — that sends
+     * the owner to re-enter something they already have. */
+    reauthRequired?: boolean
   }>
   primary: { available: boolean; label: string | null; model: string | null }
   local: { available: boolean; label: string | null; model: string | null }
@@ -157,6 +162,7 @@ interface ChatModelState {
 // curated models a secondary dropdown appears next to this one for
 // model selection (see renderProviderModelPicker).
 function getChatModelOptionText(option: ChatModelState['options'][number]) {
+  if (option.reauthRequired) return `${option.label} - Sign in again in Settings`
   if (!option.available) return `${option.label} - Set up in Settings`
   return option.label || option.id
 }
@@ -219,6 +225,7 @@ import {
   extractProviderModelId,
   isModelUsableOnSubscription,
 } from '@/lib/provider-models'
+import { chatgptReferenceProvider } from '@/lib/chatgpt-subscription'
 import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 // Hermes chat header. Deliberately a separate namespace from the OpenClaw
 // pieces above: Hermes has its own provider slugs, its own model ids and its
@@ -3612,7 +3619,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [adapter])
 
-  const switchChatModel = useCallback(async (target: { model: string; label: string }) => {
+  // `provider` is the UI id of the ROW the pick came from, and it is the only
+  // thing that can say a `openai/<id>` pick is the ChatGPT subscription rather
+  // than the API key: on a box holding both credentials the two rows offer the
+  // same reference, and the server cannot tell them apart from the model alone.
+  const switchChatModel = useCallback(async (target: { model: string; label: string; provider?: string | null }) => {
     if (switchingModel || chatModelState?.activeModel === target.model) return
     // Intercept clawai Pro picks from non-Max users. The portal's
     // /api/ai gateway silently downgrades these requests to flash via
@@ -3637,7 +3648,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const res = await fetch('/setup-api/chat/model', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: target.model }),
+        body: JSON.stringify({
+          model: target.model,
+          ...(target.provider ? { provider: target.provider } : {}),
+        }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Failed to switch chat model')
@@ -3695,13 +3709,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       onOpenSettingsSection?.(target.settingsSection)
       setMessages(prev => [...prev, {
         role: 'system',
-        text: `${target.label} is not configured. Opened Settings so you can set it up.`,
+        // A stale sign-in is not an absent one. The credential is on the box;
+        // the installed OpenClaw simply cannot route the way it was filed, and
+        // only a fresh sign-in re-files it.
+        text: target.reauthRequired
+          ? `${target.label} needs you to sign in again — this box's sign-in predates the installed OpenClaw. Opened Settings so you can reconnect it.`
+          : `${target.label} is not configured. Opened Settings so you can set it up.`,
         timestamp: Date.now(),
       }])
       return
     }
 
-    await switchChatModel({ model: target.model, label: target.label })
+    await switchChatModel({ model: target.model, label: target.label, provider: target.provider })
   }, [chatModelState, onOpenSettingsSection, switchChatModel])
 
   // Seed (or RE-seed) the Hermes header: which providers this device can
@@ -5334,9 +5353,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // to `clawai`. Try the canonical provider first, then fall
             // back to the deepseek alias so the picker can resolve the
             // active model id either way.
+            // The ChatGPT row's UI id is `codex` while its models are written
+            // `openai/<id>` — OpenClaw 2 retired the namespace but not the
+            // label (src/lib/chatgpt-subscription.ts). Comparing the row's id
+            // against the reference verbatim answered "not this provider's
+            // model" on every ChatGPT box and took this dropdown — the only
+            // way to move between GPT-5.5 / GPT-5.4 / GPT-5.6 after setup —
+            // off the screen entirely.
             let activeModelId = extractProviderModelId(
               chatModelState.activeModel,
-              activeOption.provider,
+              chatgptReferenceProvider(activeOption.provider),
             )
             if (!activeModelId && activeOption.provider === 'clawai') {
               activeModelId = extractProviderModelId(chatModelState.activeModel, 'deepseek')
@@ -5392,10 +5418,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   // (Mike's gateway routes via DeepSeek). Sending
                   // `clawai/...` would be rejected by the gateway as
                   // an unknown provider.
+                  // The ChatGPT row's models are written `openai/<id>`: its
+                  // UI id `codex` is a label, not a namespace. Posting
+                  // `codex/<id>` from the product's own daily switcher made the
+                  // server's legacy-ref shim — written for a stale tab — the
+                  // happy path, and the row signal below the thing that was
+                  // never exercised. `clawai`/`deepseek` pass through unchanged.
                   const wireProvider = activeOption.provider === 'clawai'
                     ? 'deepseek'
-                    : activeOption.provider
+                    : chatgptReferenceProvider(activeOption.provider)
                   void switchChatModel({
+                    provider: activeOption.provider,
                     model: `${wireProvider}/${nextId}`,
                     label: nextId,
                   })

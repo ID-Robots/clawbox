@@ -36,12 +36,12 @@ let agentDir: string;
 let homeAuthPath: string;
 let codexHomeAuthPath: string;
 
-function seedProfile(access: string, refresh: string = "refresh-secret") {
+function seedProfile(access: string, refresh: string = "refresh-secret", profileKey = "codex:default") {
   writeFileSync(
     path.join(agentDir, "auth-profiles.json"),
     JSON.stringify({
       profiles: {
-        "codex:default": { access, refresh, id: "id-token" },
+        [profileKey]: { access, refresh, id: "id-token" },
       },
     }),
   );
@@ -122,6 +122,122 @@ describe("codex-auth-mirror.js", () => {
       .toBe("refresh-rotated-by-appserver");
   });
 
+  it("writes an adopted rotation back into the openai:chatgpt profile too", () => {
+    // Same rotation as above, on a box signed in the OpenClaw 2 way. A
+    // write-back that only knew the two older keys returned false here, so
+    // core kept the spent refresh token and the next pass wrote it over the
+    // live file.
+    mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
+    writeFileSync(
+      codexHomeAuthPath,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: accessToken("acct-v2", "rotated"),
+          refresh_token: "refresh-rotated-by-appserver",
+          account_id: "acct-v2",
+        },
+      }),
+    );
+    seedProfile(accessToken("acct-v2", "old"), "refresh-spent", "openai:chatgpt");
+
+    const out = run();
+
+    expect(out).toContain("adopted app-server rotation");
+    const store = JSON.parse(readFileSync(path.join(agentDir, "auth-profiles.json"), "utf-8"));
+    expect(store.profiles["openai:chatgpt"].refresh).toBe("refresh-rotated-by-appserver");
+    expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-rotated-by-appserver");
+  });
+
+  it("reads the first profile that carries a credential — a bare canonical entry does not hide a legacy one", () => {
+    writeFileSync(
+      path.join(agentDir, "auth-profiles.json"),
+      JSON.stringify({
+        profiles: {
+          "openai:chatgpt": { provider: "openai", type: "oauth" },
+          "codex:default": { access: accessToken("acct-legacy"), refresh: "refresh-secret", id: "id-token" },
+        },
+      }),
+    );
+    run();
+
+    expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.account_id).toBe("acct-legacy");
+  });
+
+  it("writes a rotation back into the profile it READ, not into a half-written canonical one", () => {
+    // A sign-in interrupted after the entry was created but before the
+    // credential landed: `openai:chatgpt` exists with no `access`, beside a
+    // legacy `codex:default` that still works. The mirror reads the legacy
+    // one — and used to write the rotated token into the empty canonical one,
+    // leaving the entry it reads NEXT holding a refresh token already spent.
+    mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
+    writeFileSync(
+      codexHomeAuthPath,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: accessToken("acct-legacy", "rotated"),
+          refresh_token: "refresh-rotated-by-appserver",
+          account_id: "acct-legacy",
+        },
+      }),
+    );
+    writeFileSync(
+      path.join(agentDir, "auth-profiles.json"),
+      JSON.stringify({
+        profiles: {
+          "openai:chatgpt": { provider: "openai", type: "oauth" },
+          "codex:default": { access: accessToken("acct-legacy", "old"), refresh: "refresh-spent", id: "id-token" },
+        },
+      }),
+    );
+
+    run();
+
+    const store = JSON.parse(readFileSync(path.join(agentDir, "auth-profiles.json"), "utf-8"));
+    expect(store.profiles["codex:default"].refresh).toBe("refresh-rotated-by-appserver");
+    expect(store.profiles["openai:chatgpt"].refresh).toBeUndefined();
+  });
+
+  it("writes an adopted rotation back into the openai:chatgpt profile in the SQLite store too", () => {
+    // The route above seeds the legacy JSON file, which the mirror reads
+    // first; a 2026.8 box holds the store in SQLite only, and the write-back
+    // that reaches it is a second code path with its own key lookup.
+    mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
+    writeFileSync(
+      codexHomeAuthPath,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: accessToken("acct-v2", "rotated"),
+          refresh_token: "refresh-rotated-by-appserver",
+          account_id: "acct-v2",
+        },
+      }),
+    );
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(path.join(agentDir, "openclaw-agent.sqlite"));
+    db.exec("CREATE TABLE auth_profile_store (store_key TEXT PRIMARY KEY, store_json TEXT, updated_at INTEGER)");
+    db.prepare("INSERT INTO auth_profile_store (store_key, store_json) VALUES (?, ?)").run(
+      "primary",
+      JSON.stringify({
+        profiles: {
+          "openai:chatgpt": { access: accessToken("acct-v2", "old"), refresh: "refresh-spent", id: "id-token" },
+        },
+      }),
+    );
+    db.close();
+
+    const out = run();
+
+    expect(out).toContain("adopted app-server rotation");
+    const reopened = new DatabaseSync(path.join(agentDir, "openclaw-agent.sqlite"));
+    const row = reopened.prepare("SELECT store_json FROM auth_profile_store WHERE store_key = ?").get("primary") as { store_json: string };
+    reopened.close();
+    expect(JSON.parse(row.store_json).profiles["openai:chatgpt"].refresh).toBe("refresh-rotated-by-appserver");
+  });
+
   it("does not write the same file twice when codex-home is a symlink to ~/.codex", () => {
     // A previous version resolved both destinations to one file and then
     // deleted the real credential through the link.
@@ -144,6 +260,18 @@ describe("codex-auth-mirror.js", () => {
     expect(parsed.tokens.access_token).toBe(accessToken("acct-42"));
     expect(parsed.tokens.account_id).toBe("acct-42");
     expect(parsed.tokens.id_token).toBe("id-token");
+  });
+
+  it("reads the profile OpenClaw 2 files the sign-in under (openai:chatgpt)", () => {
+    // src/lib/chatgpt-subscription.ts: the sign-in is an openai-provider OAuth
+    // profile now; a mirror that only knew the two older keys would leave
+    // every freshly signed-in box with no credential in ~/.codex/auth.json.
+    seedProfile(accessToken("acct-v2"), "refresh-secret", "openai:chatgpt");
+    run();
+
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
+    expect(parsed.tokens.access_token).toBe(accessToken("acct-v2"));
+    expect(parsed.tokens.account_id).toBe("acct-v2");
   });
 
   it("refreshes a stale credential when core has rotated the access token", () => {

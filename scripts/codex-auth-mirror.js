@@ -94,11 +94,63 @@ function accountIdFromAccessToken(accessToken) {
   }
 }
 
+// `openai:chatgpt` is where ClawBox files the sign-in on OpenClaw 2 (an
+// openai-provider OAuth profile — src/lib/chatgpt-subscription.ts); the two
+// older keys are what boxes signed in before the core upgrade still hold. One
+// list for reading AND writing back: a rotation adopted from the app-server
+// that cannot find the profile to write it into leaves core holding the spent
+// refresh token, and the next mirror pass writes that dead token over the
+// live file.
+const PROFILE_KEYS = ["openai:chatgpt", "codex:default", "openai-codex:default"];
+
+/**
+ * The ONE profile this box's ChatGPT credential lives in — for reading it and
+ * for writing a rotation back.
+ *
+ * The first entry that actually carries `access`, because a canonical entry
+ * left half-written by an interrupted sign-in must not hide a legacy one that
+ * still works; the first entry that merely EXISTS only as a last resort, so a
+ * rotation still lands somewhere when nothing is credentialed yet.
+ *
+ * One rule for both directions, deliberately. Reading by "has a credential"
+ * while writing back by "exists" is how a box ends up reading `codex:default`
+ * and writing the rotated token into `openai:chatgpt`, leaving the entry it
+ * reads next holding a refresh token that has already been spent — the exact
+ * split this list exists to prevent.
+ */
+/** An openai-provider OAuth profile is a ChatGPT sign-in, whatever it is keyed. */
+function isChatgptProfile(key, entry) {
+  if (!entry || typeof entry !== "object") return false;
+  const provider = String(entry.provider || key.split(":")[0] || "").trim().toLowerCase();
+  const mode = String(entry.type || entry.mode || "").trim().toLowerCase();
+  if (mode && mode !== "oauth") return false;
+  return provider === "openai" || provider === "codex" || provider === "openai-codex";
+}
+
+function profileKeyIn(profiles) {
+  if (!profiles) return null;
+  // PROFILE_KEYS first, as the preference order, then ANY profile that is a
+  // ChatGPT sign-in by shape. The three literal ids miss the two `doctor --fix`
+  // itself allocates when it migrates a legacy `openai-codex:default`:
+  // `openai:default`, or `openai:chatgpt-default` when that is taken. The rest
+  // of this PR already treats "provider openai + oauth" as the sign-in — so a
+  // doctor-migrated box produced an available ChatGPT row, a runtime arm and a
+  // subscription entitlement while THIS script found no credential, never
+  // synthesized ~/.codex/auth.json and never wrote a rotation back.
+  const keys = [
+    ...PROFILE_KEYS.filter((key) => profiles[key]),
+    ...Object.keys(profiles).filter(
+      (key) => !PROFILE_KEYS.includes(key) && isChatgptProfile(key, profiles[key]),
+    ).sort(),
+  ];
+  return keys.find((key) => profiles[key] && profiles[key].access) || keys[0] || null;
+}
+
 function credentialFromProfiles(agentDir) {
   const profiles = readProfiles(agentDir);
-  const profile =
-    profiles && (profiles["codex:default"] || profiles["openai-codex:default"]);
-  if (!profile || !profile.access) return null;
+  const key = profileKeyIn(profiles);
+  const profile = key && profiles[key] && profiles[key].access ? profiles[key] : null;
+  if (!profile) return null;
   return {
     accessToken: profile.access,
     refreshToken: profile.refresh,
@@ -199,8 +251,8 @@ function writeBackToCore(agentDirs, tokens) {
     const data = readJson(jsonPath);
     const profiles = data && data.profiles;
     if (!profiles) continue;
-    const id = profiles["codex:default"] ? "codex:default" : "openai-codex:default";
-    if (!profiles[id]) continue;
+    const id = profileKeyIn(profiles);
+    if (!id) continue;
     profiles[id].access = tokens.access_token || profiles[id].access;
     profiles[id].refresh = tokens.refresh_token;
     if (tokens.id_token) profiles[id].id = tokens.id_token;
@@ -225,8 +277,8 @@ function writeBackToCore(agentDirs, tokens) {
         if (!row || !row.store_json) continue;
         const store = JSON.parse(row.store_json);
         const profiles = store.profiles || {};
-        const id = profiles["codex:default"] ? "codex:default" : "openai-codex:default";
-        if (!profiles[id]) continue;
+        const id = profileKeyIn(profiles);
+        if (!id) continue;
         profiles[id].access = tokens.access_token || profiles[id].access;
         profiles[id].refresh = tokens.refresh_token;
         if (tokens.id_token) profiles[id].id = tokens.id_token;

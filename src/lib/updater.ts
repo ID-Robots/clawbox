@@ -17,6 +17,14 @@ import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { startRootStep } from "./root-step-runner";
 import { collectBuildIdentity } from "./build-identity";
+import type { AuthProfileEntries } from "./subscription-surface";
+import {
+  CHATGPT_AGENT_RUNTIME_ID,
+  hasChatgptOauthProfile,
+  isLegacyChatgptProvider,
+  isLegacyCodexRef,
+  profileProviderId,
+} from "./chatgpt-subscription";
 
 const PROJECT_DIR = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
@@ -1030,9 +1038,10 @@ async function codexCapabilityRepairIsAllowed(): Promise<boolean> {
       ? defaults.model as Record<string, unknown>
       : {};
     const modelRefs = [model.primary, ...(Array.isArray(model.fallbacks) ? model.fallbacks : [])];
-    if (modelRefs.some((ref) =>
-      typeof ref === "string" && /^(?:codex|openai-codex)\//i.test(ref.trim()),
-    )) return true;
+    // The retired namespaces, asked once from the module that owns them. On
+    // the pinned core the canonical reference is `openai/<id>` and the signal
+    // is the runtime arm below — these still hold for a box mid-migration.
+    if (modelRefs.some((ref) => typeof ref === "string" && isLegacyCodexRef(ref))) return true;
 
     const models = defaults.models && typeof defaults.models === "object"
       ? defaults.models as Record<string, unknown>
@@ -1041,7 +1050,7 @@ async function codexCapabilityRepairIsAllowed(): Promise<boolean> {
       if (!settings || typeof settings !== "object") return false;
       const runtime = (settings as Record<string, unknown>).agentRuntime;
       return !!runtime && typeof runtime === "object"
-        && String((runtime as Record<string, unknown>).id || "").toLowerCase() === "codex";
+        && String((runtime as Record<string, unknown>).id || "").toLowerCase() === CHATGPT_AGENT_RUNTIME_ID;
     })) return true;
 
     const auth = cfg.auth && typeof cfg.auth === "object"
@@ -1050,12 +1059,17 @@ async function codexCapabilityRepairIsAllowed(): Promise<boolean> {
     const profiles = auth.profiles && typeof auth.profiles === "object"
       ? auth.profiles as Record<string, unknown>
       : {};
+    // The OpenClaw 2 sign-in counts too, and on its own: a box with
+    // `openai:chatgpt` but no runtime arm — the isLocalScope save path, a
+    // hand-edited config, or the dual-credential box the boot seed
+    // deliberately skips — used to answer "codex not in use" here and have the
+    // capability repair skipped on every update.
+    if (hasChatgptOauthProfile(profiles as AuthProfileEntries)) return true;
     return Object.entries(profiles).some(([id, profile]) =>
-      /^(?:codex|openai-codex):/i.test(id)
-        || (!!profile && typeof profile === "object"
-          && /^(?:codex|openai-codex)$/i.test(
-            String((profile as Record<string, unknown>).provider || ""),
-          )),
+      isLegacyChatgptProvider(id.split(":")[0])
+        || isLegacyChatgptProvider(
+          profileProviderId(id, profile as { provider?: string } | undefined),
+        ),
     );
   } catch {
     // Missing/malformed config has no explicit opt-out. The concrete current-

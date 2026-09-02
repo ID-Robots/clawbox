@@ -30,7 +30,7 @@ Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the token-
 - [Networking](https://docs.clawbox.com/technical/networking): AP mode (no DNS hijack — dnsmasq forwards upstream; the middleware answers captive-portal probe paths), mDNS/clawbox.local reliability, full port map, remote access via /setup-api/portal/*, portal heartbeat
 - [Filesystem Layout](https://docs.clawbox.com/technical/filesystem): where everything lives; what survives updates vs factory reset; where secrets are
 - [Authentication & Security](https://docs.clawbox.com/technical/authentication): browser login flow (unix_chkpwd), session cookies, gateway token, service tokens
-- [AI Providers](https://docs.clawbox.com/technical/ai-providers): every provider lane, credential storage map, the two OpenAI lanes (openai/ vs codex/), boot-time self-healing — OpenClaw/dual editions only; Hermes provider config is Hermes' own
+- [AI Providers](https://docs.clawbox.com/technical/ai-providers): every provider lane, credential storage map, the two OpenAI lanes (both openai/, split by credential + Codex runtime), boot-time self-healing — OpenClaw/dual editions only; Hermes provider config is Hermes' own
 - [Update System](https://docs.clawbox.com/technical/update-system): tag-based updates, channels (main/beta), divergence/"Updates paused", manual-update pitfalls
 - [Agent Interface (MCP)](https://docs.clawbox.com/technical/agent-interface): the device tools the AI agent gets, the clawbox-cli.ts wrapper (invoked via bun; no `clawbox` command on PATH), auth model — the tool set differs by edition (app_* + coding family + coordinate browser control on OpenClaw only; skill_* + ai_* on Hermes only)
 
