@@ -43,6 +43,14 @@ jobs:
       - name: Build
         run: bun run build
 
+      # A builtin loaded in a shape Turbopack cannot externalise (F-05:
+      # `createRequire(import.meta.url)("node:sqlite")`) builds fine and passes
+      # vitest, and only the built chunk shows the throwing stub it became. The
+      # chunks are here, so they are read here — and nowhere the customer's
+      # updater runs (see the script header).
+      - name: Assert no Node builtin was compiled into a throwing stub
+        run: bash scripts/check-bundled-builtins.sh
+
       # actions/checkout leaves HEAD at the exact commit under test (the merge
       # commit for a PR), which is what the built artefact must name. Passing
       # it explicitly rather than letting the script read HEAD keeps the

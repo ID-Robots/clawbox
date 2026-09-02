@@ -26,19 +26,42 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { createRequire } from "node:module";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 
-// node:sqlite is loaded lazily through require, NOT imported statically:
-// vite's client test environment cannot bundle it (the builtin is newer than
-// its externals list), and a static import here crashed every jsdom suite
-// whose import graph merely REACHES this file through openclaw-config. The
-// functions below only ever run on the server, where the require succeeds.
-const requireNodeSqlite = (() => {
-  let mod: { DatabaseSync: typeof DatabaseSyncType } | null = null;
-  const req = createRequire(import.meta.url);
-  return () => {
-    if (!mod) mod = req("node:sqlite") as { DatabaseSync: typeof DatabaseSyncType };
+type NodeSqlite = { DatabaseSync: typeof DatabaseSyncType };
+
+/**
+ * node:sqlite, resolved lazily at CALL time through `process.getBuiltinModule`
+ * — not imported statically, and not through `createRequire`:
+ *   - a static import crashed every jsdom suite whose import graph merely
+ *     REACHES this file through openclaw-config (vite cannot bundle the
+ *     builtin; it is newer than its externals list);
+ *   - `createRequire(import.meta.url)("node:sqlite")` passed every vitest suite
+ *     (vitest does not bundle) and was compiled by Turbopack into a stub that
+ *     throws "Cannot find module 'node:sqlite': Unsupported external type Url
+ *     for commonjs reference" — so on the box, where the builtin exists, every
+ *     reader here failed its open() and silently fell back to legacy files
+ *     OpenClaw 2 no longer writes. scripts/check-bundled-builtins.sh reads the
+ *     built chunks in CI so that shape cannot come back.
+ * `getBuiltinModule` is a plain runtime call the bundler leaves alone. It
+ * arrived in Node 22.3 and node:sqlite in 22.5 (behind --experimental-sqlite
+ * until 22.13), so a runtime missing the one is missing the other too — that
+ * case throws here, with the version in the message, and every caller already
+ * treats a failed open() as "not migrated".
+ * Exported so the next reader of an OpenClaw .sqlite file shares this loader
+ * instead of growing a third shape.
+ */
+export const requireNodeSqlite = (() => {
+  let mod: NodeSqlite | null = null;
+  return (): NodeSqlite => {
+    if (mod) return mod;
+    const loaded = process.getBuiltinModule?.("node:sqlite") as NodeSqlite | undefined;
+    if (typeof loaded?.DatabaseSync !== "function") {
+      throw new Error(
+        `node:sqlite is not available on Node ${process.versions.node} (it needs Node >= 22.13, or 22.5+ with --experimental-sqlite)`,
+      );
+    }
+    mod = loaded;
     return mod;
   };
 })();

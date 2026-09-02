@@ -7,8 +7,10 @@ import path from "path";
 import { sweepSessionEntries } from "@/lib/openclaw-session-store";
 import { applyModelOverrideToAllAgentSessions } from "@/lib/openclaw-config";
 
-// The store lib reaches node:sqlite the same lazy way (vite cannot bundle the
-// builtin); the fixtures here do too.
+// vite cannot bundle the builtin, so the fixtures reach node:sqlite lazily
+// too. createRequire is fine HERE — vitest never bundles a test file — and
+// wrong in the lib, where Turbopack compiles it into a throwing stub (see
+// openclaw-session-store-loader.test.ts).
 const requireNodeSqlite = createRequire(import.meta.url);
 const { DatabaseSync } = requireNodeSqlite("node:sqlite");
 
