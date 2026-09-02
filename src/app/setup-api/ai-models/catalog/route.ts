@@ -40,7 +40,7 @@ export const dynamic = "force-dynamic";
 // stamped `source: "live"`; everything else is served marked `fallback` so the
 // client comes back for the real answer. An enumeration that returns ZERO
 // models is not an answer either — the previous good catalogue is kept and the
-// CLI's stderr is logged, because "0 models" means the plugin is off or the
+// CLI's own reason is logged, because "0 models" means the plugin is off or the
 // provider id is gone, not that the box can run nothing.
 
 const OPENCLAW_BIN = findOpenclawBin();
@@ -596,6 +596,14 @@ function sanitizeCachedPayload(provider: string, cached: CatalogResponse): Catal
  *
  * The `codex` CATALOGUE id itself is being retired separately (TASK-652); this
  * entry keeps the picker showing real models until it is, and goes with it.
+ *
+ * WHAT THIS DOES NOT ANSWER: whether the box can RUN these rows on a ChatGPT
+ * account. Every openai row comes back `available: true` as soon as any openai
+ * profile exists — on the affected box that was the ClawBox AI image token, an
+ * API key that cannot chat — so `available` here means "the openai catalogue
+ * carries it", never "the ChatGPT route will take it". That second question is
+ * "is there an openai OAUTH profile", which lives with the credential store
+ * (TASK-652 surfaces it); a picker must not answer it from this payload.
  */
 const ENUMERATION_PROVIDER: Record<string, string> = {
   codex: "openai",
