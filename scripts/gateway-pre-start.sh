@@ -986,10 +986,15 @@ _clawai_proxy_base_url = ""
 # See that function for why each field is shaped the way it is. The short
 # version: the per-model `baseUrl` retargets exactly one model (a provider-wide
 # one would point OpenAI's whole built-in chat catalog at a proxy that does not
-# speak it), the absent `api` keeps the entry out of the chat model picker,
-# `name` is required or the config will not validate, and the
-# `imageGenerationModel` write is what actually makes the tool appear —
-# `imageModel` is a different key that selects the vision model.
+# speak it), the absent `api` NARROWS where the entry is offered as a chat
+# model but does not hide it — OpenClaw skips that gate under
+# `models.mode: "replace"`, and its picker exempts every configured row anyway,
+# so its own surfaces can still offer our image model (see the docblock in
+# src/lib/clawbox-ai-models.ts for the measurement and the two source paths);
+# ClawBox's own surfaces are closed separately. `name` is required or the
+# config will not validate, and the `imageGenerationModel` write is what
+# actually makes the tool appear: `imageModel` is a different key that selects
+# the vision model.
 #
 # The model id is duplicated from CLAWBOX_AI_IMAGE_MODEL_ID in
 # src/lib/clawbox-ai-models.ts because a shell migration cannot import it. It
@@ -1009,11 +1014,19 @@ OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 from urllib.parse import urlsplit
 
 
+# The scheme's default port, which `new URL(u).host` omits on the TypeScript
+# side. Spelling it out here is what keeps the two normalisers agreeing on
+# `https://clawbox.com:443/api/ai` — the route called that row ours while this
+# script called the same row foreign and backed the whole migration off.
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443, "ftp": 21}
+
+
 def _url_host(_url):
     """Lowercased host[:port] of a URL, or None when it is not a usable URL.
 
     Deliberately excludes any userinfo, and matches what `new URL(u).host`
-    returns on the TypeScript side so the two guards agree on the same string.
+    returns on the TypeScript side so the two guards agree on the same string —
+    including the default port, which `URL.host` drops and `urlsplit` keeps.
     """
     try:
         _parts = urlsplit(_url if isinstance(_url, str) else "")
@@ -1022,7 +1035,69 @@ def _url_host(_url):
         _port = _parts.port
     except ValueError:
         return None
+    if _port is not None and _DEFAULT_PORTS.get(_parts.scheme.lower()) == _port:
+        _port = None
     return _parts.hostname.lower() + (":" + str(_port) if _port is not None else "")
+
+
+# Every host ClawBox has ever written as the ClawBox AI proxy: the live one off
+# the deepseek entry (so a staging box names its staging host), plus the two
+# retired ones the retarget above still recognises. Hoisted here because both
+# questions below — "is this row mine to repair" and "would my token leave the
+# building" — have to be asked with the same set.
+#
+# The live value must only count when the deepseek entry is a ClawBox AI one:
+# install.sh's CLAWBOX_AI_API_KEY branch provisions a RAW DeepSeek key at
+# api.deepseek.com, and admitting that host would make a genuine third party
+# "not foreign". Here that is already true without a test of its own — every
+# reader of this set (`_is_our_image_row`, `_is_foreign`) sits inside the
+# `claw_` gate below, so on a raw-DeepSeek box the set is never consulted.
+# clawboxProxyHosts() in src/app/setup-api/ai-models/configure/route.ts DOES
+# test it, because its call site is not gated; the two therefore agree on
+# every box. If a reader of this set is ever moved ABOVE that gate, the
+# `claw_` test has to come with it.
+_clawai_image_base_url = deepseek_provider.get("baseUrl") if isinstance(deepseek_provider, dict) else None
+if not isinstance(_clawai_image_base_url, str) or not _clawai_image_base_url.strip():
+    _clawai_image_base_url = "https://clawbox.com/api/ai"
+_clawbox_proxy_hosts = set()
+for _known in (
+    _clawai_image_base_url,
+    "https://clawbox.com/api/ai",
+    "https://openclawhardware.dev/api/ai",
+    "https://www.openclawhardware.dev/api/ai",
+):
+    _known_host = _url_host(_known)
+    if _known_host:
+        _clawbox_proxy_hosts.add(_known_host)
+
+
+def _is_our_image_row(_row):
+    """Is this models[] row the one WE wrote?
+
+    The id cannot answer it on its own. `gpt-image-1-mini` is a real OpenAI
+    model id, so an owner running their own image endpoint — Azure OpenAI,
+    LiteLLM, vLLM, any self-hosted OpenAI-compatible gateway — can carry a row
+    of exactly that id. Claiming it repoints their route at our proxy,
+    overwrites their `api`, and puts the portal token on the provider block as
+    the credential for a route we do not own.
+
+    So ownership is POSITIVE: the row's own `baseUrl` must name a host ClawBox
+    itself has written. "Not api.openai.com" is the wrong test — api.openai.com
+    is the least likely place for a power user's private row. The set includes
+    the retired hosts, so the retarget of an entry left on an old proxy still
+    recognises it as ours.
+
+    A row with no `baseUrl` of its own is not ours either: ClawBox has always
+    written one, and an inherited provider-level URL is the owner's choice.
+
+    Mirrors isOurImageRow() in src/app/setup-api/ai-models/configure/route.ts.
+    """
+    if not isinstance(_row, dict) or _row.get("id") != CLAWBOX_IMAGE_MODEL_ID:
+        return False
+    _row_base_url = _row.get("baseUrl")
+    if not isinstance(_row_base_url, str) or not _row_base_url.strip():
+        return False
+    return _url_host(_row_base_url) in _clawbox_proxy_hosts
 
 
 # Only boxes that actually have ClawBox AI get an image provider — the token is
@@ -1032,9 +1107,7 @@ def _url_host(_url):
 # talking to that staging proxy for images too.
 _clawai_token = deepseek_provider.get("apiKey") if isinstance(deepseek_provider, dict) else None
 if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
-    _image_base_url = deepseek_provider.get("baseUrl")
-    if not isinstance(_image_base_url, str) or not _image_base_url.strip():
-        _image_base_url = "https://clawbox.com/api/ai"
+    _image_base_url = _clawai_image_base_url
 
     openai_provider = models_providers.get("openai")
     if not isinstance(openai_provider, dict):
@@ -1070,12 +1143,17 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
     # is the outcome that mails the subscription token to a third party.
     # An unparseable URL counts as foreign: we cannot say where it points.
     # Mirrors foreignOpenAiRoute() in
-    # src/app/setup-api/ai-models/configure/route.ts.
-    _proxy_host = _url_host(_image_base_url)
-
+    # src/app/setup-api/ai-models/configure/route.ts — the SAME set
+    # _is_our_image_row uses, so the two questions this block asks ("is this
+    # row mine to repair" and "would my token leave the building") cannot
+    # disagree about a host, and neither can the two writers. On the old
+    # single-host form an owner row on a RETIRED ClawBox proxy was foreign
+    # here and ours in the route, so the same config produced two different
+    # box states depending on which ran last — and the back-off also gates the
+    # speech-to-text migration below.
     def _is_foreign(_url):
         _host = _url_host(_url)
-        return _host is None or _proxy_host is None or _host != _proxy_host
+        return _host is None or _host not in _clawbox_proxy_hosts
 
     _provider_base_url = openai_provider.get("baseUrl")
     if not isinstance(_provider_base_url, str) or not _provider_base_url.strip():
@@ -1083,7 +1161,10 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
     _foreign_route = _provider_base_url if (_provider_base_url and _is_foreign(_provider_base_url)) else None
     if _foreign_route is None:
         for _row in (openai_provider.get("models") if isinstance(openai_provider.get("models"), list) else []):
-            if not isinstance(_row, dict) or _row.get("id") == CLAWBOX_IMAGE_MODEL_ID:
+            # OUR row is skipped — not every row that happens to share its id.
+            # See _is_our_image_row: skipping by id let the upsert claim an
+            # owner's own gpt-image-1-mini row and repoint it at our proxy.
+            if not isinstance(_row, dict) or _is_our_image_row(_row):
                 continue
             _row_base_url = _row.get("baseUrl")
             if not isinstance(_row_base_url, str) or not _row_base_url.strip():
@@ -1094,8 +1175,11 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
 
     if _key_is_ours and _foreign_route is not None:
         print(
+            # The host only, like the TypeScript sibling: an owner-configured
+            # URL can carry user-info or query credentials, and the journal
+            # keeps what is logged.
             "  Skipped ClawBox AI image provider: models.providers.openai already routes to "
-            + _foreign_route
+            + (_url_host(_foreign_route) or "an unparseable URL")
             + ", and the apiKey we would write there is the credential for that route too"
         )
 
@@ -1112,27 +1196,27 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
         if not isinstance(_openai_models, list):
             _openai_models = []
             openai_provider["models"] = _openai_models
-        _entry = next(
-            (m for m in _openai_models if isinstance(m, dict) and m.get("id") == CLAWBOX_IMAGE_MODEL_ID),
-            None,
-        )
-        if _entry is None:
+        _our_entries = [m for m in _openai_models if _is_our_image_row(m)]
+        if not _our_entries:
             _openai_models.append({
                 "id": CLAWBOX_IMAGE_MODEL_ID,
                 "name": CLAWBOX_IMAGE_MODEL_NAME,
                 "baseUrl": _image_base_url,
             })
             changed = True
-        else:
+        # Every duplicate of our row is repaired the same way: a stale copy
+        # left by an older upsert is offered by the same pickers as the live one.
+        for _entry in _our_entries:
             if not isinstance(_entry.get("name"), str) or not _entry.get("name").strip():
                 _entry["name"] = CLAWBOX_IMAGE_MODEL_NAME
                 changed = True
             if _entry.get("baseUrl") != _image_base_url:
                 _entry["baseUrl"] = _image_base_url
                 changed = True
-            # An `api` here would surface the image model in the chat picker as
-            # a conversational model that fails on every turn. Only ever ours to
-            # remove, so drop it wherever it appears on this entry.
+            # An `api` here widens where the image model is offered as a
+            # conversational model that fails on every turn — see the header
+            # above for why removing it narrows rather than closes that. Only
+            # ever ours to remove, so drop it wherever it appears.
             if "api" in _entry:
                 del _entry["api"]
                 changed = True

@@ -20,6 +20,7 @@ import {
   type OpenclawConfigSetArgs,
 } from "@/lib/openclaw-config";
 import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
+import { isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
 
 const SAVED_PRIMARY_KEY = "local_only_saved_primary";
 const SAVED_FALLBACKS_KEY = "local_only_saved_fallbacks";
@@ -463,11 +464,32 @@ export async function POST(request: Request) {
       // enables for every provider the restore names ride first, in the same
       // batch, and a refused batch leaves the flag and both lists as they were
       // (src/lib/provider-plugin-ops.ts).
-      const restoreFallbacks = Array.isArray(savedFallbacks) && savedFallbacks.length > 0 ? savedFallbacks : null;
+      // The ClawBox AI image entry can never be a chat model, and this route is
+      // the THIRD writer of agents.defaults.model.primary — the one that
+      // passes through neither guarded door. A box mis-pinned to it that
+      // toggles Local-only on, recovers, then toggles Local-only off was
+      // re-pinned from this snapshot, silently undoing the repair. Dropped on
+      // the way out rather than on the way in, so a snapshot already on disk
+      // is covered too.
+      const restorablePrimary = savedPrimary && !isClawboxAiImageModelRef(savedPrimary) ? savedPrimary : undefined;
+      if (savedPrimary && !restorablePrimary) {
+        // Dropping it is right; reporting the toggle as a plain success is
+        // not. With no primary op the box stays on the local model while the
+        // panel paints the switch off, and the owner believes cloud routing
+        // is back — the same "claiming a state it does not have" this
+        // handler's 503 branch below exists to avoid.
+        warnings.push(
+          "The saved provider could not be restored (it was the ClawBox AI image model, which cannot chat) — the box is still on the local model. Pick a chat model in Settings.",
+        );
+      }
+      const keptFallbacks = Array.isArray(savedFallbacks)
+        ? savedFallbacks.filter((ref) => !isClawboxAiImageModelRef(ref))
+        : savedFallbacks;
+      const restoreFallbacks = Array.isArray(keptFallbacks) && keptFallbacks.length > 0 ? keptFallbacks : null;
       const restoreOps: OpenclawConfigSetArgs[] = [
-        ...enableProviderPluginOps([savedPrimary, ...(restoreFallbacks ?? [])]),
-        ...(savedPrimary
-          ? [["agents.defaults.model.primary", JSON.stringify(savedPrimary), "--json"] as OpenclawConfigSetArgs]
+        ...enableProviderPluginOps([restorablePrimary, ...(restoreFallbacks ?? [])]),
+        ...(restorablePrimary
+          ? [["agents.defaults.model.primary", JSON.stringify(restorablePrimary), "--json"] as OpenclawConfigSetArgs]
           : []),
         ...(restoreFallbacks
           ? [["agents.defaults.model.fallbacks", JSON.stringify(restoreFallbacks), "--json"] as OpenclawConfigSetArgs]

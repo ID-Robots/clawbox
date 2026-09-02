@@ -466,6 +466,84 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       await backsOff({ models: [{ id: "mystery", name: "Mystery", baseUrl: "not-a-url" }] });
     });
 
+    it("leaves an owner's own row of OUR id on their private proxy alone", async () => {
+      // `gpt-image-1-mini` is a real OpenAI model id, and Azure OpenAI /
+      // LiteLLM / vLLM / any self-hosted OpenAI-compatible gateway is where a
+      // power user's row of that id actually lives. Claiming it by id repointed
+      // their route at our proxy, overwrote their `api`, and wrote the portal
+      // token as the provider-wide credential for a route we do not own.
+      const logged = await backsOff({
+        models: [{
+          id: CLAWBOX_AI_IMAGE_MODEL_ID,
+          name: "My Azure image model",
+          api: "azure-images",
+          baseUrl: "https://my-azure.example/openai/v1",
+        }],
+      });
+
+      expect(logged).toContain("my-azure.example");
+    });
+
+    it("leaves an owner's row of OUR id with no baseUrl alone", async () => {
+      // ClawBox has always written a baseUrl on its own row, so a row without
+      // one is the owner's, inheriting whatever the provider block says.
+      await backsOff({
+        models: [{ id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "gpt-image-1-mini", api: "openai-completions" }],
+      });
+    });
+
+    it("proceeds when a sibling row points at a RETIRED ClawBox proxy host", async () => {
+      // The foreignness test asks "would our token leave the building?", so it
+      // has to know every host ClawBox has ever written — not just the current
+      // one. With the single-host form this backed the whole migration off on
+      // a box whose owner still carries a row on the old proxy, and the boot
+      // migration (which this claims to mirror) has to agree.
+      mockReadConfig.mockResolvedValue({
+        models: {
+          providers: {
+            deepseek: { apiKey: CLAWAI_TOKEN, baseUrl: PROXY_URL },
+            openai: {
+              models: [{ id: "house-model", name: "House model", api: "openai-completions", baseUrl: "https://www.openclawhardware.dev/api/ai" }],
+            },
+          },
+        },
+      } as never);
+      await connectClawai();
+
+      expect(callFor("models.providers.openai.apiKey")).toBeDefined();
+      expect(callFor("models.providers.openai.models")).toBeDefined();
+    });
+
+    it("still aborts when the deepseek entry is a RAW key at a genuine third party", async () => {
+      // install.sh's CLAWBOX_AI_API_KEY branch provisions a raw DeepSeek key at
+      // api.deepseek.com. On the first ClawBox AI pairing the snapshot still
+      // says that, so seeding the proxy-host set from the live baseUrl would
+      // make api.deepseek.com "not foreign" and write the portal token as the
+      // bearer for a route that leaves for DeepSeek — verbatim the harm this
+      // back-off exists to prevent. Only a `claw_` deepseek entry names a
+      // ClawBox proxy.
+      mockReadConfig.mockResolvedValue({
+        models: {
+          providers: {
+            deepseek: { apiKey: "sk-deepseek-raw", baseUrl: "https://api.deepseek.com" },
+            openai: {
+              models: [{ id: "deepseek-chat", name: "DeepSeek", api: "openai-completions", baseUrl: "https://api.deepseek.com/v1" }],
+            },
+          },
+        },
+      } as never);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await connectClawai();
+        expect(warn.mock.calls.map((call) => call.join(" ")).join("\n")).toContain("Skipped ClawBox AI image provider");
+      } finally {
+        warn.mockRestore();
+      }
+
+      expect(callFor("models.providers.openai.apiKey")).toBeUndefined();
+      expect(callFor("models.providers.openai.models")).toBeUndefined();
+    });
+
     it("proceeds when a sibling row points at the same proxy we do", async () => {
       mockReadConfig.mockResolvedValue({
         models: { providers: { openai: { models: [{ id: "house-model", name: "House model", api: "openai-completions", baseUrl: PROXY_URL }] } } },
@@ -485,6 +563,58 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       await connectClawai();
 
       expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
+    });
+  });
+
+  describe("ownership of our own row", () => {
+    it("claims a row naming the default port explicitly", async () => {
+      // `new URL(u).host` drops :443; the boot migration's python normaliser
+      // kept it, so the two writers disagreed about the same row. Pinned from
+      // this side too.
+      mockReadConfig.mockResolvedValue({
+        models: {
+          providers: {
+            openai: {
+              apiKey: "claw_old",
+              models: [{
+                id: CLAWBOX_AI_IMAGE_MODEL_ID,
+                name: CLAWBOX_AI_IMAGE_MODEL_LABEL,
+                baseUrl: "https://clawbox.com:443/api/ai",
+              }],
+            },
+          },
+        },
+      } as never);
+      await connectClawai();
+
+      expect(JSON.parse(callFor("models.providers.openai.models")?.[1] ?? "null")).toEqual([
+        { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL },
+      ]);
+    });
+
+    it("still recognises our row on a RETIRED proxy host as ours", async () => {
+      // The ownership set carries every host ClawBox has ever written, so the
+      // retarget of an entry left on an old proxy still finds it — one row
+      // repaired in place, not a second appended beside it.
+      mockReadConfig.mockResolvedValue({
+        models: {
+          providers: {
+            openai: {
+              apiKey: "claw_old",
+              models: [{
+                id: CLAWBOX_AI_IMAGE_MODEL_ID,
+                name: CLAWBOX_AI_IMAGE_MODEL_LABEL,
+                baseUrl: "https://www.openclawhardware.dev/api/ai",
+              }],
+            },
+          },
+        },
+      } as never);
+      await connectClawai();
+
+      expect(JSON.parse(callFor("models.providers.openai.models")?.[1] ?? "null")).toEqual([
+        { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL },
+      ]);
     });
   });
 

@@ -6,6 +6,7 @@ import OllamaModelPanel from "./OllamaModelPanel";
 import LlamaCppModelPanel from "./LlamaCppModelPanel";
 import AIProviderIcon from "./AIProviderIcon";
 import { notifyProvidersChanged } from "@/lib/ui-events";
+import { isClawboxAiImageModelId } from "@/lib/clawbox-ai-models";
 import HermesProviderConfig from "./HermesProviderConfig";
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
 import {
@@ -684,6 +685,17 @@ export default function AIModelsStep({
       chatgptReferenceProvider(activeCatalog.provider),
     );
     if (!currentModelId) {
+      setSelectedModelId(activeCatalog.defaultModelId);
+      setCustomModelId("");
+      setUseCustomModel(false);
+      return;
+    }
+    // A model the box is pinned to but cannot chat with is not a "custom id
+    // the owner typed" — seeding it here pre-fills the field with an id the
+    // configure route refuses, so Save 400s on a value this panel supplied and
+    // the owner's API key never reaches disk. Fall through to the curated
+    // default instead: on this box that IS the repair.
+    if (isClawboxAiImageModelId(currentModelId)) {
       setSelectedModelId(activeCatalog.defaultModelId);
       setCustomModelId("");
       setUseCustomModel(false);

@@ -527,6 +527,23 @@ describe("POST /setup-api/ai-models/configure and the ChatGPT subscription surfa
     ).toBe(`openai/${OFF_SURFACE}`);
   });
 
+  it("refuses the ClawBox AI image entry typed into the OpenAI panel", async () => {
+    // This route is the SECOND write path to `agents.defaults.model.primary`.
+    // `isValidModelId` is shape-only, so `gpt-image-1-mini` typed into the
+    // custom-model field was written as `openai/gpt-image-1-mini` — an id
+    // every paired box carries in models.providers.openai.models[], which the
+    // chat header refuses and which fails every turn.
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "sk-test",
+      model: "gpt-image-1-mini",
+    }));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("not a chat model");
+    expectNoSideEffects();
+  });
+
   it("does not forget the local model's claim on the primary slot when it refuses", async () => {
     // `local_ai_was_default` is what re-promotes the local model when it is
     // switched back on. Clearing it used to happen the moment the request was

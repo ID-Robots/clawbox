@@ -21,6 +21,7 @@ import {
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { isValidModelId, parseModelSlug } from "@/lib/provider-models";
 import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
+import { isClawboxAiImageModelId, isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   CHATGPT_DEFAULT_MODEL_ID,
@@ -521,6 +522,11 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
   ) => {
     const trimmedModel = typeof model === "string" ? model.trim() : "";
     if (!trimmedModel || isLocalModel(trimmedModel)) return;
+    // The ClawBox AI image entry, written as the primary by an older build,
+    // must not own the provider's row: the profile loop below then picks a
+    // model the box can chat with instead. Only the image id — a remembered
+    // chat model the curated list omits is still what the gateway runs.
+    if (isClawboxAiImageModelRef(trimmedModel)) return;
     const provider = normalizeProvider(providerHint ?? uiProviderForModel(trimmedModel));
     if (!provider) return;
     if (configuredPrimaryOptions.has(provider)) return;
@@ -565,10 +571,32 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     //  2. The first model in the openclaw provider definition.
     //  3. The hard-coded default for this provider.
     const providerDef = providerDefinitions[rawProvider];
-    const definedModels = (providerDef?.models ?? []).filter((m): m is { id: string; name?: string } => typeof m?.id === "string" && m.id.trim().length > 0);
+    // Minus the ClawBox AI image entry, and nothing else: `models.providers
+    // .openai.models[]` carries it on every paired box, and on a box with an
+    // OpenAI key it was the FIRST row — so the OpenAI dropdown row was
+    // represented by an image model that fails on every chat turn.
+    //
+    // Deliberately NOT the catalog route's `ALLOWED_MODEL_RE_BY_PROVIDER`.
+    // That list curates a noisy UPSTREAM catalog down for a picker; this list
+    // is what the owner configured, which this route's own sibling
+    // (`foreignOpenAiRoute` in ai-models/configure) treats as "the owner's own
+    // work". Running it through the curation regex empties `models[]` for a
+    // self-hosted openai-compatible endpoint and falls the row through to a
+    // hard-coded default that endpoint does not serve.
+    const definedModels = (providerDef?.models ?? []).filter(
+      (m): m is { id: string; name?: string } =>
+        typeof m?.id === "string" && m.id.trim().length > 0 && !isClawboxAiImageModelId(m.id),
+    );
 
     let model: string | null = null;
-    if (activeModel && uiProviderForModel(activeModel) === provider) {
+    // `!isClawboxAiImageModelRef` matters here, not only in the filter above:
+    // this branch wins whenever the primary belongs to this provider, so on
+    // the very boxes the image guard exists for it took the image ref, handed
+    // it to `rememberPrimaryOption`, and had it dropped there — leaving the
+    // provider with no row until the hard-coded fallback far below invented
+    // one. Treating an image-ref primary as "no active model for this
+    // provider" is what lets the owner's configured rows be consulted.
+    if (activeModel && !isClawboxAiImageModelRef(activeModel) && uiProviderForModel(activeModel) === provider) {
       model = activeModel;
     } else if (!isChatgptSignIn && definedModels.length > 0) {
       model = `${rawProvider}/${definedModels[0].id}`;
@@ -579,8 +607,15 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     if (model) rememberPrimaryOption(model, rawProvider);
   }
 
+  // `primaryProvider`, not `configStore.ai_model_provider`: the store drifts
+  // (the comment on `primaryProvider` above), and resolving the MODEL from the
+  // drifting store while forcing the HINT to the live provider builds a row
+  // labelled for one provider around another provider's default model.
+  // POST /setup-api/providers/default reads `option.model` straight off this
+  // row and writes it to `agents.defaults.model.primary`, so the mismatch is
+  // not display-only.
   if (primaryProvider && primaryProvider !== "ollama" && primaryProvider !== "llamacpp") {
-    const model = defaultModelForProvider(configStore.ai_model_provider as string);
+    const model = defaultModelForProvider(primaryProvider);
     if (model) rememberPrimaryOption(model, primaryProvider);
   }
 
@@ -835,6 +870,16 @@ export async function POST(request: Request) {
         if (!parsed || !isValidModelId(parsed.provider, parsed.modelId)) {
           return NextResponse.json({ error: "Invalid model identifier" }, { status: 400 });
         }
+        // The door the picker does not stand in front of: the ClawBox AI
+        // image entry is a valid-SHAPED `openai/*` id on every paired box, and
+        // written as the primary it fails every chat turn. Only that id — this
+        // door deliberately takes chat ids the curated list omits.
+        if (isClawboxAiImageModelRef(requestedModel)) {
+          return NextResponse.json(
+            { error: `${parsed.modelId} is the ClawBox AI image model, not a chat model.` },
+            { status: 400 },
+          );
+        }
         let effectiveModel = requestedModel;
         let effectiveProvider = parsed.provider;
         const effectiveModelId = parsed.modelId;
@@ -1012,6 +1057,19 @@ export async function POST(request: Request) {
       chatgptRouted,
     );
     if (targetUnsupportedCodex) return targetUnsupportedCodex;
+    // The image rule, at the SECOND guard site too — the same reason the codex
+    // and Claude rules are repeated here. Its first site sits inside the
+    // power-user `else` branch, so a matched option or `{"source":"primary"}`
+    // reaches the write below without passing it. Unreachable today only
+    // because `rememberPrimaryOption` and the `models[]` filter keep the ref
+    // out of `state.options`, which is exactly the "guard that holds because
+    // of a condition two functions away" this block was written to avoid.
+    if (isClawboxAiImageModelRef(targetModel)) {
+      return NextResponse.json(
+        { error: `${resolvedParsed?.modelId ?? targetModel} is the ClawBox AI image model, not a chat model.` },
+        { status: 400 },
+      );
+    }
     const targetOffSurface = await refuseOffSurfaceClaudeModel(
       resolvedParsed?.provider,
       resolvedParsed?.modelId ?? "",

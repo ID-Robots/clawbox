@@ -122,6 +122,95 @@ export const CLAWBOX_AI_IMAGE_MODEL = `${CLAWBOX_AI_IMAGE_PROVIDER}/${CLAWBOX_AI
  */
 export const CLAWBOX_AI_IMAGE_MODEL_LABEL = "ClawBox AI Images";
 
+/*
+ * The ClawBox AI image entry is written WITHOUT an `api` field, and OpenClaw
+ * 2026.8.1 still offers it as a chat model anyway. Both halves matter.
+ *
+ * Omitting `api` DOES thin the exposure — `appendConfiguredProviderRows`
+ * (dist/list.row-sources-Bw2O0JWp.js:377-381) skips a configured row that
+ * declares none — but that gate is not the wall it looks like:
+ *
+ *   - it is written `if (!replaceMode && !shouldListConfiguredProviderModel(…))`,
+ *     so `models.mode: "replace"` bypasses it entirely — and ClawBox itself
+ *     writes that mode whenever a local model is the primary
+ *     (ai-models/configure/route.ts, the Ollama and llama.cpp branches);
+ *   - `configuredKeys` is built by `buildConfiguredModelCatalog`
+ *     (dist/model-selection-shared-DSwf-R8O.js:922-958), which emits every
+ *     `models.providers.*.models[]` row regardless of `api`, and a key in that
+ *     set is exempt from the picker's hide rule
+ *     (dist/model-catalog-visibility-DdOTmrMO.js:41-43).
+ *
+ * Measured on 2026.8.1: on a paired box with a local primary,
+ * `openclaw models list` prints `openai/gpt-image-1-mini`, and
+ * `openclaw config set agents.defaults.model.primary openai/gpt-image-1-mini`
+ * is accepted.
+ *
+ * And there is no flag that would close it. The config schema for a
+ * `models.providers.<p>.models[]` row is `.strict()` with no
+ * `status`/`deprecated`/`disabled` field (dist/zod-schema.core-BZltxHeB.js:269-303;
+ * the CLI refuses the whole config with `Unrecognized key: "status"`), and the
+ * hide rule exempts configured rows regardless. So OpenClaw's OWN surfaces —
+ * its Control UI picker, Telegram `/model`, `openclaw models set` — remain able
+ * to offer this id, and nothing ClawBox can write to the harness's config
+ * changes that. That is a harness gap, recorded as a finding rather than
+ * papered over with a ClawBox-side workaround.
+ *
+ * What ClawBox owns, it closes: the chat dropdown's row builder skips this id,
+ * and all three write paths to `agents.defaults.model.primary` refuse it (the
+ * chat POST at both guard sites, the configure route, the Local-only restore).
+ * A stray `api` is still stripped by both writers — it matches beta, it costs
+ * nothing, and it keeps the row out of the one path that does honour the gate
+ * (`models.mode: "merge"`, the common case) — but it is a narrowing, not a
+ * guarantee, and must not be described as one.
+ *
+ * The two predicates below are what those refusals are built from.
+ */
+
+/**
+ * Every proxy URL ClawBox has ever written as the ClawBox AI endpoint, current
+ * first.
+ *
+ * The two retired hosts are LEGACY values on purpose: a box paired before the
+ * clawbox.com move still names one in its config, and recognising it is what
+ * lets the retarget repair that row in place instead of appending a second one.
+ * Do not "modernise" them — the boot migration carries the same warning above
+ * its own copy of this list, and a unit test pins the two together.
+ *
+ * A staging box adds its own host at runtime from `CLAWBOX_AI_PROXY_URL` and
+ * from the live `models.providers.deepseek.baseUrl` — the latter only when
+ * that entry carries a `claw_` portal token, because `install.sh`'s
+ * `CLAWBOX_AI_API_KEY` branch provisions a RAW DeepSeek key at
+ * `api.deepseek.com` and that host must never count as ours. This list is only
+ * the part that is the same on every box.
+ *
+ * The two runtime sets are therefore not identical: the route's carries the
+ * env host as well, the boot migration's does not. That is one-directional on
+ * purpose — the migration can only ever be the more conservative of the two,
+ * declining to claim a row the route would claim, never the reverse.
+ */
+export const CLAWBOX_AI_PROXY_URLS: readonly string[] = [
+  "https://clawbox.com/api/ai",
+  "https://openclawhardware.dev/api/ai",
+  "https://www.openclawhardware.dev/api/ai",
+];
+
+/**
+ * Is `id` the bare ClawBox AI image model id (`gpt-image-1-mini`)?
+ *
+ * The one id every ClawBox surface has to keep out of a CHAT picker, and the
+ * only one: this is a curation question about a single entry, not a licence to
+ * apply the catalog route's noisy-upstream allowlist to rows the owner
+ * configured themselves.
+ */
+export function isClawboxAiImageModelId(id: unknown): boolean {
+  return typeof id === "string" && id.trim().toLowerCase() === CLAWBOX_AI_IMAGE_MODEL_ID.toLowerCase();
+}
+
+/** Is `ref` the fully-qualified ClawBox AI image entry (`openai/gpt-image-1-mini`)? */
+export function isClawboxAiImageModelRef(ref: unknown): boolean {
+  return typeof ref === "string" && ref.trim().toLowerCase() === CLAWBOX_AI_IMAGE_MODEL.toLowerCase();
+}
+
 /* ---------------------------------------------------------------------------
  * ClawBox AI vision (image understanding)
  * ------------------------------------------------------------------------ */
