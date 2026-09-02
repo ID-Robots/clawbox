@@ -31,12 +31,11 @@ const caps = capabilitiesFor("hermes", {
 const CONTEXT: HermesTurnContext = {
   devicePairing: { provider: "clawai", model: "deepseek" },
   modelsReady: true,
-  sessionKey: "desktop",
 };
 
 function makeAdapter(
   respond: (body: Record<string, unknown>) => { ok: boolean; status: number; payload: unknown },
-  context: HermesTurnContext = { devicePairing: { provider: "clawai", model: "deepseek" }, modelsReady: true, sessionKey: "desktop" },
+  context: HermesTurnContext = { devicePairing: { provider: "clawai", model: "deepseek" }, modelsReady: true },
 ) {
   const calls: Array<{ body: Record<string, unknown>; signal?: AbortSignal | null }> = [];
   const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
@@ -155,7 +154,6 @@ describe("HermesAdapter", () => {
     const { adapter, calls } = makeAdapter(ok({ text: "ok" }), {
       devicePairing: { provider: "clawai", model: "deepseek" },
       modelsReady: true,
-      sessionKey: "desktop",
     });
     // Sending a provider with no model makes the box fall back to the CONFIGURED
     // provider's default — i.e. this provider run against another one's model id.
@@ -172,7 +170,6 @@ describe("HermesAdapter", () => {
     const { adapter } = makeAdapter(ok({ text: "ok" }), {
       devicePairing: { provider: "clawai", model: "deepseek" },
       modelsReady: false,
-      sessionKey: "desktop",
     });
     const err = await adapter
       .sendTurn({ text: "x", attachments: [], idempotencyKey: "a", provider: "anthropic" })
@@ -233,7 +230,7 @@ describe("HermesAdapter", () => {
     });
     const adapter = new HermesAdapter(
       caps,
-      () => ({ devicePairing: { provider: "clawai", model: "d" }, modelsReady: true, sessionKey: "desktop" }),
+      () => ({ devicePairing: { provider: "clawai", model: "d" }, modelsReady: true }),
       fetchImpl as unknown as typeof fetch,
     );
     const turn = adapter.sendTurn({ text: "x", attachments: [], idempotencyKey: "a" });
@@ -333,7 +330,7 @@ describe("HermesAdapter", () => {
     });
     const adapter = new HermesAdapter(caps, () => CONTEXT, fetchImpl as unknown as typeof fetch);
     await adapter.resetSession();
-    expect(seen).toEqual([{ url: "/setup-api/chat/history?sessionKey=desktop", method: "DELETE" }]);
+    expect(seen).toEqual([{ url: "/setup-api/chat/history", method: "DELETE" }]);
   });
 
   it("still forgets the session when the transcript cannot be cleared", async () => {
@@ -414,7 +411,7 @@ describe("HermesAdapter", () => {
     }) as unknown as Response);
     const adapter = new HermesAdapter(
       caps,
-      () => ({ devicePairing: { provider: "clawai", model: "deepseek" }, modelsReady: true, sessionKey: "desktop" }),
+      () => ({ devicePairing: { provider: "clawai", model: "deepseek" }, modelsReady: true }),
       fetchImpl as unknown as typeof fetch,
     );
     held.adapter = adapter;
@@ -423,63 +420,6 @@ describe("HermesAdapter", () => {
       adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "a" }),
     ).rejects.toMatchObject({ code: "aborted" });
   });
-  describe("a second conversation beside the first", () => {
-    // The (+) opens a tab, and a tab is a conversation of its own: its turns
-    // resume ITS Hermes session, its transcript is ITS file, and closing it
-    // forgets exactly that much. The surface tells the adapter which one it is
-    // showing through the context's `sessionKey`.
-    it("mints a bare-filename key beside main and owns only that shape", () => {
-      const { adapter } = makeAdapter(ok({ text: "x" }));
-      const key = adapter.newSessionKey("desktop");
-      expect(key).toMatch(/^desktop-[a-z0-9]{12}$/);
-      expect(adapter.ownsSessionKey(key)).toBe(true);
-      expect(adapter.ownsSessionKey("desktop")).toBe(true);
-      // A gateway key, restored on a dual box that switched harness.
-      expect(adapter.ownsSessionKey("agent:main:clawbox-0123456789ab")).toBe(false);
-    });
-
-    it("threads each conversation on its own session id", async () => {
-      const context = { devicePairing: { provider: "clawai", model: "deepseek" }, modelsReady: true, sessionKey: "desktop" };
-      const { adapter, calls } = makeAdapter(
-        (body) => ({ ok: true, status: 200, payload: { text: "ok", sessionId: body.sessionKey === "desktop" ? "s-main" : "s-tab" } }),
-        context,
-      );
-      await adapter.sendTurn({ text: "one", attachments: [], idempotencyKey: "a" });
-      context.sessionKey = "desktop-0123456789ab";
-      await adapter.sendTurn({ text: "two", attachments: [], idempotencyKey: "b" });
-      await adapter.sendTurn({ text: "three", attachments: [], idempotencyKey: "c" });
-      context.sessionKey = "desktop";
-      await adapter.sendTurn({ text: "four", attachments: [], idempotencyKey: "d" });
-      // The tab's first turn resumes nothing — a fresh session — and every
-      // turn names the transcript it is recorded under.
-      expect(calls.map((c) => [c.body.sessionKey, c.body.sessionId])).toEqual([
-        ["desktop", undefined],
-        ["desktop-0123456789ab", undefined],
-        ["desktop-0123456789ab", "s-tab"],
-        ["desktop", "s-main"],
-      ]);
-    });
-
-    it("closing a tab forgets its session and deletes its transcript, and nothing else", async () => {
-      const context = { devicePairing: { provider: "clawai", model: "deepseek" }, modelsReady: true, sessionKey: "desktop" };
-      const seen: Array<{ url: string; method?: string }> = [];
-      const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => {
-        seen.push({ url: String(url), method: init?.method });
-        return { ok: true, status: 200, json: async () => ({ text: "ok", sessionId: "s1" }) } as unknown as Response;
-      });
-      const adapter = new HermesAdapter(caps, () => context, fetchImpl as unknown as typeof fetch);
-      await adapter.sendTurn({ text: "one", attachments: [], idempotencyKey: "a" });
-      context.sessionKey = "desktop-0123456789ab";
-      await adapter.sendTurn({ text: "two", attachments: [], idempotencyKey: "b" });
-      seen.length = 0;
-      await adapter.deleteSession("desktop-0123456789ab", { running: false });
-      expect(seen).toEqual([{ url: "/setup-api/chat/history?sessionKey=desktop-0123456789ab", method: "DELETE" }]);
-      // Main still remembers its thread.
-      context.sessionKey = "desktop";
-      expect(adapter.threadedSessionId).toBe("s1");
-    });
-  });
-
   describe("generateImage", () => {
     /** An adapter whose images route answers however the test says. */
     function drawing(
@@ -516,8 +456,7 @@ describe("HermesAdapter", () => {
       });
       expect(calls).toHaveLength(1);
       expect(calls[0].url).toBe("/setup-api/chat/images");
-      // Recorded under the conversation that asked for it, like a turn.
-      expect(calls[0].body).toEqual({ prompt: "a red maple leaf", sessionKey: "desktop" });
+      expect(calls[0].body).toEqual({ prompt: "a red maple leaf" });
     });
 
     it("refuses outright on a box whose trigger is not the composer", async () => {

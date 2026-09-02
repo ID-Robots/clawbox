@@ -5,11 +5,13 @@ import {
   readConfig,
   restartGateway,
   runOpenclawConfigSet,
+  runOpenclawConfigSetBatch,
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
   setProviderPlugins,
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
+import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import {
   CLAWBOX_AI_MODEL_BY_TIER,
@@ -741,13 +743,24 @@ export async function POST(request: Request) {
       await sqliteSet(PRIMARY_MODEL_KEY, state.activeModel);
     }
 
+    const parsed = parseFullyQualifiedModel(targetModel);
+
     // 1. Update the agent-level default so any *future* session starts
-    //    with the user's chosen model. runOpenclawConfigSet retries on
-    //    transient ConfigMutationConflictError and uses a 30 s per-attempt
-    //    timeout by default (CLI startup alone is ~10 s on Jetson Orin),
-    //    so users switching chat models don't see a bogus failure when the
-    //    gateway reloads concurrently with the write.
-    await runOpenclawConfigSet(["agents.defaults.model.primary", targetModel]);
+    //    with the user's chosen model — in ONE batch with the plugin enable
+    //    the new primary needs, ahead of it. OpenClaw 2 validates the
+    //    reference against the enabled plugins' catalogs, after applying the
+    //    whole batch to one snapshot: the enable in the same spawn is what
+    //    lets a switch back to Claude validate on a box whose plugin an
+    //    earlier gate switched off, and a refused batch leaves the flag as it
+    //    was (src/lib/provider-plugin-ops.ts). The batch retries on transient
+    //    ConfigMutationConflictError with a 30 s per-attempt timeout (CLI
+    //    startup alone is ~10 s on Jetson Orin), so users switching chat
+    //    models don't see a bogus failure when the gateway reloads
+    //    concurrently with the write.
+    await runOpenclawConfigSetBatch([
+      ...enableProviderPluginOps([targetModel]),
+      ["agents.defaults.model.primary", targetModel],
+    ]);
 
     // 1b. Codex turns only work through the Codex app-server harness, which is
     //     selected by agentRuntime. Without it core uses its generic HTTP
@@ -770,7 +783,6 @@ export async function POST(request: Request) {
     //    user's current pick, so prior tags shouldn't make repeat
     //    clicks no-op. The soft-sweep "parallel chats deliberately
     //    running different models" use case has no UI today.
-    const parsed = parseFullyQualifiedModel(targetModel);
     if (parsed) {
       try {
         await applyModelOverrideToAllAgentSessions(
@@ -787,8 +799,10 @@ export async function POST(request: Request) {
         // the open chat. Log and continue.
         console.error("[chat/model] Failed to sweep session overrides:", err);
       }
-      // 3. Gate the anthropic plugin to only when the new primary actually
-      //    needs it. Other plugins stay where they are.
+      // 3. The OFF half of the gate: switch the anthropic plugin off only
+      //    when nothing on the box could use it — the primary is elsewhere
+      //    AND no usable Anthropic credential remains (see setProviderPlugins).
+      //    Other plugins stay where they are.
       await setProviderPlugins(parsed.provider);
     }
 
