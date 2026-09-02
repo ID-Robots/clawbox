@@ -36,7 +36,6 @@ import {
   type ModelOptionsPayload,
 } from "@/lib/hermes-model-options";
 import { appendTranscript } from "@/lib/harness/transcript-store";
-import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "@/lib/harness/transcript-key";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
@@ -333,8 +332,6 @@ function wantsStream(request: Request): boolean {
  */
 async function settleTurn(
   threaded: string,
-  /** The transcript the answer is recorded under — ours, not the agent's. */
-  sessionKey: string,
   consoleText: string,
   streamedReasoning: string,
   served: { model?: string; provider?: string } = {},
@@ -411,7 +408,7 @@ async function settleTurn(
     // answer available, and it is the one the transport hands back.
     ...(served.model ? { model: served.model } : {}),
     ...(served.provider ? { provider: served.provider } : {}),
-  }, sessionKey);
+  });
   return {
     text: answer,
     harness: "hermes",
@@ -469,7 +466,7 @@ async function settleTurn(
  * point is reported inside the stream rather than as an HTTP error. Everything
  * that could have produced a clean 4xx/5xx has already run before this is called.
  */
-function streamTurn(turn: DashboardTurn, fallbackSessionId: string, sessionKey: string): Response {
+function streamTurn(turn: DashboardTurn, fallbackSessionId: string): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -541,12 +538,12 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string, sessionKey: 
             text: `Error: ${detail}`,
             timestamp: Date.now(),
             variant: "error",
-          }, sessionKey);
+          });
           send("error", { error: detail });
         } else {
           send(
             "done",
-            await settleTurn(threaded, sessionKey, final.text, final.reasoning, {
+            await settleTurn(threaded, final.text, final.reasoning, {
               // What the transport says answered, preferring the turn's own
               // report over the session's setting when it offers one.
               ...(final.model || turn.model ? { model: final.model || turn.model } : {}),
@@ -589,7 +586,7 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string, sessionKey: 
           if (recovered?.text) {
             send(
               "done",
-              await settleTurn(threaded, sessionKey, recovered.text, "", {
+              await settleTurn(threaded, recovered.text, "", {
                 ...(turn.model ? { model: turn.model } : {}),
                 ...(turn.provider ? { provider: turn.provider } : {}),
               }),
@@ -606,7 +603,7 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string, sessionKey: 
             text: `Error: ${detail}`,
             timestamp: Date.now(),
             variant: "error",
-          }, sessionKey);
+          });
           send("error", { error: detail });
         }
       } finally {
@@ -657,12 +654,6 @@ export async function POST(request: Request) {
     provider?: string;
     reasoning?: string;
     sessionId?: string;
-    /**
-     * OURS, not the agent's. `sessionId` above is the Hermes session the turn
-     * resumes; this names the transcript the turn is recorded under — the
-     * desktop thread, or one of the tabs the chat opened beside it.
-     */
-    sessionKey?: string;
   };
   try {
     body = await request.json();
@@ -681,14 +672,6 @@ export async function POST(request: Request) {
   const rawSessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
   if (rawSessionId && !SESSION_ID_RE.test(rawSessionId)) {
     return NextResponse.json({ error: "Invalid session id" }, { status: 400 });
-  }
-  // Becomes a filename in the transcript store, so it is held to the store's
-  // own rule before anything is written under it.
-  const sessionKey = typeof body.sessionKey === "string" && body.sessionKey
-    ? body.sessionKey
-    : DESKTOP_TRANSCRIPT_KEY;
-  if (!transcriptKeyIsSafe(sessionKey)) {
-    return NextResponse.json({ error: "Invalid session key" }, { status: 400 });
   }
 
   // Every value below reaches argv. No shell is involved (spawn takes an array)
@@ -913,7 +896,7 @@ export async function POST(request: Request) {
       : message,
     timestamp: Date.now(),
     ...(imagePaths.length ? { media: imagePaths.map((p) => mediaUrl(p)) } : {}),
-  }, sessionKey);
+  });
 
   const args = ["chat", "-q", promptWithImages, "-Q"];
   if (firstImage) args.push("--image", firstImage);
@@ -957,7 +940,7 @@ export async function POST(request: Request) {
       ...(rawSessionId ? { sessionId: rawSessionId } : {}),
       signal: request.signal,
     });
-    if (turn) return streamTurn(turn, rawSessionId, sessionKey);
+    if (turn) return streamTurn(turn, rawSessionId);
   }
 
   try {
@@ -969,7 +952,7 @@ export async function POST(request: Request) {
     // passed straight to the command, with no session to drift from — so the
     // request IS the record here. When no model was named, the run used
     // config.yaml's default and this route does not presume to name it.
-    const answered = await settleTurn(threaded, sessionKey, text, "", {
+    const answered = await settleTurn(threaded, text, "", {
       ...(rawModel ? { model: rawModel } : {}),
       ...(wantsProvider ? { provider: rawProvider } : {}),
     });
@@ -991,7 +974,7 @@ export async function POST(request: Request) {
       text: `Error: ${detail}`,
       timestamp: Date.now(),
       variant: "error",
-    }, sessionKey);
+    });
     return NextResponse.json({ error: detail }, { status: 502 });
   }
 }

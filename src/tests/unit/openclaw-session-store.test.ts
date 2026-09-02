@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { createRequire } from "module";
+import { Worker } from "node:worker_threads";
 import os from "os";
 import path from "path";
-import { readSessionEntries, sessionStorePath } from "@/lib/openclaw-session-store";
+import { sweepSessionEntries } from "@/lib/openclaw-session-store";
+import { applyModelOverrideToAllAgentSessions } from "@/lib/openclaw-config";
 
 // vite cannot bundle the builtin, so the fixtures reach node:sqlite lazily
 // too. createRequire is fine HERE — vitest never bundles a test file — and
@@ -14,36 +16,32 @@ const { DatabaseSync } = requireNodeSqlite("node:sqlite");
 
 const tmpRoots: string[] = [];
 
-/** A store shaped like the one OpenClaw 2026.8.1 creates, trigger included. */
-function makeAgentStore(entries: Record<string, string>) {
+function makeAgentStore(userVersion: number, entries: Record<string, object>) {
   const root = mkdtempSync(path.join(os.tmpdir(), "clawbox-session-store-"));
   tmpRoots.push(root);
   const agentDir = path.join(root, "main", "agent");
   mkdirSync(agentDir, { recursive: true });
   const db = new DatabaseSync(path.join(agentDir, "openclaw-agent.sqlite"));
-  db.exec("PRAGMA user_version = 19");
-  db.exec("CREATE TABLE session_nodes (session_key TEXT PRIMARY KEY, entry_json TEXT NOT NULL, entry_valid INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL DEFAULT 0)");
-  db.exec(`CREATE TRIGGER session_nodes_entry_valid_after_entry_update
-    AFTER UPDATE OF entry_json ON session_nodes
-    BEGIN UPDATE session_nodes SET entry_valid = 0 WHERE session_key = NEW.session_key; END`);
-  const insert = db.prepare("INSERT INTO session_nodes (session_key, entry_json) VALUES (?, ?)");
-  for (const [key, entry] of Object.entries(entries)) insert.run(key, entry);
+  db.exec(`PRAGMA user_version = ${userVersion}`);
+  db.exec("CREATE TABLE session_nodes (session_key TEXT PRIMARY KEY, entry_json TEXT, updated_at INTEGER)");
+  const insert = db.prepare("INSERT INTO session_nodes (session_key, entry_json, updated_at) VALUES (?, ?, 0)");
+  for (const [key, entry] of Object.entries(entries)) insert.run(key, JSON.stringify(entry));
   db.close();
   return root;
 }
 
-function readValidity(root: string): number[] {
+function readEntries(root: string): Record<string, Record<string, unknown>> {
   const db = new DatabaseSync(path.join(root, "main", "agent", "openclaw-agent.sqlite"), { readOnly: true });
-  const rows = db.prepare("SELECT entry_valid AS valid FROM session_nodes").all() as Array<{ valid: number }>;
+  const rows = db.prepare("SELECT session_key AS key, entry_json AS entry FROM session_nodes").all() as Array<{ key: string; entry: string }>;
   db.close();
-  return rows.map((r) => r.valid);
+  return Object.fromEntries(rows.map((r) => [r.key, JSON.parse(r.entry)]));
 }
 
 afterEach(() => {
   for (const root of tmpRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe("openclaw-session-store", () => {
+describe("sweepSessionEntries schema guard", () => {
   it("uses the device home fallback when HOME is present but empty", async () => {
     const originalClawboxHome = process.env.CLAWBOX_OPENCLAW_HOME;
     const originalOpenclawHome = process.env.OPENCLAW_HOME;
@@ -67,62 +65,82 @@ describe("openclaw-session-store", () => {
     }
   });
 
-  describe("readSessionEntries", () => {
-    it("returns every object entry, by key, and skips rows that describe no session", () => {
-      const root = makeAgentStore({
-        "agent:main:main": JSON.stringify({ sessionId: "s1", modelOverride: "old/model" }),
-        "agent:main:clawbox-1": JSON.stringify({ sessionId: "s2" }),
-        "agent:main:broken": "{ not json",
-        "agent:main:list": "[1, 2]",
-      });
-      expect(readSessionEntries("main", root)).toEqual([
-        { key: "agent:main:clawbox-1", entry: { sessionId: "s2" } },
-        { key: "agent:main:main", entry: { sessionId: "s1", modelOverride: "old/model" } },
-      ]);
-    });
-
-    it("is null for an agent without a store, and for a store that cannot be read", () => {
-      const root = mkdtempSync(path.join(os.tmpdir(), "clawbox-session-store-"));
-      tmpRoots.push(root);
-      expect(readSessionEntries("main", root)).toBeNull();
-
-      const agentDir = path.join(root, "main", "agent");
-      mkdirSync(agentDir, { recursive: true });
-      writeFileSync(path.join(agentDir, "openclaw-agent.sqlite"), "not a database");
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      expect(sessionStorePath("main", root)).not.toBeNull();
-      expect(readSessionEntries("main", root)).toBeNull();
-      expect(warn).toHaveBeenCalled();
-    });
-
-    it("leaves the core's row validity untouched", () => {
-      const root = makeAgentStore({ "agent:main:main": JSON.stringify({ sessionId: "s1" }) });
-      readSessionEntries("main", root);
-      expect(readValidity(root)).toEqual([1]);
-    });
+  it("sweeps a store at the schema it knows (2026.8.1 stamps v19)", () => {
+    const root = makeAgentStore(19, { "agent:main:main": { modelOverride: "old/model" } });
+    const result = sweepSessionEntries("main", (_key, entry) => {
+      entry.modelOverride = "new/model";
+      return true;
+    }, root);
+    expect(result).toEqual({ updated: 1, ok: true });
+    expect(readEntries(root)["agent:main:main"].modelOverride).toBe("new/model");
   });
 
-  it("carries no write path to the store at all", () => {
-    // The core invalidates any row whose entry_json is rewritten by anything
-    // but itself (finding M-03: the old sweep here bricked chat on every model
-    // switch). Everything that changes an entry goes through the gateway's
-    // API; this module only ever opens the store read-only. A tripwire, so the
-    // next "small" write cannot come back quietly.
-    const source = readFileSync(path.resolve(__dirname, "../../lib/openclaw-session-store.ts"), "utf8");
-    const code = source
-      .split("\n")
-      .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
-      .join("\n");
-    // DML, DDL and the maintenance verbs alike. PRAGMA is not listed: the one
-    // here (`busy_timeout`) is connection-scoped, and a read-only connection
-    // cannot write `user_version` or anything else anyway.
-    expect(code).not.toMatch(/\b(?:UPDATE|INSERT|DELETE|REPLACE|CREATE|DROP|ALTER|VACUUM|REINDEX|ANALYZE)\b/i);
-    // `openSqlite(path, readOnly)` is exported for the gateway-wide state
-    // store (a different database); every use INSIDE this module is read-only,
-    // and it is the only constructor path, so that covers every open.
-    expect(code.match(/\bnew DatabaseSync\(/g) ?? []).toHaveLength(1);
-    const uses = (code.match(/openSqlite\([^)]*\)/g) ?? []).filter((call) => !call.startsWith("openSqlite(dbPath: string"));
-    expect(uses.length).toBeGreaterThan(0);
-    for (const use of uses) expect(use).toMatch(/,\s*true\)$/);
+  it("refuses to write a NEWER schema than it knows, the way OpenClaw's own store code does", () => {
+    // OpenClaw hard-refuses user_version above its build's cap
+    // (createNewerSqliteSchemaVersionError); a blind UPDATE from ClawBox
+    // against a newer core could corrupt what it no longer understands —
+    // the auth-profiles lesson, one store over.
+    const root = makeAgentStore(20, { "agent:main:main": { modelOverride: "old/model" } });
+    const result = sweepSessionEntries("main", (_key, entry) => {
+      entry.modelOverride = "new/model";
+      return true;
+    }, root);
+    expect(result).toEqual({ updated: 0, ok: false, unsupportedSchema: 20 });
+    expect(readEntries(root)["agent:main:main"].modelOverride).toBe("old/model");
+  });
+
+  it("takes the write reservation before checking schema so a concurrent migration cannot race it", async () => {
+    const root = makeAgentStore(19, { "agent:main:main": { modelOverride: "old/model" } });
+    const dbPath = path.join(root, "main", "agent", "openclaw-agent.sqlite");
+    const worker = new Worker(`
+      const { parentPort, workerData } = require("node:worker_threads");
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(workerData.dbPath);
+      db.exec("BEGIN IMMEDIATE; PRAGMA user_version = 20");
+      parentPort.postMessage("migration-started");
+      setTimeout(() => {
+        db.exec("COMMIT");
+        db.close();
+        parentPort.postMessage("migration-complete");
+        parentPort.close();
+      }, 100);
+    `, { eval: true, workerData: { dbPath } });
+    const workerError = new Promise<never>((_, reject) => worker.once("error", reject));
+    const nextMessage = () => new Promise<string>((resolve) => worker.once("message", resolve));
+
+    expect(await Promise.race([nextMessage(), workerError])).toBe("migration-started");
+    const workerExit = new Promise<number>((resolve) => worker.once("exit", resolve));
+
+    // The old ordering read v19 here, then waited for BEGIN IMMEDIATE. Once the
+    // worker committed v20 it blindly updated that newer store. The fixed
+    // ordering waits for the reservation first and therefore observes v20.
+    const result = sweepSessionEntries("main", (_key, entry) => {
+      entry.modelOverride = "new/model";
+      return true;
+    }, root);
+
+    expect(result).toEqual({ updated: 0, ok: false, unsupportedSchema: 20 });
+    expect(readEntries(root)["agent:main:main"].modelOverride).toBe("old/model");
+    expect(await Promise.race([workerExit, workerError])).toBe(0);
+  });
+
+  it("does not mutate a leftover sessions.json after a newer SQLite schema refuses the sweep", async () => {
+    const root = makeAgentStore(20, { "agent:main:main": { modelOverride: "sqlite/old" } });
+    const sessionsDir = path.join(root, "main", "sessions");
+    const legacyPath = path.join(sessionsDir, "sessions.json");
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(legacyPath, JSON.stringify({
+      "agent:main:main": { modelOverride: "legacy/old" },
+    }));
+
+    const result = await applyModelOverrideToAllAgentSessions({
+      provider: "deepseek",
+      modelId: "deepseek-v4-pro",
+    }, { agentsDir: root });
+
+    expect(result).toEqual({ filesUpdated: 0, sessionsUpdated: 0 });
+    expect(readEntries(root)["agent:main:main"].modelOverride).toBe("sqlite/old");
+    expect(JSON.parse(readFileSync(legacyPath, "utf8"))["agent:main:main"].modelOverride)
+      .toBe("legacy/old");
   });
 });

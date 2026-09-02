@@ -89,7 +89,7 @@ function makeAdapter(response: Response, caps = STREAMING_CAPS) {
   });
   const adapter = new HermesAdapter(
     caps,
-    () => ({ devicePairing: { provider: "clawai", model: "deepseek-v4-flash" }, modelsReady: true, sessionKey: "desktop" }),
+    () => ({ devicePairing: { provider: "clawai", model: "deepseek-v4-flash" }, modelsReady: true }),
     fetchImpl as unknown as typeof fetch,
   );
   return { adapter, requests };

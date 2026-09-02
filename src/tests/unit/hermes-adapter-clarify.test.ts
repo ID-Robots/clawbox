@@ -59,7 +59,7 @@ function makeAdapter(pieces: string[]) {
   const fetchImpl = vi.fn(async () => sseResponse(pieces));
   return new HermesAdapter(
     CAPS,
-    () => ({ devicePairing: { provider: "clawai", model: "deepseek-v4-flash" }, modelsReady: true, sessionKey: "desktop" }),
+    () => ({ devicePairing: { provider: "clawai", model: "deepseek-v4-flash" }, modelsReady: true }),
     fetchImpl as unknown as typeof fetch,
   );
 }

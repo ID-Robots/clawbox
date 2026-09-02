@@ -134,15 +134,13 @@ describe("pasting an image the turn could not carry", () => {
   });
 });
 
-describe("Restarting the conversation where there is no gateway to reset", () => {
-  // The main tab's ✕. The strip's + used to do this on Hermes; it opens a tab
-  // now, on both editions (chat-hermes-tabs.test.tsx).
+describe("New chat where there is no gateway to reset", () => {
   it("clears the conversation without reaching for one", async () => {
     const textarea = await mountHermesChat(box);
     await sendTurn(textarea, "remember the number 41");
     await screen.findByText("hello back");
 
-    fireEvent.click(screen.getByTestId("chat-tab-restart"));
+    fireEvent.click(screen.getByTestId("chat-new-tab"));
 
     await waitFor(() => expect(screen.queryByText("hello back")).toBeNull());
     expect(screen.queryByText("remember the number 41")).toBeNull();
@@ -165,7 +163,7 @@ describe("Restarting the conversation where there is no gateway to reset", () =>
     await sendTurn(textarea, "what was the number?");
     expect(box.chatPosts[1].sessionId).toBe(HERMES_SESSION);
 
-    fireEvent.click(screen.getByTestId("chat-tab-restart"));
+    fireEvent.click(screen.getByTestId("chat-new-tab"));
     await waitFor(() => expect(screen.queryByText("hello back")).toBeNull());
 
     await sendTurn(textarea, "what was the number?");

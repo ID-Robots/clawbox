@@ -1,23 +1,18 @@
 export const dynamic = "force-dynamic";
 
 import fs from "fs/promises";
-import { listAgentIds, readSessionEntries, sessionStorePath } from "@/lib/openclaw-session-store";
-import {
-  isPatchableSession,
-  patchSessionModels,
-  sessionModelRef,
-  type SessionPatchTarget,
-} from "@/lib/openclaw-session-model";
+import { listAgentIds, sessionStorePath, sweepSessionEntries } from "@/lib/openclaw-session-store";
 import path from "path";
 import { NextResponse } from "next/server";
 import { get, set, setMany } from "@/lib/config-store";
 import {
-  callGatewayRpc,
   gatewayIsAbsent,
   readConfig,
   restartGateway,
-  runOpenclawConfigSet,
+  runOpenclawConfigSetBatch,
+  type OpenclawConfigSetArgs,
 } from "@/lib/openclaw-config";
+import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 
 const SAVED_PRIMARY_KEY = "local_only_saved_primary";
 const SAVED_FALLBACKS_KEY = "local_only_saved_fallbacks";
@@ -52,22 +47,6 @@ type SessionOverrideSnapshot = Partial<Record<SessionOverrideField, unknown>>;
 type SessionsFileBackup = Record<string, SessionOverrideSnapshot>;
 type FilesBackup = Record<string, SessionsFileBackup>;
 
-/**
- * The override fields a session carries right now, for the backup. Uses an
- * own-property check so "field explicitly set to null" stays distinct from
- * "field absent": on restore, absent fields are deleted rather than written
- * as null.
- */
-function snapshotOverrides(session: Record<string, unknown>): SessionOverrideSnapshot {
-  const snapshot: SessionOverrideSnapshot = {};
-  for (const field of SESSION_OVERRIDE_FIELDS) {
-    if (Object.prototype.hasOwnProperty.call(session, field)) {
-      snapshot[field] = session[field];
-    }
-  }
-  return snapshot;
-}
-
 // Route OpenClaw config mutations through the shared retry-aware helper.
 // The gateway reload + gateway-pre-start.sh write the same config file
 // concurrently, so a bare `openclaw config set` here can fail with
@@ -75,11 +54,15 @@ function snapshotOverrides(session: Record<string, unknown>): SessionOverrideSna
 // flipped but fallbacks still populated, and local_only_mode unset.
 // That half-applied state is visible in the UI as a failed toggle while
 // the user's chat actually continues routing to the cloud fallback.
-async function setConfig(key: string, valueJson: string) {
-  // Leave timeoutMs on the helper's default — the OpenClaw CLI takes
-  // 10-12 s per invocation on Jetson, so tighter bounds here produced
-  // spurious "timed out" errors that made Local-only mode fail to toggle.
-  await runOpenclawConfigSet([key, valueJson, "--json"]);
+/**
+ * One `config set --batch-json` for every model write of a toggle: the CLI
+ * takes 10-12 s per invocation on a Jetson (so the helper's default timeout
+ * stays), and a batch is applied to one snapshot and validated as a whole, so
+ * the primary and the fallbacks land together or not at all — the half-applied
+ * state the header above describes cannot come from here.
+ */
+async function setConfigBatch(ops: OpenclawConfigSetArgs[]) {
+  await runOpenclawConfigSetBatch(ops);
 }
 
 /** Parse "llamacpp/gemma4-e2b-it-q4_0" into {provider, modelId}. */
@@ -143,76 +126,49 @@ async function readSessionsJson(
 }
 
 /**
- * Repoint every existing session to the Local-only target and return a
- * backup of the prior override values (per store or file, per session key)
- * so the toggle can be reversed later.
+ * For every entry in every `sessions.json` on disk, replace the model
+ * and provider override fields with the Local-only target, and return
+ * a backup of the prior values (per file, per session key) so the
+ * toggle can be reversed later.
  *
- * OpenClaw 2 agents keep their sessions in a SQLite store the gateway alone
- * may write (see openclaw-session-store.ts), so they are switched through
- * `sessions.patchMany`; the backup key is the synthetic `sqlite:<agentId>`
- * and restore routes it back through the gateway. Legacy agents get the
- * `sessions.json` rewrite.
- *
- * Sessions that were already pointing at a local provider are still
- * recorded in the backup with their exact prior values, so flipping back
- * and forth preserves them.
- *
- * `sessionsSkipped` counts the sessions the gateway would not switch (each
- * one logged with its reason) and `agentsUnread` the agents whose store could
- * not even be listed (locked, unreadable). Either way those sessions still
- * route to their previous provider, which for Local-only is a privacy claim,
- * not a routing detail — so the caller says so.
+ * Sessions that were already pointing at a local provider are left
+ * untouched but still recorded in the backup with their exact prior
+ * values, so flipping back and forth preserves them.
  */
 async function patchAllSessionOverrides(
   localProvider: string,
   localModelId: string,
-): Promise<{ backup: FilesBackup; sessionsSkipped: number; agentsUnread: number }> {
+): Promise<FilesBackup> {
   const filesBackup: FilesBackup = {};
-  let sessionsSkipped = 0;
-  let agentsUnread = 0;
-  const localModel = `${localProvider}/${localModelId}`;
-  // An agent with a store is served from it whatever else is on disk: its
-  // leftover sessions.json is an archive the gateway no longer reads. Patching
-  // that too would record the same agent twice, and a restore routed through
-  // the store for the archive's entry would push pre-migration values over
-  // live sessions.
-  const migratedAgents = new Set<string>();
+  // OpenClaw 2 agents keep their sessions in SQLite. The sweep and its
+  // backup work exactly as for the legacy files; the backup key is the
+  // synthetic `sqlite:<agentId>` and restore routes it back to the store.
   for (const agentId of listAgentIds(AGENTS_DIR)) {
     if (!sessionStorePath(agentId, AGENTS_DIR)) continue;
-    migratedAgents.add(agentId);
-    const rows = readSessionEntries(agentId, AGENTS_DIR);
-    if (!rows) {
-      agentsUnread += 1;
-      console.error(`[local-only] could not list the sessions of agent ${agentId}; they keep their previous model`);
-      continue;
-    }
-    const snapshots: SessionsFileBackup = {};
-    const targets: SessionPatchTarget[] = [];
-    for (const { key, entry } of rows) {
-      if (!isPatchableSession(entry)) continue;
-      snapshots[key] = snapshotOverrides(entry);
-      targets.push({ key, agentId });
-    }
-    if (targets.length === 0) continue;
     const fileBackup: SessionsFileBackup = {};
-    for (const outcome of await patchSessionModels(targets, localModel, { call: callGatewayRpc })) {
-      if (!outcome.ok) {
-        sessionsSkipped += 1;
-        console.error(
-          `[local-only] session ${outcome.key} (agent ${agentId}) keeps its previous model:`,
-          outcome.error,
-        );
-        continue;
+    const swept = sweepSessionEntries(agentId, (sessionKey, session) => {
+      const snapshot: SessionOverrideSnapshot = {};
+      for (const field of SESSION_OVERRIDE_FIELDS) {
+        if (Object.prototype.hasOwnProperty.call(session, field)) {
+          snapshot[field] = session[field];
+        }
       }
-      // Only a session the gateway actually switched is recorded: restoring
-      // a snapshot over one this pass never changed would write stale values.
-      fileBackup[outcome.key] = snapshots[outcome.key];
-    }
-    if (Object.keys(fileBackup).length > 0) filesBackup[`sqlite:${agentId}`] = fileBackup;
+      fileBackup[sessionKey] = snapshot;
+      session.providerOverride = localProvider;
+      session.modelOverride = localModelId;
+      session.modelOverrideSource = "manual";
+      session.authProfileOverride = `${localProvider}:default`;
+      session.authProfileOverrideSource = "manual";
+      session.modelProvider = localProvider;
+      session.model = localModelId;
+      return true;
+    }, AGENTS_DIR);
+    // A failed sweep wrote nothing (single transaction) - recording its
+    // backup would let a later restore write stale values over sessions
+    // this pass never touched.
+    if (swept?.ok) filesBackup[`sqlite:${agentId}`] = fileBackup;
   }
-  const files = (await listSessionsFiles()).filter(
-    (file) => !migratedAgents.has(path.basename(path.dirname(path.dirname(file)))),
-  );
+  const files = await listSessionsFiles();
   for (const file of files) {
     const parsed = await readSessionsJson(file, "patch");
     if (!parsed) continue;
@@ -220,7 +176,18 @@ async function patchAllSessionOverrides(
     const fileBackup: SessionsFileBackup = {};
     for (const [sessionKey, session] of Object.entries(parsed)) {
       if (!session || typeof session !== "object") continue;
-      fileBackup[sessionKey] = snapshotOverrides(session);
+
+      const snapshot: SessionOverrideSnapshot = {};
+      for (const field of SESSION_OVERRIDE_FIELDS) {
+        // Use Object.prototype.hasOwnProperty-style check so we can tell
+        // "field explicitly set to null" apart from "field absent". On
+        // restore, absent fields are deleted rather than written as null.
+        if (Object.prototype.hasOwnProperty.call(session, field)) {
+          snapshot[field] = session[field];
+        }
+      }
+      fileBackup[sessionKey] = snapshot;
+
       session.providerOverride = localProvider;
       session.modelOverride = localModelId;
       session.modelOverrideSource = "manual";
@@ -237,7 +204,7 @@ async function patchAllSessionOverrides(
       console.error(`[local-only] Failed to write patched sessions file ${file}:`, err);
     }
   }
-  return { backup: filesBackup, sessionsSkipped, agentsUnread };
+  return filesBackup;
 }
 
 /**
@@ -246,60 +213,31 @@ async function patchAllSessionOverrides(
  * prior value — or delete it entirely if it was absent before.
  *
  * Sessions that have appeared since the backup was taken are left alone
- * (no backup entry → nothing to restore → user's current state wins), and
- * so are sessions that have since been deleted (nothing left to restore —
- * and the core keeps a placeholder for a deleted key, which a patch would
- * turn back into a session).
- *
- * `complete` is false only for a failure worth retrying: a gateway that
- * refused for now, or a legacy file that could not be written. A refusal
- * that will not change is counted in `sessionsKept` — those sessions stay
- * on the local model, and the toggle still finishes, because a switch the
- * owner can never move off is worse than a chat they can reset.
+ * (no backup entry → nothing to restore → user's current state wins).
  */
-async function restoreSessionOverrides(
-  backup: FilesBackup,
-): Promise<{ complete: boolean; sessionsKept: number }> {
-  let complete = true;
-  let sessionsKept = 0;
-  // Through the gateway, a session goes back to the `<provider>/<model>` its
-  // snapshot pinned, or — when it had no pin — to the agent default (`model:
-  // null`), which is the primary restored alongside. One patchMany per
-  // distinct target keeps this to a couple of CLI calls, not one per session.
-  const restoreIntoStore = async (agentId: string, sessions: SessionsFileBackup) => {
-    const rows = readSessionEntries(agentId, AGENTS_DIR);
-    if (!rows) {
-      // Cannot tell which of these sessions still exist; patching blind could
-      // recreate a deleted one. Keep the snapshot for a later attempt.
-      complete = false;
-      console.error(`[local-only] could not list the sessions of agent ${agentId}; its restore is deferred`);
-      return;
-    }
-    const live = new Map(rows.map((row) => [row.key, row.entry]));
-    const byModel = new Map<string | null, SessionPatchTarget[]>();
-    for (const [key, snapshot] of Object.entries(sessions)) {
-      const entry = live.get(key);
-      if (!entry || !isPatchableSession(entry)) continue;
-      const model = sessionModelRef(snapshot);
-      const group = byModel.get(model);
-      if (group) group.push({ key, agentId });
-      else byModel.set(model, [{ key, agentId }]);
-    }
-    for (const [model, targets] of byModel) {
-      for (const outcome of await patchSessionModels(targets, model, { call: callGatewayRpc })) {
-        if (outcome.ok) continue;
-        if (outcome.retryable) complete = false;
-        else sessionsKept += 1;
-        console.error(
-          `[local-only] session ${outcome.key} (agent ${agentId}) could not be switched back${outcome.retryable ? " yet" : ""}:`,
-          outcome.error,
-        );
+async function restoreSessionOverrides(backup: FilesBackup): Promise<boolean> {
+  let allOk = true;
+  const restoreIntoStore = (agentId: string, sessions: SessionsFileBackup) => {
+    const swept = sweepSessionEntries(agentId, (sessionKey, session) => {
+      const snapshot = sessions[sessionKey];
+      if (!snapshot) return false;
+      for (const field of SESSION_OVERRIDE_FIELDS) {
+        if (Object.prototype.hasOwnProperty.call(snapshot, field)) {
+          session[field] = snapshot[field];
+        } else {
+          delete session[field];
+        }
       }
+      return true;
+    }, AGENTS_DIR);
+    if (!swept?.ok) {
+      allOk = false;
+      console.error(`[local-only] SQLite restore did not complete for agent ${agentId}`);
     }
   };
   for (const [file, sessions] of Object.entries(backup)) {
     if (file.startsWith("sqlite:")) {
-      await restoreIntoStore(file.slice("sqlite:".length), sessions);
+      restoreIntoStore(file.slice("sqlite:".length), sessions);
       continue;
     }
     const parsed = await readSessionsJson(file, "restore");
@@ -311,7 +249,7 @@ async function restoreSessionOverrides(
       // silently leaving every session pinned to the local model.
       const agentId = path.basename(path.dirname(path.dirname(file)));
       if (agentId && sessionStorePath(agentId, AGENTS_DIR)) {
-        await restoreIntoStore(agentId, sessions);
+        restoreIntoStore(agentId, sessions);
       }
       continue;
     }
@@ -331,20 +269,18 @@ async function restoreSessionOverrides(
     try {
       await atomicWriteJson(file, parsed);
     } catch (err) {
-      // A legacy write that failed is exactly as incomplete as a session the
-      // gateway would not switch back yet: the caller must keep the snapshot
-      // and the mode.
-      complete = false;
+      // A legacy write that failed is exactly as incomplete as a refused
+      // SQLite sweep: the caller must keep the snapshot and the mode.
+      allOk = false;
       console.error(`[local-only] Failed to write restored sessions file ${file}:`, err);
     }
   }
-  return { complete, sessionsKept };
+  return allOk;
 }
 
 // Local-only mode is built entirely out of OpenClaw CLI calls: it flips
-// `agents.defaults.model.primary`, empties `fallbacks`, and repoints every
-// session (gateway `sessions.patchMany`, or the legacy sessions.json). Hermes
-// has none of those —
+// `agents.defaults.model.primary`, empties `fallbacks`, and sweeps
+// `~/.openclaw/agents/*/sessions/sessions.json`. Hermes has none of those —
 // `hermes-local-ai.ts` can install and remove a local provider but has no
 // fallback chain to make exclusive, so there is nothing here to port.
 //
@@ -389,7 +325,6 @@ export async function POST(request: Request) {
     if (currentMode === body.enabled) {
       return NextResponse.json({ enabled: body.enabled });
     }
-    const warnings: string[] = [];
 
     if (body.enabled) {
       const localModel = (await get("local_ai_model")) as string | undefined;
@@ -415,29 +350,21 @@ export async function POST(request: Request) {
       }
 
       // 1. Flip the defaults so *new* sessions pick up local.
-      await setConfig("agents.defaults.model.primary", JSON.stringify(localModel));
-      await setConfig("agents.defaults.model.fallbacks", "[]");
+      await setConfigBatch([
+        ["agents.defaults.model.primary", JSON.stringify(localModel), "--json"],
+        ["agents.defaults.model.fallbacks", "[]", "--json"],
+      ]);
 
       // 2. Sweep every existing session's per-session override. Without
       //    this step the toggle only affects sessions born after the
       //    flip — any chat pane that was already open silently keeps
       //    routing to its previously-bound cloud provider, and users
       //    have no UI signal that Local-only isn't actually local.
-      const { backup, sessionsSkipped, agentsUnread } = await patchAllSessionOverrides(
+      const sessionBackup = await patchAllSessionOverrides(
         parsedLocal.provider,
         parsedLocal.modelId,
       );
-      await set(SAVED_SESSION_OVERRIDES_KEY, backup);
-      if (sessionsSkipped > 0) {
-        warnings.push(
-          `${sessionsSkipped} open chat(s) could not be switched to the local model and still route to their previous provider — start a new chat to stay local.`,
-        );
-      }
-      if (agentsUnread > 0) {
-        warnings.push(
-          `The sessions of ${agentsUnread} agent(s) could not be listed and still route to their previous provider — start a new chat to stay local.`,
-        );
-      }
+      await set(SAVED_SESSION_OVERRIDES_KEY, sessionBackup);
 
       await set(MODE_KEY, true);
     } else {
@@ -445,72 +372,63 @@ export async function POST(request: Request) {
       const savedFallbacks = (await get(SAVED_FALLBACKS_KEY)) as string[] | undefined;
       const savedSessionOverrides = (await get(SAVED_SESSION_OVERRIDES_KEY)) as FilesBackup | undefined;
 
-      if (savedPrimary) {
-        await setConfig("agents.defaults.model.primary", JSON.stringify(savedPrimary));
+      // The saved primary — and any saved fallback — can be Anthropic's, and a
+      // provider save made while Local-only was on may have switched that
+      // plugin off. OpenClaw 2 validates EVERY model reference the batch
+      // touches (the primary and each fallback) against the enabled plugins'
+      // catalogs, after applying the whole batch to one snapshot: so the
+      // enables for every provider the restore names ride first, in the same
+      // batch, and a refused batch leaves the flag and both lists as they were
+      // (src/lib/provider-plugin-ops.ts).
+      const restoreFallbacks = Array.isArray(savedFallbacks) && savedFallbacks.length > 0 ? savedFallbacks : null;
+      const restoreOps: OpenclawConfigSetArgs[] = [
+        ...enableProviderPluginOps([savedPrimary, ...(restoreFallbacks ?? [])]),
+        ...(savedPrimary ? [["agents.defaults.model.primary", JSON.stringify(savedPrimary), "--json"] as OpenclawConfigSetArgs] : []),
+        ...(restoreFallbacks ? [["agents.defaults.model.fallbacks", JSON.stringify(restoreFallbacks), "--json"] as OpenclawConfigSetArgs] : []),
+      ];
+      if (restoreOps.length > 0) {
+        await setConfigBatch(restoreOps);
       }
-      if (Array.isArray(savedFallbacks) && savedFallbacks.length > 0) {
-        await setConfig("agents.defaults.model.fallbacks", JSON.stringify(savedFallbacks));
+      let restoreOk = true;
+      if (savedSessionOverrides) {
+        restoreOk = await restoreSessionOverrides(savedSessionOverrides);
       }
-      const restore = savedSessionOverrides
-        ? await restoreSessionOverrides(savedSessionOverrides)
-        : { complete: true, sessionsKept: 0 };
 
-      if (!restore.complete) {
-        // The mode stays ON: the snapshot is the ONLY copy of the pre-Local-only
-        // overrides, and a restore that could not complete yet (the gateway
-        // was not reachable, or refused for now) must be retried from it —
-        // clearing the mode would make that retry an early no-op, and an
-        // enable-then-disable cycle would overwrite the snapshot with local
-        // values. Nothing saved is cleared either, so the retry starts over.
-        //
-        // The primary and fallbacks were already written back to the cloud
-        // values above, and a box that says Local-only while every new
-        // session after the next gateway start would go to the cloud is a
-        // box claiming a state it does not have. Put them back where the
-        // mode says they are.
-        const localModel = (await get("local_ai_model")) as string | undefined;
-        if (localModel) {
-          await setConfig("agents.defaults.model.primary", JSON.stringify(localModel));
-          await setConfig("agents.defaults.model.fallbacks", "[]");
-        } else {
-          console.error("[local-only] restore incomplete and no local model recorded; the primary stays on the saved provider");
-        }
-        // Not a 2xx: the panel reads `res.ok` as "the switch moved" and would
-        // paint the toggle OFF over a box that is still in Local-only. A
-        // failure status keeps the switch where the server is and shows why.
-        return NextResponse.json(
-          {
-            enabled: true,
-            restoreIncomplete: true,
-            error:
-              "Some sessions could not be switched back yet (the gateway did not accept the change). Local-only stays on — try turning it off again in a moment.",
-          },
-          { status: 503 },
-        );
-      }
       await setMany({
         [SAVED_PRIMARY_KEY]: undefined,
         [SAVED_FALLBACKS_KEY]: undefined,
-        [SAVED_SESSION_OVERRIDES_KEY]: undefined,
-        [MODE_KEY]: undefined,
+        // The snapshot is the ONLY copy of the pre-Local-only overrides. A
+        // restore that could not complete (contended or corrupt store) keeps
+        // it, so the next toggle-off can finish the job instead of stranding
+        // every session on the local model for ever.
+        [SAVED_SESSION_OVERRIDES_KEY]: restoreOk ? undefined : savedSessionOverrides,
+        // The mode stays ON while the restore is incomplete: clearing it
+        // would make the next disable return early as a no-op, and an
+        // enable-then-disable cycle would overwrite the kept snapshot with
+        // local values. The owner retries the same toggle instead.
+        [MODE_KEY]: restoreOk ? undefined : true,
       });
-      if (restore.sessionsKept > 0) {
-        warnings.push(
-          `${restore.sessionsKept} chat(s) could not be switched back and stay on the local model — reset those chats to use the restored provider.`,
-        );
+      if (!restoreOk) {
+        return NextResponse.json({
+          enabled: true,
+          restoreIncomplete: true,
+          warning:
+            "Some sessions could not be switched back yet (the session store was busy). Local-only stays on — try turning it off again in a moment.",
+        });
       }
     }
 
+    let restartWarning: string | undefined;
     try {
       await restartGateway();
     } catch (err) {
-      warnings.push(`Gateway restart failed: ${err instanceof Error ? err.message : String(err)}`);
+      restartWarning = err instanceof Error ? err.message : String(err);
       console.error("Failed to restart gateway after exclusive config change:", err);
     }
 
     return NextResponse.json({
       enabled: body.enabled,
-      ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}),
+      ...(restartWarning ? { warning: `Gateway restart failed: ${restartWarning}` } : {}),
     });
   } catch (err) {
     return NextResponse.json(
