@@ -2112,10 +2112,32 @@ function hasUsableAnthropicCredential(config: OpenClawConfig, disabledProviders:
 }
 
 /**
- * AFTER the primary write: keep the anthropic plugin on while the primary is
- * anthropic or a usable Anthropic credential exists; off only when nothing on
- * the box could use it. Pass the provider segment of
- * `agents.defaults.model.primary`. Idempotent and non-fatal.
+ * Does the config still POINT at an Anthropic model — the default primary or
+ * any of its fallbacks? A configured reference outranks every other signal,
+ * the owner's provider switch included: the gateway will try to route there,
+ * and the plugin is what resolves it. The core does not protect this by
+ * itself — a batch whose only operation is the plugin flag touches no model
+ * ref, so `collectTouchedTextModelRefs` validates nothing and the disable
+ * lands (read on 2026.8.1); the fallback then fails when it is next selected.
+ *
+ * Prefix match on the provider segment, the shape ClawBox writes everywhere.
+ * A model ALIAS that resolves to anthropic is not seen here — resolving one
+ * needs the core's own resolver, and nothing in ClawBox writes aliases.
+ */
+function configReferencesAnthropic(config: OpenClawConfig): boolean {
+  const modelDefaults = config.agents?.defaults?.model;
+  return [
+    modelDefaults?.primary,
+    ...(Array.isArray(modelDefaults?.fallbacks) ? modelDefaults.fallbacks : []),
+  ].some((ref) => typeof ref === "string" && ref.trim().toLowerCase().startsWith("anthropic/"));
+}
+
+/**
+ * AFTER the primary write: keep the anthropic plugin on while the config still
+ * names an Anthropic model (primary or fallback) or a usable Anthropic
+ * credential exists; off only when nothing on the box could use it. Pass the
+ * provider segment of `agents.defaults.model.primary`. Idempotent and
+ * non-fatal.
  */
 export async function setProviderPlugins(activeProvider: string): Promise<void> {
   // Strict, because the decision below is about ABSENCE: `readConfig` answers
@@ -2134,7 +2156,9 @@ export async function setProviderPlugins(activeProvider: string): Promise<void> 
     return;
   }
   const disabled = parseDisabledProviders(await getConfigStoreValue(DISABLED_PROVIDERS_KEY).catch(() => undefined));
-  const wanted = activeProvider === "anthropic" || hasUsableAnthropicCredential(config, disabled);
+  const wanted = activeProvider === "anthropic"
+    || configReferencesAnthropic(config)
+    || hasUsableAnthropicCredential(config, disabled);
   // An absent flag IS enabled: the plugin declares `enabledByDefault: true`,
   // so a fresh box needs no write to be on.
   const current = (config.plugins as { entries?: Record<string, { enabled?: boolean }> } | undefined)

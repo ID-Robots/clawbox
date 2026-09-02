@@ -127,6 +127,23 @@ describe("setProviderPlugins — the half AFTER the primary write", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
+  it("keeps the plugin on while a configured FALLBACK still names Anthropic, credential or not", async () => {
+    // The gateway will route there when the primary fails, and only the plugin
+    // resolves the reference. The core does not protect this itself: a batch
+    // whose only operation is the plugin flag touches no model ref, so nothing
+    // is validated and the disable lands.
+    await fs.writeFile(
+      path.join(home, "openclaw.json"),
+      JSON.stringify({
+        plugins: { entries: { anthropic: { enabled: true } } },
+        agents: { defaults: { model: { primary: "openai/gpt-5.5", fallbacks: ["anthropic/claude-sonnet-5"] } } },
+      }),
+    );
+    const { setProviderPlugins } = await import("@/lib/openclaw-config");
+    await setProviderPlugins("openai");
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
   it("switches the plugin off despite a credential the owner switched off in Settings", async () => {
     // The switch takes the provider out of every place the box picks a model,
     // so a credential behind it is one nothing can route to — and its plugin
