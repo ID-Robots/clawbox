@@ -137,6 +137,25 @@ describe("hermesConfigGet", () => {
     expect(await hermesConfigGet("image_gen.provider")).toBe("clawai");
   });
 
+  it("does not remember a shim that could not start hermes as an answer", async () => {
+    // While an update rebuilds the checkout, `hermes` is a shim that runs and
+    // exits 127 without reaching the CLI. Stored against the mtime, that ""
+    // would outlive the rebuild — on a linked box nothing rewrites config.yaml
+    // — so it is held for the backoff like a timeout and re-asked.
+    for (const code of [126, 127]) {
+      runHermesCli.mockReset();
+      runHermesCli.mockResolvedValue({ code, stdout: "", stderr: "hermes: not found" });
+      const { hermesConfigGet, hermesConfigReadPending } = await load();
+      expect(await hermesConfigGet("auxiliary.vision.model"), `exit ${code}`).toBe("");
+      expect(hermesConfigReadPending("auxiliary.vision.model"), `exit ${code}`).toBe(true);
+
+      runHermesCli.mockReset();
+      runHermesCli.mockResolvedValue(ok("gpt-4.1-mini"));
+      vi.setSystemTime(Date.now() + PAST_THE_BACKOFF_MS);
+      expect(await hermesConfigGet("auxiliary.vision.model"), `exit ${code}`).toBe("gpt-4.1-mini");
+    }
+  });
+
   it("does not re-spawn the CLI for every caller while a read is failing", async () => {
     // Forgetting the failure must not turn a hanging `hermes` into one Python
     // start per request. The failure is held for a short backoff, then re-asked.

@@ -138,6 +138,31 @@ export async function register() {
     console.error('[instrumentation] Could not warm the memory status cache:', err instanceof Error ? err.message : err)
   }
   try {
+    // The chat's capability facts on a Hermes box cost three Python starts on
+    // a cold cache, and `use-harness-adapter` asks for them on every chat
+    // mount. Pay them once here, after the boot rush, so the first chat open
+    // after a restart answers from the memos. Same delay as the memory probe
+    // above, on purpose: a probe that times out under boot load is held as a
+    // 60 s backoff, which would hide the attach button for exactly the chat
+    // open this is meant to speed up.
+    //
+    // Only on a Hermes box, and decided at fire time rather than now: an
+    // OpenClaw box can have a `hermes` checkout and a config.yaml on disk, and
+    // an ungated probe would start Python at boot for facts no OpenClaw
+    // capability reads.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getActiveHarness } = require('./lib/harness')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { warmHermesFeatureMemos } = require('./lib/harness/hermes-features')
+    setTimeout(() => {
+      void getActiveHarness()
+        .then((harness: string) => (harness === 'hermes' ? warmHermesFeatureMemos() : undefined))
+        .catch(() => { /* the first chat open asks for itself */ })
+    }, 45_000).unref()
+  } catch (err) {
+    console.error('[instrumentation] Could not warm the hermes chat capability memos:', err instanceof Error ? err.message : err)
+  }
+  try {
     // Memory indexing is armed the same way, from its own persisted schedule.
     // Rebuilding the timer at every boot is what makes the schedule survive a
     // reboot and an update without a crontab entry to duplicate or orphan.

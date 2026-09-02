@@ -1,4 +1,5 @@
 import { runHermesCli } from "@/lib/hermes-cli";
+import { hermesCliAnswered } from "@/lib/hermes-cli-answered";
 import {
   FAILED_READ_TTL_MS,
   hermesConfigGet,
@@ -84,13 +85,14 @@ export async function hermesSupportsImages(): Promise<boolean> {
   entry.promise = (async () => {
     try {
       const result = await runHermesCli(["chat", "--help"], { timeoutMs: PROBE_TIMEOUT_MS });
-      // A numeric exit code means the CLI ran and argparse spoke: 0 prints the
-      // option list, and non-zero is how it rejects a subcommand or a flag it
-      // does not have (verified on the box: exit 2). Either way that is an
-      // answer about THIS checkout, and it is kept for the life of the process.
-      // `null` means the child was killed by a signal and printed nothing,
-      // which is not an answer at all.
-      if (typeof result.code !== "number") throw new Error("hermes probe was killed");
+      // An exit code from the CLI means argparse spoke: 0 prints the option
+      // list, and non-zero is how it rejects a subcommand or a flag it does not
+      // have (verified on the box: exit 2). Either way that is an answer about
+      // THIS checkout, and it is kept for the life of the process. `null` (the
+      // child was killed by a signal) and the shell's own 126/127 (the shim ran
+      // but could not start the interpreter — see `hermesCliAnswered`) printed
+      // no help text and are not answers at all.
+      if (!hermesCliAnswered(result)) throw new Error("hermes probe did not answer");
       entry.expiresAt = Number.POSITIVE_INFINITY;
       if (result.code !== 0) return false;
       return /^\s*--image\b/m.test(`${result.stdout}\n${result.stderr}`);
@@ -286,4 +288,25 @@ export async function hermesAgentDrawsImages(): Promise<boolean> {
 /** Same question again, for the agent's image backend. See above. */
 export function hermesImageBackendPending(): boolean {
   return hermesConfigReadPending(IMAGE_PROVIDER_KEY);
+}
+
+/**
+ * Pay the cold probes ONCE, so the first chat open after a restart does not.
+ *
+ * Of the facts the capabilities route reports, these three are the ones that
+ * start a Python interpreter on a miss — the `--image` probe and the two config
+ * reads — and the chat asks for all of them on every mount. The streaming and
+ * image-route probes next door are cheap and short-lived, and are not warmed.
+ * Where and when to call this is the caller's decision (boot, on a Hermes box,
+ * after the boot rush); every probe here fails closed, so this never rejects.
+ */
+export async function warmHermesFeatureMemos(): Promise<void> {
+  // One interpreter at a time, on purpose. Nobody is waiting on this, and the
+  // box is still settling after boot: three Python starts at once on a Jetson
+  // are exactly the load that turns a probe into a timeout, and a timed-out
+  // probe is held as a placeholder for the backoff — the outcome the chat open
+  // this is meant to help would then inherit.
+  await hermesSupportsImages();
+  await hermesHasVisionRoute();
+  await hermesAgentDrawsImages();
 }

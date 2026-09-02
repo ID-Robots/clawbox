@@ -32,55 +32,68 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const harness = await getActiveHarness();
   const linked = await hasClawaiToken();
+  // The five Hermes facts are asked TOGETHER, and only on a Hermes box.
+  //
+  // Together, because nothing in this list feeds the next entry, and on a cold
+  // cache each one is a real wait: `hermesSupportsImages` and the two config
+  // reads each start a Python interpreter (0.9-1.3 s on a Jetson), the
+  // streaming probe mints a ticket, and the image-route probe leaves the
+  // device. Awaited one after another they added up to 2.5-4 s of chat with no
+  // attach button on every mount while the memos were cold — and every
+  // `hermes config set` bumps config.yaml's mtime and cools two of them again.
+  // Asked at once, the wait is the slowest probe rather than the sum. Safe to
+  // gather with `Promise.all`: every probe fails CLOSED and never rejects, and
+  // each memoises its in-flight promise so concurrent callers share one spawn.
+  //
+  // Only on Hermes, because `hermes` may not be installed on an OpenClaw box
+  // at all, and no OpenClaw capability reads any of these: it has its own
+  // socket and its own streaming, makes pictures through its own bundled
+  // plugin, and reads the credential instead. Spending a spawn (and a failure)
+  // there would compute facts nobody consumes.
+  const onHermes = harness === "hermes";
+  const [supportsImages, hasVisionRoute, streamsTurns, hasImageRoute, drawsImages] =
+    await Promise.all([
+      // Whether the installed `hermes` understands `chat --image` — PROBED,
+      // once per process. An attach button shown on a guess would stage files
+      // into a turn that ignores them, which is worse than no button at all.
+      onHermes ? hermesSupportsImages() : false,
+      // The second half of the same question: whether anything on this box
+      // would LOOK at the picture the flag above lets the turn carry. Read
+      // from `auxiliary.vision.model`, which is the store the agent's own image
+      // routing reads, through the mtime-keyed config memo — so linking ClawBox
+      // AI flips it on the next re-probe rather than on the next restart.
+      onHermes ? hermesHasVisionRoute() : false,
+      // Whether a turn can go through the running dashboard and stream back,
+      // rather than spawning a CLI whose answer only exists once it exits.
+      // Probed by minting a WebSocket ticket — cheap, local, and the same door
+      // the turn itself will use, so a yes here is a yes for the real thing.
+      onHermes ? hermesCanStreamTurns() : false,
+      // Whether the ClawBox AI proxy is up and still serving the image model
+      // this box would ask for. The one fact here that leaves the device, so
+      // it is asked only where the answer can matter — on Hermes, whose
+      // picture button is the thing it gates, and only once there is a
+      // credential to spend on a picture at all. An unlinked box is already
+      // `canGenerateImages: false` and would be spending a network round trip
+      // to stay that way.
+      //
+      // Cheap and cached (0.32 s measured, 10 minutes on a yes), so a chat
+      // opened twice pays for it once. It is a plain metadata read: no
+      // generation is started and no daily allowance is spent.
+      onHermes && linked ? clawaiImageRouteReachable() : false,
+      // Whether the agent has an image backend selected — the Hermes spelling
+      // of "can this box draw". Read from `image_gen.provider` through the same
+      // mtime-keyed memo as the vision route, so it flips on the model-state
+      // event the moment ClawBox AI is linked rather than at the next restart.
+      onHermes ? hermesAgentDrawsImages() : false,
+    ]);
   const facts: HarnessFacts = {
+    // A boolean precisely so the device credential never travels to a browser.
     hasClawaiToken: linked,
-    // Whether the installed `hermes` understands `chat --image` — PROBED, once
-    // per process, and only where the answer can matter. An attach button shown
-    // on a guess would stage files into a turn that ignores them, which is
-    // worse than no button at all.
-    //
-    // Not asked on an OpenClaw box: `hermes` may not be installed there at all,
-    // and the probe would spend a spawn (and a failure) to compute a fact that
-    // no OpenClaw capability reads.
-    hermesSupportsImages: harness === "hermes" ? await hermesSupportsImages() : false,
-    // The second half of the same question: whether anything on this box would
-    // LOOK at the picture the flag above lets the turn carry. Read from
-    // `auxiliary.vision.model`, which is the store the agent's own image
-    // routing reads, through the mtime-keyed config memo — so linking ClawBox
-    // AI flips it on the next re-probe rather than on the next restart.
-    //
-    // Not asked on an OpenClaw box, for the same reason as above: `hermes` may
-    // not be installed there, and no OpenClaw capability reads this.
-    hermesHasVisionRoute: harness === "hermes" ? await hermesHasVisionRoute() : false,
-    // Whether a turn can go through the running dashboard and stream back,
-    // rather than spawning a CLI whose answer only exists once it exits. Probed
-    // by minting a WebSocket ticket — cheap, local, and the same door the turn
-    // itself will use, so a yes here is a yes for the real thing.
-    //
-    // Not asked on an OpenClaw box: it has its own socket and its own streaming,
-    // and `hermes` may not be installed there at all.
-    hermesStreamsTurns: harness === "hermes" ? await hermesCanStreamTurns() : false,
-    // Whether the ClawBox AI proxy is up and still serving the image model this
-    // box would ask for. The one fact here that leaves the device, so it is
-    // asked only where the answer can matter — on Hermes, whose picture button
-    // is the thing it gates, and only once there is a credential to spend on a
-    // picture at all. An unlinked box is already `canGenerateImages: false` and
-    // would be spending a network round trip to stay that way.
-    //
-    // Cheap and cached (0.32 s measured, 10 minutes on a yes), so a chat opened
-    // twice pays for it once. It is a plain metadata read: no generation is
-    // started and no daily allowance is spent.
-    hasClawaiImageRoute:
-      harness === "hermes" && linked ? await clawaiImageRouteReachable() : false,
-    // Whether the agent has an image backend selected — the Hermes spelling of
-    // "can this box draw". Read from `image_gen.provider` through the same
-    // mtime-keyed memo as the vision route, so it flips on the model-state
-    // event the moment ClawBox AI is linked rather than at the next restart.
-    //
-    // Not asked on an OpenClaw box: it makes pictures through its own bundled
-    // plugin and reads the credential instead, and `hermes` may not be
-    // installed there at all.
-    hermesAgentDrawsImages: harness === "hermes" ? await hermesAgentDrawsImages() : false,
+    hermesSupportsImages: supportsImages,
+    hermesHasVisionRoute: hasVisionRoute,
+    hermesStreamsTurns: streamsTurns,
+    hasClawaiImageRoute: hasImageRoute,
+    hermesAgentDrawsImages: drawsImages,
   };
   // Which of those `false`s is an ANSWER, and which is a placeholder the server
   // has already undertaken to replace by itself.
