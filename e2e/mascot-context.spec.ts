@@ -19,8 +19,7 @@ test("mascot tap opens the chat popup", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
-  const boxImage = page.locator('img[src="/clawbox-box.png"]').first();
-  await expect(boxImage).toBeVisible();
+  await expect(page.locator('img[src="/clawbox-box.png"]')).toHaveCount(0);
   const mascotImg = page.locator('img[src="/clawbox-crab.png"][alt=""]').first();
   await expect(mascotImg).toBeVisible();
 

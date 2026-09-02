@@ -24,7 +24,7 @@ export interface MascotPhraseSet {
   nameGreetings: string[];
   /** Single-word friendly placeholders used when `ui_user_name` is unset. */
   nameFallbacks: string[];
-  /** Shouted while the crab perches on top of the box in power stance. */
+  /** Shouted while the crab strikes its power stance. */
   power: string[];
 }
 
