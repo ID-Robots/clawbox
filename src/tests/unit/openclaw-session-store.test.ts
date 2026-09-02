@@ -113,7 +113,10 @@ describe("openclaw-session-store", () => {
       .split("\n")
       .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
       .join("\n");
-    expect(code).not.toMatch(/\b(?:UPDATE|INSERT|DELETE|REPLACE)\b/i);
+    // DML, DDL and the maintenance verbs alike. PRAGMA is not listed: the one
+    // here (`busy_timeout`) is connection-scoped, and a read-only connection
+    // cannot write `user_version` or anything else anyway.
+    expect(code).not.toMatch(/\b(?:UPDATE|INSERT|DELETE|REPLACE|CREATE|DROP|ALTER|VACUUM|REINDEX|ANALYZE)\b/i);
     // `openSqlite(path, readOnly)` is exported for the gateway-wide state
     // store (a different database); every use INSIDE this module is read-only,
     // and it is the only constructor path, so that covers every open.
