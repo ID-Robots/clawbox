@@ -114,22 +114,27 @@ describe("ai_list_models — the default is labelled as the default", () => {
     expect(body.current_chat).toBe(CURRENT_CHAT_MODEL_NOTE);
   });
 
-  it("keeps the same shape on a filtered call, and reads the default off the scoped reply", async () => {
-    // `current` is the saved model IFF it belongs to the asked-about provider —
-    // so a non-empty one names the default outright.
-    apiGet.mockResolvedValue({ provider: "zai", current: "glm-4", reasoning: "low", models: [{ id: "glm-4" }], providers: [] });
-    let body = await parsed(ai(), "ai_list_models", { provider: "zai" });
-    expect(body.asked_about).toBe("zai");
-    expect(body.device_default).toEqual({ provider: "zai", model: "glm-4", thinking: "low" });
-    expect(body.current_chat).toBe(CURRENT_CHAT_MODEL_NOTE);
-
-    // Saved under a different provider: the scoped reply says which.
+  it("keeps the same shape on a filtered call, and reads the default off the scoped reply's `saved`", async () => {
+    // The scoped reply reuses `provider` for the filter and carries the saved
+    // pairing as `saved` — whichever provider it belongs to.
     apiGet.mockResolvedValue({
       provider: "zai", current: "", reasoning: "low", models: [{ id: "glm-4" }], providers: [],
-      savedElsewhere: { provider: "clawai", model: "deepseek-v4-flash" },
+      saved: { provider: "clawai", model: "deepseek-v4-flash" },
     });
-    body = await parsed(ai(), "ai_list_models", { provider: "zai" });
+    let body = await parsed(ai(), "ai_list_models", { provider: "zai" });
+    expect(body.asked_about).toBe("zai");
     expect(body.device_default).toEqual({ provider: "clawai", model: "deepseek-v4-flash", thinking: "low" });
+    expect(body.current_chat).toBe(CURRENT_CHAT_MODEL_NOTE);
+
+    // The box's OWN provider, with a stale list that no longer has the saved
+    // model: `current` is blank and `savedElsewhere` is null, and the default
+    // is still exactly this provider.
+    apiGet.mockResolvedValue({
+      provider: "clawai", current: "", reasoning: "off", models: [], providers: [], savedElsewhere: null,
+      saved: { provider: "clawai", model: "deepseek-v4-flash" },
+    });
+    body = await parsed(ai(), "ai_list_models", { provider: "clawai" });
+    expect(body.device_default).toEqual({ provider: "clawai", model: "deepseek-v4-flash", thinking: "off" });
 
     // Nothing to read: still the object, still "unknown" — never a prose string
     // in a field the unfiltered call fills with an object.

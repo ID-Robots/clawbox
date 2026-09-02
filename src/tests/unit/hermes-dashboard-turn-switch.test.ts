@@ -526,6 +526,19 @@ describe("the provider a turn reports as having served it", () => {
     expect(turn?.provider).toBe("custom");
   });
 
+  it("does not let a completion that names no provider reinstate a request the session contradicted", async () => {
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "deepseek-v4-flash", provider: "anthropic", providerIsUserDefined: false },
+      { model: "deepseek-v4-flash", provider: "custom" },
+    );
+    expect(turn?.provider ?? "").toBe("");
+    const running = turn!.run(() => {});
+    await Promise.resolve();
+    socket.event("message.complete", { text: "one", status: "complete" });
+    const final = await running;
+    expect(final.provider ?? "").toBe("");
+  });
+
   it("does not let a completion's own kind overwrite the resolved slug", async () => {
     const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5" });
     const running = turn!.run(() => {});

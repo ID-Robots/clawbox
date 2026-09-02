@@ -972,8 +972,14 @@ export async function POST(request: Request) {
   // picture is rare and already slow; correctness first.
   if (wantsStream(request) && imagePaths.length === 0) {
     // The catalogue knows which providers are user-defined; the transport
-    // needs that one bit to read the dashboard's provider KIND honestly.
-    const providerRow = wantsProvider && payload ? payload.providers.find((row) => row.id === rawProvider) : undefined;
+    // needs that one bit to read the dashboard's provider KIND honestly. Only
+    // the LIVE catalogue knows it: the catalog-file fallback writes `false`
+    // for every row (the manifest has no such column) and cold-start writes
+    // `true` for its own — neither is the dashboard's `is_user_defined`, and a
+    // wrong `false` would blank the label on the box's own provider.
+    const providerRow = wantsProvider && payload?.source === "dashboard"
+      ? payload.providers.find((row) => row.id === rawProvider)
+      : undefined;
     const turn = await openDashboardTurn({
       text: promptWithImages,
       ...(rawModel ? { model: rawModel } : {}),
@@ -986,6 +992,12 @@ export async function POST(request: Request) {
     if (turn) return streamTurn(turn, rawSessionId, sessionKey);
   }
 
+  // Read BEFORE the run, not after: the default this turn used is the one on
+  // disk when it was spawned, and a switch made during the turn — ai_set_model
+  // does exactly that when told "switch to X" — must not become the record of
+  // the turn that was told.
+  const cliServed = await cliServedPair(rawModel, wantsProvider ? rawProvider : "", payload);
+
   try {
     const { out: text, err } = await runHermes(args, request.signal);
     // The run reports its own session id on stderr — no DB race, no guessing
@@ -997,7 +1009,7 @@ export async function POST(request: Request) {
     // config.yaml's pairing, which is the same read the validation above makes
     // when it has a reason to: recorded too, because a blank under a reply the
     // box knows the model of is a false unknown, not modesty.
-    const answered = await settleTurn(threaded, sessionKey, text, "", await cliServedPair(rawModel, wantsProvider ? rawProvider : "", payload));
+    const answered = await settleTurn(threaded, sessionKey, text, "", cliServed);
     return NextResponse.json(answered);
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {

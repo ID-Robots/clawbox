@@ -520,6 +520,9 @@ function servedProviderSlug(reported: string, req: DashboardTurnRequest, onReque
   const reportedIsKind = reported === DASHBOARD_PROVIDER_KIND && requested !== DASHBOARD_PROVIDER_KIND;
   if (reported && !reportedIsKind && (isHermesCliProvider(reported) || reported === requested)) return reported;
   if (!onRequestedModel || !requested) return "";
+  // Nothing reported at all — the SESSION-level call, where the dashboard had
+  // its chance to name one. A completion frame that names none defers to what
+  // the session was resolved to instead (see the messageComplete handler).
   if (!reported) return requested;
   return reportedIsKind && req.providerIsUserDefined !== false ? requested : "";
 }
@@ -1256,10 +1259,13 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                 // this session was settled on above is the answer.
                 const servedModel = typeof payload.model === "string" && payload.model ? payload.model : activeModel;
                 // A completion's `provider` is the same field with the same
-                // kind-not-slug problem, resolved the same way; what the
-                // session was settled on above is the answer otherwise.
+                // kind-not-slug problem, resolved the same way. A frame that
+                // names none defers to what the session was settled on above —
+                // NOT to the request, which the session may have contradicted.
                 const completionProvider = typeof payload.provider === "string" ? payload.provider : "";
-                const servedProvider = servedProviderSlug(completionProvider, req, servedModel === req.model) || activeProvider;
+                const servedProvider = completionProvider
+                  ? servedProviderSlug(completionProvider, req, servedModel === req.model)
+                  : activeProvider;
                 return {
                   text: truncated ? `${finalText}\n\n[Reply truncated — it was too long to hold.]` : finalText,
                   reasoning: finalReasoning,

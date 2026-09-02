@@ -150,6 +150,11 @@ describe("which model answered, on the bubble", () => {
     const label = screen.getByTestId(LABEL);
     expect(label.textContent).toContain("Nebius AI");
     expect(label.textContent).toContain("anthropic/claude-fable-5");
+    // Visible means visible: a line that clips to an ellipsis and keeps the
+    // rest in a mouse-only title is not.
+    expect(label.style.whiteSpace).not.toBe("nowrap");
+    expect(label.style.textOverflow).toBe("");
+    expect(label.getAttribute("title")).toBeNull();
   });
 
   it("shows the label on a live turn the moment it settles", async () => {

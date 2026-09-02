@@ -115,5 +115,10 @@ describe("the scoped reply and the device's reasoning level", () => {
     const body = await (await GET(request("?provider=anthropic", false))).json();
     expect(body.provider).toBe("anthropic");
     expect(body.reasoning).toBe("medium");
+    // And the saved pairing itself, whichever provider it belongs to: `current`
+    // is blank when the saved model is not in this provider's (possibly stale)
+    // list, and `savedElsewhere` is null when it IS this provider — so
+    // neither can name the default on the box's own provider.
+    expect(body.saved).toEqual({ provider: "anthropic", model: "anthropic/claude-opus-5" });
   });
 });

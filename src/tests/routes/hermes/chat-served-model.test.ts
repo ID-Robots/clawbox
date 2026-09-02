@@ -22,12 +22,20 @@ vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/tmp/clawbox-chat-served-model-test",
   get: vi.fn(),
 }));
+// The dashboard transport, captured: the cases below read what the route
+// HANDS it, then let the turn fall through to the CLI.
+vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/hermes-dashboard-turn")>();
+  return { ...actual, openDashboardTurn: vi.fn(async () => null) };
+});
 
 import { spawn } from "child_process";
 import { getModelOptions } from "@/lib/hermes-model-options";
+import { openDashboardTurn } from "@/lib/hermes-dashboard-turn";
 
 const mockSpawn = vi.mocked(spawn);
 const mockGetModelOptions = vi.mocked(getModelOptions);
+const mockOpenDashboardTurn = vi.mocked(openDashboardTurn);
 
 /** A `hermes chat` that exits 0 with a one-line answer and a session banner. */
 function fakeHermes() {
@@ -47,22 +55,22 @@ function fakeHermes() {
   return child;
 }
 
-function payload(provider: string, model: string) {
+function payload(provider: string, model: string, source = "dashboard", isUserDefined = false) {
   return {
-    providers: [{ id: provider, name: provider, authenticated: true, models: [{ id: model }], total: 1, source: "live", isUserDefined: false }],
+    providers: [{ id: provider, name: provider, authenticated: true, models: [{ id: model }], total: 1, source, isUserDefined }],
     current: { provider, model },
     reasoning: "medium",
     fetchedAt: Date.now(),
-    source: "live",
+    source,
     stale: false,
   };
 }
 
-async function post(body: Record<string, unknown>) {
+async function post(body: Record<string, unknown>, headers: Record<string, string> = {}) {
   const { POST } = await import("@/app/setup-api/hermes/chat/route");
   return POST(new Request("http://localhost/setup-api/hermes/chat", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
   }));
 }
@@ -92,6 +100,22 @@ describe("/setup-api/hermes/chat — what the CLI path records as the served mod
     expect(await res.json()).toMatchObject({ model: "deepseek-v4-flash", provider: "clawai" });
   });
 
+  it("reads the default before the run, so a switch made during the turn is not the turn's record", async () => {
+    // "Switch to GPT" makes the agent call ai_set_model mid-turn, which
+    // rewrites config.yaml. The turn itself ran on what the file said when
+    // it was spawned.
+    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-flash") as never);
+    mockSpawn.mockImplementation(() => {
+      mockGetModelOptions.mockResolvedValue(payload("openai", "gpt-5.6-sol") as never);
+      return fakeHermes() as never;
+    });
+
+    const res = await post({ message: "switch to gpt" });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ model: "deepseek-v4-flash", provider: "clawai" });
+  });
+
   it("records nothing rather than a guess when the default cannot be read", async () => {
     mockGetModelOptions.mockRejectedValue(new Error("dashboard unreachable"));
 
@@ -101,5 +125,31 @@ describe("/setup-api/hermes/chat — what the CLI path records as the served mod
     const body = await res.json();
     expect(body).not.toHaveProperty("model");
     expect(body).not.toHaveProperty("provider");
+  });
+});
+
+describe("/setup-api/hermes/chat — what the dashboard transport is told about the provider", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSpawn.mockImplementation(() => fakeHermes() as never);
+    mockOpenDashboardTurn.mockResolvedValue(null);
+  });
+
+  const stream = { Accept: "text/event-stream" };
+
+  it("passes the catalogue's own user-defined flag when the catalogue is the live dashboard", async () => {
+    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-flash", "dashboard", true) as never);
+    await post({ message: "hi", provider: "clawai", model: "deepseek-v4-flash" }, stream);
+    expect(mockOpenDashboardTurn).toHaveBeenCalledTimes(1);
+    expect(mockOpenDashboardTurn.mock.calls[0][0]).toMatchObject({ provider: "clawai", providerIsUserDefined: true });
+  });
+
+  it("passes no flag off the catalog-file fallback, which marks every provider built-in", async () => {
+    // The manifest has no such column; the fallback writes `false` for all of
+    // them, and a `false` here would blank the label on the box's own provider.
+    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-flash", "catalog-file", false) as never);
+    await post({ message: "hi", provider: "clawai", model: "deepseek-v4-flash" }, stream);
+    expect(mockOpenDashboardTurn).toHaveBeenCalledTimes(1);
+    expect(mockOpenDashboardTurn.mock.calls[0][0]).not.toHaveProperty("providerIsUserDefined");
   });
 });

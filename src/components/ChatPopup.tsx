@@ -4727,12 +4727,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 {served && (
                   <div
                     data-testid="chat-served-model"
-                    title={served}
                     // 0.55 over the panel's #0d1117 is ~6:1 — AA. The quiet
                     // 0.35 the tool chips use is ~3.2:1, which is fine for a
                     // decoration and not for the one line that answers a
-                    // question.
-                    style={{ marginTop: 4, fontSize: 11, lineHeight: 1.3, color: 'rgba(255,255,255,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                    // question. Wraps rather than clips: an id cut to an
+                    // ellipsis with the rest in a mouse-only title is not
+                    // visible.
+                    style={{ marginTop: 4, fontSize: 11, lineHeight: 1.3, color: 'rgba(255,255,255,0.55)', wordBreak: 'break-all' }}
                   >
                     {served}
                   </div>

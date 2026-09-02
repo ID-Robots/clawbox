@@ -86,10 +86,17 @@ export async function GET(request: Request) {
       if (!isAllowedProvider(scoped, provider)) {
         return NextResponse.json({ error: "Unknown provider" }, { status: 400 });
       }
-      // `reasoning` rides along: it is device-wide, not per provider, and a
-      // reader of the scoped form (ai_list_models before a switch) otherwise
-      // reports it as unknown with the value one field away.
-      return NextResponse.json({ ...(await scopeFromPayload(scoped, provider)), reasoning: scoped.reasoning });
+      // `reasoning` and `saved` ride along: both are device-wide, not per
+      // provider, and a reader of the scoped form (ai_list_models before a
+      // switch) otherwise reports them as unknown with the values one field
+      // away. `saved` is the pairing itself — `current` is blank when the
+      // saved model is not in this provider's list, and `savedElsewhere` is
+      // null when it IS this provider, so neither names the default reliably.
+      return NextResponse.json({
+        ...(await scopeFromPayload(scoped, provider)),
+        reasoning: scoped.reasoning,
+        saved: scoped.current,
+      });
     }
 
     const payload = await getModelOptions({ refresh });
