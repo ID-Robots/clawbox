@@ -149,10 +149,12 @@ docker compose -f e2e-install/docker-compose.test.yml exec --user clawbox clawbo
 `install.sh` contains `reboot` inside `step_rebuild_reboot`. When
 `CLAWBOX_TEST_MODE=1` is set, that call is replaced by
 `systemctl restart clawbox-setup.service` — the Next.js process goes down,
-the updater's post-reboot `checkContinuation` fires on the next
-`/setup-api/update/status` poll, and `post_update` runs. This is how the
-upgrade test exercises the same "cross-restart" code path that would run on
-a real reboot without actually stopping the container.
+the updater's post-reboot `checkContinuation` fires from the server's own
+boot hook (`src/instrumentation.ts`, a few seconds after start; a
+`/setup-api/update/status` poll is only the fallback), and `post_update`
+runs. This is how the upgrade test exercises the same "cross-restart" code
+path that would run on a real reboot without actually stopping the
+container.
 
 For tests that want to simulate a full container reboot, call
 `composeRestart()` from `helpers/container.ts` — the `clawbox-home` volume

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { repairOpenclawConfig } from "@/instrumentation";
+import { deferred } from "@/tests/helpers/deferred";
 
 /**
  * The boot-time repairs of openclaw.json ran TOGETHER. Each is a read-modify-
@@ -11,13 +12,6 @@ import { repairOpenclawConfig } from "@/instrumentation";
  * The sequencing is a plain function with the repairs handed in, so this can
  * pin the order without `require()`-ing the real config module.
  */
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (err: unknown) => void;
-  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
-  return { promise, resolve, reject };
-}
 
 describe("repairOpenclawConfig", () => {
   it("starts the second repair only after the first has finished", async () => {

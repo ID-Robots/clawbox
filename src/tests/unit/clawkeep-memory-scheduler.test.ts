@@ -89,6 +89,7 @@ describe("the memory index scheduler", () => {
     // settle. The empty-index upgrade it applies to the request is covered in
     // clawkeep-memory.test.ts.
     const startMemoryIndex = vi.fn(async () => ({ accepted: true, run: {} as never }));
+    vi.doMock("@/lib/updater", () => ({ updateInFlight: vi.fn(async () => false) }));
     vi.doMock("@/lib/clawkeep-memory", async () => {
       const actual = await vi.importActual<typeof import("@/lib/clawkeep-memory")>("@/lib/clawkeep-memory");
       return { ...actual, startMemoryIndex };
@@ -108,6 +109,7 @@ describe("the memory index scheduler", () => {
     // over it. Before this line existed a declined slot left no trace at all
     // — the card showed the manual run, the journal showed nothing.
     const startMemoryIndex = vi.fn(async () => ({ accepted: false, run: { status: "running" } as never }));
+    vi.doMock("@/lib/updater", () => ({ updateInFlight: vi.fn(async () => false) }));
     vi.doMock("@/lib/clawkeep-memory", async () => {
       const actual = await vi.importActual<typeof import("@/lib/clawkeep-memory")>("@/lib/clawkeep-memory");
       return { ...actual, startMemoryIndex };
@@ -120,6 +122,34 @@ describe("the memory index scheduler", () => {
     await vi.advanceTimersByTimeAsync(61 * 60_000);
     expect(startMemoryIndex).toHaveBeenCalledTimes(1);
     expect(log).toHaveBeenCalledWith(expect.stringContaining("skipped: an index run is in progress"));
+    log.mockRestore();
+  });
+
+  it("stands down for the slot while an update is in flight, and re-arms", async () => {
+    // post_update repairs the OpenClaw store with the gateway masked so there
+    // is one writer; `openclaw memory index` would be a second. A slot that
+    // lands inside an update is skipped — one missed incremental pass costs
+    // nothing — and the next slot is armed as usual.
+    const startMemoryIndex = vi.fn(async () => ({ accepted: true, run: {} as never }));
+    const updateInFlight = vi.fn(async () => true);
+    vi.doMock("@/lib/updater", () => ({ updateInFlight }));
+    vi.doMock("@/lib/clawkeep-memory", async () => {
+      const actual = await vi.importActual<typeof import("@/lib/clawkeep-memory")>("@/lib/clawkeep-memory");
+      return { ...actual, startMemoryIndex };
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await writeSchedule({ enabled: true, frequency: "daily", timeOfDay: "06:00", weekday: 0 });
+    const sched = await import("@/lib/clawkeep-memory-scheduler");
+    await sched.start();
+
+    await vi.advanceTimersByTimeAsync(61 * 60_000);
+    expect(updateInFlight).toHaveBeenCalledTimes(1);
+    expect(startMemoryIndex).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("skipped: an update is in progress"));
+    // Tomorrow's slot, not nothing (the re-arm re-reads the schedule file).
+    await vi.waitFor(() => {
+      expect(sched.nextRunAtMs()).toBe(new Date("2026-08-23T06:00:00").getTime());
+    });
     log.mockRestore();
   });
 });

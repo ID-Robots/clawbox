@@ -28,6 +28,7 @@ vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: mockRunHermesCli }));
 
 import { get, set, setMany } from "@/lib/config-store";
 import { isPortOpen } from "@/lib/port-probe";
+import { deferred } from "@/tests/helpers/deferred";
 
 const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
@@ -378,6 +379,106 @@ describe("updater", () => {
       expect(mockSetMany).toHaveBeenCalledWith(
         expect.objectContaining({ update_completed: true }),
       );
+    });
+
+    it("does not stop the gateway while its pre-start is still running", async () => {
+      // At boot clawbox-gateway.service and clawbox-setup.service start
+      // together, and the gateway's ExecStartPre (gateway-pre-start.sh) can
+      // spend minutes in a plugin install on a cold box. The second half of
+      // an update is resumed from boot now, and its first act is to quiesce
+      // the gateway — `systemctl stop` on a unit in `start-pre` kills that
+      // migration halfway, the very thing the pre-start budget exists to
+      // prevent. The quiesce has to let the pre-start finish first.
+      const preStart = { stdout: "start-pre\n", stderr: "" };
+      setupExecFileMock({
+        "show clawbox-gateway.service -p SubState": preStart,
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+      // The first query sees the pre-start running; every later one sees it
+      // done (the mock reads `preStart` at call time).
+      const answer = mockExecFile.getMockImplementation()!;
+      let preStartQueries = 0;
+      mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+        if (args.join(" ").includes("clawbox-gateway.service -p SubState") && preStartQueries++ > 0) {
+          preStart.stdout = "running\n";
+        }
+        return (answer as (...a: unknown[]) => unknown)(cmd, args, ...rest);
+      }) as unknown as typeof childProcess.execFile);
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("completed");
+      });
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      const firstMask = calls.findIndex((call) => call.includes("systemctl --runtime mask clawbox-gateway.service"));
+      const firstStop = calls.findIndex((call) => call.includes("systemctl stop clawbox-gateway.service"));
+      const subStateQueries = calls
+        .map((call, index) => call.includes("show clawbox-gateway.service -p SubState --value") ? index : -1)
+        .filter((index) => index >= 0);
+      expect(firstMask).toBeGreaterThan(-1);
+      expect(firstStop).toBeGreaterThan(firstMask);
+      // Masked first (nothing can enter start-pre behind the wait), then
+      // asked, saw the pre-start running, asked again, and only then stopped.
+      expect(subStateQueries[0]).toBeGreaterThan(firstMask);
+      expect(subStateQueries.filter((index) => index < firstStop).length).toBeGreaterThanOrEqual(2);
+    });
+
+    it("keeps waiting when the pre-start state cannot be read", async () => {
+      // A `systemctl show` that times out under a cold box's load says
+      // nothing about the pre-start. Treating "unanswered" as "finished"
+      // would stop the gateway mid-migration on exactly the boot this wait
+      // exists for. Ask again; stop only once the unit is seen out of
+      // `start-pre`.
+      const preStart = { stdout: "start-pre\n", stderr: "" };
+      setupExecFileMock({
+        "show clawbox-gateway.service -p SubState": preStart,
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+      const answer = mockExecFile.getMockImplementation()!;
+      const answers = [new Error("systemctl timed out"), { stdout: "start-pre\n", stderr: "" }, { stdout: "running\n", stderr: "" }];
+      let query = 0;
+      mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+        if (args.join(" ").includes("clawbox-gateway.service -p SubState")) {
+          const next = answers[Math.min(query++, answers.length - 1)];
+          if (next instanceof Error) {
+            const callback = rest.find((arg) => typeof arg === "function") as
+              ((error: Error | null, result: { stdout: string; stderr: string }) => void) | undefined;
+            callback?.(next, { stdout: "", stderr: "" });
+            return { then: (_: unknown, reject: (err: Error) => void) => reject(next) };
+          }
+          preStart.stdout = next.stdout;
+        }
+        return (answer as (...a: unknown[]) => unknown)(cmd, args, ...rest);
+      }) as unknown as typeof childProcess.execFile);
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("completed");
+      });
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      const firstStop = calls.findIndex((call) => call.includes("systemctl stop clawbox-gateway.service"));
+      const subStateQueriesBeforeStop = calls
+        .slice(0, firstStop)
+        .filter((call) => call.includes("show clawbox-gateway.service -p SubState --value"));
+      expect(firstStop).toBeGreaterThan(-1);
+      // Unanswered, then start-pre, then running — and only then stopped.
+      expect(subStateQueriesBeforeStop.length).toBeGreaterThanOrEqual(3);
     });
 
     it("fails when an overrun post_update later settles with a systemd error result", async () => {
@@ -857,6 +958,46 @@ describe("updater", () => {
       expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", undefined);
     });
 
+    it("resumes once when a boot check and a status poll overlap, and tells both", async () => {
+      // The boot hook and the status route can both ask within the same
+      // tick. The flag read is an await, so without a claim taken BEFORE it
+      // both callers read the flag as set and both launch the second half of
+      // the update — post_update twice, two gateway restarts. The second
+      // caller joins the first's read: a poll that lands here must answer
+      // "running", not "idle", so it gets the same true.
+      updater.resetUpdateState();
+      const flagRead = deferred();
+      mockGet.mockImplementation(async (key: string) =>
+        key === "update_needs_continuation" ? flagRead.promise.then(() => true) : undefined,
+      );
+
+      const fromBoot = updater.checkContinuation();
+      const fromPoll = updater.checkContinuation();
+      flagRead.resolve();
+
+      expect(await Promise.all([fromBoot, fromPoll])).toEqual([true, true]);
+      expect(mockSet.mock.calls.filter(([key]) => key === "update_needs_continuation")).toHaveLength(1);
+      expect(mockGet.mock.calls.filter(([key]) => key === "update_needs_continuation")).toHaveLength(1);
+    });
+
+    it("refuses a full or scoped update while the continuation is being read", async () => {
+      // Between the claim and `running = true` the check is reading persisted
+      // state. A POST /update/run in that window used to see `running` false
+      // and launch a full update under the second half about to resume.
+      updater.resetUpdateState();
+      const flagRead = deferred();
+      mockGet.mockImplementation(async (key: string) =>
+        key === "update_needs_continuation" ? flagRead.promise.then(() => true) : undefined,
+      );
+
+      const continuation = updater.checkContinuation();
+      expect(updater.startUpdate()).toEqual({ started: false, error: "Update already in progress" });
+      expect(updater.startOpenclawUpdate()).toEqual({ started: false, error: "Update already in progress" });
+
+      flagRead.resolve();
+      expect(await continuation).toBe(true);
+    });
+
     it("reports a failed update instead of resuming when the rebuild unit failed", async () => {
       // The continuation flag only proves the rebuild unit STARTED. If the
       // server came back without the unit succeeding (georgi: a config-set
@@ -904,6 +1045,48 @@ describe("updater", () => {
       const state = updater.getUpdateState();
       expect(state.phase).toBe("failed");
       expect(state.error).toContain("without producing a new build");
+    });
+  });
+
+  describe("updateInFlight", () => {
+    // What the boot hooks that touch the OpenClaw store ask before starting:
+    // an update is in flight while it runs AND while its second half is still
+    // waiting to be resumed after the reboot.
+    it("is false on a box with nothing to update", async () => {
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(undefined);
+      expect(await updater.updateInFlight()).toBe(false);
+    });
+
+    it("is true while an update runs", async () => {
+      updater.resetUpdateState();
+      updater.startUpdate();
+      expect(await updater.updateInFlight()).toBe(true);
+    });
+
+    it("is true when an update starts while the flag is being read", async () => {
+      // Owner clicks Update in the same instant the 45 s warm asks. The
+      // ownership check before the flag read is stale by the time the read
+      // resolves; without a re-check the warm would run under the update.
+      updater.resetUpdateState();
+      const flagRead = deferred();
+      mockGet.mockImplementation(async (key: string) =>
+        key === "update_needs_continuation" ? flagRead.promise.then(() => undefined) : undefined,
+      );
+
+      const asked = updater.updateInFlight();
+      expect(updater.startUpdate()).toEqual({ started: true });
+      flagRead.resolve();
+
+      expect(await asked).toBe(true);
+    });
+
+    it("is true while the post-reboot half is still waiting to be resumed", async () => {
+      updater.resetUpdateState();
+      mockGet.mockImplementation(async (key: string) =>
+        key === "update_needs_continuation" ? "build-before-reboot" : undefined,
+      );
+      expect(await updater.updateInFlight()).toBe(true);
     });
   });
 
