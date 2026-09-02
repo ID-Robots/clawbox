@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import { listAgentIds, sessionStorePath, sweepSessionEntries } from "./openclaw-session-store";
+import { clearPairingState, readPairingAllowEntries, readPairingRequests } from "./openclaw-state-store";
 import fsSync from "fs";
 import path from "path";
 import { execFile, spawn } from "child_process";
@@ -1813,11 +1814,15 @@ export async function setDiscordToken(botToken: string): Promise<void> {
 // === Telegram pairing (DM sender approval) ===
 //
 // OpenClaw's default `dmPolicy: "pairing"` makes an unknown Telegram sender's
-// first message inert until the owner approves their 8-char code. OpenClaw
-// persists approvals in `~/.openclaw/credentials/telegram-<account>-allowFrom.json`
-// (a string array of user ids) — a *different* file from `openclaw.json`, so the
-// boot-time `channels.telegram.allowFrom` strip in gateway-pre-start.sh never
-// touches them. We only ever approve specific senders; we never widen dmPolicy.
+// first message inert until the owner approves their 8-char code. OpenClaw 2
+// persists approvals and pending codes in `~/.openclaw/state/openclaw.sqlite`
+// (see openclaw-state-store.ts); OpenClaw 1 kept them in
+// `~/.openclaw/credentials/telegram-<account>-allowFrom.json` (a string array
+// of user ids) + `telegram-pairing.json`, which the readers below still serve
+// on a box that has not migrated. Either way it is a *different* store from
+// `openclaw.json`, so the boot-time `channels.telegram.allowFrom` strip in
+// gateway-pre-start.sh never touches them. We only ever approve specific
+// senders; we never widen dmPolicy.
 
 const CREDENTIALS_DIR = path.join(OPENCLAW_HOME, "credentials");
 export const PAIRING_CODE_RE = /^[A-Z0-9]{8}$/;
@@ -1866,11 +1871,14 @@ export async function listTelegramPairingRequests(): Promise<TelegramPairingRequ
 
 /**
  * Pending Telegram DM pairing requests read straight from OpenClaw's pairing
- * store file — a plain read with no CLI cold-start, so it's cheap enough to poll
- * for the desktop "new request" popup. The store path mirrors the allowFrom
- * store; the default account is unsuffixed (`telegram-pairing.json`).
+ * store — a plain read with no CLI cold-start, so it's cheap enough to poll
+ * for the desktop "new request" popup. OpenClaw 2 answers from the state
+ * database; the legacy file path mirrors the allowFrom store, with the default
+ * account unsuffixed (`telegram-pairing.json`).
  */
 export async function readTelegramPairingRequests(account = "default"): Promise<TelegramPairingRequest[]> {
+  const fromStore = readPairingRequests("telegram", account);
+  if (fromStore) return withDerivedNames(fromStore);
   const file = path.join(
     CREDENTIALS_DIR,
     account === "default" ? "telegram-pairing.json" : `telegram-${account}-pairing.json`,
@@ -1900,9 +1908,14 @@ export async function approveTelegramPairing(code: string): Promise<void> {
 /**
  * Approved Telegram sender ids, read from the allowFrom store (empty on any
  * failure). `account` is OpenClaw's channel account id; ClawBox is single-account
- * so it defaults to "default" (file `telegram-default-allowFrom.json`).
+ * so it defaults to "default". The v2 state database wins whenever it exists:
+ * it is what the gateway enforces, and a migrated box's leftover JSON is a
+ * stale copy that must not shadow it. Without one, the legacy file
+ * (`telegram-default-allowFrom.json`) is the store.
  */
 export async function readTelegramAllowFrom(account = "default"): Promise<string[]> {
+  const fromStore = readPairingAllowEntries("telegram", account);
+  if (fromStore) return fromStore;
   const file = path.join(CREDENTIALS_DIR, `telegram-${account}-allowFrom.json`);
   try {
     const parsed = JSON.parse(await fs.readFile(file, "utf-8")) as { allowFrom?: unknown };
@@ -1916,9 +1929,14 @@ export async function readTelegramAllowFrom(account = "default"): Promise<string
 /**
  * Wipe the per-account Telegram allowlist + pending stores. Used when the bot
  * token changes: previously-approved senders belong to the old bot, so a new
- * bot should start with a fresh allowlist. Best-effort — missing files are fine.
+ * bot should start with a fresh allowlist. Clears the v2 state database rows
+ * when the store exists, and always the legacy files, so no copy survives for
+ * a later migration to carry back in. Best-effort — a missing store or file
+ * is fine; the caller restarts the gateway right after, so nothing cached
+ * outlives the wipe.
  */
 export async function clearTelegramPairingState(account = "default"): Promise<void> {
+  clearPairingState("telegram", account);
   const files = [
     path.join(CREDENTIALS_DIR, `telegram-${account}-allowFrom.json`),
     path.join(CREDENTIALS_DIR, account === "default" ? "telegram-pairing.json" : `telegram-${account}-pairing.json`),

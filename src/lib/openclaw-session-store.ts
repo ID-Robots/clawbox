@@ -81,7 +81,12 @@ export function sessionStorePath(agentId: string, agentsDir: string = AGENTS_DIR
   }
 }
 
-function open(dbPath: string, readOnly: boolean): DatabaseSyncType {
+/**
+ * Open one of OpenClaw's SQLite stores with the busy timeout every reader and
+ * writer here relies on. Shared with openclaw-state-store.ts, which serves the
+ * gateway-wide `state/openclaw.sqlite` the same way.
+ */
+export function openSqlite(dbPath: string, readOnly: boolean): DatabaseSyncType {
   const { DatabaseSync } = requireNodeSqlite();
   const db = new DatabaseSync(dbPath, { readOnly });
   try {
@@ -111,7 +116,7 @@ export function readTranscriptRaw(
   // 500 from a chat-history read.
   let db: DatabaseSyncType;
   try {
-    db = open(dbPath, true);
+    db = openSqlite(dbPath, true);
   } catch (err) {
     console.warn(`[session-store] could not open ${dbPath}:`, err);
     return null;
@@ -201,7 +206,7 @@ export function sweepSessionEntries(
   if (!dbPath) return null;
   let db: DatabaseSyncType;
   try {
-    db = open(dbPath, false);
+    db = openSqlite(dbPath, false);
   } catch (err) {
     console.error(`[session-store] could not open ${dbPath} for sweep:`, err);
     return { updated: 0, ok: false };
