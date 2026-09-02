@@ -328,6 +328,41 @@ export function buildTurnFromRows(rows: MessageRow[]): HermesTurnRecord | null {
   };
 }
 
+/** One `session_model_usage` row, trimmed to the column this module reads. */
+interface UsageRow {
+  billing_provider?: string | null;
+}
+
+/**
+ * Which provider a set of usage rows can be said to name — or nothing.
+ *
+ * Exported for its own test: the rule is the part with a decision in it, and a
+ * test for it should not need a SQLite file to say what it means.
+ *
+ * ONE provider or none, deliberately. `session_model_usage` is keyed on
+ * (session, model, provider, base_url, mode, task), so one session can hold
+ * several rows for the same model id — several tasks under one provider, which
+ * is the ordinary case and answers cleanly, or the same model billed under two
+ * DIFFERENT providers over the conversation's life, which is the case nothing
+ * here can resolve.
+ *
+ * "Take the newest" is not that resolution, and `first_seen` / `last_seen` are
+ * why rather than why not: a row AGGREGATES a session's calls for its key
+ * (`api_call_count` beside them), so `last_seen` says when that combination
+ * last billed, never which turn it billed for. No comparison this function can
+ * make attributes one row to one turn, so a tie between providers is refused
+ * instead of broken. Unknown beats wrong, the rule this whole path follows.
+ */
+export function pickBillingProvider(rows: UsageRow[]): string {
+  if (!Array.isArray(rows)) return "";
+  const named = new Set(
+    rows
+      .map((row) => (typeof row?.billing_provider === "string" ? row.billing_provider.trim() : ""))
+      .filter(Boolean),
+  );
+  return named.size === 1 ? [...named][0] : "";
+}
+
 /** The shape of the `node:sqlite` handle we use, kept local to avoid a dep. */
 interface ReadOnlyDb {
   prepare: (sql: string) => { all: (...params: unknown[]) => unknown[] };
@@ -335,15 +370,17 @@ interface ReadOnlyDb {
 }
 
 /**
- * The turn the agent just finished, read back from its own store.
- *
- * Returns null whenever the record cannot be had for ANY reason — that is the
- * contract, and the caller's fallback is the console text it already captured.
- * Nothing in here is allowed to throw into a request that has a good reply in
- * its hand.
+ * Open `state.db` read-only, hand it to `read`, and give `fallback` back for
+ * ANY failure at all — no database, no `node:sqlite`, a table or column that
+ * moved. That is the contract every caller here relies on: nothing in this
+ * module is allowed to throw into a request that has a good reply in its hand.
  */
-export async function readHermesTurn(sessionId: string): Promise<HermesTurnRecord | null> {
-  if (!sessionId) return null;
+async function withStateDb<T>(
+  /** What was being read, for the journal line. Never the contents. */
+  what: string,
+  fallback: T,
+  read: (db: ReadOnlyDb) => T,
+): Promise<T> {
   let db: ReadOnlyDb | null = null;
   try {
     // `node:sqlite` is a Node 22.5+ builtin and still flagged experimental, so
@@ -359,25 +396,19 @@ export async function readHermesTurn(sessionId: string): Promise<HermesTurnRecor
     const DatabaseSync = (sqlite as unknown as {
       DatabaseSync?: new (file: string, options?: { readOnly?: boolean }) => ReadOnlyDb;
     }).DatabaseSync;
-    if (!DatabaseSync) return null;
+    if (!DatabaseSync) return fallback;
     // READ-ONLY, always. This file is the agent's memory; the UI is a reader of
     // it and must never be able to become a writer by accident.
     db = new DatabaseSync(statePath(), { readOnly: true });
-    const rows = db
-      .prepare(
-        "SELECT id, role, content, tool_calls, tool_call_id, tool_name, reasoning, reasoning_content"
-        + " FROM messages WHERE session_id = ? ORDER BY id",
-      )
-      .all(sessionId) as MessageRow[];
-    return buildTurnFromRows(rows);
+    return read(db);
   } catch (err) {
     // Name the failure, never the contents: this journal line is the one part
     // of the pipeline that leaves the box, and the turn is the customer's.
     console.warn(
-      "[hermes/turn] could not read the agent's record:",
+      `[hermes/turn] could not read ${what}:`,
       err instanceof Error ? err.message : "unknown error",
     );
-    return null;
+    return fallback;
   } finally {
     try {
       db?.close();
@@ -385,4 +416,49 @@ export async function readHermesTurn(sessionId: string): Promise<HermesTurnRecor
       // Nothing left to do about a handle that will be collected anyway.
     }
   }
+}
+
+/**
+ * The turn the agent just finished, read back from its own store.
+ *
+ * Returns null whenever the record cannot be had for ANY reason — that is the
+ * contract, and the caller's fallback is the console text it already captured.
+ */
+export async function readHermesTurn(sessionId: string): Promise<HermesTurnRecord | null> {
+  if (!sessionId) return null;
+  return withStateDb<HermesTurnRecord | null>("the agent's record", null, (db) => {
+    const rows = db
+      .prepare(
+        "SELECT id, role, content, tool_calls, tool_call_id, tool_name, reasoning, reasoning_content"
+        + " FROM messages WHERE session_id = ? ORDER BY id",
+      )
+      .all(sessionId) as MessageRow[];
+    return buildTurnFromRows(rows);
+  });
+}
+
+/**
+ * Who Hermes says it BILLED for this session's turns on this model — the
+ * harness's own answer to "who served that reply", read from its own store.
+ *
+ * `messages` cannot answer it: its columns are the turn's content, and there is
+ * no model or provider among them (checked on the box with
+ * `PRAGMA table_info(messages)`). `sessions` carries `model` and
+ * `billing_provider`, but only the LAST ones the thread used, so a conversation
+ * that switched models would relabel its older bubbles — the exact defect the
+ * served-model work exists to prevent. `session_model_usage` is the surface
+ * that fits: keyed per (session, model), carrying the provider that actually
+ * billed. It is read here keyed on BOTH, so a row belonging to another model in
+ * the same conversation cannot speak for this one.
+ *
+ * Returns "" for anything less than a single unambiguous answer.
+ */
+export async function readHermesBillingProvider(sessionId: string, model: string): Promise<string> {
+  if (!sessionId || !model) return "";
+  return withStateDb("the agent's billing record", "", (db) => {
+    const rows = db
+      .prepare("SELECT billing_provider FROM session_model_usage WHERE session_id = ? AND model = ?")
+      .all(sessionId, model) as UsageRow[];
+    return pickBillingProvider(rows);
+  });
 }

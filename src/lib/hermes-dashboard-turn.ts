@@ -538,7 +538,13 @@ const COMMAND_SAFE_ID = /^[A-Za-z0-9_./:-]+$/;
  * and one it switched, and neither reaches this function (see
  * `providerFromRequest`).
  */
-const DASHBOARD_PROVIDER_KIND = "custom";
+/**
+ * The dashboard's word for "a user-defined provider", which is ALSO a real CLI
+ * slug. Exported because the route has to make the same refusal about the same
+ * word when it reads the harness's billing record — one definition, so the two
+ * cannot drift.
+ */
+export const DASHBOARD_PROVIDER_KIND = "custom";
 function servedProviderSlug(reported: string, req: DashboardTurnRequest, onRequestedModel: boolean): string {
   const requested = req.provider;
   const reportedIsKind = reported === DASHBOARD_PROVIDER_KIND;

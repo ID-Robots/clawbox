@@ -41,14 +41,19 @@ import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "@/lib/harness/trans
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
-import { readHermesTurn } from "@/lib/harness/hermes-turn-record";
+import { readHermesBillingProvider, readHermesTurn } from "@/lib/harness/hermes-turn-record";
 import {
   adoptHermesGeneratedImages,
   reclaimImageMentions,
   servableMediaRoot,
 } from "@/lib/harness/hermes-generated-media";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
-import { isQuietStreamError, openDashboardTurn, type DashboardTurn } from "@/lib/hermes-dashboard-turn";
+import {
+  DASHBOARD_PROVIDER_KIND,
+  isQuietStreamError,
+  openDashboardTurn,
+  type DashboardTurn,
+} from "@/lib/hermes-dashboard-turn";
 import {
   errorFromStderr,
   hermesFailureMessage,
@@ -410,16 +415,18 @@ async function settleTurn(
     // moment the turn was submitted, after any switch had been applied and
     // acknowledged.
     //
-    // UNVERIFIED, and worth stating as such: this rests on `state.db`'s
-    // `messages` table having no model column, which nothing here has ever
-    // asked. `readHermesTurn` selects an explicit column list
-    // (`hermes-turn-record.ts`), so the code neither proves nor disproves it.
-    // If that table — or `sessions` — does carry the model, the harness knows
-    // the answer natively and this reconstruction should be replaced by reading
-    // the row `readHermesTurn` already opens for reasoning and tool calls,
-    // which would be strictly more accurate and would retire `cliServedPair`
-    // with it. One read-only command settles it:
-    // `sqlite3 ~/.hermes/state.db 'PRAGMA table_info(messages)'`.
+    // ASKED, on the box, and the answer is on the record now.
+    // `PRAGMA table_info(messages)` lists 23 columns and not one of them names
+    // a model, a provider or a billing mode — so the row `readHermesTurn`
+    // already opens genuinely cannot supply this, and the reconstruction
+    // stands. `sessions` DOES carry `model` and `billing_provider`, but only
+    // the LAST ones the thread used: reading them per bubble would relabel
+    // every older reply in a conversation that switched, which is the defect
+    // this field exists to prevent.
+    //
+    // What the harness can answer per (session, model) is
+    // `session_model_usage.billing_provider` — see `billedProviderFor`, which
+    // asks it for the one case nothing else can speak for.
     ...(served.model ? { model: served.model } : {}),
     ...(served.provider ? { provider: served.provider } : {}),
   }, sessionKey);
@@ -497,19 +504,88 @@ async function settleTurn(
  * the half it left empty. Only a turn that reported no model at all — a
  * transport that never produced a frame, and the quiet-stream recovery, which
  * passes `null` — falls back to what the session was settled on.
+ *
+ * The half it left empty is then asked of the HARNESS, and only ever of the
+ * harness — see `billedProviderFor`. That is not a retreat from the paragraph
+ * above: it invents nothing and reads nothing about what was configured. It
+ * asks Hermes what it billed for this session and this model, which is the one
+ * source that can answer "who served that reply" as a fact.
  */
-function servedPair(
+async function servedPair(
   final: { model?: string; provider?: string } | null,
   turn: DashboardTurn,
-): { model?: string; provider?: string } {
+  /** The session the answer was recorded under — the key the harness bills by. */
+  sessionId: string,
+  /** Whether the REQUEST named a provider; see `billedProviderFor`. */
+  requestNamedProvider: boolean,
+): Promise<{ model?: string; provider?: string }> {
   const source = final?.model ? final : { model: turn.model, provider: turn.provider };
+  const model = source.model || "";
+  const provider = source.provider
+    || (model && !requestNamedProvider ? await billedProviderFor(sessionId, model) : "");
   return {
-    ...(source.model ? { model: source.model } : {}),
-    ...(source.provider ? { provider: source.provider } : {}),
+    ...(model ? { model } : {}),
+    ...(provider ? { provider } : {}),
   };
 }
 
-function streamTurn(turn: DashboardTurn, fallbackSessionId: string, sessionKey: string): Response {
+/**
+ * The provider Hermes itself recorded against this turn, for a turn the
+ * customer pinned nothing on.
+ *
+ * THE CASE THIS EXISTS FOR is the ordinary new chat: press "+", type, send. The
+ * request names neither half, so the transport has no contract to fall back on
+ * — `servedProviderSlug` returns nothing without a requested provider — and the
+ * dashboard's own frames name a model and no provider. Measured on the box,
+ * three runs out of three: `done` carried `gpt-5.6-sol` with no `provider` key
+ * and the durable transcript stored `provider=None`, while Hermes'
+ * `session_model_usage` held `billing_provider='openai-codex'` for each of
+ * those three session ids. The bubble said which model answered and could not
+ * say who served it, and the answer was one read away.
+ *
+ * ONLY when the request named no provider. Where it did and the transport still
+ * declined, the decline is the contradiction guard doing its job — a canonical
+ * slug asked of a session the dashboard reports as the KIND `custom` — and this
+ * must not talk over it. Nothing here loosens that guard; it answers the case
+ * the guard was never about.
+ *
+ * NOT from `config.yaml` and NOT from the device default, which is the fix this
+ * deliberately is not: what the box is configured to run is not evidence about
+ * what this session ran, and reading it that way is exactly what the served-
+ * model work removed.
+ */
+async function billedProviderFor(sessionId: string, model: string): Promise<string> {
+  const billed = await readHermesBillingProvider(sessionId, model);
+  // It is about to be persisted and rendered, so it is charset-checked like any
+  // other provider id, even though it came from the box's own store.
+  if (!billed || !isPlausibleHermesProviderId(billed)) return "";
+  // `custom` is a KIND as well as a real slug and nothing here can tell the two
+  // apart — the same refusal `servedProviderSlug` makes about the same word.
+  if (billed === DASHBOARD_PROVIDER_KIND) return "";
+  // A recorded pairing the catalogue calls impossible is not an answer about
+  // this turn. Judged by the same two helpers the request itself passes on the
+  // way in, so "we cannot tell" (a stale payload, a provider we could not
+  // enumerate) can never become "wrong": `shouldEnforcePairing` declines those.
+  //
+  // The catalogue is memoised — fresh under a minute, served stale instantly
+  // for hours, and warmed by the chat header on mount — so this is a lookup in
+  // steady state. The one turn that could pay a live fetch is the first
+  // unpinned turn of a cold process, and it pays it AFTER the answer has
+  // already streamed: what arrives late is the label, never the reply.
+  const payload = await getModelOptions().catch(() => null);
+  if (payload && shouldEnforcePairing(payload, billed) && !isPairAllowed(payload, billed, model)) {
+    return "";
+  }
+  return billed;
+}
+
+function streamTurn(
+  turn: DashboardTurn,
+  fallbackSessionId: string,
+  sessionKey: string,
+  /** Whether the REQUEST named a provider — see `billedProviderFor`. */
+  requestNamedProvider: boolean,
+): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -586,7 +662,13 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string, sessionKey: 
         } else {
           send(
             "done",
-            await settleTurn(threaded, sessionKey, final.text, final.reasoning, servedPair(final, turn)),
+            await settleTurn(
+              threaded,
+              sessionKey,
+              final.text,
+              final.reasoning,
+              await servedPair(final, turn, threaded, requestNamedProvider),
+            ),
           );
         }
       } catch (err) {
@@ -624,7 +706,13 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string, sessionKey: 
           if (recovered?.text) {
             send(
               "done",
-              await settleTurn(threaded, sessionKey, recovered.text, "", servedPair(null, turn)),
+              await settleTurn(
+                threaded,
+                sessionKey,
+                recovered.text,
+                "",
+                await servedPair(null, turn, threaded, requestNamedProvider),
+              ),
             );
             return;
           }
@@ -701,6 +789,13 @@ function isAbort(err: unknown): boolean {
  * assumption the fallback already rests on, rather than inventing a second one.
  * Unverified on a box all the same, and it is one read: `hermes chat --help`
  * plus one resumed turn with `-m`.
+ *
+ * The harness's billing record is deliberately NOT consulted here, though the
+ * dashboard leg now reads it (`billedProviderFor`). It is keyed on the model,
+ * and the only CLI case with a blank provider is the resumed run — the one case
+ * whose MODEL is the unverified claim above. A lookup keyed on a model the
+ * session may have overridden either finds nothing or corroborates a label that
+ * was never the question. It would answer with more confidence, not more truth.
  */
 async function cliServedPair(
   model: string,
@@ -1053,7 +1148,10 @@ export async function POST(request: Request) {
       ...(rawSessionId ? { sessionId: rawSessionId } : {}),
       signal: request.signal,
     });
-    if (turn) return streamTurn(turn, rawSessionId, sessionKey);
+    // `wantsProvider` and not `rawProvider`: "auto" is ClawBox's word for "let
+    // Hermes decide", so a turn that sent it named no provider either, and the
+    // harness's own record is precisely the answer to what it decided.
+    if (turn) return streamTurn(turn, rawSessionId, sessionKey, wantsProvider);
   }
 
   // Read BEFORE the run, not after: the default this turn used is the one on

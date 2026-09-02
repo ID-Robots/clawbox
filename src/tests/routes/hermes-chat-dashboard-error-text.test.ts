@@ -38,7 +38,13 @@ vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => ({
 }));
 vi.mock("child_process", () => ({ spawn: spawnMock }));
 vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock }));
-vi.mock("@/lib/harness/hermes-turn-record", () => ({ readHermesTurn: readTurnMock }));
+// The billing read answers "" here: nothing in this file is about the served
+// pair, and a module mock that omits an export the route imports fails as a
+// missing-export error rather than as the assertion it was written for.
+vi.mock("@/lib/harness/hermes-turn-record", () => ({
+  readHermesTurn: readTurnMock,
+  readHermesBillingProvider: async () => "",
+}));
 vi.mock("@/lib/harness/media-root", () => ({
   resolveInMediaRoot: vi.fn(async (p: string) => p),
   chatMediaRoot: vi.fn(async () => "/tmp/clawbox-dashboard-error-media"),

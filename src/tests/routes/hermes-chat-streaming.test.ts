@@ -22,6 +22,7 @@ const openTurnMock = vi.hoisted(() => vi.fn());
 const spawnMock = vi.hoisted(() => vi.fn());
 const appendMock = vi.hoisted(() => vi.fn());
 const readTurnMock = vi.hoisted(() => vi.fn());
+const billedMock = vi.hoisted(() => vi.fn());
 
 // Only the OPENING is faked. The rest of the module — `isQuietStreamError` and
 // the error class it recognises — is the real thing, because the route's
@@ -34,7 +35,13 @@ vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => ({
 }));
 vi.mock("child_process", () => ({ spawn: spawnMock }));
 vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock }));
-vi.mock("@/lib/harness/hermes-turn-record", () => ({ readHermesTurn: readTurnMock }));
+// `readHermesBillingProvider` answers "" throughout this file: these cases are
+// about what the TRANSPORT says, and a box whose usage record cannot be read is
+// what leaves the transport's own answer as the only one on the table.
+vi.mock("@/lib/harness/hermes-turn-record", () => ({
+  readHermesTurn: readTurnMock,
+  readHermesBillingProvider: billedMock,
+}));
 // `chatMediaRoot` is named here as well as `resolveInMediaRoot` because the
 // settle path asks for it now. Left out, the CALL throws synchronously rather
 // than rejecting, which `servableMediaRoot` survives — but then every case in
@@ -145,6 +152,8 @@ beforeEach(() => {
   appendMock.mockResolvedValue(true);
   readTurnMock.mockReset();
   readTurnMock.mockResolvedValue(null);
+  billedMock.mockReset();
+  billedMock.mockResolvedValue("");
 });
 
 describe("a streamed chat turn", () => {
