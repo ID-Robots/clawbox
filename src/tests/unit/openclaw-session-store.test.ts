@@ -113,9 +113,11 @@ describe("openclaw-session-store", () => {
       .split("\n")
       .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
       .join("\n");
-    expect(code).not.toMatch(/\b(UPDATE|INSERT|DELETE|REPLACE)\b/);
+    expect(code).not.toMatch(/\b(?:UPDATE|INSERT|DELETE|REPLACE)\b/i);
     // `openSqlite(path, readOnly)` is exported for the gateway-wide state
-    // store (a different database); every use INSIDE this module is read-only.
+    // store (a different database); every use INSIDE this module is read-only,
+    // and it is the only constructor path, so that covers every open.
+    expect(code.match(/\bnew DatabaseSync\(/g) ?? []).toHaveLength(1);
     const uses = (code.match(/openSqlite\([^)]*\)/g) ?? []).filter((call) => !call.startsWith("openSqlite(dbPath: string"));
     expect(uses.length).toBeGreaterThan(0);
     for (const use of uses) expect(use).toMatch(/,\s*true\)$/);

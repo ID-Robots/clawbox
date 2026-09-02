@@ -43,7 +43,7 @@ vi.mock("@/lib/openclaw-session-store", () => ({
   readSessionEntries: vi.fn(),
 }));
 
-import { callGatewayRpc } from "@/lib/openclaw-config";
+import { callGatewayRpc, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { readSessionEntries } from "@/lib/openclaw-session-store";
 
 type Params = { targets: Array<{ key: string; agentId: string }>; patch: { model: string | null } };
@@ -51,6 +51,7 @@ type Outcome = { ok: boolean; key: string; agentId?: string; error?: { code: str
 
 const gateway = vi.mocked(callGatewayRpc);
 const rows = vi.mocked(readSessionEntries);
+const configWrites = () => vi.mocked(runOpenclawConfigSet).mock.calls.map(([args]) => args);
 
 /** Answers every target `ok`, except the keys in `refuse`. */
 function answering(refuse: Record<string, { code: string; message: string }> = {}) {
@@ -139,11 +140,28 @@ describe("Local-only on (sessions)", () => {
     expect(JSON.parse(readFileSync(archive, "utf8"))["agent:main:main"].modelOverride).toBe("deepseek-v4-pro");
     expect(JSON.parse(readFileSync(legacy, "utf8"))["agent:legacy:main"].modelOverride).toBe("gemma4-e2b-it-q4_0");
   });
+
+  it("says so when an agent's sessions could not be listed, instead of claiming every chat is local", async () => {
+    rows.mockReturnValue(null);
+    answering();
+
+    const res = await post(true);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      enabled: true,
+      warning: expect.stringMatching(/^The sessions of 1 agent\(s\) could not be listed/),
+    });
+    expect(gateway).not.toHaveBeenCalled();
+    expect(state.store.get("local_only_mode")).toBe(true);
+    expect(state.store.get("local_only_saved_session_overrides")).toEqual({});
+  });
 });
 
 describe("Local-only off (sessions)", () => {
   beforeEach(() => {
     state.store.set("local_only_mode", true);
+    state.store.set("local_ai_model", "llamacpp/gemma4-e2b-it-q4_0");
     state.store.set("local_only_saved_primary", "deepseek/deepseek-v4-pro");
     state.store.set("local_only_saved_session_overrides", {
       "sqlite:main": {
@@ -171,6 +189,27 @@ describe("Local-only off (sessions)", () => {
     expect(calls).toEqual([
       ["sessions.patchMany", { targets: [{ key: "agent:main:main", agentId: "main" }], patch: { model: "deepseek/deepseek-v4-pro" } }],
       ["sessions.patchMany", { targets: [{ key: "agent:main:clawbox-1", agentId: "main" }], patch: { model: null } }],
+    ]);
+    expect(state.store.has("local_only_mode")).toBe(false);
+    expect(state.store.has("local_only_saved_session_overrides")).toBe(false);
+  });
+
+  it("routes a backup that names a since-migrated sessions.json through the gateway", async () => {
+    // Local-only went on before the OpenClaw 2 migration: the backup names
+    // the agent's sessions.json, which the doctor has since folded into the
+    // store and removed. Same keys, same entries — restore them where the
+    // gateway reads them now, for the sessions that still exist.
+    const archive = path.join(agentsDir, "main", "sessions", "sessions.json");
+    state.store.set("local_only_saved_session_overrides", {
+      [archive]: { "agent:main:main": DEEPSEEK_PIN, "agent:main:closed": DEEPSEEK_PIN },
+    });
+    answering();
+
+    const res = await post(false);
+
+    expect(res.status).toBe(200);
+    expect(gateway.mock.calls.map(([method, params]) => [method, params])).toEqual([
+      ["sessions.patchMany", { targets: [{ key: "agent:main:main", agentId: "main" }], patch: { model: "deepseek/deepseek-v4-pro" } }],
     ]);
     expect(state.store.has("local_only_mode")).toBe(false);
     expect(state.store.has("local_only_saved_session_overrides")).toBe(false);
@@ -207,5 +246,14 @@ describe("Local-only off (sessions)", () => {
     expect(state.store.get("local_only_saved_session_overrides")).toEqual({
       "sqlite:main": { "agent:main:main": DEEPSEEK_PIN, "agent:main:clawbox-1": {}, "agent:main:closed": DEEPSEEK_PIN },
     });
+    // The box must be what the mode says it is: the cloud primary written
+    // for the restore goes back to the local model, and the saved primary
+    // survives so the next toggle-off starts over.
+    expect(configWrites()).toEqual([
+      ["agents.defaults.model.primary", JSON.stringify("deepseek/deepseek-v4-pro"), "--json"],
+      ["agents.defaults.model.primary", JSON.stringify("llamacpp/gemma4-e2b-it-q4_0"), "--json"],
+      ["agents.defaults.model.fallbacks", "[]", "--json"],
+    ]);
+    expect(state.store.get("local_only_saved_primary")).toBe("deepseek/deepseek-v4-pro");
   }, 10_000);
 });

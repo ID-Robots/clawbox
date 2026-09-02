@@ -158,16 +158,18 @@ async function readSessionsJson(
  * and forth preserves them.
  *
  * `sessionsSkipped` counts the sessions the gateway would not switch (each
- * one logged with its reason). They still route to their previous provider,
- * which for Local-only is a privacy claim, not a routing detail — so the
- * caller says so.
+ * one logged with its reason) and `agentsUnread` the agents whose store could
+ * not even be listed (locked, unreadable). Either way those sessions still
+ * route to their previous provider, which for Local-only is a privacy claim,
+ * not a routing detail — so the caller says so.
  */
 async function patchAllSessionOverrides(
   localProvider: string,
   localModelId: string,
-): Promise<{ backup: FilesBackup; sessionsSkipped: number }> {
+): Promise<{ backup: FilesBackup; sessionsSkipped: number; agentsUnread: number }> {
   const filesBackup: FilesBackup = {};
   let sessionsSkipped = 0;
+  let agentsUnread = 0;
   const localModel = `${localProvider}/${localModelId}`;
   // An agent with a store is served from it whatever else is on disk: its
   // leftover sessions.json is an archive the gateway no longer reads. Patching
@@ -180,6 +182,7 @@ async function patchAllSessionOverrides(
     migratedAgents.add(agentId);
     const rows = readSessionEntries(agentId, AGENTS_DIR);
     if (!rows) {
+      agentsUnread += 1;
       console.error(`[local-only] could not list the sessions of agent ${agentId}; they keep their previous model`);
       continue;
     }
@@ -234,7 +237,7 @@ async function patchAllSessionOverrides(
       console.error(`[local-only] Failed to write patched sessions file ${file}:`, err);
     }
   }
-  return { backup: filesBackup, sessionsSkipped };
+  return { backup: filesBackup, sessionsSkipped, agentsUnread };
 }
 
 /**
@@ -420,7 +423,7 @@ export async function POST(request: Request) {
       //    flip — any chat pane that was already open silently keeps
       //    routing to its previously-bound cloud provider, and users
       //    have no UI signal that Local-only isn't actually local.
-      const { backup, sessionsSkipped } = await patchAllSessionOverrides(
+      const { backup, sessionsSkipped, agentsUnread } = await patchAllSessionOverrides(
         parsedLocal.provider,
         parsedLocal.modelId,
       );
@@ -428,6 +431,11 @@ export async function POST(request: Request) {
       if (sessionsSkipped > 0) {
         warnings.push(
           `${sessionsSkipped} open chat(s) could not be switched to the local model and still route to their previous provider — start a new chat to stay local.`,
+        );
+      }
+      if (agentsUnread > 0) {
+        warnings.push(
+          `The sessions of ${agentsUnread} agent(s) could not be listed and still route to their previous provider — start a new chat to stay local.`,
         );
       }
 
@@ -447,21 +455,26 @@ export async function POST(request: Request) {
         ? await restoreSessionOverrides(savedSessionOverrides)
         : { complete: true, sessionsKept: 0 };
 
-      await setMany({
-        [SAVED_PRIMARY_KEY]: undefined,
-        [SAVED_FALLBACKS_KEY]: undefined,
-        // The snapshot is the ONLY copy of the pre-Local-only overrides. A
-        // restore that could not complete yet (the gateway was not reachable,
-        // or refused for now) keeps it, so the next toggle-off can finish the
-        // job instead of stranding every session on the local model for ever.
-        [SAVED_SESSION_OVERRIDES_KEY]: restore.complete ? undefined : savedSessionOverrides,
-        // The mode stays ON while the restore is incomplete: clearing it
-        // would make the next disable return early as a no-op, and an
-        // enable-then-disable cycle would overwrite the kept snapshot with
-        // local values. The owner retries the same toggle instead.
-        [MODE_KEY]: restore.complete ? undefined : true,
-      });
       if (!restore.complete) {
+        // The mode stays ON: the snapshot is the ONLY copy of the pre-Local-only
+        // overrides, and a restore that could not complete yet (the gateway
+        // was not reachable, or refused for now) must be retried from it —
+        // clearing the mode would make that retry an early no-op, and an
+        // enable-then-disable cycle would overwrite the snapshot with local
+        // values. Nothing saved is cleared either, so the retry starts over.
+        //
+        // The primary and fallbacks were already written back to the cloud
+        // values above, and a box that says Local-only while every new
+        // session after the next gateway start would go to the cloud is a
+        // box claiming a state it does not have. Put them back where the
+        // mode says they are.
+        const localModel = (await get("local_ai_model")) as string | undefined;
+        if (localModel) {
+          await setConfig("agents.defaults.model.primary", JSON.stringify(localModel));
+          await setConfig("agents.defaults.model.fallbacks", "[]");
+        } else {
+          console.error("[local-only] restore incomplete and no local model recorded; the primary stays on the saved provider");
+        }
         // Not a 2xx: the panel reads `res.ok` as "the switch moved" and would
         // paint the toggle OFF over a box that is still in Local-only. A
         // failure status keeps the switch where the server is and shows why.
@@ -475,6 +488,12 @@ export async function POST(request: Request) {
           { status: 503 },
         );
       }
+      await setMany({
+        [SAVED_PRIMARY_KEY]: undefined,
+        [SAVED_FALLBACKS_KEY]: undefined,
+        [SAVED_SESSION_OVERRIDES_KEY]: undefined,
+        [MODE_KEY]: undefined,
+      });
       if (restore.sessionsKept > 0) {
         warnings.push(
           `${restore.sessionsKept} chat(s) could not be switched back and stay on the local model — reset those chats to use the restored provider.`,
