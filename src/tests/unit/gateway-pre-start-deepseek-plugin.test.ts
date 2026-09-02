@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { testEnv } from "@/tests/helpers/env";
 
 // gateway-pre-start.sh installs @openclaw/deepseek-provider on a paired box
 // that lacks it, PINNED to the installed core. The day OpenClaw 2026.8.2
@@ -84,14 +85,14 @@ function run(opts: RunOptions): { installs: string[]; stdout: string } {
   chmodSync(bin, 0o755);
   const result = spawnSync("bash", ["-c", BLOCK], {
     encoding: "utf-8",
-    env: {
+    env: testEnv({
       PATH: process.env.PATH ?? "/usr/bin:/bin",
       CLAWBOX_OPENCLAW_V2: "1",
       OPENCLAW_HOME_DIR: home,
       OPENCLAW_CONFIG: config,
       OPENCLAW_BIN: bin,
       CLAWBOX_OPENCLAW_EFFECTIVE: opts.effective,
-    },
+    }),
   });
   if (result.status !== 0) throw new Error(`block exited ${result.status}: ${result.stderr}`);
   let installs: string[] = [];

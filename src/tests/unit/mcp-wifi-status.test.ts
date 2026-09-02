@@ -61,6 +61,7 @@ function routes(wifi: unknown, ethernet: unknown | Error) {
 
 async function status(h: ReturnType<typeof harness>) {
   const out = await h.call("wifi_status");
+  if (out.isError) throw new Error("wifi_status failed");
   return JSON.parse(out.text);
 }
 

@@ -23,6 +23,7 @@ interface BenchRow {
   audio_seconds: number;
   cold_wall_seconds: number | null;
   median_wall_seconds: number | null;
+  cold_excluded_from_median: boolean;
   median_rtf: number | null;
   median_x_realtime: number | null;
   wer: number | null;
@@ -57,6 +58,7 @@ interface BenchReport {
     note: string;
     cpu: string[];
     cuda: string[];
+    cuda_error: string;
     ctranslate2_version: string;
     faster_whisper_version: string;
   };

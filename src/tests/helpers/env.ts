@@ -17,3 +17,18 @@ export function saveEnv(...keys: string[]): () => void {
     }
   };
 }
+
+/**
+ * Build a `ProcessEnv` for a test to hand to spawned processes or env-reading
+ * helpers.
+ *
+ * Next's `global.d.ts` declares `NODE_ENV` as a REQUIRED property of
+ * `NodeJS.ProcessEnv`, and @types/node 20.19.43 dropped the optional `TZ`
+ * member that used to let a partial object literal slide through the cast.
+ * This supplies the one required key in ONE place, so no test needs its own
+ * `as NodeJS.ProcessEnv`.
+ */
+export function testEnv(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { NODE_ENV: "test" };
+  return Object.assign(env, overrides);
+}

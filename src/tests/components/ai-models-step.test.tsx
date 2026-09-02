@@ -396,7 +396,10 @@ describe("AIModelsStep variants", () => {
   });
 
   it("reserves the redirect OAuth tab before awaiting and offers a blocked-popup recovery link", async () => {
-    let resolveStart: (() => void) | null = null;
+    // A no-op rather than null: the executor assigns inside a closure, so
+    // control-flow analysis otherwise narrows the variable to `null` at the
+    // call below and `?.()` becomes a call on `never`.
+    let resolveStart: () => void = () => {};
     const startReady = new Promise<void>((resolve) => { resolveStart = resolve; });
     const authorizationUrl = "https://console.anthropic.com/oauth/authorize?state=test";
     const fetchMock = vi.mocked(fetch);
@@ -432,7 +435,7 @@ describe("AIModelsStep variants", () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/oauth/start"))).toBe(true);
     expect(getByRole("button", { name: "Connect to Anthropic Claude" })).toBeInTheDocument();
 
-    resolveStart?.();
+    resolveStart();
 
     const recovery = await findByRole("link", { name: "Open authorization page" });
     expect(recovery).toHaveAttribute("href", authorizationUrl);

@@ -82,10 +82,10 @@ const PROBES = {
   embeddings: { supported: true, ready: true, available: false, provider: null, model: null, local: false },
 };
 
-function entry(models: { id: string }[], id: string) {
+function entry<T extends { id: string }>(models: T[], id: string): T {
   const found = models.find(m => m.id === id);
   if (!found) throw new Error(`no entry ${id}`);
-  return found as never;
+  return found;
 }
 
 describe("local model inventory", () => {

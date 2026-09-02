@@ -4,6 +4,8 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { testEnv } from "@/tests/helpers/env";
+
 /**
  * install.sh advertised "On-device TTS configured (Kokoro GPU, Piper fallback)"
  * while calling `install-voice.sh --piper-only`, which installs the CPU
@@ -193,7 +195,7 @@ function runTtsOnly(
   const res = spawnSync("bash", [INSTALL_VOICE, mode], {
     encoding: "utf-8",
     timeout: 60_000,
-    env: {
+    env: testEnv({
       PATH: `${bin}:/usr/bin:/bin`,
       HOME: home,
       CLAWBOX_USER: "clawbox",
@@ -207,7 +209,7 @@ function runTtsOnly(
       // only ever be measuring the permission error.
       CLAWBOX_TTS_STATUS_FILE: ttsStatus,
       ...env,
-    },
+    }),
   });
 
   const read = (f: string) => (existsSync(f) ? readFileSync(f, "utf-8") : "");
