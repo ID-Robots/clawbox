@@ -182,10 +182,17 @@ describe("catalog — a fallback is never served as a live enumeration", () => {
   });
 
   it("does not persist anything when the live enumeration returns no models", async () => {
-    mockList(
-      { count: 0, models: [] },
-      "Unknown provider filter: google\n",
-    );
+    // The real shape of a refusal, measured on 2026.8.1: `{ok: false, error}`
+    // on STDOUT, empty stderr, exit code 0. Reading the exit code alone would
+    // call this a successful refresh — which is precisely what
+    // "[catalog] refreshed codex: 0 models" was.
+    mockList({
+      ok: false,
+      error: {
+        type: "cli_error",
+        message: 'Unknown provider filter "google" for this installation.',
+      },
+    });
 
     refreshInBackground("google");
     await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled(), { timeout: 2000 });

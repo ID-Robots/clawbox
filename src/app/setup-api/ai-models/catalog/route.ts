@@ -170,6 +170,15 @@ async function writeDiskCache(provider: string, payload: CatalogResponse): Promi
 
 interface OpenclawListResponse {
   count: number;
+  /**
+   * A refused command answers `{ok: false, error}` on STDOUT and exits 0 —
+   * measured: `models list --provider codex --all --json` on 2026.8.1 prints
+   * `Unknown provider filter "codex" for this installation` in that body, with
+   * an empty stderr and exit code 0. An empty list has to be able to say why,
+   * so this is read rather than the exit code.
+   */
+  ok?: boolean;
+  error?: { type?: string; message?: string };
   models: Array<{
     key: string;
     name?: string;
@@ -594,8 +603,23 @@ const ENUMERATION_PROVIDER: Record<string, string> = {
 
 interface CatalogFetchResult {
   models: CatalogModel[];
-  /** The CLI's stderr, so a zero-model answer can say why it was empty. */
-  stderr: string;
+  /**
+   * Why an empty list was empty: the CLI's own `error.message` when it refused
+   * the command, else its stderr. Empty when it simply had nothing to list.
+   */
+  diagnostic: string;
+}
+
+function toFetchResult(
+  provider: string,
+  parsed: OpenclawListResponse,
+  stderr: string,
+): CatalogFetchResult {
+  const refusal = parsed.ok === false ? parsed.error?.message?.trim() : "";
+  return {
+    models: transformOpenclawEntries(provider, parsed.models ?? []),
+    diagnostic: refusal || stderr.trim(),
+  };
 }
 
 function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
@@ -630,10 +654,7 @@ function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
       try {
         const parsed = JSON.parse(stdout) as OpenclawListResponse;
         clearTimeout(timer);
-        finish(() => resolve({
-          models: transformOpenclawEntries(provider, parsed.models ?? []),
-          stderr,
-        }));
+        finish(() => resolve(toFetchResult(provider, parsed, stderr)));
       } catch {
         // Partial JSON — keep accumulating.
       }
@@ -653,7 +674,7 @@ function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
       finish(() => {
         try {
           const parsed = JSON.parse(stdout) as OpenclawListResponse;
-          resolve({ models: transformOpenclawEntries(provider, parsed.models ?? []), stderr });
+          resolve(toFetchResult(provider, parsed, stderr));
         } catch {
           reject(new Error(`openclaw produced non-JSON output: ${stdout.slice(0, 200)}`));
         }
@@ -671,7 +692,7 @@ async function fetchOpenRouterCatalog(): Promise<CatalogFetchResult> {
     throw new Error(`openrouter ${res.status}`);
   }
   const data = (await res.json()) as OpenRouterListResponse;
-  return { models: transformOpenRouterEntries(data.data ?? []), stderr: "" };
+  return { models: transformOpenRouterEntries(data.data ?? []), diagnostic: "" };
 }
 
 // Refresh the catalog for `provider` in the background. Returns
@@ -704,7 +725,7 @@ export function refreshInBackground(provider: string): void {
     // The only catalogue with no upstream to ask: Mike's gateway routes the
     // two device tiers and nothing else, so these two rows ARE the device's
     // answer rather than a stand-in for one.
-    fetcher = Promise.resolve({ models: CLAWAI_STATIC_MODELS, stderr: "" });
+    fetcher = Promise.resolve({ models: CLAWAI_STATIC_MODELS, diagnostic: "" });
   } else {
     fetcher = fetchOpenclawCatalog(provider);
   }
@@ -744,7 +765,7 @@ export function refreshInBackground(provider: string): void {
   };
 
   fetcher
-    .then(async ({ models, stderr }) => {
+    .then(async ({ models, diagnostic }) => {
       if (models.length === 0) {
         // NOT a success. "[catalog] refreshed codex: 0 models" used to be
         // followed by a disk write of the curated list, which then read back
@@ -754,7 +775,7 @@ export function refreshInBackground(provider: string): void {
         // of those are facts about what the box can run.
         console.warn(
           `[catalog] ${provider}: live enumeration returned no models, keeping the previous catalogue`
-          + (stderr.trim() ? ` — ${stderr.slice(-300).trim()}` : " (no stderr)"),
+          + (diagnostic ? ` — ${diagnostic.slice(-300)}` : " (the CLI gave no reason)"),
         );
         markStale();
         return;
