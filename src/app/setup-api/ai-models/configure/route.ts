@@ -1216,7 +1216,60 @@ async function applyCloudProviderTransport(opts: {
   return false;
 }
 
+/**
+ * Where the OpenClaw branch of one request has left clawbox-gateway.
+ *
+ * `runOpenclawDoctorFix` stops the unit before `doctor --fix` migrates the
+ * auth store the gateway holds open, and the matching restart is step 9 at
+ * the very end of the save. systemd does not start a unit again after an
+ * explicit `stop`, so every error exit between the two — the 502 rollback when
+ * doctor fails, the 400 profile-key refusal, any 500 from the config-set batch
+ * — used to answer with the gateway down: chat and every channel stayed dead
+ * until a reboot or a later save that happened to succeed (F-07).
+ */
+type GatewayState =
+  /** Nothing touched it: every early exit, and the API-key path before step 9. */
+  | "untouched"
+  /** Stopped for `doctor --fix`; no later step has restarted it. */
+  | "stopped-for-doctor"
+  /** Step 9 issued its restart — it came up, or step 9 answered its own 502. */
+  | "restart-issued";
+
+/** Folded into the error the owner sees when the restore itself fails. */
+const GATEWAY_OFFLINE_HINT =
+  "The assistant is offline until the gateway restarts — use Restart in the system tray.";
+
 export async function POST(request: Request) {
+  const gateway: { state: GatewayState } = { state: "untouched" };
+  const response = await configureModel(request, gateway);
+  if (gateway.state !== "stopped-for-doctor") return response;
+  // An error exit between the doctor stop and step 9. Only `restart` is
+  // granted to the clawbox user (config/clawbox-sudoers has no `start`), and
+  // it runs AFTER the rollback archived the legacy file, so the gateway does
+  // not boot straight into the AuthProfileMigrationRequired it would have hit.
+  try {
+    await restartGateway();
+    return response;
+  } catch (err) {
+    // A runtime mask (an update in flight) refuses the restart; never unmask
+    // from here. The save already failed — tell the owner what is left to do.
+    console.error(
+      "[configure] Gateway restart after the failed save also failed:",
+      err instanceof Error ? logSafe(err.message) : err,
+    );
+    return withGatewayOfflineHint(response);
+  }
+}
+
+async function withGatewayOfflineHint(response: Response): Promise<Response> {
+  const body = (await response.json().catch(() => ({}))) as { error?: unknown };
+  const error = typeof body.error === "string"
+    ? `${body.error} ${GATEWAY_OFFLINE_HINT}`
+    : GATEWAY_OFFLINE_HINT;
+  return NextResponse.json({ ...body, error }, { status: response.status });
+}
+
+async function configureModel(request: Request, gateway: { state: GatewayState }): Promise<Response> {
   // Hoisted so the catch can classify the failure without re-parsing the body —
   // a local-model or wrong-edition failure must not be reported as a credential
   // problem (there is no credential to check).
@@ -1928,6 +1981,9 @@ export async function POST(request: Request) {
       // proof; an early doctor failure may create none, so the installed binary
       // version is the second authority. An explicit v1 keeps its legitimate
       // legacy file and the old best-effort behavior.
+      // The stop inside is unconditional; POST restores the unit if no later
+      // step restarts it.
+      gateway.state = "stopped-for-doctor";
       try {
         await runOpenclawDoctorFix();
       } catch (doctorErr) {
@@ -2419,6 +2475,7 @@ export async function POST(request: Request) {
     // un-migrated auth store.)
 
     // 9. Restart OpenClaw gateway so it picks up the new auth profile and model
+    gateway.state = "restart-issued";
     try {
       await restartGateway();
     } catch (err) {
