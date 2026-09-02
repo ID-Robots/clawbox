@@ -1,6 +1,7 @@
 import { expect, vi } from "vitest";
 import { render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
+import { DESKTOP_TRANSCRIPT_KEY } from "@/lib/harness/transcript-key";
 
 /**
  * A box that runs Hermes and no gateway, as the chat surface sees it.
@@ -60,6 +61,12 @@ export interface HermesBox {
   /** The session key of every transcript READ, in order. */
   historyReads: string[];
   /**
+   * Per-key latency on the transcript read, so a test can switch conversations
+   * while one is still in flight. The gateway fake has the same seam, for the
+   * same races (`chat-tabs.test.tsx`).
+   */
+  historyDelayMs: Record<string, number>;
+  /**
    * What the chat route answers, when a test needs more than a line of text: a
    * failure, a reply it releases by hand, a paced event stream. Whatever this
    * returns is handed to the adapter as the fetch result verbatim (a promise is
@@ -109,6 +116,7 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
     transcriptDeletes: 0,
     deletedKeys: [],
     historyReads: [],
+    historyDelayMs: {},
     chatResponse: null,
     sessionIdFor: () => HERMES_SESSION,
     imagePrompts: [],
@@ -175,8 +183,8 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
       if (url.includes("/setup-api/chat/history")) {
         // The desktop thread unless the surface named another conversation —
         // the route's own default.
-        const key = new URL(url, "http://box").searchParams.get("sessionKey") || "desktop";
-        const isDesktop = key === "desktop";
+        const key = new URL(url, "http://box").searchParams.get("sessionKey") || DESKTOP_TRANSCRIPT_KEY;
+        const isDesktop = key === DESKTOP_TRANSCRIPT_KEY;
         if (init?.method === "DELETE") {
           box.transcriptDeletes += 1;
           box.deletedKeys.push(key);
@@ -186,6 +194,8 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
         }
         box.historyReads.push(key);
         const messages = isDesktop ? box.storedTranscript : box.tabTranscripts[key] ?? [];
+        const delay = box.historyDelayMs[key] ?? 0;
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
         return { ok: true, json: async () => ({ messages }) };
       }
       if (url.includes("/setup-api/hermes/chat")) {
@@ -193,7 +203,9 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
         box.chatPosts.push(body);
         const custom = box.chatResponse?.(body);
         if (custom) return custom;
-        const sessionId = box.sessionIdFor(typeof body.sessionKey === "string" ? body.sessionKey : "desktop");
+        const sessionId = box.sessionIdFor(
+          typeof body.sessionKey === "string" ? body.sessionKey : DESKTOP_TRANSCRIPT_KEY,
+        );
         return {
           ok: true,
           json: async () => ({ text: reply(String(body.message)), sessionId }),

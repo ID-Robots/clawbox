@@ -180,6 +180,29 @@ describe("the + on the Hermes edition", () => {
     expect(screen.getByTestId("chat-tab-restart")).toHaveStyle({ width: "24px", height: "24px" });
   });
 
+  it("is one tab stop, and the arrows move along it", async () => {
+    await mountHermesChat(box);
+    await openNewTab();
+    // Roving: the strip costs the keyboard ONE stop on the way to the composer,
+    // however many conversations are open.
+    const [main, second] = tabs();
+    expect(main).toHaveAttribute("tabindex", "-1");
+    expect(second).toHaveAttribute("tabindex", "0");
+
+    second.focus();
+    fireEvent.keyDown(second, { key: "ArrowRight" });
+    // Wraps, and moves FOCUS only: arriving on a tab must not spend a history
+    // read on a conversation nobody asked to open.
+    expect(document.activeElement).toBe(main);
+    expect(activeTabKey()).not.toBe(DESKTOP);
+    fireEvent.keyDown(main, { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(second);
+    // Enter is what opens one.
+    main.focus();
+    fireEvent.keyDown(main, { key: "Enter" });
+    await waitFor(() => expect(activeTabKey()).toBe(DESKTOP));
+  });
+
   it("the tabs and the open one survive a remount", async () => {
     await mountHermesChat(box);
     const key = await openNewTab();
@@ -326,5 +349,71 @@ describe("a run that lands while the owner is in another tab", () => {
     await push(frame("done", { text: "one two three", harness: "hermes", sessionId: HERMES_SESSION }));
     await push(null);
     await waitFor(() => expect(screen.getAllByText(/one two three/)).toHaveLength(1));
+  });
+});
+
+describe("what a screen reader is told about a tab", () => {
+  /** A turn the test releases by hand, so a tab can be left mid-run. */
+  function heldTurn(): { release: (answer: unknown) => void } {
+    let release!: (answer: unknown) => void;
+    const held = new Promise((resolve) => { release = resolve; });
+    box.chatResponse = () => held;
+    return { release };
+  }
+
+  it("says which conversation is working and which is holding a new reply", async () => {
+    // Both dots are aria-hidden decoration. Without the state in the name, a
+    // conversation still answering, one holding an unread reply, and an idle
+    // one are indistinguishable to anyone not looking at the colour.
+    const { release } = heldTurn();
+    await mountHermesChat(box);
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "take your time" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    await waitFor(() => expect(box.chatPosts).toHaveLength(1));
+
+    await openNewTab();
+    screen.getByRole("tab", { name: "ClawBox, working" });
+
+    release({ ok: true, json: async () => ({ text: "done", sessionId: HERMES_SESSION }) });
+    await screen.findByRole("tab", { name: "ClawBox, new reply" });
+
+    // Read, and it goes back to being just a name.
+    fireEvent.click(tabs()[0]);
+    await waitFor(() => expect(activeTabKey()).toBe(DESKTOP));
+    screen.getByRole("tab", { name: "ClawBox" });
+  });
+
+  it("keeps a background tab's error for that tab when the owner switches again mid-read", async () => {
+    // `switchSession` awaits the transcript read. A second switch during it
+    // used to hand the leaving tab's error to whatever was on screen by then —
+    // and lose it, because reading the entry also removes it.
+    const { release } = heldTurn();
+    await mountHermesChat(box);
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "boom" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    await waitFor(() => expect(box.chatPosts).toHaveLength(1));
+
+    const second = await openNewTab();
+    // It failed the way a request that never reached the route does: nothing is
+    // recorded on the box, so the client-side line is the only account of it.
+    release({ ok: false, status: 500, json: async () => ({ error: "nothing was written" }) });
+    await waitFor(() => expect(tabs()[0].querySelector('[data-testid="chat-tab-unread"]')).not.toBeNull());
+
+    // Head back to main, then change our mind while its transcript is loading.
+    box.historyDelayMs[DESKTOP] = 40;
+    fireEvent.click(tabs()[0]);
+    fireEvent.click(tabs()[1]);
+    await waitFor(() => expect(activeTabKey()).toBe(second));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    // Not spilled into the conversation the owner actually has open…
+    expect(screen.queryByText(/nothing was written/i)).toBeNull();
+
+    // …and not lost either: it is still waiting in the tab it belongs to.
+    box.historyDelayMs = {};
+    fireEvent.click(tabs()[0]);
+    await waitFor(() => expect(activeTabKey()).toBe(DESKTOP));
+    await screen.findByText(/nothing was written/i);
   });
 });

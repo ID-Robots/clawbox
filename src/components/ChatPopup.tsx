@@ -2404,6 +2404,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       return next
     })
     const loaded = await loadHistory()
+    // The owner switched again while that read was in flight. `loadHistory`
+    // protects its own paint the same way; without this the tab being left
+    // would hand its error to whichever conversation is on screen now — and
+    // lose it, because the entry is taken out of the map as it is read.
+    if (sessionKeyRef.current !== key) return
     const storedError = tabErrorsRef.current.get(key)
     if (storedError) {
       tabErrorsRef.current.delete(key)
@@ -4245,14 +4250,37 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 >
                   <div
                     role="tab"
-                    tabIndex={0}
+                    // Roving, per the ARIA tabs pattern: the strip is ONE tab
+                    // stop, not one per conversation — eight open chats used to
+                    // mean eight presses to reach the composer.
+                    tabIndex={active ? 0 : -1}
                     aria-selected={active}
                     data-testid="chat-tab"
                     data-session-key={tab.key}
+                    // Both dots are aria-hidden decoration, so without this a
+                    // conversation that is still answering, one holding a reply
+                    // nobody has read, and an idle one all read alike: colour
+                    // and shape were carrying the fact by themselves.
+                    aria-label={busy ? t('chat.tabBusy', { label: tab.label })
+                      : unread ? t('chat.tabUnread', { label: tab.label })
+                      : tab.label}
                     title={tab.label}
                     onPointerDown={stopHeaderDrag}
                     onClick={select}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select() } }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); return }
+                      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+                      // MANUAL activation: the arrows move focus, Enter opens.
+                      // Automatic activation is the other half of the pattern
+                      // and wrong here — every step would spend a history read
+                      // on a conversation nobody asked to see.
+                      e.preventDefault()
+                      const strip = e.currentTarget.closest('[role="tablist"]')
+                      const all = [...(strip?.querySelectorAll<HTMLElement>('[role="tab"]') ?? [])]
+                      const at = all.indexOf(e.currentTarget)
+                      if (at < 0 || all.length < 2) return
+                      all[(at + (e.key === 'ArrowRight' ? 1 : all.length - 1)) % all.length]?.focus()
+                    }}
                     style={{
                       display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1,
                       cursor: switchable ? 'pointer' : 'default',

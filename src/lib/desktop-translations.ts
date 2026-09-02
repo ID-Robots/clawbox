@@ -186,6 +186,8 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.connectingPlaceholder": "Connecting...",
     "chat.tabNew": "New chat",
     "chat.tabList": "Chats",
+    "chat.tabBusy": "{label}, working",
+    "chat.tabUnread": "{label}, new reply",
     "chat.tabClose": "Close tab",
     "chat.tabUntitled": "Chat {n}",
     "chat.tabRestart": "New session",
