@@ -16,8 +16,10 @@ import {
   gatewayIsAbsent,
   readConfig,
   restartGateway,
-  runOpenclawConfigSet,
+  runOpenclawConfigSetBatch,
+  type OpenclawConfigSetArgs,
 } from "@/lib/openclaw-config";
+import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 
 const SAVED_PRIMARY_KEY = "local_only_saved_primary";
 const SAVED_FALLBACKS_KEY = "local_only_saved_fallbacks";
@@ -75,11 +77,15 @@ function snapshotOverrides(session: Record<string, unknown>): SessionOverrideSna
 // flipped but fallbacks still populated, and local_only_mode unset.
 // That half-applied state is visible in the UI as a failed toggle while
 // the user's chat actually continues routing to the cloud fallback.
-async function setConfig(key: string, valueJson: string) {
-  // Leave timeoutMs on the helper's default — the OpenClaw CLI takes
-  // 10-12 s per invocation on Jetson, so tighter bounds here produced
-  // spurious "timed out" errors that made Local-only mode fail to toggle.
-  await runOpenclawConfigSet([key, valueJson, "--json"]);
+/**
+ * One `config set --batch-json` for every model write of a toggle: the CLI
+ * takes 10-12 s per invocation on a Jetson (so the helper's default timeout
+ * stays), and a batch is applied to one snapshot and validated as a whole, so
+ * the primary and the fallbacks land together or not at all — the half-applied
+ * state the header above describes cannot come from here.
+ */
+async function setConfigBatch(ops: OpenclawConfigSetArgs[]) {
+  await runOpenclawConfigSetBatch(ops);
 }
 
 /** Parse "llamacpp/gemma4-e2b-it-q4_0" into {provider, modelId}. */
@@ -348,7 +354,7 @@ async function restoreSessionOverrides(
 // `hermes-local-ai.ts` can install and remove a local provider but has no
 // fallback chain to make exclusive, so there is nothing here to port.
 //
-// Ungated, every call reached `runOpenclawConfigSet`, which throws
+// Ungated, every call reached `runOpenclawConfigSetBatch`, which throws
 // `OpenclawUnavailableError`, which the catch-all turned into a 500 whose body
 // SettingsApp painted verbatim into a red banner: "The OpenClaw CLI is not
 // available on this edition." That is the product telling a Hermes owner about
@@ -414,9 +420,13 @@ export async function POST(request: Request) {
         await set(SAVED_FALLBACKS_KEY, currentFallbacks);
       }
 
-      // 1. Flip the defaults so *new* sessions pick up local.
-      await setConfig("agents.defaults.model.primary", JSON.stringify(localModel));
-      await setConfig("agents.defaults.model.fallbacks", "[]");
+      // 1. Flip the defaults so *new* sessions pick up local — both lists in
+      //    one batch, so the primary can never land with the cloud fallbacks
+      //    still in place.
+      await setConfigBatch([
+        ["agents.defaults.model.primary", JSON.stringify(localModel), "--json"],
+        ["agents.defaults.model.fallbacks", "[]", "--json"],
+      ]);
 
       // 2. Sweep every existing session's per-session override. Without
       //    this step the toggle only affects sessions born after the
@@ -445,11 +455,26 @@ export async function POST(request: Request) {
       const savedFallbacks = (await get(SAVED_FALLBACKS_KEY)) as string[] | undefined;
       const savedSessionOverrides = (await get(SAVED_SESSION_OVERRIDES_KEY)) as FilesBackup | undefined;
 
-      if (savedPrimary) {
-        await setConfig("agents.defaults.model.primary", JSON.stringify(savedPrimary));
-      }
-      if (Array.isArray(savedFallbacks) && savedFallbacks.length > 0) {
-        await setConfig("agents.defaults.model.fallbacks", JSON.stringify(savedFallbacks));
+      // The saved primary — and any saved fallback — can be Anthropic's, and a
+      // provider save made while Local-only was on may have switched that
+      // plugin off. OpenClaw 2 validates EVERY model reference the batch
+      // touches (the primary and each fallback) against the enabled plugins'
+      // catalogs, after applying the whole batch to one snapshot: so the
+      // enables for every provider the restore names ride first, in the same
+      // batch, and a refused batch leaves the flag and both lists as they were
+      // (src/lib/provider-plugin-ops.ts).
+      const restoreFallbacks = Array.isArray(savedFallbacks) && savedFallbacks.length > 0 ? savedFallbacks : null;
+      const restoreOps: OpenclawConfigSetArgs[] = [
+        ...enableProviderPluginOps([savedPrimary, ...(restoreFallbacks ?? [])]),
+        ...(savedPrimary
+          ? [["agents.defaults.model.primary", JSON.stringify(savedPrimary), "--json"] as OpenclawConfigSetArgs]
+          : []),
+        ...(restoreFallbacks
+          ? [["agents.defaults.model.fallbacks", JSON.stringify(restoreFallbacks), "--json"] as OpenclawConfigSetArgs]
+          : []),
+      ];
+      if (restoreOps.length > 0) {
+        await setConfigBatch(restoreOps);
       }
       const restore = savedSessionOverrides
         ? await restoreSessionOverrides(savedSessionOverrides)
@@ -470,8 +495,10 @@ export async function POST(request: Request) {
         // mode says they are.
         const localModel = (await get("local_ai_model")) as string | undefined;
         if (localModel) {
-          await setConfig("agents.defaults.model.primary", JSON.stringify(localModel));
-          await setConfig("agents.defaults.model.fallbacks", "[]");
+          await setConfigBatch([
+            ["agents.defaults.model.primary", JSON.stringify(localModel), "--json"],
+            ["agents.defaults.model.fallbacks", "[]", "--json"],
+          ]);
         } else {
           console.error("[local-only] restore incomplete and no local model recorded; the primary stays on the saved provider");
         }
