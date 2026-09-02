@@ -1,6 +1,7 @@
 import { expect, vi } from "vitest";
 import { render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
+import { DESKTOP_TRANSCRIPT_KEY } from "@/lib/harness/transcript-key";
 
 /**
  * A box that runs Hermes and no gateway, as the chat surface sees it.
@@ -46,8 +47,39 @@ export interface HermesBox {
    * signal back.
    */
   storedTranscript: Record<string, unknown>[];
+  /**
+   * The transcripts of the conversations the surface opens BESIDE the desktop
+   * one, keyed by the session key it minted for each. Read for any key that is
+   * not the desktop's; a key never written answers an empty transcript, as the
+   * store does.
+   */
+  tabTranscripts: Record<string, Record<string, unknown>[]>;
   /** DELETEs of the stored transcript, so "new chat" can be shown to reach it. */
   transcriptDeletes: number;
+  /** The session key of every transcript DELETEd, in order. */
+  deletedKeys: string[];
+  /** The session key of every transcript READ, in order. */
+  historyReads: string[];
+  /**
+   * Per-key latency on the transcript read, so a test can switch conversations
+   * while one is still in flight. The gateway fake has the same seam, for the
+   * same races (`chat-tabs.test.tsx`).
+   */
+  historyDelayMs: Record<string, number>;
+  /**
+   * What the chat route answers, when a test needs more than a line of text: a
+   * failure, a reply it releases by hand, a paced event stream. Whatever this
+   * returns is handed to the adapter as the fetch result verbatim (a promise is
+   * awaited, so returning a pending one holds the turn open); return nothing
+   * for the ordinary JSON answer below.
+   */
+  chatResponse: ((body: Record<string, unknown>) => unknown) | null;
+  /**
+   * The Hermes session id the chat route reports for a turn on this session
+   * key. One fixed id by default; a test that needs to tell two conversations
+   * apart answers differently per key.
+   */
+  sessionIdFor: (sessionKey: string) => string;
   /** Prompts POSTed to the images route, in order. */
   imagePrompts: string[];
   /**
@@ -80,7 +112,13 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
       hasClawaiImageRoute: false,
     },
     storedTranscript: [{ role: "assistant", text: "Earlier in this chat.", timestamp: 1 }],
+    tabTranscripts: {},
     transcriptDeletes: 0,
+    deletedKeys: [],
+    historyReads: [],
+    historyDelayMs: {},
+    chatResponse: null,
+    sessionIdFor: () => HERMES_SESSION,
     imagePrompts: [],
     imageReply: () => ({
       ok: true,
@@ -143,19 +181,34 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
         return { ok: answer.ok, status: answer.status, json: async () => answer.payload };
       }
       if (url.includes("/setup-api/chat/history")) {
+        // The desktop thread unless the surface named another conversation —
+        // the route's own default.
+        const key = new URL(url, "http://box").searchParams.get("sessionKey") || DESKTOP_TRANSCRIPT_KEY;
+        const isDesktop = key === DESKTOP_TRANSCRIPT_KEY;
         if (init?.method === "DELETE") {
           box.transcriptDeletes += 1;
-          box.storedTranscript = [];
+          box.deletedKeys.push(key);
+          if (isDesktop) box.storedTranscript = [];
+          else delete box.tabTranscripts[key];
           return { ok: true, json: async () => ({ ok: true }) };
         }
-        return { ok: true, json: async () => ({ messages: box.storedTranscript }) };
+        box.historyReads.push(key);
+        const messages = isDesktop ? box.storedTranscript : box.tabTranscripts[key] ?? [];
+        const delay = box.historyDelayMs[key] ?? 0;
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+        return { ok: true, json: async () => ({ messages }) };
       }
       if (url.includes("/setup-api/hermes/chat")) {
         const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
         box.chatPosts.push(body);
+        const custom = box.chatResponse?.(body);
+        if (custom) return custom;
+        const sessionId = box.sessionIdFor(
+          typeof body.sessionKey === "string" ? body.sessionKey : DESKTOP_TRANSCRIPT_KEY,
+        );
         return {
           ok: true,
-          json: async () => ({ text: reply(String(body.message)), sessionId: HERMES_SESSION }),
+          json: async () => ({ text: reply(String(body.message)), sessionId }),
         };
       }
       return { ok: true, json: async () => ({}) };

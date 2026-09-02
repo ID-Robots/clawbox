@@ -1,5 +1,6 @@
 import fs from "fs/promises";
-import { listAgentIds, sessionStorePath, sweepSessionEntries } from "./openclaw-session-store";
+import { listAgentIds, readSessionEntries, sessionStorePath } from "./openclaw-session-store";
+import { isPatchableSession, patchSessionModels, type GatewayRpcCall } from "./openclaw-session-model";
 import { clearPairingState, readPairingAllowEntries, readPairingRequests } from "./openclaw-state-store";
 import fsSync from "fs";
 import path from "path";
@@ -10,9 +11,6 @@ import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 import { readEdition } from "@/lib/edition-source";
 import { getProviderReasoningConfig, isThinkingLevel } from "@/lib/chat-reasoning";
-import { get as getConfigStoreValue } from "@/lib/config-store";
-import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-status";
-import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
 import { isSafeDiscordToken } from "@/lib/discord-api";
 
 const exec = promisify(execFile);
@@ -255,6 +253,55 @@ export function spawnOpenclawCli(
   options: SpawnOpenclawOptions = {},
 ): Promise<string> {
   return spawnOpenclaw(args, options);
+}
+
+/** Bound on the gateway round trip itself; the spawn budget adds the CLI's own start-up on top. */
+const GATEWAY_RPC_TIMEOUT_MS = 20_000;
+const GATEWAY_RPC_SPAWN_ALLOWANCE_MS = 30_000;
+
+/**
+ * One gateway RPC through the CLI: `openclaw gateway call <method> --params
+ * <json> --json`. The CLI is the gateway's own client — it holds the device
+ * identity, the token and the protocol version, so nothing here can drift
+ * from what the gateway accepts. With `--json` it prints the method's result
+ * object and nothing else on success; a failure is written as an error
+ * payload with exit 1, which `spawnOpenclaw` turns into a rejection carrying
+ * that text. The `ok === false` check is for a build that reports a refusal
+ * on exit 0.
+ *
+ * Costs one CLI start-up (10-12 s on a Jetson), so callers batch: a sweep
+ * over N sessions is one `sessions.patchMany`, not N calls.
+ */
+export async function callGatewayRpc(
+  method: string,
+  params: Record<string, unknown>,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const timeoutMs = options.timeoutMs ?? GATEWAY_RPC_TIMEOUT_MS;
+  const out = await spawnOpenclaw(
+    ["gateway", "call", method, "--params", JSON.stringify(params), "--json", "--timeout", String(timeoutMs)],
+    {
+      captureStdout: true,
+      timeoutMs: timeoutMs + GATEWAY_RPC_SPAWN_ALLOWANCE_MS,
+      // Session keys are not secrets, but a 100-target params blob is not a log line either.
+      labelArgs: ["gateway", "call", method, "--params", "<json>", "--json"],
+    },
+  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(out);
+  } catch {
+    throw new Error(`${method} returned no JSON`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${method} returned no object`);
+  }
+  const payload = parsed as Record<string, unknown>;
+  if (payload.ok === false) {
+    const error = payload.error as { message?: unknown } | undefined;
+    throw new Error(typeof error?.message === "string" ? error.message : `${method} failed`);
+  }
+  return payload;
 }
 
 /**
@@ -522,8 +569,33 @@ interface ApplyModelOverrideOpts {
    * chat). No such surface ships today, so this branch currently has
    * no production caller — kept for the test contract and as the
    * obvious extension point.
+   *
+   * Before that surface ships, note the contract is now backend-dependent:
+   * on an OpenClaw 2 agent the gateway records "pinned to the new default"
+   * by clearing the override (no `modelOverrideSource: "user"` survives),
+   * so a later soft sweep would not see that session as sticky, where the
+   * legacy file path leaves the tag in place.
    */
   skipUserTagged?: boolean;
+  /**
+   * The gateway transport for OpenClaw 2 agents (their sessions live in a
+   * store only the gateway may write). Defaults to the CLI-backed
+   * {@link callGatewayRpc}; tests inject a fake.
+   */
+  callGateway?: GatewayRpcCall;
+}
+
+export interface ApplyModelOverrideResult {
+  /** Agents whose sessions changed: one per store or sessions.json touched. */
+  filesUpdated: number;
+  sessionsUpdated: number;
+  /**
+   * OpenClaw 2 sessions the gateway would not repoint (each one logged with
+   * the gateway's reason). They keep their previous model; nothing else is
+   * tried, because the only other way to change them is the store rewrite
+   * that invalidates every row.
+   */
+  sessionsSkipped: number;
 }
 
 async function listAgentSessionsFiles(agentsDir: string): Promise<string[]> {
@@ -553,48 +625,60 @@ async function atomicWriteSessionsFile(filePath: string, data: unknown): Promise
 }
 
 /**
- * Rewrite every session's per-session model/provider override across
- * every agent on disk to the given target, tagged with the given
- * source. Returns how many sessions were touched.
+ * Repoint every existing session, across every agent on disk, to the given
+ * model, so the switch reaches the chats that are already open and not only
+ * the sessions born after it.
  *
- * Use `source: "user"` (also the default) when the caller is acting
- * on a direct user choice — chat-panel model dropdown, Local-only
- * toggle, etc. OpenClaw's per-turn model resolver explicitly returns
- * early for entries whose `modelOverrideSource === "user"`, which is
- * the only value that survives the auto-picker re-evaluating on
- * every message. `"manual"` looks reasonable but is not special-cased
- * anywhere in the OpenClaw dist and gets silently overwritten back
- * to `"auto"` on the next turn.
+ * Two store generations, two mechanisms:
+ *   - OpenClaw 2 agents (an `agent/openclaw-agent.sqlite`) are patched through
+ *     the gateway — `sessions.patchMany { model }` — which writes the override
+ *     fields itself, tags them `modelOverrideSource: "user"` and normalises a
+ *     stale `thinkingLevel`. The store is only READ, to learn the session keys.
+ *     A session the gateway refuses is counted in `sessionsSkipped` and left
+ *     alone; there is no fallback, because a direct `session_nodes` write is
+ *     what bricked chat on every switch (finding M-03).
+ *   - Legacy agents (`sessions/sessions.json`) get the atomic file rewrite,
+ *     with the fields below written by hand. `source: "user"` (the default) is
+ *     the only value OpenClaw's per-turn resolver treats as sticky; `"manual"`
+ *     is not special-cased anywhere and is overwritten back to `"auto"` on the
+ *     next turn.
  *
- * Writes are atomic (temp + rename). If any individual sessions.json
- * fails to parse/write, the error is logged and the sweep continues —
- * one bad file should not block the rest.
+ * One bad agent — an unreadable store, a corrupt file — is logged and the
+ * sweep continues with the rest.
  */
 export async function applyModelOverrideToAllAgentSessions(
   update: SessionOverrideUpdate,
   opts: ApplyModelOverrideOpts = {},
-): Promise<{ filesUpdated: number; sessionsUpdated: number }> {
+): Promise<ApplyModelOverrideResult> {
   const agentsDir = opts.agentsDir ?? AGENTS_DIR;
   const source = update.source ?? "user";
   const authProfile = update.authProfile ?? `${update.provider}:default`;
   const skipUserTagged = opts.skipUserTagged === true;
+  const callGateway = opts.callGateway ?? callGatewayRpc;
 
   let filesUpdated = 0;
   let sessionsUpdated = 0;
+  let sessionsSkipped = 0;
 
-  /** The per-entry mutation, shared verbatim by both store generations. */
+  /**
+   * The soft sweep's exclusion: a session the user pinned to something else.
+   * A pin that already matches the target is still swept so its source and
+   * auth profile converge.
+   */
+  const keepsUserPick = (session: Record<string, unknown>): boolean => {
+    if (!skipUserTagged || session.modelOverrideSource !== "user") return false;
+    const sameProvider =
+      session.providerOverride === update.provider ||
+      session.modelProvider === update.provider;
+    const sameModel =
+      session.modelOverride === update.modelId ||
+      session.model === update.modelId;
+    return !sameProvider || !sameModel;
+  };
+
+  /** The legacy-file mutation. */
   const applyToSession = (session: Record<string, unknown>): boolean => {
-    if (skipUserTagged && session.modelOverrideSource === "user") {
-      const sameProvider =
-        session.providerOverride === update.provider ||
-        session.modelProvider === update.provider;
-      const sameModel =
-        session.modelOverride === update.modelId ||
-        session.model === update.modelId;
-      if (!sameProvider || !sameModel) {
-        return false;
-      }
-    }
+    if (keepsUserPick(session)) return false;
     session.providerOverride = update.provider;
     session.modelOverride = update.modelId;
     session.modelOverrideSource = source;
@@ -602,6 +686,14 @@ export async function applyModelOverrideToAllAgentSessions(
     session.authProfileOverrideSource = source;
     session.modelProvider = update.provider;
     session.model = update.modelId;
+    // Normalise the sticky reasoning-effort override to the new model's
+    // capability. `thinkingLevel` is a per-session sticky the gateway keeps
+    // (set via `sessions.patch`); repointing the session to a model that
+    // can't honour the old level would otherwise leave e.g. a DeepSeek
+    // `high` on a local llama.cpp Gemma session, and the gateway rejects the
+    // next turn with `thinkingLevel "high" is not supported for llamacpp/…
+    // (use off)`. Only rewrite when the existing level is actually
+    // unsupported, so a compatible level (e.g. cloud→cloud) is left intact.
     if (isThinkingLevel(session.thinkingLevel)) {
       const reasoning = getProviderReasoningConfig(update.provider, `${update.provider}/${update.modelId}`);
       if (!reasoning.levels.includes(session.thinkingLevel)) {
@@ -611,23 +703,38 @@ export async function applyModelOverrideToAllAgentSessions(
     return true;
   };
 
-  // OpenClaw 2 agents keep their sessions in SQLite; an agent with a store is
-  // swept there and its (absent or archived) sessions.json is left alone.
+  // OpenClaw 2 agents: the store names the sessions, the gateway changes them.
+  // An agent with a store is served from it whatever else is on disk — its
+  // (absent or archived) sessions.json is an archive the gateway no longer
+  // reads, and is left alone below.
   const migratedAgents = new Set<string>();
+  const model = `${update.provider}/${update.modelId}`;
   for (const agentId of listAgentIds(agentsDir)) {
     if (!sessionStorePath(agentId, agentsDir)) continue;
-    const result = sweepSessionEntries(agentId, (_key, entry) => applyToSession(entry), agentsDir);
-    // A newer SQLite schema is still authoritative for this migrated agent.
-    // It refused our write on purpose; falling through to an old sessions.json
-    // would report success while the gateway keeps reading unchanged SQLite.
-    if (result?.unsupportedSchema !== undefined) migratedAgents.add(agentId);
-    // Other failed sweeps retain the established best-effort legacy behavior.
-    if (!result?.ok) continue;
     migratedAgents.add(agentId);
-    if (result.updated > 0) {
-      filesUpdated += 1;
-      sessionsUpdated += result.updated;
+    const rows = readSessionEntries(agentId, agentsDir);
+    if (!rows) {
+      console.warn(`[openclaw-config] could not list the sessions of agent ${agentId}; they keep their previous model`);
+      continue;
     }
+    const targets = rows
+      .filter(({ entry }) => isPatchableSession(entry) && !keepsUserPick(entry))
+      .map(({ key }) => ({ key, agentId }));
+    if (targets.length === 0) continue;
+    let patched = 0;
+    for (const outcome of await patchSessionModels(targets, model, { call: callGateway })) {
+      if (outcome.ok) {
+        patched += 1;
+        continue;
+      }
+      sessionsSkipped += 1;
+      console.warn(
+        `[openclaw-config] session ${outcome.key} (agent ${agentId}) keeps its previous model:`,
+        outcome.error,
+      );
+    }
+    sessionsUpdated += patched;
+    if (patched > 0) filesUpdated += 1;
   }
 
   const files = (await listAgentSessionsFiles(agentsDir)).filter(
@@ -647,21 +754,7 @@ export async function applyModelOverrideToAllAgentSessions(
     let touchedInFile = 0;
     for (const session of Object.values(sessions)) {
       if (!session || typeof session !== "object") continue;
-      // Preserve sticky per-session user choices when the caller asked
-      // for a soft sweep. A session whose existing override matches
-      // the new target is still touched so its source/authProfile
-      // converge with the target — only diverging user picks stay put.
-      if (!applyToSession(session)) {
-        continue;
-      }
-      // Normalise the sticky reasoning-effort override to the new model's
-      // capability. `thinkingLevel` is a per-session sticky the gateway keeps
-      // (set via `sessions.patch`); repointing the session to a model that
-      // can't honour the old level would otherwise leave e.g. a DeepSeek
-      // `high` on a local llama.cpp Gemma session, and the gateway rejects the
-      // next turn with `thinkingLevel "high" is not supported for llamacpp/…
-      // (use off)`. Only rewrite when the existing level is actually
-      // unsupported, so a compatible level (e.g. cloud→cloud) is left intact.
+      if (!applyToSession(session)) continue;
       touchedInFile += 1;
     }
 
@@ -675,7 +768,7 @@ export async function applyModelOverrideToAllAgentSessions(
     }
   }
 
-  return { filesUpdated, sessionsUpdated };
+  return { filesUpdated, sessionsUpdated, sessionsSkipped };
 }
 
 /**
@@ -1953,102 +2046,28 @@ export async function clearTelegramPairingState(account = "default"): Promise<vo
   await Promise.all(files.map((f) => fs.rm(f, { force: true }).catch(() => {})));
 }
 
-// === The anthropic plugin, around the primary write =========================
-//
-// `plugins.entries.anthropic.enabled` is on whenever the box could use it: the
-// primary is anthropic, or an Anthropic credential exists that the owner has
-// not switched off. It used to follow the active provider alone — every
-// enabled plugin loads its tool schemas synchronously on the gateway's main
-// loop during agent prep (5-8 s for anthropic on a Jetson, an old measurement
-// TASK-654 re-takes on 2026.8.1), so the plugin was switched off whenever the
-// owner was not on Claude. On OpenClaw 2 that starves the catalog: measured on
-// a 2026.8.1 box, `openclaw models list --provider anthropic --all --json` with
-// the plugin disabled answers ONE row (the configured primary) against eleven
-// with it enabled, and that one row is the three-model picker owners saw. A
-// credentialed provider's plugin therefore stays on; the prep-latency saving
-// only applies where nothing could use the plugin anyway. Other plugins
-// (openai) are shared across providers and stay enabled.
-//
-// The toggle is two halves around the `agents.defaults.model.primary` write:
-//
-//   enableProviderPluginOps(refs)   IN the same batch as the write, before it
-//                                   (src/lib/provider-plugin-ops.ts)
-//   setProviderPlugins(provider)    AFTER it
-//
-// OpenClaw 2 validates a model reference on `config set` against the captured
-// catalogs of the ENABLED plugins only. With the plugin off, every
-// `anthropic/*` reference is refused: "Unknown model: anthropic/claude-sonnet-5.
-// Run openclaw models list to list available models." Both callers used to
-// write first and toggle after, and on a 2026.8.1 core the chat popup showed
-// the owner exactly that line on every switch back to Claude (2026.7.x
-// answered from the bundled catalog whatever the plugin state, which is why
-// the order never mattered before). The OFF half stays AFTER the write on
-// purpose: a plugin whose model is the CURRENT primary is never switched off
-// underneath it. It is idempotent and non-fatal, and a plugin enabled by the
-// batch loads on the next gateway start ("Restart the gateway to apply"), so
-// the caller's restart has to follow.
-
-/**
- * Does this box hold an Anthropic credential the owner has not switched off —
- * an auth profile or the inline override key, and `anthropic` not in the
- * owner's disabled-providers set (the switch takes the provider out of every
- * place the box picks a model, so a credential behind it is one nothing can
- * route to).
- *
- * Read off openclaw.json's `auth.profiles` METADATA, not the agent's SQLite
- * credential store the core resolves a usable profile from. Unverified on a
- * box (no device in this run): whether `openclaw models auth logout` also
- * drops the metadata entry. If it does not, a logged-out box keeps the plugin
- * on until the owner switches the provider off — the cost is prep latency,
- * never a broken box.
- */
-function hasUsableAnthropicCredential(config: OpenClawConfig, disabledProviders: ReadonlySet<string>): boolean {
-  if (disabledProviders.has("anthropic")) return false;
-  const profiles = Object.entries(config.auth?.profiles ?? {});
-  if (profiles.some(([key, entry]) => {
-    const provider = typeof entry?.provider === "string" && entry.provider.trim()
-      ? entry.provider
-      : key.split(":")[0];
-    return provider.trim().toLowerCase() === "anthropic";
-  })) return true;
-  const override = config.models?.providers?.anthropic as { apiKey?: unknown } | undefined;
-  return typeof override?.apiKey === "string" && override.apiKey.trim().length > 0;
-}
-
-/**
- * AFTER the primary write: keep the anthropic plugin on while the primary is
- * anthropic or a usable Anthropic credential exists; off only when nothing on
- * the box could use it. Pass the provider segment of
- * `agents.defaults.model.primary`. Idempotent and non-fatal.
- */
+// Toggles `plugins.entries.anthropic.enabled` in lock-step with the active
+// provider. Every enabled plugin loads its tool schemas synchronously on
+// the gateway's main loop during agent prep (~5-8s for anthropic on Jetson),
+// so leaving it on while the user is not using Claude is pure waste. Other
+// plugins (openai) are shared across providers and stay enabled. Pass the
+// provider segment of `agents.defaults.model.primary`.
 export async function setProviderPlugins(activeProvider: string): Promise<void> {
-  // Strict, because the decision below is about ABSENCE: `readConfig` answers
-  // `{}` to an unreadable file, and that would read as "no Anthropic
-  // credential" and switch the plugin off on a box that has one — the very
-  // starvation this gate exists to avoid. An unreadable config leaves the
-  // plugin where it is; the next switch or save re-applies the gate.
-  let config: OpenClawConfig;
+  const wantAnthropic = activeProvider === "anthropic";
   try {
-    config = await readConfigStrict();
-  } catch (err) {
-    console.warn(
-      "[openclaw-config] Leaving the anthropic plugin as it is — could not read the config:",
-      err instanceof Error ? err.message : err,
-    );
-    return;
+    const config = await readConfig();
+    const current = (config.plugins as { entries?: Record<string, { enabled?: boolean }> } | undefined)
+      ?.entries?.anthropic?.enabled;
+    if (current === wantAnthropic) return;
+  } catch {
+    // Fall through and write — readConfig already swallows errors.
   }
-  const disabled = parseDisabledProviders(await getConfigStoreValue(DISABLED_PROVIDERS_KEY).catch(() => undefined));
-  const wanted = activeProvider === "anthropic" || hasUsableAnthropicCredential(config, disabled);
-  // An absent flag IS enabled: the plugin declares `enabledByDefault: true`,
-  // so a fresh box needs no write to be on.
-  const current = (config.plugins as { entries?: Record<string, { enabled?: boolean }> } | undefined)
-    ?.entries?.anthropic?.enabled ?? true;
-  if (current === wanted) return;
   try {
-    await runOpenclawConfigSet([ANTHROPIC_PLUGIN_ENABLED_KEY, wanted ? "true" : "false", "--json"]);
+    await runOpenclawConfigSet(
+      ["plugins.entries.anthropic.enabled", wantAnthropic ? "true" : "false", "--json"],
+    );
   } catch (err) {
-    // Non-fatal: a gate left wrong costs prep seconds or one catalog refresh,
-    // never correctness, and the next switch or save re-applies it.
+    // Non-fatal: the gateway will still work, just with the heavier prep cost.
     console.warn(
       "[openclaw-config] Failed to toggle anthropic plugin:",
       err instanceof Error ? err.message : err,

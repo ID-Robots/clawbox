@@ -225,7 +225,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
     mockRunOpenclawConfigSet.mockResolvedValue(undefined);
     mockRunOpenclawConfigSetBatch.mockResolvedValue(undefined);
     vi.mocked(unpairLocal).mockResolvedValue(undefined);
-    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
+    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 0 });
     vi.mocked(parseFullyQualifiedModel).mockImplementation(parseFullyQualifiedModelImpl);
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network disabled in tests")));
 

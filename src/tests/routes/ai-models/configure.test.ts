@@ -1,5 +1,4 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import type { Mock } from "vitest";
 import * as childProcess from "child_process";
 import fsp from "fs/promises";
 import type { ChildProcess } from "child_process";
@@ -100,10 +99,9 @@ vi.mock("@/lib/openclaw-config", () => ({
   // new primary provider takes effect on the open chat without a reset.
   applyModelOverrideToAllAgentSessions: vi.fn().mockResolvedValue(undefined),
   parseFullyQualifiedModel: vi.fn(parseFullyQualifiedModelImpl),
-  // Plugin gating: the route switches the plugin the new primary needs ON
-  // before the batch that writes `agents.defaults.model.primary` and gates
-  // the rest OFF after it. "the anthropic plugin around the primary write"
-  // asserts on both halves; every other test only needs the imports to resolve.
+  // Plugin gating: configure route now toggles `plugins.entries.anthropic.enabled`
+  // based on the active provider. Tests don't care about the side effect; just
+  // make the import resolve.
   setProviderPlugins: vi.fn().mockResolvedValue(undefined),
   // Edition guard: these tests exercise the OpenClaw path, so openclaw is
   // present. The Hermes branch (openclawIsAbsent → true) is covered separately
@@ -151,7 +149,6 @@ import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway
   setPrimaryModelWithoutCatalogValidation,
   runOpenclawDoctorFix,
   spawnOpenclawCli,
-  setProviderPlugins,
 } from "@/lib/openclaw-config";
 import { configSetCalls, configSetCommands, failConfigSetsMatching, findConfigSet } from "./config-set-calls";
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
@@ -256,12 +253,11 @@ describe("POST /setup-api/ai-models/configure", () => {
     vi.mocked(runOpenclawConfigUnset).mockResolvedValue(undefined);
     mockUnpairLocal.mockResolvedValue(undefined);
     vi.mocked(setPrimaryModelWithoutCatalogValidation).mockResolvedValue(undefined);
-    vi.mocked(setProviderPlugins).mockResolvedValue(undefined);
 
     // Re-apply implementations cleared by vi.clearAllMocks above. Factory
     // defaults set in `vi.mock(...)` hold across vi.resetModules but are
     // wiped by mockClear call history cleanup, so we seed them per-test.
-    mockApplyModelOverrideToAllAgentSessions.mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
+    mockApplyModelOverrideToAllAgentSessions.mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 0 });
     mockParseFullyQualifiedModel.mockImplementation(parseFullyQualifiedModelImpl);
     mockGetDefaultLlamaCppModel.mockReturnValue("gemma4-e2b-it-q4_0");
     mockGetLlamaCppContextWindow.mockReturnValue(131072);
@@ -1248,7 +1244,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       mockReadOpenClawConfig.mockResolvedValue({});
       mockReadOpenClawConfigStrict.mockResolvedValue({});
       mockParseFullyQualifiedModel.mockImplementation(parseFullyQualifiedModelImpl);
-      mockApplyModelOverrideToAllAgentSessions.mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
+      mockApplyModelOverrideToAllAgentSessions.mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 0 });
 
       const res = await configurePost(jsonRequest({
         provider,
@@ -1955,101 +1951,6 @@ describe("POST /setup-api/ai-models/configure", () => {
       }));
 
       expect(res.status).toBe(500);
-    });
-  });
-
-  // OpenClaw 2 validates a model reference on `config set` against the
-  // captured catalogs of the ENABLED plugins, and an older gate switched the
-  // anthropic plugin off on every switch away from Claude. This route wrote
-  // the primary in its batch FIRST and enabled the plugin at step 8b — so on a
-  // box whose last primary was ClawBox AI / OpenAI / Google, a Claude save had
-  // its batch refused with `Unknown model: anthropic/claude-sonnet-5` and fell
-  // through to the direct-write fallback: a "success" whose primary the CLI
-  // had just refused. The enable now rides in the SAME batch, ahead of the
-  // primary: the core applies a batch to one snapshot and validates the
-  // references afterwards, so one spawn does both, and a refused batch leaves
-  // the flag as it was.
-  describe("the anthropic plugin around the primary write", () => {
-    const UNKNOWN_MODEL =
-      'Cannot set model reference "anthropic/claude-sonnet-5" at agents.defaults.model.primary: '
-      + "Unknown model: anthropic/claude-sonnet-5. Run openclaw models list to list available models.";
-    const ENABLE_OP = ["plugins.entries.anthropic.enabled", "true", "--json"];
-
-    /** Where in vitest's global call sequence the first call `pick` accepts sits. */
-    function orderOf(mock: Mock, pick: (args: unknown[]) => boolean = () => true): number {
-      const index = mock.mock.calls.findIndex((args) => pick(args));
-      expect(index).toBeGreaterThanOrEqual(0);
-      return mock.mock.invocationCallOrder[index];
-    }
-
-    const carriesAnthropicPrimary = (op: string[]) =>
-      op[0] === "agents.defaults.model.primary" && String(op[1]).startsWith("anthropic/");
-    const isEnable = (op: string[]) => op[0] === ENABLE_OP[0] && op[1] === "true";
-
-    /**
-     * The CLI as a 2026.8.1 box answers it: the anthropic plugin is OFF (an
-     * older gate switched it off on the last switch away from Claude) and a
-     * batch carrying an `anthropic/*` primary is refused unless the same batch
-     * switches the plugin on ahead of it.
-     */
-    function refuseAnthropicPrimaryUnlessEnabledFirst() {
-      vi.mocked(runOpenclawConfigSet).mockImplementation(async (args) => {
-        if (carriesAnthropicPrimary(args)) throw new Error(UNKNOWN_MODEL);
-      });
-      vi.mocked(runOpenclawConfigSetBatch).mockImplementation(async (ops) => {
-        const enableIdx = ops.findIndex(isEnable);
-        const primaryIdx = ops.findIndex(carriesAnthropicPrimary);
-        if (primaryIdx >= 0 && !(enableIdx >= 0 && enableIdx < primaryIdx)) throw new Error(UNKNOWN_MODEL);
-      });
-    }
-
-    it.each([
-      ["a Claude subscription", { apiKey: ANTHROPIC_OAUTH_ACCESS, authMode: "subscription", refreshToken: "refresh-token", expiresIn: 3600 }],
-      ["an Anthropic API key", { apiKey: "sk-ant-test123" }],
-    ])("switches the plugin on in the SAME batch as the primary, ahead of it, for %s", async (_label, body) => {
-      refuseAnthropicPrimaryUnlessEnabledFirst();
-
-      const res = await configurePost(jsonRequest({ provider: "anthropic", ...body }));
-      expect(res.status).toBe(200);
-
-      // The reference went through the CLI's own validation. The direct-write
-      // fallback exists for an EMPTY catalog (placeholder key, first boot);
-      // taken here it would have masked exactly this ordering bug.
-      expect(vi.mocked(setPrimaryModelWithoutCatalogValidation)).not.toHaveBeenCalled();
-      const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls.find(([ops]) => ops.some(carriesAnthropicPrimary));
-      expect(batch).toBeDefined();
-      const ops = batch![0];
-      expect(ops.findIndex(isEnable)).toBeGreaterThanOrEqual(0);
-      expect(ops.findIndex(isEnable)).toBeLessThan(ops.findIndex(carriesAnthropicPrimary));
-      expect(vi.mocked(runOpenclawConfigSet).mock.calls.some(([args]) => isEnable(args))).toBe(false);
-
-      // The OFF half of the gate stays after the write (a no-op for Anthropic,
-      // but its place is what keeps a live primary's plugin on), and a plugin
-      // enabled by the batch loads on the next gateway start, so the restart
-      // that already ends the save has to stay after all of it.
-      const writtenAt = orderOf(vi.mocked(runOpenclawConfigSetBatch), (args) => (args[0] as string[][]).some(carriesAnthropicPrimary));
-      const gatedAt = orderOf(vi.mocked(setProviderPlugins), (args) => args[0] === "anthropic");
-      expect(writtenAt).toBeLessThan(gatedAt);
-      expect(gatedAt).toBeLessThan(orderOf(mockRestartGateway));
-    });
-
-    it("re-lands the enable with the rest of the batch when the catalog refuses the primary", async () => {
-      // The empty-catalog fallback retries the batch WITHOUT the primary and
-      // writes the primary directly; the enable is not the primary, so it
-      // rides the retry — the plugin is on for the model the direct write
-      // then names.
-      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(new Error(UNKNOWN_MODEL));
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-      const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-test123" }));
-      expect(res.status).toBe(200);
-      expect(vi.mocked(setPrimaryModelWithoutCatalogValidation)).toHaveBeenCalledWith("anthropic/claude-sonnet-5");
-      const batches = vi.mocked(runOpenclawConfigSetBatch).mock.calls;
-      expect(batches.length).toBeGreaterThanOrEqual(2);
-      const retry = batches[1][0];
-      expect(retry.some(isEnable)).toBe(true);
-      expect(retry.some(carriesAnthropicPrimary)).toBe(false);
-      expect(warn.mock.calls.map(([first]) => String(first)).some((line) => line.includes("Primary written directly"))).toBe(true);
     });
   });
 });
