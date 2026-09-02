@@ -169,6 +169,31 @@ describe("hermesSupportsImages", () => {
     }
   });
 
+  it("does not remember a shim that could not start hermes as an answer", async () => {
+    // While an update rebuilds the checkout, `hermes` is a shim that runs and
+    // exits 127 without reaching argparse. The shell's code, not the CLI's:
+    // it said nothing about `--image`, so it is held for the backoff and
+    // reported as pending, never kept as this checkout's verdict.
+    for (const code of [126, 127]) {
+      runHermesCli.mockReset();
+      runHermesCli.mockResolvedValue({ code, stdout: "", stderr: "hermes: not found" });
+      const { hermesSupportsImages, hermesFeatureProbePending } = await load();
+      expect(await hermesSupportsImages(), `exit ${code}`).toBe(false);
+      expect(hermesFeatureProbePending(), `exit ${code}`).toBe(true);
+
+      vi.useFakeTimers();
+      try {
+        runHermesCli.mockReset();
+        runHermesCli.mockResolvedValue({ code: 0, stdout: HELP_WITH_IMAGE, stderr: "" });
+        vi.setSystemTime(Date.now() + PAST_THE_BACKOFF_MS);
+        expect(await hermesSupportsImages(), `exit ${code}`).toBe(true);
+        expect(hermesFeatureProbePending(), `exit ${code}`).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  });
+
   it("forgets a probe that threw before it ever awaited", async () => {
     // A spawn that fails synchronously runs the catch BEFORE the memo has been
     // assigned, so bookkeeping done through the module-level slot would be
@@ -348,5 +373,41 @@ describe("pending accessors", () => {
     // duplicated on the client, so the two cannot drift apart.
     const { HERMES_FACT_RETRY_MS } = await load();
     expect(HERMES_FACT_RETRY_MS).toBeGreaterThanOrEqual(PAST_THE_BACKOFF_MS - 1_000);
+  });
+});
+
+describe("warmHermesFeatureMemos", () => {
+  beforeEach(() => {
+    runHermesCli.mockReset();
+    hermesConfigGet.mockReset();
+  });
+  afterEach(() => vi.clearAllMocks());
+
+  it("touches exactly the memos that cost an interpreter on a miss", async () => {
+    runHermesCli.mockResolvedValue({ code: 0, stdout: HELP_WITH_IMAGE, stderr: "" });
+    hermesConfigGet.mockResolvedValue("");
+    const { warmHermesFeatureMemos } = await load();
+    await warmHermesFeatureMemos();
+    expect(runHermesCli).toHaveBeenCalledWith(["chat", "--help"], expect.anything());
+    expect(hermesConfigGet).toHaveBeenCalledWith("auxiliary.vision.model");
+    expect(hermesConfigGet).toHaveBeenCalledWith("image_gen.provider");
+  });
+
+  it("leaves the first chat open answering from the memo it filled", async () => {
+    runHermesCli.mockResolvedValue({ code: 0, stdout: HELP_WITH_IMAGE, stderr: "" });
+    hermesConfigGet.mockResolvedValue("");
+    const { warmHermesFeatureMemos, hermesSupportsImages } = await load();
+    await warmHermesFeatureMemos();
+    expect(await hermesSupportsImages()).toBe(true);
+    expect(runHermesCli).toHaveBeenCalledTimes(1);
+  });
+
+  it("never rejects, however the probes fail", async () => {
+    // Boot must not care how the warm-up went: every probe behind it fails
+    // closed, and the first chat open asks for itself.
+    runHermesCli.mockRejectedValue(new Error("hermes timed out"));
+    hermesConfigGet.mockRejectedValue(new Error("config read failed"));
+    const { warmHermesFeatureMemos } = await load();
+    await expect(warmHermesFeatureMemos()).resolves.toBeUndefined();
   });
 });

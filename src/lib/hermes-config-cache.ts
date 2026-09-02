@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { runHermesCli } from "@/lib/hermes-cli";
+import { hermesCliAnswered } from "@/lib/hermes-cli-answered";
 
 /**
  * A memo around `hermes config get <key>`.
@@ -109,12 +110,13 @@ export async function hermesConfigGet(key: string, timeoutMs = 10_000): Promise<
     // stderr, so a non-zero exit is the CLI saying "nothing is configured
     // there" — an answer, and one the mtime correctly invalidates. A child that
     // closed with no exit code at all was killed by a signal (OOM on a loaded
-    // Jetson) and told us nothing; `runHermesCli` rejects on a timeout, a
+    // Jetson) and told us nothing, and a shim that exited 126/127 never reached
+    // the CLI (see `hermesCliAnswered`); `runHermesCli` rejects on a timeout, a
     // missing binary and its own SIGKILL, which likewise tell us nothing.
     let answered = false;
     try {
       const r = await runHermesCli(["config", "get", key], { timeoutMs });
-      answered = typeof r.code === "number";
+      answered = hermesCliAnswered(r);
       if (r.code === 0) value = r.stdout.trim();
     } catch {
       // hermes missing or timed out — fall through with "".
