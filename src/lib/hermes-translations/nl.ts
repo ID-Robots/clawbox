@@ -487,6 +487,7 @@ export const nl: Record<string, string> = {
   "skills.builtinSkill": "‘{name}’ zat al op dit apparaat en kan niet worden verwijderd.",
   "skills.notInstalled": "Er is op dit apparaat geen store-skill met de naam ‘{name}’ geïnstalleerd.",
   "skills.uninstallRefused": "Het apparaat weigerde die skill te verwijderen.",
+  "skills.ambiguousName": "Meer dan één geïnstalleerde skill luistert naar ‘{name}’. Verwijder hem met zijn eigen naam: {names}.",
 
   "skills.browseTimeout": "Het laden van de skillcatalogus duurde te lang. Probeer het zo nog eens.",
   "skills.browseUnavailable": "Hermes is niet op dit apparaat geïnstalleerd, dus de skillcatalogus kan niet worden geladen.",

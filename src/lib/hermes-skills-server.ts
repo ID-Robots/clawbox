@@ -22,6 +22,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { NextResponse } from 'next/server';
+import { matchRemovableSkill } from '@/lib/hermes-skills';
 import type { InstalledHermesSkill, ScanFinding, SkillOrigin } from '@/lib/hermes-skills';
 import { parseSkillFrontmatter, type SkillFrontmatter } from '@/lib/hermes-skill-frontmatter';
 import { removeSkillDir } from '@/lib/hermes-skill-manifest';
@@ -132,14 +133,78 @@ export async function isInHubLock(name: string, identifier?: string): Promise<bo
   return false;
 }
 
+/**
+ * Every lock key whose entry records `identifier`, in lock order.
+ *
+ * Normally 0 or 1: a store id lands under one key. It can be more, because
+ * `/setup-api/hermes/skills/install` passes a caller's `name` through to
+ * `hermes skills install --name`, so one store id can be installed twice under
+ * two keys. Only `resolveLockKey` reads this — it is naming a skill the install
+ * route has just created, so the first is right there. The uninstall side is
+ * deleting and goes through `matchRemovableSkill`, which refuses a tie.
+ */
+function lockKeysForIdentifier(
+  installed: Record<string, HubLockEntry>,
+  identifier: string,
+): string[] {
+  const keys: string[] = [];
+  for (const [key, entry] of Object.entries(installed)) {
+    if (entry.identifier === identifier) keys.push(key);
+  }
+  return keys;
+}
+
 /** Resolve the lock key (the `uninstall` argument) for an identifier or name. */
 export async function resolveLockKey(idOrName: string): Promise<string | null> {
   const lock = await readHubLock();
   if (Object.prototype.hasOwnProperty.call(lock, idOrName)) return idOrName;
-  for (const [key, entry] of Object.entries(lock)) {
-    if (entry.identifier === idOrName) return key;
-  }
-  return null;
+  return lockKeysForIdentifier(lock, idOrName)[0] ?? null;
+}
+
+/**
+ * The lock key an /uninstall argument names — key, store identifier or DISPLAY
+ * name — or the keys it could not be told apart from.
+ *
+ * `hermes skills uninstall` resolves one string and one only: the lock key. The
+ * three that reach this device for a single skill are not always the same
+ * string, and the third one is the only one a customer ever sees. A ClawHub
+ * install lands flat under its slug and records that slug as both the key and
+ * the identifier (pinned by skills-install-clawhub.test.ts's fakeHermes) while its SKILL.md
+ * names it whatever the author wrote: `martin-weather` in the lock, `weather`
+ * on the card. The key and the identifier are the pass `resolveLockKey` makes
+ * for the install route (its `lockName` resolution), on the same scan; the display
+ * name is the one that route has no use for and this one cannot do without.
+ *
+ * Past the exact lock key the tiers are `matchRemovableSkill`'s, the same
+ * function the agent's skill_uninstall applies to the same device state a
+ * moment earlier — literally one rule, so the tool cannot refuse what this
+ * resolves and cannot resolve what this refuses.
+ *
+ * A TIE IS ANSWERED, NEVER BROKEN, across every non-unique key and BETWEEN
+ * them: two entries sharing an identifier, two rows showing one display name,
+ * and one row's identifier equal to another row's display name. This ends in a
+ * delete and nothing in the request says which was meant. An exact lock key is
+ * not a tie — it is a JSON object key, unique by construction — so it settles
+ * the question even when another card shows that same string.
+ *
+ * Only HUB rows are searched by display name, and a builtin sharing that name
+ * does NOT block the hub row: a builtin cannot be removed under any string, so
+ * the removable row is the only actionable reading, and it is the one the
+ * Skills page and skill_uninstall have always acted on. What the caller passed
+ * comes back in `requested` so a client can see that a display name was
+ * resolved. A string nothing hub-installed answers to is returned unchanged, so
+ * the builtin and not-installed answers downstream are what they were.
+ */
+export async function resolveUninstallKey(
+  idOrName: string,
+): Promise<{ key: string } | { ambiguous: string[] }> {
+  const lock = await readHubLock();
+  // The lock itself for tier 1, because it needs no disk walk and an unreadable
+  // lock has to degrade to the pre-F-09 answer (the argument, straight through).
+  if (Object.prototype.hasOwnProperty.call(lock, idOrName)) return { key: idOrName };
+  const match = matchRemovableSkill(await enumerateInstalledSkills(), idOrName);
+  if (match.kind === 'ambiguous') return { ambiguous: match.ids };
+  return { key: match.kind === 'one' ? match.row.id : idOrName };
 }
 
 /**

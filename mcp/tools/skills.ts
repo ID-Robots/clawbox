@@ -17,6 +17,8 @@ import {
   isRemovableOrigin,
   isValidQuery,
   isValidSkillName,
+  matchRemovableSkill,
+  type InstalledHermesSkill,
 } from "../../src/lib/hermes-skills";
 import { type ApiOptions, apiGet, apiPost } from "../lib/api";
 import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
@@ -41,17 +43,25 @@ interface BrowseBody {
   degraded?: boolean;
 }
 
-interface InstalledSkill {
-  name: string;
-  category?: string;
-  source?: string;
-  origin?: string;
-  /** Store id the skill was installed from — only ever set for a store skill. */
-  identifier?: string;
-  enabled?: boolean;
-  incompatible?: boolean;
-  description?: string;
-}
+/**
+ * A row of /installed, narrowed to what this module reads. Taken from the
+ * route's own type rather than re-declared: `id` (the hub lock key, the one
+ * string the uninstall route resolves) and `name` (SKILL.md's, what the
+ * customer sees on a card) are different fields for a reason, and a private
+ * copy of the shape is what let this module read one as the other.
+ */
+type InstalledSkill = Pick<
+  InstalledHermesSkill,
+  | "id"
+  | "name"
+  | "category"
+  | "source"
+  | "origin"
+  | "identifier"
+  | "enabled"
+  | "incompatible"
+  | "description"
+>;
 
 interface InstalledBody {
   skills?: InstalledSkill[];
@@ -134,8 +144,31 @@ const INSTALL_RULES: ErrorRule[] = [
 const notInstalledMessage = (name: string) =>
   `There is no installed skill called "${name}" on this device.`;
 const NOT_INSTALLED_NEXT =
-  "Call skill_list and pass the name field of a skill it actually lists. Do not retry this name.";
-const builtinMessage = (name: string) => `"${name}" came with the device, so it cannot be removed.`;
+  "Call skill_list and pass the first word of a line it actually lists. Do not retry this name.";
+/**
+ * A string that answers for two installed skills, on the tool that DELETES one.
+ *
+ * The house pattern is the dangerous-skill refusal below: the tool does not make
+ * the owner's decision for them, it says what it knows and puts the question
+ * back. "Call again with the exact name of the one the user means" is not that —
+ * nothing the agent has says which that is, so it picks, and a 4-8B model
+ * picking between two skills to delete is the coin toss this exists to prevent.
+ *
+ * One wording for one device state, whichever side found it: the tool's own
+ * pre-condition knows the lock ids, the route's refusal (relayed by an ErrorRule,
+ * which cannot read the body it listed them in) does not.
+ */
+const ambiguousMessage = (name: string) =>
+  `More than one installed skill on this device answers to "${name}".`;
+const ambiguousNext = (ids: string[]) =>
+  "Do NOT choose one yourself — this removes a skill. "
+  + (ids.length
+    ? `Ask the user which of these they mean, then call skill_uninstall again with the one they `
+      + `name: ${ids.join(", ")}.`
+    : "Call skill_list to see which skills share that name, ask the user which one they mean, "
+      + "then call skill_uninstall again with the first word of that skill's line.");
+const builtinMessage = (name: string, shown = "") =>
+  `"${name}"${shown} came with the device, so it cannot be removed.`;
 const BUILTIN_NEXT =
   "Only skills that skill_list marks \"from the store\" can be removed. "
   + "Tell the user this one is built in. Do not retry.";
@@ -161,8 +194,12 @@ const LOCAL_NEXT =
  * decoded by EDITION_RULE, which skillsPost() prepends; a 404 carrying neither
  * code still falls through to the generic mapping, which is the honest outcome
  * when we cannot tell which failure it was.
+ *
+ * @param shown ` (it showed as "x")` when the lock id these messages name is
+ *              not the string the agent passed — it and the user only ever saw
+ *              the card, and every message from the POST on names the id.
  */
-const uninstallRules = (name: string): ErrorRule[] => [
+const uninstallRules = (name: string, shown = ""): ErrorRule[] => [
   {
     // The route could not run the CLI at all (HERMES-04 names it by code).
     status: 502,
@@ -175,29 +212,38 @@ const uninstallRules = (name: string): ErrorRule[] => [
     status: 400,
     code: "BAD_ARGUMENT",
     message: "Uninstall takes the short skill name, not the full store id.",
-    next: "Call skill_list and pass the name field of the skill you want removed.",
+    next: "Call skill_list and pass the first word of the line for the skill you want removed.",
   },
   {
     // The route reaches `not_installed` for a name that is in neither the hub
-    // lock nor .bundled_manifest — which is a name the device does not have AND
-    // a name it has as a `local` directory, and its own sentence says "No STORE
-    // skill called x is installed". This rule only ever runs when the installed
-    // list could not be read, so the two cannot be told apart here; claiming the
+    // lock nor .bundled_manifest, and that is now a name its own resolution pass
+    // could not place either — a name the device does not have AND a name it has
+    // as a `local` directory. This rule only ever runs when the installed list
+    // could not be read, so the two cannot be told apart here; claiming the
     // stronger of them is how a skill that skill_list shows came to be reported
-    // as not installed at all.
+    // as not installed at all, and telling the agent to go and delete a folder
+    // is the worst version of that guess.
     status: 404,
     match: /"code"\s*:\s*"not_installed"/,
     code: "NOT_FOUND",
     message: `There is no installed skill called "${name}" that came from the skill store.`,
     next:
-      "Do not retry this name. Call skill_list: if it is not listed, it is not installed; "
-      + "if it is listed, it was made on this device and its folder has to be deleted there.",
+      "Do not retry this exact string. Call skill_list: if nothing is listed under it, it is not "
+      + "installed; if a line shows it, pass the FIRST WORD of that line — and if that is the "
+      + "string you just passed, the skill was made on this device and only a person can delete "
+      + "its folder there.",
   },
+  // NOTE there is deliberately no rule for 409 `ambiguous_name`. Its whole
+  // content is the `candidates` array in the body, which an ErrorRule cannot
+  // read, and the fallback advice — "call skill_list" — is unusable in the one
+  // state this refusal can reach the tool in: skill_list reads the very route
+  // whose failure is why the argument went unresolved. Leaving it unmatched is
+  // what lets the ApiError through to ambiguityToToolError() below.
   {
     status: 409,
     match: /"code"\s*:\s*"builtin_skill"/,
     code: "CONFLICT",
-    message: builtinMessage(name),
+    message: builtinMessage(name, shown),
     next: BUILTIN_NEXT,
   },
   {
@@ -207,7 +253,7 @@ const uninstallRules = (name: string): ErrorRule[] => [
     status: 409,
     match: /"code"\s*:\s*"removal_incomplete"/,
     code: "CONFLICT",
-    message: `The device removed "${name}" from the store but could not delete its files.`,
+    message: `The device removed "${name}"${shown} from the store but could not delete its files.`,
     next:
       "Do NOT retry — there is nothing left in the store to remove. Tell the user the skill's "
       + "folder is still on the device and has to be deleted there.",
@@ -299,6 +345,40 @@ function isStoreSkill(s: InstalledSkill): boolean {
 }
 
 /**
+ * Which installed row does `name` mean?
+ *
+ * The rule is `matchRemovableSkill` — the SAME function the /uninstall route
+ * resolves with (`resolveUninstallKey` in hermes-skills-server.ts), not a
+ * second one that happens to agree. A parallel rule here refused `weather` as a
+ * tie while the route resolved it to the lock key `weather`, which left an
+ * official skill whose id and display name are both `weather` unremovable by
+ * any string the agent could pass: the refusal named `weather, martin-weather`,
+ * `weather` looped it, and `martin-weather` deleted the other skill. That is the
+ * F-09 incident in a narrower device state, produced by the fix for it.
+ *
+ * A store identifier needs no tier of its own. The only registry with bare
+ * identifiers is ClawHub, which records the slug as BOTH the identifier and the
+ * lock key (pinned by skills-install-clawhub.test.ts's fakeHermes), and every other source's
+ * identifier carries a slash, which isValidSkillName refuses before this runs.
+ * The route keeps an identifier tier because a client that is not this tool can
+ * reach it; from here it can only ever repeat the lock-id answer.
+ */
+function findRemovalTarget(before: InstalledSkill[], name: string): InstalledSkill | undefined {
+  const match = matchRemovableSkill(before, name);
+  if (match.kind === "ambiguous") {
+    throw new ToolError("BAD_ARGUMENT", ambiguousMessage(name), ambiguousNext(match.ids));
+  }
+  if (match.kind === "one") return match.row;
+  // Nothing removable matched. Return a builtin or local row if one answers to
+  // the name, so the refusal can say "that came with the device" or "that was
+  // made here" instead of the "not installed" that sends the agent off to look
+  // for it again. Nothing is deleted off this row, so a tie here only picks
+  // wording: the lock id wins, because that is the column skill_list prints.
+  const rest = before.filter((sk) => !isRemovableOrigin(sk.origin));
+  return rest.find((sk) => sk.id === name) ?? rest.find((sk) => sk.name === name);
+}
+
+/**
  * Did the uninstall leave the STORE skill behind?
  *
  * A store skill may SHADOW a builtin of the same name — the README's own worked
@@ -309,15 +389,51 @@ function isStoreSkill(s: InstalledSkill): boolean {
  * answered CONFLICT after a removal that had in fact succeeded.
  *
  * Only a surviving row that is itself a store skill counts as a failure, and
- * when we know which store id was removed, only that same id does.
+ * when we know which store id was removed, only that same id does. Rows are
+ * matched on the lock id the route was given: the display name can be shared
+ * by another skill entirely, and the #517 half-removal that leaves the
+ * directory behind re-lists it as `local` under the same lock id.
  */
-function stillInstalled(after: InstalledSkill[], name: string, removed?: InstalledSkill): boolean {
+function stillInstalled(after: InstalledSkill[], id: string, removed?: InstalledSkill): boolean {
   return after.some(
     (sk) =>
-      sk.name === name
+      sk.id === id
       && isStoreSkill(sk)
       && (!removed?.identifier || !sk.identifier || sk.identifier === removed.identifier),
   );
+}
+
+/** The uninstall route's 200: which lock key went, and what it was asked for. */
+interface UninstallOk {
+  id?: string;
+  requested?: string;
+}
+
+/**
+ * Decode the uninstall route's 409 `ambiguous_name` into a refusal that names
+ * the two lock ids it listed.
+ *
+ * Same job, and the same reason, as refusalToToolError() on the install path:
+ * an ErrorRule is applied inside api() and can only produce fixed text, so a
+ * refusal whose content is IN THE BODY has to be decoded by the caller. Here it
+ * matters more than usual — this refusal only reaches the tool when /installed
+ * could not be read, and the generic advice is "call skill_list", which reads
+ * that same route. Without the candidates the agent has nothing left to try.
+ */
+function ambiguityToToolError(err: unknown, name: string): ToolError | null {
+  if (!(err instanceof ApiError)) return null;
+  let payload: { code?: string; candidates?: unknown };
+  try {
+    payload = JSON.parse(err.body) as { code?: string; candidates?: unknown };
+  } catch {
+    return null;
+  }
+  if (payload.code !== "ambiguous_name") return null;
+  const candidates = Array.isArray(payload.candidates)
+    ? payload.candidates.filter((c): c is string => typeof c === "string")
+    : [];
+  // No candidates: the empty-list wording at least stops the agent guessing.
+  return new ToolError("BAD_ARGUMENT", ambiguousMessage(name), ambiguousNext(candidates));
 }
 
 function shortDescription(s: BrowseSkill): string | undefined {
@@ -614,7 +730,10 @@ export function registerSkillTools(reg: Registrar): void {
 
   reg.tool(
     "skill_list",
-    "List the skills already installed on this device, with the short name each one is removed by. Call this before skill_install so you do not install something twice, and before skill_uninstall to get the exact name. Only skills marked \"from the store\" can be removed.",
+    "List the skills already installed on this device. The first word of each line is the "
+      + "name skill_uninstall removes it by. Call this before skill_install so you do not "
+      + "install something twice, and before skill_uninstall to get the exact name. "
+      + "Only skills marked \"from the store\" can be removed.",
     {},
     { editions: ["hermes"], readOnly: true, profile: "core", maxChars: 6_000 },
     async () => {
@@ -624,7 +743,17 @@ export function registerSkillTools(reg: Registrar): void {
       // list has to fit a 4-8B model's context alongside everything else.
       // Only the EXCEPTIONS are annotated. Repeating "built in" on all 77 rows
       // is 2 KB of noise that says nothing.
-      const lines = (body.skills ?? []).map((s) => {
+      // Sorted by the LOCK ID, because that is the column being printed first.
+      // The route sorts by display name, so a hub `martin-weather` shown as
+      // `weather` lands under "w" while its line reads "martin-weather" — and a
+      // 4-8B model scanning the leading column alphabetically never finds it.
+      // `s.id` unguarded, deliberately: it is a required field of the row type
+      // this route serves (InstalledHermesSkill.id) and the MCP child reads the
+      // web server deployed beside it, so there is no build that answers without
+      // it. skill_uninstall's `removing?.id ?? wanted` below is NOT the same
+      // guard — it covers "no row matched at all", not a row missing its id.
+      const rows = [...(body.skills ?? [])].sort((a, b) => a.id.localeCompare(b.id));
+      const lines = rows.map((s) => {
         const marks: string[] = [];
         // "from the store" is the mark this tool's own description, the header
         // below and skill_uninstall's builtin refusal all use to mean REMOVABLE,
@@ -635,7 +764,11 @@ export function registerSkillTools(reg: Registrar): void {
         else if (s.origin === "local") marks.push("made on this device, cannot be removed from here");
         if (s.incompatible) marks.push("cannot run here");
         if (s.enabled === false) marks.push("disabled");
-        return `${s.name} (${s.category ?? "other"})${marks.length ? ` — ${marks.join(", ")}` : ""}`;
+        // The lock id leads, because it is the one string skill_uninstall
+        // resolves; a display name that differs is shown so the agent can
+        // still match what the user sees on the card.
+        const shows = s.name !== s.id ? `, shows as "${s.name}"` : "";
+        return `${s.id} (${s.category || "other"}${shows})${marks.length ? ` — ${marks.join(", ")}` : ""}`;
       });
       const c = body.counts ?? {};
       const header = `${c.total ?? lines.length} skills installed. `
@@ -807,15 +940,29 @@ export function registerSkillTools(reg: Registrar): void {
 
   reg.tool(
     "skill_uninstall",
-    "Remove an installed skill from this device. Takes the short name that skill_list reports, NOT the full store id that skill_install takes. Ask the user to confirm before calling this.",
-    { name: zText(64, "Short skill name from skill_list, e.g. \"pdf\"") },
+    "Remove an installed skill from this device. Takes the short name skill_install returned "
+      + "or skill_list reports as the first word of a line — not the full store id that "
+      + "skill_install takes, and not a name with a space in it. Ask the user to confirm "
+      + "before calling this.",
+    {
+      // 128, the cap isValidSkillName() and the route both apply. At 64 a long
+      // lock key skill_install had just handed out could not be passed back.
+      name: zText(128, "Short skill name, as skill_install returned it or as skill_list lists "
+        + "it, e.g. \"pdf\""),
+    },
     { editions: ["hermes"], readOnly: false, destructive: true },
     async ({ name }: { name: string }) => {
-      if (!isValidSkillName(name)) {
+      // Trimmed first, because isValidSkillName() tests the trimmed string: an
+      // untrimmed " pdf" passed validation, matched no row, and came back as
+      // "there is no such skill, do not retry this name" about a skill the
+      // device has.
+      const wanted = name.trim();
+      if (!isValidSkillName(wanted)) {
         throw new ToolError(
           "BAD_ARGUMENT",
           "That is not a valid skill name.",
-          "Call skill_list and pass the name field, which has no slashes.",
+          "Call skill_list and pass the FIRST WORD of its line: the name a skill is removed by "
+            + "never contains a space or a slash.",
         );
       }
       // PRE-CONDITION. A 200 from the route does not mean anything was removed,
@@ -824,12 +971,9 @@ export function registerSkillTools(reg: Registrar): void {
       const before = await installedSkills();
       let removing: InstalledSkill | undefined;
       if (before) {
-        // The hub copy, not the builtin it may be shadowing: when both are
-        // listed under one name, the hub one is the only removable row and its
-        // identifier is what the post-condition needs.
-        const entry = before.find((sk) => sk.name === name && isRemovableOrigin(sk.origin)) ?? before.find((sk) => sk.name === name);
+        const entry = findRemovalTarget(before, wanted);
         if (!entry) {
-          throw new ToolError("NOT_FOUND", notInstalledMessage(name), NOT_INSTALLED_NEXT);
+          throw new ToolError("NOT_FOUND", notInstalledMessage(wanted), NOT_INSTALLED_NEXT);
         }
         if (!isRemovableOrigin(entry.origin)) {
           // Three origins, three answers. Calling a `local` skill built in would
@@ -837,37 +981,86 @@ export function registerSkillTools(reg: Registrar): void {
           // the route would earn a 404 that reads as "there is no such skill" —
           // about a skill skill_list is listing.
           throw entry.origin === "local"
-            ? new ToolError("CONFLICT", localMessage(name), LOCAL_NEXT)
-            : new ToolError("CONFLICT", builtinMessage(name), BUILTIN_NEXT);
+            ? new ToolError("CONFLICT", localMessage(wanted), LOCAL_NEXT)
+            : new ToolError("CONFLICT", builtinMessage(wanted), BUILTIN_NEXT);
         }
         removing = entry;
       }
-      // The route's field is `id`, but it means the lock NAME — the MCP
+      // The route's field is `id`, but it means the lock KEY — the MCP
       // parameter is called `name` so the model cannot confuse it with the
-      // store id that skill_install takes.
-      await skillsPost(
-        "/setup-api/hermes/skills/uninstall",
-        { id: name },
-        { timeoutMs: 60_000, rules: uninstallRules(name) },
-      );
+      // store id that skill_install takes. Sending the key this row already
+      // carries keeps the messages below on the same string the device acts on;
+      // when the list could not be read the argument goes through as it is and
+      // the ROUTE resolves it (resolveUninstallKey).
+      const sent = removing?.id ?? wanted;
+      // The rules fire only on a FAILURE, where there is no body to read, so
+      // they get what the pre-condition knew.
+      const shownPre = removing && removing.name !== sent ? ` (it showed as "${removing.name}")` : "";
+      let done: UninstallOk;
+      try {
+        done = await skillsPost<UninstallOk>(
+          "/setup-api/hermes/skills/uninstall",
+          { id: sent },
+          { timeoutMs: 60_000, rules: uninstallRules(sent, shownPre) },
+        );
+      } catch (err) {
+        // An ErrorRule cannot read a body, and the ambiguity refusal's whole
+        // content is in one — the two lock ids. Decoded here for the same
+        // reason refusalToToolError() decodes the install refusals, and there
+        // is no rule for this code precisely so the ApiError reaches this catch.
+        throw ambiguityToToolError(err, wanted) ?? err;
+      }
+      // WHICH SKILL WENT. On the branch where the pre-read failed we sent the
+      // raw argument and the ROUTE resolved it, so its answer is the only thing
+      // that knows the lock key — and the post-condition and every message below
+      // are about that skill, not about the string the agent typed. Judging by
+      // the argument reported a successful removal as a CONFLICT (a device-made
+      // `weather` beside the ClawHub `martin-weather` that actually went) and,
+      // with a builtin of that name, reported removing a store skill that never
+      // existed.
+      const id = removing?.id ?? (typeof done?.id === "string" ? done.id : undefined) ?? wanted;
+      // Name the card as well as the lock id: the agent and the user only ever
+      // saw the card. From the pre-read when we have it, otherwise from what the
+      // route says it was asked for.
+      const asked = removing?.name ?? (typeof done?.requested === "string" ? done.requested : undefined);
+      const shown = asked && asked !== id
+        ? removing
+          ? ` (it showed as "${asked}")`
+          : ` (you asked for "${asked}")`
+        : "";
       // POST-CONDITION. A STORE skill still there means the CLI refused it
       // quietly; a builtin of the same name resurfacing means it worked.
       const after = await installedSkills();
-      if (after && stillInstalled(after, name, removing)) {
+      if (after && stillInstalled(after, id, removing)) {
         throw new ToolError(
           "CONFLICT",
-          `The device did not remove "${name}" — it is still installed.`,
+          `The device did not remove "${id}"${shown} — it is still installed.`,
           "Do not retry. Tell the user the device refused to remove that skill.",
         );
       }
-      // The store copy was shadowing a builtin of the same name, and removing
-      // it brought the builtin back. Saying so stops the agent reading the
-      // still-present name off a later skill_list as a failed uninstall.
-      const unshadowed = after?.some((sk) => sk.name === name && !isStoreSkill(sk));
+      // A row the agent will still see under a string it just used. The FAILED
+      // removal is already thrown above, so whatever is left here is legitimate,
+      // and it comes in two shapes. The builtin this store copy was SHADOWING
+      // comes back under the same lock id. A DIFFERENT skill — built in, made on
+      // the device, or another store one — carries the same display name on its
+      // card; that is the `weather` collision an exact lock id is allowed to
+      // settle, and saying nothing about it is what would make the next
+      // skill_list read as a failed uninstall.
+      const unshadowed = after?.find((sk) => sk.id === id && !isRemovableOrigin(sk.origin));
+      const alias = unshadowed
+        ? undefined
+        : after?.find((sk) => sk.id !== id && (sk.name === wanted || sk.name === asked));
+      const survivor = unshadowed ?? alias;
+      if (!survivor) return text(`Removed the skill "${id}"${shown}.`);
+      const kind = survivor.origin === "local"
+        ? "device-made"
+        : isRemovableOrigin(survivor.origin) ? "store" : "built-in";
+      const why = unshadowed
+        ? `The device's own ${kind} "${id}" was underneath it and is available again`
+        : `A different ${kind} skill, "${survivor.id}", shows as "${survivor.name}" too`;
       return text(
-        unshadowed
-          ? `Removed the store skill "${name}". The device's own built-in "${name}" was underneath it and is available again.`
-          : `Removed the skill "${name}".`,
+        `Removed the store skill "${id}"${shown}. ${why}, so seeing that name again is not a `
+          + "failed removal.",
       );
     },
   );

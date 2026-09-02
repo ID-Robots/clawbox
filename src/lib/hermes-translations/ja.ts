@@ -489,6 +489,7 @@ export const ja: Record<string, string> = {
   "skills.builtinSkill": "「{name}」は最初から本体に入っているため、削除できません。",
   "skills.notInstalled": "「{name}」という名前のストアのスキルは、この本体にインストールされていません。",
   "skills.uninstallRefused": "本体がこのスキルの削除を拒否しました。",
+  "skills.ambiguousName": "「{name}」に該当するスキルが複数あります。それぞれの名前で削除してください：{names}。",
 
   "skills.browseTimeout": "スキルカタログの読み込みに時間がかかりすぎました。しばらくしてからもう一度お試しください。",
   "skills.browseUnavailable": "この本体には Hermes がインストールされていないため、スキルカタログを読み込めません。",

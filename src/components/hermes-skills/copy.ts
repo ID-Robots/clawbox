@@ -256,6 +256,14 @@ export function useCopy() {
       builtinSkill: (name: string) => t('skills.builtinSkill', { name }),
       notInstalled: (name: string) => t('skills.notInstalled', { name }),
       uninstallRefused: t('skills.uninstallRefused'),
+      /**
+       * F-09: two installed skills answer to one string, so the device refused
+       * rather than deleting one of them. The candidate lock ids come from the
+       * route's `candidates` — they are lock keys, not translatable text, and
+       * they are the only strings that separate the two on the next attempt.
+       */
+      ambiguousName: (name: string, candidates: string[]) =>
+        t('skills.ambiguousName', { name, names: candidates.join(', ') }),
       /** The browse route's failure code; one it did not name gets the generic line. */
       browseError: (code: string) => t(`skills.${BROWSE_ERROR_KEYS[code] ?? 'browseFailed'}`),
       /**

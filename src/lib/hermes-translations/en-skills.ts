@@ -238,6 +238,7 @@ export const skillsEn: Record<string, string> = {
   "skills.builtinSkill": "“{name}” came with this device, so it cannot be removed.",
   "skills.notInstalled": "No store skill called “{name}” is installed on this device.",
   "skills.uninstallRefused": "The device refused to remove that skill.",
+  "skills.ambiguousName": "More than one installed skill answers to \u201c{name}\u201d. Remove it by its own name: {names}.",
 
   // === HERMES-04: browse failures, by the route's code ===
   // `cli_failed`, `too_large` and `cancelled` share the generic line.

@@ -60,6 +60,69 @@ export function isRemovableOrigin(origin?: string): boolean {
   return origin === 'hub';
 }
 
+/** The three strings an installed skill can be asked for by. */
+export interface SkillRemovalRow {
+  /** The hub lock key — the argument `hermes skills uninstall` resolves. */
+  id: string;
+  /** SKILL.md's `name` — what the customer sees on a card. */
+  name: string;
+  /** The store id it was installed from, when the lock recorded one. */
+  identifier?: string;
+  origin?: string;
+}
+
+export type SkillRemovalMatch<T> =
+  | { kind: 'one'; row: T }
+  /** Two removable skills show the same name and nothing says which was meant. */
+  | { kind: 'ambiguous'; ids: string[] }
+  | { kind: 'none' };
+
+/**
+ * Which installed skill does `wanted` name?
+ *
+ * Exported for the same reason `isRemovableOrigin` is: BOTH surfaces that answer
+ * this question have to answer it the same way. The /uninstall route asks it of
+ * the hub lock plus the disk walk (`resolveUninstallKey`), and the agent's
+ * skill_uninstall asks it of the /installed rows a moment earlier — and a tool
+ * that refuses what the route it defers to resolves is the F-09 symptom in a
+ * narrower device state, not a fix for it.
+ *
+ * The rule, in order:
+ *
+ *   1. An exact LOCK ID on a removable row wins outright. Lock ids are the keys
+ *      of a JSON object, so a hit is unique by construction — it is an answer,
+ *      never a tie, even when another card happens to show that same string.
+ *      Refusing here would leave a skill whose id and display name are both
+ *      `weather` unremovable by any string the agent can pass: `weather` would
+ *      loop the refusal and the other row's id would delete the wrong skill.
+ *   2. Otherwise the store IDENTIFIER and the DISPLAY name, searched TOGETHER
+ *      over removable rows. Neither is unique, and they collide with each other
+ *      — a lock entry installed under a `--name` override can carry `weather` as
+ *      its identifier while a different row shows `weather` on its card — so two
+ *      hits is a refusal. This ends in a delete and nothing in the request says
+ *      which was meant. Searching them in tiers instead would re-create, one
+ *      level down, the silent pick that F-02 was raised for.
+ *
+ * Non-removable rows are deliberately not searched: a builtin cannot be removed
+ * under any name, so the only actionable reading of a string that names both a
+ * builtin's card and a removable skill's card is the removable one. Callers use
+ * the `none` verdict to reach for those rows themselves and word a refusal.
+ */
+export function matchRemovableSkill<T extends SkillRemovalRow>(
+  rows: readonly T[],
+  wanted: string,
+): SkillRemovalMatch<T> {
+  const removable = rows.filter((r) => isRemovableOrigin(r.origin));
+  const byKey = removable.find((r) => r.id === wanted);
+  if (byKey) return { kind: 'one', row: byKey };
+  const rest = removable.filter((r) => r.identifier === wanted || r.name === wanted);
+  if (rest.length > 1) {
+    return { kind: 'ambiguous', ids: rest.map((r) => r.id).sort((a, b) => a.localeCompare(b)) };
+  }
+  if (rest.length === 1) return { kind: 'one', row: rest[0] };
+  return { kind: 'none' };
+}
+
 /** Card payload for the Installed grid — everything comes from disk. */
 export interface InstalledHermesSkill {
   /** Skill name — the lock.json key and the `uninstall` positional argument. */

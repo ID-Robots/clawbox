@@ -4,7 +4,7 @@ import fs from "fs/promises";
 import path from "path";
 import { NextResponse } from "next/server";
 import { type HermesCliResult, runHermesCli } from "@/lib/hermes-cli";
-import { checkInstallIdentifier, cliInstallIdentifier, isValidMeta, CLI_FAILURE_SENTENCES, cliFailureCode } from "@/lib/hermes-skills";
+import { checkInstallIdentifier, cliInstallIdentifier, isValidMeta, isValidSkillName, CLI_FAILURE_SENTENCES, cliFailureCode } from "@/lib/hermes-skills";
 import {
   type InstallOutcome,
   type InstallOutcomeKind,
@@ -124,7 +124,13 @@ export async function POST(request: Request) {
   if (category && !isValidMeta(category)) {
     return NextResponse.json({ error: "Invalid category" }, { status: 400 });
   }
-  if (name && !isValidMeta(name)) {
+  // The NAME override becomes the lock KEY (`hermes skills install --name`), so
+  // it is validated as a skill name, not as free-form metadata. isValidMeta
+  // allows a space; a key with one cannot be passed back — the uninstall route
+  // and skill_uninstall both refuse it, and "the first word of its skill_list
+  // line", which is what this repo now documents as the way to remove a skill,
+  // names something else. A category is genuinely free-form and keeps isValidMeta.
+  if (name && !isValidSkillName(name)) {
     return NextResponse.json({ error: "Invalid name" }, { status: 400 });
   }
 

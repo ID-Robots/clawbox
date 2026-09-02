@@ -80,6 +80,8 @@ const INSTALLED = "/setup-api/hermes/skills/installed";
 const UNINSTALL = "/setup-api/hermes/skills/uninstall";
 
 interface Row {
+  /** The hub lock key. enumerateInstalledSkills() sets it on every row. */
+  id: string;
   name: string;
   origin?: string;
   identifier?: string;
@@ -87,10 +89,10 @@ interface Row {
 }
 
 /** What enumerateInstalledSkills() puts on the wire, in miniature. */
-const BUILTIN: Row = { name: "pdf-builtin", origin: "builtin", category: "documents" };
-const HUB: Row = { name: "invoices", origin: "hub", identifier: "official/invoices", category: "hub" };
+const BUILTIN: Row = { id: "pdf-builtin", name: "pdf-builtin", origin: "builtin", category: "documents" };
+const HUB: Row = { id: "invoices", name: "invoices", origin: "hub", identifier: "official/invoices", category: "hub" };
 /** A directory on disk that is in neither the lock nor the bundled manifest. */
-const LOCAL: Row = { name: "scratchpad", origin: "local", category: "other" };
+const LOCAL: Row = { id: "scratchpad", name: "scratchpad", origin: "local", category: "other" };
 
 function skills() {
   const h = captureRegistrar("hermes");
@@ -280,9 +282,12 @@ describe("the route's not_installed, when the pre-condition could not run", () =
     const out = await skills().call("skill_uninstall", { name: LOCAL.name });
     expect(out.isError).toBe(true);
     if (!out.isError) return;
-    expect(out.error.next).not.toMatch(/pass the name field of a skill it actually lists/i);
-    // Both branches, because from here the two cannot be told apart.
-    expect(out.error.next).toMatch(/if it is listed/i);
+    // Both branches, because from here the two cannot be told apart — and the
+    // listed one leads with the recoverable reading (a lock id the agent has
+    // not tried) before the one only a person can act on.
+    expect(out.error.next).toMatch(/if nothing is listed/i);
+    expect(out.error.next).toMatch(/if a line shows it/i);
+    expect(out.error.next).toMatch(/first word/i);
     expect(out.error.next).toMatch(/do not retry/i);
   });
 });
@@ -320,8 +325,8 @@ describe("anti-regression — the refusals #513 shipped", () => {
 
   it("un-shadowing a builtin is still reported as a success, not a failure", async () => {
     installedIs(
-      [{ name: "pdf", origin: "hub", identifier: "official/pdf" }],
-      [{ name: "pdf", origin: "builtin" }],
+      [{ id: "pdf", name: "pdf", origin: "hub", identifier: "official/pdf" }],
+      [{ id: "pdf", name: "pdf", origin: "builtin" }],
     );
     apiPost.mockResolvedValue({ ok: true });
     const out = await skills().call("skill_uninstall", { name: "pdf" });
@@ -338,7 +343,7 @@ describe("anti-regression — the refusals #513 shipped", () => {
    * this.
    */
   it("a hub skill that came back as `local` still reads as a failed uninstall", async () => {
-    installedIs([HUB], [{ name: HUB.name, origin: "local" }]);
+    installedIs([HUB], [{ id: HUB.id, name: HUB.name, origin: "local" }]);
     apiPost.mockResolvedValue({ ok: true });
     const out = await skills().call("skill_uninstall", { name: HUB.name });
     expect(out.isError).toBe(true);

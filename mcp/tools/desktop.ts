@@ -11,6 +11,7 @@ import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
 import { zBool, zConfirm, zEnumOf, zInt, zOptText, zSlug, zText } from "../lib/schema";
 import { builtInApps, type McpContext } from "../lib/context";
+import type { InstalledHermesSkill } from "../../src/lib/hermes-skills";
 
 const UI_PICKUP_DELAY_MS = 2_500;
 
@@ -44,8 +45,14 @@ async function installedAppIds(): Promise<string[]> {
   return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : [];
 }
 
+/**
+ * The rows of /setup-api/hermes/skills/installed this tool reads. `id` is the
+ * hub lock key — the only string skill_uninstall resolves — and `name` is
+ * SKILL.md's, which is not always the same one (a ClawHub `martin-weather`
+ * shows as `weather`). Taken from the route's own type so the two cannot drift.
+ */
 interface InstalledSkillsBody {
-  skills?: { name: string; category?: string }[];
+  skills?: Pick<InstalledHermesSkill, "id" | "name">[];
 }
 
 // /setup-api/code answers 404 for a project id that does not exist. Without a
@@ -139,7 +146,12 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     "ui_list_apps",
     "List what is available on this ClawBox desktop: the built-in apps, and everything the user has installed or you have built. Call this before ui_open_app so you use an id that exists here.",
     {},
-    { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: 4_000 },
+    // 6,000, the cap skill_list already carries for this exact volume. A stock
+    // Hermes device ships ~77 skills, and capText() hard-SLICES at the cap:
+    // 4,000 cut the JSON mid-object and told the agent to "narrow the query" on
+    // a tool that takes no arguments. The rows below are compact for the same
+    // reason — one line each rather than a pretty-printed object per skill.
+    { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: 6_000 },
     async () => {
       const builtIn = apps.map((a) => ({ id: a.id, name: a.name, what: a.description }));
       const installed = (await installedAppIds()).map((id) => ({ id: `installed-${id}`, name: id }));
@@ -151,7 +163,13 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
         const body = await apiGet<InstalledSkillsBody>("/setup-api/hermes/skills/installed", {
           timeoutMs: 10_000,
         }).catch(() => null);
-        skills = (body?.skills ?? []).map((s) => s.name);
+        // BOTH names, in skill_list's own shape: the lock id leads, because it
+        // is the one string skill_uninstall resolves, and the display name is
+        // added only when it differs. Printing the display name alone put the
+        // two agent-facing lists on different strings for one skill; printing a
+        // pretty-printed {id, name} pair for each of ~77 rows overran this
+        // tool's output cap and truncated the JSON mid-object.
+        skills = (body?.skills ?? []).map((s) => (s.name === s.id ? s.id : `${s.id} (${s.name})`));
       }
       return json({
         built_in: builtIn,

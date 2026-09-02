@@ -487,6 +487,7 @@ export const fr: Record<string, string> = {
   "skills.builtinSkill": "« {name} » est fournie avec cet appareil et ne peut pas être retirée.",
   "skills.notInstalled": "Aucune compétence de la boutique nommée « {name} » n’est installée sur cet appareil.",
   "skills.uninstallRefused": "L’appareil a refusé de retirer cette compétence.",
+  "skills.ambiguousName": "Plusieurs compétences installées répondent à « {name} ». Retirez-la par son propre nom : {names}.",
 
   "skills.browseTimeout": "Le chargement du catalogue de compétences a pris trop de temps. Réessayez dans un instant.",
   "skills.browseUnavailable": "Hermes n’est pas installé sur cet appareil, le catalogue de compétences ne peut donc pas être chargé.",

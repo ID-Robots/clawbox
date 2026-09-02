@@ -81,6 +81,8 @@ type RefusalBody = {
   code?: string;
   name?: string;
   warning?: { verdict?: string; trust?: string };
+  /** `ambiguous_name`: the lock ids the argument could not be told apart from. */
+  candidates?: string[];
 };
 
 /**
@@ -137,6 +139,15 @@ function uninstallRefusalCopy(COPY: SkillsCopy, data: RefusalBody, name: string)
       return COPY.notInstalled(name);
     case 'uninstall_refused':
       return COPY.uninstallRefused;
+    case 'ambiguous_name': {
+      // The candidates ARE the answer here — without them the line says a
+      // choice is needed and gives nothing to choose between, so an empty list
+      // falls through to the route's own sentence rather than a useless one.
+      const candidates = Array.isArray(data.candidates)
+        ? data.candidates.filter((c): c is string => typeof c === 'string')
+        : [];
+      return candidates.length ? COPY.ambiguousName(name, candidates) : null;
+    }
     case 'uninstall_failed':
     case 'cli_timeout':
     case 'cli_missing':
