@@ -39,13 +39,10 @@ export async function POST(request: Request) {
     // A different bot means a fresh allowlist — previously-approved senders
     // belong to the old bot. Detect a real token change (re-saving the same
     // token keeps approvals) so we can reset the harness's allowlist/pending
-    // stores and our name map below.
+    // stores and our name map.
     const previousToken = await get("telegram_bot_token");
     const tokenChanged =
       typeof previousToken === "string" && previousToken.length > 0 && previousToken !== botToken;
-
-    // Save to ClawBox config
-    await set("telegram_bot_token", botToken);
 
     // Hand the token to whichever harness this device actually runs. A Hermes
     // device has no OpenClaw gateway at all (the unit is masked, the port is
@@ -53,13 +50,34 @@ export async function POST(request: Request) {
     // the bot never answered.
     const harness = await getActiveHarness();
 
+    // The reset runs BEFORE the new token is persisted, on purpose. A reset
+    // that fails then fails the save with nothing changed: the old bot keeps
+    // its old approvals, and the next attempt still sees a token change and
+    // retries the reset. Run after the save, a failed reset left the new bot
+    // answering senders approved for the old one — and the retry, seeing the
+    // same token, never reset again.
+    if (tokenChanged) {
+      try {
+        if (harness === "hermes") await clearHermesTelegramPairingState();
+        else await clearTelegramPairingState();
+      } catch (resetErr) {
+        console.error("[telegram/configure] Pairing reset failed; the token was not saved:", resetErr);
+        return NextResponse.json(
+          {
+            error:
+              "The previous Telegram approvals could not be cleared, so the new bot token was not saved. See the ClawBox service log.",
+          },
+          { status: 500 }
+        );
+      }
+      await set("telegram_approved_names", undefined);
+    }
+
+    // Save to ClawBox config
+    await set("telegram_bot_token", botToken);
+
     if (harness === "hermes") {
       await setHermesTelegramToken(botToken, request.signal);
-
-      if (tokenChanged) {
-        await clearHermesTelegramPairingState();
-        await set("telegram_approved_names", undefined);
-      }
 
       // Hermes' messaging gateway is the process that RECEIVES messages, so it
       // has to be installed and up. As with the OpenClaw restart below, the
@@ -93,11 +111,6 @@ export async function POST(request: Request) {
 
     // Register Telegram channel with OpenClaw gateway
     await setTelegramToken(botToken);
-
-    if (tokenChanged) {
-      await clearTelegramPairingState();
-      await set("telegram_approved_names", undefined);
-    }
 
     // Restart gateway so it picks up the new channel (and the reset allowlist).
     // The token is already persisted at this point, so a restart failure must

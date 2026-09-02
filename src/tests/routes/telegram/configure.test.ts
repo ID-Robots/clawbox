@@ -84,6 +84,36 @@ describe("POST /setup-api/telegram/configure", () => {
     expect(mockSet).not.toHaveBeenCalledWith("telegram_approved_names", undefined);
   });
 
+  it("clears the old approvals before the new token is persisted", async () => {
+    mockGet.mockResolvedValue("111:OLD_token_value");
+    await telegramConfigurePost(jsonRequest({ botToken: "222:new_token_value" }));
+
+    const tokenSave = mockSet.mock.calls.findIndex(([key]) => key === "telegram_bot_token");
+    expect(tokenSave).toBeGreaterThanOrEqual(0);
+    const reset = mockClearPairing.mock.invocationCallOrder[0];
+    expect(reset).toBeLessThan(mockSet.mock.invocationCallOrder[tokenSave]);
+    expect(reset).toBeLessThan(mockSetTelegramToken.mock.invocationCallOrder[0]);
+  });
+
+  it("fails the save, old token still in place, when the old approvals cannot be cleared", async () => {
+    // A new bot must not go live answering senders approved for the old one,
+    // and the next attempt has to see the token change again so the reset is
+    // retried — both need the reset to run before anything is persisted.
+    mockGet.mockResolvedValue("111:OLD_token_value");
+    mockClearPairing.mockRejectedValue(new Error("Could not clear the previous Telegram approvals"));
+    const res = await telegramConfigurePost(jsonRequest({ botToken: "222:new_token_value" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(500);
+    expect(body.success).toBeUndefined();
+    expect(body.error).toMatch(/approvals/);
+    expect(body.error).toMatch(/not saved/);
+    expect(mockSet).not.toHaveBeenCalledWith("telegram_bot_token", expect.anything());
+    expect(mockSet).not.toHaveBeenCalledWith("telegram_approved_names", undefined);
+    expect(mockSetTelegramToken).not.toHaveBeenCalled();
+    expect(mockRestartGateway).not.toHaveBeenCalled();
+  });
+
   it("returns 400 for invalid JSON", async () => {
     const req = new Request("http://localhost/test", {
       method: "POST",

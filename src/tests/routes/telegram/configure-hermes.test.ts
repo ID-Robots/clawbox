@@ -113,6 +113,17 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
       expect(mockClearHermesPairing).not.toHaveBeenCalled();
     });
 
+    it("fails the save with the old token in place when the pairing reset throws", async () => {
+      mockGet.mockResolvedValue(TOKEN);
+      mockClearHermesPairing.mockRejectedValue(new Error("store refused"));
+      const res = await POST(req({ botToken: NEW_TOKEN }));
+
+      expect(res.status).toBe(500);
+      expect(mockSet).not.toHaveBeenCalledWith("telegram_bot_token", expect.anything());
+      expect(mockSetHermesToken).not.toHaveBeenCalled();
+      expect(mockEnsureGateway).not.toHaveBeenCalled();
+    });
+
     // The token is already persisted by then, so a gateway that won't come up
     // is a warning about delivery, not a failed save.
     it("still reports the save when the gateway cannot be started", async () => {

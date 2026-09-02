@@ -286,8 +286,9 @@ const MAX_RESET_REVOKES = 25;
  * Wipe Telegram pairing state, for when the bot token changes: approvals belong
  * to the old bot. Revokes each approved sender (so Hermes also drops it from any
  * TELEGRAM_ALLOWED_USERS mirror it maintains), clears pending codes, then removes
- * any store file left behind. Best-effort throughout — the token is already saved
- * by the time this runs, so a failure must not fail the save.
+ * any store file left behind. Best-effort throughout: each step is a separate
+ * `hermes` process that may be missing or refuse, and the store-file removal
+ * at the end is the backstop.
  *
  * Note `hermes pairing clear-pending` takes no platform argument and clears every
  * platform's pending codes. On ClawBox Telegram is the only one configured.
