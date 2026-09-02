@@ -887,7 +887,8 @@ async function waitForGatewayPreStart(): Promise<void> {
       announced = true;
       console.log("[Updater] waiting for clawbox-gateway to finish its pre-start before stopping it");
     }
-    await delay(GATEWAY_WAIT_INTERVAL_MS);
+    // Never sleep past the ceiling: the gateway is masked while this waits.
+    await delay(Math.min(GATEWAY_WAIT_INTERVAL_MS, Math.max(0, deadline - Date.now())));
   }
   // systemd's own TimeoutStartSec has killed any pre-start by now, so this is
   // a unit whose state could not be confirmed for ten minutes. Leave it alone:
