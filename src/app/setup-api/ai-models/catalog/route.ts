@@ -887,10 +887,6 @@ export function refreshInBackground(provider: string): void {
           + (diagnostic ? ` — ${diagnostic.slice(-300)}` : " (the CLI gave no reason)"),
         );
         markStale();
-        // Settled, not abandoned: for a provider with a genuinely narrower
-        // surface this is a second multi-minute fork, and returning without it
-        // would release the single-flight guard while it still burns CPU.
-        await surface;
         return;
       }
       await publish(models, null);
@@ -901,7 +897,19 @@ export function refreshInBackground(provider: string): void {
       console.error(`[catalog] refresh failed for ${provider}:`, err instanceof Error ? err.message : err);
       markStale();
     })
-    .finally(() => {
+    .finally(async () => {
+      // The guard is released only once BOTH forks are settled, and it is
+      // released here rather than in each arm above because the arms that end
+      // early — an empty enumeration, a rejection — are exactly the ones that
+      // used to forget. For a provider with a genuinely narrower surface the
+      // surface enumeration is a second multi-minute `openclaw models list`,
+      // and releasing while it still holds ~2 cores of a Jetson lets the next
+      // request start a second MAIN enumeration beside it.
+      //
+      // Swallowed rather than awaited bare: this is cleanup, and a surface
+      // failure has already been logged by `fetchSubscriptionSurfaceIds` or
+      // handled by the `.catch` above.
+      await surface.catch(() => {});
       refreshing.delete(provider);
     });
 }

@@ -314,8 +314,11 @@ describe("/setup-api/chat/model and the Claude subscription surface", () => {
   });
 
   it("judges an EMPTY cached surface by the curated catalogue, like the picker", async () => {
-    // Not unknown. The catalog route unions the curated catalogue into what
-    // it serves for this same file, so the picker on this box offered the
+    // Not unknown. Nothing unions the curated list into a SERVED catalogue any
+    // more — the route keeps it as a cold-start fallback it never persists. The
+    // union is in the guard itself: `readSubscriptionSurfaceIds` counts the
+    // curated ids of the surface provider, because a file holding `models: []`
+    // is what leaves the picker on that curated list. So the box offered the
     // curated rows and nothing else — an id in none of them is one the picker
     // never showed, and letting it through would write the very id this guard
     // exists to refuse.

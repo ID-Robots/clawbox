@@ -272,7 +272,8 @@ describe("catalog — the ChatGPT surface has no enumeration on this core", () =
     // and written down; forking a whole openclaw process on a Jetson at every
     // boot, and again once per backoff window, to be told
     // `Unknown provider filter "codex"` buys nothing.
-    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(spawnedProviders()).not.toContain("codex");
+    expect(spawnedProviders()).not.toContain("openai");
     expect(fs.existsSync(cacheFile("codex"))).toBe(false);
   });
 
@@ -362,14 +363,14 @@ describe("catalog — a provider that cannot answer is not asked on every reques
     // in this file succeeded and therefore cleared it. This describe is last,
     // so leaving anthropic backed off costs nothing.
     refreshInBackground("anthropic");
-    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalledTimes(1), { timeout: 2000 });
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await vi.waitFor(() => expect(spawnedProviders()).toContain("anthropic"), { timeout: 2000 });
+    await settle();
 
     mockSpawn.mockClear();
     refreshInBackground("anthropic");
     refreshInBackground("anthropic");
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(mockSpawn).not.toHaveBeenCalled();
+    await settle();
+    expect(spawnedProviders()).not.toContain("anthropic");
   });
 
   // A wait that does not GROW is not a backoff. Deriving the last wait from the
