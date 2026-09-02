@@ -49,6 +49,46 @@ export async function repairOpenclawConfig(repairs: {
   }
 }
 
+/**
+ * Ask the updater, once the boot rush has passed, whether an update is waiting
+ * for its second half.
+ *
+ * WHY. An update reboots the box halfway through: the system fixups, the
+ * Hermes re-provisioning and the build-identity check run AFTER the restart,
+ * and `checkContinuation()` is what starts them. Its only caller was the
+ * update status route, so the second half waited for somebody to open the
+ * Update page — both test boxes sat at "running" for six and a half hours and
+ * then bounced the gateway and the dashboard the moment a page was opened
+ * (2026-09-01). Nothing an update does should depend on being watched.
+ *
+ * The status route keeps its call as the fallback. The two never collide: the
+ * check consumes the persisted flag synchronously before any real I/O, so
+ * whichever asks first resumes and the other finds nothing to do.
+ *
+ * Never awaited and never allowed to throw: clawbox-setup.service is
+ * Restart=always, so an unhandled rejection here is a crash loop, not a
+ * missed step. Unref'd, so an exiting server does not wait on it. A plain
+ * function with the check handed in, so a test can drive it with fake timers
+ * without `require()`-ing the real updater.
+ */
+export function armUpdateContinuation(
+  checkContinuation: () => Promise<boolean>,
+  delayMs = 5_000,
+): NodeJS.Timeout {
+  const timer = setTimeout(() => {
+    void Promise.resolve()
+      .then(() => checkContinuation())
+      .then((resumed) => {
+        if (resumed) console.log('[Updater] continuation resumed at boot')
+      })
+      .catch((err: unknown) => {
+        console.error('[instrumentation] Update continuation at boot failed:', err instanceof Error ? err.message : err)
+      })
+  }, delayMs)
+  timer.unref()
+  return timer
+}
+
 export async function register() {
   if (typeof process === 'undefined' || process.env.NEXT_RUNTIME === 'edge') return
 
@@ -61,6 +101,16 @@ export async function register() {
   // One-time repairs of openclaw.json, in sequence — see repairOpenclawConfig
   // for why they must not run together. Never awaited: boot goes on.
   void repairOpenclawConfig({ ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, restartGateway })
+  try {
+    // An update that rebooted the box still has its second half to run. Ask
+    // here, so it starts whether or not anyone opens the Update page — see
+    // armUpdateContinuation.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { checkContinuation } = require('./lib/updater')
+    armUpdateContinuation(checkContinuation)
+  } catch (err) {
+    console.error('[instrumentation] Could not arm the update continuation:', err instanceof Error ? err.message : err)
+  }
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const clawkeepScheduler = require('./lib/clawkeep-scheduler')

@@ -1655,7 +1655,9 @@ function launchUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOpt
 
 /**
  * Check if a post-restart continuation is needed and trigger it.
- * Called from the status route on first poll after restart.
+ * Called once from the server boot path (src/instrumentation.ts) and from
+ * the status route on every idle poll as the fallback. The flag is consumed
+ * synchronously before any real I/O, so the two cannot both resume.
  */
 export async function checkContinuation(): Promise<boolean> {
   if (running) return false;
