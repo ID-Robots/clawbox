@@ -277,6 +277,21 @@ describe("catalog — the ChatGPT surface has no enumeration on this core", () =
     expect(fs.existsSync(cacheFile("codex"))).toBe(false);
   });
 
+  // The sibling of the backoff bypass: `?refresh=1` now means "the provider set
+  // changed" and clears the wait for a provider a connect could make listable.
+  // Nothing a box can do makes `codex` listable on this core, so it must not be
+  // cleared there — otherwise every forced read reprints its one log line, and
+  // the picker sends one per provider-set signal.
+  it("stays unasked even when the provider set changes", async () => {
+    mockSpawn.mockClear();
+    await get("codex", "&refresh=1");
+    await settle();
+
+    expect(spawnedProviders()).not.toContain("codex");
+    expect(spawnedProviders()).not.toContain("openai");
+    expect(fs.existsSync(cacheFile("codex"))).toBe(false);
+  });
+
   it("serves the curated ChatGPT list marked fallback, in its curated order", async () => {
     const body = await get("codex");
 

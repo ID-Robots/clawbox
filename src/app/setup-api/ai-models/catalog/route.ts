@@ -787,6 +787,17 @@ function sanitizeCachedPayload(provider: string, cached: CatalogResponse): Catal
  */
 const NO_CLI_ENUMERATION_PROVIDERS: ReadonlySet<string> = new Set(["openrouter", "clawai", "codex"]);
 
+/**
+ * Of those three, the one with NOTHING to ask rather than something else to
+ * ask. openrouter has a REST catalogue and clawai has its routing table; codex
+ * has no enumeration on this core in any form, so unlike the other two it is
+ * not merely CLI-exempt — no state the box can reach makes it listable, which
+ * is why a provider-set change does not clear its backoff.
+ */
+function hasNoEnumerationOnThisCore(provider: string): boolean {
+  return provider === "codex";
+}
+
 interface CatalogFetchResult {
   models: CatalogModel[];
   /**
@@ -916,7 +927,14 @@ export function refreshInBackground(
   } = {},
 ): void {
   if (refreshing.has(provider)) return;
-  if (opts.providerChanged) clearFailedRefresh(provider);
+  // A provider-set change clears the wait — but only where a change to the box
+  // could plausibly make this provider enumerable. `codex` is not a provider on
+  // this core at all (see the note above `NO_CLI_ENUMERATION_PROVIDERS`), so no
+  // connect, plugin switch or credential makes it listable, and clearing there
+  // would only reprint its one log line on every `?refresh=1` the picker sends.
+  if (opts.providerChanged && !hasNoEnumerationOnThisCore(provider)) {
+    clearFailedRefresh(provider);
+  }
   // A provider that just failed to answer waits before it is asked again. This
   // is the only brake on the "not live -> re-enumerate" rule, so it comes
   // before every other check — including the edition guard below, whose log
@@ -940,7 +958,7 @@ export function refreshInBackground(
 
   refreshing.add(provider);
 
-  if (provider === "codex") {
+  if (hasNoEnumerationOnThisCore(provider)) {
     // Documented above: this core has no ChatGPT-surface enumeration, and the
     // CLI answers `Unknown provider filter "codex"`. Forking a whole openclaw
     // process on a Jetson to be told that again — at every boot, and once per
