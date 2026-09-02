@@ -1220,7 +1220,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // The composer a tab was left with: its draft and the turns queued behind
   // its running one. Restored when the tab is shown again, so text typed for
   // one conversation is never sent into another.
-  const tabStashRef = useRef<Map<string, { input: string; queuedSends: { id: string; text: string; attachments: ChatAttachment[] }[]; attachments: ChatAttachment[] }>>(new Map())
+  const tabStashRef = useRef<Map<string, { input: string; queuedSends: { id: string; text: string; attachments: ChatAttachment[] }[]; attachments: ChatAttachment[]; runId: string | null }>>(new Map())
   // A run that died in a background tab leaves NOTHING in the transcript to
   // explain itself — the error line is client-side only. It is kept here when
   // the terminal event goes by and handed over when the tab is next shown.
@@ -2312,7 +2312,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const switchSession = useCallback(async (key: string) => {
     if (!key || key === sessionKeyRef.current) return
     const oldKey = sessionKeyRef.current
-    if (oldKey) tabStashRef.current.set(oldKey, { input, queuedSends, attachments })
+    // `runId` rides with the rest: the live-frame gates in `dispatchTurn` ask
+    // whether the frame belongs to the run this popup is showing, and a tab
+    // returned to with the id dropped would take its own reply as a stranger's
+    // and stop painting it.
+    if (oldKey) tabStashRef.current.set(oldKey, { input, queuedSends, attachments, runId: runIdRef.current })
     if (sendingRef.current && oldKey) {
       busyKeysRef.current.add(oldKey)
       setBusyKeys(new Set(busyKeysRef.current))
@@ -2362,6 +2366,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (busyKeysRef.current.has(key)) {
       sendingRef.current = true
       setSending(true)
+      runIdRef.current = stash?.runId ?? null
     }
     setUnreadKeys(prev => {
       if (!prev.has(key)) return prev
@@ -2369,11 +2374,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       next.delete(key)
       return next
     })
-    await loadHistory()
+    const loaded = await loadHistory()
     const storedError = tabErrorsRef.current.get(key)
     if (storedError) {
       tabErrorsRef.current.delete(key)
-      setMessages(prev => [...prev, { role: 'system', text: storedError, timestamp: Date.now() }])
+      // …unless the replay above already carries it. This line exists for a
+      // transport whose failures live only in the browser (the gateway's:
+      // a run that died in a background tab leaves nothing behind). A box that
+      // keeps its own transcript records the failure there itself, and the
+      // history read has just painted it — appending here would report one
+      // failed turn twice, in two different wordings.
+      const replayed = loaded?.[loaded.length - 1]
+      if (replayed?.variant !== 'error') {
+        setMessages(prev => [...prev, { role: 'system', text: storedError, timestamp: Date.now() }])
+      }
     }
   }, [input, queuedSends, attachments, clearTranscript, endImageWait, loadHistory, wsRequest])
 
@@ -3407,6 +3421,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // land in the window before the state commit, and two generations would be
     // two charges against the customer's daily allowance for one intent.
     if (!prompt || drawingRef.current) return
+    // The conversation that asked. A generation takes 15-40 seconds and the
+    // route records it under this key, so a tab switch mid-wait must not paint
+    // the picture into whichever conversation is on screen when it lands —
+    // the same rule `dispatchTurn` and `loadHistory` already follow.
+    const keyAtSend = sessionKeyRef.current
     setInput('')
     const controller = new AbortController()
     drawingAbortRef.current = controller
@@ -3415,6 +3434,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setMessages(prev => [...prev, { role: 'user', text: prompt, timestamp: Date.now() }])
     try {
       const { media } = await adapter.generateImage(prompt, controller.signal)
+      // It is in the transcript either way, so the tab it belongs to replays it.
+      if (sessionKeyRef.current !== keyAtSend) return
       setMessages(prev => [...prev, {
         role: 'assistant',
         // A picture with no caption is the whole reply here — there is no model
@@ -3427,6 +3448,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } catch (err) {
       // Stopping is not failing, and must not leave a red bubble behind.
       if (err instanceof HarnessError && err.code === 'aborted') return
+      // Nor does a failure belong in a conversation that did not ask.
+      if (sessionKeyRef.current !== keyAtSend) return
       setMessages(prev => [...prev, {
         role: 'system',
         // The same leak rules a failed turn goes through. Everything this path
@@ -4101,9 +4124,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         0%, 100% { opacity: 1; }
         50%      { opacity: 0.35; }
       }
-      .claw-tab-hover-close { opacity: 0; transition: opacity 0.12s ease; }
-      .claw-tab-plate:hover .claw-tab-hover-close,
-      .claw-tab-plate:focus-within .claw-tab-hover-close { opacity: 1; }`}</style>
+      /* Hidden until hover — but ONLY where a pointer can hover, and never
+         merely transparent. A touch surface has no hover state and most mobile
+         browsers apply :hover on tap, so an unconditional rule left an INVISIBLE
+         restart sitting on the main plate that one tap could reveal and fire —
+         and it makes the agent forget the thread, with no confirmation. Inside
+         the query, pointer-events:none says the same thing to the pointer
+         that CAN hover: while it is invisible it is not clickable either. */
+      @media (hover: hover) and (pointer: fine) {
+        .claw-tab-hover-close { opacity: 0; pointer-events: none; transition: opacity 0.12s ease; }
+        .claw-tab-plate:hover .claw-tab-hover-close,
+        .claw-tab-plate:focus-within .claw-tab-hover-close { opacity: 1; pointer-events: auto; }
+      }`}</style>
       {/* Header — drag handle (desktop) / simple bar (mobile).
           A real bar in the flow, not a strip floating over the transcript.
           The floating version faded from the shell colour to transparent
@@ -4144,7 +4176,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               rather than wrapping into a second header row. */}
           <div
             role="tablist"
-            aria-label="Chats"
+            aria-label={t('chat.tabList')}
             data-testid="chat-tabs"
             style={{ display: 'flex', alignItems: 'center', gap: 2, minWidth: 0, flex: 1, overflowX: 'auto', scrollbarWidth: 'none' }}
           >
@@ -4223,7 +4255,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       data-testid="chat-tab-close"
                       style={{
                         background: 'none', border: 'none', padding: 0,
-                        marginLeft: 2, marginRight: -2, width: 18, height: 18, borderRadius: 5,
+                        // 24x24 is the WCAG 2.5.8 floor, and the spacing
+                        // exception does not apply: the tab beside this is
+                        // itself a target. The glyph below stays 10px — this
+                        // grows the hit area, not the ink.
+                        marginLeft: 2, marginRight: -2, width: 24, height: 24, borderRadius: 5,
                         display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
                         color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
                         transition: 'background 0.15s, color 0.15s',
@@ -4245,7 +4281,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                        invisible, still clickable, and invisible to jsdom too,
                        which is why the test passed. Scoping the rule to the
                        wrapper keeps the button a sibling of the tab with its
-                       own focus stop; :focus-within shows it to the keyboard. */
+                       own focus stop; :focus-within shows it to the keyboard.
+                       The hiding itself is gated on a hover-capable pointer —
+                       see the rule — so a touch surface, which has no hover to
+                       reveal anything with, simply always shows it. */
                     <button
                       type="button"
                       onPointerDown={stopHeaderDrag}
@@ -4256,7 +4295,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       className="claw-tab-hover-close"
                       style={{
                         background: 'none', border: 'none', padding: 0,
-                        marginLeft: 2, marginRight: -2, width: 18, height: 18, borderRadius: 5,
+                        // 24x24 is the WCAG 2.5.8 floor, and the spacing
+                        // exception does not apply: the tab beside this is
+                        // itself a target. The glyph below stays 10px — this
+                        // grows the hit area, not the ink.
+                        marginLeft: 2, marginRight: -2, width: 24, height: 24, borderRadius: 5,
                         display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
                         color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
                         transition: 'background 0.15s, color 0.15s',

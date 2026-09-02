@@ -60,6 +60,14 @@ export interface HermesBox {
   /** The session key of every transcript READ, in order. */
   historyReads: string[];
   /**
+   * What the chat route answers, when a test needs more than a line of text: a
+   * failure, a reply it releases by hand, a paced event stream. Whatever this
+   * returns is handed to the adapter as the fetch result verbatim (a promise is
+   * awaited, so returning a pending one holds the turn open); return nothing
+   * for the ordinary JSON answer below.
+   */
+  chatResponse: ((body: Record<string, unknown>) => unknown) | null;
+  /**
    * The Hermes session id the chat route reports for a turn on this session
    * key. One fixed id by default; a test that needs to tell two conversations
    * apart answers differently per key.
@@ -101,6 +109,7 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
     transcriptDeletes: 0,
     deletedKeys: [],
     historyReads: [],
+    chatResponse: null,
     sessionIdFor: () => HERMES_SESSION,
     imagePrompts: [],
     imageReply: () => ({
@@ -182,6 +191,8 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
       if (url.includes("/setup-api/hermes/chat")) {
         const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
         box.chatPosts.push(body);
+        const custom = box.chatResponse?.(body);
+        if (custom) return custom;
         const sessionId = box.sessionIdFor(typeof body.sessionKey === "string" ? body.sessionKey : "desktop");
         return {
           ok: true,

@@ -363,7 +363,11 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
    */
   newSessionKey(mainSessionKey: string): string {
     const parts = mainSessionKey.split(":");
-    const agentId = parts[0] === "agent" && parts[1] ? parts[1] : "main";
+    // Lowercased like the suffix, and for the same reason: the gateway
+    // lowercases the key it files the session under, so a main key that ever
+    // arrived with an uppercase agent id would leave the popup persisting a
+    // tab key that no longer names the session behind it.
+    const agentId = (parts[0] === "agent" && parts[1] ? parts[1] : "main").toLowerCase();
     return `agent:${agentId}:clawbox-${uuid().replace(/-/g, "").slice(0, 12).toLowerCase()}`;
   }
 

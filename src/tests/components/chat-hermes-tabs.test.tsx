@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, waitFor } from "@/tests/helpers/test-utils";
 import {
+  GENERATED_IMAGE_PATH,
   HERMES_SESSION,
   installHermesBox,
   mountHermesChat,
@@ -163,6 +164,22 @@ describe("the + on the Hermes edition", () => {
     await screen.findByText("Earlier in this chat.");
   });
 
+  it("names the strip and sizes its controls for a real finger", async () => {
+    // The accessible name goes through the same table every other string in
+    // this strip does, and both icon buttons clear the WCAG 2.5.8 floor: they
+    // sit beside a tab that is itself a target, so the spacing exception that
+    // would excuse an 18px box does not apply here.
+    await mountHermesChat(box);
+    await openNewTab();
+    screen.getByRole("tablist", { name: "Chats" });
+    // Each control belongs to the tab the owner is on: close on a side tab,
+    // restart on main.
+    expect(screen.getByTestId("chat-tab-close")).toHaveStyle({ width: "24px", height: "24px" });
+    fireEvent.click(tabs()[0]);
+    await waitFor(() => expect(activeTabKey()).toBe(DESKTOP));
+    expect(screen.getByTestId("chat-tab-restart")).toHaveStyle({ width: "24px", height: "24px" });
+  });
+
   it("the tabs and the open one survive a remount", async () => {
     await mountHermesChat(box);
     const key = await openNewTab();
@@ -175,5 +192,139 @@ describe("the + on the Hermes edition", () => {
     await waitFor(() => expect(box.historyReads[0]).toBe(key));
     // A restored empty tab is not a first conversation: no greet.
     expect(box.chatPosts).toHaveLength(0);
+  });
+});
+
+describe("a run that lands while the owner is in another tab", () => {
+  /** A turn the test releases by hand, so a tab switch can happen mid-run. */
+  function heldTurn(): { release: (answer: unknown) => void } {
+    let release!: (answer: unknown) => void;
+    const held = new Promise((resolve) => { release = resolve; });
+    box.chatResponse = () => held;
+    return { release };
+  }
+
+  it("reports a failed turn once, not once per store that recorded it", async () => {
+    // The stashed error line exists for the gateway, whose failures live only
+    // in the browser. This box writes its own: the route appends an `Error:`
+    // row to the transcript, so the replay on return already says it. Saying it
+    // again is one failed turn, reported twice, in two different wordings.
+    const { release } = heldTurn();
+    await mountHermesChat(box);
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "boom" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    await waitFor(() => expect(box.chatPosts).toHaveLength(1));
+
+    await openNewTab();
+    // The box recorded the failure, as its route does, and answers 502.
+    box.storedTranscript = [
+      ...box.storedTranscript,
+      { role: "user", text: "boom", timestamp: 30 },
+      { role: "system", text: "Error: the agent gave up", timestamp: 31, variant: "error" },
+    ];
+    release({ ok: false, status: 502, json: async () => ({ error: "the agent gave up" }) });
+    // The tab it failed in is marked for the owner's return, not painted over
+    // the conversation they are reading now.
+    await waitFor(() => expect(tabs()[0].querySelector('[data-testid="chat-tab-unread"]')).not.toBeNull());
+    expect(screen.queryByText(/the agent gave up/)).toBeNull();
+
+    fireEvent.click(tabs()[0]);
+    await screen.findByText("Error: the agent gave up");
+    // One failure, one line: the box's own, and not our second copy of it.
+    expect(screen.getAllByText(/agent gave up/)).toHaveLength(1);
+    expect(screen.queryByText(/Try sending it again/i)).toBeNull();
+  });
+
+  it("puts a picture in the conversation that asked for it", async () => {
+    // A composer generation takes 15-40 seconds and the box records it under
+    // the key that asked. The screen has to follow the same rule the turn path
+    // does, or the picture lands in whichever tab happens to be open when it
+    // arrives — and a refresh would then move it, which is worse than either.
+    box.facts.hasClawaiToken = true;
+    box.facts.hasClawaiImageRoute = true;
+    let release!: (answer: { ok: boolean; status: number; payload: unknown }) => void;
+    box.imageReply = () => {
+      throw new Error("unused: the picture is released by hand below");
+    };
+    const held = new Promise<{ ok: boolean; status: number; payload: unknown }>((resolve) => { release = resolve; });
+    // The helper calls `imageReply()` synchronously and awaits the payload, so
+    // a pending payload is what keeps the generation in flight.
+    box.imageReply = () => ({ ok: true, status: 200, payload: held.then((a) => a.payload) });
+    await mountHermesChat(box);
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "a red maple leaf" } });
+    const draw = await screen.findByTestId("generate-image");
+    await waitFor(() => expect(draw).not.toBeDisabled());
+    fireEvent.click(draw);
+    await waitFor(() => expect(box.imagePrompts).toEqual(["a red maple leaf"]));
+
+    const key = await openNewTab();
+    const mediaRef = `/setup-api/chat/media?path=${encodeURIComponent(GENERATED_IMAGE_PATH)}`;
+    // The route records both halves under the conversation that asked.
+    box.storedTranscript = [
+      ...box.storedTranscript,
+      { role: "user", text: "a red maple leaf", timestamp: 40 },
+      { role: "assistant", text: "", timestamp: 41, images: [mediaRef] },
+    ];
+    release({ ok: true, status: 200, payload: { ok: true, media: [mediaRef] } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Not here: this tab never asked for a picture.
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(box.tabTranscripts[key] ?? []).toHaveLength(0);
+
+    fireEvent.click(tabs()[0]);
+    await waitFor(() => expect(screen.getByRole("img")).toHaveAttribute("src", mediaRef));
+  });
+
+  it("keeps painting a streamed reply after the owner leaves the tab and comes back", async () => {
+    // The live-frame gates ask whether a frame belongs to the run this popup is
+    // showing. Leaving a tab puts that run's id down; coming back has to pick it
+    // up again, or the tab stops painting its own reply half-written.
+    box.facts.hermesStreamsTurns = true;
+    const encoder = new TextEncoder();
+    // The reader hands out one chunk per `read()`, so the test paces the
+    // stream: null the releaser, wait for the loop to arm a fresh one.
+    let releaseChunk: ((chunk: string | null) => void) | null = null;
+    const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    const push = async (chunk: string | null) => {
+      await waitFor(() => expect(releaseChunk).not.toBeNull());
+      const release = releaseChunk!;
+      releaseChunk = null;
+      release(chunk);
+      await new Promise((r) => setTimeout(r, 0));
+    };
+    box.chatResponse = () => ({
+      ok: true,
+      status: 200,
+      headers: { get: (n: string) => (n.toLowerCase() === "content-type" ? "text/event-stream" : null) },
+      body: {
+        getReader: () => ({
+          read: () => new Promise<{ done: boolean; value?: Uint8Array }>((resolve) => {
+            releaseChunk = (chunk) => chunk === null
+              ? resolve({ done: true })
+              : resolve({ done: false, value: encoder.encode(chunk) });
+          }),
+        }),
+      },
+    });
+    await mountHermesChat(box);
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "count slowly" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    await push(frame("delta", { text: "one" }));
+    await waitFor(() => expect(screen.getByText(/one/)).toBeTruthy());
+
+    await openNewTab();
+    fireEvent.click(tabs()[0]);
+    await waitFor(() => expect(activeTabKey()).toBe(DESKTOP));
+
+    // Still the same run, still this tab's reply: the frames that arrive after
+    // the owner comes back keep painting where they belong.
+    await push(frame("delta", { text: " two" }));
+    await waitFor(() => expect(screen.getByText(/one two/)).toBeTruthy());
+    await push(frame("done", { text: "one two three", harness: "hermes", sessionId: HERMES_SESSION }));
+    await push(null);
+    await waitFor(() => expect(screen.getAllByText(/one two three/)).toHaveLength(1));
   });
 });
