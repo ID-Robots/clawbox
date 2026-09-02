@@ -20,6 +20,14 @@
 # install.sh calls it directly, gateway-pre-start.sh launches it detached (the
 # model is a ~600MB download and pre-start is a blocking ExecStartPre).
 #
+# OpenClaw 2 (2026.8+) moved the choice from agents.defaults.memorySearch.* to
+# memory.search.* and its CLI refuses the retired path outright ("moved to
+# memory.search. Run openclaw doctor --fix"). Measured on a 2026.8.1 box: the
+# config already said memory.search.provider=ollama, this script read the old
+# path, saw "unset", tried the old write and logged "could not set the local
+# embedding model" on every boot — so no upgraded box could be pointed at local
+# embeddings. The key names follow the installed core, decided below.
+#
 # Everything here is best-effort. A failure must leave the box on lexical FTS,
 # never half-configured, and never block the gateway.
 set -euo pipefail
@@ -36,28 +44,72 @@ EMBED_RETRY_SECONDS="${EMBED_RETRY_SECONDS:-21600}"
 
 log() { echo "  [local-embeddings] $*"; }
 
+# --- which generation of OpenClaw will parse what we write? ------------------
+# gateway-pre-start.sh asks the binary and exports CLAWBOX_OPENCLAW_V2 before
+# launching this, so the two cannot disagree. install.sh calls this directly and
+# exports nothing: then read the installed core's own package.json, the one
+# next to the binary (/home/clawbox/.npm-global/lib/node_modules/openclaw) —
+# never `openclaw --version`, which costs ~10s on a Jetson. No core at all (a
+# Hermes box) keeps the legacy names, where the write fails soft as before.
+if [ -z "${CLAWBOX_OPENCLAW_V2:-}" ]; then
+  CLAWBOX_OPENCLAW_V2=0
+  OPENCLAW_PKG="$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/package.json"
+  INSTALLED_VERSION="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("version") or "")' "$OPENCLAW_PKG" 2>/dev/null || true)"
+  if [ -n "$INSTALLED_VERSION" ] && [ "$(printf '%s\n' 2026.8 "$INSTALLED_VERSION" | sort -V | head -1)" = "2026.8" ]; then
+    CLAWBOX_OPENCLAW_V2=1
+  fi
+fi
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+  MEMORY_SEARCH_KEY="memory.search"
+else
+  MEMORY_SEARCH_KEY="agents.defaults.memorySearch"
+fi
+
 # --- read the current choice -------------------------------------------------
 # Read straight from openclaw.json rather than `openclaw config get`: this runs
 # before/around the gateway and a CLI round-trip costs ~10s on a Jetson.
-read_cfg() {
+read_path() {
   python3 - "$OPENCLAW_CONFIG" "$1" <<'PY' 2>/dev/null || true
 import json, sys
 try:
-    cfg = json.load(open(sys.argv[1]))
+    node = json.load(open(sys.argv[1]))
 except Exception:
     print("")
     sys.exit(0)
-ms = ((cfg.get("agents") or {}).get("defaults") or {}).get("memorySearch") or {}
-value = ms.get(sys.argv[2])
-print(value if isinstance(value, str) else "")
+for part in sys.argv[2].split("."):
+    node = node.get(part) if isinstance(node, dict) else None
+print(node if isinstance(node, str) else "")
 PY
 }
+read_cfg() { read_path "$MEMORY_SEARCH_KEY.$1"; }
+
+# The other generation's home. Read for ONE decision, the guard just below.
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+  OTHER_SEARCH_KEY="agents.defaults.memorySearch"
+else
+  OTHER_SEARCH_KEY="memory.search"
+fi
 
 PROVIDER="$(read_cfg provider)"
-case "$PROVIDER" in
+# A remote provider the owner chose is left alone wherever it is recorded. On a
+# box upgraded to OpenClaw 2 whose config `doctor --fix` has not migrated yet,
+# that choice still sits in agents.defaults.memorySearch while memory.search is
+# empty; reading only the live home saw "unset", overwrote it with ollama, and
+# the later migration then had nothing left to carry forward. install.sh's
+# post-run check applies the same rule — the legacy block speaks when the live
+# home is silent. Everything AFTER this guard (the "already configured" test
+# and both writes) stays on the live home, so a legacy "ollama" on a v2 box is
+# migrated, not mistaken for done.
+RECORDED_PROVIDER="$PROVIDER"
+RECORDED_IN="$MEMORY_SEARCH_KEY"
+if [ -z "$RECORDED_PROVIDER" ]; then
+  RECORDED_PROVIDER="$(read_path "$OTHER_SEARCH_KEY.provider")"
+  RECORDED_IN="$OTHER_SEARCH_KEY"
+fi
+case "$RECORDED_PROVIDER" in
   ""|auto|ollama) ;;
   *)
-    log "memorySearch.provider is \"$PROVIDER\" — a deliberate choice, leaving it alone"
+    log "$RECORDED_IN.provider is \"$RECORDED_PROVIDER\" — a deliberate choice, leaving it alone"
     exit 0
     ;;
 esac
@@ -138,7 +190,7 @@ if ! model_present "$TAGS"; then
   state_write "$NOW" 0
   TAGS="$(fetch_tags)"
   if ! model_present "$TAGS"; then
-    log "WARN: $EMBED_MODEL still absent after a successful pull; leaving memorySearch untouched"
+    log "WARN: $EMBED_MODEL still absent after a successful pull; leaving memory search untouched"
     exit 0
   fi
   log "pulled $EMBED_MODEL"
@@ -165,7 +217,7 @@ else
   # embedding backends, so if either call fails the box is left on exactly the
   # provider it already had — never on ollama pointed at the wrong model.
   if [ "$SET_MODEL" -eq 1 ] \
-    && ! "$OPENCLAW_BIN" config set agents.defaults.memorySearch.model "$EMBED_MODEL" >/dev/null 2>&1; then
+    && ! "$OPENCLAW_BIN" config set "$MEMORY_SEARCH_KEY.model" "$EMBED_MODEL" >/dev/null 2>&1; then
     log "WARN: could not set the local embedding model (non-fatal; nothing changed, lexical FTS remains)"
     exit 0
   fi
@@ -176,8 +228,8 @@ else
   # attempt finishes the job, and a stale marker only costs one extra reindex.
   state_set_reindex_pending 1
   if [ "$SET_PROVIDER" -eq 1 ] \
-    && ! "$OPENCLAW_BIN" config set agents.defaults.memorySearch.provider ollama >/dev/null 2>&1; then
-    log "WARN: could not point memorySearch at Ollama (non-fatal; provider is unchanged, lexical FTS remains)"
+    && ! "$OPENCLAW_BIN" config set "$MEMORY_SEARCH_KEY.provider" ollama >/dev/null 2>&1; then
+    log "WARN: could not point memory search at Ollama (non-fatal; provider is unchanged, lexical FTS remains)"
     exit 0
   fi
   log "memory search -> local Ollama embeddings ($EMBED_MODEL, no API key needed)"

@@ -7,8 +7,10 @@
  * `@/lib/memory-shard-state` instead (types and constants), never this.
  */
 
+import { readFile } from "fs/promises";
+import path from "path";
 import { get as configGet, set as configSet } from "@/lib/config-store";
-import { readConfig, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { findOpenclawBin, readConfig, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import {
   EXTRA_PATHS_CONFIG_PATH,
   LOCAL_EMBEDDING_MODEL,
@@ -85,13 +87,57 @@ export async function writeExtraPaths(paths: readonly string[]): Promise<void> {
 }
 
 /**
+ * The installed core's own package.json, derived from the binary the way
+ * scripts/ensure-local-embeddings.sh derives it (`dirname bin`/../lib/…), so
+ * the two writers read one file and cannot disagree about the generation.
+ * Not `openclaw --version`: that costs ~10 s on a Jetson, and this runs on a
+ * wizard click right before a second CLI spawn (the write itself).
+ */
+function openclawPackageJson(): string {
+  return path.join(path.dirname(findOpenclawBin()), "..", "lib", "node_modules", "openclaw", "package.json");
+}
+
+async function installedOpenclawVersion(): Promise<string | null> {
+  try {
+    const pkg = JSON.parse(await readFile(openclawPackageJson(), "utf-8")) as { version?: unknown };
+    return typeof pkg.version === "string" ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where the installed core keeps the embedding choice.
+ *
+ * OpenClaw 2 (2026.8+) moved it from `agents.defaults.memorySearch.*` to
+ * `memory.search.*`, and its CLI refuses the retired path outright ("moved to
+ * memory.search. Run openclaw doctor --fix") — so the names must follow the
+ * core that will parse the write, on the same 2026.8 boundary
+ * scripts/ensure-local-embeddings.sh uses at boot.
+ *
+ * The two differ only when the version cannot be read at all. There, the boot
+ * script keeps the legacy names because it also runs on a Hermes box that has
+ * no core (and no binary to accept either spelling); this path is reached only
+ * by the OpenClaw wizard, so it assumes the generation ClawBox pins instead
+ * (config/openclaw-target.txt, 2026.8.x) — the write fails loudly either way
+ * if that guess is wrong, and every shipping OpenClaw box is on it.
+ */
+export function embeddingConfigHome(version: string | null): "memory.search" | "agents.defaults.memorySearch" {
+  const match = /\b(20\d{2})\.(\d+)\b/.exec(version ?? "");
+  if (match === null) return "memory.search";
+  const [year, month] = match.slice(1).map(Number);
+  const legacy = year < 2026 || (year === 2026 && month < 8);
+  return legacy ? "agents.defaults.memorySearch" : "memory.search";
+}
+
+/**
  * Point the memory index at the model running on this box.
  *
  * Named `switchTo...` rather than `use...`: the `use` prefix is reserved for
  * React hooks and the lint rule reads any such call as one.
  *
- * This is the gap the design surfaced: `agents.defaults.memorySearch` had no
- * route and no TypeScript caller anywhere in the product — only
+ * This is the gap the design surfaced: the embedding choice had no route and
+ * no TypeScript caller anywhere in the product — only
  * scripts/ensure-local-embeddings.sh wrote it, at boot, and on this box it had
  * failed six times in a row. So nothing the owner could click could move memory
  * off the cloud embedder, which is why the panel says "Cloud" while the wizard
@@ -102,9 +148,10 @@ export async function writeExtraPaths(paths: readonly string[]): Promise<void> {
  * that can interleave.
  */
 export async function switchToLocalEmbeddings(): Promise<void> {
+  const home = embeddingConfigHome(await installedOpenclawVersion());
   await runOpenclawConfigSetBatch([
-    ["agents.defaults.memorySearch.provider", "ollama"],
-    ["agents.defaults.memorySearch.model", LOCAL_EMBEDDING_MODEL],
+    [`${home}.provider`, "ollama"],
+    [`${home}.model`, LOCAL_EMBEDDING_MODEL],
   ]);
 }
 

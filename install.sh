@@ -4256,8 +4256,21 @@ step_ollama_install() {
     as_clawbox_login "$ENSURE_EMBEDDINGS" || true
     # The helper exits 0 on every soft failure by design (a missing Ollama must
     # not abort an install), so its exit code says nothing about the outcome.
-    # Read the config it was supposed to write instead.
-    if as_clawbox python3 -c 'import json,sys; ms=((json.load(open("/home/clawbox/.openclaw/openclaw.json")).get("agents",{}).get("defaults",{}) or {}).get("memorySearch",{}) or {}); sys.exit(0 if ms.get("provider")=="ollama" and ms.get("model")=="qwen3-embedding:0.6b" else 1)' 2>/dev/null; then
+    # Read the config it was supposed to write instead — from the ACTIVE home.
+    # Only an OpenClaw 2 core writes memory.search, and once that names a
+    # provider the core ignores agents.defaults.memorySearch entirely — so a
+    # stale legacy block still saying "ollama" from the box's OpenClaw 1 days,
+    # beside a memory.search the owner has since pointed at OpenAI, is a box on
+    # the cloud embedder. "Ready, needs no API key" would be false there.
+    if as_clawbox python3 - /home/clawbox/.openclaw/openclaw.json <<'PY' 2>/dev/null
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+v2 = (cfg.get("memory") or {}).get("search") or {}
+legacy = ((cfg.get("agents") or {}).get("defaults") or {}).get("memorySearch") or {}
+home = v2 if v2.get("provider") else legacy
+sys.exit(0 if home.get("provider") == "ollama" and home.get("model") == "qwen3-embedding:0.6b" else 1)
+PY
+    then
       echo "  Local embeddings ready (qwen3-embedding:0.6b, semantic memory needs no API key)"
     else
       echo "  WARN: local embeddings are not configured yet; semantic memory falls back to lexical FTS until the next boot retries it (non-fatal)"
