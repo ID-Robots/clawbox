@@ -166,6 +166,31 @@ interface FailedRefresh {
 const failedRefreshes = new Map<string, FailedRefresh>();
 const FAILED_REFRESH_BACKOFF_MS = 2 * 60_000;
 
+/**
+ * "A provider-set change arrived while this provider was already enumerating,
+ * and the answer in flight predates it."
+ *
+ * The single-flight guard is right to collapse two overlapping enumerations —
+ * but only when they would ask the same question. A connect changes the
+ * question: the fork already running was started before the credential existed
+ * and will answer for a box that no longer exists. Dropped, it does worse than
+ * lose the refresh, because that pre-credential answer is then PUBLISHED with
+ * `source: "live"` and a fresh `fetchedAt` — one openai row on a stock host
+ * where a linked box lists ten — and `force || isStale || !isLivePayload` is
+ * false against it for the next six hours. The marker this route exists to
+ * introduce would be vouching for the very thing it was introduced to catch.
+ *
+ * The wizard's own timing makes this the common case rather than a race:
+ * `bootWarmup` starts on the FIRST picker GET, not at boot, and staggers the
+ * providers 5s apart at ~3 minutes each on a Jetson, so a key saved a minute
+ * after the AI-models step opens lands inside its provider's window.
+ *
+ * So the change is remembered here and re-entered from the `.finally` that
+ * releases the guard. Bounded: the entry is deleted before the re-entry, and
+ * the re-entry is serialised by `refreshing` like any other.
+ */
+const pendingProviderChange = new Set<string>();
+
 function refreshIsBlocked(provider: string): boolean {
   const failure = failedRefreshes.get(provider);
   return failure !== undefined && failure.until > Date.now();
@@ -926,28 +951,42 @@ export function refreshInBackground(
     providerChanged?: boolean;
   } = {},
 ): void {
-  if (refreshing.has(provider)) return;
-  // A provider-set change clears the wait — but only where a change to the box
-  // could plausibly make this provider enumerable. `codex` is not a provider on
-  // this core at all (see the note above `NO_CLI_ENUMERATION_PROVIDERS`), so no
-  // connect, plugin switch or credential makes it listable, and clearing there
-  // would only reprint its one log line on every `?refresh=1` the picker sends.
-  if (opts.providerChanged && !hasNoEnumerationOnThisCore(provider)) {
+  // Providers that never touch the CLI (see NO_CLI_ENUMERATION_PROVIDERS);
+  // every other one's catalog comes from `openclaw models list`. On an edition
+  // without the binary (Hermes) that spawn is a guaranteed ENOENT.
+  const usesOpenclawCli = !NO_CLI_ENUMERATION_PROVIDERS.has(provider);
+  const cliMissing = usesOpenclawCli && openclawIsAbsent();
+
+  // "Could any change to this box make this provider enumerable?" Two say no
+  // for reasons no credential touches: `codex` is not a provider on this core
+  // at all (see the note above NO_CLI_ENUMERATION_PROVIDERS), and an edition
+  // without the CLI has nothing to ask. Clearing the wait for either would only
+  // reprint their one log line on every `?refresh=1` the picker sends, which is
+  // the property that log line's own comment claims.
+  const changeCouldMakeItEnumerable = !hasNoEnumerationOnThisCore(provider) && !cliMissing;
+
+  if (refreshing.has(provider)) {
+    // Collapsed, but NOT forgotten — see `pendingProviderChange`. The fork in
+    // flight was started before this change and answers for the box as it was.
+    if (opts.providerChanged && changeCouldMakeItEnumerable) {
+      pendingProviderChange.add(provider);
+    }
+    return;
+  }
+  if (opts.providerChanged && changeCouldMakeItEnumerable) {
     clearFailedRefresh(provider);
   }
   // A provider that just failed to answer waits before it is asked again. This
   // is the only brake on the "not live -> re-enumerate" rule, so it comes
-  // before every other check — including the edition guard below, whose log
-  // line would otherwise repeat on every request of a Hermes box's session.
+  // before every other check that can log — the edition guard below would
+  // otherwise repeat its line on every request of a Hermes box's session, which
+  // is why the clear above excludes exactly that case.
   if (refreshIsBlocked(provider)) return;
 
-  // Providers that never touch the CLI (see NO_CLI_ENUMERATION_PROVIDERS);
-  // every other one's catalog comes from `openclaw models list`. On an edition without
-  // the binary (Hermes) that spawn is a guaranteed ENOENT, so skip it cleanly
-  // rather than fork a missing binary for each provider on every boot warmup.
-  // Hermes surfaces its own model list through the Hermes dashboard, not here.
-  const usesOpenclawCli = !NO_CLI_ENUMERATION_PROVIDERS.has(provider);
-  if (usesOpenclawCli && openclawIsAbsent()) {
+  // Skip a missing binary cleanly rather than fork it for each provider on
+  // every boot warmup. Hermes surfaces its own model list through the Hermes
+  // dashboard, not here.
+  if (cliMissing) {
     console.log(`[catalog] skipping ${provider}: the openclaw CLI is not present on this edition`);
     // Recorded as a failed attempt so the line above appears once per backoff
     // window instead of once per picker open: on this edition it can never
@@ -1060,6 +1099,13 @@ export function refreshInBackground(
       // handled by the `.catch` above.
       await surface.catch(() => {});
       refreshing.delete(provider);
+      // A provider-set change that arrived while the fork above was running was
+      // collapsed into it, and that fork answered for the box as it was BEFORE
+      // the change. Serve it now, against the box as it is. Deleted first, so
+      // this can re-enter at most once per signal.
+      if (pendingProviderChange.delete(provider)) {
+        refreshInBackground(provider, { providerChanged: true });
+      }
     });
 }
 
@@ -1111,10 +1157,21 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // Sanitised BEFORE freshness is judged, because the sanitiser is what decides
+  // how many rows this response actually carries. A live, under-6h payload
+  // whose every row the CURRENT rules filter out is served as `models: []` —
+  // and judged on the raw cache it looked fresh, live and unfailed, so nothing
+  // re-enumerated and the picker sat on the curated list. That state arrives
+  // the first time a filter is tightened, which is exactly what this branch
+  // just did to the previous generation of caches.
+  const sanitized = cached ? sanitizeCachedPayload(provider, cached) : null;
+  const servedEmpty = sanitized !== null && sanitized.models.length === 0;
+
   const ageMs = cached ? Date.now() - cached.fetchedAt : Infinity;
   const isStale = ageMs > REFRESH_INTERVAL_MS
     || cached?.stale === true
-    || refreshFailedLast(provider);
+    || refreshFailedLast(provider)
+    || servedEmpty;
   // A payload no device produced is a reason to ask AGAIN, not a reason to
   // wait six hours. That includes a cache written before `source` existed —
   // on an upgraded box those files hold the curated list a failed enumeration
@@ -1134,13 +1191,27 @@ export async function GET(req: NextRequest) {
   // where a fork really is out there, is.
   const enumerating = refreshing.has(provider);
 
-  if (cached) {
-    const sanitized = sanitizeCachedPayload(provider, cached);
+  if (cached && sanitized) {
     memCache.set(provider, sanitized);
     const payload: CatalogResponse = {
       ...sanitized,
       ...(isStale ? { stale: true } : {}),
-      ...(enumerating && !isLivePayload(cached) ? { warming: true } : {}),
+      // `warming` means "asking again is worth something", so it is true
+      // whenever a fork is out there AND what this response carries is not the
+      // answer that fork will bring:
+      //  * the payload is not a device's (cold start, upgraded cache);
+      //  * `force` — the provider set just changed, so even a LIVE payload is
+      //    the pre-change one. Without this clause a connect on a provider that
+      //    already had a live catalogue was invisible: the hook polls only on
+      //    `warming`, so it read once, settled, and the post-credential list
+      //    landed three minutes later with nobody asking;
+      //  * the sanitiser emptied it, so the client is about to render the
+      //    curated rows instead.
+      // The plain 6h refresh still passes none of these, which is what keeps
+      // every mounted picker from polling through it.
+      ...(enumerating && (!isLivePayload(cached) || force || servedEmpty)
+        ? { warming: true }
+        : {}),
     };
     return NextResponse.json(payload, { headers: noStore() });
   }
