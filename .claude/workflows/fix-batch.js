@@ -26,9 +26,10 @@ const verified = await pipeline(ids, (id) => parallel(LENSES.map(([key, angle]) 
     { label: 'verify:' + id + '/' + key, phase: 'Verify', agentType: 'clawbox-refuter', schema: VERDICT })))
   .then((vs) => {
     const live = vs.filter(Boolean)
-    // Every lens must have returned a schema-valid verdict; a missing verifier is not a pass.
+    // Every lens must have returned a schema-valid verdict AND confirmed the finding with confidence;
+    // a missing verifier, an uncertain one (refuted:true, confident:false) or a refutation all reject.
     const complete = live.length === LENSES.length
-    const keep = complete && !live.some((v) => v.refuted && v.confident)
+    const keep = complete && live.every((v) => v.confident && !v.refuted)
     return { id, keep, complete, verdicts: live, corrections: live.map((v) => v.correction).filter(Boolean).join('\n') }
   }))
 
