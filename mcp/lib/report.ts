@@ -51,4 +51,4 @@ export function hermesDeviceDefault(source: HermesDefaultSource | null | undefin
  * is, and the payload points at the record: the label under each reply.
  */
 export const CURRENT_CHAT_MODEL_NOTE =
-  "not visible here. device_default is what a new chat starts on; this chat may be on a per-session override no tool can read. The model that served each reply is printed under each reply in the ClawBox chat.";
+  "not visible here. device_default is what a new chat starts on; this chat may be on a per-session override no tool can read. Where the ClawBox chat knows the model that served a reply, it prints it under that reply.";

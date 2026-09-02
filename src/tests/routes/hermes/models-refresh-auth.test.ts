@@ -105,3 +105,15 @@ describe("GET /setup-api/hermes/models", () => {
     });
   });
 });
+
+describe("the scoped reply and the device's reasoning level", () => {
+  it("carries `reasoning` on ?provider= too, so a reader of the scoped form is not left guessing", async () => {
+    // HERMES-05: ai_list_models reads this form before every model switch and
+    // reports the device default's thinking level off it. The value was in
+    // hand (`payload.reasoning`) and not on the scoped answer — a false
+    // unknown.
+    const body = await (await GET(request("?provider=anthropic", false))).json();
+    expect(body.provider).toBe("anthropic");
+    expect(body.reasoning).toBe("medium");
+  });
+});

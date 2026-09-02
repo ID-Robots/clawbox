@@ -259,7 +259,7 @@ import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS } from '@/components/NewAppWizardCard' 
 import { CloudTtsWarning } from '@/components/CloudTtsWarning'
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
-import { shortModelPillLabel, lastModelSegment, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
+import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
 
 // ── Waiting for a generated picture ─────────────────────────────────────────
 //
@@ -4550,10 +4550,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // Which model actually answered, as the turn recorded it. The header
           // pills are a request; this is the record — the one thing on screen
           // that settles "which model are you" after a mid-conversation
-          // switch. Provider by its full display name, model by its last
-          // segment (the full id is the title); nothing when not recorded.
+          // switch. Provider by its full display name, model by its full id —
+          // a record, so nothing is trimmed off it; nothing when not recorded.
           const served = msg.role === 'assistant' && msg.model
-            ? `${msg.provider ? `${hermesProviderName(msg.provider)} · ` : ''}${lastModelSegment(msg.model)}`
+            ? `${msg.provider ? `${hermesProviderName(msg.provider)} · ` : ''}${msg.model}`
             : null;
           return (
             <div key={i} style={{
@@ -4727,8 +4727,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 {served && (
                   <div
                     data-testid="chat-served-model"
-                    title={msg.model}
-                    style={{ marginTop: 4, fontSize: 10.5, lineHeight: 1.3, color: 'rgba(255,255,255,0.35)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                    title={served}
+                    // 0.55 over the panel's #0d1117 is ~6:1 — AA. The quiet
+                    // 0.35 the tool chips use is ~3.2:1, which is fine for a
+                    // decoration and not for the one line that answers a
+                    // question.
+                    style={{ marginTop: 4, fontSize: 11, lineHeight: 1.3, color: 'rgba(255,255,255,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                   >
                     {served}
                   </div>

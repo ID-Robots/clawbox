@@ -119,9 +119,11 @@ and `ai_set_provider` / `ai_set_model` answer "device default is now …". The c
 a tool call arrives from may be running a per-session override chosen in its
 header, and this server cannot see it — it is one stdio child shared by every
 Hermes session, started with a filtered environment (`mcp/lib/profile.ts`) and
-called with no session id. The model that served each reply is printed under
-that reply in the ClawBox chat; the payloads point there in `current_chat`, so
-the agent never answers "which model are you" from a tool.
+called with no session id. Where the ClawBox chat knows the model that served
+a reply it prints it under that reply; the payloads point there in
+`current_chat`, so the agent never answers "which model are you" from a tool.
+On OpenClaw the header writes the box default and repoints every session, so
+there `device_status` says the default is what the chat runs.
 
 ### Pictures
 

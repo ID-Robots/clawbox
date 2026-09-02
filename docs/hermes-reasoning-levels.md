@@ -111,7 +111,7 @@ on-device provider with a small model (≤ 8B, or a context window ≤ 16k — s
   (10.7 KB on its own), `session_search`, `delegation`, `clarify`,
   `code_execution`, `todo`, `tts`, vision, image generation, cron.
 - **ClawBox MCP** (opt-in, `CLAWBOX_MCP_PROFILE=auto`): the `core` profile. The
-  MCP server reads the device's active provider/model at startup and picks it
+  MCP server reads the device's configured default provider/model at startup and picks it
   (`mcp/lib/profile.ts`). Measured off-device: 38 tools / 22.4 KB → 14 tools /
   8.2 KB of `tools/list`. Under `auto` the MCP instruction stub also switches to
   its short form, which drops the two paragraphs about browser tools that `core`

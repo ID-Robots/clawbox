@@ -70,7 +70,7 @@ const VERSION = "3.2.0";
 // "tool-verified" — while running on something else. Hermes only: the label
 // exists only in that chat, and so does `ai_list_models`.
 const WHICH_MODEL_AM_I =
-  "The model answering a conversation is printed under each reply in the ClawBox chat. `device_status` and `ai_list_models` report the device default, which a chat may override per session — never name yourself from those tools; read the label, or say you cannot tell.";
+  "Where the ClawBox chat knows the model that served a reply, it prints it under that reply. `device_status` and `ai_list_models` report the device default, which a chat may override per session — never name yourself from those tools; read the label, or say you cannot tell.";
 
 function instructionsFor(edition: Ed, profile: Profile): string {
   const product =

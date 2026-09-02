@@ -18,7 +18,7 @@ import { isPlausibleHermesProviderId, isSafeHermesModelId } from "../../src/lib/
 import { apiGet, apiPost } from "../lib/api";
 import { ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
-import { CURRENT_CHAT_MODEL_NOTE, hermesDeviceDefault } from "../lib/report";
+import { CURRENT_CHAT_MODEL_NOTE, hermesDeviceDefault, type HermesDefaultSource } from "../lib/report";
 import { zEnumOf, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
 
@@ -36,13 +36,27 @@ interface ProviderRow {
   total?: number;
 }
 
-interface ModelsBody {
+interface ModelsBody extends HermesDefaultSource {
   models?: ModelRow[];
-  current?: string;
-  provider?: string;
-  reasoning?: string;
   providers?: ProviderRow[];
   stale?: boolean;
+  /** Scoped form only: the saved pairing, when it belongs to another provider. */
+  savedElsewhere?: { provider?: string; model?: string } | null;
+}
+
+/**
+ * The device default as a SCOPED reply tells it. The route reuses `provider`
+ * for the filter it was given and `current` for the saved model IFF it belongs
+ * to that provider; when it belongs elsewhere, `savedElsewhere` names the
+ * pairing. Read that way, a filtered call reports the same object an unfiltered
+ * one does — never the asked-about provider as the default, and never a prose
+ * string in a field that is an object everywhere else.
+ */
+function scopedDeviceDefault(body: ModelsBody, provider: string) {
+  const saved = body.current
+    ? { provider, current: body.current }
+    : { provider: body.savedElsewhere?.provider, current: body.savedElsewhere?.model };
+  return hermesDeviceDefault({ ...saved, reasoning: body.reasoning });
 }
 
 const MODEL_LIMIT = 40;
@@ -182,19 +196,12 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
       // KEY ORDER IS LOAD-BEARING. The output cap truncates from the end, so
       // what the caller asked about goes first and the provider directory last.
       return json({
-        // When a provider FILTER was given the route echoes that provider back
-        // in the same `provider` field it otherwise uses for the device
-        // default, so reading it off a filtered reply reported the device as
-        // set to whatever was asked about. A filtered call says so instead.
-        //
         // `device_default`, not `in_use`: config.yaml's pairing is not what
-        // the calling chat necessarily runs — `current_chat` says so.
-        ...(provider
-          ? {
-              asked_about: provider,
-              device_default: "not reported for a filtered query — call ai_list_models with no arguments to see this device's default",
-            }
-          : { device_default: hermesDeviceDefault(body), current_chat: CURRENT_CHAT_MODEL_NOTE }),
+        // the calling chat necessarily runs — `current_chat` says so. Same
+        // shape on both branches; see scopedDeviceDefault for the filtered one.
+        ...(provider ? { asked_about: provider } : {}),
+        device_default: provider ? scopedDeviceDefault(body, provider) : hermesDeviceDefault(body),
+        current_chat: CURRENT_CHAT_MODEL_NOTE,
         models,
         models_truncated: (body.models ?? []).length > MODEL_LIMIT,
         catalogue_stale: body.stale === true,

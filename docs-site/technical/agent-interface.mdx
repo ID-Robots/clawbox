@@ -32,7 +32,7 @@ startup from the device's edition lock.
 ### Orientation — the agent calls these first
 | Tool | Purpose |
 |---|---|
-| `device_status` | Edition, agent, AI provider/model, configured context/output limits, thinking level, free disk, update waiting — in one call |
+| `device_status` | Edition, agent, the device's **default** AI provider/model/thinking (`ai.device_default`, with `ai.current_chat` saying how that relates to the chat asking), configured context/output limits, free disk, update waiting — in one call |
 | `clawbox_health` | Is the device API reachable, and is our token accepted — separates auth from connectivity |
 | `clawbox_context` | The on-device field guide plus the webapp storage/styling rules |
 
@@ -75,6 +75,16 @@ There is deliberately **no** tool for switching your ClawBox AI plan: that
 changes what you are billed, and "switch to a bigger plan for better results" is
 a one-line prompt-injection payload with a financial outcome. The plan is
 reported by `device_status`; changing it is one click in **Settings → AI**.
+
+These tools read and write the **device default** — the provider and model in
+`~/.hermes/config.yaml`, what a new conversation starts on. `ai_list_models`
+reports it as `device_default`, and `ai_set_provider` / `ai_set_model` change
+only that. The chat window can run a different model per conversation, chosen
+in its header, and the tool server cannot see which: it is one process shared
+by every session. So the chat itself prints the model that served each reply
+under the reply, and the agent is told to read that — not a tool — when asked
+"which model are you". On the OpenClaw edition the header writes the box
+default for every session, so there the default is the chat's model.
 
 ### Browser (drives the real desktop Chromium — visible in Remote Desktop)
 `browser_open` · `browser_navigate` · `browser_screenshot` · `browser_close` —

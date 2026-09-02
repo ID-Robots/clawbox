@@ -6,18 +6,26 @@ import { join } from "path";
 import { apiTry, apiToken, API_BASE, authHeader } from "../lib/api";
 import { DEFAULT_CWD } from "../lib/guard";
 import { json, text, type Registrar } from "../lib/register";
-import { CURRENT_CHAT_MODEL_NOTE, hermesDeviceDefault, reported } from "../lib/report";
+import { CURRENT_CHAT_MODEL_NOTE, hermesDeviceDefault, reported, type HermesDefaultSource } from "../lib/report";
 import type { McpContext } from "../lib/context";
 import { WEBAPP_KV_CLIENT_SNIPPET } from "../../src/lib/webapp-sandbox";
 
 const FIELD_GUIDE_PATH = join(DEFAULT_CWD, "Clawbox.md");
 
-// The OpenClaw edition's hedge on CURRENT_CHAT_MODEL_NOTE. The chat header's
-// pick is POSTed to /setup-api/chat/model, which writes the box default AND
-// applies it to every agent session, so the two normally agree — but a session
-// can still carry an override, and this process cannot see one either way.
+// The OpenClaw answer to CURRENT_CHAT_MODEL_NOTE, and it is the opposite one.
+// The chat header's pick is POSTed to /setup-api/chat/model, which writes
+// agents.defaults.model.primary AND repoints every agent session, and this
+// edition has neither a per-turn override nor a reply label — so the default
+// IS the chat's model, and saying "not visible" here would turn a right answer
+// into a shrug.
 const OPENCLAW_CURRENT_CHAT_NOTE =
-  "not visible here; on this edition the chat header writes device_default, so they normally agree, but a session can still carry an override this tool cannot see.";
+  "the device default above: on this edition the chat header writes it to the box and repoints every session, so it is what this chat runs.";
+
+/** How the description qualifies the default, per edition — the Hermes chat can override it per session; the OpenClaw chat cannot. */
+const DEFAULT_QUALIFIER: Record<string, string> = {
+  hermes: "not necessarily the one answering this chat",
+  openclaw: "which is also what the chat runs",
+};
 
 // Moved wholesale out of webapp_create / code_project_init: those descriptions
 // were 700+ chars of tutorial that a small model had to read on every
@@ -76,12 +84,6 @@ interface StatsPayload {
 interface VersionsPayload {
   clawbox?: { current?: string | null; target?: string | null; updateAvailable?: boolean };
   openclaw?: { current?: string | null; target?: string | null; updateAvailable?: boolean };
-}
-
-interface HermesModelsPayload {
-  current?: string;
-  provider?: string;
-  reasoning?: string;
 }
 
 interface ClawaiPayload {
@@ -153,7 +155,7 @@ function rootDisk(stats: StatsPayload | null) {
 export function registerOrientationTools(reg: Registrar, ctx: McpContext): void {
   reg.tool(
     "device_status",
-    "Report what this ClawBox is: edition, active agent, the device's default AI provider and model (not necessarily the one answering this chat), the default model's configured context/output limits, thinking level, free disk space, and whether a software update is waiting. Call this before answering any question about the device itself or its model limits. Any part that cannot be read reports \"unknown\" instead of failing the whole call.",
+    `Report what this ClawBox is: edition, active agent, the device's default AI provider and model (${DEFAULT_QUALIFIER[ctx.edition]}), the default model's configured context/output limits, thinking level, free disk space, and whether a software update is waiting. Call this before answering any question about the device itself or its model limits. Any part that cannot be read reports "unknown" instead of failing the whole call.`,
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core" },
     async () => {
@@ -163,7 +165,7 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
         apiTry<StatsPayload>("/setup-api/system/stats", { timeoutMs: 6_000 }),
         apiTry<VersionsPayload>("/setup-api/update/versions", { timeoutMs: 6_000 }),
         ctx.edition === "hermes"
-          ? apiTry<HermesModelsPayload>("/setup-api/hermes/models", { timeoutMs: 6_000 })
+          ? apiTry<HermesDefaultSource>("/setup-api/hermes/models", { timeoutMs: 6_000 })
           : Promise.resolve(null),
         ctx.edition === "hermes"
           ? apiTry<ClawaiPayload>("/setup-api/hermes/clawai", { timeoutMs: 6_000 })

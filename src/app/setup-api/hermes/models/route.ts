@@ -86,7 +86,10 @@ export async function GET(request: Request) {
       if (!isAllowedProvider(scoped, provider)) {
         return NextResponse.json({ error: "Unknown provider" }, { status: 400 });
       }
-      return NextResponse.json(await scopeFromPayload(scoped, provider));
+      // `reasoning` rides along: it is device-wide, not per provider, and a
+      // reader of the scoped form (ai_list_models before a switch) otherwise
+      // reports it as unknown with the value one field away.
+      return NextResponse.json({ ...(await scopeFromPayload(scoped, provider)), reasoning: scoped.reasoning });
     }
 
     const payload = await getModelOptions({ refresh });

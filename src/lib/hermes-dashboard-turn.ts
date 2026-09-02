@@ -1,5 +1,6 @@
 import { WebSocket } from "ws";
 import { DASHBOARD_WS_ORIGIN, dashboardWsTicket } from "@/lib/hermes-dashboard-auth";
+import { isHermesCliProvider } from "@/lib/hermes-providers";
 
 /**
  * A Hermes turn driven through the dashboard's own JSON-RPC socket instead of a
@@ -362,6 +363,13 @@ export interface DashboardTurnRequest {
   readonly model?: string;
   readonly provider?: string;
   readonly reasoning?: string;
+  /**
+   * Whether `provider` is a user-defined provider (a `providers.<slug>` entry
+   * in config.yaml) rather than one of Hermes' built-ins — the catalogue's own
+   * `is_user_defined`, which the route has in hand and this process does not.
+   * Read only to resolve the dashboard's provider KIND; see servedProviderSlug.
+   */
+  readonly providerIsUserDefined?: boolean;
   /** A stored session id to resume, or empty to start a new conversation. */
   readonly sessionId?: string;
   readonly signal?: AbortSignal;
@@ -482,6 +490,39 @@ function frameType(frame: GatewayFrame): string {
  * would be enough to undo it.
  */
 const COMMAND_SAFE_ID = /^[A-Za-z0-9_./:-]+$/;
+
+/**
+ * The provider a turn reports as having served it — a SLUG, or nothing.
+ *
+ * The dashboard names a user-defined provider by its KIND (`custom`), never
+ * its slug: `info.provider` and a completion's `provider` both read `custom`
+ * for clawai. Handed through as the served provider, that kind was persisted
+ * per turn and the chat labelled every resumed reply "custom · …" for the
+ * shipped default provider. So a reported value is trusted only when it is a
+ * slug the CLI defines, or the very slug this turn asked for. A kind is
+ * resolved to the requested slug only when the request named a user-defined
+ * provider and the session is on the model it asked for — the route already
+ * validated that pairing. A CANONICAL request against a `custom` session is a
+ * contradiction (the switch is skipped on the model id alone, so the session
+ * is still on whatever the kind stands for), and the honest answer is none.
+ *
+ * Two traps. `custom` is ALSO a real CLI slug (a generic OpenAI-compatible
+ * endpoint), so it passes the allowlist: it is read as the kind unless this
+ * very turn asked for the literal `custom` provider. And the allowlist cannot
+ * say which slugs are user-defined (`clawai` is in Hermes' captured registry,
+ * `clawlocal` is not), so the contradiction is detected off the catalogue's
+ * own flag, carried on the request as `providerIsUserDefined`; a request whose
+ * flag is unknown is given the benefit of the doubt.
+ */
+const DASHBOARD_PROVIDER_KIND = "custom";
+function servedProviderSlug(reported: string, req: DashboardTurnRequest, onRequestedModel: boolean): string {
+  const requested = req.provider;
+  const reportedIsKind = reported === DASHBOARD_PROVIDER_KIND && requested !== DASHBOARD_PROVIDER_KIND;
+  if (reported && !reportedIsKind && (isHermesCliProvider(reported) || reported === requested)) return reported;
+  if (!onRequestedModel || !requested) return "";
+  if (!reported) return requested;
+  return reportedIsKind && req.providerIsUserDefined !== false ? requested : "";
+}
 
 function commandSafe(value: string): boolean {
   return !value.startsWith("-") && COMMAND_SAFE_ID.test(value);
@@ -908,6 +949,9 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       // The switch WIPES the session's reasoning effort — see below.
       switchedModel = true;
     }
+    // Resolved once, after any switch, so the handle below and the completion
+    // frame report the same thing — see servedProviderSlug.
+    activeProvider = servedProviderSlug(activeProvider, req, Boolean(activeModel) && activeModel === req.model);
 
     // ── Putting the reasoning level back after a switch takes it away ────
     //
@@ -1211,8 +1255,11 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                 // The turn may name the model that served it; otherwise the one
                 // this session was settled on above is the answer.
                 const servedModel = typeof payload.model === "string" && payload.model ? payload.model : activeModel;
-                const servedProvider =
-                  typeof payload.provider === "string" && payload.provider ? payload.provider : activeProvider;
+                // A completion's `provider` is the same field with the same
+                // kind-not-slug problem, resolved the same way; what the
+                // session was settled on above is the answer otherwise.
+                const completionProvider = typeof payload.provider === "string" ? payload.provider : "";
+                const servedProvider = servedProviderSlug(completionProvider, req, servedModel === req.model) || activeProvider;
                 return {
                   text: truncated ? `${finalText}\n\n[Reply truncated — it was too long to hold.]` : finalText,
                   reasoning: finalReasoning,

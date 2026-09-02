@@ -72,7 +72,7 @@ function envProfile(env: NodeJS.ProcessEnv): ProfileRequest | null {
 }
 
 /**
- * The profile for a device whose active model is `model`.
+ * The profile for a device whose configured default model is `model`.
  *
  * Pure, so the rule is testable without a device. Unset env answers `full` —
  * see the header for why following the model is opt-in. Under `auto` the gate
@@ -92,7 +92,7 @@ export function profileForActiveModel(
 }
 
 /**
- * Ask the device what it is running, then decide.
+ * Ask the device what it is set to run by default, then decide.
  *
  * A failed read answers "full": the larger set is what every device had before
  * this existed, and quietly withholding two thirds of the agent's tools because

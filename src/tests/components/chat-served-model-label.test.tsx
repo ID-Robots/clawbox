@@ -109,6 +109,49 @@ describe("which model answered, on the bubble", () => {
     expect(labels[0].textContent).toContain("ClawBox AI");
   });
 
+  it("prints the full model id and a provider the catalogue, not the static table, names", async () => {
+    // `nebius` has no curated label, so the display name can only come from
+    // the box's own provider list — the half of hermesProviderName the clawai
+    // case above never exercises. And the id is shown whole: a vendor-prefixed
+    // id cut to its last segment is not the record, and a mouse-only title is
+    // not visible.
+    const box = installHermesBox();
+    const inner = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        if (String(input).includes("/setup-api/hermes/models")) {
+          // The helper's mount waits for this URL to have been fetched.
+          box.fetchedUrls.push(String(input));
+          return {
+            ok: true,
+            json: async () => ({
+              providers: [
+                { id: "clawlocal", name: "On this box", authenticated: true },
+                { id: "nebius", name: "Nebius AI", authenticated: true },
+              ],
+              models: [{ id: "gemma", name: "Gemma" }],
+              provider: "clawlocal",
+              current: "gemma",
+              defaultModel: "gemma",
+              reasoning: "off",
+            }),
+          };
+        }
+        return inner(input as RequestInfo, init);
+      }),
+    );
+    box.storedTranscript = [
+      { role: "assistant", text: "Routed reply.", timestamp: 1, model: "anthropic/claude-fable-5", provider: "nebius" },
+    ];
+    await mountHermesChat(box);
+    await waitFor(() => expect(screen.getByText(/Routed reply\./)).toBeTruthy());
+
+    const label = screen.getByTestId(LABEL);
+    expect(label.textContent).toContain("Nebius AI");
+    expect(label.textContent).toContain("anthropic/claude-fable-5");
+  });
+
   it("shows the label on a live turn the moment it settles", async () => {
     const textarea = await mountHermesChat(installStreamingBox());
     fireEvent.change(textarea, { target: { value: "which model are you" } });

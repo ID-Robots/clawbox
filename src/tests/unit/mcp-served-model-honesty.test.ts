@@ -96,8 +96,11 @@ describe("the note both tools attach", () => {
   it("says the default is not the chat, and where the answer is", () => {
     expect(CURRENT_CHAT_MODEL_NOTE).toMatch(/per-session/);
     expect(CURRENT_CHAT_MODEL_NOTE).toMatch(/not visible/);
-    // It points at the one place that does know: the label under the reply.
-    expect(CURRENT_CHAT_MODEL_NOTE).toMatch(/under each reply/);
+    // It points at the one place that does know — the label under a reply —
+    // without promising one under every reply: rows stored before the field
+    // existed, and sessions that never touched the ClawBox chat, have none.
+    expect(CURRENT_CHAT_MODEL_NOTE).toMatch(/under (that|a) reply/);
+    expect(CURRENT_CHAT_MODEL_NOTE).not.toMatch(/under each reply/);
   });
 });
 
@@ -108,6 +111,31 @@ describe("ai_list_models — the default is labelled as the default", () => {
 
     expect(body).not.toHaveProperty("in_use");
     expect(body.device_default).toEqual({ provider: "openai", model: "gpt-5.6-sol", thinking: "medium" });
+    expect(body.current_chat).toBe(CURRENT_CHAT_MODEL_NOTE);
+  });
+
+  it("keeps the same shape on a filtered call, and reads the default off the scoped reply", async () => {
+    // `current` is the saved model IFF it belongs to the asked-about provider —
+    // so a non-empty one names the default outright.
+    apiGet.mockResolvedValue({ provider: "zai", current: "glm-4", reasoning: "low", models: [{ id: "glm-4" }], providers: [] });
+    let body = await parsed(ai(), "ai_list_models", { provider: "zai" });
+    expect(body.asked_about).toBe("zai");
+    expect(body.device_default).toEqual({ provider: "zai", model: "glm-4", thinking: "low" });
+    expect(body.current_chat).toBe(CURRENT_CHAT_MODEL_NOTE);
+
+    // Saved under a different provider: the scoped reply says which.
+    apiGet.mockResolvedValue({
+      provider: "zai", current: "", reasoning: "low", models: [{ id: "glm-4" }], providers: [],
+      savedElsewhere: { provider: "clawai", model: "deepseek-v4-flash" },
+    });
+    body = await parsed(ai(), "ai_list_models", { provider: "zai" });
+    expect(body.device_default).toEqual({ provider: "clawai", model: "deepseek-v4-flash", thinking: "low" });
+
+    // Nothing to read: still the object, still "unknown" — never a prose string
+    // in a field the unfiltered call fills with an object.
+    apiGet.mockResolvedValue({ provider: "zai", current: "", models: [], providers: [] });
+    body = await parsed(ai(), "ai_list_models", { provider: "zai" });
+    expect(body.device_default).toEqual({ provider: "unknown", model: "unknown", thinking: "unknown" });
     expect(body.current_chat).toBe(CURRENT_CHAT_MODEL_NOTE);
   });
 
@@ -158,17 +186,25 @@ describe("device_status — the same honesty on the orientation tool", () => {
     expect(report.limits).toBe("unknown");
   });
 
-  it("applies the same shape to the OpenClaw branch, whose header writes the box default", async () => {
+  it("says on OpenClaw that the default IS the chat's model, because the header writes it", async () => {
+    // /setup-api/chat/model writes agents.defaults.model.primary AND repoints
+    // every agent session, and OpenClaw has neither the reply label nor the
+    // Hermes instruction — so telling this edition "not visible" would turn a
+    // right answer into a shrug.
     routes({ "/setup-api/chat/model": { selected: { provider: "anthropic", model: "claude-fable-5" }, current: "" } });
     const { ai: report } = (await parsed(status("openclaw"), "device_status")) as { ai: Record<string, unknown> };
 
     expect(report).not.toHaveProperty("model");
     expect(report.device_default).toMatchObject({ provider: "anthropic", model: "claude-fable-5" });
-    expect(String(report.current_chat)).toMatch(/not visible/);
+    expect(String(report.current_chat)).toMatch(/what this chat runs/);
+    expect(String(report.current_chat)).not.toMatch(/not visible/);
   });
 
-  it("says default, not in use, in the description", () => {
-    expect(status("hermes").get("device_status").description).toMatch(/device's default/);
+  it("qualifies the default per edition in the description", () => {
+    expect(status("hermes").get("device_status").description).toMatch(/not necessarily the one answering this chat/);
+    const openclaw = status("openclaw").get("device_status").description;
+    expect(openclaw).toMatch(/default/);
+    expect(openclaw).not.toMatch(/not necessarily/);
   });
 });
 
@@ -178,7 +214,8 @@ describe("the server's standing instructions", () => {
   const source = fs.readFileSync(path.join(process.cwd(), "mcp", "clawbox-mcp.ts"), "utf8");
 
   it("point the agent at the reply label for its own identity, not at the tools", () => {
-    expect(source).toMatch(/"[^"\n]*printed under each reply[^"\n]*report the device default[^"\n]*"/);
+    expect(source).toMatch(/"[^"\n]*under (that|a) reply[^"\n]*report the device default[^"\n]*"/);
+    expect(source).not.toMatch(/"[^"\n]*under each reply[^"\n]*"/);
   });
 
   it("do so on the Hermes edition only, where the label and ai_list_models exist", () => {

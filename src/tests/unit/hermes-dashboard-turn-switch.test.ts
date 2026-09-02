@@ -460,3 +460,79 @@ describe("putting the reasoning level back after a switch takes it away", () => 
     expect(socket.method("config.set")).toBeUndefined();
   });
 });
+
+/**
+ * HERMES-05 — what the turn reports as the provider that served it.
+ *
+ * The dashboard names a user-defined provider by its KIND (`custom`), never
+ * its slug — the fixtures above carry exactly that shape for clawai. On a
+ * resumed turn that needs no switch the transport used to hand that kind
+ * straight through as the served provider, the route persisted it, and the
+ * bubble read "custom · deepseek-v4-flash" from the second turn on, for the
+ * shipped default provider. A kind is not a provider; only a slug is.
+ */
+describe("the provider a turn reports as having served it", () => {
+  it("is the requested slug on a resumed turn the session was already on, never the dashboard's kind", async () => {
+    const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5" });
+    expect(socket.method("slash.exec")).toBeUndefined();
+    expect(turn?.model).toBe("deepseek-v4-flash");
+    expect(turn?.provider).toBe("clawai");
+  });
+
+  it("is a canonical slug the dashboard reports, as is", async () => {
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "claude-fable-5", provider: "anthropic" },
+      { model: "claude-fable-5", provider: "anthropic" },
+    );
+    expect(socket.method("slash.exec")).toBeUndefined();
+    expect(turn?.provider).toBe("anthropic");
+  });
+
+  it("is unknown, not the kind, when nothing was requested and the dashboard names only a kind", async () => {
+    const { turn } = await connect({ model: undefined, provider: undefined });
+    expect(turn?.model).toBe("deepseek-v4-flash");
+    expect(turn?.provider ?? "").toBe("");
+  });
+
+  it("is unknown when the request's canonical slug contradicts the session's kind", async () => {
+    // Same model id, different provider: the switch is skipped on the model id
+    // alone (see the transport), so the session is still on whatever
+    // user-defined provider `custom` stands for — not on the one requested.
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "deepseek-v4-flash", provider: "anthropic", providerIsUserDefined: false },
+      { model: "deepseek-v4-flash", provider: "custom" },
+    );
+    expect(socket.method("slash.exec")).toBeUndefined();
+    expect(turn?.provider ?? "").toBe("");
+  });
+
+  it("resolves the kind to a user-defined slug the allowlist has never heard of", async () => {
+    // clawlocal is registered on the box, not in Hermes' captured registry;
+    // the catalogue's flag, not the allowlist, is what says it is user-defined.
+    const { turn } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "gemma", provider: "clawlocal", providerIsUserDefined: true },
+      { model: "gemma", provider: "custom" },
+    );
+    expect(turn?.provider).toBe("clawlocal");
+  });
+
+  it("keeps `custom` when the turn asked for Hermes' literal custom provider", async () => {
+    // `custom` is a real CLI slug as well as the dashboard's kind for every
+    // user-defined provider; the request is what tells them apart.
+    const { turn } = await connect(
+      { model: "my-model", provider: "custom" },
+      { model: "my-model", provider: "custom" },
+    );
+    expect(turn?.provider).toBe("custom");
+  });
+
+  it("does not let a completion's own kind overwrite the resolved slug", async () => {
+    const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5" });
+    const running = turn!.run(() => {});
+    await Promise.resolve();
+    socket.event("message.complete", { text: "one", status: "complete", provider: "custom" });
+    const final = await running;
+    expect(final.provider).toBe("clawai");
+    expect(final.model).toBe("deepseek-v4-flash");
+  });
+});

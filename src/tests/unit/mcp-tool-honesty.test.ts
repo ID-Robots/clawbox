@@ -384,7 +384,7 @@ describe("skill_info — a synthesised record is not a skill", () => {
 
 // ── ai_list_models ───────────────────────────────────────────────────────────
 
-describe("ai_list_models — what is in use, and what fits", () => {
+describe("ai_list_models — the device default, and what fits", () => {
   function ai(providers: string[] = []) {
     const h = captureRegistrar("hermes");
     registerAiTools(h.reg, ctx("hermes", providers));
@@ -403,16 +403,16 @@ describe("ai_list_models — what is in use, and what fits", () => {
     ],
   };
 
-  it("does not report the provider you asked about as the one in use", async () => {
-    // The route reuses the `provider` field for the filter it was given.
+  it("does not report the provider you asked about as the device default", async () => {
+    // The route reuses the `provider` field for the filter it was given, and
+    // an empty `current` means the saved model is NOT this provider's.
     apiGet.mockResolvedValue({ provider: "zai", current: "", models: [{ id: "glm-4" }], providers: [] });
 
     const out = await ai().call("ai_list_models", { provider: "zai" });
     if (out.isError) throw new Error("ai_list_models failed");
     const body = JSON.parse(out.text);
     expect(body.asked_about).toBe("zai");
-    expect(JSON.stringify(body.device_default)).not.toMatch(/"provider"\s*:\s*"zai"/);
-    expect(String(body.device_default)).toMatch(/ai_list_models with no arguments/);
+    expect(body.device_default).toEqual({ provider: "unknown", model: "unknown", thinking: "unknown" });
   });
 
   it("reports the real provider and model on an unfiltered call", async () => {

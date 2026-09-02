@@ -638,6 +638,28 @@ function isAbort(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError";
 }
 
+/**
+ * What a `hermes chat -q` run served: the named half of the pair as named, the
+ * other half as config.yaml has it. `-m` alone runs on the configured provider;
+ * `--provider` alone is refused above unless it IS the configured one. A
+ * default that cannot be read is left out rather than guessed.
+ */
+async function cliServedPair(
+  model: string,
+  provider: string,
+  payload: ModelOptionsPayload | null,
+): Promise<{ model?: string; provider?: string }> {
+  const current = model && provider
+    ? null
+    : payload?.current ?? (await getModelOptions().catch(() => null))?.current ?? null;
+  const servedModel = model || current?.model || "";
+  const servedProvider = provider || current?.provider || "";
+  return {
+    ...(servedModel ? { model: servedModel } : {}),
+    ...(servedProvider ? { provider: servedProvider } : {}),
+  };
+}
+
 export async function POST(request: Request) {
   let body: {
     message?: string;
@@ -949,10 +971,14 @@ export async function POST(request: Request) {
   // `image.attach` handshake this route has not been taught. A turn carrying a
   // picture is rare and already slow; correctness first.
   if (wantsStream(request) && imagePaths.length === 0) {
+    // The catalogue knows which providers are user-defined; the transport
+    // needs that one bit to read the dashboard's provider KIND honestly.
+    const providerRow = wantsProvider && payload ? payload.providers.find((row) => row.id === rawProvider) : undefined;
     const turn = await openDashboardTurn({
       text: promptWithImages,
       ...(rawModel ? { model: rawModel } : {}),
       ...(wantsProvider ? { provider: rawProvider } : {}),
+      ...(providerRow ? { providerIsUserDefined: providerRow.isUserDefined } : {}),
       ...(rawReasoning ? { reasoning: rawReasoning } : {}),
       ...(rawSessionId ? { sessionId: rawSessionId } : {}),
       signal: request.signal,
@@ -967,12 +993,11 @@ export async function POST(request: Request) {
     const threaded = parseSessionId(err) || rawSessionId;
     // The CLI path runs exactly what argv asked for — `-m` and `--provider` are
     // passed straight to the command, with no session to drift from — so the
-    // request IS the record here. When no model was named, the run used
-    // config.yaml's default and this route does not presume to name it.
-    const answered = await settleTurn(threaded, sessionKey, text, "", {
-      ...(rawModel ? { model: rawModel } : {}),
-      ...(wantsProvider ? { provider: rawProvider } : {}),
-    });
+    // request IS the record here. What it did NOT ask for, the run took from
+    // config.yaml's pairing, which is the same read the validation above makes
+    // when it has a reason to: recorded too, because a blank under a reply the
+    // box knows the model of is a false unknown, not modesty.
+    const answered = await settleTurn(threaded, sessionKey, text, "", await cliServedPair(rawModel, wantsProvider ? rawProvider : "", payload));
     return NextResponse.json(answered);
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
