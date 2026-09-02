@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor, fireEvent } from "@/tests/helpers/test-utils";
 import { HERMES_SESSION, installHermesBox, mountHermesChat, type HermesBox } from "@/tests/helpers/hermes-chat-box";
@@ -129,5 +131,27 @@ describe("which model answered, on the bubble", () => {
     await push(null);
 
     await waitFor(() => expect(screen.getByTestId(LABEL).textContent).toContain("gpt-5.6-sol"));
+    // The provider half travels the same `done` frame and is just as easy to
+    // drop on the live path alone. `openai` is not in this box's catalogue, so
+    // it has no display name to resolve to and the label falls back to the raw
+    // slug — honest, and the case the replayed test above does not cover.
+    expect(screen.getByTestId(LABEL).textContent).toContain("openai ·");
+  });
+});
+
+/**
+ * A source assertion, deliberately, and for the reason
+ * chat-model-pill-stability.test.tsx gives for its own: the behaviour depends
+ * on two history reads reconciling against a live bubble whose timestamp the
+ * test cannot control, and the thing worth pinning is the RULE — a per-message
+ * field that can arrive late has to be named in the comparator, or React skips
+ * the repaint and the label never appears.
+ */
+describe("the transcript comparator", () => {
+  it("counts a reply that gained its served model as changed", () => {
+    const source = fs.readFileSync(
+      path.join(process.cwd(), "src", "components", "ChatPopup.tsx"), "utf8");
+    const sameTranscript = /function sameTranscript[\s\S]*?\n}/.exec(source)?.[0] ?? "";
+    expect(sameTranscript).toMatch(/x\.model !== y\.model \|\| x\.provider !== y\.provider/);
   });
 });

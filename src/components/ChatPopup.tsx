@@ -297,6 +297,11 @@ function sameTranscript(a: ChatMessage[], b: ChatMessage[]): boolean {
     const xa = x.audio ?? [], ya = y.audio ?? []
     if (xa.length !== ya.length) return false
     for (let j = 0; j < xa.length; j++) if (xa[j] !== ya[j]) return false
+    // Same rule as the audio above, for the same reason: a reply that gained
+    // the model that served it between two reads must repaint, or the label
+    // never appears. Declared here because this comparator is where a
+    // late-arriving per-message field has to be named to survive a reconcile.
+    if (x.model !== y.model || x.provider !== y.provider) return false
   }
   return true
 }
