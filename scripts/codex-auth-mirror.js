@@ -94,13 +94,23 @@ function accountIdFromAccessToken(accessToken) {
   }
 }
 
+// `openai:chatgpt` is where ClawBox files the sign-in on OpenClaw 2 (an
+// openai-provider OAuth profile — src/lib/chatgpt-subscription.ts); the two
+// older keys are what boxes signed in before the core upgrade still hold. One
+// list for reading AND writing back: a rotation adopted from the app-server
+// that cannot find the profile to write it into leaves core holding the spent
+// refresh token, and the next mirror pass writes that dead token over the
+// live file.
+const PROFILE_KEYS = ["openai:chatgpt", "codex:default", "openai-codex:default"];
+
+function profileKeyIn(profiles) {
+  return PROFILE_KEYS.find((key) => profiles && profiles[key]) || null;
+}
+
 function credentialFromProfiles(agentDir) {
   const profiles = readProfiles(agentDir);
-  // `openai:chatgpt` is where ClawBox files the sign-in on OpenClaw 2 (an
-  // openai-provider OAuth profile — src/lib/chatgpt-subscription.ts); the two
-  // older keys are what boxes signed in before the core upgrade still hold.
-  const profile =
-    profiles && (profiles["openai:chatgpt"] || profiles["codex:default"] || profiles["openai-codex:default"]);
+  const key = profileKeyIn(profiles);
+  const profile = key ? profiles[key] : null;
   if (!profile || !profile.access) return null;
   return {
     accessToken: profile.access,
@@ -202,8 +212,8 @@ function writeBackToCore(agentDirs, tokens) {
     const data = readJson(jsonPath);
     const profiles = data && data.profiles;
     if (!profiles) continue;
-    const id = profiles["codex:default"] ? "codex:default" : "openai-codex:default";
-    if (!profiles[id]) continue;
+    const id = profileKeyIn(profiles);
+    if (!id) continue;
     profiles[id].access = tokens.access_token || profiles[id].access;
     profiles[id].refresh = tokens.refresh_token;
     if (tokens.id_token) profiles[id].id = tokens.id_token;
@@ -228,8 +238,8 @@ function writeBackToCore(agentDirs, tokens) {
         if (!row || !row.store_json) continue;
         const store = JSON.parse(row.store_json);
         const profiles = store.profiles || {};
-        const id = profiles["codex:default"] ? "codex:default" : "openai-codex:default";
-        if (!profiles[id]) continue;
+        const id = profileKeyIn(profiles);
+        if (!id) continue;
         profiles[id].access = tokens.access_token || profiles[id].access;
         profiles[id].refresh = tokens.refresh_token;
         if (tokens.id_token) profiles[id].id = tokens.id_token;

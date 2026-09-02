@@ -122,6 +122,34 @@ describe("codex-auth-mirror.js", () => {
       .toBe("refresh-rotated-by-appserver");
   });
 
+  it("writes an adopted rotation back into the openai:chatgpt profile too", () => {
+    // Same rotation as above, on a box signed in the OpenClaw 2 way. A
+    // write-back that only knew the two older keys returned false here, so
+    // core kept the spent refresh token and the next pass wrote it over the
+    // live file.
+    mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
+    writeFileSync(
+      codexHomeAuthPath,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: accessToken("acct-v2", "rotated"),
+          refresh_token: "refresh-rotated-by-appserver",
+          account_id: "acct-v2",
+        },
+      }),
+    );
+    seedProfile(accessToken("acct-v2", "old"), "refresh-spent", "openai:chatgpt");
+
+    const out = run();
+
+    expect(out).toContain("adopted app-server rotation");
+    const store = JSON.parse(readFileSync(path.join(agentDir, "auth-profiles.json"), "utf-8"));
+    expect(store.profiles["openai:chatgpt"].refresh).toBe("refresh-rotated-by-appserver");
+    expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-rotated-by-appserver");
+  });
+
   it("does not write the same file twice when codex-home is a symlink to ~/.codex", () => {
     // A previous version resolved both destinations to one file and then
     // deleted the real credential through the link.
