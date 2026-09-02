@@ -58,8 +58,8 @@ export function useCopy() {
       facetTrust: t('skills.facetTrust'),
       facetSafety: t('skills.facetSafety'),
       /** Fixed vocabularies, so an id a newer index invents falls back to itself. */
-      trustBucket: (id: string) => (TRUST_KEYS.has(id) ? t(`skills.trustBucket.${id}`) : id),
-      safetyBucket: (id: string) => (SAFETY_KEYS.has(id) ? t(`skills.safetyBucket.${id}`) : id),
+      trustBucket: (id: string) => trustLabel(t, id),
+      safetyBucket: (id: string) => safetyLabel(t, id),
       facetCategoryCoverage: (n: number, total: number) =>
         t('skills.facetCategoryCoverage', { n: n.toLocaleString(), total: total.toLocaleString() }),
       facetCountsLoaded: (n: number) => t('skills.facetCountsLoaded', { n: n.toLocaleString() }),
@@ -222,6 +222,54 @@ export function useCopy() {
       installRepaired: (n: number) =>
         n === 1 ? t('skills.installRepaired.one', { n }) : t('skills.installRepaired.other', { n }),
 
+      // === HERMES-04: refusals the routes name by code ===
+      // The routes' own `error` sentences are English composed on the server;
+      // the card reads the `code` (installRefusalCopy / uninstallRefusalCopy in
+      // HermesSkillsStore) and says it from here.
+      installTimeout: (name: string) => t('skills.installTimeout', { name }),
+      ambiguousId: t('skills.ambiguousId'),
+      alreadyInstalled: t('skills.alreadyInstalled'),
+      alreadyInstalledFlagged: (name: string, verdict?: string) =>
+        t('skills.alreadyInstalledFlagged', { name, verdict: safetyLabel(t, verdict || 'caution') }),
+      rateLimited: t('skills.rateLimited'),
+      downloadFailed: t('skills.downloadFailed'),
+      unresolved: t('skills.unresolved'),
+      /**
+       * The scanner's verdict and the source's trust tier, as the rail names
+       * them. The route sends this code for a "dangerous" verdict and nothing
+       * else, so that is what a payload missing the verdict is assumed to say —
+       * "caution" would describe a skill the device does install.
+       *
+       * The TRUST tier has no such single answer: the device refuses a
+       * dangerous verdict from a community OR a trusted source, and its own
+       * sentence says "third-party" when the scan carried no tier. Defaulting
+       * to the rail's `unknown` bucket told the owner where the skill came
+       * from, which is a claim this payload did not make — so a missing tier
+       * drops the clause instead.
+       */
+      blockedByDevice: (name: string, verdict?: string, trust?: string) => {
+        const params = { name, verdict: safetyLabel(t, verdict || 'dangerous') };
+        return trust
+          ? t('skills.blockedByDevice', { ...params, trust: trustLabel(t, trust) })
+          : t('skills.blockedByDeviceUnknownSource', params);
+      },
+      builtinSkill: (name: string) => t('skills.builtinSkill', { name }),
+      notInstalled: (name: string) => t('skills.notInstalled', { name }),
+      uninstallRefused: t('skills.uninstallRefused'),
+      /** The browse route's failure code; one it did not name gets the generic line. */
+      browseError: (code: string) => t(`skills.${BROWSE_ERROR_KEYS[code] ?? 'browseFailed'}`),
+      /**
+       * The detail panel's note. `docs` lost only the documentation body — the
+       * metadata is on screen behind the note — so it says so rather than
+       * claiming the skill could not be loaded. A device without Hermes is the
+       * one `meta` cause worth naming: nothing on that panel will load, and
+       * retrying is pointless.
+       */
+      detailError: (part: 'meta' | 'docs', code?: string | null) =>
+        part === 'docs'
+          ? t('skills.detailDocsFailed')
+          : t(code === 'cli_missing' ? 'skills.detailUnavailable' : 'skills.detailFailed'),
+
       // === TASK-452: enabled/disabled ===
       skillDisabled: t('skills.skillDisabled'),
       skillDisabledHelp: t('skills.skillDisabledHelp'),
@@ -278,6 +326,25 @@ export function useCopy() {
 // back to its own id rather than render a raw translation key at the customer.
 const TRUST_KEYS = new Set(['official', 'trusted', 'community', 'unknown']);
 const SAFETY_KEYS = new Set(['safe', 'caution', 'dangerous', 'unscanned']);
+
+type Translate = ReturnType<typeof useT>['t'];
+
+const trustLabel = (t: Translate, id: string) =>
+  TRUST_KEYS.has(id) ? t(`skills.trustBucket.${id}`) : id;
+const safetyLabel = (t: Translate, id: string) =>
+  SAFETY_KEYS.has(id) ? t(`skills.safetyBucket.${id}`) : id;
+
+// The browse route's failure codes that have their own line; `cli_failed`,
+// `too_large`, `cancelled` and a code this build does not know share the
+// generic one. (`cancelled` is answered only once the client has gone, so no
+// card ever shows it — it has no line of its own on purpose.)
+const BROWSE_ERROR_KEYS: Record<string, string> = {
+  cli_timeout: 'browseTimeout',
+  cli_missing: 'browseUnavailable',
+  // Not a device failure at all: the search itself is one the route will not
+  // run, so the line says what to change and the button clears it.
+  bad_query: 'browseBadQuery',
+};
 
 // The capability ids hermes-skill-capabilities.ts can emit. Kept as a set so a
 // bucket a newer scanner introduces falls back to the generic line instead of

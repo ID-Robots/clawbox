@@ -771,6 +771,32 @@ describe("skill_install — a refusal the agent can act on", () => {
     return out.error;
   }
 
+  it("reads an install cli_failed as the device failing, not as a refusal that forbids retrying", async () => {
+    // The install route answers 502 + cli_failed when the installer could not
+    // be run. Without a branch it reached the 409/502 catch-all, which reports
+    // "the device refused the install. Do not retry." — the wrong story, and
+    // it forbids the one next step that can work.
+    refuse(502, { error: "The device's Hermes command failed.", code: "cli_failed" });
+
+    const e = await installErr();
+
+    expect(e.code).toBe("INTERNAL");
+    expect(e.next).toMatch(/retry once/i);
+    expect(e.message).not.toMatch(/refused/i);
+  });
+
+  it("reads cli_missing as a device without Hermes — not a bad id, not a dead service", async () => {
+    // HERMES-04: the install route's generic catch now names the CLI it could
+    // not run. Before, a 502 with no code fell to the generic mapping and its
+    // clawbox_health advice, for a device whose Hermes was simply not there.
+    refuse(502, { error: "Hermes is not installed on this device", code: "cli_missing" });
+
+    const e = await installErr();
+
+    expect(e.code).toBe("NOT_SUPPORTED_HERE");
+    expect(e.next).not.toMatch(/skill_search|clawbox_health|wifi_status/);
+  });
+
   it("does not send the agent back to skill_search when the DEVICE blocked the skill", async () => {
     refuse(409, {
       error: 'The device refused to install "oo-terraform".',
@@ -890,6 +916,23 @@ describe("skill_install — a refusal the agent can act on", () => {
     expect(e.next).toMatch(/FULL id/);
   });
 
+  it("reads the install route's 504 as a deadline, not as a dead service", async () => {
+    // HERMES-04. The timeout answer is the one refusal outside the 409/502 the
+    // decoder's catch-all is scoped to, so it fell through to the generic
+    // mapping and told the agent to call clawbox_health for a slow download.
+    refuse(504, {
+      error: 'Installing "oo-terraform" took too long and was stopped, so nothing was installed.',
+      code: "install_timeout",
+    });
+
+    const e = await installErr();
+
+    expect(e.code).toBe("TIMEOUT");
+    expect(e.message).toMatch(/nothing was installed/i);
+    expect(e.next).toMatch(/retry once/i);
+    expect(e.next).not.toMatch(/clawbox_health/);
+  });
+
   it("does not report an auth failure as a device refusal", async () => {
     // The catch-all for an unrecognised code is scoped to the two statuses the
     // route refuses with. A 401 has to keep classifyError's own advice: a
@@ -916,6 +959,103 @@ describe("skill_install — a refusal the agent can act on", () => {
  * and to read `ai.limits` before stating any context or output limit — a key
  * the Hermes branch never emitted at all.
  */
+// ── skill_search ─────────────────────────────────────────────────────────────
+
+describe("skill_search — a slow catalogue is not a dead network", () => {
+  function skills() {
+    const h = captureRegistrar("hermes");
+    registerSkillTools(h.reg);
+    return h;
+  }
+
+  async function searchErr() {
+    const out = await skills().call("skill_search", { query: "pdf", sort: "relevance", limit: 10 });
+    if (!out.isError) throw new Error("expected skill_search to fail");
+    return out.error;
+  }
+
+  it("reads the browse route's cli_timeout as a deadline to retry, not a network to check", async () => {
+    // HERMES-04. The browse route used to answer a bare `{ error: "hermes timed
+    // out" }`; every 502 was mapped to "call wifi_status" by status alone.
+    apiGet.mockRejectedValue(
+      new ApiError(
+        502,
+        JSON.stringify({ error: "Loading the skill catalogue took too long.", code: "cli_timeout" }),
+      ),
+    );
+
+    const e = await searchErr();
+
+    expect(e.code).toBe("TIMEOUT");
+    expect(e.next).toMatch(/retry once/i);
+    expect(e.next).not.toMatch(/wifi_status/);
+  });
+
+  it("refuses a search the route would reject without asking the device at all", async () => {
+    // The tool guards on the same `isValidQuery` the browse route applies, so
+    // a `bad_query` 400 cannot reach the rules — the request is never made.
+    // (That is why no rule decodes it: an unreachable rule is the browse tab's
+    // `browseCancelled` copy over again.)
+    apiGet.mockRejectedValue(new ApiError(500, "{}"));
+
+    const out = await skills().call("skill_search", { query: "-rf", sort: "relevance", limit: 10 });
+    if (!out.isError) throw new Error("expected skill_search to fail");
+
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.next).toMatch(/not starting with a dash/i);
+    expect(apiGet).not.toHaveBeenCalled();
+  });
+
+  it("reads cli_missing as a device without Hermes — not a network to check, not a retry", async () => {
+    apiGet.mockRejectedValue(
+      new ApiError(
+        502,
+        JSON.stringify({ error: "Hermes is not installed on this device, so the skill catalogue cannot be loaded.", code: "cli_missing" }),
+      ),
+    );
+
+    const e = await searchErr();
+
+    expect(e.code).toBe("NOT_SUPPORTED_HERE");
+    expect(e.next).toMatch(/do not retry/i);
+    expect(e.next).not.toMatch(/wifi_status/);
+  });
+
+  it("reads cli_failed as the device failing — one retry, no network check", async () => {
+    apiGet.mockRejectedValue(
+      new ApiError(502, JSON.stringify({ error: "The device could not load the skill catalogue.", code: "cli_failed" })),
+    );
+
+    const e = await searchErr();
+
+    expect(e.code).toBe("INTERNAL");
+    expect(e.next).toMatch(/retry once/i);
+    expect(e.next).not.toMatch(/wifi_status/);
+  });
+
+  it("reads too_large as a narrower search, not a dead service", async () => {
+    apiGet.mockRejectedValue(
+      new ApiError(502, JSON.stringify({ error: "The device's answer was too large to use.", code: "too_large" })),
+    );
+
+    const e = await searchErr();
+
+    expect(e.code).toBe("TOO_LARGE");
+    expect(e.next).not.toMatch(/wifi_status/);
+  });
+
+  it("still sends a code-less 502 to the network check", async () => {
+    // The guard for older device builds and the other failure codes: nothing
+    // narrower than a timeout has earned different advice.
+    apiGet.mockRejectedValue(new ApiError(502, JSON.stringify({ error: "Browse failed" })));
+
+    const e = await searchErr();
+
+    expect(e.code).toBe("ENDPOINT_DOWN");
+    expect(e.next).toMatch(/wifi_status/);
+  });
+});
+
 describe("device_status — nothing read is reported as unknown", () => {
   function status(edition: "openclaw" | "hermes") {
     const h = captureRegistrar(edition);

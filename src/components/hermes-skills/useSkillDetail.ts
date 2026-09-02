@@ -1,7 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { HermesSkill, HermesSkillDetail } from '@/lib/hermes-skills';
+import {
+  type CliFailureCode,
+  type HermesSkill,
+  type HermesSkillDetail,
+  isCliFailureCode,
+} from '@/lib/hermes-skills';
 
 // Two-phase detail fetch.
 //
@@ -15,7 +20,28 @@ import type { HermesSkill, HermesSkillDetail } from '@/lib/hermes-skills';
 const INSPECT_URL = '/setup-api/hermes/skills/inspect';
 const CACHE_LIMIT = 50;
 
+/**
+ * What a cached answer — and a failure — belong to. Both scopes are kept apart
+ * because the same string can be a lock name in the Installed tab and a
+ * registry identifier in Browse, and those are two DIFFERENT skills.
+ */
+const detailKey = (id: string, fromInstalled: boolean) => `${fromInstalled ? 'i' : 'b'}:${id}`;
+
 export type DetailPhase = 'idle' | 'meta' | 'docs' | 'done';
+
+/**
+ * Why the panel has a note on it, in the two parts the panel says differently:
+ * `docs` cost only the documentation body — the metadata is already on screen —
+ * while `meta` is the whole detail. The CODE, never the route's sentence: that
+ * sentence is English composed on the device, and it used to be painted
+ * verbatim under a localised header (HERMES-04). A failure that carried no code
+ * — an older device build, a transport error — is `null` and gets the generic
+ * line, the same rule the Browse tab applies.
+ */
+export interface DetailFailure {
+  part: 'meta' | 'docs';
+  code: CliFailureCode | null;
+}
 
 interface DetailDelta extends Partial<HermesSkillDetail> {
   provenance?: HermesSkillDetail['provenance'];
@@ -24,7 +50,7 @@ interface DetailDelta extends Partial<HermesSkillDetail> {
 export interface DetailController {
   detail: HermesSkillDetail | null;
   phase: DetailPhase;
-  error: string | null;
+  error: DetailFailure | null;
   ambiguous: { query: string; candidates: HermesSkill[] } | null;
   /**
    * Drop the cached entries for these ids AND re-run the fetch for whatever is
@@ -38,13 +64,35 @@ export interface DetailController {
 
 /** True when the id came from the Installed tab (see the inspect route). */
 export function useSkillDetail(inspectId: string | null, fromInstalled = false): DetailController {
-  const [detail, setDetail] = useState<HermesSkillDetail | null>(null);
+  // Every answer carries the request it belongs to, and the bottom of this hook
+  // hands back only the ones that still describe what is on screen — dropping a
+  // stale answer by DERIVATION rather than by an extra state write.
+  //
+  // The tag is the CACHE KEY, not the bare id: the same string is a lock name
+  // in the Installed tab and a registry identifier in Browse, and those are two
+  // DIFFERENT skills (40 ClawHub ids collide with a bundled skill on this
+  // device — it is why the route takes a `scope` at all). An id-only tag let
+  // one tab's answer be painted for the other's skill.
+  //
+  // The two that describe an ATTEMPT rather than a skill carry the RUN of the
+  // effect they came from, so a re-ask hides them without clearing anything: a
+  // note from the attempt before has no business sitting under a panel that is
+  // being asked again. `reloadKey` cannot do that job — it moves only in
+  // `refresh()`, so Installed(id) -> Browse(id) -> Installed(id) came back with
+  // the same tag as the failure before it and showed that failure while the new
+  // request was still in flight. `epoch` moves for every run of the effect.
+  //
+  // A ref, not state, and read during render on purpose: it only ever changes
+  // inside the effect, and every run of the effect also writes `held` with a
+  // fresh object, so the render that sees the new value always happens.
+  const [held, setHeld] = useState<{ key: string; skill: HermesSkillDetail } | null>(null);
   const [phase, setPhase] = useState<DetailPhase>('idle');
-  // Errors and ambiguity are tagged with the id they belong to, so switching
-  // skills drops them by DERIVATION rather than by an extra state write.
-  const [errorState, setErrorState] = useState<{ id: string; message: string } | null>(null);
-  const [ambiguous, setAmbiguous] = useState<{ query: string; candidates: HermesSkill[] } | null>(null);
+  const [errorState, setErrorState] = useState<({ key: string; run: number } & DetailFailure) | null>(null);
+  const [ambiguous, setAmbiguous] = useState<
+    { key: string; run: number; query: string; candidates: HermesSkill[] } | null
+  >(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const epoch = useRef(0);
   const cache = useRef<Map<string, HermesSkillDetail>>(new Map());
 
   // Both scopes are dropped for an id: the same string can be a lock name in
@@ -84,22 +132,27 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
     if (!inspectId) return;
 
     const scope = fromInstalled ? '&scope=installed' : '';
-    const cacheKey = `${fromInstalled ? 'i' : 'b'}:${inspectId}`;
+    const cacheKey = detailKey(inspectId, fromInstalled);
+    const run = ++epoch.current;
     const controller = new AbortController();
     let cancelled = false;
 
     const cached = cache.current.get(cacheKey);
     if (cached) {
-      setDetail(cached);
+      setHeld({ key: cacheKey, skill: cached });
       setPhase(cached.needsRemoteDocs ? 'docs' : 'done');
       if (!cached.needsRemoteDocs) return;
     } else {
-      setDetail(null);
+      setHeld(null);
       setPhase('meta');
     }
 
     (async () => {
       let base = cached ?? null;
+      // Set from the answer's own code before the throw below, so the catch —
+      // which also covers a transport failure that has no code at all — knows
+      // which of the two it is holding.
+      let metaCode: CliFailureCode | null = null;
       try {
         if (!base) {
           const res = await fetch(`${INSPECT_URL}?id=${encodeURIComponent(inspectId)}${scope}`, {
@@ -107,10 +160,13 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
             cache: 'no-store',
           });
           const data = await res.json().catch(() => ({}));
-          if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+          if (!res.ok) {
+            if (isCliFailureCode(data?.code)) metaCode = data.code;
+            throw new Error(data?.error || `HTTP ${res.status}`);
+          }
           base = data.skill as HermesSkillDetail;
           if (cancelled) return;
-          setDetail(base);
+          setHeld({ key: cacheKey, skill: base });
           remember(cacheKey, base);
           setPhase(base.needsRemoteDocs ? 'docs' : 'done');
         }
@@ -124,15 +180,26 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
         const data = await res.json().catch(() => ({}));
         if (cancelled) return;
         if (res.ok && data?.ambiguous && Array.isArray(data.candidates)) {
-          setAmbiguous({ query: String(data.query || inspectId), candidates: data.candidates as HermesSkill[] });
+          setAmbiguous({
+            key: cacheKey,
+            run,
+            query: String(data.query || inspectId),
+            candidates: data.candidates as HermesSkill[],
+          });
           setPhase('done');
           return;
         }
         if (!res.ok) {
           // The metadata is already on screen; a failed docs fetch only costs
           // the body, so it degrades to a note rather than an error page.
+          console.error('[skills detail] documentation', data?.code ?? 'no code', data?.error ?? res.status);
           setPhase('done');
-          setErrorState({ id: inspectId, message: data?.error || 'Could not load the full documentation' });
+          setErrorState({
+            key: cacheKey,
+            run,
+            part: 'docs',
+            code: isCliFailureCode(data?.code) ? data.code : null,
+          });
           return;
         }
         const delta = (data.delta || {}) as DetailDelta;
@@ -161,13 +228,14 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
                 : {}),
           },
         };
-        setDetail(merged);
+        setHeld({ key: cacheKey, skill: merged });
         remember(cacheKey, merged);
         setPhase('done');
       } catch (err) {
         if ((err as Error).name === 'AbortError' || cancelled) return;
+        console.error('[skills detail]', err);
         setPhase('done');
-        setErrorState({ id: inspectId, message: err instanceof Error ? err.message : 'Couldn’t load details' });
+        setErrorState({ key: cacheKey, run, part: 'meta', code: metaCode });
       }
     })();
 
@@ -181,15 +249,18 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
     return { detail: null, phase: 'idle', error: null, ambiguous: null, refresh };
   }
   // The effect runs AFTER the render that changed the selection, so for one
-  // frame the state still describes the previous skill. Every payload carries
-  // the id it was fetched for, so a mismatch is reported as "still loading"
-  // rather than painting another skill's version/author into this header.
-  const stale = !detail || detail.id !== inspectId;
+  // frame the state still describes the previous request. Everything below is
+  // therefore checked against what is on screen NOW, and a mismatch reads as
+  // "still loading" rather than painting another skill's version, another
+  // tab's failure, or the ambiguity of a query this one already resolved.
+  const heldFor = detailKey(inspectId, fromInstalled);
+  const stale = !held || held.key !== heldFor || held.skill.id !== inspectId;
+  const fromThisRun = (a: { key: string; run: number }) => a.key === heldFor && a.run === epoch.current;
   return {
-    detail: stale ? null : detail,
+    detail: stale ? null : held.skill,
     phase: stale ? 'meta' : phase,
-    error: errorState && errorState.id === inspectId ? errorState.message : null,
-    ambiguous: ambiguous && ambiguous.query === inspectId ? ambiguous : null,
+    error: errorState && fromThisRun(errorState) ? errorState : null,
+    ambiguous: ambiguous && fromThisRun(ambiguous) && ambiguous.query === inspectId ? ambiguous : null,
     refresh,
   };
 }

@@ -220,6 +220,35 @@ export const skillsEn: Record<string, string> = {
   "skills.installRepaired.one": "Completed the download: {n} file the installer had skipped.",
   "skills.installRepaired.other": "Completed the download: {n} files the installer had skipped.",
 
+  // === HERMES-04: refusals the routes name by code ===
+  // The install/uninstall routes answer every refusal with a machine `code`
+  // and an English sentence. The sentence is for the log and the agent; the
+  // card reads the code and says it from here, in the owner's language.
+  // `{verdict}` and `{trust}` are the scanner's verdict and the source's
+  // trust tier, already translated through the rail's bucket labels.
+  "skills.installTimeout": "Installing “{name}” took too long and was stopped, so nothing was installed. Some community skills download from a slow source — try again in a moment.",
+  "skills.ambiguousId": "More than one skill goes by that name — install it by its full identifier.",
+  "skills.alreadyInstalled": "That skill is already installed on this device.",
+  "skills.alreadyInstalledFlagged": "“{name}” is already installed, so nothing was changed. Its security scan rated it “{verdict}” — remove it from the Skills store if you no longer want it.",
+  "skills.rateLimited": "The skill could not be downloaded: this device has used up its hourly GitHub allowance. Try again in an hour.",
+  "skills.downloadFailed": "The skill was found in the store, but none of its sources would serve it.",
+  "skills.unresolved": "That skill could not be found — try its full identifier.",
+  "skills.blockedByDevice": "The device refused to install “{name}”: its security scan rated it “{verdict}” and its source has the “{trust}” trust level, which the device will not install even when confirmed.",
+  "skills.blockedByDeviceUnknownSource": "The device refused to install “{name}”: its security scan rated it “{verdict}”, which the device will not install even when confirmed.",
+  "skills.builtinSkill": "“{name}” came with this device, so it cannot be removed.",
+  "skills.notInstalled": "No store skill called “{name}” is installed on this device.",
+  "skills.uninstallRefused": "The device refused to remove that skill.",
+
+  // === HERMES-04: browse failures, by the route's code ===
+  // `cli_failed`, `too_large` and `cancelled` share the generic line.
+  "skills.browseTimeout": "Loading the skill catalogue took too long. Try again in a moment.",
+  "skills.browseUnavailable": "Hermes is not installed on this device, so the skill catalogue cannot be loaded.",
+  "skills.browseFailed": "Couldn’t load the skill catalogue. Try again.",
+  "skills.browseBadQuery": "That search can’t be used. Try different words.",
+  "skills.detailFailed": "Couldn’t load this skill’s details. Try again.",
+  "skills.detailUnavailable": "Hermes is not installed on this device, so this skill’s details cannot be loaded.",
+  "skills.detailDocsFailed": "Couldn’t load this skill’s full documentation. The details above come from the device.",
+
   // === TASK-452: enabled / disabled ===
   "skills.skillDisabled": "Disabled",
   "skills.skillDisabledHelp": "Installed, but switched off — your assistant will not use it.",

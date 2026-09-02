@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
-import { isValidSkillName } from "@/lib/hermes-skills";
+import { isValidSkillName, CLI_FAILURE_SENTENCES, cliFailureCode } from "@/lib/hermes-skills";
 import { parseUninstallOutcome } from "@/lib/hermes-skill-cli-outcome";
 import {
   hermesSkillsGuard,
@@ -180,9 +180,11 @@ export async function POST(request: Request) {
     }
     return NextResponse.json({ ok: true, id, name: id });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Hermes uninstall failed" },
-      { status: 502 },
-    );
+    // This try covers the lock read, the spawn and the removal check, so an
+    // I/O failure here names absolute device paths — the exception's message
+    // goes to the log, the caller gets a fixed sentence and the code.
+    const code = cliFailureCode(err);
+    console.error("[hermes skills uninstall] failed", code, err instanceof Error ? err.message : err);
+    return NextResponse.json({ error: CLI_FAILURE_SENTENCES[code], code }, { status: 502 });
   }
 }

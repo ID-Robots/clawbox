@@ -246,6 +246,63 @@ export interface BrowseResponse {
   degraded: boolean;
 }
 
+/**
+ * Why a skills route's CLI call could not answer. The route's `error` sentence
+ * is English composed on the server, for the log and for a caller with no
+ * locale. The store — and the MCP tool's rules — read the CODE, the way the
+ * install route's own refusals are already read.
+ */
+export const CLI_FAILURE_CODES = ['cli_timeout', 'cli_missing', 'cli_failed', 'cancelled', 'too_large'] as const;
+export type CliFailureCode = (typeof CLI_FAILURE_CODES)[number];
+
+export function isCliFailureCode(value: unknown): value is CliFailureCode {
+  return typeof value === 'string' && (CLI_FAILURE_CODES as readonly string[]).includes(value);
+}
+
+/**
+ * What the BROWSE route can refuse with: every CLI failure, plus the one
+ * refusal the owner caused and can undo. A search the route will not run — it
+ * caps the length and rejects a leading `-`, both of which the search box lets
+ * you type — is a 400, and a 400 carrying no code read as "the catalogue could
+ * not be loaded, retry": the wrong story and a button that cannot help.
+ */
+export const BROWSE_FAILURE_CODES = [...CLI_FAILURE_CODES, 'bad_query'] as const;
+export type BrowseFailureCode = (typeof BROWSE_FAILURE_CODES)[number];
+
+export function isBrowseFailureCode(value: unknown): value is BrowseFailureCode {
+  return typeof value === 'string' && (BROWSE_FAILURE_CODES as readonly string[]).includes(value);
+}
+
+/**
+ * Classify a runHermesCli / skills-gate rejection by the message it settled
+ * with — the test the install route applies to its own timeout. The messages
+ * are runHermesCli's ("hermes timed out", "hermes call cancelled", the spawn
+ * failures, the output cap) and the gate's SkillsCliAborted ("Request
+ * cancelled"). Anything unrecognised is a plain failure.
+ */
+export function cliFailureCode(err: unknown): CliFailureCode {
+  const message = err instanceof Error ? err.message : '';
+  if (/timed out/i.test(message)) return 'cli_timeout';
+  if (/not installed/i.test(message)) return 'cli_missing';
+  if (/exceeded the size limit/i.test(message)) return 'too_large';
+  if (/cancelled/i.test(message)) return 'cancelled';
+  return 'cli_failed';
+}
+
+/**
+ * The fixed sentence a skills route answers for a CLI failure — the log's twin
+ * in the response, for a caller with no locale. Never the exception's own
+ * message: the routes' try blocks cover lock and filesystem work as well as
+ * the spawn, and an I/O error names absolute device paths.
+ */
+export const CLI_FAILURE_SENTENCES: Record<CliFailureCode, string> = {
+  cli_timeout: "The device's Hermes command took too long and was stopped.",
+  cli_missing: 'Hermes is not installed on this device.',
+  cli_failed: "The device's Hermes command failed.",
+  cancelled: 'The request was cancelled.',
+  too_large: "The device's answer was too large to use.",
+};
+
 /** How many values one facet group may carry, and how many may be selected. */
 export const MAX_FACET_VALUES = 24;
 export const MAX_FACET_SELECTION = 12;

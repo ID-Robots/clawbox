@@ -4,11 +4,13 @@ import { NextResponse } from "next/server";
 import {
   type BrowseResponse,
   type CatalogFacets,
+  type CliFailureCode,
   type HermesSkill,
   MAX_BROWSE_PAGE,
   MAX_FACET_SELECTION,
   MAX_FACET_VALUES,
   clampInt,
+  cliFailureCode,
   isBrowsableSource,
   isValidMeta,
   isValidQuery,
@@ -166,6 +168,15 @@ function bump(counts: Map<string, number>, key: string): void {
   counts.set(key, (counts.get(key) || 0) + 1);
 }
 
+/** Fixed words per code, for the log and for a caller with no locale — never the card's. */
+const BROWSE_FAILURES: Record<CliFailureCode, string> = {
+  cli_timeout: "Loading the skill catalogue took too long and was stopped — try again in a moment.",
+  cli_missing: "Hermes is not installed on this device, so the skill catalogue cannot be loaded.",
+  cli_failed: "The device could not load the skill catalogue.",
+  cancelled: "The request was cancelled before the skill catalogue was loaded.",
+  too_large: "The device's answer was too large to use.",
+};
+
 export async function GET(request: Request) {
   const blocked = await hermesSkillsGuard();
   if (blocked) return blocked;
@@ -178,7 +189,14 @@ export async function GET(request: Request) {
 
   if (page === null) return NextResponse.json({ error: "Invalid page" }, { status: 400 });
   if (pageSize === null) return NextResponse.json({ error: "Invalid size" }, { status: 400 });
-  if (q && !isValidQuery(q)) return NextResponse.json({ error: "Invalid query" }, { status: 400 });
+  // The one 400 on this route the OWNER can cause and undo: the search box
+  // accepts a leading `-` and any length, and `isValidQuery` refuses both. It
+  // carries a code so the store can say "change the search" rather than the
+  // catalogue's "could not load, retry" — the others below are the rail's own
+  // values and the hook's paging, which no typing can make invalid.
+  if (q && !isValidQuery(q)) {
+    return NextResponse.json({ error: "Invalid query", code: "bad_query" }, { status: 400 });
+  }
 
   // The in-memory filter accepts every source the catalog can contain; only the
   // CLI fallback is restricted to the flag allowlist (see below). `?source=`
@@ -302,10 +320,16 @@ export async function GET(request: Request) {
     return NextResponse.json(body);
   } catch (err) {
     // runHermesCli rejects with a sanitized message ("Hermes is not installed on
-    // this device", "hermes timed out") — never the binary path.
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Could not load skills" },
-      { status: 502 },
-    );
+    // this device", "hermes timed out") — never the binary path. Sanitised is
+    // not the same as sayable: that sentence is the CLI's word for its own
+    // failure, and the store painted it as the red empty state's title, in
+    // English, on every locale. The install route already rewrites the same
+    // timeout into a coded answer; the code is the part a client can translate.
+    const code = cliFailureCode(err);
+    if (code !== "cancelled") {
+      console.error("[hermes skills browse] CLI fallback failed", code, err instanceof Error ? err.message : err);
+    }
+    return NextResponse.json({ error: BROWSE_FAILURES[code], code }, { status: 502 });
   }
 }
+

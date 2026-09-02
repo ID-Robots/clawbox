@@ -32,7 +32,7 @@ import {
   fixedFacets,
   rankFacets,
 } from '@/lib/hermes-skill-facets';
-import { useCopy } from './hermes-skills/copy';
+import { type SkillsCopy, useCopy } from './hermes-skills/copy';
 import {
   Alert,
   EmptyState,
@@ -75,6 +75,95 @@ type ProgressState = { status: 'working' | 'success' | 'error'; message?: string
  * name left a removed skill still reading as installed on its Browse card.
  */
 type UninstallTarget = { name: string; key: string; identifier?: string };
+
+/** The fields of an install/uninstall refusal the card reads. */
+type RefusalBody = {
+  code?: string;
+  name?: string;
+  warning?: { verdict?: string; trust?: string };
+};
+
+/**
+ * The card's line for a refusal the route named by code, or null for a code
+ * this build does not know. Every code below answers with a FIXED sentence on
+ * the server — English, composed there, and painted verbatim on the card until
+ * this map existed. The codes whose sentence is composed from device state
+ * (`rollback_incomplete`, `removal_incomplete`, a pre-existing
+ * `incomplete_install`) are deliberately not here: their branches above keep
+ * the route's words until the store can describe that state itself.
+ */
+function installRefusalCopy(COPY: SkillsCopy, data: RefusalBody, name: string): string | null {
+  switch (data.code) {
+    case 'install_timeout':
+      return COPY.installTimeout(name);
+    case 'ambiguous_id':
+      return COPY.ambiguousId;
+    case 'rate_limited':
+      return COPY.rateLimited;
+    case 'download_failed':
+      return COPY.downloadFailed;
+    case 'unresolved':
+      return COPY.unresolved;
+    case 'install_failed':
+      return COPY.installFailed;
+    case 'dangerous_skill_blocked':
+      return COPY.blockedByDevice(name, data.warning?.verdict, data.warning?.trust);
+    case 'already_installed':
+      // Two route branches share the code: the plain refusal, and the one that
+      // found the installed copy's own scan verdict flagged — that one carries
+      // the `warning` and the lock name.
+      return data.warning
+        ? COPY.alreadyInstalledFlagged(data.name || name, data.warning.verdict)
+        : COPY.alreadyInstalled;
+    // The CLI itself could not be run to completion. A deadline is the one
+    // case with its own line; the rest are one failure to the owner.
+    case 'cli_timeout':
+      return COPY.installTimeout(name);
+    case 'cli_missing':
+    case 'cli_failed':
+    case 'too_large':
+    case 'cancelled':
+      return COPY.installFailed;
+    default:
+      return null;
+  }
+}
+
+function uninstallRefusalCopy(COPY: SkillsCopy, data: RefusalBody, name: string): string | null {
+  switch (data.code) {
+    case 'builtin_skill':
+      return COPY.builtinSkill(name);
+    case 'not_installed':
+      return COPY.notInstalled(name);
+    case 'uninstall_refused':
+      return COPY.uninstallRefused;
+    case 'uninstall_failed':
+    case 'cli_timeout':
+    case 'cli_missing':
+    case 'cli_failed':
+    case 'too_large':
+    case 'cancelled':
+      return COPY.uninstallFailed;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The line the card gets for a refusal: the copy for its code; else, for a
+ * code this build does not know, the route's own sentence — a newer device may
+ * name a refusal this build has no copy for, and its words beat "HTTP 502";
+ * else, for no code at all (an older build, a transport error), the generic
+ * line — the sentence is English composed on the server, and it goes to the
+ * console, as the browse tab already does with its own.
+ */
+function refusalLine(copy: string | null, data: RefusalBody & { error?: unknown }, status: number, generic: string, tag: string): string {
+  if (copy) return copy;
+  const sentence = typeof data.error === 'string' && data.error ? data.error : `HTTP ${status}`;
+  if (data.code) return sentence;
+  console.error(tag, sentence);
+  return generic;
+}
 
 const SELECT_CLS =
   'rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-primary)] ' +
@@ -239,7 +328,13 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
           await installed.refresh();
           throw new Error(String(data.error || COPY.installFailed));
         }
-        if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+        // Every other refusal the route names by code is said in the owner's
+        // language; the route's sentence is kept only for a code this build
+        // has no copy for — still better than "HTTP 502".
+        if (!res.ok) {
+          const body = data ?? {};
+          throw new Error(refusalLine(installRefusalCopy(COPY, body, skill.name), body, res.status, COPY.installFailed, '[skills install]'));
+        }
         setProgressAutoClear(key, { status: 'success' }, 2000);
         // The detail answer changes completely once a skill is on disk (full
         // SKILL.md, scan report, size). Dropping the cache is not enough — the
@@ -279,7 +374,10 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
           await installed.refresh();
           throw new Error(String(data.error || COPY.uninstallFailed));
         }
-        if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+        if (!res.ok) {
+          const body = data ?? {};
+          throw new Error(refusalLine(uninstallRefusalCopy(COPY, body, name), body, res.status, COPY.uninstallFailed, '[skills uninstall]'));
+        }
         const timer = timers.current.get(key);
         if (timer) clearTimeout(timer);
         timers.current.delete(key);
@@ -778,7 +876,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
           skill={selected}
           detail={detail.detail}
           phase={detail.phase}
-          error={detail.error}
+          error={detail.error && COPY.detailError(detail.error.part, detail.error.code)}
           ambiguous={detail.ambiguous}
           action={action}
           breadcrumb={'origin' in selected ? COPY.breadcrumbInstalled : COPY.breadcrumbBrowse}
@@ -792,6 +890,8 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
 
   // ── Grid view ─────────────────────────────────────────────────────────────
   const q = catalog.query.trim();
+  /** The one browse refusal the owner caused, and the only one Retry cannot fix. */
+  const badQuery = catalog.error === 'bad_query';
   const rangeFrom = catalog.results.length ? 1 : 0;
   // Two ways to earn the first-run panel: the device says it is still building
   // the index (`preparing` — true even though the request has COMPLETED, which
@@ -965,11 +1065,20 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
               </SkillGrid>
             )}
             {catalog.error && !catalog.loading && (
+              // A search the route would not run is the owner's to fix, not the
+              // device's: Retry re-sends the same rejected text, so that case
+              // gets the search's own icon and the button that empties it.
               <EmptyState
-                icon="error"
-                tone="danger"
-                title={catalog.error}
-                action={<PrimaryButton onClick={catalog.reload}>{COPY.retry}</PrimaryButton>}
+                icon={badQuery ? 'search_off' : 'error'}
+                tone={badQuery ? 'muted' : 'danger'}
+                title={COPY.browseError(catalog.error)}
+                action={
+                  badQuery ? (
+                    <PrimaryButton onClick={() => catalog.setQuery('')}>{COPY.clearSearch}</PrimaryButton>
+                  ) : (
+                    <PrimaryButton onClick={catalog.reload}>{COPY.retry}</PrimaryButton>
+                  )
+                }
               />
             )}
             {/* "Nothing here" is a claim about the catalogue, so it may only be
