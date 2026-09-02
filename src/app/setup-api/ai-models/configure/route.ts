@@ -1244,7 +1244,25 @@ const GATEWAY_OFFLINE_HINT =
 
 export async function POST(request: Request) {
   const gateway: GatewayTracker = { state: "untouched" };
-  const response = await configureModel(request, gateway);
+  let response: Response;
+  try {
+    response = await configureModel(request, gateway);
+  } catch (err) {
+    // `configureModel` answers a Response for every failure it can classify, so
+    // reaching here means its own catch block threw. Restoring only off the
+    // returned value would leave the gateway stopped on exactly that path —
+    // the failure this whole tracker exists to prevent. Restore, then let the
+    // original throw become Next's generic 500.
+    if (gateway.state === "stopped-for-doctor") {
+      await restartGateway().catch((restartErr) => {
+        console.error(
+          "[configure] Gateway restart after an unhandled save failure also failed:",
+          restartErr instanceof Error ? logSafe(restartErr.message) : restartErr,
+        );
+      });
+    }
+    throw err;
+  }
   if (gateway.state !== "stopped-for-doctor") return response;
   // An error exit between the doctor stop and step 9. Only `restart` is
   // granted to the clawbox user (config/clawbox-sudoers has no `start`), and

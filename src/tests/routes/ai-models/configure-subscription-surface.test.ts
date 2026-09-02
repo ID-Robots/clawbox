@@ -609,6 +609,21 @@ describe("POST /setup-api/ai-models/configure and the gateway doctor --fix stopp
     expect(restartGateway).toHaveBeenCalledTimes(1);
   });
 
+  it("restarts the gateway when the route's own error handling throws", async () => {
+    // The handler's catch classifies the failure and logs `logSafe(err.message)`,
+    // which reads `.length` — an Error carrying a null message makes the catch
+    // itself throw, so nothing returns a Response and the restore that hangs off
+    // the return value never runs. Contrived on purpose: it is the one shape that
+    // reaches past the catch today, and without it any future await added to that
+    // block would silently re-open F-07 with the gateway left down.
+    const poisoned = new Error("boom") as unknown as { message: unknown };
+    poisoned.message = null;
+    vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(poisoned);
+
+    await expect(configurePost(subscribe())).rejects.toThrow();
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+  });
+
   it("tells the owner the assistant is offline when that restart fails too", async () => {
     vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("doctor exited 1"));
     mockFs.readdir.mockResolvedValueOnce([MIGRATED_SIBLING] as never);
