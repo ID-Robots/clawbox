@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { clearTranscript, readTranscript, type TranscriptRecord } from "@/lib/harness/transcript-store";
+import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "@/lib/harness/transcript-key";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +51,19 @@ const WRONG_STORE = {
   error: "This box's chat transcript is held by its agent gateway, not on disk. Ask the gateway.",
 } as const;
 
+const BAD_KEY = { error: "Invalid session key" } as const;
+
+/**
+ * Which conversation: the desktop thread unless the caller names one of the
+ * tabs opened beside it. A key that is not a bare filename is refused before
+ * it can become one — see `transcriptKeyIsSafe`. Null means refused.
+ */
+function sessionKeyOf(req: NextRequest): string | null {
+  const raw = req.nextUrl.searchParams.get("sessionKey");
+  if (!raw) return DESKTOP_TRANSCRIPT_KEY;
+  return transcriptKeyIsSafe(raw) ? raw : null;
+}
+
 /** One stored record as the chat surface's own message shape. */
 function toMessage(record: TranscriptRecord) {
   return {
@@ -68,32 +82,36 @@ function toMessage(record: TranscriptRecord) {
   };
 }
 
-// GET /setup-api/chat/history?limit=50 → { messages }
+// GET /setup-api/chat/history?limit=50[&sessionKey=…] → { messages }
 // Oldest first, newest last — the order the transcript renders in.
 export async function GET(req: NextRequest) {
   if (!(await transcriptLivesHere())) {
     return NextResponse.json(WRONG_STORE, { status: 409 });
   }
+  const key = sessionKeyOf(req);
+  if (!key) return NextResponse.json(BAD_KEY, { status: 400 });
   const raw = Number(req.nextUrl.searchParams.get("limit"));
   // A missing or nonsensical limit is the default, not a 400: the caller asked
   // for the conversation, and there is a right answer to give them.
   const limit = Number.isFinite(raw) && raw > 0 ? Math.min(Math.floor(raw), MAX_LIMIT) : DEFAULT_LIMIT;
-  const records = await readTranscript(limit);
+  const records = await readTranscript(limit, key);
   return NextResponse.json({ messages: records.map(toMessage) });
 }
 
-// DELETE /setup-api/chat/history → { ok: true }
+// DELETE /setup-api/chat/history[?sessionKey=…] → { ok: true }
 //
-// The "new chat" half that makes forgetting real. The adapter also drops the
-// resumed session id, which is what makes the AGENT forget; without this the
-// screen would refill with the previous conversation on the next refresh while
-// the agent had no idea what any of it referred to.
-export async function DELETE() {
+// The half of "restart" (and of closing a tab) that makes forgetting real. The
+// adapter also drops the resumed session id, which is what makes the AGENT
+// forget; without this the screen would refill with the previous conversation
+// on the next refresh while the agent had no idea what any of it referred to.
+export async function DELETE(req: NextRequest) {
   if (!(await transcriptLivesHere())) {
     return NextResponse.json(WRONG_STORE, { status: 409 });
   }
+  const key = sessionKeyOf(req);
+  if (!key) return NextResponse.json(BAD_KEY, { status: 400 });
   try {
-    await clearTranscript();
+    await clearTranscript(key);
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not clear the transcript" },

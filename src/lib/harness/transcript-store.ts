@@ -1,6 +1,7 @@
 import fsp from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
+import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "./transcript-key";
 
 /**
  * A durable transcript for a harness whose transport does not keep one.
@@ -154,27 +155,16 @@ export interface TranscriptRecord {
 }
 
 /**
- * One chat surface, one transcript.
+ * One conversation, one file.
  *
- * The desktop chat is a single conversation — there is one popup and one thread
- * in it — so there is one file and its name is a constant rather than a
- * parameter threaded through four call sites for a second value that does not
- * exist. THIS is the line to change when a second chat surface arrives: make it
- * an argument, and `transcriptKeyIsSafe` below is already the validator that
- * argument needs.
+ * The desktop chat used to be a single thread, and `DESKTOP_TRANSCRIPT_KEY`
+ * still names that one. Every tab the chat opens beside it is a key of its
+ * own, minted by the Hermes adapter and validated by the routes with
+ * `transcriptKeyIsSafe` before it reaches this module. Both live in
+ * `transcript-key.ts` so the client can share them without importing `fs`;
+ * they are re-exported here for the callers that always found them here.
  */
-export const DESKTOP_TRANSCRIPT_KEY = "desktop";
-
-/**
- * A key must be a bare filename, because it becomes one.
- *
- * Unused while the key is a constant, and deliberately kept anyway: the moment
- * the key comes from a request this is the guard that stops `../../openclaw.json`
- * being a transcript name. Exported so its test can hold it to that.
- */
-export function transcriptKeyIsSafe(key: string): boolean {
-  return /^[a-z0-9][a-z0-9_-]{0,63}$/i.test(key);
-}
+export { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe };
 
 function transcriptPath(key: string): string {
   if (!transcriptKeyIsSafe(key)) {

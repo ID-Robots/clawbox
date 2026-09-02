@@ -12,21 +12,12 @@ vi.mock("fs", () => ({
   promises: { readFile: vi.fn() },
 }));
 
-const { configSetMock } = vi.hoisted(() => ({ configSetMock: vi.fn() }));
-
 vi.mock("@/lib/openclaw-config", () => ({
   inferConfiguredLocalModel: vi.fn(),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
-  runOpenclawConfigSet: configSetMock,
-  // The route writes the primary in a batch now. Record every assignment of
-  // a batch on `runOpenclawConfigSet` too, the way config-set-calls flattens
-  // both forms for the configure suites: the assertions here are about which
-  // assignments were made, not about how many processes carried them.
-  runOpenclawConfigSetBatch: vi.fn(async (ops: string[][]) => {
-    for (const op of ops) await configSetMock(op);
-  }),
+  runOpenclawConfigSet: vi.fn(),
   applyModelOverrideToAllAgentSessions: vi.fn(),
   parseFullyQualifiedModel: vi.fn(),
   setProviderPlugins: vi.fn().mockResolvedValue(undefined),
@@ -159,7 +150,7 @@ describe("/setup-api/chat/model and the Claude subscription surface", () => {
 
     vi.mocked(promisify).mockReturnValue(vi.fn().mockResolvedValue({ stdout: "", stderr: "" }) as never);
     vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
-    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
+    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 0 });
     vi.mocked(parseFullyQualifiedModel).mockImplementation((fq: string) => {
       const idx = fq.indexOf("/");
       if (idx <= 0 || idx === fq.length - 1) return null;

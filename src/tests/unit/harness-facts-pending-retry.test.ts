@@ -60,6 +60,7 @@ const gateway: GatewayLink = {
 const hermesContext = (): HermesTurnContext => ({
   devicePairing: { provider: "", model: "" },
   modelsReady: false,
+  sessionKey: "desktop",
 });
 
 async function mount() {

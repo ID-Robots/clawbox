@@ -27,7 +27,6 @@ import {
   OpenclawUnavailableError,
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
-import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { getActiveHarness } from "@/lib/harness";
 import { applyLocalAiToHermes, HermesLocalApplyError } from "@/lib/hermes-local-ai";
 import { applyClawaiToHermes, ClawaiApplyError } from "@/lib/hermes-clawai";
@@ -1174,9 +1173,8 @@ async function clearOpenAICompatProvider(provider: string): Promise<void> {
  * override the device already had is removed — the second half matters as much
  * as the first, because a box configured with an API key and later switched to
  * a subscription kept the old entry (nothing here ever deleted one) and stayed
- * broken. Routing then belongs to the anthropic plugin, which the primary
- * batch switches on ahead of the reference it validates (step 3) and
- * `setProviderPlugins` keeps on at step 8b while the credential exists.
+ * broken. Routing then belongs to the anthropic plugin, which is what
+ * `setProviderPlugins` enables a few steps later.
  */
 /**
  * True when the save wrote the openai-compat override, false when it handed the
@@ -2070,14 +2068,6 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       ],
     ];
     if (!isLocalScope || shouldPromoteLocalToPrimary) {
-      // The plugin the new primary resolves through rides in the SAME batch,
-      // ahead of the reference: OpenClaw 2 validates every model reference a
-      // batch touches against the enabled plugins' catalogs after applying
-      // the whole batch to one snapshot, so this is what lets a Claude save on
-      // a box whose plugin an earlier gate switched off validate at all — in
-      // one spawn, and atomically: a refused batch leaves the flag as it was
-      // (src/lib/provider-plugin-ops.ts).
-      baseOps.unshift(...enableProviderPluginOps([config.defaultModel]));
       baseOps.push(["agents.defaults.model.primary", config.defaultModel]);
       if (shouldPromoteLocalToPrimary) {
         console.log(`[AI Config] Promoted local model to active primary: ${logSafe(config.defaultModel)}`);
@@ -2138,11 +2128,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       }
     }
 
-    const primaryIdx = baseOps.findIndex((op) => op[0] === "agents.defaults.model.primary");
     try {
       await runConfigSetBatch(baseOps);
     } catch (batchErr) {
       const message = batchErr instanceof Error ? batchErr.message : String(batchErr);
+      const primaryIdx = baseOps.findIndex((op) => op[0] === "agents.defaults.model.primary");
       // Only the OpenClaw 2 catalog-validation refusal of the primary falls
       // through — anything else keeps its existing failure path. v2 checks a
       // model reference against a freshly refreshed provider catalog, so a
@@ -2166,8 +2156,6 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // write from overwriting a concurrent auth/provider/gateway mutation and
       // refuses malformed input instead of rebuilding the config from a fragment.
       await setPrimaryModelWithoutCatalogValidation(primaryModel);
-      // The retry above re-lands the plugin enable with the rest of the
-      // batch (it is not the primary), so the refusal here is the catalog's.
       console.warn(
         "[AI Config] Primary written directly — the CLI refused the reference (empty catalog for this key/plugin):",
         // JSON-quoted: the modeled sanitizer for js/log-injection (see 3ef684a1).
@@ -2464,11 +2452,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       }
     }
 
-    // 8b. The OFF half of the gate: switch the anthropic plugin off only when
-    //     nothing on the box could use it — the primary is elsewhere AND no
-    //     usable Anthropic credential remains (the ON half rode in the primary
-    //     batch at step 3). See setProviderPlugins for the catalog measurement
-    //     behind the rule.
+    // 8b. Gate the anthropic plugin to only when the active primary provider
+    //     actually needs it. The plugin's tool schemas otherwise add several
+    //     seconds to every agent prep — see setProviderPlugins.
     if (!isLocalScope || shouldPromoteLocalToPrimary) {
       const primaryProvider = config.defaultModel.split("/", 1)[0];
       await setProviderPlugins(primaryProvider);
