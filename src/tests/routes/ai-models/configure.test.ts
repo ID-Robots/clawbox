@@ -670,7 +670,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     // it, and the core is asked to prefer the sign-in over the API-key
     // profile the same provider carries for the ClawBox AI image token.
     expect(commands).toContain("config set agents.defaults.model.primary openai/gpt-5.5");
-    expect(commands).toContain("config set agents.defaults.models.openai/gpt-5.5.agentRuntime.id codex");
+    expect(commands).toContain('config set agents.defaults.models["openai/gpt-5.5"].agentRuntime.id codex');
     expect(commands).toContain('config set auth.profiles.openai:chatgpt {"provider":"openai","mode":"oauth"} --json');
     expect(commands.some((c) => c.includes("codex/"))).toBe(false);
     const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
@@ -679,8 +679,30 @@ describe("POST /setup-api/ai-models/configure", () => {
     // One openai profile on this box, so there is nothing to disambiguate and
     // an explicit order would only hide the credential the owner adds next —
     // the core already selects a usable profile over the
-    // `models.providers.openai.apiKey` fallback. Any order an earlier ClawBox
-    // left behind is cleared instead.
+    // `models.providers.openai.apiKey` fallback. And no `clear` either: ClawBox
+    // has never written an order on this box, so the clear would be a CLI cold
+    // start (~10 s on a Jetson, on the wizard's critical path) against a store
+    // that has none.
+    expect(vi.mocked(spawnOpenclawCli).mock.calls.some(
+      ([args]) => Array.isArray(args) && args[2] === "order",
+    )).toBe(false);
+  });
+
+  it("clears an order ClawBox itself wrote once the box is down to one profile", async () => {
+    // The fail-safe half: the marker says there IS something of ours to clear,
+    // so the spawn is worth its cold start. Without the marker the same box
+    // costs nothing.
+    mockGetAll.mockResolvedValue({ openai_auth_order_written: true } as never);
+
+    await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+
     expect(vi.mocked(spawnOpenclawCli)).toHaveBeenCalledWith(
       ["models", "auth", "order", "clear", "--agent", "main", "--provider", "openai"],
       expect.anything(),
@@ -693,6 +715,12 @@ describe("POST /setup-api/ai-models/configure", () => {
   // configured agent and otherwise resolves whichever sole agent is declared
   // — not necessarily `main`, the directory the credential was written into.
   it("addresses the same agent store the credential was written to", async () => {
+    // Two openai profiles, so an order IS written — and it must name the agent
+    // whose store the credential went to.
+    mockReadOpenClawConfig.mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+    } as never);
+
     await configurePost(jsonRequest({
       provider: "openai",
       apiKey: "access.token.jwt",
@@ -760,10 +788,99 @@ describe("POST /setup-api/ai-models/configure", () => {
     )).toBe(false);
   });
 
+  // The other door onto the write-only arm: the owner signs in with ChatGPT,
+  // later switches OpenAI to API-key mode and saves the SAME model. Nothing
+  // used to remove the arm, so Settings said "Configured" while every turn kept
+  // going to the ChatGPT account — and once the sign-in is removed, the
+  // app-server has no credential and every turn dies on the Cloudflare
+  // challenge with no ClawBox surface that can undo it.
+  it("clears the Codex runtime arm on an OpenAI API-key save", async () => {
+    mockReadOpenClawConfig.mockResolvedValue({
+      auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
+      agents: {
+        defaults: { models: { "openai/gpt-5": { agentRuntime: { id: "codex" } } } },
+      },
+    } as never);
+
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-openai-key" }));
+
+    expect(res.status).toBe(200);
+    expect(vi.mocked(runOpenclawConfigUnset)).toHaveBeenCalledWith(
+      'agents.defaults.models["openai/gpt-5"].agentRuntime',
+      expect.anything(),
+    );
+  });
+
+  it("costs no spawn when there is no arm to clear", async () => {
+    await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-openai-key" }));
+
+    expect(vi.mocked(runOpenclawConfigUnset)).not.toHaveBeenCalled();
+  });
+
+  it("says the box is still on the subscription when the disarm fails", async () => {
+    // A clean 200 over a box that still routes that model to the ChatGPT
+    // account is the false success this finding is about.
+    mockReadOpenClawConfig.mockResolvedValue({
+      auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
+      agents: {
+        defaults: { models: { "openai/gpt-5": { agentRuntime: { id: "codex" } } } },
+      },
+    } as never);
+    vi.mocked(runOpenclawConfigUnset).mockRejectedValue(new Error("unset failed"));
+
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-openai-key" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.warning).toMatch(/still routes openai\/gpt-5 through your ChatGPT account/);
+  });
+
+  it("leaves the arm alone when the save IS the subscription", async () => {
+    mockReadOpenClawConfig.mockResolvedValue({
+      auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
+      agents: {
+        defaults: { models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } } },
+      },
+    } as never);
+
+    await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+
+    expect(vi.mocked(runOpenclawConfigUnset)).not.toHaveBeenCalled();
+  });
+
+  it("answers an error, not success, when the batch carrying the runtime arm is refused", async () => {
+    // The arm is part of the sign-in's contract: a 200 whose box cannot route
+    // a ChatGPT turn is the failure this PR exists to stop reporting as fine.
+    vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(
+      new Error('Config validation failed: agents.defaults.models."openai/gpt-5.5": bad'),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+
+    expect(res.status).not.toBe(200);
+  });
+
   it("names a failed auth-order preference in the answer instead of hiding it", async () => {
     // The sign-in is stored either way; what the owner must not get is a
     // silent success whose chat then answers with an authentication error
     // because the image-token API-key profile won the route.
+    mockReadOpenClawConfig.mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+    } as never);
     vi.mocked(spawnOpenclawCli).mockImplementation(async (args) => {
       if (Array.isArray(args) && args[2] === "order") throw new Error("auth order failed");
       return "";
@@ -780,7 +897,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
-    expect(body.warning).toMatch(/models auth order clear --agent main --provider openai/);
+    expect(body.warning).toMatch(/models auth order set --agent main --provider openai/);
   });
 
   // A Pro account used to land on gpt-5.5 after sign-in and had to know to

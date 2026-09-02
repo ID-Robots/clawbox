@@ -6,6 +6,7 @@ import {
   restartGateway,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
+  runOpenclawConfigUnset,
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
   setProviderPlugins,
@@ -28,6 +29,7 @@ import {
   canonicalChatgptModelRef,
   chatgptModelRef,
   chatgptRuntimeArmOp,
+  chatgptRuntimeEntryPath,
   hasChatgptOauthProfile,
   hasLegacyChatgptProfile,
   isLegacyChatgptProvider,
@@ -274,19 +276,25 @@ function resolveChatgptPick(
     // No sign-in at all: a legacy ref falls to the provider-configured check,
     // a keyless `openai/*` pick is the API-key case the message names.
     if (legacy) return null;
-    return { refusal: refuseKeylessOpenAiModel(parsed.modelId) };
+    return { refusal: refuseKeylessOpenAiModel(parsed.modelId, credentials.hasApiKey) };
   }
   if (legacy) return { model: canonicalChatgptModelRef(ref) };
   if (CODEX_SUPPORTED_MODEL_RE.test(parsed.modelId)) return { model: chatgptModelRef(parsed.modelId) };
-  return { refusal: refuseKeylessOpenAiModel(parsed.modelId) };
+  return { refusal: refuseKeylessOpenAiModel(parsed.modelId, credentials.hasApiKey) };
 }
 
-function refuseKeylessOpenAiModel(modelId: string): NextResponse {
+function refuseKeylessOpenAiModel(modelId: string, hasApiKey: boolean): NextResponse {
+  // The next step depends on what the box already holds. Telling an owner who
+  // HAS an API key to "switch to API-key mode" names a lever they have already
+  // pulled; the actionable step there is the other row, which routes this very
+  // model. One sentence builder for the supported list, fed by the ChatGPT
+  // catalogue — the hand-written copy here had already lost the GPT-5.6
+  // generation the allowlist accepts.
+  const nextStep = hasApiKey
+    ? `Pick it on the ${PROVIDER_LABELS.openai} row instead, which routes it on this box's API key.`
+    : `${modelId} requires OpenAI API-key mode.`;
   return NextResponse.json({
-    // One sentence builder, fed by the ChatGPT catalogue — the hand-written
-    // copy here had already lost the GPT-5.6 generation the allowlist accepts.
-    error: `${modelId} requires OpenAI API-key mode. `
-      + `ChatGPT subscription auth supports ${chatgptSupportedModelsSentence()}.`,
+    error: `${nextStep} ChatGPT subscription auth supports ${chatgptSupportedModelsSentence()}.`,
   }, { status: 400 });
 }
 
@@ -295,6 +303,37 @@ function chatgptRuntimeArmed(config: OpenClawConfig | null, modelRef: string | n
   if (!modelRef) return false;
   const models = (config?.agents?.defaults as { models?: Record<string, { agentRuntime?: { id?: unknown } }> } | undefined)?.models;
   return models?.[modelRef]?.agentRuntime?.id === CHATGPT_AGENT_RUNTIME_ID;
+}
+
+/**
+ * Take the Codex runtime OFF `modelRef`, or return the sentence that says it is
+ * still on.
+ *
+ * The arm was write-only: two routes added it and the only remover was
+ * v1-gated, so on the pinned core nothing ever cleared it. That was harmless
+ * while it could only sit on a `codex/<id>` key no other lane could name — but
+ * the subscription and the API key now share `openai/<id>`, so an arm left
+ * behind by an earlier ChatGPT pick keeps sending the SAME reference through
+ * the ChatGPT account after the owner switches to the API-key row. Silently:
+ * the box answers, on the wrong account, and the header pill flips back.
+ *
+ * `config unset`, not a `null` write. A batch entry takes only `value`/`ref`/
+ * `provider` (the core's `parseBatchEntries` — no delete), and
+ * `{"...agentRuntime": null}` is refused by the schema:
+ * `Invalid input: expected object, received null`. Measured on 2026.8.1.
+ * So it is its own spawn, and its failure is REPORTED rather than swallowed —
+ * the box is still on the ChatGPT account and the owner has to know.
+ */
+async function disarmChatgptRuntime(modelRef: string): Promise<string | undefined> {
+  try {
+    await runOpenclawConfigUnset(chatgptRuntimeEntryPath(modelRef));
+    return undefined;
+  } catch (err) {
+    console.error("[chat/model] failed to clear the Codex runtime entry:", err);
+    return `Switched to ${modelRef}, but this box still routes it through your ChatGPT account — `
+      + "clearing the Codex runtime setting failed. Chat may answer on the subscription instead of "
+      + `the API key until you run 'openclaw config unset ${chatgptRuntimeEntryPath(modelRef)}' from the Terminal.`;
+  }
 }
 
 /**
@@ -486,8 +525,14 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     if (!provider) return;
     if (configuredPrimaryOptions.has(provider)) return;
     const label = labelForProvider(provider, "AI Provider");
+    // Two rows CAN carry the same model on a dual-credential box — the
+    // `openai` row's first defined model can equal the armed ChatGPT one — and
+    // `id` is the picker's React key as well as what POST echoes back. The
+    // first row to claim a model keeps the bare id; a later one is qualified,
+    // so no two rows collide.
+    const claimed = [...configuredPrimaryOptions.values()].some((option) => option.id === trimmedModel);
     configuredPrimaryOptions.set(provider, {
-      id: trimmedModel,
+      id: claimed ? `${provider}:${trimmedModel}` : trimmedModel,
       label,
       model: trimmedModel,
       provider,
@@ -628,7 +673,15 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
   const activeSource: ChatModelSource | null = activeModel
     ? (isLocalModel(activeModel) ? "local" : "primary")
     : null;
-  const activeOption = options.find((option) => option.model === activeModel) ?? null;
+  // Resolved by ROW, not by model alone: on a dual-credential box the same
+  // `openai/<id>` can sit on both rows, `sortPrimaryOptions` puts the ranked
+  // `openai` one first, and the header then rendered the API-key row — with
+  // its catalogue — for a model the box routes through the subscription.
+  const activeUiProvider = uiProviderForModel(activeModel);
+  const activeOption = options.find(
+    (option) => option.model === activeModel
+      && (!activeUiProvider || option.provider === activeUiProvider),
+  ) ?? options.find((option) => option.model === activeModel) ?? null;
   const activeLabel = activeOption?.label ?? null;
 
   return {
@@ -975,14 +1028,36 @@ export async function POST(request: Request) {
       // account, and this route was its only repair short of a reboot; a
       // no-op answer here left every turn failing. One write, only when the
       // entry is absent — a same-model pick on an armed box stays free.
-      if (chatgptRouted && !chatgptRuntimeArmed(preloadedConfig, targetModel)) {
+      //
+      //     Two-sided, and that is the fix for the mirror defect: the same
+      //     model picked from the OpenAI API-key row on a box where an earlier
+      //     ChatGPT pick armed it has to have the arm REMOVED, or the turn
+      //     keeps going to the subscription over a click that said otherwise.
+      //     The branch is entered whenever the arm disagrees with the pick, so
+      //     a same-model pick is free only when they already agree.
+      let sameModelWarning: string | undefined;
+      const armed = chatgptRuntimeArmed(preloadedConfig, targetModel);
+      const wrote = chatgptRouted !== armed;
+      if (chatgptRouted && !armed) {
         await runOpenclawConfigSet(chatgptRuntimeArmOp(targetModel));
+      } else if (!chatgptRouted && armed) {
+        sameModelWarning = await disarmChatgptRuntime(targetModel);
       }
+      // Re-read after a write, never before it: `state` was loaded from the
+      // config as it was, where the arm this branch just removed still says
+      // the model belongs to the ChatGPT row. Answering with that would tell
+      // the owner they are on the subscription in the same response that took
+      // them off it. A branch that wrote nothing keeps the snapshot it has.
+      const settledState = wrote ? await loadChatModelState() : state;
+      const sameModelOption = settledState.options.find((option) =>
+        option.model === targetModel
+        && (!pickedUiProvider || option.provider === pickedUiProvider));
       return NextResponse.json({
-        ...state,
+        ...settledState,
         activeSource: isLocalModel(targetModel) ? "local" : "primary",
-        activeLabel: state.options.find((option) => option.model === targetModel)?.label ?? state.activeLabel,
-        activeOptionId: state.options.find((option) => option.model === targetModel)?.id ?? state.activeOptionId,
+        activeLabel: sameModelOption?.label ?? settledState.activeLabel,
+        activeOptionId: sameModelOption?.id ?? settledState.activeOptionId,
+        ...(sameModelWarning ? { warning: sameModelWarning } : {}),
       });
     }
 
@@ -1004,10 +1079,27 @@ export async function POST(request: Request) {
     //    startup alone is ~10 s on Jetson Orin), so users switching chat
     //    models don't see a bogus failure when the gateway reloads
     //    concurrently with the write.
+    //
+    // 1b. The Codex runtime arm rides in the SAME batch. Codex turns only work
+    //     through the Codex app-server harness, which `agentRuntime` selects:
+    //     without it core uses its generic HTTP responses transport, which
+    //     posts to https://chatgpt.com/backend-api/responses — a browser
+    //     endpoint Cloudflare managed-challenges — and every turn fails with
+    //     "the provider returned an HTML error page". gateway-pre-start.sh sets
+    //     it too, but a model change applies WITHOUT a restart, so the pick has
+    //     to arm it immediately or the very next message fails until the box is
+    //     rebooted. In the batch rather than a second spawn: one CLI cold start
+    //     instead of two on a Jetson, and atomic with the primary it describes —
+    //     the reference is `openai/<id>` for both OpenAI lanes and this entry
+    //     is the ONLY thing that says the turn belongs to the ChatGPT account.
+    const armOps = chatgptRouted && !chatgptRuntimeArmed(preloadedConfig, targetModel)
+      ? [chatgptRuntimeArmOp(targetModel)]
+      : [];
     try {
       await runOpenclawConfigSetBatch([
         ...enableProviderPluginOps([targetModel]),
         ["agents.defaults.model.primary", targetModel],
+        ...armOps,
       ]);
     } catch (err) {
       // OpenClaw 2 validates the reference against the catalogs it can see and
@@ -1020,22 +1112,13 @@ export async function POST(request: Request) {
       throw err;
     }
 
-    // 1b. Codex turns only work through the Codex app-server harness, which is
-    //     selected by agentRuntime. Without it core uses its generic HTTP
-    //     responses transport, which posts to
-    //     https://chatgpt.com/backend-api/responses — a browser endpoint
-    //     Cloudflare managed-challenges — and every turn fails with "the
-    //     provider returned an HTML error page". gateway-pre-start.sh sets this
-    //     too, but a model change applies WITHOUT a restart, so picking Codex
-    //     here has to arm the runtime immediately or the very next message
-    //     fails until the box is rebooted.
-    //
-    //
-    //     The reference is `openai/<id>` and this entry is the ONLY thing that
-    //     says the turn belongs to the ChatGPT account rather than an API key
-    //     — which is why the namespace test became a flag.
-    if (chatgptRouted) {
-      await runOpenclawConfigSet(chatgptRuntimeArmOp(targetModel));
+    // 1c. The other side of the arm: a pick that is NOT the subscription's, on
+    //     a reference an earlier ChatGPT pick armed, has to clear it — a
+    //     separate spawn because a batch has no delete (see
+    //     `disarmChatgptRuntime`). Its failure is carried in the answer.
+    let disarmWarning: string | undefined;
+    if (!chatgptRouted && chatgptRuntimeArmed(preloadedConfig, targetModel)) {
+      disarmWarning = await disarmChatgptRuntime(targetModel);
     }
 
     // 2. Full sweep including sessions previously tagged
@@ -1069,9 +1152,10 @@ export async function POST(request: Request) {
     await restartGateway();
 
     const nextState = await loadChatModelState();
-    return NextResponse.json(nextState, {
-      headers: { "Cache-Control": "no-store" },
-    });
+    return NextResponse.json(
+      { ...nextState, ...(disarmWarning ? { warning: disarmWarning } : {}) },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to switch chat model" },

@@ -569,10 +569,49 @@ for _model_key in list(agents_models.keys()):
     if _needs_codex_runtime(_model_key):
         _codex_refs.add(_model_key)
 
+# The OTHER side of the seed, and the only remover on the box. On v1 the rule
+# was "an agentRuntime outside the codex/ namespace is stale", which the
+# namespace made safe. On v2 the namespace says nothing — both OpenAI lanes are
+# `openai/<id>` — so this fires only on POSITIVE evidence that the arm is
+# stale: the box holds an OpenAI API key and NO ChatGPT sign-in of any kind.
+# There is then no account for the arm to route to and every turn on that model
+# dies on the Cloudflare-challenged browser endpoint — the recovery for a box
+# whose sign-in was removed while the arm stayed.
+#
+# Absence of evidence is not evidence: a config with no auth block at all is an
+# unconfigured or half-read box, and `doctor --fix` writes exactly this arm
+# when it migrates a `codex/<id>` reference, so stripping there would fight the
+# core's own migration. And where a sign-in DOES exist the reference is
+# ambiguous at boot — the chat and configure routes own that one, and both now
+# write AND clear it from the row the owner picked.
+def _has_any_chatgpt_signin():
+    for _entry in _auth_profiles():
+        if not isinstance(_entry, dict):
+            continue
+        _p = str(_entry.get("provider", "")).strip().lower()
+        _m = str(_entry.get("mode", "")).strip().lower()
+        if _m == "oauth" and _p in ("openai", "codex", "openai-codex"):
+            return True
+    return False
+
+_v2_no_chatgpt = (
+    _clawbox_v2_codex
+    and _has_openai_api_key_profile()
+    and not _has_any_chatgpt_signin()
+)
+
+def _armed_codex(entry):
+    _rt = entry.get("agentRuntime")
+    if not isinstance(_rt, dict):
+        return False
+    return str(_rt.get("id", "")).strip().lower() == "codex"
+
 for _model_key, _model_val in list(agents_models.items()):
     if not isinstance(_model_val, dict):
         continue
-    if (not _clawbox_v2_codex) and not _is_codex_ref(_model_key) and "agentRuntime" in _model_val:
+    _stale_v1 = (not _clawbox_v2_codex) and not _is_codex_ref(_model_key)
+    _stale_v2 = _v2_no_chatgpt and _armed_codex(_model_val)
+    if (_stale_v1 or _stale_v2) and "agentRuntime" in _model_val:
         del _model_val["agentRuntime"]
         changed = True
 

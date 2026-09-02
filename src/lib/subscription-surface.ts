@@ -144,7 +144,11 @@ export function chatgptSupportedModelsSentence(): string {
   const labels = (getProviderCatalog(CHATGPT_UI_PROVIDER)?.models ?? [])
     .filter((model) => CODEX_SUPPORTED_MODEL_RE.test(model.id))
     .map((model) => model.label);
-  if (labels.length === 0) return "";
+  // Never an empty fragment: the callers embed this mid-sentence, and "Use ,
+  // or switch OpenAI to API-key mode" is worse than naming the surface
+  // generically. Unreachable while the catalogue is the static CODEX_MODELS,
+  // which is exactly why it is cheap to make impossible.
+  if (labels.length === 0) return "a model the ChatGPT subscription supports";
   if (labels.length === 1) return labels[0];
   return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
 }

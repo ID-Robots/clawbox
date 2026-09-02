@@ -572,16 +572,17 @@ export default function AIModelsStep({
   // from the currently-configured model so their existing pick survives;
   // if the current model isn't in the catalog (user typed a custom ID),
   // we flip into custom-input mode so it isn't silently overwritten.
-  // Provider+authMode selects the effective catalog. Subscription mode for
-  // OpenAI routes through the `codex` namespace (ChatGPT backend),
-  // whose catalog is completely different from the token-mode `openai`
-  // API catalog — `gpt-5.4` only exists via codex, `gpt-5` only via the
-  // public API. Matching the catalog to the actual namespace prevents
-  // the picker from offering IDs that the upstream will reject.
-  // Resolve which catalog namespace the picker should pull from. Differs
-  // from `selectedProvider` for OpenAI in subscription/OAuth mode, where
-  // the routeable namespace is `codex` (ChatGPT backend) rather
-  // than `openai` (api.openai.com). Same swap the configure route applies.
+  // Provider+authMode selects the effective CATALOGUE. For OpenAI the two auth
+  // modes offer different model sets — `gpt-5.4-mini` only on the ChatGPT
+  // subscription, `gpt-5` and the `-pro` tiers only on the API key — so the
+  // picker must not offer ids the chosen credential will reject.
+  //
+  // `codex` is the catalogue id for the subscription, and ONLY that: OpenClaw 2
+  // retired the namespace and both lanes are written `openai/<id>`
+  // (src/lib/chatgpt-subscription.ts). Anything that turns a catalogue id back
+  // into a model reference — or a reference back into a catalogue's model id,
+  // like the seeding effect below — has to go through
+  // `chatgptReferenceProvider`.
   const catalogProvider = useMemo<string | null>(() => {
     if (authMode === "subscription" && selectedProvider) {
       // SUBSCRIPTION_SURFACE is the one table for "what does signing in change
@@ -1389,11 +1390,12 @@ export default function AIModelsStep({
     showConfiguring();
 
     try {
-      // For subscription flows (ChatGPT/Codex OAuth), include the
-      // user's model pick so the backend writes codex/<chosen>
-      // instead of the PROVIDERS subscriptionOverride default. Without
-      // this, picking a model in the wizard would silently be ignored
-      // for OAuth providers.
+      // For subscription flows (ChatGPT OAuth), include the user's model pick
+      // so the backend writes the chosen id instead of the PROVIDERS
+      // subscriptionOverride default. Without this, picking a model in the
+      // wizard would silently be ignored for OAuth providers. The reference
+      // the backend writes is `openai/<chosen>` — the `codex` namespace this
+      // comment used to name is retired (src/lib/chatgpt-subscription.ts).
       const subscriptionModel = getRequestedCatalogModelId(true);
       // Device-auth (server-side handoff): the provider tokens were persisted
       // to a server-only file by device-poll, so we send no token fields —

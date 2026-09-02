@@ -133,8 +133,12 @@ describe("the chat header on a ChatGPT-subscription box", () => {
         String(url).includes("/setup-api/chat/model")
         && (init as RequestInit | undefined)?.method === "POST");
       expect(posted).toBeTruthy();
+      // `openai/<id>`, not `codex/<id>`: the row's UI id is a label, and the
+      // server's legacy-ref shim is for a stale tab — not for the product's
+      // own daily switcher. Posting the retired namespace from here made the
+      // shim the happy path and left the row signal beside it untested.
       expect(JSON.parse(String((posted![1] as RequestInit).body))).toMatchObject({
-        model: "codex/gpt-5.5",
+        model: "openai/gpt-5.5",
         provider: "codex",
       });
     });

@@ -118,11 +118,32 @@ const PROFILE_KEYS = ["openai:chatgpt", "codex:default", "openai-codex:default"]
  * reads next holding a refresh token that has already been spent — the exact
  * split this list exists to prevent.
  */
+/** An openai-provider OAuth profile is a ChatGPT sign-in, whatever it is keyed. */
+function isChatgptProfile(key, entry) {
+  if (!entry || typeof entry !== "object") return false;
+  const provider = String(entry.provider || key.split(":")[0] || "").trim().toLowerCase();
+  const mode = String(entry.type || entry.mode || "").trim().toLowerCase();
+  if (mode && mode !== "oauth") return false;
+  return provider === "openai" || provider === "codex" || provider === "openai-codex";
+}
+
 function profileKeyIn(profiles) {
   if (!profiles) return null;
-  return PROFILE_KEYS.find((key) => profiles[key] && profiles[key].access)
-    || PROFILE_KEYS.find((key) => profiles[key])
-    || null;
+  // PROFILE_KEYS first, as the preference order, then ANY profile that is a
+  // ChatGPT sign-in by shape. The three literal ids miss the two `doctor --fix`
+  // itself allocates when it migrates a legacy `openai-codex:default`:
+  // `openai:default`, or `openai:chatgpt-default` when that is taken. The rest
+  // of this PR already treats "provider openai + oauth" as the sign-in — so a
+  // doctor-migrated box produced an available ChatGPT row, a runtime arm and a
+  // subscription entitlement while THIS script found no credential, never
+  // synthesized ~/.codex/auth.json and never wrote a rotation back.
+  const keys = [
+    ...PROFILE_KEYS.filter((key) => profiles[key]),
+    ...Object.keys(profiles).filter(
+      (key) => !PROFILE_KEYS.includes(key) && isChatgptProfile(key, profiles[key]),
+    ).sort(),
+  ];
+  return keys.find((key) => profiles[key] && profiles[key].access) || keys[0] || null;
 }
 
 function credentialFromProfiles(agentDir) {

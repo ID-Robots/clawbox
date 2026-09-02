@@ -547,3 +547,50 @@ describe("the openai-codex primary migration", () => {
     expect(block).toContain('if [ "$CLAWBOX_OPENCLAW_V2" != "1" ]; then');
   });
 });
+
+// The arm had exactly one remover on the whole box and it was v1-gated, so on
+// the core ClawBox pins nothing ever cleared it. The recovery that matters is
+// the box whose ChatGPT sign-in is gone while the arm stayed: there is no
+// account for it to route to, and every turn on that model dies on the
+// Cloudflare-challenged browser endpoint.
+describe.runIf(hasPython3)("the boot disarm on OpenClaw 2", () => {
+  const ARMED = {
+    agents: {
+      defaults: {
+        model: { primary: "openai/gpt-5.5" },
+        models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } },
+      },
+    },
+  };
+
+  it("strips a codex arm on a box with no ChatGPT sign-in at all", () => {
+    const models = applyPolicy({
+      ...structuredClone(ARMED),
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+    }, true);
+    expect(models["openai/gpt-5.5"]?.agentRuntime).toBeUndefined();
+  });
+
+  it("leaves it while a sign-in exists — the routes own that one", () => {
+    // Ambiguous at boot on a dual-credential box, and the chat and configure
+    // routes now write AND clear it from the row the owner picked.
+    const models = applyPolicy({
+      ...structuredClone(ARMED),
+      auth: {
+        profiles: {
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
+          "openai:default": { provider: "openai", mode: "api_key" },
+        },
+      },
+    }, true);
+    expect(models["openai/gpt-5.5"]?.agentRuntime).toEqual({ id: "codex" });
+  });
+
+  it("re-seeds rather than strips on a subscription-only box", () => {
+    const models = applyPolicy({
+      ...structuredClone(ARMED),
+      auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
+    }, true);
+    expect(models["openai/gpt-5.5"]?.agentRuntime).toEqual({ id: "codex" });
+  });
+});

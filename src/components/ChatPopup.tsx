@@ -5418,9 +5418,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   // (Mike's gateway routes via DeepSeek). Sending
                   // `clawai/...` would be rejected by the gateway as
                   // an unknown provider.
+                  // The ChatGPT row's models are written `openai/<id>`: its
+                  // UI id `codex` is a label, not a namespace. Posting
+                  // `codex/<id>` from the product's own daily switcher made the
+                  // server's legacy-ref shim — written for a stale tab — the
+                  // happy path, and the row signal below the thing that was
+                  // never exercised. `clawai`/`deepseek` pass through unchanged.
                   const wireProvider = activeOption.provider === 'clawai'
                     ? 'deepseek'
-                    : activeOption.provider
+                    : chatgptReferenceProvider(activeOption.provider)
                   void switchChatModel({
                     provider: activeOption.provider,
                     model: `${wireProvider}/${nextId}`,

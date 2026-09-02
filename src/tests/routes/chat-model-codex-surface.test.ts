@@ -183,7 +183,7 @@ describe("/setup-api/chat/model and the ChatGPT subscription surface", () => {
     await postModel(POST, `codex/${OFF_SURFACE}`);
 
     expect(runOpenclawConfigSet).not.toHaveBeenCalledWith(
-      expect.arrayContaining([`agents.defaults.models.openai/${OFF_SURFACE}.agentRuntime.id`]),
+      expect.arrayContaining([`agents.defaults.models["openai/${OFF_SURFACE}"].agentRuntime.id`]),
     );
   });
 
@@ -200,7 +200,7 @@ describe("/setup-api/chat/model and the ChatGPT subscription surface", () => {
       `openai/${ON_SURFACE}`,
     ]);
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
-      `agents.defaults.models.openai/${ON_SURFACE}.agentRuntime.id`,
+      `agents.defaults.models["openai/${ON_SURFACE}"].agentRuntime.id`,
       "codex",
     ]);
   });

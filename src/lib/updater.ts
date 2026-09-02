@@ -17,8 +17,10 @@ import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { startRootStep } from "./root-step-runner";
 import { collectBuildIdentity } from "./build-identity";
+import type { AuthProfileEntries } from "./subscription-surface";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
+  hasChatgptOauthProfile,
   isLegacyChatgptProvider,
   isLegacyCodexRef,
   profileProviderId,
@@ -1057,6 +1059,12 @@ async function codexCapabilityRepairIsAllowed(): Promise<boolean> {
     const profiles = auth.profiles && typeof auth.profiles === "object"
       ? auth.profiles as Record<string, unknown>
       : {};
+    // The OpenClaw 2 sign-in counts too, and on its own: a box with
+    // `openai:chatgpt` but no runtime arm — the isLocalScope save path, a
+    // hand-edited config, or the dual-credential box the boot seed
+    // deliberately skips — used to answer "codex not in use" here and have the
+    // capability repair skipped on every update.
+    if (hasChatgptOauthProfile(profiles as AuthProfileEntries)) return true;
     return Object.entries(profiles).some(([id, profile]) =>
       isLegacyChatgptProvider(id.split(":")[0])
         || isLegacyChatgptProvider(

@@ -109,9 +109,34 @@ export function chatgptModelRef(modelId: string): string {
   return `${CHATGPT_PROVIDER}/${modelId}`;
 }
 
+/**
+ * The `agentRuntime` entry for `modelRef`, as a config path the CLI can parse.
+ *
+ * BRACKET-QUOTED, and that is the whole point. The CLI's path grammar splits an
+ * unquoted segment on `.` and reads `[...]` with a quoted key as ONE segment
+ * (the core's `parseConcreteConfigPathWithProvenance`, which also accepts `\.`
+ * escapes). Every ChatGPT model id carries a dot — `gpt-5.5`, `gpt-5.4`,
+ * `gpt-5.4-mini`, `gpt-5.6-sol` — so the dotted form
+ * `agents.defaults.models.openai/gpt-5.5.agentRuntime.id` is parsed as
+ * `… models → "openai/gpt-5" → "5" → …` and the CLI answers
+ *
+ *   Config validation failed: agents.defaults.models.openai/gpt-5: Unrecognized key: "5"
+ *
+ * refusing the whole write — and, in a batch, every other operation with it.
+ * Measured against the pinned 2026.8.1 core; the bracket form is what the CLI
+ * itself echoes back on success ("Updated
+ * agents.defaults.models[\"openai/gpt-5.5\"].agentRuntime.id").
+ *
+ * `JSON.stringify` produces the quoted key, and escapes a `"` or `\` in a
+ * model id the same way the grammar reads it back.
+ */
+export function chatgptRuntimeEntryPath(modelRef: string): string {
+  return `agents.defaults.models[${JSON.stringify(modelRef)}].agentRuntime`;
+}
+
 /** The config path that arms the Codex app-server runtime for `modelRef`. */
 function chatgptRuntimeConfigPath(modelRef: string): string {
-  return `agents.defaults.models.${modelRef}.agentRuntime.id`;
+  return `${chatgptRuntimeEntryPath(modelRef)}.id`;
 }
 
 /** The whole `config set` op that arms the Codex runtime on `modelRef`. */
@@ -197,9 +222,22 @@ export function canonicalChatgptModelRef(legacyRef: string): string {
  * store lacks, `order set` rejects the whole call and the caller says so in
  * its answer rather than reporting a preference it did not record.
  */
-export function openaiAuthOrder(profiles: AuthProfileEntries, preferred: string): string[] {
+export function openaiAuthOrder(
+  profiles: AuthProfileEntries,
+  preferred: string,
+  // Every id in the result reaches the CLI as argv and is echoed back in the
+  // route's `warning`. The preferred one is validated by its caller before it
+  // gets here; the SIBLINGS come out of a config file, so they are held to the
+  // same shape rather than trusted — the asymmetry, not any reachable
+  // injection (spawn takes an argv array, the answer is JSON), is what makes
+  // this worth spelling out.
+  isValidProfileKey: (key: string) => boolean = () => true,
+): string[] {
   const others = Object.entries(profiles ?? {})
-    .filter(([key, entry]) => key !== preferred && profileProviderId(key, entry) === CHATGPT_PROVIDER)
+    .filter(([key, entry]) =>
+      key !== preferred
+      && profileProviderId(key, entry) === CHATGPT_PROVIDER
+      && isValidProfileKey(key))
     .map(([key]) => key)
     .sort();
   return [preferred, ...others];

@@ -29,6 +29,10 @@ vi.mock("@/lib/openclaw-config", () => ({
   runOpenclawConfigSetBatch: vi.fn(async (ops: string[][]) => {
     for (const op of ops) await configSetMock(op);
   }),
+  // The disarm half of the Codex runtime arm. A batch entry carries only
+  // value/ref/provider — there is no delete — and a null value is refused by
+  // the schema, so removing the key is its own `config unset` spawn.
+  runOpenclawConfigUnset: vi.fn(),
   applyModelOverrideToAllAgentSessions: vi.fn(),
   parseFullyQualifiedModel: vi.fn(),
   // Plugin gating: the route switches the plugin the new primary needs ON
@@ -44,7 +48,7 @@ vi.mock("@/lib/sqlite-store", () => ({
 }));
 
 import { getAll } from "@/lib/config-store";
-import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { promisify } from "util";
 
@@ -518,7 +522,7 @@ describe("/setup-api/chat/model", () => {
     // ...and it is the ChatGPT account, not an API key, that runs it: the
     // Codex runtime is armed on the canonical reference.
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
-      "agents.defaults.models.openai/gpt-5.5.agentRuntime.id",
+      'agents.defaults.models["openai/gpt-5.5"].agentRuntime.id',
       "codex",
     ]);
     expect(applyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
@@ -595,7 +599,7 @@ describe("/setup-api/chat/model", () => {
       "openai/gpt-5.6-sol",
     ]);
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
-      "agents.defaults.models.openai/gpt-5.6-sol.agentRuntime.id",
+      'agents.defaults.models["openai/gpt-5.6-sol"].agentRuntime.id',
       "codex",
     ]);
     expect(restartGateway).toHaveBeenCalled();
@@ -740,11 +744,34 @@ describe("/setup-api/chat/model", () => {
       }));
       const body = await response.json();
 
-      expect(response.status).toBe(500);
-      expect(body.error).toContain("Unknown model: anthropic/claude-sonnet-5");
+      // The batch is #589's and the 409 is #584's, and BOTH have to survive the
+      // merge: the plugin enable rides in the batch this wraps, and the owner
+      // still gets the model-unresolvable answer instead of the CLI's sentence.
+      expect(response.status).toBe(409);
+      expect(body.kind).toBe("model_unresolvable");
+      expect(body.error).not.toMatch(/openclaw models list|Cannot set model reference/);
       expect(runOpenclawConfigSet).not.toHaveBeenCalledWith(expect.arrayContaining([ENABLE_OP[0]]));
       expect(setProviderPlugins).not.toHaveBeenCalled();
       expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("carries the plugin enable inside the try that answers the 409", async () => {
+      // Pins the merge shape itself: one batch, enable ahead of the primary,
+      // and the refusal converted. Taking either side wholesale loses one of
+      // the two — silently, because each side's own tests still pass.
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(new Error(UNKNOWN_MODEL));
+
+      await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+      }));
+
+      const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls.at(-1)?.[0] as string[][];
+      expect(batch[0]).toEqual(ENABLE_OP);
+      expect(batch.some((op) => op[0] === "agents.defaults.model.primary")).toBe(true);
+      expect(batch.findIndex((op) => op[0] === ENABLE_OP[0]))
+        .toBeLessThan(batch.findIndex((op) => op[0] === "agents.defaults.model.primary"));
     });
 
     it("keeps the OFF half of the gate AFTER the write when the new primary is not Anthropic", async () => {
@@ -849,9 +876,106 @@ describe("/setup-api/chat/model", () => {
       // Without this entry the turn leaves the ChatGPT account for
       // api.openai.com and the box silently spends the API key instead.
       expect(runOpenclawConfigSet).toHaveBeenCalledWith([
-        "agents.defaults.models.openai/gpt-5.5.agentRuntime.id",
+        'agents.defaults.models["openai/gpt-5.5"].agentRuntime.id',
         "codex",
       ]);
+    });
+
+    // The arm was WRITE-ONLY: two routes added it and the only remover is
+    // gateway-pre-start's v1-gated cleanup, so on the pinned core nothing on
+    // the box cleared it. Harmless while it could only sit on a `codex/<id>`
+    // key no other lane could name — not harmless now that both OpenAI lanes
+    // write `openai/<id>`, because the leftover keeps sending the SAME
+    // reference through the ChatGPT account after the owner picks the API-key
+    // row, and the header pill flips back on the next GET.
+    const ARMED_DUAL_BOX = {
+      ...DUAL_BOX,
+      agents: {
+        defaults: {
+          model: { primary: "openai/gpt-5.4" },
+          models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } },
+        },
+      },
+    };
+
+    it("clears the runtime arm when the same model is picked on the API-key row", async () => {
+      vi.mocked(readConfig).mockResolvedValue(ARMED_DUAL_BOX as never);
+
+      const response = await post({ model: "openai/gpt-5.5", provider: "openai" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigUnset).toHaveBeenCalledWith(
+        'agents.defaults.models["openai/gpt-5.5"].agentRuntime',
+      );
+    });
+
+    it("clears it on the same-model no-op door too", async () => {
+      // Already the primary AND armed: the old repair was one-sided, so this
+      // returned 200 having changed nothing while the turn stayed on the
+      // subscription.
+      const armedNow = {
+        ...DUAL_BOX,
+        agents: {
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } },
+          },
+        },
+      };
+      // The disarm changes the file, so the answer's re-read sees it gone —
+      // the request must not report the row it just moved the owner off.
+      vi.mocked(readConfig)
+        .mockResolvedValueOnce(armedNow as never)
+        .mockResolvedValue({
+          ...DUAL_BOX,
+          agents: { defaults: { model: { primary: "openai/gpt-5.5" }, models: {} } },
+        } as never);
+
+      const response = await post({ model: "openai/gpt-5.5", provider: "openai" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigUnset).toHaveBeenCalledWith(
+        'agents.defaults.models["openai/gpt-5.5"].agentRuntime',
+      );
+      await expect(response.json()).resolves.toMatchObject({ activeLabel: "OpenAI GPT" });
+    });
+
+    it("says so instead of answering clean when the disarm fails", async () => {
+      // A 200 that looks like a switch, over a box still routing that model to
+      // the ChatGPT account, is the false success this whole finding is about.
+      vi.mocked(readConfig).mockResolvedValue(ARMED_DUAL_BOX as never);
+      vi.mocked(runOpenclawConfigUnset).mockRejectedValue(new Error("config unset failed"));
+
+      const response = await post({ model: "openai/gpt-5.5", provider: "openai" });
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.warning).toMatch(/still routes it through your ChatGPT account/);
+    });
+
+    it("leaves the arm alone when the pick IS the subscription's", async () => {
+      vi.mocked(readConfig).mockResolvedValue(ARMED_DUAL_BOX as never);
+
+      await post({ model: "openai/gpt-5.5", provider: "codex" });
+
+      expect(runOpenclawConfigUnset).not.toHaveBeenCalled();
+    });
+
+    it("writes the arm on a config path the CLI can actually parse", async () => {
+      // The CLI's path grammar splits an unquoted segment on `.`, and every
+      // ChatGPT model id carries one, so the dotted form is read as
+      // `models -> "openai/gpt-5" -> "5"` and answers
+      // `Config validation failed: ... Unrecognized key: "5"` — taking the
+      // whole batch, primary included, with it. Bracket-quoted is the form the
+      // CLI itself echoes back. Measured on the pinned 2026.8.1 core.
+      vi.mocked(readConfig).mockResolvedValue(CHATGPT_BOX as never);
+
+      await post({ model: "openai/gpt-5.4-mini" });
+
+      const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls.at(-1)?.[0] as string[][];
+      const arm = batch.find((op) => op[0].includes("agentRuntime"));
+      expect(arm?.[0]).toBe('agents.defaults.models["openai/gpt-5.4-mini"].agentRuntime.id');
+      expect(arm?.[0]).not.toContain("models.openai/");
     });
 
     it("attributes an armed openai/<id> to the ChatGPT row, not the API-key one", async () => {
@@ -883,8 +1007,11 @@ describe("/setup-api/chat/model", () => {
 
       expect(response.status).toBe(400);
       const refusal = await response.json();
-      // Names the lever the owner has: the same box's API-key row runs it.
-      expect(refusal.error).toContain("requires OpenAI API-key mode");
+      // Names the lever the owner has NOT pulled. This box HOLDS an API key,
+      // so "switch to API-key mode" would name one they already have; the
+      // actionable step is the other row, which routes this very model.
+      expect(refusal.error).toContain("Pick it on the OpenAI GPT row instead");
+      expect(refusal.error).not.toContain("requires OpenAI API-key mode");
       // The supported list is built from the catalogue, so the GPT-5.6
       // generation the allowlist accepts cannot fall out of the sentence.
       expect(refusal.error).toContain("GPT-5.6 Sol");
@@ -899,7 +1026,7 @@ describe("/setup-api/chat/model", () => {
       expect(response.status).toBe(200);
       expect(runOpenclawConfigSet).toHaveBeenCalledWith(["agents.defaults.model.primary", "openai/gpt-5.5-pro"]);
       expect(runOpenclawConfigSet).not.toHaveBeenCalledWith([
-        "agents.defaults.models.openai/gpt-5.5-pro.agentRuntime.id",
+        'agents.defaults.models["openai/gpt-5.5-pro"].agentRuntime.id',
         "codex",
       ]);
     });
@@ -953,7 +1080,7 @@ describe("/setup-api/chat/model", () => {
 
       expect(response.status).toBe(200);
       expect(runOpenclawConfigSet).toHaveBeenCalledWith([
-        "agents.defaults.models.openai/gpt-5.5.agentRuntime.id",
+        'agents.defaults.models["openai/gpt-5.5"].agentRuntime.id',
         "codex",
       ]);
       expect(runOpenclawConfigSet).not.toHaveBeenCalledWith(expect.arrayContaining(["agents.defaults.model.primary"]));
