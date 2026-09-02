@@ -43,6 +43,7 @@ vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock 
 // missing-export error rather than as the assertion it was written for.
 vi.mock("@/lib/harness/hermes-turn-record", () => ({
   readHermesTurn: readTurnMock,
+  readHermesUsageMarks: async () => null,
   readHermesBillingProvider: async () => "",
 }));
 vi.mock("@/lib/harness/media-root", () => ({

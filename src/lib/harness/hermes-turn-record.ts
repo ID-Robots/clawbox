@@ -328,35 +328,68 @@ export function buildTurnFromRows(rows: MessageRow[]): HermesTurnRecord | null {
   };
 }
 
-/** One `session_model_usage` row, trimmed to the column this module reads. */
-interface UsageRow {
+/**
+ * One `session_model_usage` row, trimmed to the columns this module reads.
+ *
+ * `api_call_count` and `last_seen` are read only to tell a row apart from
+ * ITSELF one turn earlier — see `usageMark`. Nothing here interprets either as
+ * a time or a quantity, so neither the clock nor the units have to be known.
+ */
+export interface UsageRow {
+  model?: string | null;
   billing_provider?: string | null;
+  api_call_count?: number | null;
+  last_seen?: unknown;
 }
 
 /**
- * Which provider a set of usage rows can be said to name — or nothing.
+ * A row's identity AND its version, in one string.
+ *
+ * The whole billing question is "which of these rows did the turn that just ran
+ * write?", and `session_model_usage` cannot be asked that directly: a row
+ * AGGREGATES a session's calls for its key, so `last_seen` says when that
+ * combination last billed, never which turn it billed for. Comparing it against
+ * a clock this process holds would also mean knowing its epoch and units, which
+ * nothing here does.
+ *
+ * So the rows are compared against THEMSELVES instead: snapshot the session's
+ * marks before the turn, read them again after, and a mark that was not there
+ * before belongs to a row the turn either created or billed against again. No
+ * absolute time, no unit, no epoch — only "did this change".
+ */
+export function usageMark(row: UsageRow): string {
+  return [
+    typeof row?.model === "string" ? row.model : "",
+    typeof row?.billing_provider === "string" ? row.billing_provider : "",
+    typeof row?.api_call_count === "number" ? String(row.api_call_count) : "",
+    row?.last_seen === null || row?.last_seen === undefined ? "" : String(row.last_seen),
+  ].join(" ");
+}
+
+/**
+ * Which provider the rows THIS TURN touched can be said to name — or nothing.
  *
  * Exported for its own test: the rule is the part with a decision in it, and a
  * test for it should not need a SQLite file to say what it means.
  *
- * ONE provider or none, deliberately. `session_model_usage` is keyed on
- * (session, model, provider, base_url, mode, task), so one session can hold
- * several rows for the same model id — several tasks under one provider, which
- * is the ordinary case and answers cleanly, or the same model billed under two
- * DIFFERENT providers over the conversation's life, which is the case nothing
- * here can resolve.
+ * `before` is the session's marks as they stood when the turn was submitted. A
+ * row still carrying one of them was not written by this turn and cannot speak
+ * for it — that is what stops an earlier turn's provider from labelling this
+ * bubble when the conversation moved to another provider serving the same model
+ * id, and it also turns "the row has not landed yet" into a blank rather than a
+ * stale answer.
  *
- * "Take the newest" is not that resolution, and `first_seen` / `last_seen` are
- * why rather than why not: a row AGGREGATES a session's calls for its key
- * (`api_call_count` beside them), so `last_seen` says when that combination
- * last billed, never which turn it billed for. No comparison this function can
- * make attributes one row to one turn, so a tie between providers is refused
- * instead of broken. Unknown beats wrong, the rule this whole path follows.
+ * Then ONE provider or none. `session_model_usage` is keyed on (session, model,
+ * provider, base_url, mode, task), so several rows can be touched by one turn —
+ * several tasks under one provider, which is the ordinary case and answers
+ * cleanly, or two providers, which nothing here can resolve. Unknown beats
+ * wrong, the rule this whole path follows.
  */
-export function pickBillingProvider(rows: UsageRow[]): string {
+export function pickBillingProvider(rows: UsageRow[], before: ReadonlySet<string>): string {
   if (!Array.isArray(rows)) return "";
   const named = new Set(
     rows
+      .filter((row) => !before.has(usageMark(row)))
       .map((row) => (typeof row?.billing_provider === "string" ? row.billing_provider.trim() : ""))
       .filter(Boolean),
   );
@@ -379,6 +412,11 @@ async function withStateDb<T>(
   /** What was being read, for the journal line. Never the contents. */
   what: string,
   fallback: T,
+  /**
+   * MUST be synchronous. The handle is closed in the `finally` below, so an
+   * `async` reader would be handed a closed database. `fallback` pins `T`, so
+   * writing one is a compile error rather than a use-after-close.
+   */
   read: (db: ReadOnlyDb) => T,
 ): Promise<T> {
   let db: ReadOnlyDb | null = null;
@@ -437,9 +475,30 @@ export async function readHermesTurn(sessionId: string): Promise<HermesTurnRecor
   });
 }
 
+/** The four columns both billing reads select, so their marks are comparable. */
+const USAGE_COLUMNS = "model, billing_provider, api_call_count, last_seen";
+
 /**
- * Who Hermes says it BILLED for this session's turns on this model — the
- * harness's own answer to "who served that reply", read from its own store.
+ * The session's billing rows as they stand right now, as marks.
+ *
+ * Taken BEFORE a turn runs, so that afterwards the rows it wrote can be told
+ * from the ones it did not. Returns null — never an empty set — when the store
+ * could not be read at all, because "no baseline" and "no rows yet" are
+ * different facts and only the second one is safe to answer from.
+ */
+export async function readHermesUsageMarks(sessionId: string): Promise<Set<string> | null> {
+  if (!sessionId) return null;
+  return withStateDb<Set<string> | null>("the agent's billing record", null, (db) => {
+    const rows = db
+      .prepare(`SELECT ${USAGE_COLUMNS} FROM session_model_usage WHERE session_id = ?`)
+      .all(sessionId) as UsageRow[];
+    return new Set(rows.map(usageMark));
+  });
+}
+
+/**
+ * Who Hermes says it BILLED for the turn that just ran — the harness's own
+ * answer to "who served that reply", read from its own store.
  *
  * `messages` cannot answer it: its columns are the turn's content, and there is
  * no model or provider among them (checked on the box with
@@ -449,16 +508,22 @@ export async function readHermesTurn(sessionId: string): Promise<HermesTurnRecor
  * served-model work exists to prevent. `session_model_usage` is the surface
  * that fits: keyed per (session, model), carrying the provider that actually
  * billed. It is read here keyed on BOTH, so a row belonging to another model in
- * the same conversation cannot speak for this one.
+ * the same conversation cannot speak for this one, and narrowed by `before` to
+ * the rows this turn actually wrote.
  *
  * Returns "" for anything less than a single unambiguous answer.
  */
-export async function readHermesBillingProvider(sessionId: string, model: string): Promise<string> {
+export async function readHermesBillingProvider(
+  sessionId: string,
+  model: string,
+  /** `readHermesUsageMarks` from before the turn — see `pickBillingProvider`. */
+  before: ReadonlySet<string>,
+): Promise<string> {
   if (!sessionId || !model) return "";
   return withStateDb("the agent's billing record", "", (db) => {
     const rows = db
-      .prepare("SELECT billing_provider FROM session_model_usage WHERE session_id = ? AND model = ?")
+      .prepare(`SELECT ${USAGE_COLUMNS} FROM session_model_usage WHERE session_id = ? AND model = ?`)
       .all(sessionId, model) as UsageRow[];
-    return pickBillingProvider(rows);
+    return pickBillingProvider(rows, before);
   });
 }

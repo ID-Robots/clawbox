@@ -7,6 +7,7 @@ import {
   pickBillingProvider,
   readHermesBillingProvider,
   readHermesTurn,
+  readHermesUsageMarks,
 } from "@/lib/harness/hermes-turn-record";
 
 /**
@@ -422,10 +423,36 @@ describe("a turn that drew something", () => {
  * The schema below is the table as `~/.hermes/state.db` declared it, including
  * its six-column primary key, which is the whole reason the picker has a rule:
  * one session can hold several rows for the same model id.
+ *
+ * Every case runs the real pair — snapshot the marks, change the table the way
+ * a turn would, read again — because the whole rule is "which rows did THIS
+ * turn write", and a fixture that skipped the snapshot would be asserting a
+ * different function.
  */
 describe("readHermesBillingProvider", () => {
   let home: string;
   let available = true;
+
+  /** Bill `count` calls of `model` to `provider`, `seen` being its `last_seen`. */
+  async function bill(
+    session: string,
+    model: string,
+    provider: string,
+    count: number,
+    seen: number,
+    task = "chat",
+  ) {
+    const specifier = "node:sqlite";
+    const { DatabaseSync } = await import(specifier);
+    const db = new DatabaseSync(path.join(home, "state.db"));
+    db.prepare(
+      "INSERT INTO session_model_usage (session_id, model, billing_provider, billing_mode, task,"
+      + " api_call_count, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?)"
+      + " ON CONFLICT(session_id, model, billing_provider, billing_base_url, billing_mode, task)"
+      + " DO UPDATE SET api_call_count = excluded.api_call_count, last_seen = excluded.last_seen",
+    ).run(session, model, provider, "subscription_included", task, count, 1, seen);
+    db.close();
+  }
 
   beforeEach(async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-billing-"));
@@ -446,18 +473,6 @@ describe("readHermesBillingProvider", () => {
         last_seen REAL,
         PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
       )`);
-      const row = db.prepare(
-        "INSERT INTO session_model_usage (session_id, model, billing_provider, billing_mode, task,"
-        + " api_call_count, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?)",
-      );
-      // The shipped shape: one provider, two tasks.
-      row.run("s1", "gpt-5.6-sol", "openai-codex", "subscription_included", "chat", 4, 10, 20);
-      row.run("s1", "gpt-5.6-sol", "openai-codex", "subscription_included", "title", 1, 11, 21);
-      // A different model in the SAME conversation, on a different provider.
-      row.run("s1", "claude-sonnet-5", "anthropic", "anthropic_messages", "chat", 1, 30, 40);
-      // The same model id billed under TWO providers over one session's life.
-      row.run("s2", "glm-5", "zai", "api_key", "chat", 1, 10, 20);
-      row.run("s2", "glm-5", "openrouter", "api_key", "chat", 1, 30, 40);
       db.close();
     } catch {
       available = false;
@@ -469,39 +484,77 @@ describe("readHermesBillingProvider", () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
-  it("names the provider that billed this session's turns on this model", async () => {
-    const billed = await readHermesBillingProvider("s1", "gpt-5.6-sol");
+  it("names the provider the turn just billed", async () => {
+    const before = await readHermesUsageMarks("s1");
     if (!available) {
-      // No SQLite: the contract is "", so the bubble keeps its blank.
-      expect(billed).toBe("");
+      // No SQLite: no baseline, so the bubble keeps its blank.
+      expect(before).toBeNull();
       return;
     }
-    expect(billed).toBe("openai-codex");
+    await bill("s1", "gpt-5.6-sol", "openai-codex", 4, 20);
+    expect(await readHermesBillingProvider("s1", "gpt-5.6-sol", before!)).toBe("openai-codex");
+  });
+
+  it("answers cleanly when one turn billed the same provider under two tasks", async () => {
+    if (!available) return;
+    const before = await readHermesUsageMarks("s1");
+    await bill("s1", "gpt-5.6-sol", "openai-codex", 4, 20, "chat");
+    await bill("s1", "gpt-5.6-sol", "openai-codex", 1, 21, "title");
+    expect(await readHermesBillingProvider("s1", "gpt-5.6-sol", before!)).toBe("openai-codex");
   });
 
   it("does not let one model in a conversation answer for another", async () => {
     if (!available) return;
-    expect(await readHermesBillingProvider("s1", "claude-sonnet-5")).toBe("anthropic");
+    const before = await readHermesUsageMarks("s1");
+    await bill("s1", "gpt-5.6-sol", "openai-codex", 1, 20);
+    await bill("s1", "claude-sonnet-5", "anthropic", 1, 40);
+    expect(await readHermesBillingProvider("s1", "claude-sonnet-5", before!)).toBe("anthropic");
   });
 
-  it("says nothing when one session billed the same model under two providers", async () => {
+  it("does not let an EARLIER turn's provider label this one", async () => {
+    // The defect this bound exists for. Turn 1 bills glm-5 to zai. The box then
+    // moves to a provider serving the same model id, and turn 2's row has not
+    // landed when the label is decided. Without the baseline the old row answers
+    // — confidently, wrongly, and into a durable transcript.
     if (!available) return;
-    expect(await readHermesBillingProvider("s2", "glm-5")).toBe("");
+    await bill("s1", "glm-5", "zai", 1, 20);
+    const before = await readHermesUsageMarks("s1");
+    expect(await readHermesBillingProvider("s1", "glm-5", before!)).toBe("");
+  });
+
+  it("notices a row this turn billed against AGAIN, which is not a new row", async () => {
+    if (!available) return;
+    await bill("s1", "glm-5", "zai", 1, 20);
+    const before = await readHermesUsageMarks("s1");
+    await bill("s1", "glm-5", "zai", 2, 30);
+    expect(await readHermesBillingProvider("s1", "glm-5", before!)).toBe("zai");
+  });
+
+  it("says nothing when one turn billed the same model under two providers", async () => {
+    if (!available) return;
+    const before = await readHermesUsageMarks("s1");
+    await bill("s1", "glm-5", "zai", 1, 20);
+    await bill("s1", "glm-5", "openrouter", 1, 30);
+    expect(await readHermesBillingProvider("s1", "glm-5", before!)).toBe("");
   });
 
   it("says nothing for a session, a model or a database that is not there", async () => {
-    await expect(readHermesBillingProvider("s1", "no-such-model")).resolves.toBe("");
-    await expect(readHermesBillingProvider("nope", "gpt-5.6-sol")).resolves.toBe("");
-    await expect(readHermesBillingProvider("", "gpt-5.6-sol")).resolves.toBe("");
-    await expect(readHermesBillingProvider("s1", "")).resolves.toBe("");
+    const empty = new Set<string>();
+    await expect(readHermesBillingProvider("s1", "no-such-model", empty)).resolves.toBe("");
+    await expect(readHermesBillingProvider("nope", "gpt-5.6-sol", empty)).resolves.toBe("");
+    await expect(readHermesBillingProvider("", "gpt-5.6-sol", empty)).resolves.toBe("");
+    await expect(readHermesBillingProvider("s1", "", empty)).resolves.toBe("");
     process.env.HERMES_HOME = path.join(home, "gone");
-    await expect(readHermesBillingProvider("s1", "gpt-5.6-sol")).resolves.toBe("");
+    await expect(readHermesBillingProvider("s1", "gpt-5.6-sol", empty)).resolves.toBe("");
+    await expect(readHermesUsageMarks("s1")).resolves.toBeNull();
+    await expect(readHermesUsageMarks("")).resolves.toBeNull();
   });
 
   it("ignores a row whose provider is blank rather than treating it as an answer", () => {
-    expect(pickBillingProvider([{ billing_provider: "  " }, { billing_provider: "clawai" }]))
+    const none = new Set<string>();
+    expect(pickBillingProvider([{ billing_provider: "  " }, { billing_provider: "clawai" }], none))
       .toBe("clawai");
-    expect(pickBillingProvider([{ billing_provider: null }])).toBe("");
-    expect(pickBillingProvider([])).toBe("");
+    expect(pickBillingProvider([{ billing_provider: null }], none)).toBe("");
+    expect(pickBillingProvider([], none)).toBe("");
   });
 });

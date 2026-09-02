@@ -29,6 +29,7 @@ import {
   smallLocalModelToolsets,
 } from "@/lib/local-model-profile";
 import {
+  cachedModelOptions,
   getModelOptions,
   isAllowedProvider,
   isPairAllowed,
@@ -41,7 +42,11 @@ import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "@/lib/harness/trans
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
-import { readHermesBillingProvider, readHermesTurn } from "@/lib/harness/hermes-turn-record";
+import {
+  readHermesBillingProvider,
+  readHermesTurn,
+  readHermesUsageMarks,
+} from "@/lib/harness/hermes-turn-record";
 import {
   adoptHermesGeneratedImages,
   reclaimImageMentions,
@@ -410,10 +415,11 @@ async function settleTurn(
     // collapse the monologue the same way the live turn did.
     ...(settledReasoning ? { reasoning: settledReasoning } : {}),
     ...(toolCalls?.length ? { toolCalls } : {}),
-    // Which model actually answered, from the transport rather than from the
-    // agent's own record — the dashboard's `info` for the session, read at the
-    // moment the turn was submitted, after any switch had been applied and
-    // acknowledged.
+    // Which model actually answered, from the transport — the dashboard's
+    // `info` for the session, read at the moment the turn was submitted, after
+    // any switch had been applied and acknowledged. The PROVIDER beside it can
+    // come from the agent's own record instead, and only where the transport
+    // named none and the request asked for none: see `billedProviderFor`.
     //
     // ASKED, on the box, and the answer is on the record now.
     // `PRAGMA table_info(messages)` lists 23 columns and not one of them names
@@ -488,8 +494,9 @@ async function settleTurn(
  * that could have produced a clean 4xx/5xx has already run before this is called.
  */
 /**
- * What the dashboard transport says answered — taken WHOLE, never half from one
- * source and half from the other.
+ * What answered, assembled under one rule: the model and the provider are never
+ * taken from two different TRANSPORT reports. A half the transport left empty
+ * may be filled from the harness's own billing record, and from nowhere else.
  *
  * The transport works hard to answer NOTHING rather than a pairing the turn did
  * not establish: `servedProviderSlug` declines a kind it cannot resolve, and a
@@ -516,13 +523,17 @@ async function servedPair(
   turn: DashboardTurn,
   /** The session the answer was recorded under — the key the harness bills by. */
   sessionId: string,
-  /** Whether the REQUEST named a provider; see `billedProviderFor`. */
-  requestNamedProvider: boolean,
+  /**
+   * The session's billing marks from before this turn ran, or null for "do not
+   * ask the harness" — either the request named a provider (see
+   * `billedProviderFor`) or the baseline could not be taken.
+   */
+  usageBefore: ReadonlySet<string> | null,
 ): Promise<{ model?: string; provider?: string }> {
   const source = final?.model ? final : { model: turn.model, provider: turn.provider };
   const model = source.model || "";
   const provider = source.provider
-    || (model && !requestNamedProvider ? await billedProviderFor(sessionId, model) : "");
+    || (model && usageBefore ? await billedProviderFor(sessionId, model, usageBefore) : "");
   return {
     ...(model ? { model } : {}),
     ...(provider ? { provider } : {}),
@@ -553,9 +564,25 @@ async function servedPair(
  * deliberately is not: what the box is configured to run is not evidence about
  * what this session ran, and reading it that way is exactly what the served-
  * model work removed.
+ *
+ * WHY THE STORE AND NOT THE WIRE, which is the question the harness-first rule
+ * asks. Hermes exposes no other surface for this: `messages` has no such
+ * column, `sessions` has only the thread's last one, the `session.usage` RPC's
+ * params and result are undocumented, `/api/analytics/usage` is aggregated by
+ * day and names no provider, the `/usage` slash command is prose, and
+ * `--usage-file` is `-z`-only while `-z` ignores `--resume`. The ONE candidate
+ * still open is the `session.usage` EVENT this transport already receives and
+ * drops (`hermes-dashboard-turn.ts`, the frame loop's `default`): its payload
+ * has never been captured, and if it carries the provider it is better than
+ * this on every axis — per turn, pushed, no second store to open. That capture
+ * is the next lane's, and it retires this function if it lands.
  */
-async function billedProviderFor(sessionId: string, model: string): Promise<string> {
-  const billed = await readHermesBillingProvider(sessionId, model);
+async function billedProviderFor(
+  sessionId: string,
+  model: string,
+  usageBefore: ReadonlySet<string>,
+): Promise<string> {
+  const billed = await readHermesBillingProvider(sessionId, model, usageBefore);
   // It is about to be persisted and rendered, so it is charset-checked like any
   // other provider id, even though it came from the box's own store.
   if (!billed || !isPlausibleHermesProviderId(billed)) return "";
@@ -563,17 +590,27 @@ async function billedProviderFor(sessionId: string, model: string): Promise<stri
   // apart — the same refusal `servedProviderSlug` makes about the same word.
   if (billed === DASHBOARD_PROVIDER_KIND) return "";
   // A recorded pairing the catalogue calls impossible is not an answer about
-  // this turn. Judged by the same two helpers the request itself passes on the
-  // way in, so "we cannot tell" (a stale payload, a provider we could not
-  // enumerate) can never become "wrong": `shouldEnforcePairing` declines those.
+  // this turn — but only where the catalogue really is an ENUMERATION. For a
+  // provider it does not positively call built-in, the model list may be one
+  // this repo seeded (`normalizeRow` does exactly that for the box's own
+  // provider and the on-device one, from a single configured id), and vetoing
+  // the harness's own record with a list we padded ourselves would blank the
+  // label on the most common provider on the fleet. `isUserDefined === false`
+  // is the only value that says "Hermes ships this one and listed its models".
   //
-  // The catalogue is memoised — fresh under a minute, served stale instantly
-  // for hours, and warmed by the chat header on mount — so this is a lookup in
-  // steady state. The one turn that could pay a live fetch is the first
-  // unpinned turn of a cold process, and it pays it AFTER the answer has
-  // already streamed: what arrives late is the label, never the reply.
-  const payload = await getModelOptions().catch(() => null);
-  if (payload && shouldEnforcePairing(payload, billed) && !isPairAllowed(payload, billed, model)) {
+  // Cache only, never a fetch: this runs after the answer has streamed, and the
+  // veto is waived anyway whenever the catalogue is unavailable or stale
+  // (`shouldEnforcePairing` declines both), so waiting for one would hold the
+  // `done` frame — and the durable transcript write with it — to maybe apply a
+  // check that a failed fetch waives.
+  const payload = cachedModelOptions();
+  const row = payload?.providers.find((entry) => entry.id === billed);
+  if (
+    payload
+    && row?.isUserDefined === false
+    && shouldEnforcePairing(payload, billed)
+    && !isPairAllowed(payload, billed, model)
+  ) {
     return "";
   }
   return billed;
@@ -593,6 +630,13 @@ function streamTurn(
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
       };
       const threaded = turn.sessionId || fallbackSessionId;
+      // The session's billing rows BEFORE this turn writes any, so that
+      // afterwards the ones it wrote can be told from the ones it did not —
+      // see `pickBillingProvider`. Taken only for a turn that could need it,
+      // and null means "do not ask": the request already named a provider, or
+      // the store could not be read, and a missing baseline is not a baseline.
+      // One small read against a store this route opens once more anyway.
+      const usageBefore = requestNamedProvider ? null : await readHermesUsageMarks(threaded);
       try {
         const final = await turn.run(
           (chunk) => send("delta", { text: chunk }),
@@ -667,7 +711,7 @@ function streamTurn(
               sessionKey,
               final.text,
               final.reasoning,
-              await servedPair(final, turn, threaded, requestNamedProvider),
+              await servedPair(final, turn, threaded, usageBefore),
             ),
           );
         }
@@ -711,7 +755,7 @@ function streamTurn(
                 sessionKey,
                 recovered.text,
                 "",
-                await servedPair(null, turn, threaded, requestNamedProvider),
+                await servedPair(null, turn, threaded, usageBefore),
               ),
             );
             return;
@@ -791,11 +835,16 @@ function isAbort(err: unknown): boolean {
  * plus one resumed turn with `-m`.
  *
  * The harness's billing record is deliberately NOT consulted here, though the
- * dashboard leg now reads it (`billedProviderFor`). It is keyed on the model,
- * and the only CLI case with a blank provider is the resumed run — the one case
- * whose MODEL is the unverified claim above. A lookup keyed on a model the
- * session may have overridden either finds nothing or corroborates a label that
- * was never the question. It would answer with more confidence, not more truth.
+ * dashboard leg now reads it (`billedProviderFor`). Two cases blank the provider
+ * on this path and neither is one the record can settle. On a RESUMED run the
+ * lookup would be keyed on a model that is itself the unverified claim above, so
+ * it either finds nothing or corroborates a label that was never the question.
+ * On a non-resumed run the blank means `readCurrentFromCli` could not answer at
+ * all — a spawn that timed out or a value that failed its charset check — and a
+ * box whose `hermes config get` is not answering is not a box whose store should
+ * be trusted to say who billed the turn it just ran. Leaving both is a choice
+ * about scope, not a claim that nothing could be read: the dashboard transport
+ * is what serves on this hardware, and it is where the defect was measured.
  */
 async function cliServedPair(
   model: string,

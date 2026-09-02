@@ -85,6 +85,7 @@ let turnRecord: unknown = null;
 // missing-export error rather than as the assertion it was written for.
 vi.mock("@/lib/harness/hermes-turn-record", () => ({
   readHermesTurn: async () => turnRecord,
+  readHermesUsageMarks: async () => null,
   readHermesBillingProvider: async () => "",
 }));
 

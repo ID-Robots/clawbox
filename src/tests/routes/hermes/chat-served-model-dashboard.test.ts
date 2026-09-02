@@ -19,8 +19,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * `billing_provider='openai-codex'` for each of those three session ids. The
  * answer was one read away and nobody asked.
  *
- * The fixtures below are that shape: a real `state.db`, the columns the box
- * declared, and the route driven end to end over its own SSE stream.
+ * The fixtures are that shape: a real `state.db` with the columns the box
+ * declared, and the route driven end to end over its own SSE stream. Usage rows
+ * are written by the FAKE TURN rather than by the setup, because the rule under
+ * test is "which rows did this turn write" — a fixture that seeded them before
+ * the turn would be asserting a different function, and is what case 5 pins.
  */
 
 const openTurnMock = vi.hoisted(() => vi.fn());
@@ -42,14 +45,17 @@ vi.mock("@/lib/harness/media-root", () => ({
   resolveInMediaRoot: vi.fn(async (p: string) => p),
   chatMediaRoot: vi.fn(async () => "/tmp/clawbox-served-model-dashboard-media"),
 }));
-// The catalogue is the only thing that can call a recorded pairing impossible,
-// and the pure judges around it (`shouldEnforcePairing` / `isPairAllowed`) stay
-// real — a hand-written stand-in for those would prove nothing.
+// `cachedModelOptions` is what the settle path reads, and the pure judges around
+// it (`shouldEnforcePairing` / `isPairAllowed`) stay real — a hand-written
+// stand-in for those would prove nothing.
 vi.mock("@/lib/hermes-model-options", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/hermes-model-options")>();
   return {
     ...actual,
-    getModelOptions: modelOptionsMock,
+    cachedModelOptions: modelOptionsMock,
+    getModelOptions: vi.fn(async () => {
+      throw new Error("the settle path must not fetch the catalogue");
+    }),
     readCurrentFromCli: vi.fn(async () => ({ provider: "", model: "", reasoning: "" })),
   };
 });
@@ -59,24 +65,67 @@ import { POST } from "@/app/setup-api/hermes/chat/route";
 /** The session the box's step-4b run actually produced. */
 const SESSION_ID = "20260902_205829_99ac3f";
 
+/** Variable specifier: `@types/node` here has no declaration for the builtin. */
+const SQLITE = "node:sqlite";
+
 /**
- * A turn handle that streams one fragment and then settles on the given pair.
+ * Whether this runtime has `node:sqlite` at all. Resolved once, at collection
+ * time, so an environment without it SKIPS these cases loudly instead of
+ * running them to a green that asserted nothing.
+ */
+const sqliteAvailable = await (async () => {
+  try {
+    await import(SQLITE);
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+/** Bill `count` calls of `model` to `provider` in `~/.hermes/state.db`. */
+async function bill(home: string, model: string, provider: string, count: number, seen: number) {
+  const { DatabaseSync } = await import(SQLITE);
+  const db = new DatabaseSync(path.join(home, "state.db"));
+  db.prepare(
+    "INSERT INTO session_model_usage (session_id, model, billing_provider, billing_mode, task,"
+    + " api_call_count, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?)"
+    + " ON CONFLICT(session_id, model, billing_provider, billing_base_url, billing_mode, task)"
+    + " DO UPDATE SET api_call_count = excluded.api_call_count, last_seen = excluded.last_seen",
+  ).run(SESSION_ID, model, provider, "subscription_included", "chat", count, 1, seen);
+  db.close();
+}
+
+/**
+ * A turn handle that streams one fragment, bills what it was told to bill, and
+ * then settles on the given pair.
  *
  * `provider: ""` is the shape under test, not an oversight: the transport
  * answers a model with NO provider whenever it cannot name one honestly.
  */
-function fakeTurn(opts: { model?: string; provider?: string; sessionId?: string }) {
+function fakeTurn(opts: {
+  home: string;
+  model?: string;
+  provider?: string;
+  /** What the completion frame reports, when it differs from the session's. */
+  finalModel?: string;
+  /** What Hermes bills WHILE the turn runs, as it does on a box. */
+  bills?: Array<{ model: string; provider: string; count?: number; seen?: number }>;
+}) {
   return {
-    sessionId: opts.sessionId ?? SESSION_ID,
+    sessionId: SESSION_ID,
     model: opts.model ?? "",
     provider: opts.provider ?? "",
     async run(onDelta: (chunk: string) => void) {
+      for (const entry of opts.bills ?? []) {
+        await bill(opts.home, entry.model, entry.provider, entry.count ?? 1, entry.seen ?? 20);
+      }
       onDelta("I am a model.");
+      const finalModel = opts.finalModel ?? opts.model;
       return {
         text: "I am a model.",
         reasoning: "",
         status: "complete",
-        ...(opts.model ? { model: opts.model } : {}),
+        ...(finalModel ? { model: finalModel } : {}),
         ...(opts.provider ? { provider: opts.provider } : {}),
       };
     },
@@ -114,18 +163,21 @@ function persistedAssistant(): Record<string, unknown> | undefined {
 
 /**
  * A catalogue payload. `authenticated` with a non-empty model list is what
- * makes `shouldEnforcePairing` willing to judge a pairing at all.
+ * makes `shouldEnforcePairing` willing to judge a pairing at all, and
+ * `isUserDefined === false` is what makes the list an ENUMERATION rather than
+ * one this repo may have seeded.
  */
-function catalogue(provider: string, models: string[]) {
+function catalogue(provider: string, models: string[], isUserDefined: boolean | null = false) {
   return {
     providers: [{
       id: provider,
       name: provider,
       authenticated: true,
+      verified: null,
       models: models.map((id) => ({ id })),
       total: models.length,
       source: "dashboard",
-      isUserDefined: false,
+      isUserDefined,
     }],
     current: { provider, model: models[0] ?? "" },
     reasoning: "medium",
@@ -141,144 +193,222 @@ function catalogue(provider: string, models: string[]) {
  * one — a session can bill the same model id under more than one provider over
  * its life, which is the case the picker has to refuse rather than guess at.
  */
-async function writeStateDb(
-  home: string,
-  usage: Array<{ session: string; model: string; provider: string }>,
-): Promise<boolean> {
-  try {
-    // Variable specifier: `@types/node` here has no declaration for the
-    // builtin, and this fixture is about the runtime, not the types.
-    const specifier = "node:sqlite";
-    const { DatabaseSync } = await import(specifier);
-    const db = new DatabaseSync(path.join(home, "state.db"));
-    db.exec(`CREATE TABLE messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      role TEXT NOT NULL,
-      content TEXT,
-      tool_call_id TEXT,
-      tool_calls TEXT,
-      tool_name TEXT,
-      timestamp REAL NOT NULL,
-      finish_reason TEXT,
-      reasoning TEXT,
-      reasoning_content TEXT
-    )`);
-    db.exec(`CREATE TABLE session_model_usage (
-      session_id TEXT NOT NULL,
-      model TEXT NOT NULL,
-      billing_provider TEXT NOT NULL,
-      billing_base_url TEXT NOT NULL DEFAULT '',
-      billing_mode TEXT NOT NULL DEFAULT '',
-      task TEXT NOT NULL DEFAULT '',
-      api_call_count INTEGER NOT NULL DEFAULT 0,
-      first_seen REAL,
-      last_seen REAL,
-      PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
-    )`);
-    const message = db.prepare(
-      "INSERT INTO messages (session_id, role, content, timestamp, finish_reason) VALUES (?,?,?,?,?)",
-    );
-    message.run(SESSION_ID, "user", "which model are you", 1, null);
-    message.run(SESSION_ID, "assistant", "I am a model.", 2, "stop");
-    const row = db.prepare(
-      "INSERT INTO session_model_usage (session_id, model, billing_provider, billing_mode, task,"
-      + " api_call_count, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?)",
-    );
-    for (const entry of usage) {
-      row.run(entry.session, entry.model, entry.provider, "subscription_included", "chat", 1, 10, 20);
-    }
-    db.close();
-    return true;
-  } catch {
-    // Node without `node:sqlite`. Every case below is written so the module's
-    // documented degradation ("no provider") is what it asserts.
-    return false;
-  }
+async function writeStateDb(home: string): Promise<void> {
+  const { DatabaseSync } = await import(SQLITE);
+  const db = new DatabaseSync(path.join(home, "state.db"));
+  db.exec(`CREATE TABLE messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT,
+    tool_call_id TEXT,
+    tool_calls TEXT,
+    tool_name TEXT,
+    timestamp REAL NOT NULL,
+    finish_reason TEXT,
+    reasoning TEXT,
+    reasoning_content TEXT
+  )`);
+  db.exec(`CREATE TABLE session_model_usage (
+    session_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    billing_provider TEXT NOT NULL,
+    billing_base_url TEXT NOT NULL DEFAULT '',
+    billing_mode TEXT NOT NULL DEFAULT '',
+    task TEXT NOT NULL DEFAULT '',
+    api_call_count INTEGER NOT NULL DEFAULT 0,
+    first_seen REAL,
+    last_seen REAL,
+    PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
+  )`);
+  const message = db.prepare(
+    "INSERT INTO messages (session_id, role, content, timestamp, finish_reason) VALUES (?,?,?,?,?)",
+  );
+  message.run(SESSION_ID, "user", "which model are you", 1, null);
+  message.run(SESSION_ID, "assistant", "I am a model.", 2, "stop");
+  db.close();
 }
 
-describe("/setup-api/hermes/chat — what the DASHBOARD transport records as the served provider", () => {
-  let home: string;
-  let sqliteAvailable = true;
+describe.skipIf(!sqliteAvailable)(
+  "/setup-api/hermes/chat — what the DASHBOARD transport records as the served provider",
+  () => {
+    let home: string;
 
-  beforeEach(() => {
-    vi.clearAllMocks();
-    home = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-served-provider-"));
-    process.env.HERMES_HOME = home;
-    appendMock.mockResolvedValue(true);
-    // No catalogue unless a case supplies one: the unpinned turn never asks for
-    // it on the way in, so this is the shape the settle path really meets.
-    modelOptionsMock.mockRejectedValue(new Error("no catalogue"));
-  });
+    beforeEach(async () => {
+      vi.clearAllMocks();
+      home = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-served-provider-"));
+      process.env.HERMES_HOME = home;
+      appendMock.mockResolvedValue(true);
+      // No catalogue unless a case supplies one: the unpinned turn never warms
+      // it on the way in, so this is the shape the settle path really meets.
+      modelOptionsMock.mockReturnValue(null);
+      await writeStateDb(home);
+    });
 
-  afterEach(() => {
-    delete process.env.HERMES_HOME;
-    fs.rmSync(home, { recursive: true, force: true });
-  });
+    afterEach(() => {
+      delete process.env.HERMES_HOME;
+      fs.rmSync(home, { recursive: true, force: true });
+    });
 
-  it("names the provider Hermes itself billed, when the frame gave a model and the request pinned nothing", async () => {
-    sqliteAvailable = await writeStateDb(home, [
-      { session: SESSION_ID, model: "gpt-5.6-sol", provider: "openai-codex" },
-    ]);
-    if (!sqliteAvailable) return;
-    openTurnMock.mockResolvedValue(fakeTurn({ model: "gpt-5.6-sol" }));
+    it("names the provider Hermes itself billed, when the frame gave a model and the request pinned nothing", async () => {
+      openTurnMock.mockResolvedValue(fakeTurn({
+        home,
+        model: "gpt-5.6-sol",
+        bills: [{ model: "gpt-5.6-sol", provider: "openai-codex" }],
+      }));
 
-    const done = await doneEvent(await POST(post({ message: "which model are you" })));
+      const done = await doneEvent(await POST(post({ message: "which model are you" })));
 
-    expect(done).toMatchObject({ model: "gpt-5.6-sol", provider: "openai-codex" });
-    // ...and the same into the durable transcript, which is what a refreshed
-    // page replays. A bubble that loses its provider on reload is the same
-    // defect one layer down.
-    expect(persistedAssistant()).toMatchObject({ model: "gpt-5.6-sol", provider: "openai-codex" });
-  });
+      expect(done).toMatchObject({ model: "gpt-5.6-sol", provider: "openai-codex" });
+      // ...and the same into the durable transcript, which is what a refreshed
+      // page replays. A bubble that loses its provider on reload is the same
+      // defect one layer down.
+      expect(persistedAssistant()).toMatchObject({ model: "gpt-5.6-sol", provider: "openai-codex" });
+    });
 
-  it("still says nothing when the harness recorded no usage for that turn", async () => {
-    sqliteAvailable = await writeStateDb(home, []);
-    if (!sqliteAvailable) return;
-    openTurnMock.mockResolvedValue(fakeTurn({ model: "gpt-5.6-sol" }));
+    it("still says nothing when the harness recorded no usage for that turn", async () => {
+      openTurnMock.mockResolvedValue(fakeTurn({ home, model: "gpt-5.6-sol" }));
 
-    const done = await doneEvent(await POST(post({ message: "which model are you" })));
+      const done = await doneEvent(await POST(post({ message: "which model are you" })));
 
-    expect(done).toMatchObject({ model: "gpt-5.6-sol" });
-    expect(done).not.toHaveProperty("provider");
-    expect(persistedAssistant()).not.toHaveProperty("provider");
-  });
+      expect(done).toMatchObject({ model: "gpt-5.6-sol" });
+      expect(done).not.toHaveProperty("provider");
+      expect(persistedAssistant()).not.toHaveProperty("provider");
+    });
 
-  it("says nothing when the recorded provider cannot serve the model the frame named", async () => {
-    // A contradiction is not an answer. The catalogue here is live and lists
-    // anthropic's models, and `gpt-5.6-sol` is not among them, so the recorded
-    // pairing describes something other than this turn.
-    sqliteAvailable = await writeStateDb(home, [
-      { session: SESSION_ID, model: "gpt-5.6-sol", provider: "anthropic" },
-    ]);
-    if (!sqliteAvailable) return;
-    modelOptionsMock.mockResolvedValue(catalogue("anthropic", ["claude-fable-5"]));
-    openTurnMock.mockResolvedValue(fakeTurn({ model: "gpt-5.6-sol" }));
+    it("does not let an EARLIER turn's row label this one", async () => {
+      // The box moves to another provider serving the same model id, and this
+      // turn's row has not landed when the label is decided. The old row is
+      // still there and must not answer — that would be a wrong provider
+      // written durably, which is worse than the blank this replaces.
+      await bill(home, "glm-5", "zai", 1, 20);
+      openTurnMock.mockResolvedValue(fakeTurn({ home, model: "glm-5" }));
 
-    const done = await doneEvent(await POST(post({ message: "which model are you" })));
+      const done = await doneEvent(await POST(post({ message: "which model are you" })));
 
-    expect(done).toMatchObject({ model: "gpt-5.6-sol" });
-    expect(done).not.toHaveProperty("provider");
-    expect(persistedAssistant()).not.toHaveProperty("provider");
-  });
+      expect(done).toMatchObject({ model: "glm-5" });
+      expect(done).not.toHaveProperty("provider");
+      expect(persistedAssistant()).not.toHaveProperty("provider");
+    });
 
-  it("leaves a request that DID name a provider alone, so the transport's refusal still stands", async () => {
-    // The transport declines to confirm a provider the turn did not establish
-    // — a canonical request against a session reporting the KIND `custom`. That
-    // silence is deliberate and the billing record must not talk over it: this
-    // fix answers only where nobody asked for a provider at all.
-    sqliteAvailable = await writeStateDb(home, [
-      { session: SESSION_ID, model: "claude-fable-5", provider: "openai-codex" },
-    ]);
-    if (!sqliteAvailable) return;
-    modelOptionsMock.mockResolvedValue(catalogue("anthropic", ["claude-fable-5"]));
-    openTurnMock.mockResolvedValue(fakeTurn({ model: "claude-fable-5" }));
+    it("says nothing when the recorded provider cannot serve the model the frame named", async () => {
+      // A contradiction is not an answer. The catalogue here enumerates
+      // anthropic's models, and `gpt-5.6-sol` is not among them, so the
+      // recorded pairing describes something other than this turn.
+      modelOptionsMock.mockReturnValue(catalogue("anthropic", ["claude-fable-5"]));
+      openTurnMock.mockResolvedValue(fakeTurn({
+        home,
+        model: "gpt-5.6-sol",
+        bills: [{ model: "gpt-5.6-sol", provider: "anthropic" }],
+      }));
 
-    const done = await doneEvent(
-      await POST(post({ message: "hi", provider: "anthropic", model: "claude-fable-5" })),
-    );
+      const done = await doneEvent(await POST(post({ message: "which model are you" })));
 
-    expect(done).toMatchObject({ model: "claude-fable-5" });
-    expect(done).not.toHaveProperty("provider");
-  });
-});
+      expect(done).toMatchObject({ model: "gpt-5.6-sol" });
+      expect(done).not.toHaveProperty("provider");
+      expect(persistedAssistant()).not.toHaveProperty("provider");
+    });
+
+    it("keeps the provider when the catalogue's list is one this repo may have seeded", async () => {
+      // A user-defined provider's models are whatever config declares, and
+      // `normalizeRow` pads the box's own provider from a single configured id.
+      // Vetoing the harness's own billing record against a list we padded
+      // ourselves would blank the label on the commonest provider on the fleet.
+      modelOptionsMock.mockReturnValue(catalogue("clawai", ["deepseek-v4-flash"], true));
+      openTurnMock.mockResolvedValue(fakeTurn({
+        home,
+        model: "deepseek-v4-reasoner",
+        bills: [{ model: "deepseek-v4-reasoner", provider: "clawai" }],
+      }));
+
+      const done = await doneEvent(await POST(post({ message: "which model are you" })));
+
+      expect(done).toMatchObject({ model: "deepseek-v4-reasoner", provider: "clawai" });
+    });
+
+    it("keeps the provider when a live catalogue agrees the pair is real", async () => {
+      // The only shape that runs on a warm box: the chat header warms the
+      // catalogue, so the veto is consulted and must not fire on a good pair.
+      modelOptionsMock.mockReturnValue(catalogue("openai-codex", ["gpt-5.6-sol"]));
+      openTurnMock.mockResolvedValue(fakeTurn({
+        home,
+        model: "gpt-5.6-sol",
+        bills: [{ model: "gpt-5.6-sol", provider: "openai-codex" }],
+      }));
+
+      const done = await doneEvent(await POST(post({ message: "which model are you" })));
+
+      expect(done).toMatchObject({ model: "gpt-5.6-sol", provider: "openai-codex" });
+      expect(persistedAssistant()).toMatchObject({ provider: "openai-codex" });
+    });
+
+    it("answers for the model the COMPLETION frame named, not the one the session settled on", async () => {
+      // The frame changed the model, so the transport records that model with no
+      // provider — the settled provider belongs to the settled model. The
+      // billing record is keyed on the frame's model, so it speaks for the pair
+      // that actually ran rather than reinstating the session's.
+      openTurnMock.mockResolvedValue(fakeTurn({
+        home,
+        model: "deepseek-v4-flash",
+        finalModel: "gpt-5.6-sol",
+        bills: [{ model: "gpt-5.6-sol", provider: "openai-codex" }],
+      }));
+
+      const done = await doneEvent(await POST(post({ message: "which model are you" })));
+
+      expect(done).toMatchObject({ model: "gpt-5.6-sol", provider: "openai-codex" });
+    });
+
+    it("says nothing when the harness recorded the ambiguous word `custom`", async () => {
+      // `custom` is the dashboard's KIND for a user-defined provider AND a real
+      // CLI slug for a generic OpenAI-compatible endpoint. Nothing here can tell
+      // them apart, so it is never asserted — the same refusal the transport's
+      // `servedProviderSlug` makes about the same word.
+      openTurnMock.mockResolvedValue(fakeTurn({
+        home,
+        model: "gpt-5.6-sol",
+        bills: [{ model: "gpt-5.6-sol", provider: "custom" }],
+      }));
+
+      const done = await doneEvent(await POST(post({ message: "which model are you" })));
+
+      expect(done).toMatchObject({ model: "gpt-5.6-sol" });
+      expect(done).not.toHaveProperty("provider");
+    });
+
+    it("says nothing for a recorded id that could not be a provider id", async () => {
+      // It is about to be persisted and rendered, so it is charset-checked like
+      // any other provider id even though it came from the box's own store.
+      openTurnMock.mockResolvedValue(fakeTurn({
+        home,
+        model: "gpt-5.6-sol",
+        bills: [{ model: "gpt-5.6-sol", provider: "--provider=evil" }],
+      }));
+
+      const done = await doneEvent(await POST(post({ message: "which model are you" })));
+
+      expect(done).toMatchObject({ model: "gpt-5.6-sol" });
+      expect(done).not.toHaveProperty("provider");
+    });
+
+    it("leaves a request that DID name a provider alone, so the transport's refusal still stands", async () => {
+      // The transport declines to confirm a provider the turn did not establish
+      // — a canonical request against a session reporting the KIND `custom`. That
+      // silence is deliberate and the billing record must not talk over it: this
+      // fix answers only where nobody asked for a provider at all.
+      modelOptionsMock.mockReturnValue(catalogue("anthropic", ["claude-fable-5"]));
+      openTurnMock.mockResolvedValue(fakeTurn({
+        home,
+        model: "claude-fable-5",
+        bills: [{ model: "claude-fable-5", provider: "openai-codex" }],
+      }));
+
+      const done = await doneEvent(
+        await POST(post({ message: "hi", provider: "anthropic", model: "claude-fable-5" })),
+      );
+
+      expect(done).toMatchObject({ model: "claude-fable-5" });
+      expect(done).not.toHaveProperty("provider");
+    });
+  },
+);
