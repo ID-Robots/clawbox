@@ -36,12 +36,12 @@ let agentDir: string;
 let homeAuthPath: string;
 let codexHomeAuthPath: string;
 
-function seedProfile(access: string, refresh: string = "refresh-secret") {
+function seedProfile(access: string, refresh: string = "refresh-secret", profileKey = "codex:default") {
   writeFileSync(
     path.join(agentDir, "auth-profiles.json"),
     JSON.stringify({
       profiles: {
-        "codex:default": { access, refresh, id: "id-token" },
+        [profileKey]: { access, refresh, id: "id-token" },
       },
     }),
   );
@@ -144,6 +144,18 @@ describe("codex-auth-mirror.js", () => {
     expect(parsed.tokens.access_token).toBe(accessToken("acct-42"));
     expect(parsed.tokens.account_id).toBe("acct-42");
     expect(parsed.tokens.id_token).toBe("id-token");
+  });
+
+  it("reads the profile OpenClaw 2 files the sign-in under (openai:chatgpt)", () => {
+    // src/lib/chatgpt-subscription.ts: the sign-in is an openai-provider OAuth
+    // profile now; a mirror that only knew the two older keys would leave
+    // every freshly signed-in box with no credential in ~/.codex/auth.json.
+    seedProfile(accessToken("acct-v2"), "refresh-secret", "openai:chatgpt");
+    run();
+
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
+    expect(parsed.tokens.access_token).toBe(accessToken("acct-v2"));
+    expect(parsed.tokens.account_id).toBe("acct-v2");
   });
 
   it("refreshes a stale credential when core has rotated the access token", () => {

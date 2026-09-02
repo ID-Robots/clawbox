@@ -96,8 +96,11 @@ function accountIdFromAccessToken(accessToken) {
 
 function credentialFromProfiles(agentDir) {
   const profiles = readProfiles(agentDir);
+  // `openai:chatgpt` is where ClawBox files the sign-in on OpenClaw 2 (an
+  // openai-provider OAuth profile — src/lib/chatgpt-subscription.ts); the two
+  // older keys are what boxes signed in before the core upgrade still hold.
   const profile =
-    profiles && (profiles["codex:default"] || profiles["openai-codex:default"]);
+    profiles && (profiles["openai:chatgpt"] || profiles["codex:default"] || profiles["openai-codex:default"]);
   if (!profile || !profile.access) return null;
   return {
     accessToken: profile.access,

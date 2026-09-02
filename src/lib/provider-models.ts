@@ -78,10 +78,12 @@ export const OPENAI_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "Fast, cheap." },
 ] as const;
 
-// ChatGPT-subscription (Codex) models — provider id `codex` in OpenClaw
-// 2026.6.x (renamed from `openai-codex` in <=2026.5.x). Available when
-// the user authenticates via ChatGPT OAuth instead of pasting an API
-// key. NO -pro variants — those are API-key only (they 400 with "model
+// ChatGPT-subscription (Codex) models. `codex` is the UI id for the
+// subscription; the models themselves are written as `openai/<id>` — OpenClaw
+// 2 retired the `codex` provider id (`openai-codex` before 2026.6), see
+// src/lib/chatgpt-subscription.ts. Available when the user authenticates via
+// ChatGPT OAuth instead of pasting an API key. NO -pro variants — those are
+// API-key only (they 400 with "model
 // not supported when using Codex with a ChatGPT account" on the OAuth
 // path). Per developers.openai.com/codex/models the supported set via
 // ChatGPT-account auth is gpt-5.6-{sol,terra,luna}, gpt-5.5, gpt-5.4,

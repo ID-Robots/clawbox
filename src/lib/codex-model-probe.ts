@@ -1,4 +1,6 @@
-// Which Codex model should a freshly-signed-in ChatGPT account default to?
+// Which ChatGPT-subscription model should a fresh sign-in default to? (The
+// answer is a bare id; the caller writes it as `openai/<id>` — see
+// src/lib/chatgpt-subscription.ts.)
 //
 // We can't answer that from a catalog. `openclaw models list --provider codex
 // --all --json` returns the plugin's STATIC list — the same five ids for every

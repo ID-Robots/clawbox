@@ -64,6 +64,13 @@ import {
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
+import {
+  CHATGPT_DEFAULT_MODEL_ID,
+  CHATGPT_PROFILE_KEY,
+  CHATGPT_PROVIDER,
+  chatgptModelRef,
+  chatgptRuntimeConfigPath,
+} from "@/lib/chatgpt-subscription";
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import {
   isValidModelId,
@@ -140,10 +147,15 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     defaultModel: "openai/gpt-5",
     profileKey: "openai:default",
     subscriptionOverride: {
-      // Newest model every ChatGPT tier can run, Free included. Entitled
-      // accounts are moved up to gpt-5.6 by the sign-in probe below.
-      defaultModel: "codex/gpt-5.5",
-      profileKey: "codex:default",
+      // The ChatGPT sign-in is an OAuth profile of the SAME provider, under a
+      // key of its own so it coexists with the API-key one, and the model is
+      // `openai/<id>` — OpenClaw 2 has no `codex/` namespace and never
+      // consults a `codex:*` profile for an openai route. Evidence in
+      // src/lib/chatgpt-subscription.ts. Newest model every ChatGPT tier can
+      // run, Free included; entitled accounts are moved up to gpt-5.6 by the
+      // sign-in probe below.
+      defaultModel: chatgptModelRef(CHATGPT_DEFAULT_MODEL_ID),
+      profileKey: CHATGPT_PROFILE_KEY,
     },
   },
   google: {
@@ -1508,6 +1520,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const llamaCppContextWindow = getLlamaCppContextWindow();
     const llamaCppMaxTokens = getLlamaCppMaxTokens();
     const ocProvider = config.profileKey.split(":")[0];
+    // The ChatGPT subscription shares `ocProvider === "openai"` with the API
+    // key; the auth mode is what tells the two apart from here on.
+    const isChatgptSubscription = authMode === "subscription" && ocProvider === CHATGPT_PROVIDER;
 
     // Codex (OpenAI subscription) authenticates with a JWT id_token, and the
     // gateway synthesizes ~/.codex/auth.json from `id` (falling back to
@@ -1516,11 +1531,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // the save here so the failure surfaces at config time, not in the chat.
     const normalizedIdToken = typeof idToken === "string" ? idToken.trim() : "";
     const isJwtLike = (value: string) => value.split(".").length === 3;
-    if (
-      authMode === "subscription" &&
-      ocProvider === "codex" &&
-      !isJwtLike(normalizedIdToken || normalizedApiKey)
-    ) {
+    if (isChatgptSubscription && !isJwtLike(normalizedIdToken || normalizedApiKey)) {
       return NextResponse.json(
         {
           error:
@@ -1685,11 +1696,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       config.defaultModel = `llamacpp/${modelName}`;
     } else if (isClawAI && resolvedClawboxTier) {
       config.defaultModel = CLAWBOX_AI_MODEL_BY_TIER[resolvedClawboxTier];
-    } else if (
-      authMode === "subscription"
-      && ocProvider === "codex"
-      && !normalizedModel
-    ) {
+    } else if (isChatgptSubscription && !normalizedModel) {
       // ChatGPT sign-in with no explicit pick. The hardcoded default is
       // gpt-5.5, so a Pro account used to land a generation behind and had
       // to know to change it. We can't read entitlement from a catalog — the
@@ -1707,7 +1714,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           onDiagnostic: (message) => console.log(`[configure] ${message}`),
         });
         if (entitled) {
-          config.defaultModel = `codex/${entitled}`;
+          config.defaultModel = chatgptModelRef(entitled);
         }
       } catch (err) {
         // Never let model selection break sign-in.
@@ -1720,21 +1727,16 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // the curated list — users can type newer model IDs we haven't
       // added yet.
       //
-      // Provider namespace differs between auth modes:
-      //   openai + token        → openai/<id>       (api.openai.com)
-      //   openai + subscription → codex/<id>        (chatgpt.com backend)
-      // The two catalogs are NOT the same — `gpt-5.4` only exists on
-      // codex; `gpt-5` only exists on openai direct. The
-      // `config.defaultModel` was already set to the correct namespace
-      // above by applying subscriptionOverride, so we derive the
-      // target provider from the existing default instead of `provider`.
+      // Both OpenAI auth modes write `openai/<id>`; which catalogue applies
+      // is the subscription surface's business (offSurfaceCodexModelMessage
+      // below), not the namespace's. `config.defaultModel` already carries
+      // the provider the override chose, so derive the target from it.
       const requestedModel = normalizedModel;
       const targetProvider = config.defaultModel.split("/", 1)[0];
       const supportedProviders = new Set([
         "openrouter",
         "anthropic",
         "openai",
-        "codex",
         "google",
       ]);
       if (supportedProviders.has(targetProvider)) {
@@ -1861,20 +1863,20 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const settledModelId = config.defaultModel.slice(settledSlash + 1);
 
     // ChatGPT: the same gap as the Claude one below, on the other
-    // subscription — and the one that ARMS it, because an off-surface
-    // `codex/*` id has to reach `agents.defaults.model.primary` before the
-    // chat header can restore it, and this save is the only way in.
-    // `isValidModelId` above checks SHAPE only and `resolveEntitledCodexModel`
-    // runs solely in the nothing-was-typed branch, so `gpt-5.4-pro` typed into
-    // the custom-model field was written as `codex/gpt-5.4-pro` — precisely
-    // the id /setup-api/chat/model has refused since it was written. Every
-    // turn afterwards fails upstream.
+    // subscription — and the one that ARMS it, because an off-surface id has
+    // to reach `agents.defaults.model.primary` before the chat header can
+    // restore it, and this save is the only way in. `isValidModelId` above
+    // checks SHAPE only and `resolveEntitledCodexModel` runs solely in the
+    // nothing-was-typed branch, so `gpt-5.4-pro` typed into the custom-model
+    // field was written as the subscription's primary — precisely the id
+    // /setup-api/chat/model has refused since it was written. Every turn
+    // afterwards fails upstream.
     //
-    // Not gated on `authMode`, because the NAMESPACE is the gate: ClawBox
-    // writes `codex/` only for an OpenAI save in subscription mode, and an
-    // API-key save writes `openai/`, where the -pro tiers route fine — which
-    // is exactly the switch the refusal recommends.
-    const offSurfaceCodex = offSurfaceCodexModelMessage(settledProvider, settledModelId);
+    // Gated on the auth MODE: both OpenAI modes write `openai/<id>`, and only
+    // the subscription is confined to the ChatGPT surface — an API-key save
+    // routes the -pro tiers fine, which is exactly the switch the refusal
+    // recommends.
+    const offSurfaceCodex = offSurfaceCodexModelMessage(settledProvider, settledModelId, isChatgptSubscription);
     if (offSurfaceCodex) {
       return NextResponse.json({ error: offSurfaceCodex }, { status: 400 });
     }
@@ -1934,7 +1936,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //
     //   * anthropic     → --auth-choice apiKey --anthropic-api-key
     //   * openai (api)  → --auth-choice openai-api-key --openai-api-key
-    //   * codex         → ChatGPT app-server auth (~/.codex/auth.json, written by gateway-pre-start.sh)
+    //   * openai (ChatGPT) → `models auth login --provider openai` (the OAuth bundle below is its output)
     //   * google        → --auth-choice gemini-api-key --gemini-api-key
     //   * openrouter    → --auth-choice openrouter-api-key --openrouter-api-key
     //   * deepseek      → no canonical onboard equivalent today; we use
@@ -2042,6 +2044,33 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       }
     }
 
+    // 1b. The ChatGPT profile now sits beside `openai:default`, the API-key
+    //     profile the same provider carries for the ClawBox AI image token
+    //     (`models.providers.openai.apiKey`). Chat has to prefer the sign-in:
+    //     `openclaw models auth order set` is the core's own per-provider
+    //     preference (docs/cli/models.md), stored in the agent's auth store
+    //     with precedence over config — so it is asked, not re-implemented.
+    //     Best effort: the profile is stored either way, and the chat route
+    //     arms the Codex runtime on the model, which only an OAuth profile
+    //     satisfies; a failed order is still named in the answer.
+    let chatgptOrderWarning: string | undefined;
+    if (isChatgptSubscription) {
+      try {
+        await spawnOpenclawCli(
+          ["models", "auth", "order", "set", "--provider", CHATGPT_PROVIDER, config.profileKey],
+          { timeoutMs: 60_000 },
+        );
+      } catch (orderErr) {
+        chatgptOrderWarning = "Signed in, but OpenClaw did not record the ChatGPT profile as preferred; "
+          + "if chat answers with an authentication error, run 'openclaw models auth order set --provider openai "
+          + `${config.profileKey}' from the Terminal.`;
+        console.warn(
+          "[configure] models auth order set failed for the ChatGPT profile:",
+          orderErr instanceof Error ? JSON.stringify(logSafe(orderErr.message)) : orderErr,
+        );
+      }
+    }
+
     // 2. Validate profileKey before interpolating into config path
     if (!PROFILE_KEY_RE.test(config.profileKey)) {
       return NextResponse.json(
@@ -2079,6 +2108,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // (src/lib/provider-plugin-ops.ts).
       baseOps.unshift(...enableProviderPluginOps([config.defaultModel]));
       baseOps.push(["agents.defaults.model.primary", config.defaultModel]);
+      // The reference is `openai/<id>` for both OpenAI auth modes; this entry
+      // is what says the turn belongs to the ChatGPT account and runs on the
+      // Codex app-server — the key the core itself keeps when it migrates a
+      // `codex/*` reference (src/lib/chatgpt-subscription.ts).
+      if (isChatgptSubscription) {
+        baseOps.push([chatgptRuntimeConfigPath(config.defaultModel), "codex"]);
+      }
       if (shouldPromoteLocalToPrimary) {
         console.log(`[AI Config] Promoted local model to active primary: ${logSafe(config.defaultModel)}`);
       }
@@ -2499,7 +2535,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // stale file so the restart below regenerates it with the fresh token —
     // afterward the Codex app-server owns its own refresh, so we don't touch
     // it again.
-    if (ocProvider === "codex") {
+    if (isChatgptSubscription) {
       await fs
         .rm(path.join(CLAWBOX_HOME_DIR, ".codex", "auth.json"), { force: true })
         .catch(() => {});
@@ -2528,7 +2564,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       await fs.unlink(pendingHandoffTokensPath).catch(() => {});
     }
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, ...(chatgptOrderWarning ? { warning: chatgptOrderWarning } : {}) });
   } catch (err) {
     // Never surface the raw error: it can carry CLI internals and filesystem
     // paths. Log it server-side for diagnosis and return a generic, actionable

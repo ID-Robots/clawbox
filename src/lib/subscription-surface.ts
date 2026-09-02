@@ -141,8 +141,12 @@ export const CODEX_SUPPORTED_MODEL_RE = /^(?:gpt-5\.6-(?:sol|terra|luna)|gpt-5\.
 export function offSurfaceCodexModelMessage(
   provider: string | null | undefined,
   modelId: string,
+  // OpenClaw 2 writes the subscription under `openai/`, where the namespace
+  // no longer says anything: the caller that knows the box reaches OpenAI
+  // through a ChatGPT account passes that in (src/lib/chatgpt-subscription.ts).
+  chatgptSubscription: boolean = provider === "codex",
 ): string | null {
-  if (provider !== "codex") return null;
+  if (!chatgptSubscription) return null;
   if (CODEX_SUPPORTED_MODEL_RE.test(modelId)) return null;
   return `${modelId} is not supported with ChatGPT subscription auth. `
     + "Use GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, or GPT-5.4 Mini, "

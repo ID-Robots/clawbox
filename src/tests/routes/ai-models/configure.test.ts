@@ -665,7 +665,44 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.success).toBe(true);
 
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
-    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.5");
+    // OpenClaw 2: the subscription is an openai-provider OAuth profile under
+    // its own key, the model is `openai/<id>` with the Codex runtime armed on
+    // it, and the core is asked to prefer the sign-in over the API-key
+    // profile the same provider carries for the ClawBox AI image token.
+    expect(commands).toContain("config set agents.defaults.model.primary openai/gpt-5.5");
+    expect(commands).toContain("config set agents.defaults.models.openai/gpt-5.5.agentRuntime.id codex");
+    expect(commands).toContain('config set auth.profiles.openai:chatgpt {"provider":"openai","mode":"oauth"} --json');
+    expect(commands.some((c) => c.includes("codex/"))).toBe(false);
+    const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(written.profiles["openai:chatgpt"]).toEqual(expect.objectContaining({ type: "oauth", provider: "openai" }));
+    expect(written.profiles["codex:default"]).toBeUndefined();
+    expect(vi.mocked(spawnOpenclawCli)).toHaveBeenCalledWith(
+      ["models", "auth", "order", "set", "--provider", "openai", "openai:chatgpt"],
+      expect.anything(),
+    );
+  });
+
+  it("names a failed auth-order preference in the answer instead of hiding it", async () => {
+    // The sign-in is stored either way; what the owner must not get is a
+    // silent success whose chat then answers with an authentication error
+    // because the image-token API-key profile won the route.
+    vi.mocked(spawnOpenclawCli).mockImplementation(async (args) => {
+      if (Array.isArray(args) && args[2] === "order") throw new Error("auth order failed");
+      return "";
+    });
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.warning).toMatch(/models auth order set --provider openai openai:chatgpt/);
   });
 
   // A Pro account used to land on gpt-5.5 after sign-in and had to know to
@@ -685,7 +722,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
-    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.6-sol");
+    expect(commands).toContain("config set agents.defaults.model.primary openai/gpt-5.6-sol");
   });
 
   it("leaves a non-entitled account on gpt-5.5 rather than a model that 400s", async () => {
@@ -704,7 +741,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
-    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.5");
+    expect(commands).toContain("config set agents.defaults.model.primary openai/gpt-5.5");
   });
 
   it("does not probe when the user picked a model explicitly", async () => {
@@ -725,7 +762,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
-    expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.4-mini");
+    expect(commands).toContain("config set agents.defaults.model.primary openai/gpt-5.4-mini");
     const probedCodex = fetchMock.mock.calls.some(([url]) => String(url).includes("backend-api/codex/responses"));
     expect(probedCodex).toBe(false);
   });
@@ -1343,12 +1380,12 @@ describe("POST /setup-api/ai-models/configure", () => {
     );
     // The access token from the file lands in the oauth auth profile.
     const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
-    expect(written.profiles["codex:default"].access).toBe("access.token.jwt");
-    expect(written.profiles["codex:default"].id).toBe("id.token.jwt");
+    expect(written.profiles["openai:chatgpt"].access).toBe("access.token.jwt");
+    expect(written.profiles["openai:chatgpt"].id).toBe("id.token.jwt");
   });
 
   it("binds the handoff tokens to the provider recorded in the file, not the body", async () => {
-    // The file says openai (→ codex profile); the body claims google. The
+    // The file says openai (→ the ChatGPT profile); the body claims google. The
     // tokens were minted for openai, so the file's provider must win — binding
     // them under google:default would be wrong.
     mockFs.readFile.mockImplementation(async (file) =>
@@ -1371,13 +1408,13 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
 
     expect(res.status).toBe(200);
-    // Profile is codex:default (openai subscription), NOT google:default.
+    // Profile is openai:chatgpt (openai subscription), NOT google:default.
     const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
-    expect(written.profiles["codex:default"]).toBeDefined();
+    expect(written.profiles["openai:chatgpt"]).toBeDefined();
     expect(written.profiles["google:default"]).toBeUndefined();
 
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
-    expect(commands.some((c) => c.startsWith("config set agents.defaults.model.primary codex/"))).toBe(true);
+    expect(commands.some((c) => c.startsWith("config set agents.defaults.model.primary openai/"))).toBe(true);
   });
 
   it("keeps the handoff file for a retry when the gateway restart fails", async () => {

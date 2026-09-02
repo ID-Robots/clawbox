@@ -60,15 +60,17 @@ const ON_SURFACE = "gpt-5.5";
  * active model is the LOCAL one — so the codex row in `state.options` takes
  * its model from the provider definition rather than from the active primary.
  */
-function codexSubscriptionBox(modelIds: string[]) {
+/**
+ * A box signed in with ChatGPT the way OpenClaw 2 files it: an OAuth profile
+ * of the openai provider (src/lib/chatgpt-subscription.ts). The ids reach
+ * this route as `codex/<id>` from a stale tab or `openai/<id>` from a fresh
+ * one, and both are judged on the ChatGPT surface; the box has no provider
+ * override for it, exactly as a real one has not.
+ */
+function codexSubscriptionBox(_modelIds: string[]) {
   return {
-    auth: { profiles: { "codex:default": { provider: "codex", mode: "oauth" } } },
-    models: {
-      mode: "merge",
-      providers: {
-        codex: { models: modelIds.map((id) => ({ id, name: id })) },
-      },
-    },
+    auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
+    models: { mode: "merge", providers: {} },
     agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
   };
 }
@@ -181,7 +183,7 @@ describe("/setup-api/chat/model and the ChatGPT subscription surface", () => {
     await postModel(POST, `codex/${OFF_SURFACE}`);
 
     expect(runOpenclawConfigSet).not.toHaveBeenCalledWith(
-      expect.arrayContaining([`agents.defaults.models.codex/${OFF_SURFACE}.agentRuntime.id`]),
+      expect.arrayContaining([`agents.defaults.models.openai/${OFF_SURFACE}.agentRuntime.id`]),
     );
   });
 
@@ -191,9 +193,15 @@ describe("/setup-api/chat/model and the ChatGPT subscription surface", () => {
     const response = await postModel(POST, `codex/${ON_SURFACE}`);
 
     expect(response.status).toBe(200);
+    // Written where OpenClaw 2 resolves it, with the ChatGPT account's runtime
+    // armed on it — the retired namespace is only ever what arrived.
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
       "agents.defaults.model.primary",
-      `codex/${ON_SURFACE}`,
+      `openai/${ON_SURFACE}`,
+    ]);
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      `agents.defaults.models.openai/${ON_SURFACE}.agentRuntime.id`,
+      "codex",
     ]);
   });
 
@@ -206,7 +214,7 @@ describe("/setup-api/chat/model and the ChatGPT subscription surface", () => {
     expect(response.status).toBe(200);
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
       "agents.defaults.model.primary",
-      `codex/${ON_SURFACE}`,
+      `openai/${ON_SURFACE}`,
     ]);
   });
 

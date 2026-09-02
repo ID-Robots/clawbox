@@ -442,6 +442,10 @@ describe("/setup-api/chat/model", () => {
   });
 
   it("rejects ChatGPT subscription Pro/API-only Codex models before gateway restart", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
+      agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
+    } as never);
     const response = await POST(new Request("http://localhost/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -459,7 +463,7 @@ describe("/setup-api/chat/model", () => {
     vi.mocked(readConfig).mockResolvedValue({
       auth: {
         profiles: {
-          "codex:default": { provider: "codex", mode: "oauth" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
         },
       },
       agents: {
@@ -488,13 +492,13 @@ describe("/setup-api/chat/model", () => {
     vi.mocked(readConfig).mockResolvedValue({
       auth: {
         profiles: {
-          "codex:default": { provider: "codex", mode: "oauth" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
         },
       },
       agents: {
         defaults: {
           model: {
-            primary: "codex/gpt-5.4",
+            primary: "openai/gpt-5.4",
           },
         },
       },
@@ -509,11 +513,17 @@ describe("/setup-api/chat/model", () => {
     expect(response.status).toBe(200);
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
       "agents.defaults.model.primary",
-      "codex/gpt-5.5",
+      "openai/gpt-5.5",
+    ]);
+    // ...and it is the ChatGPT account, not an API key, that runs it: the
+    // Codex runtime is armed on the canonical reference.
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      "agents.defaults.models.openai/gpt-5.5.agentRuntime.id",
+      "codex",
     ]);
     expect(applyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
       {
-        provider: "codex",
+        provider: "openai",
         modelId: "gpt-5.5",
         source: "user",
       },
@@ -528,13 +538,13 @@ describe("/setup-api/chat/model", () => {
       vi.mocked(readConfig).mockResolvedValue({
         auth: {
           profiles: {
-            "codex:default": { provider: "codex", mode: "oauth" },
+            "openai:chatgpt": { provider: "openai", mode: "oauth" },
           },
         },
         agents: {
           defaults: {
             model: {
-              primary: "codex/gpt-5.4",
+              primary: "openai/gpt-5.4",
             },
           },
         },
@@ -547,9 +557,11 @@ describe("/setup-api/chat/model", () => {
       }));
 
       expect(response.status).toBe(200);
+      // Posted under the retired `codex/` namespace (a stale tab); written
+      // where OpenClaw 2 resolves it.
       expect(runOpenclawConfigSet).toHaveBeenCalledWith([
         "agents.defaults.model.primary",
-        `codex/${modelId}`,
+        `openai/${modelId}`,
       ]);
       expect(restartGateway).toHaveBeenCalled();
     },
@@ -559,13 +571,13 @@ describe("/setup-api/chat/model", () => {
     vi.mocked(readConfig).mockResolvedValue({
       auth: {
         profiles: {
-          "codex:default": { provider: "codex", mode: "oauth" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
         },
       },
       agents: {
         defaults: {
           model: {
-            primary: "codex/gpt-5.4",
+            primary: "openai/gpt-5.4",
           },
         },
       },
@@ -580,7 +592,11 @@ describe("/setup-api/chat/model", () => {
     expect(response.status).toBe(200);
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
       "agents.defaults.model.primary",
-      "codex/gpt-5.6-sol",
+      "openai/gpt-5.6-sol",
+    ]);
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      "agents.defaults.models.openai/gpt-5.6-sol.agentRuntime.id",
+      "codex",
     ]);
     expect(restartGateway).toHaveBeenCalled();
   });
@@ -746,6 +762,108 @@ describe("/setup-api/chat/model", () => {
       const gatedAt = orderOf(vi.mocked(setProviderPlugins), (args) => args[0] === "llamacpp");
       expect(writtenAt).toBeLessThan(gatedAt);
       expect(gatedAt).toBeLessThan(orderOf(vi.mocked(restartGateway)));
+    });
+  });
+
+  // OpenClaw 2 has no `codex/` model namespace: the ChatGPT subscription is an
+  // OAuth profile of the openai provider and the model is `openai/<id>` with
+  // the Codex runtime armed on it (src/lib/chatgpt-subscription.ts). The
+  // picker used to offer `codex/gpt-5.5` and the write was refused with the
+  // CLI's own sentence; a box signed in before the upgrade holds a
+  // `codex:default` the core never consults.
+  describe("the ChatGPT subscription on OpenClaw 2", () => {
+    const CHATGPT_BOX = {
+      auth: {
+        profiles: {
+          "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
+        },
+      },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+    };
+    const LEGACY_BOX = {
+      auth: {
+        profiles: {
+          "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          "codex:default": { provider: "codex", mode: "oauth" },
+        },
+      },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+    };
+    const post = (body: unknown) => POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }));
+
+    it("offers the ChatGPT row as openai/<id>, never in the retired namespace", async () => {
+      vi.mocked(readConfig).mockResolvedValue(CHATGPT_BOX as never);
+
+      const body = await (await GET()).json();
+
+      const row = body.options.find((option: { provider: string }) => option.provider === "codex");
+      expect(row).toMatchObject({ label: "OpenAI Codex", model: "openai/gpt-5.5", available: true });
+      expect(body.options.some((option: { model: string | null }) => option.model?.startsWith("codex/"))).toBe(false);
+      // No API key on this box, so `openai/*` IS the subscription: no second
+      // "OpenAI GPT" row, and the header pill knows it is on a subscription.
+      expect(body.options.some((option: { provider: string }) => option.provider === "openai")).toBe(false);
+      expect(body.subscriptionProviders).toContain("codex");
+    });
+
+    it("keeps the API-key row separate when the box holds both", async () => {
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: {
+          profiles: {
+            "openai:default": { provider: "openai", mode: "api_key" },
+            "openai:chatgpt": { provider: "openai", mode: "oauth" },
+          },
+        },
+        agents: { defaults: { model: { primary: "openai/gpt-5.4" } } },
+      } as never);
+
+      const body = await (await GET()).json();
+
+      const providers = body.options.map((option: { provider: string }) => option.provider);
+      expect(providers).toContain("openai");
+      expect(providers).toContain("codex");
+      expect(body.subscriptionProviders).not.toContain("codex");
+    });
+
+    it("offers a sign-in the core cannot use greyed, with the reason, instead of a pick that fails", async () => {
+      vi.mocked(readConfig).mockResolvedValue(LEGACY_BOX as never);
+
+      const body = await (await GET()).json();
+
+      const row = body.options.find((option: { provider: string }) => option.provider === "codex");
+      expect(row).toMatchObject({ available: false, reauthRequired: true, model: "openai/gpt-5.5" });
+    });
+
+    it("refuses a pick on a sign-in the core cannot use with the next step, before any write", async () => {
+      vi.mocked(readConfig).mockResolvedValue(LEGACY_BOX as never);
+
+      const response = await post({ model: "codex/gpt-5.5" });
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ kind: "chatgpt_reauth_required", provider: "codex" });
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("answers a reference the core refuses with the provider and a next step, not the CLI's sentence", async () => {
+      vi.mocked(readConfig).mockResolvedValue(CHATGPT_BOX as never);
+      vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error(
+        'Cannot set model reference "openai/gpt-5.5" at agents.defaults.model.primary: '
+        + "Unknown model: openai/gpt-5.5. Run openclaw models list to list available models.",
+      ));
+
+      const response = await post({ model: "openai/gpt-5.5" });
+      const body = await response.json();
+
+      expect(response.status).toBe(409);
+      expect(body.kind).toBe("model_unresolvable");
+      expect(body.error).not.toMatch(/openclaw models list|Cannot set model reference/);
+      expect(body.error).toMatch(/OpenAI Codex does not list gpt-5.5/);
+      expect(restartGateway).not.toHaveBeenCalled();
     });
   });
 });
