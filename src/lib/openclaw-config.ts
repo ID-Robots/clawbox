@@ -11,6 +11,9 @@ import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 import { readEdition } from "@/lib/edition-source";
 import { getProviderReasoningConfig, isThinkingLevel } from "@/lib/chat-reasoning";
+import { get as getConfigStoreValue } from "@/lib/config-store";
+import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-status";
+import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
 import { isSafeDiscordToken } from "@/lib/discord-api";
 
 const exec = promisify(execFile);
@@ -2046,28 +2049,126 @@ export async function clearTelegramPairingState(account = "default"): Promise<vo
   await Promise.all(files.map((f) => fs.rm(f, { force: true }).catch(() => {})));
 }
 
-// Toggles `plugins.entries.anthropic.enabled` in lock-step with the active
-// provider. Every enabled plugin loads its tool schemas synchronously on
-// the gateway's main loop during agent prep (~5-8s for anthropic on Jetson),
-// so leaving it on while the user is not using Claude is pure waste. Other
-// plugins (openai) are shared across providers and stay enabled. Pass the
-// provider segment of `agents.defaults.model.primary`.
+// === The anthropic plugin, around the primary write =========================
+//
+// `plugins.entries.anthropic.enabled` is on whenever the box could use it: the
+// primary is anthropic, or an Anthropic credential exists that the owner has
+// not switched off. It used to follow the active provider alone — every
+// enabled plugin loads its tool schemas synchronously on the gateway's main
+// loop during agent prep (5-8 s for anthropic on a Jetson, an old measurement
+// TASK-654 re-takes on 2026.8.1), so the plugin was switched off whenever the
+// owner was not on Claude. On OpenClaw 2 that starves the catalog: measured on
+// a 2026.8.1 box, `openclaw models list --provider anthropic --all --json` with
+// the plugin disabled answers ONE row (the configured primary) against eleven
+// with it enabled, and that one row is the three-model picker owners saw. A
+// credentialed provider's plugin therefore stays on; the prep-latency saving
+// only applies where nothing could use the plugin anyway. Other plugins
+// (openai) are shared across providers and stay enabled.
+//
+// The toggle is two halves around the `agents.defaults.model.primary` write:
+//
+//   enableProviderPluginOps(refs)   IN the same batch as the write, before it
+//                                   (src/lib/provider-plugin-ops.ts)
+//   setProviderPlugins(provider)    AFTER it
+//
+// OpenClaw 2 validates a model reference on `config set` against the captured
+// catalogs of the ENABLED plugins only. With the plugin off, every
+// `anthropic/*` reference is refused: "Unknown model: anthropic/claude-sonnet-5.
+// Run openclaw models list to list available models." Both callers used to
+// write first and toggle after, and on a 2026.8.1 core the chat popup showed
+// the owner exactly that line on every switch back to Claude (2026.7.x
+// answered from the bundled catalog whatever the plugin state, which is why
+// the order never mattered before). The OFF half stays AFTER the write on
+// purpose: a plugin whose model is the CURRENT primary is never switched off
+// underneath it. It is idempotent and non-fatal, and a plugin enabled by the
+// batch loads on the next gateway start ("Restart the gateway to apply"), so
+// the caller's restart has to follow.
+
+/**
+ * Does this box hold an Anthropic credential the owner has not switched off —
+ * an auth profile or the inline override key, and `anthropic` not in the
+ * owner's disabled-providers set (the switch takes the provider out of every
+ * place the box picks a model, so a credential behind it is one nothing can
+ * route to).
+ *
+ * Read off openclaw.json's `auth.profiles` METADATA, not the agent's SQLite
+ * credential store the core resolves a usable profile from. Unverified on a
+ * box (no device in this run): whether `openclaw models auth logout` also
+ * drops the metadata entry. If it does not, a logged-out box keeps the plugin
+ * on until the owner switches the provider off — the cost is prep latency,
+ * never a broken box.
+ */
+function hasUsableAnthropicCredential(config: OpenClawConfig, disabledProviders: ReadonlySet<string>): boolean {
+  if (disabledProviders.has("anthropic")) return false;
+  const profiles = Object.entries(config.auth?.profiles ?? {});
+  if (profiles.some(([key, entry]) => {
+    const provider = typeof entry?.provider === "string" && entry.provider.trim()
+      ? entry.provider
+      : key.split(":")[0];
+    return provider.trim().toLowerCase() === "anthropic";
+  })) return true;
+  const override = config.models?.providers?.anthropic as { apiKey?: unknown } | undefined;
+  return typeof override?.apiKey === "string" && override.apiKey.trim().length > 0;
+}
+
+/**
+ * Does the config still POINT at an Anthropic model — the default primary or
+ * any of its fallbacks? A configured reference outranks every other signal,
+ * the owner's provider switch included: the gateway will try to route there,
+ * and the plugin is what resolves it. The core does not protect this by
+ * itself — a batch whose only operation is the plugin flag touches no model
+ * ref, so `collectTouchedTextModelRefs` validates nothing and the disable
+ * lands (read on 2026.8.1); the fallback then fails when it is next selected.
+ *
+ * Prefix match on the provider segment, the shape ClawBox writes everywhere.
+ * A model ALIAS that resolves to anthropic is not seen here — resolving one
+ * needs the core's own resolver, and nothing in ClawBox writes aliases.
+ */
+function configReferencesAnthropic(config: OpenClawConfig): boolean {
+  const modelDefaults = config.agents?.defaults?.model;
+  return [
+    modelDefaults?.primary,
+    ...(Array.isArray(modelDefaults?.fallbacks) ? modelDefaults.fallbacks : []),
+  ].some((ref) => typeof ref === "string" && ref.trim().toLowerCase().startsWith("anthropic/"));
+}
+
+/**
+ * AFTER the primary write: keep the anthropic plugin on while the config still
+ * names an Anthropic model (primary or fallback) or a usable Anthropic
+ * credential exists; off only when nothing on the box could use it. Pass the
+ * provider segment of `agents.defaults.model.primary`. Idempotent and
+ * non-fatal.
+ */
 export async function setProviderPlugins(activeProvider: string): Promise<void> {
-  const wantAnthropic = activeProvider === "anthropic";
+  // Strict, because the decision below is about ABSENCE: `readConfig` answers
+  // `{}` to an unreadable file, and that would read as "no Anthropic
+  // credential" and switch the plugin off on a box that has one — the very
+  // starvation this gate exists to avoid. An unreadable config leaves the
+  // plugin where it is; the next switch or save re-applies the gate.
+  let config: OpenClawConfig;
   try {
-    const config = await readConfig();
-    const current = (config.plugins as { entries?: Record<string, { enabled?: boolean }> } | undefined)
-      ?.entries?.anthropic?.enabled;
-    if (current === wantAnthropic) return;
-  } catch {
-    // Fall through and write — readConfig already swallows errors.
-  }
-  try {
-    await runOpenclawConfigSet(
-      ["plugins.entries.anthropic.enabled", wantAnthropic ? "true" : "false", "--json"],
-    );
+    config = await readConfigStrict();
   } catch (err) {
-    // Non-fatal: the gateway will still work, just with the heavier prep cost.
+    console.warn(
+      "[openclaw-config] Leaving the anthropic plugin as it is — could not read the config:",
+      err instanceof Error ? err.message : err,
+    );
+    return;
+  }
+  const disabled = parseDisabledProviders(await getConfigStoreValue(DISABLED_PROVIDERS_KEY).catch(() => undefined));
+  const wanted = activeProvider === "anthropic"
+    || configReferencesAnthropic(config)
+    || hasUsableAnthropicCredential(config, disabled);
+  // An absent flag IS enabled: the plugin declares `enabledByDefault: true`,
+  // so a fresh box needs no write to be on.
+  const current = (config.plugins as { entries?: Record<string, { enabled?: boolean }> } | undefined)
+    ?.entries?.anthropic?.enabled ?? true;
+  if (current === wanted) return;
+  try {
+    await runOpenclawConfigSet([ANTHROPIC_PLUGIN_ENABLED_KEY, wanted ? "true" : "false", "--json"]);
+  } catch (err) {
+    // Non-fatal: a gate left wrong costs prep seconds or one catalog refresh,
+    // never correctness, and the next switch or save re-applies it.
     console.warn(
       "[openclaw-config] Failed to toggle anthropic plugin:",
       err instanceof Error ? err.message : err,

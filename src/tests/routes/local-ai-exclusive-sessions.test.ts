@@ -26,6 +26,10 @@ vi.mock("@/lib/config-store", () => ({
   }),
 }));
 
+const { configSetMock } = vi.hoisted(() => ({
+  configSetMock: vi.fn<(op: string[]) => Promise<void>>(async () => {}),
+}));
+
 vi.mock("@/lib/openclaw-config", () => ({
   callGatewayRpc: vi.fn(),
   gatewayIsAbsent: () => false,
@@ -33,7 +37,14 @@ vi.mock("@/lib/openclaw-config", () => ({
     agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro", fallbacks: [] } } },
   })),
   restartGateway: vi.fn(async () => {}),
-  runOpenclawConfigSet: vi.fn(async () => {}),
+  runOpenclawConfigSet: configSetMock,
+  // The primary and the fallbacks travel in one `config set --batch-json` now
+  // (atomic, and it carries the plugin enable an Anthropic reference needs).
+  // Record each operation on `runOpenclawConfigSet` too, so `configWrites`
+  // stays a list of the assignments made, not of the processes that made them.
+  runOpenclawConfigSetBatch: vi.fn(async (ops: string[][]) => {
+    for (const op of ops) await configSetMock(op);
+  }),
 }));
 
 vi.mock("@/lib/openclaw-session-store", () => ({

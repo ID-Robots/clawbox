@@ -12,12 +12,21 @@ vi.mock("fs", () => ({
   promises: { readFile: vi.fn() },
 }));
 
+const { configSetMock } = vi.hoisted(() => ({ configSetMock: vi.fn() }));
+
 vi.mock("@/lib/openclaw-config", () => ({
   inferConfiguredLocalModel: vi.fn(),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
-  runOpenclawConfigSet: vi.fn(),
+  runOpenclawConfigSet: configSetMock,
+  // The route writes the primary in a batch now. Record every assignment of
+  // a batch on `runOpenclawConfigSet` too, the way config-set-calls flattens
+  // both forms for the configure suites: the assertions here are about which
+  // assignments were made, not about how many processes carried them.
+  runOpenclawConfigSetBatch: vi.fn(async (ops: string[][]) => {
+    for (const op of ops) await configSetMock(op);
+  }),
   applyModelOverrideToAllAgentSessions: vi.fn(),
   parseFullyQualifiedModel: vi.fn(),
   setProviderPlugins: vi.fn().mockResolvedValue(undefined),
