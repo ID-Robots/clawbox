@@ -4,7 +4,7 @@ import fs from "fs/promises";
 import path from "path";
 import { NextResponse } from "next/server";
 import { type HermesCliResult, runHermesCli } from "@/lib/hermes-cli";
-import { checkInstallIdentifier, cliInstallIdentifier, isValidMeta, cliFailureCode } from "@/lib/hermes-skills";
+import { checkInstallIdentifier, cliInstallIdentifier, isValidMeta, CLI_FAILURE_SENTENCES, cliFailureCode } from "@/lib/hermes-skills";
 import {
   type InstallOutcome,
   type InstallOutcomeKind,
@@ -192,12 +192,12 @@ export async function POST(request: Request) {
     cli = await runHermesCli(args, { timeoutMs: INSTALL_TIMEOUT_MS });
   } catch (err) {
     if (!(err instanceof Error && /timed out/i.test(err.message))) {
-      // Sanitised, but still the CLI's own sentence: the code is the part the
-      // store can say in the owner's language (HERMES-04).
-      return NextResponse.json(
-        { error: err instanceof Error ? err.message : "Hermes install failed", code: cliFailureCode(err) },
-        { status: 502 },
-      );
+      // The code is the part the store can say in the owner's language
+      // (HERMES-04); the sentence is fixed per code, and the exception's own
+      // message goes to the log only.
+      const code = cliFailureCode(err);
+      console.error("[hermes skills install] CLI failed", code, err instanceof Error ? err.message : err);
+      return NextResponse.json({ error: CLI_FAILURE_SENTENCES[code], code }, { status: 502 });
     }
     timedOut = true;
     // A neutral placeholder: from here the outcome is decided by the lock, not

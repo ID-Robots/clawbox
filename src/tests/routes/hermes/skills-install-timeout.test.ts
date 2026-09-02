@@ -37,6 +37,7 @@ vi.mock("@/lib/hermes-skill-index", () => ({ getCatalogRecord: vi.fn(async () =>
 
 import { runHermesCli } from "@/lib/hermes-cli";
 import { getCatalogRecord } from "@/lib/hermes-skill-index";
+import { CLI_FAILURE_SENTENCES } from "@/lib/hermes-skills";
 
 const mockCli = vi.mocked(runHermesCli);
 const mockRecord = vi.mocked(getCatalogRecord);
@@ -140,13 +141,15 @@ describe("POST /setup-api/hermes/skills/install — a timeout must not lie about
     await expect(readLock()).resolves.not.toHaveProperty(SLUG);
   });
 
-  it("still 502s on a non-timeout spawn failure (unchanged)", async () => {
+  it("still 502s on a non-timeout spawn failure, now by code", async () => {
     mockCli.mockRejectedValue(new Error("Hermes is not installed on this device"));
 
     const res = await install({ id: SLUG });
 
     expect(res.status).toBe(502);
-    expect(res.body).toMatchObject({ error: "Hermes is not installed on this device" });
+    // The sentence is this route's own (HERMES-04), not the exception's — the
+    // store reads the code and says it in the owner's language.
+    expect(res.body).toMatchObject({ error: CLI_FAILURE_SENTENCES.cli_missing, code: "cli_missing" });
   });
 });
 
@@ -161,6 +164,16 @@ describe("a CLI the install route could not run carries a code", () => {
 
     expect(res.status).toBe(502);
     expect(res.body).toMatchObject({ code: "cli_missing" });
+  });
+
+  it("answers a fixed sentence, never the exception's own message", async () => {
+    mockCli.mockRejectedValue(new Error("spawn /home/clawbox/.local/bin/hermes EACCES"));
+
+    const res = await install({ id: SLUG });
+
+    expect(res.status).toBe(502);
+    expect(res.body).toMatchObject({ code: "cli_failed" });
+    expect(String(res.body.error)).not.toMatch(/EACCES|\/home\/clawbox/);
   });
 
   it("names a non-zero exit install_failed, keeping the traceback for the log", async () => {

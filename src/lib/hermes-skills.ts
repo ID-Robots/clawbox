@@ -275,6 +275,20 @@ export function cliFailureCode(err: unknown): CliFailureCode {
   return 'cli_failed';
 }
 
+/**
+ * The fixed sentence a skills route answers for a CLI failure — the log's twin
+ * in the response, for a caller with no locale. Never the exception's own
+ * message: the routes' try blocks cover lock and filesystem work as well as
+ * the spawn, and an I/O error names absolute device paths.
+ */
+export const CLI_FAILURE_SENTENCES: Record<CliFailureCode, string> = {
+  cli_timeout: "The device's Hermes command took too long and was stopped.",
+  cli_missing: 'Hermes is not installed on this device.',
+  cli_failed: "The device's Hermes command failed.",
+  cancelled: 'The request was cancelled.',
+  too_large: "The device's answer was too large to use.",
+};
+
 /** How many values one facet group may carry, and how many may be selected. */
 export const MAX_FACET_VALUES = 24;
 export const MAX_FACET_SELECTION = 12;

@@ -225,6 +225,18 @@ describe("POST …/skills/uninstall — a real uninstall still works", () => {
     expect(res.body.code).toBe("cli_missing");
   });
 
+  it("never echoes an exception's own message — the try covers the lock and the filesystem too", async () => {
+    mockCli.mockRejectedValue(
+      new Error("ENOENT: no such file or directory, open '/home/clawbox/.hermes/skills/.hub/lock.json'"),
+    );
+
+    const res = await uninstall(INSTALLED);
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe("cli_failed");
+    expect(String(res.body.error)).not.toMatch(/ENOENT|\/home\/clawbox/);
+  });
+
   it("still answers 502 for a non-zero exit", async () => {
     mockCli.mockResolvedValue({ code: 1, stdout: "", stderr: "Traceback (most recent call last)" });
 
