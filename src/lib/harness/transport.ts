@@ -380,6 +380,35 @@ export interface HarnessAdapter {
   resetSession(): Promise<void>;
 
   /**
+   * A fresh session key beside `mainSessionKey`, for a second conversation
+   * with the same agent — the (+) in the chat header. Pure and free: nothing
+   * exists until the first turn (the gateway files a session on its first
+   * `chat.send`, the transcript store on its first append), and reading the
+   * history of a key never seen answers an empty page, so a new tab costs no
+   * round trip. The SHAPE is the transport's business, which is why this
+   * lives here and not in the component: the gateway needs `agent:<id>:…`,
+   * the transcript store needs a bare filename.
+   */
+  newSessionKey(mainSessionKey: string): string;
+
+  /**
+   * Whether `key` was minted by THIS transport. The tab list is persisted
+   * across reloads, and a dual box that switched harness restores the other
+   * one's keys — which would then be read against a store that has never
+   * heard of them. The bind step drops what this answers false to.
+   */
+  ownsSessionKey(key: string): boolean;
+
+  /**
+   * Forget a conversation this surface opened with `newSessionKey`: abort its
+   * run if `running`, then delete its transcript. Best effort and never
+   * rejects — a closed tab cannot be reopened, so nothing waits on the answer,
+   * and a session that refuses deletion mid-run simply stays until its
+   * transport's own cleanup. Never the main session.
+   */
+  deleteSession(key: string, opts: { running: boolean }): Promise<void>;
+
+  /**
    * Newest-last. Returns an empty page for a fresh chat rather than throwing
    * on "no history yet".
    * Precondition: `capabilities.canListHistory`.

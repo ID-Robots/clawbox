@@ -27,9 +27,10 @@ async function load() {
   return import("@/app/setup-api/chat/history/route");
 }
 
-const request = (limit?: string) => {
+const request = (limit?: string, sessionKey?: string) => {
   const url = new URL("http://localhost/setup-api/chat/history");
   if (limit !== undefined) url.searchParams.set("limit", limit);
+  if (sessionKey !== undefined) url.searchParams.set("sessionKey", sessionKey);
   return new NextRequest(url);
 };
 
@@ -45,11 +46,11 @@ describe("/setup-api/chat/history", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  function writeTranscript(lines: object[]) {
+  function writeTranscript(lines: object[], key = "desktop") {
     const dir = path.join(root, "data", "chat-transcripts");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
-      path.join(dir, "desktop.jsonl"),
+      path.join(dir, `${key}.jsonl`),
       `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`,
     );
   }
@@ -112,8 +113,32 @@ describe("/setup-api/chat/history", () => {
   it("clears the transcript on DELETE", async () => {
     writeTranscript([{ role: "user", text: "private", timestamp: 1 }]);
     const { DELETE, GET } = await load();
-    expect((await DELETE()).status).toBe(200);
+    expect((await DELETE(request())).status).toBe(200);
     expect((await (await GET(request())).json()).messages).toEqual([]);
+  });
+
+  it("keeps each conversation's transcript apart, by session key", async () => {
+    // A tab beside the desktop thread is its own file. Closing the tab deletes
+    // THAT file and leaves the desktop's alone — the (+) on the Hermes edition
+    // used to delete the one transcript there was.
+    const tab = "desktop-0123456789ab";
+    writeTranscript([{ role: "user", text: "main thread", timestamp: 1 }]);
+    writeTranscript([{ role: "user", text: "in the tab", timestamp: 2 }], tab);
+    const { GET, DELETE } = await load();
+    expect((await (await GET(request(undefined, tab))).json()).messages).toEqual([
+      { role: "user", text: "in the tab", timestamp: 2 },
+    ]);
+    expect((await DELETE(request(undefined, tab))).status).toBe(200);
+    expect((await (await GET(request(undefined, tab))).json()).messages).toEqual([]);
+    expect((await (await GET(request())).json()).messages).toEqual([
+      { role: "user", text: "main thread", timestamp: 1 },
+    ]);
+  });
+
+  it("refuses a key that is not a bare filename, before it can become one", async () => {
+    const { GET, DELETE } = await load();
+    expect((await GET(request(undefined, "../openclaw"))).status).toBe(400);
+    expect((await DELETE(request(undefined, "../openclaw"))).status).toBe(400);
   });
 
   it("tells an OpenClaw box it is asking the wrong store", async () => {
@@ -124,7 +149,7 @@ describe("/setup-api/chat/history", () => {
     const res = await GET(request());
     expect(res.status).toBe(409);
     expect((await res.json()).error).toMatch(/gateway/i);
-    expect((await DELETE()).status).toBe(409);
+    expect((await DELETE(request())).status).toBe(409);
   });
 
   it("does not delete an OpenClaw box's transcript through the wrong door", async () => {
@@ -134,7 +159,7 @@ describe("/setup-api/chat/history", () => {
     writeTranscript([{ role: "user", text: "still here", timestamp: 1 }]);
     harness = "openclaw";
     const { DELETE } = await load();
-    await DELETE();
+    await DELETE(request());
     harness = "hermes";
     const { GET } = await load();
     expect((await (await GET(request())).json()).messages).toHaveLength(1);
