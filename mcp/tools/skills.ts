@@ -164,6 +164,14 @@ const LOCAL_NEXT =
  */
 const uninstallRules = (name: string): ErrorRule[] => [
   {
+    // The route could not run the CLI at all (HERMES-04 names it by code).
+    status: 502,
+    match: /"code"\s*:\s*"cli_missing"/,
+    code: "NOT_SUPPORTED_HERE",
+    message: "Hermes is not installed on this device, so no skill can be removed.",
+    next: "Do not retry and do not check the network. Tell the user this device's Hermes install is missing.",
+  },
+  {
     status: 400,
     code: "BAD_ARGUMENT",
     message: "Uninstall takes the short skill name, not the full store id.",
@@ -213,6 +221,40 @@ const uninstallRules = (name: string): ErrorRule[] => [
 ];
 
 const CATALOG_RULES: ErrorRule[] = [
+  // The browse route names its CLI-fallback deadline by code (HERMES-04).
+  // Before it did, the status-only rule below sent the agent to wifi_status for
+  // a device that was merely slow — and matchRule() takes the first rule that
+  // fits, so this one has to stand ahead of it.
+  {
+    status: 502,
+    match: /"code"\s*:\s*"cli_timeout"/,
+    code: "TIMEOUT",
+    message: "Loading the skill catalogue took too long and was stopped.",
+    next: "Retry once. If it times out again, tell the user the device is busy right now and to try later.",
+  },
+  {
+    status: 502,
+    match: /"code"\s*:\s*"cli_missing"/,
+    code: "NOT_SUPPORTED_HERE",
+    message: "Hermes is not installed on this device, so the skill catalogue cannot be loaded.",
+    next: "Do not retry and do not check the network. Tell the user this device's Hermes install is missing.",
+  },
+  {
+    status: 502,
+    match: /"code"\s*:\s*"too_large"/,
+    code: "TOO_LARGE",
+    message: "The device's answer was too large to use.",
+    next: "Retry with a more specific search and a smaller limit.",
+  },
+  {
+    status: 502,
+    match: /"code"\s*:\s*"cli_failed"/,
+    code: "INTERNAL",
+    message: "The device could not load the skill catalogue.",
+    next: "Retry once. If it fails again, tell the user the device could not load its skill catalogue; the network is not the cause.",
+  },
+  // A 502 with no code, or one this build does not know: an older device
+  // build, where the network really is the first thing to rule out.
   {
     status: 502,
     code: "ENDPOINT_DOWN",
@@ -415,6 +457,24 @@ function refusalToToolError(err: unknown): ToolError | null {
       "CONFLICT",
       "The device's installer stopped without installing the skill, and did not say why in a way this tool can relay.",
       "Do not retry. Tell the user the install failed on the device and that Settings -> Skills has the details.",
+    );
+  }
+  if (payload.code === "install_timeout") {
+    // A 504, so the 409/502 catch-all below never saw it and the generic
+    // mapping called it "the ClawBox service did not complete this request" —
+    // with a clawbox_health check as the next step, for a skill whose source
+    // was merely slow. The route has already established that nothing landed.
+    return new ToolError(
+      "TIMEOUT",
+      "Installing the skill took too long and was stopped; nothing was installed.",
+      "Retry once. If it times out again, tell the user the skill's source is slow from this device right now and to try later.",
+    );
+  }
+  if (payload.code === "cli_missing") {
+    return new ToolError(
+      "NOT_SUPPORTED_HERE",
+      "Hermes is not installed on this device, so no skill can be installed.",
+      "Do not retry and do not check the network. Tell the user this device's Hermes install is missing.",
     );
   }
   if (payload.code === "bundled_conflict") {

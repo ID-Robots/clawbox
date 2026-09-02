@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
-import { isValidSkillName } from "@/lib/hermes-skills";
+import { isValidSkillName, cliFailureCode } from "@/lib/hermes-skills";
 import { parseUninstallOutcome } from "@/lib/hermes-skill-cli-outcome";
 import {
   hermesSkillsGuard,
@@ -181,7 +181,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, id, name: id });
   } catch (err) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Hermes uninstall failed" },
+      { error: err instanceof Error ? err.message : "Hermes uninstall failed", code: cliFailureCode(err) },
       { status: 502 },
     );
   }

@@ -4,7 +4,7 @@ import fs from "fs/promises";
 import path from "path";
 import { NextResponse } from "next/server";
 import { type HermesCliResult, runHermesCli } from "@/lib/hermes-cli";
-import { checkInstallIdentifier, cliInstallIdentifier, isValidMeta } from "@/lib/hermes-skills";
+import { checkInstallIdentifier, cliInstallIdentifier, isValidMeta, cliFailureCode } from "@/lib/hermes-skills";
 import {
   type InstallOutcome,
   type InstallOutcomeKind,
@@ -192,8 +192,10 @@ export async function POST(request: Request) {
     cli = await runHermesCli(args, { timeoutMs: INSTALL_TIMEOUT_MS });
   } catch (err) {
     if (!(err instanceof Error && /timed out/i.test(err.message))) {
+      // Sanitised, but still the CLI's own sentence: the code is the part the
+      // store can say in the owner's language (HERMES-04).
       return NextResponse.json(
-        { error: err instanceof Error ? err.message : "Hermes install failed" },
+        { error: err instanceof Error ? err.message : "Hermes install failed", code: cliFailureCode(err) },
         { status: 502 },
       );
     }
@@ -212,7 +214,7 @@ export async function POST(request: Request) {
     // browser — it is logged here and the user gets a fixed message, the same
     // rule browse/inspect follow.
     console.error("[hermes skills install] exit", cli.code, cli.stderr);
-    return NextResponse.json({ error: "Install failed" }, { status: 502 });
+    return NextResponse.json({ error: "Install failed", code: "install_failed" }, { status: 502 });
   }
 
   // Hermes' resolver can exit 0 while installing nothing (a bare id with no

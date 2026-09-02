@@ -1,13 +1,15 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type {
-  BrowseResponse,
-  CatalogFacets,
-  CatalogMeta,
-  FacetScope,
-  HermesSkill,
-  SortOption,
+import {
+  type CliFailureCode,
+  type BrowseResponse,
+  type CatalogFacets,
+  type CatalogMeta,
+  type FacetScope,
+  type HermesSkill,
+  type SortOption,
+  isCliFailureCode,
 } from '@/lib/hermes-skills';
 
 // Browse-tab data: one endpoint (/browse) serves listing, search, the facet rail
@@ -89,7 +91,13 @@ export interface CatalogController {
    * new filters.
    */
   stale: boolean;
-  error: string | null;
+  /**
+   * Why page 1 could not be loaded: the route's code, or 'unknown' for a
+   * failure that carried none (an older device build, a transport error).
+   * Never the message — that is English composed on the server, and the one
+   * place it belongs is the console.
+   */
+  error: CliFailureCode | 'unknown' | null;
   degraded: boolean;
   catalog: CatalogMeta | null;
   facets: CatalogFacets;
@@ -114,7 +122,7 @@ export function useSkillCatalog(active: boolean): CatalogController {
   const [loading, setLoading] = useState(false);
   const [appending, setAppending] = useState(false);
   const [slow, setSlow] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<CliFailureCode | 'unknown' | null>(null);
   const [degraded, setDegraded] = useState(false);
   const [catalog, setCatalog] = useState<CatalogMeta | null>(null);
   const [facets, setFacets] = useState<CatalogFacets>(EMPTY_FACETS);
@@ -192,10 +200,17 @@ export function useSkillCatalog(active: boolean): CatalogController {
         setError(null);
       }
       const slowTimer = append ? null : setTimeout(() => setSlow(true), SLOW_AFTER_MS);
+      let failure: CliFailureCode | 'unknown' = 'unknown';
       try {
         const res = await fetch(buildUrl(targetPage), { signal: controller.signal, cache: 'no-store' });
-        const data = (await res.json().catch(() => ({}))) as Partial<BrowseResponse> & { error?: string };
-        if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+        const data = (await res.json().catch(() => ({}))) as Partial<BrowseResponse> & {
+          error?: string;
+          code?: string;
+        };
+        if (!res.ok) {
+          if (isCliFailureCode(data?.code)) failure = data.code;
+          throw new Error(data?.error || `HTTP ${res.status}`);
+        }
         const incoming = Array.isArray(data.skills) ? data.skills : [];
         if (append) {
           const fresh = incoming.filter((s) => !seenIds.current.has(s.id));
@@ -219,7 +234,8 @@ export function useSkillCatalog(active: boolean): CatalogController {
       } catch (err) {
         if ((err as Error).name === 'AbortError') return;
         if (!append) {
-          setError(err instanceof Error ? err.message : 'Couldn’t load skills');
+          console.error('[skills browse]', err);
+          setError(failure);
           setResults([]);
           setTotal(0);
           setHasMore(false);
