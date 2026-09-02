@@ -261,6 +261,12 @@ function refuseKeylessOpenAiModel(modelId: string): NextResponse {
   }, { status: 400 });
 }
 
+/** Is `agents.defaults.models[modelRef].agentRuntime.id` already `codex` in this config? */
+function chatgptRuntimeArmed(config: OpenClawConfig | null, modelRef: string): boolean {
+  const models = (config?.agents?.defaults as { models?: Record<string, { agentRuntime?: { id?: unknown } }> } | undefined)?.models;
+  return models?.[modelRef]?.agentRuntime?.id === "codex";
+}
+
 /**
  * The 409 for a primary the core refused as a reference it cannot resolve —
  * `Cannot set model reference ... Unknown model` — or null for any other
@@ -893,6 +899,16 @@ export async function POST(request: Request) {
     if (targetOffSurface) return targetOffSurface;
 
     if (state.activeModel === targetModel) {
+      // Already the primary — but a ChatGPT pick can arrive as `codex/<id>`
+      // and remap onto a primary that IS `openai/<id>` already, on a box whose
+      // Codex runtime entry is missing (written by an older ClawBox, or lost).
+      // That entry is the only thing that keeps the turn on the ChatGPT
+      // account, and this route was its only repair short of a reboot; a
+      // no-op answer here left every turn failing. One write, only when the
+      // entry is absent — a same-model pick on an armed box stays free.
+      if (chatgptRouted && !chatgptRuntimeArmed(preloadedConfig, targetModel)) {
+        await runOpenclawConfigSet([chatgptRuntimeConfigPath(targetModel), "codex"]);
+      }
       return NextResponse.json({
         ...state,
         activeSource: isLocalModel(targetModel) ? "local" : "primary",

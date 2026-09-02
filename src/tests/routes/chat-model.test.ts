@@ -849,6 +849,44 @@ describe("/setup-api/chat/model", () => {
       expect(restartGateway).not.toHaveBeenCalled();
     });
 
+    it("arms the Codex runtime on a same-model pick when the entry is missing — the only repair short of a reboot", async () => {
+      // A stale tab posts `codex/gpt-5.5`; the primary IS `openai/gpt-5.5`
+      // already, but nothing armed its runtime (an older ClawBox wrote the
+      // primary, or the entry was lost). The remap made this a no-op answer
+      // that left every turn failing.
+      vi.mocked(readConfig).mockResolvedValue({
+        ...CHATGPT_BOX,
+        agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
+      } as never);
+
+      const response = await post({ model: "codex/gpt-5.5" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+        "agents.defaults.models.openai/gpt-5.5.agentRuntime.id",
+        "codex",
+      ]);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalledWith(expect.arrayContaining(["agents.defaults.model.primary"]));
+    });
+
+    it("leaves an armed same-model pick free of any write", async () => {
+      vi.mocked(readConfig).mockResolvedValue({
+        ...CHATGPT_BOX,
+        agents: {
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } },
+          },
+        },
+      } as never);
+
+      const response = await post({ model: "openai/gpt-5.5" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
     it("answers a reference the core refuses with the provider and a next step, not the CLI's sentence", async () => {
       vi.mocked(readConfig).mockResolvedValue(CHATGPT_BOX as never);
       vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error(

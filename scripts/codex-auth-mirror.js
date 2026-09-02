@@ -109,9 +109,14 @@ function profileKeyIn(profiles) {
 
 function credentialFromProfiles(agentDir) {
   const profiles = readProfiles(agentDir);
-  const key = profileKeyIn(profiles);
-  const profile = key ? profiles[key] : null;
-  if (!profile || !profile.access) return null;
+  // For READING, the first profile that actually carries a credential: a
+  // canonical entry without `access` beside a legacy one that has it must not
+  // hide the working sign-in. Write-back keeps `profileKeyIn`'s first-present
+  // rule so a rotation lands in the entry the core will read next.
+  const profile = profiles
+    ? PROFILE_KEYS.map((key) => profiles[key]).find((entry) => entry && entry.access) || null
+    : null;
+  if (!profile) return null;
   return {
     accessToken: profile.access,
     refreshToken: profile.refresh,
