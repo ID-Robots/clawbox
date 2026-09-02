@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isCodingRunStatus, type CodingRunStatus } from "@/lib/coding-agent-status";
 import { onCodingRunStarted } from "@/lib/ui-events";
+import { isPrPending, type PrState } from "@/lib/coding-pr-state";
 
 /**
  * The coding runs this conversation has seen, and what became of them.
@@ -102,6 +103,9 @@ export interface CodingAgentActivity {
 }
 
 interface RunPayload {
+  /** The pull request this run's work went into, when the auto-PR switch is
+   *  on. Optional: a run recorded before the feature has none. */
+  pr?: PrState | null;
   id: string;
   projectId: string | null;
   task: string;
@@ -281,7 +285,9 @@ export function useCodingAgentActivity(active: boolean): {
         // more after a run this probe watched settle: the record is written
         // as settled BEFORE the commit and the review pass that follow it,
         // so the poll that saw the finish could not have seen either.
-        if (fetched.some((r) => r.status === "running")) {
+        // A run waiting on GitHub Actions has settled but is still changing,
+        // so the chat card keeps polling for it too — see CodingAgentApp.
+        if (fetched.some((r) => r.status === "running" || isPrPending(r.pr))) {
           sawLive = true;
           timer = setTimeout(() => { void read(); }, POLL_MS);
         } else if (sawLive) {

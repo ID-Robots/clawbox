@@ -61,7 +61,7 @@ describe("ChromeShelf", () => {
     expect(screen.getByTestId("shelf-clawkeep-shield-button")).toBeInTheDocument();
   });
 
-  it("invites setup calmly on a never-paired box instead of calling the backup overdue", () => {
+  it("blinks orange on a never-paired box, without calling the backup overdue", () => {
     render(
       <ChromeShelf
         {...baseProps}
@@ -74,10 +74,14 @@ describe("ChromeShelf", () => {
     const shield = screen.getByTestId("shelf-clawkeep-shield-button");
     expect(shield).toHaveAttribute("title", "ClawKeep is not set up yet");
     const icon = shield.querySelector(".material-symbols-rounded");
-    expect(icon?.className).toContain("text-sky-300");
+    // Orange and blinking, so the invitation is noticed on a shelf nobody is
+    // looking at. It used to sit there static and sky-blue.
+    expect(icon?.className).toContain("text-orange-300");
+    expect(icon?.className).toContain("clawkeep-shelf-glow-orange");
+    expect(shield.querySelector(".clawkeep-shelf-pulse")).not.toBeNull();
+    // Still not the RED overdue alert: nothing is late on a box that has never
+    // been paired.
     expect(icon?.className).not.toContain("clawkeep-shelf-glow-red");
-    // The calm state does not pulse.
-    expect(shield.querySelector(".clawkeep-shelf-pulse")).toBeNull();
   });
 
   it("keeps the red overdue alert for a paired box whose backup is genuinely stale", () => {

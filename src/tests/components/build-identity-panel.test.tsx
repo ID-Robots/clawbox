@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
-import { BuildDriftBanner, BuildIdentityRows, useBuildIdentity } from "@/components/BuildIdentityPanel";
+import { BuildIdentityRows, useBuildIdentity } from "@/components/BuildIdentityPanel";
 import { computeDrift, type BuildIdentity } from "@/lib/build-identity";
 
 // The real English strings, resolved the way the app resolves them — so a
@@ -67,48 +67,6 @@ function identity(over: { buildCommit?: string | null; headCommit?: string; pinn
   };
 }
 
-describe("BuildDriftBanner", () => {
-  it("says in plain language which build is running and which code is on disk", () => {
-    render(<BuildDriftBanner identity={identity()} />);
-
-    expect(screen.getByText(translations.en["settings.driftTitle"])).toBeInTheDocument();
-    const line = screen.getByText(/running a build from/i);
-    expect(line.textContent).toContain("1b21187");
-    expect(line.textContent).toContain("d285cfd");
-    expect(line.textContent).toMatch(/run Update to realign/i);
-  });
-
-  it("stays out of the way on a box that agrees with itself", () => {
-    const { container } = render(<BuildDriftBanner identity={identity({ buildCommit: HEAD_SHA })} />);
-    expect(container).toBeEmptyDOMElement();
-  });
-
-  it("renders nothing before the endpoint answers", () => {
-    const { container } = render(<BuildDriftBanner identity={null} />);
-    expect(container).toBeEmptyDOMElement();
-  });
-
-  it("does not raise the banner for a merely unpinned box", () => {
-    const { container } = render(
-      <BuildDriftBanner identity={identity({ buildCommit: HEAD_SHA, pinned: false })} />,
-    );
-    expect(container).toBeEmptyDOMElement();
-  });
-
-  it("explains an unstamped build rather than showing a raw code", () => {
-    render(<BuildDriftBanner identity={identity({ buildCommit: null })} />);
-    expect(screen.getByText(translations.en["settings.driftBuildUnstamped"])).toBeInTheDocument();
-    expect(screen.queryByText(/build-unstamped/)).not.toBeInTheDocument();
-  });
-
-  it("names the tested commit the checkout is behind", () => {
-    render(<BuildDriftBanner identity={identity({ buildCommit: HEAD_SHA, pinCommit: BUILD_SHA })} />);
-    const line = screen.getByText(/is not the tested commit/i);
-    expect(line.textContent).toContain("beta");
-    expect(line.textContent).toContain("1b21187");
-  });
-});
-
 describe("BuildIdentityRows", () => {
   it("shows the build commit, branch and build time", () => {
     render(<BuildIdentityRows identity={identity({ buildCommit: HEAD_SHA })} />);
@@ -165,7 +123,9 @@ describe("useBuildIdentity", () => {
 describe("malformed responses", () => {
   function Probe() {
     const id = useBuildIdentity(true);
-    return <BuildDriftBanner identity={id} />;
+    // BuildIdentityRows is the remaining reader of this payload — the drift
+    // BANNER it used to probe was removed with the rest of the drift warnings.
+    return <BuildIdentityRows identity={id} />;
   }
 
   // A proxy error page, a half-deployed server, or an older build answering

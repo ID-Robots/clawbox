@@ -34,6 +34,13 @@ const LOCAL_MEMORY = {
   run: { status: "idle", mode: "", trigger: "", startedAtMs: 0, finishedAtMs: 0, durationMs: 0, error: "" },
   schedule: { enabled: false, frequency: "daily", timeOfDay: "03:00", weekday: 0 },
   nextRunAtMs: 0,
+  // The app shows the SETUP WIZARD until the owner has been through it, so a
+  // fixture describing an already-configured box has to say so — otherwise
+  // every test below would be looking at the wizard rather than the index card
+  // it means to exercise. The wizard's own behaviour is covered by
+  // memory-shard-wizard.test.tsx.
+  enabled: true,
+  setupComplete: true,
 };
 
 let memory: Record<string, unknown> = { ...LOCAL_MEMORY };
@@ -95,6 +102,26 @@ describe("the Memory Shard app", () => {
     expect(await screen.findByText("On device", {}, { timeout: 5000 })).toBeTruthy();
     expect(await screen.findByText("Embedding with qwen3-embedding:0.6b", {}, { timeout: 5000 })).toBeTruthy();
     expect(screen.getByText("Healthy")).toBeTruthy();
+  });
+
+  it("opens the setup wizard on a box whose owner has not been through it", async () => {
+    memory = { ...LOCAL_MEMORY, enabled: false, setupComplete: false };
+    mount();
+    expect(await screen.findByTestId("memory-shard-wizard")).toBeTruthy();
+    // The wizard REPLACES the card: an index card underneath it would invite
+    // "Index now" on a box with no embedding model yet.
+    expect(screen.queryByRole("button", { name: "Index now" })).toBeNull();
+  });
+
+  it("does not put a configured owner in front of onboarding when the status carries no flag", async () => {
+    // The e2e mock's `{}` again, and a server mid-restart answers the same way.
+    // A missing `setupComplete` says nothing about setup: only an explicit
+    // false opens the wizard, so the index card stays and says it is loading.
+    memory = {} as Record<string, unknown>;
+    mount();
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    expect(await screen.findByText(/Memory index — Loading/)).toBeTruthy();
+    expect(screen.queryByTestId("memory-shard-wizard")).toBeNull();
   });
 
   it("keeps its loading line when the route answers something else, rather than throwing", async () => {

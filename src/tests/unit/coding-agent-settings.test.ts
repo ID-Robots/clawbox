@@ -217,6 +217,126 @@ describe("the effort picker", () => {
   });
 });
 
+describe("the folder the device proposes", () => {
+  it("suggests ~/Projects, and says so in the status", async () => {
+    configGetAll.mockResolvedValue({});
+    const lib = await import("@/lib/coding-agent");
+    const status = await lib.getCodingAgentStatus();
+    expect(status.suggestedDirectory).toBe(lib.suggestedDefaultDirectory());
+    expect(status.suggestedDirectory.endsWith("/Projects")).toBe(true);
+    // A suggestion, not a default in force: nothing is chosen until saved.
+    expect(status.defaultDirectory).toBeNull();
+  });
+
+  it("creates the folder when the owner saves one inside their home", async () => {
+    // A fresh box has no ~/Projects, and the wizard pre-fills it — so
+    // accepting the folder the device proposed must not answer "that folder
+    // does not exist on this ClawBox".
+    const fs = await import("fs");
+    const os = await import("os");
+    const path = await import("path");
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "coding-home-"));
+    const prev = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      vi.resetModules();
+      const lib = await import("@/lib/coding-agent");
+      const target = path.join(fs.realpathSync(home), "Projects");
+      expect(fs.existsSync(target)).toBe(false);
+      const saved = await lib.setDefaultDirectory(target);
+      expect(saved).toBe(target);
+      expect(fs.statSync(target).isDirectory()).toBe(true);
+    } finally {
+      process.env.HOME = prev;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("does not create folders outside the owner's home", async () => {
+    // Creating directories on someone's behalf is this feature's business
+    // only inside their own home; anywhere else a missing folder stays an error.
+    const fs = await import("fs");
+    const os = await import("os");
+    const path = await import("path");
+    // Writable, and outside the owner's home: a mkdir here would SUCCEED if
+    // the fence were gone, so the assertion tests the fence and not the
+    // permissions of "/" — where an unprivileged mkdir fails on its own and
+    // would have satisfied this test with no guard at all.
+    const outside = path.join(fs.realpathSync(os.tmpdir()), "coding-outside-home-xyz");
+    expect(outside.startsWith(fs.realpathSync(os.homedir()) + path.sep)).toBe(false);
+    const lib = await import("@/lib/coding-agent");
+    await expect(lib.setDefaultDirectory(outside)).rejects.toThrow();
+    expect(fs.existsSync(outside)).toBe(false);
+  });
+
+  it("does not create folders through a symlink that leaves the home", async () => {
+    // The lexical fence sees ~/scratch/Projects as inside the home; on disk
+    // ~/scratch may be a link to anywhere, and mkdir follows it — so the
+    // nearest EXISTING ancestor has to be realpath'd and checked too, or the
+    // owner's typed path would create a folder somewhere else entirely.
+    const fs = await import("fs");
+    const os = await import("os");
+    const path = await import("path");
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "coding-home-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "coding-outside-"));
+    const prev = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      fs.symlinkSync(outside, path.join(home, "scratch"));
+      vi.resetModules();
+      const lib = await import("@/lib/coding-agent");
+      const typed = path.join(home, "scratch", "Projects");
+      await expect(lib.setDefaultDirectory(typed)).rejects.toThrow();
+      // Neither through the link nor under the real home.
+      expect(fs.existsSync(path.join(outside, "Projects"))).toBe(false);
+      expect(fs.existsSync(typed)).toBe(false);
+      expect(configSet).not.toHaveBeenCalled();
+    } finally {
+      process.env.HOME = prev;
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the setup wizard flag", () => {
+  it("is false on a box that has never been set up", async () => {
+    configGetAll.mockResolvedValue({});
+    const lib = await import("@/lib/coding-agent");
+    expect((await lib.getCodingAgentStatus()).setupComplete).toBe(false);
+  });
+
+  it("counts a box configured before the wizard existed as done", async () => {
+    // The switch being ON is the same consent the wizard collects. Without
+    // this, every owner who already had the agent running would be dropped
+    // back into onboarding by the update that introduced it.
+    configGetAll.mockResolvedValue({ coding_agent_enabled: true });
+    const lib = await import("@/lib/coding-agent");
+    expect((await lib.getCodingAgentStatus()).setupComplete).toBe(true);
+  });
+
+  it("lets the wizard switch the agent ON without declaring setup finished", async () => {
+    // The wizard enables the agent at step 2 so its last step has something to
+    // test on. An explicit false must beat the `enabled` fallback, or the app
+    // swaps the last step for the home page a second after it appears.
+    configGetAll.mockResolvedValue({ coding_agent_enabled: true, coding_agent_setup_complete: false });
+    const lib = await import("@/lib/coding-agent");
+    const status = await lib.getCodingAgentStatus();
+    expect(status.enabled).toBe(true);
+    expect(status.setupComplete).toBe(false);
+  });
+
+  it("stays done after the owner switches the agent off again", async () => {
+    configGetAll.mockResolvedValue({ coding_agent_enabled: false, coding_agent_setup_complete: true });
+    const lib = await import("@/lib/coding-agent");
+    const status = await lib.getCodingAgentStatus();
+    expect(status.enabled).toBe(false);
+    // Only a reset reopens the wizard; a switched-off agent is a setting, not
+    // an unfinished setup.
+    expect(status.setupComplete).toBe(true);
+  });
+});
+
 describe("sub-agent definitions", () => {
   it("ships agents to delegate to — the Task tool alone never fired", async () => {
     // Every run on this box reported subagentsTotal 0: the tool existed and

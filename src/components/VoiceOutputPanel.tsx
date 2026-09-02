@@ -336,18 +336,6 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   // with it only produced a refusal to read.
   const canSpeak = engineById(source)?.configured === true;
 
-  // The privacy notice, in the owner's language when the box sent the fact
-  // behind it, in the box's English when it only sent the sentence. Amber
-  // where the cloud speaks first — the text leaves the box — and one muted
-  // line where the box's own voice goes first and the cloud stands behind it.
-  const disclosure = status.disclosure ?? null;
-  const notice = disclosure
-    ? t(disclosure.kind === "uses-cloud" ? "settings.voice.notice.usesCloud" : "settings.voice.notice.mayUseCloud", {
-      providers: disclosure.providers.join(", "),
-    })
-    : status.warning;
-  const cloudSpeaksFirst = source === "cloud" || disclosure?.kind === "uses-cloud";
-
   const optionLabel = (engine: VoiceEngine | null, nameKey: string, missingKey: string) =>
     engine?.configured ? t(nameKey) : `${t(nameKey)} — ${t(missingKey)}`;
 
@@ -392,13 +380,6 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
             {writing === "reconcile" ? t("settings.voice.restoringAuto") : t("settings.voice.saving")}
           </p>
         )}
-        {notice && cloudSpeaksFirst && (
-          <p className="text-xs text-amber-200" data-testid="voice-cloud-warning">{notice}</p>
-        )}
-        {notice && !cloudSpeaksFirst && (
-          <p className={MUTED} data-testid="voice-cloud-fallback-note">{notice}</p>
-        )}
-
         <div className={ROW}>
           <label htmlFor="voice-language" className={LABEL}>{t("settings.voice.language")}</label>
           <select

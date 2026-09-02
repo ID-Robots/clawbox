@@ -66,8 +66,8 @@ export default function ClawBoxLoginModal({ open, onClose, feature = "generic" }
           <img
             src="/clawbox-crab.png"
             alt=""
-            width={56}
-            height={56}
+            width={42}
+            height={42}
             className="shrink-0 select-none pointer-events-none drop-shadow-[0_0_12px_rgba(249,115,22,0.5)]"
           />
           <div className="flex-1 min-w-0">

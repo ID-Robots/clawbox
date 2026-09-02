@@ -42,6 +42,18 @@ vi.mock("@/lib/config-store", () => ({
 
 vi.mock("@/lib/clawkeep", () => ({ unpairLocal: vi.fn() }));
 
+// PARTIAL mock — only `getProviderCatalog` becomes replaceable, so one test can
+// take the curated catalogue away and prove the settled default still reaches
+// the surface guard. Everything else keeps its real implementation, because the
+// route settles that default out of this very module: a factory mock would have
+// the test supplying both the question and the answer.
+vi.mock("@/lib/provider-models", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/provider-models")>(
+    "@/lib/provider-models",
+  );
+  return { ...actual, getProviderCatalog: vi.fn(actual.getProviderCatalog) };
+});
+
 // Out-of-band by design (see configure.test.ts) — stubbed so nothing logs
 // after the test that triggered it has finished.
 vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
@@ -112,6 +124,7 @@ import {
   setProviderPlugins,
 } from "@/lib/openclaw-config";
 import { unpairLocal } from "@/lib/clawkeep";
+import { getProviderCatalog } from "@/lib/provider-models";
 import { findConfigSet } from "./config-set-calls";
 
 const mockFs = vi.mocked(fsp);
@@ -306,18 +319,49 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     ).toBe("anthropic/claude-opus-4-8");
   });
 
-  it("judges the provider DEFAULT too, not only a typed id", async () => {
-    // The typed-id field is the way in that was reported, but the same write
-    // carries the PROVIDERS-table default when nothing is typed. Guarding the
-    // settled `config.defaultModel` covers both with one check.
+  it("does not refuse the shipped default over a cache that predates it", async () => {
+    // The regression this pins: the catalog route SERVES its cached payload
+    // through `augmentWithStaticCatalog`, so a release that adds a model to
+    // PROVIDER_CATALOGS offers it in the picker on day one — while the on-disk
+    // cache keeps the previous enumeration for up to that route's 6h refresh
+    // interval. Judging the raw cache asked a different question than the
+    // picker answered, and refused the box's OWN default on every update until
+    // the refresh landed. `readSubscriptionSurfaceIds` unions the curated
+    // catalogue for exactly this window.
     mockSurfaceRead.mockResolvedValue(
-      surfaceCache(SURFACE_IDS.filter((id) => id !== "claude-sonnet-4-6")) as never,
+      surfaceCache(SURFACE_IDS.filter((id) => id !== "claude-sonnet-5")) as never,
+    );
+
+    const res = await configurePost(subscribe());
+
+    expect(res.status).toBe(200);
+    expect(
+      findConfigSet(
+        vi.mocked(runOpenclawConfigSet),
+        vi.mocked(runOpenclawConfigSetBatch),
+        "agents.defaults.model.primary",
+      )?.value,
+    ).toBe("anthropic/claude-sonnet-5");
+  });
+
+  it("still judges the settled default, not only a typed id", async () => {
+    // The typed-id field is the way in that was reported, but the same write
+    // carries the PROVIDERS-table default when nothing is typed. What is left
+    // to refuse after the union above is an id NO catalogue on this box
+    // carries — so this drives the settled default off both by emptying the
+    // curated catalogue the union draws on, proving the default reaches the
+    // guard rather than bypassing it.
+    // Once-only: `vi.clearAllMocks()` clears calls, not implementations, so a
+    // sticky override would follow this test into the next one.
+    vi.mocked(getProviderCatalog).mockReturnValueOnce(null);
+    mockSurfaceRead.mockResolvedValue(
+      surfaceCache(SURFACE_IDS.filter((id) => id !== "claude-sonnet-5")) as never,
     );
 
     const res = await configurePost(subscribe());
 
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toContain("claude-sonnet-4-6");
+    expect((await res.json()).error).toContain("claude-sonnet-5");
     expectNoSideEffects();
   });
 
@@ -354,12 +398,21 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     expect(res.status).toBe(200);
   });
 
-  it("lets the pick through when the cached surface is empty", async () => {
+  it("refuses a typed id an EMPTY cached surface plus the curated catalogue lacks", async () => {
+    // A file holding `models: []` is served to the picker through
+    // `augmentWithStaticCatalog`, so the customer was shown the curated rows —
+    // the guard judges by the same list rather than answering UNKNOWN. Only a
+    // MISSING cache (the test above) is unknown.
     mockSurfaceRead.mockResolvedValue(surfaceCache([]) as never);
 
     const res = await configurePost(subscribe({ model: OFF_CATALOGUE_ID }));
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
+    const { error } = await res.json();
+    expect(error).toContain(OFF_CATALOGUE_ID);
+    // What it offers instead is exactly the curated list the picker showed.
+    expect(error).toContain("claude-sonnet-5");
+    expectNoSideEffects();
   });
 
   it("does not read the Claude surface for a non-Claude provider", async () => {

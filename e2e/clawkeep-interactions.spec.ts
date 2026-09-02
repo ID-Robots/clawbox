@@ -187,9 +187,10 @@ test("unpair flow opens the confirm dialog and Esc dismisses it without unpairin
   });
 
   const clawkeep = await openClawkeep(page);
-  // Unpair sits at the very bottom of the paired dashboard, where the taskbar
-  // overlaps it — a positional click lands on the shelf instead. Dispatch the
-  // click straight to the element (no hit-testing) so its onClick fires.
+  // Unpair lives in the window's header row now (it used to sit at the very
+  // bottom of the dashboard, under the taskbar). The click is still dispatched
+  // straight to the element rather than by position, so a toast or the shelf
+  // overlapping the window cannot swallow it.
   const unpairButton = clawkeep.getByRole("button", { name: "Unpair" });
   await expect(unpairButton).toBeVisible();
   await unpairButton.dispatchEvent("click");

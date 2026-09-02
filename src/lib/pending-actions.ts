@@ -77,5 +77,36 @@ let chain: Promise<unknown> = Promise.resolve();
 export function pushPendingAction(action: Record<string, unknown>, id?: string): Promise<PendingActionEntry> {
   const next = chain.then(() => appendNow(action, id));
   chain = next.catch(() => undefined);
+  void drawIconFor(action);
   return next;
+}
+
+/**
+ * An app registered through the RING alone gets a picture too.
+ *
+ * The MCP tools and `clawbox notify` run in another process, so a project the
+ * coding agent scaffolds and serves on a local port reaches the desktop as a
+ * `register_webapp` notice and nothing else — no HTML on this box, no
+ * `deployWebapp`, and so no icon. It sat there as a bare coloured tile.
+ *
+ * Fire-and-forget, and deliberately not awaited by the push: the notice must
+ * land in the ring at once so an open desktop shows the app, while the picture
+ * takes 5-15 s and arrives later (the desktop re-reads the icon route). Loaded
+ * lazily because this module is imported by routes that have no business
+ * pulling in the image client. `ensureWebappIcon` answers 'kept' from one stat
+ * when an icon already exists, so a repeat registration costs nothing.
+ */
+function drawIconFor(action: Record<string, unknown>): void {
+  if (action.type !== "register_webapp") return;
+  const appId = typeof action.appId === "string" ? action.appId : null;
+  const name = typeof action.name === "string" ? action.name : null;
+  if (!appId || !name) return;
+  // An explicit icon means the caller drew its own.
+  if (typeof action.iconUrl === "string" && action.iconUrl) return;
+  void import("@/lib/webapp-icon")
+    .then(({ ensureWebappIcon }) => ensureWebappIcon(appId, {
+      name,
+      color: typeof action.color === "string" ? action.color : undefined,
+    }))
+    .catch(() => { /* an app with no picture is still an app */ });
 }

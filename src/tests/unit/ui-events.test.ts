@@ -54,15 +54,33 @@ describe("buildNewAppPrompt", () => {
   it("composes the one message the wizard hands to the chat", () => {
     expect(buildNewAppPrompt({ name: "Pomodoro timer", description: "A 25/5 timer with a sound", template: "app" })).toBe(
       'Create a new ClawBox app called "Pomodoro timer": A 25/5 timer with a sound.\n'
-      + 'Scaffold it as a code project from the "app" template, build it with the coding agent, verify it in the browser, and put it on my desktop.',
+      + 'Scaffold it as a small HTML/CSS/JS app in a new git folder under my project folder — not as a code project under ClawBox\'s own data directory — build it with the coding agent, verify it in the browser, and put it on my desktop with an icon.',
     );
   });
 
-  it("names the template the way code_project_init spells it, and ends the description once", () => {
+  it("asks for a folder under the project folder, and ends the description once", () => {
     const text = buildNewAppPrompt({ name: "  Notes ", description: "Keep short notes.  ", template: "blank" });
     expect(text).toContain('called "Notes": Keep short notes.\n');
     expect(text).not.toContain("notes..");
-    expect(text).toContain('from the "blank" template');
+    // NOT a code project: those live at data/code-projects/<id>, inside
+    // ClawBox's own checkout — so `git` there resolves to the PRODUCT's
+    // repository, and the project page showed ClawBox's branch, its commit
+    // count and its remote as if they belonged to the new app.
+    expect(text).toContain("new git folder under my project folder");
+    expect(text).not.toContain('from the "blank" template');
+  });
+
+  it("keeps every template out of ClawBox's own data directory", () => {
+    for (const template of ["nextjs", "react", "app", "blank"] as const) {
+      const text = buildNewAppPrompt({ name: "x", description: "y", template });
+      expect(text, template).toContain("new git folder under my project folder");
+      // The negative half of the name, asserted as such: no template may point
+      // the assistant at data/code-projects, and the only code project a
+      // prompt may mention is the one it tells the assistant NOT to make —
+      // `code_project_init` or "as a code project" would be a regression.
+      expect(text, template).not.toContain("data/code-projects");
+      expect(text.replace(/not as a code project/gu, ""), template).not.toMatch(/code[ _-]project/iu);
+    }
   });
 
   it("is a different prompt from a fix-error one — it asks for a build, not an investigation", () => {

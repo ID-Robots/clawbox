@@ -24,6 +24,8 @@ export const systemProfileEn: Record<string, string> = {
   "systemProfile.clocksPinned": "pinned",
   "systemProfile.clocksDynamic": "dynamic",
 
+  "systemProfile.memoryGuardsLabel": "Memory limits",
+
   "systemProfile.memoryGuards":
     "Memory limits in force: local AI {ollama}, browser {browser}, desktop {desktop}. Local AI serves {parallel} requests at a time.",
 

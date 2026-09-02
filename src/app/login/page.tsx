@@ -129,7 +129,7 @@ function LoginForm() {
 
       <div className="w-full max-w-[380px] flex flex-col items-center gap-6">
         <div className="flex flex-col items-center gap-3">
-          <Image src="/clawbox-crab.png" alt="ClawBox" width={96} height={96} className="w-24 h-24 sm:w-[120px] sm:h-[120px] object-contain animate-welcome-powerup" priority />
+          <Image src="/clawbox-crab.png" alt="ClawBox" width={62} height={62} className="w-[50px] h-[50px] sm:w-[62px] sm:h-[62px] object-contain animate-welcome-powerup" priority />
           <h1 className="text-2xl font-bold font-display text-white">ClawBox</h1>
           <p className="text-sm text-white/50 text-center">{t("login.subtitle")}</p>
         </div>

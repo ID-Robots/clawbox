@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { getMemoryShardEnabled, getMemoryShardSetupComplete } from "@/lib/memory-shard";
 
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { findOpenclawBin } from "@/lib/openclaw-config";
@@ -54,6 +55,12 @@ export interface ClawKeepMemoryStatus {
   indexIdentity: "valid" | "missing" | "mismatched" | "unknown";
   /** Stable, non-secret digest of provider/model/sources. */
   fingerprint: string;
+  /** The owner's switch for Memory Shard. Off on a box that has not been set
+   *  up: indexing used to be unconditional, with no consent anywhere. */
+  enabled: boolean;
+  /** False until the owner finishes the setup wizard. The app shows the wizard
+   *  instead of the index card while it is. */
+  setupComplete: boolean;
   sourceCount: number;
   files: number;
   chunks: number;
@@ -475,6 +482,10 @@ export async function parseMemoryStatus(
     semanticAvailable,
     indexIdentity,
     fingerprint,
+    // Filled in by getMemoryStatus, which is the only caller with an await to
+    // spend on the config store; the parser itself stays synchronous.
+    enabled: false,
+    setupComplete: false,
     sourceCount,
     files,
     chunks,
@@ -503,6 +514,8 @@ function unavailableStatus(
 ): ClawKeepMemoryStatus {
   return {
     available: false,
+    enabled: false,
+    setupComplete: false,
     provider: "",
     model: "",
     location: "unknown",
@@ -593,7 +606,12 @@ export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   } else if (Date.now() - cachedStatusAtMs >= STATUS_CACHE_MS) {
     reloadMemoryStatus().catch(() => { /* the next read tries again */ });
   }
-  return withLiveRunState(base);
+  const [live, enabled, setupComplete] = await Promise.all([
+    withLiveRunState(base),
+    getMemoryShardEnabled(),
+    getMemoryShardSetupComplete(),
+  ]);
+  return { ...live, enabled, setupComplete };
 }
 
 /**

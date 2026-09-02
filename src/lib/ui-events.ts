@@ -14,6 +14,22 @@ export const FIX_ERROR_EVENT = "clawbox:fix-error";
  * path it has, and page.tsx opens the popup so the owner can watch.
  */
 export const CHAT_MESSAGE_EVENT = "clawbox:chat-message";
+
+/**
+ * "Open the mascot chat and put the New app card in it."
+ *
+ * The card composes one message and hands it to the assistant, so the chat is
+ * where it belongs: the Coding Agent window used to host the same form inline,
+ * which meant two places asked for a new app and only one of them could show
+ * the reply. The Coding Agent's button is a hand-off now, not a second form.
+ */
+export const NEW_APP_EVENT = "clawbox:new-app";
+
+/** Ask the desktop to open the chat with the New app card. */
+export function openNewAppCard(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(NEW_APP_EVENT));
+}
 export const OPEN_SETTINGS_SECTION_EVENT = "clawbox:open-settings-section";
 
 /**
@@ -114,11 +130,24 @@ export const DEFAULT_NEW_APP_TEMPLATE: NewAppTemplate = "nextjs";
  * served from a port — the desktop registers them as web apps pointing at
  * that address, since a Next.js or Vite build cannot be inlined into one file.
  */
+/**
+ * Every template scaffolds into a NEW GIT FOLDER UNDER THE OWNER'S PROJECT
+ * FOLDER — never as a "code project".
+ *
+ * A code project lives at data/code-projects/<id>, which is inside ClawBox's
+ * own checkout. Three things went wrong there, all visible on the project page:
+ * `git` in that folder resolves to ClawBox's repository, so the project showed
+ * the PRODUCT's branch, its 1600 commits and its remote as if they were the
+ * app's; the Back up button would have pushed the product; and the work was in
+ * a directory the owner never browses. The two single-file templates keep their
+ * simple shape — one HTML file, or an HTML/CSS/JS trio — they just get a folder
+ * of their own like everything else.
+ */
 const SCAFFOLD_SENTENCE: Record<NewAppTemplate, string> = {
-  nextjs: "Scaffold it as a Next.js full-stack app (App Router, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, run it on a free local port, verify it in the browser, and register it on my desktop as a web app pointing at that address.",
-  react: "Scaffold it as a React app (Vite, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, serve its production build on a free local port, verify it in the browser, and register it on my desktop as a web app pointing at that address.",
-  app: 'Scaffold it as a code project from the "app" template, build it with the coding agent, verify it in the browser, and put it on my desktop.',
-  blank: 'Scaffold it as a code project from the "blank" template, build it with the coding agent, verify it in the browser, and put it on my desktop.',
+  nextjs: "Scaffold it as a Next.js full-stack app (App Router, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, run it on a free local port, verify it in the browser, and register it on my desktop as a web app pointing at that address, with an icon.",
+  react: "Scaffold it as a React app (Vite, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, serve its production build on a free local port, verify it in the browser, and register it on my desktop as a web app pointing at that address, with an icon.",
+  app: "Scaffold it as a small HTML/CSS/JS app in a new git folder under my project folder — not as a code project under ClawBox's own data directory — build it with the coding agent, verify it in the browser, and put it on my desktop with an icon.",
+  blank: "Scaffold it as a single-page HTML app in a new git folder under my project folder — not as a code project under ClawBox's own data directory — build it with the coding agent, verify it in the browser, and put it on my desktop with an icon.",
 };
 
 export interface NewAppRequest {

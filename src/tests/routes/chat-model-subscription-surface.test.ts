@@ -38,6 +38,7 @@ import {
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
 } from "@/lib/openclaw-config";
+import { getProviderCatalog } from "@/lib/provider-models";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { promisify } from "util";
 
@@ -303,12 +304,37 @@ describe("/setup-api/chat/model and the Claude subscription surface", () => {
     expect(response.status).toBe(200);
   });
 
-  it("lets the pick through when the cached surface is empty", async () => {
-    // An empty set is the same unknown wearing a different hat — treating it
-    // as authoritative would strike out every Claude model at once.
+  it("judges an EMPTY cached surface by the curated catalogue, like the picker", async () => {
+    // Not unknown. The catalog route serves this same file through
+    // `augmentWithStaticCatalog`, so the picker on this box offered the
+    // curated rows and nothing else — an id in none of them is one the picker
+    // never showed, and letting it through would write the very id this guard
+    // exists to refuse.
     vi.mocked(fsp.readFile).mockResolvedValue(surfaceCache([]) as never);
     const response = await postModel(POST, `anthropic/${OFF_CATALOGUE_ID}`);
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toContain(OFF_CATALOGUE_ID);
+    expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+  });
+
+  it("accepts a CURATED id against an empty cached surface", async () => {
+    // The other half of the same rule: the curated rows were what the picker
+    // showed, so a pick among them must land even though the box enumerated
+    // nothing. Taken from PROVIDER_CATALOGS rather than spelled here, so a
+    // release that reshuffles the curated list does not silently retire the
+    // fixture.
+    const curatedId = getProviderCatalog("anthropic")?.models[0]?.id;
+    expect(curatedId).toBeTruthy();
+    vi.mocked(fsp.readFile).mockResolvedValue(surfaceCache([]) as never);
+
+    const response = await postModel(POST, `anthropic/${curatedId}`);
+
     expect(response.status).toBe(200);
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      "agents.defaults.model.primary",
+      `anthropic/${curatedId}`,
+    ]);
   });
 
   /**

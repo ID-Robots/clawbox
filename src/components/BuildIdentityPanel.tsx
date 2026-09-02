@@ -53,17 +53,6 @@ function isBuildIdentity(data: unknown): data is BuildIdentity {
   return true;
 }
 
-/** Drift code → translation key. Codes with no entry are not rendered. */
-const DRIFT_KEYS: Partial<Record<DriftCode, string>> = {
-  "build-from-other-commit": "settings.driftBuildFromOtherCommit",
-  "build-info-not-for-deployed-assets": "settings.driftBuildRecordMismatch",
-  "build-predates-checkout": "settings.driftBuildPredatesCheckout",
-  "build-unstamped": "settings.driftBuildUnstamped",
-  "checkout-dirty": "settings.driftCheckoutDirty",
-  "checkout-behind-pin": "settings.driftCheckoutBehindPin",
-  "no-pin": "settings.driftNoPin",
-};
-
 /**
  * Fetch once per mount, and only where it is shown.
  *
@@ -103,51 +92,6 @@ function formatBuiltAt(iso: string | null, locale: string): string | null {
   } catch {
     return new Date(ms).toISOString();
   }
-}
-
-/**
- * The warning banner. Rendered only on real drift: a box that merely carries
- * no update pin is reported inside the banner but never raises it on its own,
- * because the next update pins it automatically and an alarm nobody needs to
- * act on trains people to ignore the next one.
- */
-export function BuildDriftBanner({ identity }: { identity: BuildIdentity | null }) {
-  const { t, locale } = useT();
-  if (!identity?.drift?.detected) return null;
-
-  const lines = identity.drift.codes
-    .map((code) => DRIFT_KEYS[code])
-    .filter((key): key is string => !!key)
-    .map((key) => t(key, {
-      build: identity.build?.shortCommit ?? t("settings.buildUnknownShort"),
-      checkout: identity.checkout.shortCommit ?? t("settings.buildUnknownShort"),
-      branch: identity.pin.branch ?? t("settings.buildUnknownShort"),
-      pin: identity.pin.commit ? identity.pin.commit.slice(0, 7) : t("settings.buildUnknownShort"),
-    }));
-
-  const builtAt = formatBuiltAt(identity.build?.builtAt ?? null, locale);
-
-  return (
-    <div
-      role="status"
-      className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 space-y-2"
-    >
-      <div className="flex items-center gap-2">
-        <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 20 }}>warning</span>
-        <span className="text-sm font-semibold text-amber-200">{t("settings.driftTitle")}</span>
-      </div>
-      <ul className="space-y-1 list-none p-0 m-0">
-        {lines.map((line) => (
-          <li key={line} className="text-xs text-amber-100/80 leading-relaxed">{line}</li>
-        ))}
-      </ul>
-      {builtAt && (
-        <p className="text-[11px] text-amber-100/50 m-0">
-          {t("settings.builtAt")}: {builtAt}
-        </p>
-      )}
-    </div>
-  );
 }
 
 /** The plain facts, for the About screen: which commit, which branch, when. */

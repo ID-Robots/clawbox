@@ -1,6 +1,7 @@
 import { getAll } from "@/lib/config-store";
 import { boundPreferenceText } from "@/lib/preference-schema";
 import { setPreferences } from "@/lib/preference-store";
+import { ensureWebappIcon } from "@/lib/webapp-icon";
 
 interface InstalledMeta {
   name: string;
@@ -28,7 +29,13 @@ interface InstalledMeta {
 export async function registerWebappInPreferences(
   appId: string,
   name: string,
-  opts: { color?: string; iconUrl?: string; webappUrl?: string } = {},
+  opts: {
+    color?: string;
+    iconUrl?: string;
+    webappUrl?: string;
+    /** What the app does, for the icon prompt. */
+    description?: string;
+  } = {},
 ): Promise<void> {
   // One read of the config, not three — config-store.get() re-reads and
   // re-parses the whole file on each call, and reading the three keys together
@@ -59,4 +66,17 @@ export async function registerWebappInPreferences(
     // A freshly (re)created app shouldn't stay hidden.
     "pref:hidden_installed": hiddenInstalled.filter((id) => id !== appId),
   });
+
+  // Every app that reaches the desktop gets a picture, not just the ones built
+  // out of HTML this box holds: a project the coding agent scaffolds and serves
+  // on a local port registers through here with no icon of its own, and used to
+  // sit on the desktop as a bare coloured tile forever. Drawn by ClawBox AI
+  // AFTER the registration returns — generation takes 5-15 s and nothing should
+  // wait on a picture. `ensureWebappIcon` never rejects and answers 'kept' from
+  // one stat when the icon already exists, so a re-register costs nothing; the
+  // `.catch` is belt and braces against an unhandled rejection.
+  if (!opts.iconUrl) {
+    void ensureWebappIcon(appId, { name, color: opts.color, description: opts.description })
+      .catch(() => {});
+  }
 }

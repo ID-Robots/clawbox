@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 import fs from "fs";
 import path from "path";
 import { verifyMcpBearer } from "@/lib/mcp-token";
+import { isPublicGatewayAsset } from "@/lib/gateway-static";
 import { readEdition } from "@/lib/edition-source";
 import { isBootstrapAllowedPath } from "@/lib/setup-api-gate";
 
@@ -208,6 +209,8 @@ const LOOPBACK_PROXY_PREFIXES = [
 const GATEWAY_ONLY_EXACT = new Set(["/favicon.svg", "/favicon-32.png"]);
 const GATEWAY_ONLY_PREFIXES = ["/api", "/assets"];
 
+
+
 function isGatewayOnlyPath(pathname: string): boolean {
   if (GATEWAY_ONLY_EXACT.has(pathname)) return true;
   return GATEWAY_ONLY_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + "/"));
@@ -326,8 +329,11 @@ export async function middleware(request: NextRequest) {
   // rewrites (verified on-device: /api/zzz answered 401 from here, never the
   // gateway), always sees the current edition, and survives a stale build.
   //
-  // Nothing on the ClawBox side owns these paths: there is no src/app/api, no
-  // /assets route, and public/ has neither favicon.svg nor favicon-32.png.
+  // ClawBox owns these paths only as gateway proxies: src/app/api/[...path],
+  // src/app/assets/[...path] and the two favicon route handlers all forward to
+  // 127.0.0.1:18789 via proxyGatewayRequest(). They replaced the next.config.ts
+  // rewrites (which added x-forwarded-* headers OpenClaw 2 refuses), and this
+  // gate still runs ahead of them, so a Hermes box answers 404 as before.
   if (isGatewayOnlyPath(pathname) && readEdition() === "hermes") {
     if (pathname.startsWith("/api/")) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -335,8 +341,33 @@ export async function middleware(request: NextRequest) {
     return new NextResponse("Not found", { status: 404, headers: { "Content-Type": "text/plain" } });
   }
 
-  // 2. Public paths — no auth needed
-  if (isPublicPath(pathname)) {
+  // 2. Public paths — no auth needed.
+  //
+  // The RAW path, not the lower-cased `pathname`: this gate decides, but the
+  // ROUTER routes the original string. `/Login` folded into PUBLIC_EXACT here
+  // and was then routed as `/Login`, which matches no page — so it fell to the
+  // gateway catch-all and was answered, unauthenticated, with the token-
+  // bearing SPA shell. Same for `/Manifest.json` and `/SW.JS`. Any gate must
+  // decide on the string the router will actually use.
+  if (isPublicPath(request.nextUrl.pathname)) {
+    return NextResponse.next();
+  }
+
+  // 2a. The Control UI's own static files — /assets, /themes, /fonts,
+  // /provider-icons and friends — which the browser fetches credential-less
+  // because the gateway marks its stylesheets `crossorigin`. See
+  // src/lib/gateway-static.ts. This sits AFTER the Hermes gate above, so a
+  // Hermes box still answers 404 rather than proxying to a masked gateway.
+  //
+  // The RAW path, never the lower-cased `pathname` above. Those are two
+  // different strings, and routing uses the raw one: `/ASSETS/x.css` lower-cases
+  // into the allow-list here, but no /assets route matches the real path, so it
+  // fell through to the catch-all — which answered an UNAUTHENTICATED caller
+  // with the SPA shell, and that shell carries the injected gateway auth token.
+  // One case-folded character was a full gateway credential, on the open
+  // internet through the tunnel. Any gate must decide on the string the router
+  // will actually use.
+  if (isPublicGatewayAsset(request.nextUrl.pathname, request.method)) {
     return NextResponse.next();
   }
 
