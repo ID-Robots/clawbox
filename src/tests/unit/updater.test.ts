@@ -28,6 +28,7 @@ vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: mockRunHermesCli }));
 
 import { get, set, setMany } from "@/lib/config-store";
 import { isPortOpen } from "@/lib/port-probe";
+import { deferred } from "@/tests/helpers/deferred";
 
 const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
@@ -378,6 +379,52 @@ describe("updater", () => {
       expect(mockSetMany).toHaveBeenCalledWith(
         expect.objectContaining({ update_completed: true }),
       );
+    });
+
+    it("does not stop the gateway while its pre-start is still running", async () => {
+      // At boot clawbox-gateway.service and clawbox-setup.service start
+      // together, and the gateway's ExecStartPre (gateway-pre-start.sh) can
+      // spend minutes in a plugin install on a cold box. The second half of
+      // an update is resumed from boot now, and its first act is to quiesce
+      // the gateway — `systemctl stop` on a unit in `start-pre` kills that
+      // migration halfway, the very thing the pre-start budget exists to
+      // prevent. The quiesce has to let the pre-start finish first.
+      const preStart = { stdout: "start-pre\n", stderr: "" };
+      setupExecFileMock({
+        "show clawbox-gateway.service -p SubState": preStart,
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+      // The first query sees the pre-start running; every later one sees it
+      // done (the mock reads `preStart` at call time).
+      const answer = mockExecFile.getMockImplementation()!;
+      let preStartQueries = 0;
+      mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+        if (args.join(" ").includes("clawbox-gateway.service -p SubState") && preStartQueries++ > 0) {
+          preStart.stdout = "running\n";
+        }
+        return (answer as (...a: unknown[]) => unknown)(cmd, args, ...rest);
+      }) as unknown as typeof childProcess.execFile);
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("completed");
+      });
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      const firstMask = calls.findIndex((call) => call.includes("systemctl --runtime mask clawbox-gateway.service"));
+      const preStartQueriesBeforeMask = calls
+        .slice(0, firstMask)
+        .filter((call) => call.includes("show clawbox-gateway.service -p SubState --value"));
+      expect(firstMask).toBeGreaterThan(-1);
+      // Asked, saw the pre-start running, asked again, and only then masked.
+      expect(preStartQueriesBeforeMask.length).toBeGreaterThanOrEqual(2);
     });
 
     it("fails when an overrun post_update later settles with a systemd error result", async () => {
@@ -857,6 +904,25 @@ describe("updater", () => {
       expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", undefined);
     });
 
+    it("resumes once when a boot check and a status poll overlap", async () => {
+      // The boot hook and the status route can both ask within the same
+      // tick. The flag read is an await, so without a claim taken BEFORE it
+      // both callers read the flag as set and both launch the second half of
+      // the update — post_update twice, two gateway restarts.
+      updater.resetUpdateState();
+      const flagRead = deferred();
+      mockGet.mockImplementation(async (key: string) =>
+        key === "update_needs_continuation" ? flagRead.promise.then(() => true) : undefined,
+      );
+
+      const fromBoot = updater.checkContinuation();
+      const fromPoll = updater.checkContinuation();
+      flagRead.resolve();
+
+      expect(await Promise.all([fromBoot, fromPoll])).toEqual([true, false]);
+      expect(mockSet.mock.calls.filter(([key]) => key === "update_needs_continuation")).toHaveLength(1);
+    });
+
     it("reports a failed update instead of resuming when the rebuild unit failed", async () => {
       // The continuation flag only proves the rebuild unit STARTED. If the
       // server came back without the unit succeeding (georgi: a config-set
@@ -904,6 +970,31 @@ describe("updater", () => {
       const state = updater.getUpdateState();
       expect(state.phase).toBe("failed");
       expect(state.error).toContain("without producing a new build");
+    });
+  });
+
+  describe("updateInFlight", () => {
+    // What the boot hooks that touch the OpenClaw store ask before starting:
+    // an update is in flight while it runs AND while its second half is still
+    // waiting to be resumed after the reboot.
+    it("is false on a box with nothing to update", async () => {
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(undefined);
+      expect(await updater.updateInFlight()).toBe(false);
+    });
+
+    it("is true while an update runs", async () => {
+      updater.resetUpdateState();
+      updater.startUpdate();
+      expect(await updater.updateInFlight()).toBe(true);
+    });
+
+    it("is true while the post-reboot half is still waiting to be resumed", async () => {
+      updater.resetUpdateState();
+      mockGet.mockImplementation(async (key: string) =>
+        key === "update_needs_continuation" ? "build-before-reboot" : undefined,
+      );
+      expect(await updater.updateInFlight()).toBe(true);
     });
   });
 

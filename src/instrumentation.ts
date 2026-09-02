@@ -62,8 +62,15 @@ export async function repairOpenclawConfig(repairs: {
  * (2026-09-01). Nothing an update does should depend on being watched.
  *
  * The status route keeps its call as the fallback. The two never collide: the
- * check consumes the persisted flag synchronously before any real I/O, so
- * whichever asks first resumes and the other finds nothing to do.
+ * check is single-flight (it claims the continuation before its first await),
+ * so whichever asks first resumes and the other finds nothing to do.
+ *
+ * Waits for the boot-time config repair first. That repair restarts the
+ * gateway when it changed something, and the resumed update's first act is to
+ * mask and stop the gateway for post_update: started together, the restart
+ * either fails against the mask (a spurious boot error) or the stop lands on
+ * the gateway's pre-start halfway through. Whether the repair succeeded or
+ * not is beside the point — only that it is over.
  *
  * Never awaited and never allowed to throw: clawbox-setup.service is
  * Restart=always, so an unhandled rejection here is a crash loop, not a
@@ -73,22 +80,58 @@ export async function repairOpenclawConfig(repairs: {
  */
 export function armUpdateContinuation(
   checkContinuation: () => Promise<boolean>,
-  delayMs = 5_000,
+  options: { afterConfigRepair?: Promise<unknown>; delayMs?: number } = {},
 ): NodeJS.Timeout {
-  const timer = setTimeout(() => {
-    void Promise.resolve()
-      .then(() => checkContinuation())
-      .then((resumed) => {
-        if (resumed) console.log('[Updater] continuation resumed at boot')
-      })
-      .catch((err: unknown) => {
-        console.error('[instrumentation] Update continuation at boot failed:', err instanceof Error ? err.message : err)
-      })
+  const { afterConfigRepair = Promise.resolve(), delayMs = 5_000 } = options
+  const timer = setTimeout(async () => {
+    try {
+      await afterConfigRepair.catch(() => undefined)
+      if (await checkContinuation()) console.log('[Updater] continuation resumed at boot')
+    } catch (err) {
+      console.error('[Updater] continuation at boot failed:', err instanceof Error ? err.message : err)
+    }
   }, delayMs)
   timer.unref()
   return timer
 }
 
+/**
+ * Warm the memory-status cache once the boot rush has passed — unless an
+ * update owns the box.
+ *
+ * WHY THE GATE. The probe boots a whole OpenClaw process against the v2
+ * SQLite store, and the resumed second half of an update (armed above) runs
+ * post_update against that same store with the gateway masked and stopped
+ * precisely so it has ONE writer. With the continuation resumed at boot the
+ * probe would land inside that window on every first boot after an update:
+ * "database is locked", and post_update's fixups — non-fatal by design —
+ * silently skipped. An update in flight means no warm; the first reader pays
+ * the probe instead, as it always did. A gate that cannot be read is treated
+ * the same way: better one slow Settings open than a second writer.
+ */
+export function armMemoryStatusWarm(deps: {
+  warm: () => Promise<void>
+  updateInFlight: () => Promise<boolean>
+  delayMs?: number
+}): NodeJS.Timeout {
+  const { warm, updateInFlight, delayMs = 45_000 } = deps
+  const timer = setTimeout(async () => {
+    try {
+      if (await updateInFlight()) return
+      await warm()
+    } catch {
+      /* the first reader retries */
+    }
+  }, delayMs)
+  timer.unref()
+  return timer
+}
+
+/**
+ * Next.js calls this once per server start, in both runtimes. Everything
+ * below is Node-only and loaded through `require()` so the Edge bundle never
+ * sees it; each hook fails on its own and none of them may stop the boot.
+ */
 export async function register() {
   if (typeof process === 'undefined' || process.env.NEXT_RUNTIME === 'edge') return
 
@@ -99,15 +142,16 @@ export async function register() {
   const { ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, restartGateway } = require('./lib/openclaw-config')
   startTerminalServer()
   // One-time repairs of openclaw.json, in sequence — see repairOpenclawConfig
-  // for why they must not run together. Never awaited: boot goes on.
-  void repairOpenclawConfig({ ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, restartGateway })
+  // for why they must not run together. Never awaited: boot goes on. Never
+  // rejects: every step inside catches for itself.
+  const configRepaired = repairOpenclawConfig({ ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, restartGateway })
   try {
     // An update that rebooted the box still has its second half to run. Ask
     // here, so it starts whether or not anyone opens the Update page — see
-    // armUpdateContinuation.
+    // armUpdateContinuation, including why it waits for the repair above.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { checkContinuation } = require('./lib/updater')
-    armUpdateContinuation(checkContinuation)
+    armUpdateContinuation(checkContinuation, { afterConfigRepair: configRepaired })
   } catch (err) {
     console.error('[instrumentation] Could not arm the update continuation:', err instanceof Error ? err.message : err)
   }
@@ -175,14 +219,15 @@ export async function register() {
     // Jetson). Pay it once, after the boot rush (gateway restart, schedulers,
     // Next's own warm-up) has passed, so the first Settings → Local AI open
     // answers from the cache. Not on Hermes: there is no openclaw to probe.
+    // Not under an update either — see armMemoryStatusWarm.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { openclawIsAbsent } = require('./lib/openclaw-config')
     if (!openclawIsAbsent()) {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { warmMemoryStatusCache } = require('./lib/clawkeep-memory')
-      setTimeout(() => {
-        void warmMemoryStatusCache().catch(() => { /* the first reader retries */ })
-      }, 45_000).unref()
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { updateInFlight } = require('./lib/updater')
+      armMemoryStatusWarm({ warm: warmMemoryStatusCache, updateInFlight })
     }
   } catch (err) {
     console.error('[instrumentation] Could not warm the memory status cache:', err instanceof Error ? err.message : err)

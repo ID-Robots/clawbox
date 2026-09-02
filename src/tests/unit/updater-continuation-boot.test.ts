@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
 import path from "path";
 import { armUpdateContinuation } from "@/instrumentation";
+import { deferred } from "@/tests/helpers/deferred";
 
 /**
  * The second half of an update — the system fixups, the Hermes
@@ -20,8 +21,9 @@ import { armUpdateContinuation } from "@/instrumentation";
  */
 
 const BOOT_DELAY_MS = 5_000;
-// The call in register(), as distinct from the helper's own definition.
-const BOOT_CALL = /armUpdateContinuation\(checkContinuation\)/;
+// The call in register(), as distinct from the helper's own definition. The
+// repair promise is part of the pin: see "waits for the config repair".
+const BOOT_CALL = /armUpdateContinuation\(checkContinuation, \{ afterConfigRepair: configRepaired \}\)/;
 
 describe("armUpdateContinuation", () => {
   beforeEach(() => {
@@ -52,11 +54,42 @@ describe("armUpdateContinuation", () => {
     expect(checkContinuation).toHaveBeenCalledTimes(1);
   });
 
+  it("waits for the config repair to finish before asking", async () => {
+    // The repair restarts the gateway when it wrote something; the resumed
+    // update masks and stops the gateway first thing. Overlapped, the restart
+    // fails against the mask or the stop kills the gateway's pre-start.
+    const repair = deferred();
+    const checkContinuation = vi.fn(async () => false);
+
+    armUpdateContinuation(checkContinuation, { afterConfigRepair: repair.promise, delayMs: 10 });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(checkContinuation).not.toHaveBeenCalled();
+
+    repair.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checkContinuation).toHaveBeenCalledTimes(1);
+  });
+
+  it("still asks when the config repair failed", async () => {
+    // Only that the repair is OVER matters, not how it ended: an update must
+    // not lose its second half to a broken openclaw.json repair.
+    const repair = deferred();
+    const checkContinuation = vi.fn(async () => false);
+
+    armUpdateContinuation(checkContinuation, { afterConfigRepair: repair.promise, delayMs: 10 });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(checkContinuation).not.toHaveBeenCalled();
+
+    repair.reject(new Error("no config"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checkContinuation).toHaveBeenCalledTimes(1);
+  });
+
   it("says nothing when there was no update to resume", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const checkContinuation = vi.fn(async () => false);
 
-    armUpdateContinuation(checkContinuation, 10);
+    armUpdateContinuation(checkContinuation, { delayMs: 10 });
     await vi.advanceTimersByTimeAsync(10);
 
     expect(checkContinuation).toHaveBeenCalledTimes(1);
@@ -71,7 +104,7 @@ describe("armUpdateContinuation", () => {
       throw new Error("config unreadable");
     });
 
-    armUpdateContinuation(checkContinuation, 10);
+    armUpdateContinuation(checkContinuation, { delayMs: 10 });
     await vi.advanceTimersByTimeAsync(10);
 
     expect(error).toHaveBeenCalledWith(expect.stringContaining("continuation"), "config unreadable");
@@ -83,7 +116,7 @@ describe("armUpdateContinuation", () => {
       throw new Error("updater failed to load");
     });
 
-    armUpdateContinuation(checkContinuation, 10);
+    armUpdateContinuation(checkContinuation, { delayMs: 10 });
     await vi.advanceTimersByTimeAsync(10);
 
     expect(error).toHaveBeenCalledWith(expect.stringContaining("continuation"), "updater failed to load");
@@ -111,6 +144,15 @@ describe("boot arms the update continuation", () => {
     const call = source.search(BOOT_CALL);
     expect(guard).toBeGreaterThan(-1);
     expect(call).toBeGreaterThan(guard);
+  });
+
+  it("hands it the config repair it has to wait for", () => {
+    // The promise named in the call must be the one repairOpenclawConfig
+    // returned, not a fresh one: the sequencing is the whole point.
+    const repair = source.search(/const configRepaired = repairOpenclawConfig\(/);
+    const call = source.search(BOOT_CALL);
+    expect(repair).toBeGreaterThan(-1);
+    expect(call).toBeGreaterThan(repair);
   });
 
   it("does not let a failed load stop the box booting", () => {
