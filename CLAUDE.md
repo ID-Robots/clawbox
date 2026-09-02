@@ -13,7 +13,7 @@ Read before doing anything else in this repository. Every agent, workflow subage
 - This repository is public. Never commit or print a device password, token, address or personal identifier; a credential lives in a 0600 file outside the tree and reaches a command only by file, never on a command line.
 
 **The PR flow, for every fix**
-1. RED — a regression test that fails on unmodified beta; paste the failing output. If it passes, the finding is wrong: report that instead of inventing a fix.
+1. RED — a regression test that fails on unmodified beta; paste the failing output, redacted of anything the rule above forbids (credentials, addresses, identifiers), and say when lines were removed. If it passes, the finding is wrong: report that instead of inventing a fix.
 2. Fix, then grep for every other caller of what you touched and fix or explicitly clear each one. The last twenty-one residual defects here were all "the fix was right but a second call site was left unguarded".
 3. GREEN — the new test and the neighbouring suites.
 4. `/simplify` on the diff, applied. Then `/code-review` on the diff, run from the worktree; the review is read-only — apply its findings yourself.
