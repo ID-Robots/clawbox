@@ -46,6 +46,7 @@ function sameCatalog(a: ResolvedProviderCatalog, b: ResolvedProviderCatalog): bo
     && a.models.every((model, i) => (
       model.id === b.models[i].id
       && model.label === b.models[i].label
+      && model.hint === b.models[i].hint
       && model.availableOnSubscription === b.models[i].availableOnSubscription
     ));
 }

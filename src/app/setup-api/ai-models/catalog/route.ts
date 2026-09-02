@@ -664,13 +664,15 @@ function sanitizeCachedPayload(provider: string, cached: CatalogResponse): Catal
 /**
  * Providers this route never asks `openclaw models list` about.
  *
- * openrouter has its own REST catalogue; clawai's two device tiers are the
- * gateway's whole routing table; codex is not a provider on this core at all,
- * per the note above. Naming them in one place keeps "who is CLI-backed" a
- * single fact — it was spelled as two inequalities in one function and a
- * separate branch in another.
+ * Not "providers with no catalogue": openrouter enumerates over its own REST
+ * endpoint, and clawai's two device tiers ARE the gateway's whole routing
+ * table. Only codex has nothing to ask, because it is not a provider on this
+ * core at all — see the note above. What the three share is that the CLI is
+ * not the thing that answers for them, and naming that in one place keeps
+ * "who is CLI-backed" a single fact: it was spelled as two inequalities in
+ * one function and a separate branch in another.
  */
-const NO_ENUMERATION_PROVIDERS: ReadonlySet<string> = new Set(["openrouter", "clawai", "codex"]);
+const NO_CLI_ENUMERATION_PROVIDERS: ReadonlySet<string> = new Set(["openrouter", "clawai", "codex"]);
 
 interface CatalogFetchResult {
   models: CatalogModel[];
@@ -790,12 +792,12 @@ export function refreshInBackground(provider: string): void {
   // line would otherwise repeat on every request of a Hermes box's session.
   if (refreshIsBlocked(provider)) return;
 
-  // Providers that never touch the CLI (see NO_ENUMERATION_PROVIDERS); every
-  // other one's catalog comes from `openclaw models list`. On an edition without
+  // Providers that never touch the CLI (see NO_CLI_ENUMERATION_PROVIDERS);
+  // every other one's catalog comes from `openclaw models list`. On an edition without
   // the binary (Hermes) that spawn is a guaranteed ENOENT, so skip it cleanly
   // rather than fork a missing binary for each provider on every boot warmup.
   // Hermes surfaces its own model list through the Hermes dashboard, not here.
-  const usesOpenclawCli = !NO_ENUMERATION_PROVIDERS.has(provider);
+  const usesOpenclawCli = !NO_CLI_ENUMERATION_PROVIDERS.has(provider);
   if (usesOpenclawCli && openclawIsAbsent()) {
     console.log(`[catalog] skipping ${provider}: the openclaw CLI is not present on this edition`);
     // Recorded as a failed attempt so the line above appears once per backoff
