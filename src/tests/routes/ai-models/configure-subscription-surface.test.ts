@@ -323,8 +323,8 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
   });
 
   it("does not refuse the shipped default over a cache that predates it", async () => {
-    // The regression this pins: the catalog route SERVES its cached payload
-    // through `augmentWithStaticCatalog`, so a release that adds a model to
+    // The regression this pins: the picker falls back to the curated list
+    // whenever the route has no live enumeration, so a release that adds a model to
     // PROVIDER_CATALOGS offers it in the picker on day one — while the on-disk
     // cache keeps the previous enumeration for up to that route's 6h refresh
     // interval. Judging the raw cache asked a different question than the
@@ -402,8 +402,8 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
   });
 
   it("refuses a typed id an EMPTY cached surface plus the curated catalogue lacks", async () => {
-    // A file holding `models: []` is served to the picker through
-    // `augmentWithStaticCatalog`, so the customer was shown the curated rows —
+    // A file holding `models: []` leaves the picker on the curated list, so
+    // the customer was shown the curated rows —
     // the guard judges by the same list rather than answering UNKNOWN. Only a
     // MISSING cache (the test above) is unknown.
     mockSurfaceRead.mockResolvedValue(surfaceCache([]) as never);

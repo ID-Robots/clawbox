@@ -314,8 +314,8 @@ describe("/setup-api/chat/model and the Claude subscription surface", () => {
   });
 
   it("judges an EMPTY cached surface by the curated catalogue, like the picker", async () => {
-    // Not unknown. The catalog route serves this same file through
-    // `augmentWithStaticCatalog`, so the picker on this box offered the
+    // Not unknown. The catalog route unions the curated catalogue into what
+    // it serves for this same file, so the picker on this box offered the
     // curated rows and nothing else — an id in none of them is one the picker
     // never showed, and letting it through would write the very id this guard
     // exists to refuse.

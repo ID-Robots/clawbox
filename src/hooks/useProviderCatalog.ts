@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchProviderCatalog,
   getProviderCatalog,
   type ResolvedProviderCatalog,
 } from "@/lib/provider-models";
-import { PROVIDER_SIGNAL_DEBOUNCE_MS, PROVIDERS_CHANGED_EVENT } from "@/lib/ui-events";
+import { onProvidersChanged, PROVIDERS_CHANGED_EVENT } from "@/lib/ui-events";
 
 /**
  * Resolve the live model catalog for `provider` via
@@ -29,6 +29,25 @@ import { PROVIDER_SIGNAL_DEBOUNCE_MS, PROVIDERS_CHANGED_EVENT } from "@/lib/ui-e
 interface LiveCatalog {
   provider: string;
   catalog: ResolvedProviderCatalog;
+}
+
+/**
+ * Same answer? Compared field by field rather than by identity, because the
+ * route mints a new object per request and most warming polls carry rows the
+ * picker is already rendering.
+ */
+function sameCatalog(a: ResolvedProviderCatalog, b: ResolvedProviderCatalog): boolean {
+  return a.defaultModelId === b.defaultModelId
+    && a.allowCustom === b.allowCustom
+    && a.fallback === b.fallback
+    && a.warming === b.warming
+    && a.stale === b.stale
+    && a.models.length === b.models.length
+    && a.models.every((model, i) => (
+      model.id === b.models[i].id
+      && model.label === b.models[i].label
+      && model.availableOnSubscription === b.models[i].availableOnSubscription
+    ));
 }
 
 /**
@@ -70,9 +89,14 @@ export function useProviderCatalog(
     [provider],
   );
   const [live, setLive] = useState<LiveCatalog | null>(null);
-  // Bumped by the providers-changed signal. It is in the dependency list, so a
-  // connect re-runs the effect with `refresh` set instead of the effect having
-  // to reach a fetch that has already been torn down.
+  // Set by the provider-set signal, read and cleared by the next load. A REF,
+  // not the reload counter: `reloads > 0` stays true for the rest of the
+  // session after any connect, so using it as "force a re-enumeration" made
+  // every later provider switch in the picker send `?refresh=1` for a provider
+  // that had received no signal at all — a fresh ~3-minute fork on a Jetson
+  // for a catalogue that was already live.
+  const forceNextLoad = useRef(false);
+  // Bumped by the same signal, purely to re-run the effect.
   const [reloads, setReloads] = useState(0);
 
   useEffect(() => {
@@ -85,11 +109,19 @@ export function useProviderCatalog(
       fetchProviderCatalog(provider, { signal: ctrl.signal, refresh })
         .then((next) => {
           if (ctrl.signal.aborted) return;
-          setLive({ provider, catalog: next });
+          // Only when something actually changed. During a warm-up every poll
+          // returns the same curated rows, and a fresh object identity there
+          // re-runs eight memos and two setState effects in AIModelsStep and
+          // the same again in ChatPopup, per poll, per mounted picker.
+          setLive((current) => (
+            current && current.provider === provider && sameCatalog(current.catalog, next)
+              ? current
+              : { provider, catalog: next }
+          ));
           if (!next.warming || attempt >= WARMING_RETRY_ATTEMPTS) return;
           const delay = Math.min(WARMING_RETRY_BASE_MS * 2 ** attempt, WARMING_RETRY_MAX_MS);
           attempt += 1;
-          timer = setTimeout(() => load(true), delay);
+          timer = setTimeout(() => load(false), delay);
         })
         .catch((err) => {
           if (ctrl.signal.aborted) return;
@@ -98,38 +130,33 @@ export function useProviderCatalog(
     };
 
     // A connect is exactly when the catalogue becomes enumerable — the plugin
-    // is enabled and the credential is written — so that read asks the route
-    // to re-enumerate rather than serve the pre-connect snapshot.
-    load(reloads > 0);
+    // is enabled and the credential is written — so that ONE read asks the
+    // route to re-enumerate rather than serve the pre-connect snapshot. The
+    // warming polls that may follow do not: the route is already enumerating,
+    // and telling it to start again on each poll is how a picker turns a
+    // three-minute fork into several.
+    const force = forceNextLoad.current;
+    forceNextLoad.current = false;
+    load(force);
 
-    // PROVIDERS_CHANGED_EVENT alone, NOT the `onProvidersChanged` union.
-    //
-    // That helper also spans CHAT_MODEL_STATE_EVENT, which means "the chat's
-    // model SELECTION changed" — an event ChatPopup dispatches itself, on every
-    // switch. A catalogue does not change when someone picks a different row
-    // out of it, so listening to it would re-fetch with `?refresh=1` on each
-    // switch and ask a Jetson for a fresh three-minute enumeration for nothing.
-    // Measured as a real re-render storm: it broke an unrelated ChatPopup test
-    // that switches model mid-run.
-    //
-    // Every site that changes the provider SET — a key saved, an OAuth flow
-    // approved, a provider enabled or removed, a new default — calls
-    // `notifyProvidersChanged()`, which dispatches exactly this event.
-    let signalTimer: ReturnType<typeof setTimeout> | null = null;
-    const onSignal = () => {
-      if (signalTimer) clearTimeout(signalTimer);
-      signalTimer = setTimeout(() => {
-        signalTimer = null;
+    // The provider SET changed — a key saved, an OAuth flow approved, a
+    // provider enabled or removed, a new default. Deliberately NOT the whole
+    // `PROVIDER_SIGNAL_EVENTS` union: it also spans CHAT_MODEL_STATE_EVENT,
+    // which means "the chat's model SELECTION changed", and a catalogue does
+    // not change when someone picks a different row out of the list it already
+    // has. Waking on it would ask a Jetson to re-enumerate on every switch.
+    const off = onProvidersChanged(
+      () => {
+        forceNextLoad.current = true;
         setReloads((n) => n + 1);
-      }, PROVIDER_SIGNAL_DEBOUNCE_MS);
-    };
-    window.addEventListener(PROVIDERS_CHANGED_EVENT, onSignal);
+      },
+      { events: [PROVIDERS_CHANGED_EVENT] },
+    );
 
     return () => {
       ctrl.abort();
       if (timer) clearTimeout(timer);
-      if (signalTimer) clearTimeout(signalTimer);
-      window.removeEventListener(PROVIDERS_CHANGED_EVENT, onSignal);
+      off();
     };
   }, [provider, reloads]);
 

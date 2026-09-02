@@ -70,8 +70,8 @@ vi.mock("@/hooks/useLlamaCppModels", () => ({
 
 /**
  * What the route serves before any live enumeration has landed: the curated
- * cold-start rows, marked `fallback` (they are not the box's answer) and
- * `warming` (a fork is out there, so asking again is worth something).
+ * cold-start rows, with NO `source` (they are not the box's answer) and
+ * `warming: true` (a fork is out there, so asking again is worth something).
  */
 const WARMING = {
   provider: "anthropic",
@@ -84,7 +84,6 @@ const WARMING = {
   allowCustom: true,
   fetchedAt: 0,
   warming: true,
-  fallback: true,
 };
 
 /**
@@ -111,6 +110,7 @@ const LIVE = {
   defaultModelId: "claude-sonnet-5",
   allowCustom: true,
   fetchedAt: Date.now(),
+  source: "live",
 };
 
 /** Every catalog URL the component asked for, in order. */

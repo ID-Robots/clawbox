@@ -10,11 +10,59 @@
 // (e.g. `anthropic/claude-haiku-4-5`) since OpenRouter's catalog uses
 // `<org>/<model>` slugs.
 
+import { lastModelSegment } from "./chat-header-pills";
 import {
   OPENROUTER_CURATED_MODELS,
   OPENROUTER_DEFAULT_MODEL_ID,
   isValidOpenRouterModelId,
 } from "./openrouter-models";
+
+// Model families that are not CHAT models, whatever provider lists them —
+// image, audio/speech, transcription, video, embeddings, moderation, and the
+// pre-chat completion engines.
+//
+// It lives HERE, not in the catalog route, because it is a fact about model
+// ids rather than about one HTTP handler, and this module already owns the
+// catalogue vocabulary and is import-safe from both client and server. The
+// second catalogue surface (src/lib/hermes-model-options.ts) cannot import a
+// route without dragging `spawn`/`fs` in, so a rule parked there would simply
+// be copied.
+//
+// `openclaw models list` enumerates a provider's whole catalogue and offers no
+// capability filter to ask for the chat ones (`--all`, `--local`, `--provider`
+// and nothing else on 2026.8.1), and its rows carry no capability field: an
+// image SKU comes back shaped exactly like a chat model —
+// `openai/gpt-image-1-mini` beside `openai/gpt-5.6-sol`, `input` reported as
+// "-" for both on a stock host. That gap is worth reporting upstream; until it
+// closes this is the honest stopgap, and a catalogue that DOES publish the
+// capability (OpenRouter's `architecture.output_modalities`) is read instead of
+// being matched against this list.
+//
+// A MODALITY exclusion, deliberately not a generation allowlist: it can only
+// hide SKUs a chat picker has no way to talk to, never a chat model the box has
+// learned about. That distinction is the point — the generation allowlist it
+// replaces (`/^gpt-5\.[45](-pro|-mini)?$/`) hid the whole gpt-5.6 generation,
+// which is the defect this change exists to fix. Older chat generations the box
+// lists are shown: the device's own catalogue decides, and an older model the
+// box can route is not a dead button.
+const NON_CHAT_MODEL_RE = new RegExp([
+  "^(?:gpt-image|dall-e|whisper|tts-|text-embedding|omni-moderation|sora",
+  "|davinci|babbage|codex-mini)",
+  // Suffix families: gpt-4o-audio-preview, gpt-4o-realtime-preview,
+  // gpt-4o-transcribe, gpt-4o-mini-tts.
+  "|(?:-audio|-realtime|-transcribe|-tts)(?:-|$)",
+].join(""));
+
+/**
+ * Is this id a SKU a chat picker has no way to talk to?
+ *
+ * Tested against the last path segment, because OpenRouter ids keep their
+ * `<org>/<model>` slug (`openai/gpt-image-1`) and an anchored pattern matched
+ * against the whole id is silently inert for the largest catalogue we serve.
+ */
+export function isNonChatModelId(id: string): boolean {
+  return NON_CHAT_MODEL_RE.test(lastModelSegment(id));
+}
 
 export interface ProviderModelOption {
   id: string;
@@ -358,9 +406,13 @@ interface CatalogApiResponse {
   /** True when the route fell back to a stale cached payload because the
    * upstream catalog query just failed; UI may want to show a warning. */
   stale?: boolean;
-  /** True when no live device enumeration produced this payload — see
-   * `CatalogResponse.fallback` in the catalog route. */
-  fallback?: boolean;
+  /**
+   * `"live"` when a device enumeration produced this payload. Any other value,
+   * including absent, means it did not — that is the whole test. ONE field
+   * rather than a second derived boolean beside it, so the two cannot
+   * disagree; `CatalogResponse` in the catalog route persists this one.
+   */
+  source?: string;
   /** True when an enumeration is in flight right now, so asking again will
    * eventually get a different answer. */
   warming?: boolean;
@@ -419,8 +471,21 @@ export async function fetchProviderCatalog(
     }
     const body = (await res.json()) as CatalogApiResponse;
     if (!body.models || body.models.length === 0) {
-      // Empty catalog — keep the fallback so the picker isn't blank.
-      if (fallback) return { ...fallback, stale: true, fallback: true };
+      // Empty catalog — keep the curated rows so the picker isn't blank, and
+      // carry `warming` through unchanged. It is the route saying an
+      // enumeration is in flight, and it is the ONLY thing `useProviderCatalog`
+      // polls on; dropped here, a box whose cached rows the sanitiser filtered
+      // away entirely (an upgraded box holding an older build's ids) would sit
+      // on the curated list until the next provider event, while the real
+      // answer landed seconds later with nobody left asking for it.
+      if (fallback) {
+        return {
+          ...fallback,
+          stale: true,
+          fallback: true,
+          warming: body.warming === true ? true : undefined,
+        };
+      }
       throw new Error("empty catalog");
     }
     return {
@@ -440,11 +505,11 @@ export async function fetchProviderCatalog(
       allowCustom: body.allowCustom !== false,
       stale: body.stale,
       warming: body.warming === true ? true : undefined,
-      // Carried through, never inferred: the route knows whether a device
-      // enumeration produced these rows, and the client cannot tell by looking
-      // at them — that is precisely how three hard-coded Claude entries passed
-      // for the box's own catalogue for a day.
-      fallback: body.fallback === true ? true : undefined,
+      // Derived from the route's one marker, never inferred from the rows: the
+      // client cannot tell a curated list from a device's by looking at it —
+      // that is precisely how three hard-coded model names passed for the
+      // box's own catalogue for a day.
+      fallback: body.source === "live" ? undefined : true,
     };
   } catch (err) {
     // AbortError isn't a real failure — the consumer cancelled because

@@ -115,6 +115,25 @@ async function get(provider: string, params = ""): Promise<Record<string, unknow
   return (await res.json()) as Record<string, unknown>;
 }
 
+/**
+ * The provider each `openclaw models list` spawn was for.
+ *
+ * Read instead of the raw call count because the module-level boot warmup
+ * schedules a refresh for every provider on real timers, so an unrelated one
+ * can land inside a test's window.
+ */
+function spawnedProviders(): string[] {
+  return mockSpawn.mock.calls.map((call) => {
+    const args = call[1] as string[];
+    return args[args.indexOf("--provider") + 1];
+  });
+}
+
+/** Let a detached refresh get as far as it is going to get. */
+function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 200));
+}
+
 /** Ids in the payload the route published for `provider`. */
 async function publishedIds(provider: string, expected: number): Promise<string[]> {
   let ids: string[] = [];
@@ -136,6 +155,14 @@ async function publishedIds(provider: string, expected: number): Promise<string[
 // request to openrouter.ai, so fetch is stubbed; and a late google timer could
 // write that provider's cache, so the assertion below is about the CONTENT the
 // route would have persisted, not about a file existing.
+//
+// Deliberately NOT paired with an `unstubAllGlobals` teardown. The stub cannot
+// leak: vitest runs each test file in its own isolated environment (`isolate`
+// defaults to true and this project overrides neither it nor `pool`), so it
+// dies with this file. Unstubbing between tests would instead OPEN the hole —
+// those warmup timers are real and fire on the wall clock, including in the gap
+// between an `afterEach` and the next `beforeEach`, which is the one window a
+// real openrouter.ai request could slip through.
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async () => {
     throw new Error("no network in this suite");
@@ -168,8 +195,10 @@ describe("catalog — a fallback is never served as a live enumeration", () => {
     mockList(ANTHROPIC_LIVE);
 
     const first = await get("anthropic");
-    // It is served — a blank picker helps nobody — but it says what it is.
-    expect(first.fallback).toBe(true);
+    // It is served — a blank picker helps nobody — but it carries no
+    // `source: "live"`, and that absence is what tells the client what it is
+    // holding. One marker, so two cannot disagree.
+    expect(first.source).toBeUndefined();
     expect((first.models as unknown[]).length).toBe(3);
 
     // And it is retried rather than trusted for the next six hours.
@@ -178,7 +207,7 @@ describe("catalog — a fallback is never served as a live enumeration", () => {
     expect(live).toContain("claude-opus-4-8");
 
     const second = await get("anthropic");
-    expect(second.fallback).toBeFalsy();
+    expect(second.source).toBe("live");
     expect((second.models as Array<{ id: string }>).map((m) => m.id)).toHaveLength(11);
   });
 
@@ -235,30 +264,22 @@ describe("catalog — the ChatGPT surface has no enumeration on this core", () =
   // the only row AND handed it as the saved default, and every turn would 400.
   // Replacing a hard-coded list with a wrong one is the same defect pointed the
   // other way, so this catalogue enumerates nothing and says so.
-  it("does not synthesise a ChatGPT catalogue out of the openai one", async () => {
-    mockList({
-      ok: false,
-      error: {
-        type: "cli_error",
-        message: 'Unknown provider filter "codex" for this installation.',
-      },
-    });
-
+  it("does not synthesise a ChatGPT catalogue out of the openai one, and does not ask", async () => {
     refreshInBackground("codex");
-    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled(), { timeout: 2000 });
     await new Promise((resolve) => setTimeout(resolve, 200));
 
-    const providerArgs = mockSpawn.mock.calls
-      .map((call) => (call[1] as string[]))
-      .map((args) => args[args.indexOf("--provider") + 1]);
-    expect(providerArgs).not.toContain("openai");
+    // Not from openai — and not from `codex` either. The CLI's answer is known
+    // and written down; forking a whole openclaw process on a Jetson at every
+    // boot, and again once per backoff window, to be told
+    // `Unknown provider filter "codex"` buys nothing.
+    expect(mockSpawn).not.toHaveBeenCalled();
     expect(fs.existsSync(cacheFile("codex"))).toBe(false);
   });
 
   it("serves the curated ChatGPT list marked fallback, in its curated order", async () => {
     const body = await get("codex");
 
-    expect(body.fallback).toBe(true);
+    expect(body.source).toBeUndefined();
     // Curated newest-first, and it stays that way: sorting by context window
     // put GPT-5.4 at the top, because only the Anthropic ids carry a real
     // window in the cold-start table.
@@ -349,5 +370,50 @@ describe("catalog — a provider that cannot answer is not asked on every reques
     refreshInBackground("anthropic");
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  // A wait that does not GROW is not a backoff. Deriving the last wait from the
+  // stored DEADLINE cannot grow: an attempt only gets past the guard once that
+  // deadline has passed, so `deadline - now` is negative by the time the next
+  // failure records it, and the doubling collapses to the two-minute floor
+  // forever — the flat 2-minute fork loop this brake exists to bound.
+  //
+  // Only `Date` is faked. The route's own waits are real (the mocked child
+  // settles on a microtask), and faking the timer queue as well would stop the
+  // module-level boot warmup that the rest of this file runs against.
+  it("doubles the wait after each attempt that does not answer", async () => {
+    mockList({
+      ok: false,
+      error: { type: "cli_error", message: "the anthropic plugin is disabled" },
+    });
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      // anthropic is two minutes into a backoff from the test above, which is
+      // where the sequence starts: the wait after THIS failure must be four.
+      const t0 = Date.now();
+      vi.setSystemTime(t0 + 2 * 60_000 + 1_000);
+
+      mockSpawn.mockClear();
+      refreshInBackground("anthropic");
+      await settle();
+      expect(spawnedProviders()).toContain("anthropic");
+
+      // Two more minutes is no longer enough.
+      vi.setSystemTime(Date.now() + 2 * 60_000 + 1_000);
+      mockSpawn.mockClear();
+      refreshInBackground("anthropic");
+      await settle();
+      expect(spawnedProviders()).not.toContain("anthropic");
+
+      // Four is.
+      vi.setSystemTime(Date.now() + 2 * 60_000 + 1_000);
+      mockSpawn.mockClear();
+      refreshInBackground("anthropic");
+      await settle();
+      expect(spawnedProviders()).toContain("anthropic");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

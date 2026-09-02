@@ -272,6 +272,16 @@ export function notifyProvidersChanged(): void {
  * a Jetson the provider status call is a `hermes` spawn, so the duplicate is
  * measured in seconds, not milliseconds.
  *
+ * `events` narrows the set for the rare listener that must NOT wake on all
+ * three. It exists for the model CATALOGUE, which is a fact about the box and
+ * not about the chat's current selection: `CHAT_MODEL_STATE_EVENT` means "the
+ * selection changed", and re-enumerating a catalogue for that would ask a
+ * Jetson for a ~3-minute `openclaw models list` over a pick the customer made
+ * from the list it already had. Narrowing stays an OPTION rather than a second
+ * helper so the debounce, the unsubscribe and the pending-timer cancellation
+ * below have exactly one implementation — the copy of them that briefly lived
+ * in `useProviderCatalog` is what this parameter deletes.
+ *
  * The debounce lives HERE, on the listen side, rather than inside
  * `notifyProvidersChanged`. An emitter-side debounce would collapse two
  * genuinely different writes from two different components into one, and the
@@ -282,10 +292,11 @@ export const PROVIDER_SIGNAL_DEBOUNCE_MS = 150;
 
 export function onProvidersChanged(
   listener: () => void,
-  options: { debounceMs?: number } = {},
+  options: { debounceMs?: number; events?: readonly string[] } = {},
 ): () => void {
   if (typeof window === "undefined") return () => {};
   const wait = options.debounceMs ?? PROVIDER_SIGNAL_DEBOUNCE_MS;
+  const names = options.events ?? PROVIDER_SIGNAL_EVENTS;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const onSignal = () => {
     if (timer) clearTimeout(timer);
@@ -294,13 +305,13 @@ export function onProvidersChanged(
       listener();
     }, wait);
   };
-  for (const name of PROVIDER_SIGNAL_EVENTS) window.addEventListener(name, onSignal);
+  for (const name of names) window.addEventListener(name, onSignal);
   return () => {
     // Cancel the pending call as well as unsubscribing: a listener that fires
     // after its component unmounted is a setState on a dead tree, and this is
     // the one place the timer is reachable.
     if (timer) clearTimeout(timer);
-    for (const name of PROVIDER_SIGNAL_EVENTS) window.removeEventListener(name, onSignal);
+    for (const name of names) window.removeEventListener(name, onSignal);
   };
 }
 
