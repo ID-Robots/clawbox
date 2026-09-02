@@ -1061,6 +1061,23 @@ describe("updater", () => {
       expect(await updater.updateInFlight()).toBe(true);
     });
 
+    it("is true when an update starts while the flag is being read", async () => {
+      // Owner clicks Update in the same instant the 45 s warm asks. The
+      // ownership check before the flag read is stale by the time the read
+      // resolves; without a re-check the warm would run under the update.
+      updater.resetUpdateState();
+      const flagRead = deferred();
+      mockGet.mockImplementation(async (key: string) =>
+        key === "update_needs_continuation" ? flagRead.promise.then(() => undefined) : undefined,
+      );
+
+      const asked = updater.updateInFlight();
+      expect(updater.startUpdate()).toEqual({ started: true });
+      flagRead.resolve();
+
+      expect(await asked).toBe(true);
+    });
+
     it("is true while the post-reboot half is still waiting to be resumed", async () => {
       updater.resetUpdateState();
       mockGet.mockImplementation(async (key: string) =>

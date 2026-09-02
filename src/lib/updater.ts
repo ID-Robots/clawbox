@@ -1728,7 +1728,9 @@ function launchUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOpt
  */
 export async function updateInFlight(): Promise<boolean> {
   if (updateOwned()) return true;
-  return Boolean(await get("update_needs_continuation"));
+  const needsContinuation = await get("update_needs_continuation");
+  // An update may have claimed the box while the flag was being read.
+  return updateOwned() || Boolean(needsContinuation);
 }
 
 /**
