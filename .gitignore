@@ -38,7 +38,10 @@ playwright-report/
 test-results/
 e2e-install/cache/
 scripts/nm-dispatcher-failover.sh
-.claude/
+# Claude Code: local state stays ignored; shared agents and workflows are tracked
+.claude/*
+!.claude/agents/
+!.claude/workflows/
 
 # Local debug scripts (per-session sandbox)
 .scratch/

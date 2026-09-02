@@ -2,6 +2,35 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Working rules
+
+Read before doing anything else in this repository. Every agent, workflow subagent and coding-agent run is bound by these.
+
+**Branches and commits**
+- Target `beta`. Never commit to or delete `main` or `beta` directly; every change is a PR to `beta`, merged with a merge commit. Base every branch on freshly fetched `origin/beta` and rebase before pushing — beta moves constantly, and a conflicting PR silently stops CI from running.
+- Work in a worktree: `git worktree add ../clawbox-wt-<id> -b <type>/<id>-<slug> origin/beta`. **Never `git stash`** — the stash list is shared across every worktree and one agent's stash lands in another's tree.
+- Commits are authored from git config. Never pass `--author` or `-c user.email`. No AI attribution anywhere: no generated-by footer, no `Co-Authored-By`, and no assistant name in any commit message, PR title or PR body. Commit format `type: description`.
+- This repository is public. Never commit or print a device password, token, address or personal identifier; a credential lives in a 0600 file outside the tree and reaches a command only by file, never on a command line.
+
+**The PR flow, for every fix**
+1. RED — a regression test that fails on unmodified beta; paste the failing output. If it passes, the finding is wrong: report that instead of inventing a fix.
+2. Fix, then grep for every other caller of what you touched and fix or explicitly clear each one. The last twenty-one residual defects here were all "the fix was right but a second call site was left unguarded".
+3. GREEN — the new test and the neighbouring suites.
+4. `/simplify` on the diff, applied. Then `/code-review` on the diff, run from the worktree; the review is read-only — apply its findings yourself.
+5. Push, open the PR; wait for CI (`e2e-install` takes 16–22 minutes) and CodeRabbit; address or explicitly refute every actionable comment in-thread; merge.
+
+**The three bug classes this codebase keeps producing**
+- *Probe-once*: a capability checked once at startup and treated as fact for the process lifetime.
+- *False success*: an exit code, a `200`, `|| true` or `|| echo WARN` read as an outcome; success reported before the thing happened.
+- *False failure*: an error reported over an operation that succeeded.
+Look for all three in every diff, and for the sibling call site of every fix.
+
+**Where things run**
+- Build, test and typecheck **on a device**, not on the development PC; unit suites run in CI. Device access goes only through the `clawbox-box` skill (shell, owner session, mutex, update) — never a hand-rolled SSH.
+- Take the device mutex only while mutating a box, write who and why, release it on the way out including on failure; if it is held, wait, never steal. Restore anything you change and prove it by diffing before and after. Never send or queue an email, change a channel, reset or reboot a box unless that is the task.
+- Agents run on Opus 5 or Fable 5 only; if a task resolves to any other model, stop it.
+- Findings handed to another agent go by **file path**, never sliced into a prompt; a truncated list has twice silently dropped real defects here.
+
 ## Project
 
 ClawBox is **OpenClaw OS** — the operating system for [OpenClaw Hardware](https://clawbox.com/), a private AI assistant running on NVIDIA Jetson (Tegra/ARM). It manages the full device lifecycle: broadcasts a WiFi access point with captive portal for first-boot setup from any phone/laptop, transitions to the home network, then serves a Chrome OS-style desktop environment with built-in apps. The OpenClaw AI agent controls the entire device through MCP (Model Context Protocol) tools — making ClawBox an OS the AI can operate, not just a UI the user clicks through.
