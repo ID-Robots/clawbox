@@ -38,14 +38,20 @@ interface CachedSurface {
  * Null means UNKNOWN and every caller must treat it as "do not refuse" — the
  * same rule `isModelUsableOnSubscription` applies in the pickers. A missing
  * cache is unknown: treating it as authoritative would refuse the entire
- * catalogue on a box whose enumeration simply has not run yet. A cache that
- * EXISTS but enumerated nothing is judged by the curated catalogue alone —
- * that is exactly what the catalog route serves for the same file, so the
- * picker on that box offers the curated rows and nothing else. Answering
- * UNKNOWN there would let a typed id the picker never offered through the
- * very write this guard exists to refuse. Only when neither list has an id
- * (a NARROWER named surface with no curated catalogue, enumerated empty) is
- * there nothing to judge against.
+ * catalogue on a box whose enumeration simply has not run yet.
+ *
+ * A MISSING cache is now the state a thin or failed enumeration leaves behind
+ * (M-05: the route stopped persisting a payload it did not get from a device),
+ * where it used to leave a file holding the curated ids. That moves such a box
+ * from "refuse anything outside the curated three" to UNKNOWN, and that is the
+ * right direction, not a gap: the curated three are not what the device can
+ * run, so refusing against them refused models the box routes perfectly well —
+ * the false-failure this file's own rule above forbids. The guard still
+ * refuses against a REAL enumeration, which is the case it was built for.
+ *
+ * A cache that exists but lists nothing can no longer occur; if a downgrade
+ * leaves one behind it is judged by the curated catalogue alone, which is what
+ * the picker shows for that same file.
  *
  * No age check and no memo. Both are deliberate:
  *

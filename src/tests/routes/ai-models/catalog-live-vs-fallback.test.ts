@@ -129,6 +129,19 @@ async function publishedIds(provider: string, expected: number): Promise<string[
   return ids;
 }
 
+// The first GET in this file starts the route's module-level `bootWarmup`,
+// which schedules a refresh for every CATALOG_PROVIDERS entry (clawai at 0ms,
+// then 5s apart) and cannot be reset between tests. Two consequences are
+// handled here rather than tolerated: the openrouter warmup would make a REAL
+// request to openrouter.ai, so fetch is stubbed; and a late google timer could
+// write that provider's cache, so the assertion below is about the CONTENT the
+// route would have persisted, not about a file existing.
+beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn(async () => {
+    throw new Error("no network in this suite");
+  }));
+});
+
 describe("catalog — a fallback is never served as a live enumeration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -198,49 +211,66 @@ describe("catalog — a fallback is never served as a live enumeration", () => {
     await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled(), { timeout: 2000 });
     await new Promise((resolve) => setTimeout(resolve, 200));
 
-    // Zero models is not an answer about what the box can run. Writing the six
+    // Zero models is not an answer about what the box can run. Writing the
     // curated ids here is what made "[catalog] refreshed codex: 0 models" look
     // like a successful refresh.
-    expect(fs.existsSync(cacheFile("google"))).toBe(false);
+    const persisted = fs.existsSync(cacheFile("google"))
+      ? readCache("google").models.map((m) => m.id)
+      : [];
+    expect(persisted).toEqual([]);
   });
 });
 
-describe("catalog — the ChatGPT surface is the openai catalogue", () => {
+describe("catalog — the ChatGPT surface has no enumeration on this core", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     fs.rmSync(path.join(DATA_DIR, "catalog-cache"), { recursive: true, force: true });
   });
 
-  // `codex` was a provider id in the OpenClaw core through 2026.6.x. It is
-  // gone in 2026.8.1 — `openclaw models list --provider codex` answers
-  // "Unknown provider filter" — and a ChatGPT subscription is now an `openai`
-  // OAuth profile serving `openai/*` (docs.openclaw.ai/concepts/models,
-  // `openclaw models auth login --provider openai`). So the rows the ChatGPT
-  // route can run have to be enumerated from `openai` and narrowed by the
-  // documented ChatGPT-account allowlist, not read out of a hard-coded list.
-  it("enumerates openai and narrows it to what a ChatGPT account can run", async () => {
+  // `codex` is gone from the OpenClaw 2 core, so the obvious move is to serve
+  // its picker from the `openai` catalogue narrowed by the ChatGPT-account
+  // allowlist. That would be a WRONG live list, not a live list: the openai
+  // catalogue is not plan-scoped — it carries gpt-5.6-sol on any box, and
+  // gpt-5.6 is plan-gated upstream — so a Free account would be offered it as
+  // the only row AND handed it as the saved default, and every turn would 400.
+  // Replacing a hard-coded list with a wrong one is the same defect pointed the
+  // other way, so this catalogue enumerates nothing and says so.
+  it("does not synthesise a ChatGPT catalogue out of the openai one", async () => {
     mockList({
-      count: 6,
-      models: [
-        { key: "openai/gpt-5.5", name: "GPT-5.5", contextWindow: 400_000, available: true, tags: [] },
-        { key: "openai/gpt-5.5-pro", name: "GPT-5.5 Pro", contextWindow: 400_000, available: true, tags: [] },
-        { key: "openai/gpt-5.4", name: "GPT-5.4", contextWindow: 1_000_000, available: true, tags: [] },
-        { key: "openai/gpt-5.4-mini", name: "GPT-5.4 Mini", contextWindow: 1_000_000, available: true, tags: [] },
-        { key: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", contextWindow: 400_000, available: true, tags: [] },
-        { key: "openai/gpt-image-1-mini", name: "GPT Image 1 Mini", contextWindow: 0, available: true, tags: [] },
-      ],
+      ok: false,
+      error: {
+        type: "cli_error",
+        message: 'Unknown provider filter "codex" for this installation.',
+      },
     });
 
     refreshInBackground("codex");
-    const ids = await publishedIds("codex", 4);
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled(), { timeout: 2000 });
+    await new Promise((resolve) => setTimeout(resolve, 200));
 
     const providerArgs = mockSpawn.mock.calls
       .map((call) => (call[1] as string[]))
       .map((args) => args[args.indexOf("--provider") + 1]);
-    expect(providerArgs).toContain("openai");
-    expect(providerArgs).not.toContain("codex");
+    expect(providerArgs).not.toContain("openai");
+    expect(fs.existsSync(cacheFile("codex"))).toBe(false);
+  });
 
-    expect(ids.sort()).toEqual(["gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-sol"]);
+  it("serves the curated ChatGPT list marked fallback, in its curated order", async () => {
+    const body = await get("codex");
+
+    expect(body.fallback).toBe(true);
+    // Curated newest-first, and it stays that way: sorting by context window
+    // put GPT-5.4 at the top, because only the Anthropic ids carry a real
+    // window in the cold-start table.
+    expect((body.models as Array<{ id: string }>).map((m) => m.id)).toEqual([
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+    ]);
+    expect(body.defaultModelId).toBe("gpt-5.5");
   });
 
   // The API-key surface is NOT the ChatGPT one and must not borrow its
@@ -269,21 +299,55 @@ describe("catalog — the ChatGPT surface is the openai catalogue", () => {
   });
 
   it("drops a row the harness itself reports as unavailable, and keeps an undetermined one", async () => {
-    // `available` is the harness's verdict on whether the row is in the
-    // catalogue this box resolved (docs.openclaw.ai/concepts/models), not a
-    // credential check — `null` is what an unconfigured host answers for every
-    // row, and hiding those would empty the picker during setup.
+    // `available` is tristate — it mirrors the CLI's Auth column (`ok` /
+    // `unknown` / `unavailable`). `null` is what an unconfigured host answers
+    // for every row, and hiding those would empty the picker during setup.
+    // Runs on openai because the previous test published it successfully,
+    // which clears the failed-refresh backoff; google is still serving one.
     mockList({
       count: 3,
       models: [
-        { key: "google/gemini-3.5-flash", name: "Gemini 3.5 Flash", contextWindow: 1_000_000, available: true, tags: [] },
-        { key: "google/gemini-2.5-pro", name: "Gemini 2.5 Pro", contextWindow: 1_000_000, available: null, tags: [] },
-        { key: "google/gemini-1.0-pro", name: "Gemini 1.0 Pro", contextWindow: 32_000, available: false, tags: [] },
+        { key: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", contextWindow: 400_000, available: true, tags: [] },
+        { key: "openai/gpt-5.5", name: "GPT-5.5", contextWindow: 400_000, available: null, tags: [] },
+        { key: "openai/gpt-4.1", name: "GPT-4.1", contextWindow: 128_000, available: false, tags: [] },
       ],
     });
 
-    refreshInBackground("google");
-    const ids = await publishedIds("google", 2);
-    expect(ids.sort()).toEqual(["gemini-2.5-pro", "gemini-3.5-flash"]);
+    refreshInBackground("openai");
+    const ids = await publishedIds("openai", 2);
+    expect(ids.sort()).toEqual(["gpt-5.5", "gpt-5.6-sol"]);
+  });
+});
+
+describe("catalog — a provider that cannot answer is not asked on every request", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fs.rmSync(path.join(DATA_DIR, "catalog-cache"), { recursive: true, force: true });
+  });
+
+  // `openclaw models list` costs ~3 minutes and ~2 cores on a Jetson. The rule
+  // "a payload no device produced is a reason to ask again" would, on a
+  // provider that can NEVER enumerate, turn every picker open into another
+  // fork — and the client retries twelve times with `refresh=1`. The
+  // single-flight set only collapses the concurrent ones.
+  it("backs off after an enumeration that did not answer", async () => {
+    mockList({
+      ok: false,
+      error: { type: "cli_error", message: "the anthropic plugin is disabled" },
+    });
+
+    // anthropic, because the backoff map is module state: google and codex are
+    // already serving one from the tests above, while anthropic's last refresh
+    // in this file succeeded and therefore cleared it. This describe is last,
+    // so leaving anthropic backed off costs nothing.
+    refreshInBackground("anthropic");
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalledTimes(1), { timeout: 2000 });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    mockSpawn.mockClear();
+    refreshInBackground("anthropic");
+    refreshInBackground("anthropic");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 });

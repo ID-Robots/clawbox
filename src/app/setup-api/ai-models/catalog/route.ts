@@ -68,7 +68,11 @@ interface CatalogResponse {
   fetchedAt: number;
   /** Set by GET when the cached payload is older than REFRESH_INTERVAL_MS. */
   stale?: boolean;
-  /** Set when neither cache has anything yet — client falls back to static catalog. */
+  /**
+   * Set when neither cache has anything yet. The curated cold-start list is
+   * served alongside it (and `fallback`), so the picker has rows to render
+   * while the first enumeration runs.
+   */
   warming?: boolean;
   /**
    * Where these models came from. `"live"` means a device enumeration
@@ -79,8 +83,10 @@ interface CatalogResponse {
    * Absent is not a synonym for "old": a payload persisted by a build before
    * this field existed is indistinguishable from one built out of the curated
    * cold-start arrays, which is exactly the state that made three hard-coded
-   * Claude entries the truth on a box that could run eleven. Treating an
-   * unmarked file as NOT live re-enumerates it once and costs nothing else.
+   * model names the truth on a box that could run eleven. An unmarked file is
+   * therefore re-enumerated — once if that succeeds, and thereafter on the
+   * `nextAttemptAt` backoff if it does not, so a provider that can never
+   * enumerate cannot turn this rule into a fork per request.
    */
   source?: "live";
   /**
@@ -97,6 +103,54 @@ interface CatalogResponse {
 const memCache = new Map<string, CatalogResponse>();
 // Single-flight guard so two concurrent requests don't both fork openclaw.
 const refreshing = new Set<string>();
+
+/**
+ * "The last refresh for this provider did not answer, so re-enumerate."
+ *
+ * A SET rather than a flag on the cached payload, because the payload is not
+ * always there to flag: `bootWarmup` runs before any request has loaded the
+ * disk cache into `memCache`, so a boot-time failure had nothing to mark and
+ * the next request read a live, under-6h file off disk and sat on it for the
+ * rest of the interval — the failure was silently forgotten in exactly the
+ * window it is most likely to happen.
+ */
+const staleProviders = new Set<string>();
+
+/**
+ * Earliest time a provider may be enumerated again after an attempt that did
+ * not answer. Without it, "re-enumerate whenever the payload is not live"
+ * means a provider that CANNOT enumerate — plugin disabled, provider id gone,
+ * an edition with no CLI — forks `openclaw models list` on every request
+ * forever: ~3 minutes and ~2 cores of a Jetson each, and the single-flight set
+ * only collapses the concurrent ones. The client retry (12 attempts with
+ * `refresh=1`) and two mounted pickers keep that loop fed.
+ *
+ * So a failed attempt costs the next one a wait, doubling to the ordinary
+ * refresh interval; a success clears it. `?refresh=1` does NOT bypass it —
+ * the retry loop is the very thing being rate-limited.
+ */
+const nextAttemptAt = new Map<string, number>();
+const FAILED_REFRESH_BACKOFF_MS = 2 * 60_000;
+
+function refreshBlockedUntil(provider: string): number {
+  return nextAttemptAt.get(provider) ?? 0;
+}
+
+function recordFailedRefresh(provider: string): void {
+  const previous = nextAttemptAt.get(provider);
+  const lastWait = previous ? Math.min(previous - Date.now(), REFRESH_INTERVAL_MS) : 0;
+  const wait = Math.min(
+    Math.max(lastWait * 2, FAILED_REFRESH_BACKOFF_MS),
+    REFRESH_INTERVAL_MS,
+  );
+  nextAttemptAt.set(provider, Date.now() + wait);
+  staleProviders.add(provider);
+}
+
+function recordSuccessfulRefresh(provider: string): void {
+  nextAttemptAt.delete(provider);
+  staleProviders.delete(provider);
+}
 
 const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
   clawai: "deepseek-v4-flash",
@@ -292,17 +346,46 @@ const ALLOWED_MODEL_RE_BY_PROVIDER: Record<string, RegExp> = {
 };
 
 // Model families that are not CHAT models, whatever provider lists them —
-// image generation, speech, embeddings. `openclaw models list` enumerates a
-// provider's whole catalogue and offers no capability filter to ask for the
-// chat ones (`--all`, `--local`, `--provider` and nothing else on 2026.8.1),
-// and the rows carry no capability field either: an image SKU comes back with
-// the same shape as a chat model — `openai/gpt-image-1-mini` alongside
-// `openai/gpt-5.6-sol`, `input` reported as "-" for both on a stock host. So
-// this is a modality exclusion, deliberately NOT a generation allowlist: it
-// cannot hide a chat model the box has learned about, only the SKUs a chat
-// picker has no way to talk to. If the harness grows a capability filter, this
-// should become a read of it.
-const NON_CHAT_MODEL_RE = /^(?:gpt-image|dall-e|whisper|tts-|text-embedding|omni-moderation)/;
+// image, audio/speech, transcription, video, embeddings, moderation, and the
+// pre-chat completion engines. `openclaw models list` enumerates a provider's
+// whole catalogue and offers no capability filter to ask for the chat ones
+// (`--all`, `--local`, `--provider` and nothing else on 2026.8.1), and the rows
+// carry no capability field either: an image SKU comes back with the same shape
+// as a chat model — `openai/gpt-image-1-mini` alongside `openai/gpt-5.6-sol`,
+// `input` reported as "-" for both on a stock host. That gap is worth reporting
+// upstream; until it closes, this is the honest stopgap.
+//
+// It is a MODALITY exclusion, deliberately not a generation allowlist: it can
+// only hide SKUs a chat picker has no way to talk to, never a chat model the
+// box has learned about. That distinction is the point — the generation
+// allowlist it replaces (`/^gpt-5\.[45](-pro|-mini)?$/`) hid the whole gpt-5.6
+// generation, which is the defect this change exists to fix. Older chat
+// generations the box lists are now shown: the standing instruction is that the
+// device's own catalogue decides, and an older model the box can route is not a
+// dead button.
+const NON_CHAT_MODEL_RE = new RegExp([
+  "^(?:gpt-image|dall-e|whisper|tts-|text-embedding|omni-moderation|sora",
+  "|davinci|babbage|codex-mini)",
+  // Suffix families: gpt-4o-audio-preview, gpt-4o-realtime-preview,
+  // gpt-4o-transcribe, gpt-4o-mini-tts.
+  "|(?:-audio|-realtime|-transcribe|-tts)(?:-|$)",
+].join(""));
+
+/**
+ * The model segment of an id, for the modality test above.
+ *
+ * OpenRouter ids keep their `<org>/<model>` slug (`openai/gpt-image-1`), so an
+ * anchored pattern tested against the whole id can never match one — the
+ * exclusion was silently inert for the single largest catalogue we serve.
+ */
+function modelSegment(id: string): string {
+  const slash = id.lastIndexOf("/");
+  return slash >= 0 ? id.slice(slash + 1) : id;
+}
+
+function isNonChatModel(id: string): boolean {
+  return NON_CHAT_MODEL_RE.test(modelSegment(id));
+}
 
 // Newest-first ordering: bigger context generally means newer model on
 // every catalog we ship today (claude 200k+, gpt-5 400k, gemini 1M).
@@ -390,7 +473,7 @@ function transformOpenclawEntries(
     if (entry.available === false) continue;
     if (entry.tags?.includes("deprecated")) continue;
     if (DEPRECATED_MODEL_IDS.has(id)) continue;
-    if (NON_CHAT_MODEL_RE.test(id)) continue;
+    if (isNonChatModel(id)) continue;
     if (allowed && !allowed.test(id)) continue;
     out.push({
       id,
@@ -412,7 +495,7 @@ function isAllowedCatalogModel(provider: string, model: CatalogModel): boolean {
   if (!model.id) return false;
   const allowed = ALLOWED_MODEL_RE_BY_PROVIDER[provider];
   if (allowed && !allowed.test(model.id)) return false;
-  if (NON_CHAT_MODEL_RE.test(model.id)) return false;
+  if (isNonChatModel(model.id)) return false;
   if (DEPRECATED_MODEL_IDS.has(model.id)) return false;
   return true;
 }
@@ -496,14 +579,19 @@ function staticCatalogModels(provider: string): CatalogModel[] {
   if (!isCatalogProvider(provider)) return [];
   const staticEntry = PROVIDER_CATALOGS[provider];
   if (!staticEntry) return [];
-  const models = staticEntry.models.map((sm) => ({
+  // NOT sorted. `compareCatalogModels` orders by context window and then
+  // alphabetically, which is right for an enumeration — the device reports a
+  // real window for every row — and wrong here: STATIC_MODEL_CONTEXT_WINDOWS
+  // only carries the Anthropic ids, so every other curated row takes the
+  // 200_000 default, ties, and falls back to alphabetical. CODEX_MODELS,
+  // hand-ordered newest-first, would be served GPT-5.4 first. These arrays are
+  // curated in the order they should be read; that IS their metadata.
+  return staticEntry.models.map((sm) => ({
     id: sm.id,
     label: sm.label,
     contextWindow: STATIC_MODEL_CONTEXT_WINDOWS[sm.id] ?? 200_000,
     hint: sm.hint,
   }));
-  models.sort(compareCatalogModels);
-  return models;
 }
 
 function buildPayload(
@@ -584,30 +672,39 @@ function sanitizeCachedPayload(provider: string, cached: CatalogResponse): Catal
 }
 
 /**
- * Which provider id is ENUMERATED for a given catalogue id.
+ * WHY `codex` IS NOT ENUMERATED FROM `openai`, though both name the same
+ * upstream.
  *
  * `codex` was a provider in the OpenClaw core through 2026.6.x. It is gone in
- * 2026.8.1 — `openclaw models list --provider codex` answers "Unknown provider
- * filter" — and a ChatGPT subscription is an `openai` OAuth profile now
- * (`openclaw models auth login --provider openai`, docs.openclaw.ai/cli/models)
- * serving `openai/*`. So the rows a ChatGPT account can run are the `openai`
- * catalogue narrowed by ALLOWED_MODEL_RE_BY_PROVIDER.codex, which is the
- * documented ChatGPT-account set — not a list maintained by hand here.
+ * 2026.8.1: `models list --provider codex --all --json` answers
+ * `{"ok": false, "error": {"message": "Unknown provider filter \"codex\"…"}}`,
+ * and a ChatGPT sign-in is an `openai` OAuth profile now
+ * (`openclaw models auth login --provider openai`, docs.openclaw.ai/cli/models).
+ * The obvious move is to serve the ChatGPT catalogue from the `openai` one,
+ * narrowed by the documented ChatGPT-account allowlist. It is wrong, twice:
  *
- * The `codex` CATALOGUE id itself is being retired separately (TASK-652); this
- * entry keeps the picker showing real models until it is, and goes with it.
+ *  * The openai catalogue is NOT plan-scoped. It lists `gpt-5.6-sol` on any
+ *    box — measured, one row and that row on a stock host — while gpt-5.6 is
+ *    plan-gated upstream (Plus/Pro/Max). A Free account would be handed it as
+ *    the only row AND as the saved default, and every turn would 400. The old
+ *    "no dead buttons" property came from `codex` being a plan-aware
+ *    catalogue; nothing in `openai` replaces it.
+ *  * `available` cannot rescue it. Every openai row reads `available: true` as
+ *    soon as ANY openai profile exists — on the affected box that was the
+ *    ClawBox AI image token, an API key that cannot chat.
  *
- * WHAT THIS DOES NOT ANSWER: whether the box can RUN these rows on a ChatGPT
- * account. Every openai row comes back `available: true` as soon as any openai
- * profile exists — on the affected box that was the ClawBox AI image token, an
- * API key that cannot chat — so `available` here means "the openai catalogue
- * carries it", never "the ChatGPT route will take it". That second question is
- * "is there an openai OAUTH profile", which lives with the credential store
- * (TASK-652 surfaces it); a picker must not answer it from this payload.
+ * So this core exposes no enumeration of the ChatGPT surface, and that is a
+ * finding, not a licence to synthesise one: replacing a hard-coded list with a
+ * WRONG live list is the same defect pointed the other way. `codex` therefore
+ * enumerates nothing, publishes nothing, and its picker is served the curated
+ * list marked `fallback` — never persisted, never dressed up as the box's own
+ * answer, and logged with the CLI's own refusal.
+ *
+ * The ChatGPT rendering belongs on the credential facts TASK-652 introduces —
+ * `GET /setup-api/chat/model` rows carrying `provider: "codex"` with
+ * `model: "openai/<id>"` and `reauthRequired`, and `subscriptionProviders`
+ * containing `codex` — not on this catalogue.
  */
-const ENUMERATION_PROVIDER: Record<string, string> = {
-  codex: "openai",
-};
 
 interface CatalogFetchResult {
   models: CatalogModel[];
@@ -623,17 +720,26 @@ function toFetchResult(
   parsed: OpenclawListResponse,
   stderr: string,
 ): CatalogFetchResult {
+  const rows = parsed.models ?? [];
+  const models = transformOpenclawEntries(provider, rows);
   const refusal = parsed.ok === false ? parsed.error?.message?.trim() : "";
-  return {
-    models: transformOpenclawEntries(provider, parsed.models ?? []),
-    diagnostic: refusal || stderr.trim(),
-  };
+  let diagnostic = refusal || stderr.trim();
+  if (!diagnostic && models.length === 0 && rows.length > 0) {
+    // The CLI answered, listed rows, and none of them survived. Which filter
+    // ate them decides what an operator does next — "sign in" is a different
+    // problem from "this catalogue has no chat models" — and neither is
+    // "the plugin is gone", which is what a bare "0 models" implied.
+    const unavailable = rows.filter((row) => row.available === false).length;
+    diagnostic = unavailable === rows.length
+      ? `all ${rows.length} listed rows report available: false (no route this box can take yet)`
+      : `${rows.length} rows listed, none of them chat models this picker can offer`;
+  }
+  return { models, diagnostic };
 }
 
 function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
-  const enumerated = ENUMERATION_PROVIDER[provider] ?? provider;
   return new Promise((resolve, reject) => {
-    const child = spawn(OPENCLAW_BIN, ["models", "list", "--provider", enumerated, "--all", "--json"], {
+    const child = spawn(OPENCLAW_BIN, ["models", "list", "--provider", provider, "--all", "--json"], {
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
@@ -712,6 +818,12 @@ async function fetchOpenRouterCatalog(): Promise<CatalogFetchResult> {
 // next service restart.
 export function refreshInBackground(provider: string): void {
   if (refreshing.has(provider)) return;
+  // A provider that just failed to answer waits before it is asked again. This
+  // is the only brake on the "not live -> re-enumerate" rule, so it comes
+  // before every other check — including the edition guard below, whose log
+  // line would otherwise repeat on every request of a Hermes box's session.
+  const blockedUntil = refreshBlockedUntil(provider);
+  if (blockedUntil > Date.now()) return;
 
   // OpenRouter (REST) and ClawBox AI (static) never touch the CLI; every other
   // provider's catalog comes from `openclaw models list`. On an edition without
@@ -721,6 +833,10 @@ export function refreshInBackground(provider: string): void {
   const usesOpenclawCli = provider !== "openrouter" && provider !== "clawai";
   if (usesOpenclawCli && openclawIsAbsent()) {
     console.log(`[catalog] skipping ${provider}: the openclaw CLI is not present on this edition`);
+    // Recorded as a failed attempt so the line above appears once per backoff
+    // window instead of once per picker open: on this edition it can never
+    // succeed, and it is the one branch that is guaranteed to repeat.
+    recordFailedRefresh(provider);
     return;
   }
 
@@ -753,6 +869,7 @@ export function refreshInBackground(provider: string): void {
   const publish = async (models: CatalogModel[], surfaceIds: Set<string> | null) => {
     const payload: CatalogResponse = { ...buildPayload(provider, models, surfaceIds), source: "live" };
     memCache.set(provider, payload);
+    recordSuccessfulRefresh(provider);
     await writeDiskCache(provider, payload);
     console.log(
       `[catalog] refreshed ${provider}: ${models.length} models`
@@ -761,13 +878,17 @@ export function refreshInBackground(provider: string): void {
   };
 
   /**
-   * Keep whatever good payload this box already has, and mark it stale so the
-   * next request re-enumerates instead of sitting on it for the refresh
-   * interval. Deliberately in memory only: the disk copy is the last answer a
-   * device actually gave, and rewriting it here would spend a write to record
-   * that a LATER attempt failed.
+   * Keep whatever good payload this box already has, mark it stale so a later
+   * request re-enumerates rather than sitting on it for the refresh interval,
+   * and make the next attempt wait.
+   *
+   * The mark goes in `staleProviders`, not on the cached payload: at boot
+   * warmup there is no cached payload to mark. Nothing is written to disk —
+   * the file there is the last answer a device actually gave, and rewriting it
+   * would spend a write to record that a LATER attempt failed.
    */
   const markStale = () => {
+    recordFailedRefresh(provider);
     const cached = memCache.get(provider);
     if (cached) memCache.set(provider, { ...cached, stale: true });
   };
@@ -786,6 +907,10 @@ export function refreshInBackground(provider: string): void {
           + (diagnostic ? ` — ${diagnostic.slice(-300)}` : " (the CLI gave no reason)"),
         );
         markStale();
+        // Settled, not abandoned: for a provider with a genuinely narrower
+        // surface this is a second multi-minute fork, and returning without it
+        // would release the single-flight guard while it still burns CPU.
+        await surface;
         return;
       }
       await publish(models, null);
@@ -850,7 +975,9 @@ export async function GET(req: NextRequest) {
   }
 
   const ageMs = cached ? Date.now() - cached.fetchedAt : Infinity;
-  const isStale = ageMs > REFRESH_INTERVAL_MS || cached?.stale === true;
+  const isStale = ageMs > REFRESH_INTERVAL_MS
+    || cached?.stale === true
+    || staleProviders.has(provider);
   // A payload no device produced is a reason to ask AGAIN, not a reason to
   // wait six hours. That includes a cache written before `source` existed —
   // on an upgraded box those files hold the curated list a failed enumeration
@@ -859,16 +986,30 @@ export async function GET(req: NextRequest) {
     refreshInBackground(provider);
   }
 
+  // "An answer is actually on its way" — the ONE thing that tells a client
+  // whether coming back is worth anything. A provider under the failed-refresh
+  // backoff has no enumeration running and will not get one soon, so it is not
+  // warming and a picker must not sit there polling for it; the cold start,
+  // where a fork really is out there, is.
+  const enumerating = refreshing.has(provider);
+
   if (cached) {
     const sanitized = sanitizeCachedPayload(provider, cached);
     memCache.set(provider, sanitized);
-    const payload: CatalogResponse = isStale ? { ...sanitized, stale: true } : sanitized;
+    const payload: CatalogResponse = {
+      ...sanitized,
+      ...(isStale ? { stale: true } : {}),
+      ...(enumerating && !isLivePayload(cached) ? { warming: true } : {}),
+    };
     return NextResponse.json(payload, { headers: noStore() });
   }
 
-  // Nothing cached yet — the first picker open after a restart, while the
-  // enumeration is still running. Serve the curated list so the picker is not
-  // blank, marked `fallback` so the client comes back for the real one.
-  const warming: CatalogResponse = { ...buildFallbackPayload(provider), warming: true };
-  return NextResponse.json(warming, { headers: noStore() });
+  // Nothing cached yet — the first picker open after a restart. Serve the
+  // curated list so the picker is not blank, marked `fallback` so the client
+  // knows what it is holding.
+  const payload: CatalogResponse = {
+    ...buildFallbackPayload(provider),
+    ...(enumerating ? { warming: true } : {}),
+  };
+  return NextResponse.json(payload, { headers: noStore() });
 }

@@ -361,6 +361,9 @@ interface CatalogApiResponse {
   /** True when no live device enumeration produced this payload — see
    * `CatalogResponse.fallback` in the catalog route. */
   fallback?: boolean;
+  /** True when an enumeration is in flight right now, so asking again will
+   * eventually get a different answer. */
+  warming?: boolean;
 }
 
 /**
@@ -372,10 +375,17 @@ export type ResolvedProviderCatalog = ProviderCatalog & {
   stale?: boolean;
   /**
    * True when these rows are the curated cold-start list rather than a device
-   * enumeration. A consumer that renders them must come back and ask again:
-   * they are a placeholder for an answer, not the answer.
+   * enumeration — a placeholder for an answer, not the answer. A consumer may
+   * render them, but must not treat them as facts about the box.
    */
   fallback?: boolean;
+  /**
+   * True when the box is enumerating RIGHT NOW, so a later ask gets a better
+   * answer. This, not `fallback`, is what a consumer polls on: a provider that
+   * cannot enumerate at all serves a fallback forever, and polling it would be
+   * a request loop with no destination. The route holds the matching backoff.
+   */
+  warming?: boolean;
 };
 
 /**
@@ -429,6 +439,7 @@ export async function fetchProviderCatalog(
         || "",
       allowCustom: body.allowCustom !== false,
       stale: body.stale,
+      warming: body.warming === true ? true : undefined,
       // Carried through, never inferred: the route knows whether a device
       // enumeration produced these rows, and the client cannot tell by looking
       // at them — that is precisely how three hard-coded Claude entries passed

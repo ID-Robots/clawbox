@@ -68,10 +68,18 @@ vi.mock("@/hooks/useLlamaCppModels", () => ({
   }),
 }));
 
-/** What the route serves before any live enumeration has landed. */
+/**
+ * What the route serves before any live enumeration has landed: the curated
+ * cold-start rows, marked `fallback` (they are not the box's answer) and
+ * `warming` (a fork is out there, so asking again is worth something).
+ */
 const WARMING = {
   provider: "anthropic",
-  models: [],
+  models: [
+    { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest, near-frontier.", contextWindow: 200_000 },
+    { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Default. Speed + intelligence.", contextWindow: 1_000_000 },
+    { id: "claude-opus-5", label: "Claude Opus 5", hint: "Most capable.", contextWindow: 1_000_000 },
+  ],
   defaultModelId: "claude-sonnet-5",
   allowCustom: true,
   fetchedAt: 0,
@@ -197,7 +205,7 @@ describe("model picker — live catalogue", () => {
     expect(catalogUrls[catalogUrls.length - 1]).toContain("refresh=1");
   });
 
-  it("keeps asking while the answer is still a fallback", async () => {
+  it("keeps asking while the box is still enumerating", async () => {
     // Nothing connects here: the box is simply slow. The picker must not settle
     // on the curated list for the rest of the session because its one fetch
     // happened three minutes too early.

@@ -4,10 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import {
   fetchProviderCatalog,
   getProviderCatalog,
-  type ProviderCatalog,
   type ResolvedProviderCatalog,
 } from "@/lib/provider-models";
-import { onProvidersChanged } from "@/lib/ui-events";
+import { PROVIDER_SIGNAL_DEBOUNCE_MS, PROVIDERS_CHANGED_EVENT } from "@/lib/ui-events";
 
 /**
  * Resolve the live model catalog for `provider` via
@@ -33,25 +32,41 @@ interface LiveCatalog {
 }
 
 /**
- * A catalogue marked `fallback` is a placeholder, not an answer: the box has
- * not enumerated one yet (the refresh behind the route takes ~3 minutes on a
- * Jetson), or the provider only just became listable. Asking once and keeping
- * the curated three for the rest of the session is the defect this retry
- * exists to end.
+ * Poll while the box is WARMING — an enumeration is in flight and a later ask
+ * gets a better answer. Asking once and keeping the curated three for the rest
+ * of the session is the defect this exists to end.
  *
- * Backed off rather than polled flat because the wait is minutes on the slow
- * path and instant on the fast one, and capped so an unconfigurable provider —
- * one that will never enumerate — does not leave a picker asking forever. The
- * route answers each of these from cache and single-flights the refresh
- * behind it, so a retry costs one cheap request.
+ * Deliberately not "poll while `fallback`". A provider that cannot enumerate at
+ * all — plugin gone, no CLI on this edition — serves a fallback forever, and
+ * polling that is a request loop with no destination; it also fires in every
+ * test whose fetch stub answers the catalog route with `{}`. The route says
+ * `warming` only while a fork is actually out there, and holds the failed-
+ * refresh backoff behind it, so the two brakes agree.
+ *
+ * Backed off rather than polled flat because the wait is ~3 minutes on a
+ * Jetson and instant on a warm box, and capped so nothing asks forever.
  */
-const FALLBACK_RETRY_BASE_MS = 2_000;
-const FALLBACK_RETRY_MAX_MS = 60_000;
-const FALLBACK_RETRY_ATTEMPTS = 12;
+const WARMING_RETRY_BASE_MS = 2_000;
+const WARMING_RETRY_MAX_MS = 60_000;
+const WARMING_RETRY_ATTEMPTS = 12;
 
-export function useProviderCatalog(provider: string | null | undefined): ProviderCatalog | null {
-  const fallback = useMemo(
-    () => (provider ? getProviderCatalog(provider) : null),
+/**
+ * Returns the RESOLVED catalogue — the models plus whether a device produced
+ * them. The `fallback` flag was previously erased at this boundary, which left
+ * the retry below as its only consumer: a picker could not tell "these are the
+ * box's models" from "these are three hard-coded names while we wait", which
+ * is the distinction this whole path exists to carry.
+ */
+export function useProviderCatalog(
+  provider: string | null | undefined,
+): ResolvedProviderCatalog | null {
+  const fallback = useMemo<ResolvedProviderCatalog | null>(
+    () => {
+      const curated = provider ? getProviderCatalog(provider) : null;
+      // The pre-fetch render is a fallback by definition — nothing has been
+      // asked yet — so it says so rather than looking like an answer.
+      return curated ? { ...curated, fallback: true } : null;
+    },
     [provider],
   );
   const [live, setLive] = useState<LiveCatalog | null>(null);
@@ -71,8 +86,8 @@ export function useProviderCatalog(provider: string | null | undefined): Provide
         .then((next) => {
           if (ctrl.signal.aborted) return;
           setLive({ provider, catalog: next });
-          if (!next.fallback || attempt >= FALLBACK_RETRY_ATTEMPTS) return;
-          const delay = Math.min(FALLBACK_RETRY_BASE_MS * 2 ** attempt, FALLBACK_RETRY_MAX_MS);
+          if (!next.warming || attempt >= WARMING_RETRY_ATTEMPTS) return;
+          const delay = Math.min(WARMING_RETRY_BASE_MS * 2 ** attempt, WARMING_RETRY_MAX_MS);
           attempt += 1;
           timer = setTimeout(() => load(true), delay);
         })
@@ -86,12 +101,35 @@ export function useProviderCatalog(provider: string | null | undefined): Provide
     // is enabled and the credential is written — so that read asks the route
     // to re-enumerate rather than serve the pre-connect snapshot.
     load(reloads > 0);
-    const off = onProvidersChanged(() => setReloads((n) => n + 1));
+
+    // PROVIDERS_CHANGED_EVENT alone, NOT the `onProvidersChanged` union.
+    //
+    // That helper also spans CHAT_MODEL_STATE_EVENT, which means "the chat's
+    // model SELECTION changed" — an event ChatPopup dispatches itself, on every
+    // switch. A catalogue does not change when someone picks a different row
+    // out of it, so listening to it would re-fetch with `?refresh=1` on each
+    // switch and ask a Jetson for a fresh three-minute enumeration for nothing.
+    // Measured as a real re-render storm: it broke an unrelated ChatPopup test
+    // that switches model mid-run.
+    //
+    // Every site that changes the provider SET — a key saved, an OAuth flow
+    // approved, a provider enabled or removed, a new default — calls
+    // `notifyProvidersChanged()`, which dispatches exactly this event.
+    let signalTimer: ReturnType<typeof setTimeout> | null = null;
+    const onSignal = () => {
+      if (signalTimer) clearTimeout(signalTimer);
+      signalTimer = setTimeout(() => {
+        signalTimer = null;
+        setReloads((n) => n + 1);
+      }, PROVIDER_SIGNAL_DEBOUNCE_MS);
+    };
+    window.addEventListener(PROVIDERS_CHANGED_EVENT, onSignal);
 
     return () => {
       ctrl.abort();
       if (timer) clearTimeout(timer);
-      off();
+      if (signalTimer) clearTimeout(signalTimer);
+      window.removeEventListener(PROVIDERS_CHANGED_EVENT, onSignal);
     };
   }, [provider, reloads]);
 
