@@ -65,8 +65,10 @@ for dir in "${CHUNK_DIRS[@]}"; do
   # Positive control: the session store's loader must have reached the chunks
   # as the call it is in the source. Without this, a Next release that rewords
   # the stub would make the negative grep above print OK over the same bug.
-  LOADER="$(grep -rlF --include='*.js' -- "getBuiltinModule" "$dir" 2>/dev/null \
-    | xargs -r grep -lF -- "node:sqlite" 2>/dev/null || true)"
+  # Null-delimited end to end, so a project directory with a space in its
+  # path cannot split a chunk name and turn a clean build into a FAIL.
+  LOADER="$(grep -rlFZ --include='*.js' -- "getBuiltinModule" "$dir" 2>/dev/null \
+    | xargs -0 -r grep -lF -- "node:sqlite" 2>/dev/null || true)"
   if [ -z "$LOADER" ]; then
     FOUND=1
     echo "BUNDLED BUILTINS: FAIL — no chunk under ${dir#"$PROJECT_DIR/"} carries the session store's" >&2
