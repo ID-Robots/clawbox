@@ -701,7 +701,9 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     expect(res.status).toBe(500);
     const calls = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[])?.join(" ")}`);
     expect(calls.some((c) => c.includes("connection delete"))).toBe(false);
-    expect(calls.some((c) => c.includes("clawbox-root-update@chpasswd"))).toBe(false);
+    // The password reset goes through the mocked root-step launcher, never
+    // execFile — asserting on the exec transcript here would always pass.
+    expect(vi.mocked(startRootStep)).not.toHaveBeenCalledWith("chpasswd", expect.anything());
     expect(calls.some((c) => c.includes("systemctl reboot"))).toBe(false);
   });
 });
