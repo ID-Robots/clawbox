@@ -20,6 +20,13 @@ import {
 const INSPECT_URL = '/setup-api/hermes/skills/inspect';
 const CACHE_LIMIT = 50;
 
+/**
+ * What a cached answer — and a failure — belong to. Both scopes are kept apart
+ * because the same string can be a lock name in the Installed tab and a
+ * registry identifier in Browse, and those are two DIFFERENT skills.
+ */
+const detailKey = (id: string, fromInstalled: boolean) => `${fromInstalled ? 'i' : 'b'}:${id}`;
+
 export type DetailPhase = 'idle' | 'meta' | 'docs' | 'done';
 
 /**
@@ -59,9 +66,12 @@ export interface DetailController {
 export function useSkillDetail(inspectId: string | null, fromInstalled = false): DetailController {
   const [detail, setDetail] = useState<HermesSkillDetail | null>(null);
   const [phase, setPhase] = useState<DetailPhase>('idle');
-  // Errors and ambiguity are tagged with the id they belong to, so switching
-  // skills drops them by DERIVATION rather than by an extra state write.
-  const [errorState, setErrorState] = useState<({ id: string } & DetailFailure) | null>(null);
+  // Errors and ambiguity are tagged with what they belong to, so switching
+  // skills drops them by DERIVATION rather than by an extra state write. The
+  // failure carries the CACHE KEY, not the bare id: the same string is a lock
+  // name in the Installed tab and a registry identifier in Browse — two
+  // different skills — so an id-only tag showed one tab's failure in the other.
+  const [errorState, setErrorState] = useState<({ key: string } & DetailFailure) | null>(null);
   const [ambiguous, setAmbiguous] = useState<{ query: string; candidates: HermesSkill[] } | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const cache = useRef<Map<string, HermesSkillDetail>>(new Map());
@@ -103,9 +113,14 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
     if (!inspectId) return;
 
     const scope = fromInstalled ? '&scope=installed' : '';
-    const cacheKey = `${fromInstalled ? 'i' : 'b'}:${inspectId}`;
+    const cacheKey = detailKey(inspectId, fromInstalled);
     const controller = new AbortController();
     let cancelled = false;
+
+    // A run that is about to answer the question again owns the note: leaving
+    // the old one up left a failure sitting under a panel that had just loaded
+    // (refresh() after an install re-runs this effect with the same id).
+    setErrorState((held) => (held && held.key === cacheKey ? null : held));
 
     const cached = cache.current.get(cacheKey);
     if (cached) {
@@ -159,7 +174,7 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
           // the body, so it degrades to a note rather than an error page.
           console.error('[skills detail] documentation', data?.code ?? 'no code', data?.error ?? res.status);
           setPhase('done');
-          setErrorState({ id: inspectId, part: 'docs', code: isCliFailureCode(data?.code) ? data.code : null });
+          setErrorState({ key: cacheKey, part: 'docs', code: isCliFailureCode(data?.code) ? data.code : null });
           return;
         }
         const delta = (data.delta || {}) as DetailDelta;
@@ -195,7 +210,7 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
         if ((err as Error).name === 'AbortError' || cancelled) return;
         console.error('[skills detail]', err);
         setPhase('done');
-        setErrorState({ id: inspectId, part: 'meta', code: metaCode });
+        setErrorState({ key: cacheKey, part: 'meta', code: metaCode });
       }
     })();
 
@@ -213,10 +228,11 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
   // the id it was fetched for, so a mismatch is reported as "still loading"
   // rather than painting another skill's version/author into this header.
   const stale = !detail || detail.id !== inspectId;
+  const heldFor = detailKey(inspectId, fromInstalled);
   return {
     detail: stale ? null : detail,
     phase: stale ? 'meta' : phase,
-    error: errorState && errorState.id === inspectId ? errorState : null,
+    error: errorState && errorState.key === heldFor ? errorState : null,
     ambiguous: ambiguous && ambiguous.query === inspectId ? ambiguous : null,
     refresh,
   };

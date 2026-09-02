@@ -771,6 +771,20 @@ describe("skill_install — a refusal the agent can act on", () => {
     return out.error;
   }
 
+  it("reads an install cli_failed as the device failing, not as a refusal that forbids retrying", async () => {
+    // The install route answers 502 + cli_failed when the installer could not
+    // be run. Without a branch it reached the 409/502 catch-all, which reports
+    // "the device refused the install. Do not retry." — the wrong story, and
+    // it forbids the one next step that can work.
+    refuse(502, { error: "The device's Hermes command failed.", code: "cli_failed" });
+
+    const e = await installErr();
+
+    expect(e.code).toBe("INTERNAL");
+    expect(e.next).toMatch(/retry once/i);
+    expect(e.message).not.toMatch(/refused/i);
+  });
+
   it("reads cli_missing as a device without Hermes — not a bad id, not a dead service", async () => {
     // HERMES-04: the install route's generic catch now names the CLI it could
     // not run. Before, a 502 with no code fell to the generic mapping and its
@@ -977,19 +991,19 @@ describe("skill_search — a slow catalogue is not a dead network", () => {
     expect(e.next).not.toMatch(/wifi_status/);
   });
 
-  it("reads bad_query as its own search to fix, not as the device failing", async () => {
-    // The route caps the query and refuses a leading "-". Without a rule the
-    // 400 fell through to the transport's generic failure, and the agent had
-    // no way to know the one thing that cannot help is sending it again.
-    apiGet.mockRejectedValue(
-      new ApiError(400, JSON.stringify({ error: "Invalid query", code: "bad_query" })),
-    );
+  it("refuses a search the route would reject without asking the device at all", async () => {
+    // The tool guards on the same `isValidQuery` the browse route applies, so
+    // a `bad_query` 400 cannot reach the rules — the request is never made.
+    // (That is why no rule decodes it: an unreachable rule is the browse tab's
+    // `browseCancelled` copy over again.)
+    apiGet.mockRejectedValue(new ApiError(500, "{}"));
 
-    const e = await searchErr();
+    const out = await skills().call("skill_search", { query: "-rf", sort: "relevance", limit: 10 });
+    if (!out.isError) throw new Error("expected skill_search to fail");
 
-    expect(e.code).toBe("BAD_ARGUMENT");
-    expect(e.next).toMatch(/do not retry the same text/i);
-    expect(e.next).not.toMatch(/wifi_status|clawbox_health/);
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.next).toMatch(/not starting with a dash/i);
+    expect(apiGet).not.toHaveBeenCalled();
   });
 
   it("reads cli_missing as a device without Hermes — not a network to check, not a retry", async () => {

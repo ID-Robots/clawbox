@@ -233,7 +233,7 @@ export const skillsEn: Record<string, string> = {
   "skills.rateLimited": "The skill could not be downloaded: this device has used up its hourly GitHub allowance. Try again in an hour.",
   "skills.downloadFailed": "The skill was found in the store, but none of its sources would serve it.",
   "skills.unresolved": "That skill could not be found — try its full identifier.",
-  "skills.blockedByDevice": "The device refused to install “{name}”: its security scan rated it “{verdict}” and it comes from a {trust} source, which the device will not install even when confirmed.",
+  "skills.blockedByDevice": "The device refused to install “{name}”: its security scan rated it “{verdict}” and its source has the “{trust}” trust level, which the device will not install even when confirmed.",
   "skills.blockedByDeviceUnknownSource": "The device refused to install “{name}”: its security scan rated it “{verdict}”, which the device will not install even when confirmed.",
   "skills.builtinSkill": "“{name}” came with this device, so it cannot be removed.",
   "skills.notInstalled": "No store skill called “{name}” is installed on this device.",
