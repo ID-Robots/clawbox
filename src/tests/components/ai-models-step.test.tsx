@@ -328,6 +328,49 @@ describe("AIModelsStep variants", () => {
     });
   });
 
+  it("does not pre-fill the custom-model field with the ClawBox AI image id", async () => {
+    // The recovery path for a box an older build pinned to
+    // `openai/gpt-image-1-mini`: /setup-api/ai-models/status reports that as
+    // the model and `openai` as the provider, so Settings opens on the OpenAI
+    // panel with it as `currentModel`. It is not in the curated catalog, so
+    // the seeding effect used to treat it as a typed custom id — pre-filling
+    // the field and then submitting it, which the configure route now refuses
+    // 400 BEFORE writing the API key. The owner is handed back an id they
+    // never typed and their key is not saved: a dead end on exactly the box
+    // this guard exists for.
+    const { container, getByRole, findByText } = render(
+      <AIModelsStep
+        embedded
+        providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+        defaultProviderId="clawai"
+        currentProviderId="openai"
+        currentModel="openai/gpt-image-1-mini"
+        title="Connect AI Provider"
+        description="Primary provider"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(getByRole("radio", { name: /OpenAI GPT/i })).toBeChecked();
+    });
+
+    // Settle: the seeding effect runs after the provider radio commits, so an
+    // assertion polled with waitFor would pass on its first tick — while the
+    // field is still empty — and never see the value the effect writes.
+    // Wait for the settled OUTCOME, not a timer: the seeding effect runs after
+    // the provider radio commits, so polling a negative assertion would pass
+    // on its first tick — while the field is still empty — and never see the
+    // value the effect writes. The collapsed summary naming the curated
+    // default is the positive end state, and it only appears once the effect
+    // has decided this is not a custom id.
+    await findByText("GPT-5.4");
+
+    // The custom-model field is expanded only when the panel decided the
+    // current id is a typed custom one, so its absence IS the fix.
+    expect(container.querySelector("input#ai-provider-model")).toBeNull();
+    expect(container.textContent ?? "").not.toContain("gpt-image-1-mini");
+  });
+
   it("uses consistent setup button labels for provider connections", async () => {
     const { getByRole } = render(
       <AIModelsStep

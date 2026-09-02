@@ -616,6 +616,172 @@ describe("/setup-api/chat/model", () => {
     await expect(response.json()).resolves.toEqual({ error: "Selected AI provider is not configured" });
   });
 
+  it("never represents the OpenAI row by the ClawBox AI image entry", async () => {
+    // Every paired box carries `gpt-image-1-mini` in models.providers.openai
+    // .models[] (the image provider rides the openai plugin), and with an
+    // OpenAI key on the box it was the FIRST configured openai model — so the
+    // dropdown's OpenAI row was `openai/gpt-image-1-mini`, an image model
+    // offered as a chat model that fails on every turn. The row builder now
+    // applies the same allowlist the picker does.
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: {
+        profiles: {
+          "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          "openai:default": { provider: "openai", mode: "api_key" },
+        },
+      },
+      models: {
+        mode: "merge",
+        providers: {
+          deepseek: { models: [{ id: "deepseek-v4-flash", name: "ClawBox AI Flash" }] },
+          openai: {
+            apiKey: "claw_token123",
+            models: [{ id: "gpt-image-1-mini", name: "ClawBox AI Images", baseUrl: "https://clawbox.com/api/ai", api: "openai-completions" }],
+          },
+        },
+      },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
+    expect(openai.model).toBe("openai/gpt-5.4");
+    expect(body.options.some((option: { model: string | null }) => option.model?.includes("gpt-image"))).toBe(false);
+  });
+
+  it("drops a remembered primary the picker refuses instead of letting it own the row", async () => {
+    // An older build could write the image entry as the primary; that box
+    // would otherwise show `openai/gpt-image-1-mini` as its OpenAI row
+    // forever, because the remembered active model wins the provider's slot.
+    // This box carries no other openai row, so the assertion below is
+    // satisfied by the hard-coded provider default — the `models[]` filter is
+    // covered by "never represents the OpenAI row…" and by the
+    // configured-rows test directly below.
+    vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "openai" });
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: {
+        profiles: {
+          "openai:default": { provider: "openai", mode: "api_key" },
+        },
+      },
+      models: {
+        mode: "merge",
+        providers: {
+          openai: { models: [{ id: "gpt-image-1-mini", name: "ClawBox AI Images", baseUrl: "https://clawbox.com/api/ai", api: "openai-completions" }] },
+        },
+      },
+      agents: { defaults: { model: { primary: "openai/gpt-image-1-mini" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
+    expect(openai.model).toBe("openai/gpt-5.4");
+    expect(body.activeOptionId).toBeNull();
+  });
+
+  it("builds the OpenAI row from OpenAI's own default, not the drifting store's provider", async () => {
+    // `ai_model_provider` only refreshes at configure-time, so it drifts (#162)
+    // — that is why the provider hint comes from the LIVE primary. Resolving
+    // the MODEL from the stale store while forcing the hint to the live
+    // provider builds a row whose label says OpenAI and whose model belongs to
+    // whatever the store last remembered. POST /setup-api/providers/default
+    // reads `option.model` off this very row and writes it to the primary.
+    vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "clawai" });
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: {} },
+      models: { mode: "merge", providers: {} },
+      agents: { defaults: { model: { primary: "openai/gpt-image-1-mini" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
+    expect(openai?.model).toBe("openai/gpt-5.4");
+  });
+
+  it("keeps an owner's own openai row that the picker's curation list does not carry", async () => {
+    // The catalog allowlist exists to curate a NOISY UPSTREAM catalog down for
+    // a picker. `models.providers.openai.models[]` is not that catalog — it is
+    // what the owner configured, and this route's own sibling
+    // (`foreignOpenAiRoute`) treats a row there as "the owner's own work".
+    // Filtering it through the curation regex leaves the row represented by a
+    // hard-coded default their endpoint does not serve.
+    vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "openai" });
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      models: {
+        mode: "merge",
+        providers: {
+          openai: {
+            baseUrl: "https://myproxy.example/v1",
+            models: [{ id: "llama-3.3-70b", name: "Llama 3.3 70B" }],
+          },
+        },
+      },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
+    expect(openai?.model).toBe("openai/llama-3.3-70b");
+  });
+
+  it("builds the OpenAI row from the owner's configured rows even when the primary IS the image ref", async () => {
+    // The `models[]` filter lives in branch 2 of the row builder, and branch 1
+    // — "the active model belongs to this provider" — wins whenever the
+    // primary is the image ref, which is exactly the box this guard exists
+    // for. The row was then created much later from the hard-coded
+    // DEFAULT_PROVIDER_MODELS, never from what the owner actually configured:
+    // on a self-hosted openai-compatible endpoint that is an id the endpoint
+    // does not serve, and POST /setup-api/providers/default writes it to the
+    // primary, so the mismatch is a write and not a display bug.
+    vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "openai" });
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      models: {
+        mode: "merge",
+        providers: {
+          openai: {
+            baseUrl: "https://myproxy.example/v1",
+            models: [
+              { id: "gpt-image-1-mini", name: "ClawBox AI Images", baseUrl: "https://clawbox.com/api/ai" },
+              { id: "llama-3.3-70b", name: "Llama 3.3 70B" },
+            ],
+          },
+        },
+      },
+      agents: { defaults: { model: { primary: "openai/gpt-image-1-mini" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
+    expect(openai?.model).toBe("openai/llama-3.3-70b");
+  });
+
+  it("refuses the image entry at the custom-model door, before any write", async () => {
+    // A valid-SHAPED `openai/*` id that every paired box carries in
+    // models.providers.openai.models[]; as the primary it fails every turn.
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "openai/gpt-5.4" } } },
+    } as never);
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "openai/gpt-image-1-mini" }),
+    }));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toContain("not a chat model");
+    expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
+  });
+
   describe("the owner's per-provider switch", () => {
     beforeEach(() => {
       vi.mocked(getAll).mockResolvedValue({

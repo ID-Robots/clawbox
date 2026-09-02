@@ -130,6 +130,51 @@ describe("POST /setup-api/local-ai/exclusive — restoring the saved primary and
     ]);
   });
 
+  it("does not restore a saved primary that is the ClawBox AI image entry", async () => {
+    // The third writer of agents.defaults.model.primary, and the one that
+    // passes through neither guarded door: a box mis-pinned to
+    // `openai/gpt-image-1-mini` that toggles Local-only on, recovers, then
+    // toggles Local-only off was re-pinned to the dead model from this
+    // snapshot — silently undoing the repair.
+    store.local_only_saved_primary = "openai/gpt-image-1-mini";
+
+    const response = await turnOff();
+
+    expect(response.status).toBe(200);
+    const wrote = vi.mocked(runOpenclawConfigSetBatch).mock.calls
+      .flatMap(([ops]) => ops)
+      .filter((op) => op[0] === "agents.defaults.model.primary");
+    expect(wrote.some((op) => op[1].includes("gpt-image-1-mini"))).toBe(false);
+  });
+
+  it("warns instead of claiming success when the drop leaves nothing to restore", async () => {
+    // Dropping the image ref is right, but it leaves no
+    // `agents.defaults.model.primary` op at all — the box stays on the local
+    // model while the panel paints the switch off and the response says
+    // `{ enabled: false }` with no warning. That is the false-success class:
+    // a box claiming a state it does not have. The 503 branch in this same
+    // handler exists to avoid exactly that.
+    store.local_only_saved_primary = "openai/gpt-image-1-mini";
+
+    const response = await turnOff();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.enabled).toBe(false);
+    expect(body.warning ?? "").toContain("image model");
+  });
+
+  it("drops the image entry from restored fallbacks too", async () => {
+    store.local_only_saved_fallbacks = ["openai/gpt-image-1-mini", "openai/gpt-5.4"];
+
+    await turnOff();
+
+    const fallbacks = vi.mocked(runOpenclawConfigSetBatch).mock.calls
+      .flatMap(([ops]) => ops)
+      .find((op) => op[0] === "agents.defaults.model.fallbacks");
+    expect(JSON.parse(fallbacks?.[1] ?? "[]")).toEqual(["openai/gpt-5.4"]);
+  });
+
   it("leaves Local-only on, the plugin untouched and the gateway alone when the batch is refused", async () => {
     // Atomic: a refused batch changed nothing — no primary back, no flag
     // flipped — so there is nothing to restore and nothing to restart.

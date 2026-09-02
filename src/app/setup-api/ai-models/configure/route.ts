@@ -50,10 +50,12 @@ import {
   CLAWBOX_AI_PRO_MODEL_ID,
   CLAWBOX_AI_MODEL_BY_TIER,
   CLAWBOX_AI_DEFAULT_TIER,
+  CLAWBOX_AI_PROXY_URLS,
   CLAWBOX_AI_IMAGE_PROVIDER,
   CLAWBOX_AI_IMAGE_MODEL,
   CLAWBOX_AI_IMAGE_MODEL_ID,
   CLAWBOX_AI_IMAGE_MODEL_LABEL,
+  isClawboxAiImageModelRef,
   CLAWBOX_AI_VISION_MODEL_ID,
   clawboxAiVisionModelRef,
   CLAWBOX_AI_VISION_MODEL_LABEL,
@@ -128,6 +130,8 @@ const AUTH_PROFILES_PATH = path.join(
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
 const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://clawbox.com/api/ai";
+/** Portal-token prefix — the entitlement marker both writers gate on. */
+const CLAWBOX_AI_TOKEN_PREFIX = "claw_";
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
 const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
 const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
@@ -646,15 +650,18 @@ function buildClawboxAiProviderDefinition(apiKey: string, visionModelId: string 
  *   DeepSeek chat and images, so every one of those picker entries would fail
  *   on its first turn. The per-model override touches exactly one model.
  *
- * - **No `api` field.** This is what keeps the image model out of the chat
- *   model picker. The catalog row source skips a configured model entry that
- *   declares no `api`, so the entry is invisible to `openclaw models list` and
- *   to everything downstream of it. Measured on 2026-08-20: with `api` absent
- *   `models list --provider openai --all` returns the same 7 chat rows as an
- *   unconfigured box; adding `api: "openai-completions"` makes it 8, with
- *   `openai/gpt-image-1-mini` offered as a conversational model that would
- *   fail on every turn. The image path is unaffected either way because it
- *   reads raw config, not the normalised catalog.
+ * - **No `api` field.** It narrows where the entry is offered as a chat model,
+ *   but — measured on 2026.8.1 — it does NOT hide it everywhere, and the
+ *   docblock in src/lib/clawbox-ai-models.ts says exactly where it fails: the
+ *   configured-row gate is skipped under `models.mode: "replace"` (which the
+ *   local-model branches of THIS route write), and `configuredKeys` exempts
+ *   every configured row from the picker's hide rule. So OpenClaw's own
+ *   pickers can still offer `openai/gpt-image-1-mini`; ClawBox's cannot, and
+ *   all three writers of `agents.defaults.model.primary` refuse it. The field
+ *   is still stripped from our row — it matches beta and it does close the
+ *   common `models.mode: "merge"` case — but it is not the guarantee earlier
+ *   revisions of this comment claimed. The image path is unaffected either
+ *   way, because it reads raw config rather than the normalised catalog.
  *
  * - **`name` is mandatory.** OpenClaw's config schema rejects a models[] entry
  *   without one ("models.providers.openai.models.0.name: Invalid input") and an
@@ -669,6 +676,72 @@ type OpenAiProviderConfig = NonNullable<
   NonNullable<NonNullable<OpenClawConfig["models"]>["providers"]>[string]
 >;
 type OpenAiModelEntry = NonNullable<OpenAiProviderConfig["models"]>[number];
+
+/**
+ * Every host ClawBox has ever written as the ClawBox AI proxy.
+ *
+ * Seeded from the same source the boot migration uses — the LIVE
+ * `models.providers.deepseek.baseUrl` this box was provisioned against — plus
+ * the build-time `CLAWBOX_AI_PROXY_URL` and the shared historical list.
+ *
+ * Taking the live value matters: the two writers previously disagreed whenever
+ * they disagreed about the env. A staging box whose web app was restarted
+ * without `CLAWBOX_AI_PROXY_URL` stopped recognising its own staging image row
+ * — `foreignOpenAiRoute` then called it foreign and backed the ENTIRE image
+ * and token write off, with a single `console.warn` as the only signal.
+ *
+ * But the live value is only a ClawBox host when the deepseek entry is a
+ * ClawBox AI one. `install.sh`'s `CLAWBOX_AI_API_KEY` branch provisions a RAW
+ * DeepSeek key at `api.deepseek.com`, and on the first pairing the snapshot
+ * still says that — admitting it would make a genuine third party "not
+ * foreign" and write the portal token as the bearer for a route that leaves
+ * for DeepSeek, which is the exact harm `foreignOpenAiRoute` exists to
+ * prevent. So the live host is admitted only behind the same `claw_`
+ * entitlement test the boot migration gates its whole block on.
+ */
+function clawboxProxyHosts(deepseekProvider: OpenAiProviderConfig | undefined): ReadonlySet<string> {
+  const apiKey = deepseekProvider?.apiKey;
+  const liveProxyUrl = typeof apiKey === "string" && apiKey.startsWith(CLAWBOX_AI_TOKEN_PREFIX)
+    ? deepseekProvider?.baseUrl
+    : undefined;
+  return new Set(
+    [CLAWBOX_AI_PROXY_URL, liveProxyUrl, ...CLAWBOX_AI_PROXY_URLS]
+      .map((url) => (typeof url === "string" && url.trim() ? hostOfUrl(url.trim()) : null))
+      .filter((host): host is string => host !== null),
+  );
+}
+
+/**
+ * Is this `models[]` row the one WE wrote?
+ *
+ * The id cannot answer it on its own. `gpt-image-1-mini` is a real OpenAI model
+ * id, so an owner running their own image endpoint — Azure OpenAI, LiteLLM,
+ * vLLM, any self-hosted OpenAI-compatible gateway — can have a row of exactly
+ * that id. Claiming it repoints their route at our proxy, overwrites their
+ * `api`, and puts the portal token on the provider block as the credential for
+ * a route we do not own.
+ *
+ * So ownership is positive, not negative: the row's own `baseUrl` must name a
+ * host ClawBox itself has written. "Not api.openai.com" is the wrong test —
+ * api.openai.com is the LEAST likely place for a power user's private row.
+ * The set includes the retired hosts, so the documented retarget of an entry
+ * left on an old proxy still recognises it as ours.
+ *
+ * A row with no `baseUrl` of its own is not ours either: ClawBox has always
+ * written one, and an inherited provider-level URL is the owner's choice.
+ *
+ * One question, asked identically by the four places that decide ownership:
+ * `foreignOpenAiRoute`'s skip and this upsert here, and their two siblings in
+ * scripts/gateway-pre-start.sh.
+ */
+function isOurImageRow(row: unknown, proxyHosts: ReadonlySet<string>): boolean {
+  if (typeof row !== "object" || row === null) return false;
+  const entry = row as OpenAiModelEntry;
+  if (entry.id !== CLAWBOX_AI_IMAGE_MODEL_ID) return false;
+  if (typeof entry.baseUrl !== "string" || !entry.baseUrl.trim()) return false;
+  const host = hostOfUrl(entry.baseUrl.trim());
+  return host !== null && proxyHosts.has(host);
+}
 
 /**
  * Merge our image-model entry into whatever `models[]` the box already carries.
@@ -687,12 +760,11 @@ type OpenAiModelEntry = NonNullable<OpenAiProviderConfig["models"]>[number];
  * at a retired proxy, and a stray `api` — see
  * `buildClawboxAiImageProviderModels` for why `api` must not be there.
  */
-function upsertClawboxAiImageModel(existing: unknown): OpenAiModelEntry[] {
+function upsertClawboxAiImageModel(existing: unknown, proxyHosts: ReadonlySet<string>): OpenAiModelEntry[] {
   const rows: OpenAiModelEntry[] = Array.isArray(existing)
     ? existing.filter((row): row is OpenAiModelEntry => typeof row === "object" && row !== null)
     : [];
-  const ours = rows.find((row) => row.id === CLAWBOX_AI_IMAGE_MODEL_ID);
-  if (!ours) {
+  if (!rows.some((row) => isOurImageRow(row, proxyHosts))) {
     return [
       ...rows,
       {
@@ -702,8 +774,9 @@ function upsertClawboxAiImageModel(existing: unknown): OpenAiModelEntry[] {
       },
     ];
   }
+  // Every duplicate of our row is repaired the same way — see the migration.
   return rows.map((row) => {
-    if (row !== ours) return row;
+    if (!isOurImageRow(row, proxyHosts)) return row;
     const { api: _api, ...rest } = row;
     return {
       ...rest,
@@ -713,8 +786,8 @@ function upsertClawboxAiImageModel(existing: unknown): OpenAiModelEntry[] {
   });
 }
 
-function buildClawboxAiImageProviderModels(existing?: unknown) {
-  return JSON.stringify(upsertClawboxAiImageModel(existing));
+function buildClawboxAiImageProviderModels(existing: unknown, proxyHosts: ReadonlySet<string>) {
+  return JSON.stringify(upsertClawboxAiImageModel(existing, proxyHosts));
 }
 
 /**
@@ -740,7 +813,7 @@ function canOwnOpenAiImageApiKey(existingKey: unknown): boolean {
   if (existingKey === undefined || existingKey === null) return true;
   if (typeof existingKey !== "string") return false;
   const trimmed = existingKey.trim();
-  return trimmed === "" || trimmed.startsWith("claw_");
+  return trimmed === "" || trimmed.startsWith(CLAWBOX_AI_TOKEN_PREFIX);
 }
 
 /**
@@ -799,12 +872,24 @@ function hostOfUrl(url: string): string | null {
  * per-model `apiKey`), so the two cannot be separated in this version — see
  * the note on the PR.
  */
-function foreignOpenAiRoute(provider: OpenAiProviderConfig | undefined): string | null {
+function foreignOpenAiRoute(provider: OpenAiProviderConfig | undefined, proxyHosts: ReadonlySet<string>): string | null {
   if (!provider) return null;
-  const proxyHost = hostOfUrl(CLAWBOX_AI_PROXY_URL);
+  // The SAME set `isOurImageRow` uses, not the build-time `CLAWBOX_AI_PROXY_URL`
+  // alone. The boot migration asks this question with its own
+  // `_clawbox_proxy_hosts`, built from the same three sources, and its
+  // `_is_foreign` tests membership of that set exactly as this does — so the
+  // two writers cannot disagree about a host, and neither can the two
+  // questions asked here.
+  //
+  // With the build-time value alone, a staging box whose web app restarted
+  // without the env var called its own staging host foreign while the
+  // migration called it ours — and a foreign route backs the ENTIRE image and
+  // token write off with one `console.warn`. Both were single-host once; both
+  // now carry the retired hosts too, so a row left on an old proxy is not
+  // mistaken for a third party's.
   const isForeign = (baseUrl: string) => {
     const host = hostOfUrl(baseUrl);
-    return host === null || proxyHost === null || host !== proxyHost;
+    return host === null || !proxyHosts.has(host);
   };
 
   const providerBaseUrl = typeof provider.baseUrl === "string" ? provider.baseUrl.trim() : "";
@@ -813,7 +898,11 @@ function foreignOpenAiRoute(provider: OpenAiProviderConfig | undefined): string 
   const rows = Array.isArray(provider.models) ? provider.models : [];
   for (const row of rows) {
     if (typeof row !== "object" || row === null) continue;
-    if (row.id === CLAWBOX_AI_IMAGE_MODEL_ID) continue;
+    // OUR row is skipped — not every row that happens to share its id. See
+    // `isOurImageRow`: a `gpt-image-1-mini` row on a host we have never
+    // written is the owner's, and skipping it by id here was what let the
+    // upsert downstream claim it and repoint it at our proxy.
+    if (isOurImageRow(row, proxyHosts)) continue;
     const rowBaseUrl = typeof row.baseUrl === "string" && row.baseUrl.trim()
       ? row.baseUrl.trim()
       : providerBaseUrl || OPENAI_DEFAULT_BASE_URL;
@@ -896,6 +985,9 @@ function buildClawboxAiImageOps(
   if (typeof existingOpenAiProvider !== "object" || existingOpenAiProvider === null) {
     existingOpenAiProvider = undefined;
   }
+  // Same seed the boot migration uses: the proxy this box was actually
+  // provisioned against, off the deepseek entry the configure route wrote.
+  const proxyHosts = clawboxProxyHosts(snapshot?.models?.providers?.[CLAWBOX_AI_PROVIDER]);
 
   if (!canOwnOpenAiImageApiKey(existingOpenAiProvider?.apiKey)) {
     console.warn(
@@ -904,10 +996,12 @@ function buildClawboxAiImageOps(
     return [];
   }
 
-  const foreignRoute = foreignOpenAiRoute(existingOpenAiProvider);
+  const foreignRoute = foreignOpenAiRoute(existingOpenAiProvider, proxyHosts);
   if (foreignRoute) {
     console.warn(
-      `[AI Config] Skipped ClawBox AI image provider: models.providers.openai already routes to ${logSafe(foreignRoute)}, and the apiKey we would write there is the credential for that route too`,
+      // The host only: an owner-configured URL can carry user-info or query
+      // credentials, and the journal keeps what is logged.
+      `[AI Config] Skipped ClawBox AI image provider: models.providers.openai already routes to ${logSafe(hostOfUrl(foreignRoute) ?? "an unparseable URL")}, and the apiKey we would write there is the credential for that route too`,
     );
     return [];
   }
@@ -918,7 +1012,7 @@ function buildClawboxAiImageOps(
     [`models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}.apiKey`, clawboxAiToken],
     [
       `models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}.models`,
-      buildClawboxAiImageProviderModels(existingOpenAiProvider?.models),
+      buildClawboxAiImageProviderModels(existingOpenAiProvider?.models, proxyHosts),
       "--json",
     ],
   ];
@@ -2013,6 +2107,29 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const offSurfaceCodex = offSurfaceCodexModelMessage(settledProvider, settledModelId, isChatgptSubscription);
     if (offSurfaceCodex) {
       return NextResponse.json({ error: offSurfaceCodex }, { status: 400 });
+    }
+
+    // The ClawBox AI image entry, judged on the same settled value. It sits in
+    // `models.providers.openai.models[]` on every paired box, and
+    // `isValidModelId` is shape-only — so `gpt-image-1-mini` typed into the
+    // OpenAI panel's custom-model field was written as
+    // `openai/gpt-image-1-mini` and every turn afterwards failed. The absent
+    // `api` only NARROWS where OpenClaw offers it (see the docblock in
+    // src/lib/clawbox-ai-models.ts: `models.mode: "replace"` bypasses the gate
+    // and the configured-row exemption leaves OpenClaw's own pickers open), so
+    // this door and /setup-api/chat/model's are the wall, not a backstop — and
+    // they are for ids that arrive ANY other way: typed here, or already
+    // pinned by an older build.
+    if (isClawboxAiImageModelRef(config.defaultModel)) {
+      // Names the fix, not just the refusal: this id can reach here from a box
+      // an older build pinned to it, and an owner who never typed it needs to
+      // be told which control to change.
+      return NextResponse.json(
+        {
+          error: `${settledModelId} is the ClawBox AI image model, not a chat model. Pick a chat model from the Model list and save again.`,
+        },
+        { status: 400 },
+      );
     }
 
     // Claude: only a SUBSCRIPTION save can create the hazard here. An API-key

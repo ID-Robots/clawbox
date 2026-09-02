@@ -11,7 +11,12 @@ import path from "node:path";
 // while both sides are perfectly correct. Load the module with the override
 // cleared instead: what the migration has to match is the documented default,
 // not whatever the ambient environment is pointed at today.
-const { CLAWBOX_AI_IMAGE_MODEL, CLAWBOX_AI_IMAGE_MODEL_ID, CLAWBOX_AI_IMAGE_MODEL_LABEL } =
+const {
+  CLAWBOX_AI_IMAGE_MODEL,
+  CLAWBOX_AI_IMAGE_MODEL_ID,
+  CLAWBOX_AI_IMAGE_MODEL_LABEL,
+  CLAWBOX_AI_PROXY_URLS,
+} =
   await (async () => {
     const override = process.env.CLAWBOX_AI_IMAGE_MODEL_ID;
     delete process.env.CLAWBOX_AI_IMAGE_MODEL_ID;
@@ -317,6 +322,53 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
       backedOff(boxWithOpenai({ models: [{ id: "mystery", name: "Mystery", baseUrl: "not-a-url" }] }));
     });
 
+    it("leaves an owner's own row of OUR id on their private proxy alone", () => {
+      // `gpt-image-1-mini` is a real OpenAI model id, and Azure OpenAI /
+      // LiteLLM / vLLM / any self-hosted OpenAI-compatible gateway is where a
+      // power user's row of that id actually lives. Claiming it by id repointed
+      // their route at our proxy, overwrote their `api`, and wrote the portal
+      // token as the provider-wide credential for a route we do not own.
+      const theirs = {
+        id: CLAWBOX_AI_IMAGE_MODEL_ID,
+        name: "My Azure image model",
+        api: "azure-images",
+        baseUrl: "https://my-azure.example/openai/v1",
+      };
+      const { cfg, changed, log } = migrate(boxWithOpenai({ models: [{ ...theirs }] }));
+
+      // Their row marks the route foreign, so the whole migration backs off.
+      expect(changed).toBe(false);
+      expect(openaiModels(cfg)).toEqual([theirs]);
+      expect(openaiProvider(cfg).apiKey).toBeUndefined();
+      expect(log).toContain("my-azure.example");
+    });
+
+    it("leaves an owner's row of OUR id with no baseUrl alone", () => {
+      // ClawBox has always written a baseUrl on its own row, so a row without
+      // one is the owner's, inheriting whatever the provider block says.
+      const theirs = { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "gpt-image-1-mini", api: "openai-completions" };
+      const { cfg, changed } = migrate(boxWithOpenai({ models: [{ ...theirs }] }));
+
+      expect(changed).toBe(false);
+      expect(openaiModels(cfg)).toEqual([theirs]);
+    });
+
+    it("proceeds when a sibling row points at a RETIRED ClawBox proxy host", () => {
+      // The foreignness test asks "would our token leave the building?", so it
+      // has to know every host ClawBox has ever written, exactly as the
+      // ownership test does — and exactly as its TypeScript mirror now does.
+      // On the single-host form this backed the whole migration off, which
+      // also gates the speech-to-text migration after it, so the same config
+      // produced two different box states depending on which writer ran last.
+      const { cfg, changed } = migrate(boxWithOpenai({
+        models: [{ id: "house-model", name: "House model", api: "openai-completions", baseUrl: "https://openclawhardware.dev/api/ai" }],
+      }));
+
+      expect(changed).toBe(true);
+      expect(openaiProvider(cfg).apiKey).toBe("claw_token123");
+      expect(imageEntry(cfg)).toBeDefined();
+    });
+
     it("proceeds when a sibling row points at the same proxy we do", () => {
       const { cfg, changed } = migrate(boxWithOpenai({
         models: [{ id: "house-model", name: "House model", api: "openai-completions", baseUrl: "https://clawbox.com/api/ai" }],
@@ -347,6 +399,126 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
 
       expect(log).toBe("");
     });
+  });
+
+  it("normalises a default port away, exactly as `new URL(u).host` does", () => {
+    // The docstring on `_url_host` claims it matches the TypeScript side so
+    // the two guards agree on one string. `urlsplit` KEEPS an explicit :443
+    // and `URL.host` drops it, so a row naming the default port explicitly was
+    // ours to the route and foreign to this script — which then backed the
+    // whole image migration off on a box the route had just repaired.
+    const { cfg, changed } = migrate(pairedBox({
+      models: {
+        providers: {
+          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
+          openai: {
+            apiKey: "claw_token123",
+            models: [{
+              id: CLAWBOX_AI_IMAGE_MODEL_ID,
+              name: CLAWBOX_AI_IMAGE_MODEL_LABEL,
+              baseUrl: "https://clawbox.com:443/api/ai",
+            }],
+          },
+        },
+      },
+      agents: { defaults: { imageGenerationModel: { primary: CLAWBOX_AI_IMAGE_MODEL } } },
+    }));
+
+    // Recognised as ours: retargeted in place, not treated as a foreign route.
+    expect(changed).toBe(true);
+    expect(openaiModels(cfg)).toHaveLength(1);
+    expect(imageEntry(cfg)?.baseUrl).toBe("https://clawbox.com/api/ai");
+  });
+
+  it("still recognises our own row on a RETIRED proxy host as ours", () => {
+    // The ownership set carries every host ClawBox has ever written, so the
+    // documented retarget of an entry left on an old proxy still finds it —
+    // one row repaired in place, not a second one appended beside it.
+    const { cfg, changed } = migrate(pairedBox({
+      models: {
+        providers: {
+          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
+          openai: {
+            apiKey: "claw_token123",
+            models: [{
+              id: CLAWBOX_AI_IMAGE_MODEL_ID,
+              name: CLAWBOX_AI_IMAGE_MODEL_LABEL,
+              baseUrl: "https://www.openclawhardware.dev/api/ai",
+            }],
+          },
+        },
+      },
+      agents: { defaults: { imageGenerationModel: { primary: CLAWBOX_AI_IMAGE_MODEL } } },
+    }));
+
+    expect(changed).toBe(true);
+    expect(openaiModels(cfg)).toHaveLength(1);
+    expect(imageEntry(cfg)?.baseUrl).toBe("https://clawbox.com/api/ai");
+  });
+
+  it("strips a stray `api` from every duplicate of our entry, not just the first", () => {
+    // A stale copy left by an older upsert is offered by the same pickers as
+    // the live one, so the `api` strip has to reach all of them.
+    const { cfg, changed } = migrate(pairedBox({
+      models: {
+        providers: {
+          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
+          openai: {
+            apiKey: "claw_token123",
+            models: [
+              { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: "https://clawbox.com/api/ai", api: "openai-completions" },
+              { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: "https://clawbox.com/api/ai", api: "openai-completions" },
+            ],
+          },
+        },
+      },
+      agents: { defaults: { imageGenerationModel: { primary: CLAWBOX_AI_IMAGE_MODEL } } },
+    }));
+
+    expect(changed).toBe(true);
+    expect(openaiModels(cfg)).toHaveLength(2);
+    for (const row of openaiModels(cfg)) expect(row).not.toHaveProperty("api");
+  });
+
+  it("keeps its ownership host list identical to the route's", () => {
+    // The two writers decide "is this row ours?" from separate literal lists,
+    // in two languages. If they ever diverge one writer claims a row the other
+    // calls foreign — and the route's back-off is total, so the box silently
+    // stops getting its image provider. Pinned here rather than left to
+    // convention.
+    const shellHosts = Array.from(POLICY.matchAll(/"(https:\/\/[^"]+)"/g))
+      .map((match) => match[1])
+      .filter((url) => url.includes("/api/ai"));
+    // Against the list the ROUTE actually uses, not a copy written here: a
+    // fourth host added to CLAWBOX_AI_PROXY_URLS alone must fail this, or the
+    // test pins the shell to itself and the two writers can still drift.
+    expect(new Set(shellHosts)).toEqual(new Set(CLAWBOX_AI_PROXY_URLS));
+  });
+
+  it("prints only the host of the route it refuses to claim, never its credentials", () => {
+    // The TypeScript sibling redacts this to host-only because an
+    // owner-configured URL can carry user-info or query credentials and the
+    // journal keeps what is logged. This block writes to that same journal.
+    const { log } = migrate(pairedBox({
+      models: {
+        providers: {
+          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
+          openai: {
+            models: [{
+              id: "their-model",
+              name: "Theirs",
+              api: "openai-completions",
+              baseUrl: "https://hunter2:s3cret@their-host.example/v1?token=abc",
+            }],
+          },
+        },
+      },
+    }));
+
+    expect(log).toContain("their-host.example");
+    expect(log).not.toContain("hunter2");
+    expect(log).not.toContain("s3cret");
+    expect(log).not.toContain("token=abc");
   });
 
   it("preserves other openai provider settings — it writes leaves, not the provider", () => {
