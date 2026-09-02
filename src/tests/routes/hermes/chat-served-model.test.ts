@@ -58,7 +58,12 @@ function fakeHermes() {
   return child;
 }
 
-function payload(provider: string, model: string, source = "dashboard", isUserDefined = false) {
+function payload(
+  provider: string,
+  model: string,
+  source = "dashboard",
+  isUserDefined: boolean | null = false,
+) {
   return {
     providers: [{ id: provider, name: provider, authenticated: true, models: [{ id: model }], total: 1, source, isUserDefined }],
     current: { provider, model },
@@ -139,7 +144,11 @@ describe("/setup-api/hermes/chat — what the CLI path records as the served mod
   });
 
   it("records nothing rather than a guess when the default cannot be read", async () => {
-    mockReadCurrent.mockRejectedValue(new Error("hermes did not answer"));
+    // The real shape of "could not read": `hermesConfigGet` catches the CLI and
+    // `configMtime` catches the stat, so the failure arrives as empty strings —
+    // this function does not reject. Asserting on a rejection instead would
+    // pin a path that cannot happen.
+    mockReadCurrent.mockResolvedValue({ provider: "", model: "", reasoning: "" });
 
     const res = await post({ message: "hi" });
 
@@ -147,6 +156,20 @@ describe("/setup-api/hermes/chat — what the CLI path records as the served mod
     const body = await res.json();
     expect(body).not.toHaveProperty("model");
     expect(body).not.toHaveProperty("provider");
+  });
+
+  it("does not fill a half from config.yaml on a RESUMED run, which may be on a session override", async () => {
+    // The dashboard transport pins per-session overrides with `/model … --session`
+    // and a conversation crosses between the transports (an attachment turn is
+    // forced onto this one). config.yaml's default is not that session's model,
+    // and whether `-m` even beats such an override is unverified on a box.
+    const res = await post({ message: "hi", model: "deepseek-v4-flash", sessionId: "20260823_185842_1eabd5" });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ model: "deepseek-v4-flash" });
+    expect(body).not.toHaveProperty("provider");
+    expect(mockReadCurrent).not.toHaveBeenCalled();
   });
 });
 
@@ -166,10 +189,28 @@ describe("/setup-api/hermes/chat — what the dashboard transport is told about 
     expect(mockOpenDashboardTurn.mock.calls[0][0]).toMatchObject({ provider: "clawai", providerIsUserDefined: true });
   });
 
-  it("passes no flag off the catalog-file fallback, which marks every provider built-in", async () => {
-    // The manifest has no such column; the fallback writes `false` for all of
-    // them, and a `false` here would blank the label on the box's own provider.
-    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-flash", "catalog-file", false) as never);
+  it("passes no flag when the dashboard's own row did not carry one", async () => {
+    // `source === "dashboard"` says where the payload came from, not that the
+    // dashboard answered this question. No capture of a live
+    // /api/model/options row exists in this repo, so a row without the field is
+    // a shape we cannot rule out — and read as `false` it blanks the label on
+    // the box's own provider from the second turn on, on the shipped config.
+    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-flash", "dashboard", null) as never);
+    await post({ message: "hi", provider: "clawai", model: "deepseek-v4-flash" }, stream);
+    expect(mockOpenDashboardTurn).toHaveBeenCalledTimes(1);
+    expect(mockOpenDashboardTurn.mock.calls[0][0]).not.toHaveProperty("providerIsUserDefined");
+  });
+
+  it("passes the dashboard's own `false` through, which is an answer", async () => {
+    mockGetModelOptions.mockResolvedValue(payload("anthropic", "claude-fable-5", "dashboard", false) as never);
+    await post({ message: "hi", provider: "anthropic", model: "claude-fable-5" }, stream);
+    expect(mockOpenDashboardTurn.mock.calls[0][0]).toMatchObject({ providerIsUserDefined: false });
+  });
+
+  it("passes no flag off the catalog-file fallback, which cannot know either", async () => {
+    // The manifest has no such column, so the fallback reports null for every
+    // row; a `false` here would blank the label on the box's own provider.
+    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-flash", "catalog-file", null) as never);
     await post({ message: "hi", provider: "clawai", model: "deepseek-v4-flash" }, stream);
     expect(mockOpenDashboardTurn).toHaveBeenCalledTimes(1);
     expect(mockOpenDashboardTurn.mock.calls[0][0]).not.toHaveProperty("providerIsUserDefined");

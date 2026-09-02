@@ -81,9 +81,9 @@ These tools read and write the **device default** — the provider and model in
 reports it as `device_default`, and `ai_set_provider` / `ai_set_model` change
 only that. The chat window can run a different model per conversation, chosen
 in its header, and the tool server cannot see which: it is one process shared
-by every session. So the chat itself prints the model that served each reply
-under the reply, and the agent is told to read that — not a tool — when asked
-"which model are you". On the OpenClaw edition the header writes the box
+by every session. So where the chat knows the model that served a
+reply it prints it under that reply, and the agent is told to read that — not a
+tool — when asked "which model are you". On the OpenClaw edition the header writes the box
 default for every session, so there the default is the chat's model.
 
 ### Browser (drives the real desktop Chromium — visible in Remote Desktop)

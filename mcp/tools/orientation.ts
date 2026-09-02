@@ -5,7 +5,7 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { apiTry, apiToken, API_BASE, authHeader } from "../lib/api";
 import { DEFAULT_CWD } from "../lib/guard";
-import { json, text, type Registrar } from "../lib/register";
+import { json, text, type Ed, type Registrar } from "../lib/register";
 import { CURRENT_CHAT_MODEL_NOTE, hermesDeviceDefault, reported, type HermesDefaultSource } from "../lib/report";
 import type { McpContext } from "../lib/context";
 import { WEBAPP_KV_CLIENT_SNIPPET } from "../../src/lib/webapp-sandbox";
@@ -21,8 +21,15 @@ const FIELD_GUIDE_PATH = join(DEFAULT_CWD, "Clawbox.md");
 const OPENCLAW_CURRENT_CHAT_NOTE =
   "the device default above: on this edition the chat header writes it to the box and repoints every session, so it is what this chat runs.";
 
-/** How the description qualifies the default, per edition — the Hermes chat can override it per session; the OpenClaw chat cannot. */
-const DEFAULT_QUALIFIER: Record<string, string> = {
+/**
+ * How the description qualifies the default, per edition — the Hermes chat can
+ * override it per session; the OpenClaw chat cannot.
+ *
+ * Keyed on `Ed`, not `string`: a third edition would then be a compile error
+ * here rather than the literal "(undefined)" inside a tool description every
+ * model reads.
+ */
+const DEFAULT_QUALIFIER: Record<Ed, string> = {
   hermes: "not necessarily the one answering this chat",
   openclaw: "which is also what the chat runs",
 };

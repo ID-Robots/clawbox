@@ -155,6 +155,14 @@ describe("which model answered, on the bubble", () => {
     expect(label.style.whiteSpace).not.toBe("nowrap");
     expect(label.style.textOverflow).toBe("");
     expect(label.getAttribute("title")).toBeNull();
+    // Two proper nouns and a middot say nothing on their own to a screen
+    // reader, so the accessible name carries the whole visible line behind a
+    // prefix that says what they are. The prefix is `t("chat.servedBy")` —
+    // rendered here with no I18nProvider above, where `t` echoes the key — and
+    // that it exists in all ten locales is what translations.test.ts enforces.
+    const aria = label.getAttribute("aria-label") ?? "";
+    expect(aria).toContain("Nebius AI · anthropic/claude-fable-5");
+    expect(aria).toMatch(/^chat\.servedBy: /);
   });
 
   it("shows the label on a live turn the moment it settles", async () => {

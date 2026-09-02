@@ -511,7 +511,8 @@ const COMMAND_SAFE_ID = /^[A-Za-z0-9_./:-]+$/;
  * of a session it did not just build for this request cannot be telling the
  * two apart, so on such a session the literal `custom` provider is never
  * asserted: the answer is none. (A session the request built, or switched, is
- * on the requested provider by contract and never reaches this function.)
+ * on the requested provider by contract, and BOTH call sites keep that answer
+ * out of here rather than re-deriving it — `providerFromRequest`.)
  * And the allowlist cannot say which slugs are user-defined (`clawai` is in
  * Hermes' captured registry, `clawlocal` is not), so the contradiction is
  * detected off the catalogue's own flag, carried on the request as
@@ -1283,18 +1284,32 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                 // this session was settled on above is the answer.
                 const servedModel = typeof payload.model === "string" && payload.model ? payload.model : activeModel;
                 // A completion's `provider` is the same field with the same
-                // kind-not-slug problem, resolved the same way. A frame that
-                // names none defers to what the session was settled on above —
-                // NOT to the request, which the session may have contradicted —
-                // and only while it is still talking about that model: a frame
-                // naming a DIFFERENT model describes a pairing this turn never
-                // established, and the settled provider is not that model's.
+                // kind-not-slug problem, and it is decided by the SAME rule the
+                // session site applies — that site's guard was missing here,
+                // which is how a session this turn BUILT on the literal
+                // `custom` provider lost it again on the way out: the frame
+                // reports `custom` (it must — the session is on custom), and
+                // the resolver cannot tell that word's two meanings apart.
+                //
+                // So, in order:
+                //   - off the settled model, the frame describes a pairing this
+                //     turn never established: only the frame's own provider can
+                //     speak for it, and a bare frame answers nothing;
+                //   - on the settled model, a session this turn built or
+                //     switched is on the request's provider BY CONTRACT,
+                //     whatever the dashboard calls it;
+                //   - otherwise the frame's report is resolved, and a frame that
+                //     names none defers to what the session was settled on —
+                //     NOT to the request, which the session may have contradicted.
                 const completionProvider = typeof payload.provider === "string" ? payload.provider : "";
-                const servedProvider = completionProvider
-                  ? servedProviderSlug(completionProvider, req, servedModel === req.model)
-                  : servedModel === activeModel
-                    ? activeProvider
-                    : "";
+                const onSettledModel = servedModel === activeModel;
+                const servedProvider = onSettledModel && providerFromRequest
+                  ? activeProvider
+                  : completionProvider
+                    ? servedProviderSlug(completionProvider, req, servedModel === req.model)
+                    : onSettledModel
+                      ? activeProvider
+                      : "";
                 return {
                   text: truncated ? `${finalText}\n\n[Reply truncated — it was too long to hold.]` : finalText,
                   reasoning: finalReasoning,

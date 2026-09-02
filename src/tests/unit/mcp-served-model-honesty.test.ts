@@ -114,12 +114,12 @@ describe("ai_list_models — the default is labelled as the default", () => {
     expect(body.current_chat).toBe(CURRENT_CHAT_MODEL_NOTE);
   });
 
-  it("keeps the same shape on a filtered call, and reads the default off the scoped reply's `saved`", async () => {
+  it("keeps the same shape on a filtered call, and reads the default off the scoped reply's `savedPair`", async () => {
     // The scoped reply reuses `provider` for the filter and carries the saved
-    // pairing as `saved` — whichever provider it belongs to.
+    // pairing as `savedPair` — whichever provider it belongs to.
     apiGet.mockResolvedValue({
       provider: "zai", current: "", reasoning: "low", models: [{ id: "glm-4" }], providers: [],
-      saved: { provider: "clawai", model: "deepseek-v4-flash" },
+      savedPair: { provider: "clawai", model: "deepseek-v4-flash" },
     });
     let body = await parsed(ai(), "ai_list_models", { provider: "zai" });
     expect(body.asked_about).toBe("zai");
@@ -131,7 +131,7 @@ describe("ai_list_models — the default is labelled as the default", () => {
     // is still exactly this provider.
     apiGet.mockResolvedValue({
       provider: "clawai", current: "", reasoning: "off", models: [], providers: [], savedElsewhere: null,
-      saved: { provider: "clawai", model: "deepseek-v4-flash" },
+      savedPair: { provider: "clawai", model: "deepseek-v4-flash" },
     });
     body = await parsed(ai(), "ai_list_models", { provider: "clawai" });
     expect(body.device_default).toEqual({ provider: "clawai", model: "deepseek-v4-flash", thinking: "off" });

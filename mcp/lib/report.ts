@@ -48,7 +48,8 @@ export function hermesDeviceDefault(source: HermesDefaultSource | null | undefin
  * mcp/lib/profile.ts) and called with no session id. It reads config.yaml's
  * default, and the one time it reported that as "in use" the agent answered
  * "which model are you" with it, wrongly. So the default is named for what it
- * is, and the payload points at the record: the label under each reply.
+ * is, and the payload points at the record: the label the chat prints under a
+ * reply whose model it knows.
  */
 export const CURRENT_CHAT_MODEL_NOTE =
   "not visible here. device_default is what a new chat starts on; this chat may be on a per-session override no tool can read. Where the ClawBox chat knows the model that served a reply, it prints it under that reply.";

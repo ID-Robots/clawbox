@@ -93,6 +93,7 @@ export const bg: Record<string, string> = {
   "chat.showLess": "Покажи по-малко",
   "chat.working": "Работи…",
   "chat.reasoning": "Разсъждения",
+  "chat.servedBy": "Отговорено от",
   "chat.toolsUsed": "Използвани инструменти",
   // === Full message view: the real email, opened from the chat ===
   "chat.email.openFull": "Отвори цялото писмо",
@@ -655,6 +656,7 @@ export const de: Record<string, string> = {
   "chat.showLess": "Weniger anzeigen",
   "chat.working": "Arbeitet…",
   "chat.reasoning": "Gedankengang",
+  "chat.servedBy": "Beantwortet von",
   "chat.toolsUsed": "Verwendete Werkzeuge",
   // === Full message view: the real email, opened from the chat ===
   "chat.email.openFull": "Ganze Nachricht öffnen",
@@ -1217,6 +1219,7 @@ export const es: Record<string, string> = {
   "chat.showLess": "Mostrar menos",
   "chat.working": "Trabajando…",
   "chat.reasoning": "Razonamiento",
+  "chat.servedBy": "Respondido por",
   "chat.toolsUsed": "Herramientas usadas",
   // === Full message view: the real email, opened from the chat ===
   "chat.email.openFull": "Abrir el mensaje completo",

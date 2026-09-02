@@ -112,6 +112,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.saySomething": "Say something!",
     "chat.running": "running…",
     "chat.reasoning": "Reasoning",
+    "chat.servedBy": "Answered by",
     "chat.toolsUsed": "Tools used",
     "chat.ranCommand": "Ran 1 command",
     "chat.ranCommands": "Ran {n} commands",

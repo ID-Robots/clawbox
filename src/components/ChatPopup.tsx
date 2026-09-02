@@ -4727,6 +4727,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 {served && (
                   <div
                     data-testid="chat-served-model"
+                    // Sighted readers get the answer from where the line sits —
+                    // under the reply, in the place the tool chips and the
+                    // monologue use. A screen reader gets two proper nouns and
+                    // a middot, so the label says what they are; the visible
+                    // text stays as short as the bubble needs it to be.
+                    aria-label={`${t("chat.servedBy")}: ${served}`}
                     // 0.55 over the panel's #0d1117 is ~6:1 — AA. The quiet
                     // 0.35 the tool chips use is ~3.2:1, which is fine for a
                     // decoration and not for the one line that answers a

@@ -470,6 +470,35 @@ async function settleTurn(
  * point is reported inside the stream rather than as an HTTP error. Everything
  * that could have produced a clean 4xx/5xx has already run before this is called.
  */
+/**
+ * What the dashboard transport says answered — taken WHOLE, never half from one
+ * source and half from the other.
+ *
+ * The transport works hard to answer NOTHING rather than a pairing the turn did
+ * not establish: `servedProviderSlug` declines a kind it cannot resolve, and a
+ * completion frame that changes the model gets no provider at all, because the
+ * settled provider belongs to the settled model. Reading the two halves with
+ * independent `||`s undid all of it at the one place the answer is persisted —
+ * a frame reporting `gpt-5.6-sol` with no provider was recorded as
+ * `gpt-5.6-sol` beside the session's `clawai`, the invented pairing, in the
+ * customer's durable transcript.
+ *
+ * So: a turn that reported a model owns both halves of the record, including
+ * the half it left empty. Only a turn that reported no model at all — a
+ * transport that never produced a frame, and the quiet-stream recovery, which
+ * passes `null` — falls back to what the session was settled on.
+ */
+function servedPair(
+  final: { model?: string; provider?: string } | null,
+  turn: DashboardTurn,
+): { model?: string; provider?: string } {
+  const source = final?.model ? final : { model: turn.model, provider: turn.provider };
+  return {
+    ...(source.model ? { model: source.model } : {}),
+    ...(source.provider ? { provider: source.provider } : {}),
+  };
+}
+
 function streamTurn(turn: DashboardTurn, fallbackSessionId: string, sessionKey: string): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -547,12 +576,7 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string, sessionKey: 
         } else {
           send(
             "done",
-            await settleTurn(threaded, sessionKey, final.text, final.reasoning, {
-              // What the transport says answered, preferring the turn's own
-              // report over the session's setting when it offers one.
-              ...(final.model || turn.model ? { model: final.model || turn.model } : {}),
-              ...(final.provider || turn.provider ? { provider: final.provider || turn.provider } : {}),
-            }),
+            await settleTurn(threaded, sessionKey, final.text, final.reasoning, servedPair(final, turn)),
           );
         }
       } catch (err) {
@@ -590,10 +614,7 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string, sessionKey: 
           if (recovered?.text) {
             send(
               "done",
-              await settleTurn(threaded, sessionKey, recovered.text, "", {
-                ...(turn.model ? { model: turn.model } : {}),
-                ...(turn.provider ? { provider: turn.provider } : {}),
-              }),
+              await settleTurn(threaded, sessionKey, recovered.text, "", servedPair(null, turn)),
             );
             return;
           }
@@ -651,9 +672,23 @@ function isAbort(err: unknown): boolean {
  * own `/model` persist and a `hermes config set` from a terminal do not. The
  * `hermes config get` read underneath is keyed on config.yaml's mtime, so it
  * costs a stat when nothing changed and cannot lag a write.
+ *
+ * NOT on a RESUMED run, though — `resuming` is the whole of the difference.
+ * config.yaml's default is only what the run took when the run had nothing else
+ * to take: a `--resume`d session can be carrying a per-session override, which
+ * is exactly what the dashboard transport writes with `/model … --session`, and
+ * one conversation moves between the two transports routinely (every turn with
+ * an attachment is forced onto this one). Whether `-m` even beats such an
+ * override is unverified on a box. So a resumed run records what argv named and
+ * nothing else: unknown beats wrong, the same rule the dashboard half follows.
  */
-async function cliServedPair(model: string, provider: string): Promise<{ model?: string; provider?: string }> {
-  const current = model && provider ? null : await readCurrentFromCli().catch(() => null);
+async function cliServedPair(
+  model: string,
+  provider: string,
+  resuming: boolean,
+): Promise<{ model?: string; provider?: string }> {
+  const complete = Boolean(model && provider);
+  const current = complete || resuming ? null : await readCurrentFromCli();
   const servedModel = model || current?.model || "";
   const servedProvider = provider || current?.provider || "";
   return {
@@ -982,11 +1017,18 @@ export async function POST(request: Request) {
     const providerRow = wantsProvider && payload?.source === "dashboard"
       ? payload.providers.find((row) => row.id === rawProvider)
       : undefined;
+    // `source === "dashboard"` says where the payload came from, not that the
+    // dashboard reported this field. A row that simply omits `is_user_defined`
+    // normalises to null, and passing that on as `false` would blank the label
+    // on the box's own provider — the hazard the comment above names.
+    const reportedUserDefined = typeof providerRow?.isUserDefined === "boolean"
+      ? providerRow.isUserDefined
+      : undefined;
     const turn = await openDashboardTurn({
       text: promptWithImages,
       ...(rawModel ? { model: rawModel } : {}),
       ...(wantsProvider ? { provider: rawProvider } : {}),
-      ...(providerRow ? { providerIsUserDefined: providerRow.isUserDefined } : {}),
+      ...(reportedUserDefined === undefined ? {} : { providerIsUserDefined: reportedUserDefined }),
       ...(rawReasoning ? { reasoning: rawReasoning } : {}),
       ...(rawSessionId ? { sessionId: rawSessionId } : {}),
       signal: request.signal,
@@ -998,7 +1040,7 @@ export async function POST(request: Request) {
   // disk when it was spawned, and a switch made during the turn — ai_set_model
   // does exactly that when told "switch to X" — must not become the record of
   // the turn that was told.
-  const cliServed = await cliServedPair(rawModel, wantsProvider ? rawProvider : "");
+  const cliServed = await cliServedPair(rawModel, wantsProvider ? rawProvider : "", Boolean(rawSessionId));
 
   try {
     const { out: text, err } = await runHermes(args, request.signal);

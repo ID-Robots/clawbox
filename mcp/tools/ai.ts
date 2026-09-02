@@ -40,8 +40,13 @@ interface ModelsBody extends HermesDefaultSource {
   models?: ModelRow[];
   providers?: ProviderRow[];
   stale?: boolean;
-  /** Scoped form only: the saved pairing, whichever provider it belongs to. */
-  saved?: { provider?: string; model?: string } | null;
+  /**
+   * Scoped form only: the device's saved pairing, whichever provider it belongs
+   * to. Named as the route names it (`ScopedModelsReply` in
+   * src/lib/hermes-model-options.ts) — this file cannot import from the app, so
+   * the two are kept honest by the name and by mcp-served-model-honesty.test.ts.
+   */
+  savedPair?: { provider?: string; model?: string } | null;
 }
 
 /**
@@ -53,7 +58,11 @@ interface ModelsBody extends HermesDefaultSource {
  * never a prose string in a field that is an object everywhere else.
  */
 function scopedDeviceDefault(body: ModelsBody) {
-  return hermesDeviceDefault({ provider: body.saved?.provider, current: body.saved?.model, reasoning: body.reasoning });
+  return hermesDeviceDefault({
+    provider: body.savedPair?.provider,
+    current: body.savedPair?.model,
+    reasoning: body.reasoning,
+  });
 }
 
 const MODEL_LIMIT = 40;
@@ -67,7 +76,11 @@ const PROVIDER_LIMIT = 12;
 // Both setters change the default only. Said once in each description and
 // once in each answer — the answer is what the agent relays to the user.
 const DEFAULT_SCOPE = "what new chats start on; this chat keeps its header model";
-const KEEPS_HEADER_MODEL = "This chat keeps the model chosen in its header; the user changes it there.";
+// "Where there is a header" is not padding: this answer also reaches Telegram
+// and cron sessions, which have no header to keep a model in — what is true of
+// all of them is that the setter moved the DEFAULT and not this conversation.
+const KEEPS_HEADER_MODEL =
+  "This conversation keeps the model it is already on; where it has a header, the user changes it there.";
 
 const SET_RULES: ErrorRule[] = [
   {

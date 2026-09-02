@@ -93,6 +93,7 @@ export const nl: Record<string, string> = {
   "chat.showLess": "Minder tonen",
   "chat.working": "Bezig…",
   "chat.reasoning": "Redenering",
+  "chat.servedBy": "Beantwoord door",
   "chat.toolsUsed": "Gebruikte tools",
   // === Full message view: the real email, opened from the chat ===
   "chat.email.openFull": "Volledig bericht openen",
@@ -655,6 +656,7 @@ export const sv: Record<string, string> = {
   "chat.showLess": "Visa mindre",
   "chat.working": "Arbetar…",
   "chat.reasoning": "Resonemang",
+  "chat.servedBy": "Besvarat av",
   "chat.toolsUsed": "Använda verktyg",
   // === Full message view: the real email, opened from the chat ===
   "chat.email.openFull": "Öppna hela meddelandet",
@@ -1217,6 +1219,7 @@ export const zh: Record<string, string> = {
   "chat.showLess": "收起",
   "chat.working": "处理中…",
   "chat.reasoning": "推理过程",
+  "chat.servedBy": "回复模型",
   "chat.toolsUsed": "使用的工具",
   // === Full message view: the real email, opened from the chat ===
   "chat.email.openFull": "打开完整邮件",

@@ -580,6 +580,41 @@ describe("the provider a turn reports as having served it", () => {
     expect(final.provider ?? "").toBe("");
   });
 
+  it("keeps the literal `custom` through the COMPLETION frame too, on a session this turn built", async () => {
+    // The session site knows the request IS the provider on a session it built
+    // (`providerFromRequest`); the completion site did not, so the frame — which
+    // reports `custom` because the session really is on custom — was handed to a
+    // resolver that cannot tell that word's two meanings apart, and the provider
+    // was lost on the way out. Only the route's `||` was hiding it.
+    const { turn, socket } = await connect(
+      { model: "my-model", provider: "custom" },
+      { model: "my-model", provider: "custom" },
+    );
+    expect(turn?.provider).toBe("custom");
+    const running = turn!.run(() => {});
+    await Promise.resolve();
+    socket.event("message.complete", { text: "one", status: "complete", provider: "custom" });
+    const final = await running;
+    expect(final.provider).toBe("custom");
+    expect(final.model).toBe("my-model");
+  });
+
+  it("still answers nothing when a built session's frame names a model it never settled on", async () => {
+    // The contract is about the session the request built, on the model it was
+    // built with. A frame naming another model describes a pairing this turn
+    // never established, and `providerFromRequest` says nothing about it.
+    const { turn, socket } = await connect(
+      { model: "my-model", provider: "custom" },
+      { model: "my-model", provider: "custom" },
+    );
+    const running = turn!.run(() => {});
+    await Promise.resolve();
+    socket.event("message.complete", { text: "one", status: "complete", model: "some-other-model" });
+    const final = await running;
+    expect(final.model).toBe("some-other-model");
+    expect(final.provider ?? "").toBe("");
+  });
+
   it("does not let a completion's own kind overwrite the resolved slug", async () => {
     const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5" });
     const running = turn!.run(() => {});
