@@ -763,10 +763,10 @@ const GATEWAY_PORT = Number(process.env.GATEWAY_PORT || "18789");
 const GATEWAY_HEALTH_WAIT_MS = Number(process.env.GATEWAY_HEALTH_WAIT_MS || "30000");
 const GATEWAY_RECOVERY_WAIT_MS = Number(process.env.GATEWAY_RECOVERY_WAIT_MS || "45000");
 const GATEWAY_WAIT_INTERVAL_MS = Number(process.env.GATEWAY_WAIT_INTERVAL_MS || "1500");
-// The unit's TimeoutStartSec (config/clawbox-gateway.service): a pre-start
-// still running at this point is killed by systemd itself, so the wait below
-// never outlives the thing it waits for.
-const GATEWAY_PRE_START_TIMEOUT_MS = Number(process.env.GATEWAY_PRE_START_TIMEOUT_MS || "600000");
+// The unit's own TimeoutStartSec (config/clawbox-gateway.service), not a
+// tunable: a pre-start still running at this point is killed by systemd
+// itself, so the wait below never outlives the thing it waits for.
+const GATEWAY_PRE_START_TIMEOUT_MS = 600_000;
 const ROOT_STEP_SETTLE_TIMEOUT_MS = Number(process.env.ROOT_STEP_SETTLE_TIMEOUT_MS || "7200000");
 const LEGACY_GATEWAY_BLOCKER_RE =
   /installs\.json|conflicting plugin install metadata|carl_pir|belongs to agent piper/i;
@@ -848,7 +848,9 @@ async function removeGatewayMaintenanceMask(): Promise<void> {
 
 /**
  * Let a gateway that is still in its ExecStartPre finish it before it is
- * stopped.
+ * stopped. Called with the runtime mask already in place: a masked unit
+ * cannot be started again, so nothing can enter `start-pre` behind this
+ * wait — checked, then masked, would leave that gap open.
  *
  * WHY. clawbox-gateway.service and clawbox-setup.service start together at
  * boot, and gateway-pre-start.sh can spend minutes in a plugin install on a
@@ -880,27 +882,29 @@ async function waitForGatewayPreStart(): Promise<void> {
     if (subState !== "start-pre") return;
     if (!announced) {
       announced = true;
-      console.log("[Updater] waiting for clawbox-gateway to finish its pre-start before quiescing it");
+      console.log("[Updater] waiting for clawbox-gateway to finish its pre-start before stopping it");
     }
     await delay(GATEWAY_WAIT_INTERVAL_MS);
   }
-  console.warn("[Updater] clawbox-gateway pre-start did not finish within its ceiling — quiescing anyway");
+  console.warn("[Updater] clawbox-gateway pre-start did not finish within its ceiling — stopping anyway");
 }
 
 /**
  * Keep systemd from starting the gateway while an OpenClaw writer is active.
  * Mask comes before stop so a root update step cannot race the stop with its
- * own restart. The runtime mask is always removed, including failure paths.
+ * own restart, and before the pre-start wait so no new activation can slip
+ * into `start-pre` behind it. The runtime mask is always removed, including
+ * failure paths.
  */
 async function withGatewayQuiesced<T>(operation: () => Promise<T>): Promise<T> {
   if (gatewayIsAbsent()) return operation();
-  await waitForGatewayPreStart();
 
   let masked = false;
   let outcome!: { ok: true; value: T } | { ok: false; error: unknown };
   try {
     await setGatewayMaintenanceMask(true);
     masked = true;
+    await waitForGatewayPreStart();
     await stopGatewayForMaintenance();
     outcome = { ok: true, value: await operation() };
   } catch (err) {
@@ -1660,6 +1664,16 @@ function createInitialState(steps: UpdateStepDef[]): UpdateState {
 
 let state: UpdateState = createInitialState(applicableSteps());
 let running = false;
+// Taken before the first await in checkContinuation and released when it
+// returns. `running` covers a launched run; this covers the reads before it,
+// so two callers in one tick — the boot hook and a status poll — cannot both
+// find the flag set and both resume, and no full run can start underneath.
+let continuationClaimed = false;
+
+/** An update owns the box: one is running, or a continuation is being read. */
+function updateOwned(): boolean {
+  return running || continuationClaimed;
+}
 
 export function getUpdateState(): UpdateState {
   return {
@@ -1699,12 +1713,6 @@ function launchUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOpt
     });
 }
 
-// Taken before the first await in checkContinuation and released when it
-// returns. `running` covers a launched run; this covers the reads before it,
-// so two callers in one tick — the boot hook and a status poll — cannot both
-// find the flag set and both resume.
-let continuationClaimed = false;
-
 /**
  * Whether an update owns the box right now: one is running, or one has
  * rebooted the box and is waiting for its second half to be resumed. Boot
@@ -1712,7 +1720,7 @@ let continuationClaimed = false;
  * ask this before they start.
  */
 export async function updateInFlight(): Promise<boolean> {
-  if (running || continuationClaimed) return true;
+  if (updateOwned()) return true;
   return Boolean(await get("update_needs_continuation"));
 }
 
@@ -1723,7 +1731,7 @@ export async function updateInFlight(): Promise<boolean> {
  * overlapping callers only the first reads the flag; the other gets false.
  */
 export async function checkContinuation(): Promise<boolean> {
-  if (running || continuationClaimed) return false;
+  if (updateOwned()) return false;
   continuationClaimed = true;
   try {
     return await resumeContinuation();
@@ -1790,7 +1798,7 @@ async function resumeContinuation(): Promise<boolean> {
 }
 
 export function startUpdate(): { started: boolean; error?: string } {
-  if (running) {
+  if (updateOwned()) {
     return { started: false, error: "Update already in progress" };
   }
 
@@ -1829,7 +1837,7 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
 ];
 
 export function startOpenclawUpdate(): { started: boolean; error?: string } {
-  if (running) {
+  if (updateOwned()) {
     return { started: false, error: "Update already in progress" };
   }
   // Every step in this list is OpenClaw's, so there is no filtered version of

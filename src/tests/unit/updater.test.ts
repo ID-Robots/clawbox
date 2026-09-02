@@ -419,12 +419,16 @@ describe("updater", () => {
         `${cmd} ${(args as string[]).join(" ")}`,
       );
       const firstMask = calls.findIndex((call) => call.includes("systemctl --runtime mask clawbox-gateway.service"));
-      const preStartQueriesBeforeMask = calls
-        .slice(0, firstMask)
-        .filter((call) => call.includes("show clawbox-gateway.service -p SubState --value"));
+      const firstStop = calls.findIndex((call) => call.includes("systemctl stop clawbox-gateway.service"));
+      const subStateQueries = calls
+        .map((call, index) => call.includes("show clawbox-gateway.service -p SubState --value") ? index : -1)
+        .filter((index) => index >= 0);
       expect(firstMask).toBeGreaterThan(-1);
-      // Asked, saw the pre-start running, asked again, and only then masked.
-      expect(preStartQueriesBeforeMask.length).toBeGreaterThanOrEqual(2);
+      expect(firstStop).toBeGreaterThan(firstMask);
+      // Masked first (nothing can enter start-pre behind the wait), then
+      // asked, saw the pre-start running, asked again, and only then stopped.
+      expect(subStateQueries[0]).toBeGreaterThan(firstMask);
+      expect(subStateQueries.filter((index) => index < firstStop).length).toBeGreaterThanOrEqual(2);
     });
 
     it("fails when an overrun post_update later settles with a systemd error result", async () => {
@@ -921,6 +925,24 @@ describe("updater", () => {
 
       expect(await Promise.all([fromBoot, fromPoll])).toEqual([true, false]);
       expect(mockSet.mock.calls.filter(([key]) => key === "update_needs_continuation")).toHaveLength(1);
+    });
+
+    it("refuses a full or scoped update while the continuation is being read", async () => {
+      // Between the claim and `running = true` the check is reading persisted
+      // state. A POST /update/run in that window used to see `running` false
+      // and launch a full update under the second half about to resume.
+      updater.resetUpdateState();
+      const flagRead = deferred();
+      mockGet.mockImplementation(async (key: string) =>
+        key === "update_needs_continuation" ? flagRead.promise.then(() => true) : undefined,
+      );
+
+      const continuation = updater.checkContinuation();
+      expect(updater.startUpdate()).toEqual({ started: false, error: "Update already in progress" });
+      expect(updater.startOpenclawUpdate()).toEqual({ started: false, error: "Update already in progress" });
+
+      flagRead.resolve();
+      expect(await continuation).toBe(true);
     });
 
     it("reports a failed update instead of resuming when the rebuild unit failed", async () => {

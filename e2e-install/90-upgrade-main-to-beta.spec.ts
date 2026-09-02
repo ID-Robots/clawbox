@@ -93,10 +93,9 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     // `checkContinuation`, which the server's own boot hook fires a few
     // seconds after it is back up (our status polls are only the fallback).
     const state = await waitForUpdate({ timeoutMs: 45 * 60_000 });
-    // phase may legitimately be "completed" (after post_update ran) or
-    // "running" while the resumed second half is still going. We poll
-    // through the restart, so by the time this returns we should be at one
-    // of the terminal states.
+    // `waitForUpdate` returns only a terminal phase — "completed" once
+    // post_update and the checks after it ran, or "failed" — polling through
+    // the restart and the resumed second half to get there.
     expect(["completed", "failed"]).toContain(state.phase);
     if (state.phase === "failed") {
       const failedStep = state.steps.find((s) => s.status === "failed");
