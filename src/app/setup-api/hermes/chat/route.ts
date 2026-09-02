@@ -33,6 +33,7 @@ import {
   isAllowedProvider,
   isPairAllowed,
   shouldEnforcePairing,
+  readCurrentFromCli,
   type ModelOptionsPayload,
 } from "@/lib/hermes-model-options";
 import { appendTranscript } from "@/lib/harness/transcript-store";
@@ -643,15 +644,16 @@ function isAbort(err: unknown): boolean {
  * other half as config.yaml has it. `-m` alone runs on the configured provider;
  * `--provider` alone is refused above unless it IS the configured one. A
  * default that cannot be read is left out rather than guessed.
+ *
+ * Read through `readCurrentFromCli`, never off the catalogue payload: that
+ * payload is memoised whole (fresh under 60 s, served stale for hours with a
+ * background refresh) and only ClawBox's own writers invalidate it — Hermes'
+ * own `/model` persist and a `hermes config set` from a terminal do not. The
+ * `hermes config get` read underneath is keyed on config.yaml's mtime, so it
+ * costs a stat when nothing changed and cannot lag a write.
  */
-async function cliServedPair(
-  model: string,
-  provider: string,
-  payload: ModelOptionsPayload | null,
-): Promise<{ model?: string; provider?: string }> {
-  const current = model && provider
-    ? null
-    : payload?.current ?? (await getModelOptions().catch(() => null))?.current ?? null;
+async function cliServedPair(model: string, provider: string): Promise<{ model?: string; provider?: string }> {
+  const current = model && provider ? null : await readCurrentFromCli().catch(() => null);
   const servedModel = model || current?.model || "";
   const servedProvider = provider || current?.provider || "";
   return {
@@ -996,7 +998,7 @@ export async function POST(request: Request) {
   // disk when it was spawned, and a switch made during the turn — ai_set_model
   // does exactly that when told "switch to X" — must not become the record of
   // the turn that was told.
-  const cliServed = await cliServedPair(rawModel, wantsProvider ? rawProvider : "", payload);
+  const cliServed = await cliServedPair(rawModel, wantsProvider ? rawProvider : "");
 
   try {
     const { out: text, err } = await runHermes(args, request.signal);

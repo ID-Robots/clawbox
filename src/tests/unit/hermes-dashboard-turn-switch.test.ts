@@ -516,14 +516,27 @@ describe("the provider a turn reports as having served it", () => {
     expect(turn?.provider).toBe("clawlocal");
   });
 
-  it("keeps `custom` when the turn asked for Hermes' literal custom provider", async () => {
+  it("keeps `custom` on a session this turn built for Hermes' literal custom provider", async () => {
     // `custom` is a real CLI slug as well as the dashboard's kind for every
-    // user-defined provider; the request is what tells them apart.
+    // user-defined provider. A session.create with `provider: custom` is on
+    // the literal one by contract.
     const { turn } = await connect(
       { model: "my-model", provider: "custom" },
       { model: "my-model", provider: "custom" },
     );
     expect(turn?.provider).toBe("custom");
+  });
+
+  it("never asserts the literal `custom` provider on a resumed session the dashboard calls `custom`", async () => {
+    // The session may be on clawai (kind `custom`) serving the same model id;
+    // a request for the literal `custom` provider skips the switch on the
+    // model id alone, and nothing can tell the two apart. Unknown, not wrong.
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "my-model", provider: "custom" },
+      { model: "my-model", provider: "custom" },
+    );
+    expect(socket.method("slash.exec")).toBeUndefined();
+    expect(turn?.provider ?? "").toBe("");
   });
 
   it("does not let a completion that names no provider reinstate a request the session contradicted", async () => {

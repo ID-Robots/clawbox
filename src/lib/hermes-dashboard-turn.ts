@@ -507,23 +507,30 @@ const COMMAND_SAFE_ID = /^[A-Za-z0-9_./:-]+$/;
  * is still on whatever the kind stands for), and the honest answer is none.
  *
  * Two traps. `custom` is ALSO a real CLI slug (a generic OpenAI-compatible
- * endpoint), so it passes the allowlist: it is read as the kind unless this
- * very turn asked for the literal `custom` provider. And the allowlist cannot
- * say which slugs are user-defined (`clawai` is in Hermes' captured registry,
- * `clawlocal` is not), so the contradiction is detected off the catalogue's
- * own flag, carried on the request as `providerIsUserDefined`; a request whose
- * flag is unknown is given the benefit of the doubt.
+ * endpoint), so it passes the allowlist — and a dashboard that says `custom`
+ * of a session it did not just build for this request cannot be telling the
+ * two apart, so on such a session the literal `custom` provider is never
+ * asserted: the answer is none. (A session the request built, or switched, is
+ * on the requested provider by contract and never reaches this function.)
+ * And the allowlist cannot say which slugs are user-defined (`clawai` is in
+ * Hermes' captured registry, `clawlocal` is not), so the contradiction is
+ * detected off the catalogue's own flag, carried on the request as
+ * `providerIsUserDefined`; a request whose flag is unknown is given the
+ * benefit of the doubt.
  */
 const DASHBOARD_PROVIDER_KIND = "custom";
 function servedProviderSlug(reported: string, req: DashboardTurnRequest, onRequestedModel: boolean): string {
   const requested = req.provider;
-  const reportedIsKind = reported === DASHBOARD_PROVIDER_KIND && requested !== DASHBOARD_PROVIDER_KIND;
+  const reportedIsKind = reported === DASHBOARD_PROVIDER_KIND;
   if (reported && !reportedIsKind && (isHermesCliProvider(reported) || reported === requested)) return reported;
   if (!onRequestedModel || !requested) return "";
   // Nothing reported at all — the SESSION-level call, where the dashboard had
   // its chance to name one. A completion frame that names none defers to what
   // the session was resolved to instead (see the messageComplete handler).
   if (!reported) return requested;
+  // The kind and the literal slug are the same word; nothing here can say
+  // which the session is on.
+  if (requested === DASHBOARD_PROVIDER_KIND) return "";
   return reportedIsKind && req.providerIsUserDefined !== false ? requested : "";
 }
 
@@ -866,13 +873,20 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
     const info = (result.info || {}) as Record<string, unknown>;
     let activeModel = typeof info.model === "string" ? info.model : "";
     let activeProvider = typeof info.provider === "string" ? info.provider : "";
+    // Whether `activeProvider` is the REQUEST's slug (a session this turn
+    // built, or switched) rather than the dashboard's report — the former is
+    // true by contract and needs no resolving.
+    let providerFromRequest = false;
     const activeReasoning = typeof info.reasoning_effort === "string" ? info.reasoning_effort : "";
     // On a FRESH session the override is part of the create call itself and is
     // honoured by contract (`session.create` builds the agent with it), so the
     // request is the truth here even if `info` was assembled before the build.
     if (!wantResume && req.model) {
       activeModel = req.model;
-      if (req.provider) activeProvider = req.provider;
+      if (req.provider) {
+        activeProvider = req.provider;
+        providerFromRequest = true;
+      }
     }
 
     // ── Making a mid-conversation switch REAL ────────────────────────────
@@ -948,13 +962,19 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
         throw new Error(`dashboard would not switch this session to ${req.model}`);
       }
       activeModel = req.model;
-      if (req.provider) activeProvider = req.provider;
+      if (req.provider) {
+        activeProvider = req.provider;
+        providerFromRequest = true;
+      }
       // The switch WIPES the session's reasoning effort — see below.
       switchedModel = true;
     }
-    // Resolved once, after any switch, so the handle below and the completion
-    // frame report the same thing — see servedProviderSlug.
-    activeProvider = servedProviderSlug(activeProvider, req, Boolean(activeModel) && activeModel === req.model);
+    // What the DASHBOARD reported is resolved once, here, so the handle below
+    // and the completion frame report the same thing — see servedProviderSlug.
+    // What the request set stands as it is.
+    if (!providerFromRequest) {
+      activeProvider = servedProviderSlug(activeProvider, req, Boolean(activeModel) && activeModel === req.model);
+    }
 
     // ── Putting the reasoning level back after a switch takes it away ────
     //

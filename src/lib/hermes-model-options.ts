@@ -471,7 +471,7 @@ async function readDiskCatalog(): Promise<HermesProviderRow[] | null> {
  *  the same store the dashboard reads, unlike the old config.yaml regex (whose
  *  `^\s*(?:default|model)\s*:` pattern matched the FIRST `model:` anywhere in
  *  the file, so it was order-dependent and wrong on some configs). */
-async function readCurrentFromCli(): Promise<{ provider: string; model: string; reasoning: string }> {
+export async function readCurrentFromCli(): Promise<{ provider: string; model: string; reasoning: string }> {
   // Three CLI spawns at ~600 ms each; memoised against config.yaml's mtime so
   // repeat reads (every chat open, every Settings visit) cost a stat.
   const [provider, model, reasoning] = await Promise.all([

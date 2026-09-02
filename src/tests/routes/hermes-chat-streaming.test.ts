@@ -48,6 +48,9 @@ vi.mock("@/lib/hermes-model-options", () => ({
   // itself judge the pair, which is the path a box takes before the header has
   // warmed the cache.
   getModelOptions: vi.fn(async () => null),
+  // Same box, same story one layer down: no pairing to read, so the CLI path
+  // records nothing rather than guessing one.
+  readCurrentFromCli: vi.fn(async () => ({ provider: "", model: "", reasoning: "" })),
   isAllowedProvider: vi.fn(() => true),
   isPairAllowed: vi.fn(() => true),
   shouldEnforcePairing: vi.fn(() => false),

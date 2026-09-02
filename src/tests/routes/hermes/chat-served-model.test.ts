@@ -16,7 +16,7 @@ vi.mock("child_process", () => ({ spawn: vi.fn(), execFile: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ HERMES_BIN: "/home/clawbox/.local/bin/hermes" }));
 vi.mock("@/lib/hermes-model-options", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/hermes-model-options")>();
-  return { ...actual, getModelOptions: vi.fn() };
+  return { ...actual, getModelOptions: vi.fn(), readCurrentFromCli: vi.fn() };
 });
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/tmp/clawbox-chat-served-model-test",
@@ -30,11 +30,14 @@ vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => {
 });
 
 import { spawn } from "child_process";
-import { getModelOptions } from "@/lib/hermes-model-options";
+import { getModelOptions, readCurrentFromCli } from "@/lib/hermes-model-options";
 import { openDashboardTurn } from "@/lib/hermes-dashboard-turn";
 
 const mockSpawn = vi.mocked(spawn);
 const mockGetModelOptions = vi.mocked(getModelOptions);
+/** The mtime-keyed read of config.yaml's pairing — what the CLI itself falls back to. */
+const mockReadCurrent = vi.mocked(readCurrentFromCli);
+const current = (provider: string, model: string) => ({ provider, model, reasoning: "medium" });
 const mockOpenDashboardTurn = vi.mocked(openDashboardTurn);
 
 /** A `hermes chat` that exits 0 with a one-line answer and a session banner. */
@@ -79,11 +82,11 @@ describe("/setup-api/hermes/chat — what the CLI path records as the served mod
   beforeEach(() => {
     vi.clearAllMocks();
     mockSpawn.mockImplementation(() => fakeHermes() as never);
+    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-flash") as never);
+    mockReadCurrent.mockResolvedValue(current("clawai", "deepseek-v4-flash"));
   });
 
   it("records the device default when the request named neither model nor provider", async () => {
-    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-flash") as never);
-
     const res = await post({ message: "which model are you" });
 
     expect(res.status).toBe(200);
@@ -92,21 +95,32 @@ describe("/setup-api/hermes/chat — what the CLI path records as the served mod
 
   it("records the device's provider when only the model was named", async () => {
     // `-m` without `--provider` runs the named model on config.yaml's provider.
-    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-flash") as never);
-
     const res = await post({ message: "hi", model: "deepseek-v4-flash" });
 
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ model: "deepseek-v4-flash", provider: "clawai" });
   });
 
+  it("reads the pairing off config.yaml itself, not the catalogue memo, which can lag an outside write", async () => {
+    // getModelOptions() memoises the whole payload (fresh <60 s, stale-served
+    // <6 h) and only ClawBox's own writers invalidate it; Hermes' own `/model`
+    // persist and `hermes config set` do not. The `hermes config get` read is
+    // keyed on config.yaml's mtime and cannot lag.
+    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-flash") as never);
+    mockReadCurrent.mockResolvedValue(current("openai", "gpt-5.6-sol"));
+
+    const res = await post({ message: "which model are you" });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ model: "gpt-5.6-sol", provider: "openai" });
+  });
+
   it("reads the default before the run, so a switch made during the turn is not the turn's record", async () => {
     // "Switch to GPT" makes the agent call ai_set_model mid-turn, which
     // rewrites config.yaml. The turn itself ran on what the file said when
     // it was spawned.
-    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-flash") as never);
     mockSpawn.mockImplementation(() => {
-      mockGetModelOptions.mockResolvedValue(payload("openai", "gpt-5.6-sol") as never);
+      mockReadCurrent.mockResolvedValue(current("openai", "gpt-5.6-sol"));
       return fakeHermes() as never;
     });
 
@@ -116,8 +130,16 @@ describe("/setup-api/hermes/chat — what the CLI path records as the served mod
     expect(await res.json()).toMatchObject({ model: "deepseek-v4-flash", provider: "clawai" });
   });
 
+  it("does not read the pairing at all when the request named both halves", async () => {
+    const res = await post({ message: "hi", provider: "clawai", model: "deepseek-v4-flash" });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ model: "deepseek-v4-flash", provider: "clawai" });
+    expect(mockReadCurrent).not.toHaveBeenCalled();
+  });
+
   it("records nothing rather than a guess when the default cannot be read", async () => {
-    mockGetModelOptions.mockRejectedValue(new Error("dashboard unreachable"));
+    mockReadCurrent.mockRejectedValue(new Error("hermes did not answer"));
 
     const res = await post({ message: "hi" });
 
