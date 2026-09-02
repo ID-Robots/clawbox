@@ -48,7 +48,7 @@ describe("/setup-api/chat/model", () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
     vi.mocked(promisify).mockReturnValue(mockExec as never);
     vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
-    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
+    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 0 });
     // Mirror real `parseFullyQualifiedModel` from `@/lib/openclaw-config`
     // exactly — trailing-slash rejection matters, a lax mock can mask bugs.
     vi.mocked(parseFullyQualifiedModel).mockImplementation((fq: string) => {

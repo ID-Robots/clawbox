@@ -11,17 +11,30 @@
  *                         same JSON the old .jsonl files carried, ordered by
  *                         `seq` per `session_id`.
  *
- * Every reader/writer here decides per agent: a box the doctor has migrated
- * has the .sqlite file and is served from it; a box still on the legacy
- * files (mid-update, or a downgrade) keeps the old path — the callers all
- * fall back. Writes mirror what the gateway itself does closely enough for
- * the same sweeps the sessions.json writers ran (the gateway reads entries
- * back from the store on demand, exactly as it re-read the JSON file).
+ * Every reader here decides per agent: a box the doctor has migrated has the
+ * .sqlite file and is served from it; a box still on the legacy files
+ * (mid-update, or a downgrade) keeps the old path — the callers all fall back.
+ *
+ * READ-ONLY for the agent store, without exception. The core owns
+ * `session_nodes` with triggers:
+ *
+ *   CREATE TRIGGER session_nodes_entry_valid_after_entry_update
+ *   AFTER UPDATE OF entry_json ON session_nodes
+ *   BEGIN UPDATE session_nodes SET entry_valid = 0 WHERE session_key = NEW.session_key; END;
+ *
+ * and its scan throws SessionCanonicalKeyMigrationRequiredError for any row
+ * whose `entry_valid` is not 1 — the gateway then refuses to start until
+ * `openclaw doctor --fix`. Only the core's own write path re-validates a row,
+ * so an external UPDATE of `entry_json` is never safe, whatever the schema
+ * version says (2026.8.1 stamps 19; the sweep this module used to carry
+ * checked exactly that and still bricked chat on every model switch — finding
+ * M-03). Anything that must change an entry goes through the gateway's own
+ * API: see openclaw-session-model.ts.
  *
  * node:sqlite on purpose: it ships with the Node 22 the box runs, needs no
- * native build on Tegra, and `DatabaseSync` keeps these sweeps as simple as
- * the readFile/writeFile they replace. Opened with a busy timeout so a
- * concurrently writing gateway makes us wait, not fail.
+ * native build on Tegra, and `DatabaseSync` keeps these reads as simple as
+ * the readFile they replace. Opened with a busy timeout so a concurrently
+ * writing gateway makes us wait, not fail.
  */
 
 import fs from "node:fs";
@@ -83,8 +96,11 @@ export function sessionStorePath(agentId: string, agentsDir: string = AGENTS_DIR
 
 /**
  * Open one of OpenClaw's SQLite stores with the busy timeout every reader and
- * writer here relies on. Shared with openclaw-state-store.ts, which serves the
- * gateway-wide `state/openclaw.sqlite` the same way.
+ * writer relies on. Shared with openclaw-state-store.ts, which serves the
+ * gateway-wide `state/openclaw.sqlite` the same way (and may write there —
+ * that store has no validity trigger). Inside THIS module every call passes
+ * `readOnly: true`; see the module comment for why there is no other mode
+ * for the agent store.
  */
 export function openSqlite(dbPath: string, readOnly: boolean): DatabaseSyncType {
   const { DatabaseSync } = requireNodeSqlite();
@@ -95,6 +111,20 @@ export function openSqlite(dbPath: string, readOnly: boolean): DatabaseSyncType 
     /* busy_timeout is advisory; a refusal changes nothing below */
   }
   return db;
+}
+
+/**
+ * {@link open}, with a failed open resolved to null. A corrupt header or a
+ * permission error must reach the caller as "no store" — the legacy-file
+ * fallback — not escape as a 500 from a chat read.
+ */
+function openOrNull(dbPath: string): DatabaseSyncType | null {
+  try {
+    return openSqlite(dbPath, true);
+  } catch (err) {
+    console.warn(`[session-store] could not open ${dbPath}:`, err);
+    return null;
+  }
 }
 
 /**
@@ -111,16 +141,8 @@ export function readTranscriptRaw(
 ): { raw: string; identity: string } | null {
   const dbPath = sessionStorePath(agentId, agentsDir);
   if (!dbPath) return null;
-  // open() sits INSIDE the guarded region: a corrupt header or permission
-  // error must resolve to null (the legacy-file fallback), not escape as a
-  // 500 from a chat-history read.
-  let db: DatabaseSyncType;
-  try {
-    db = openSqlite(dbPath, true);
-  } catch (err) {
-    console.warn(`[session-store] could not open ${dbPath}:`, err);
-    return null;
-  }
+  const db = openOrNull(dbPath);
+  if (!db) return null;
   try {
     const node = db
       .prepare("SELECT current_session_id AS sid, updated_at AS updatedAt FROM session_nodes WHERE session_key = ?")
@@ -170,97 +192,46 @@ export function listAgentIds(agentsDir: string = AGENTS_DIR_DEFAULT): string[] {
   }
 }
 
-/**
- * The newest agent-store schema this sweep has been verified against —
- * OpenClaw 2026.8.1 stamps PRAGMA user_version 19 and its own maintenance
- * code hard-refuses anything newer, so ours does too.
- */
-const KNOWN_SESSION_SCHEMA_VERSION = 19;
-
-export interface SessionEntrySweepResult {
-  /** Entries the mutator changed and that were written back. */
-  updated: number;
-  /** False when the sweep died (a contended or corrupt store): nothing can
-   *  be said about what was written, and a caller must not treat the pass
-   *  as done — record no backup, count no update. */
-  ok: boolean;
-  /** Present only when the store is from a newer OpenClaw generation. The
-   *  caller must not reinterpret that refusal as permission to mutate a
-   *  leftover legacy sessions.json for the same migrated agent. */
-  unsupportedSchema?: number;
+export interface SessionEntryRow {
+  key: string;
+  /** The parsed `entry_json` object (modelOverride, thinkingLevel, sessionId, …). */
+  entry: Record<string, unknown>;
 }
 
 /**
- * Read every session entry in one agent's SQLite store, hand each to the
- * mutator, and write back the ones it changed. The mutator receives the
- * parsed `entry_json` object keyed by session key and returns true to
- * persist its mutation. One IMMEDIATE transaction per store: the sweep the
- * sessions.json writers did with a whole-file rewrite stays just as atomic.
+ * Every session entry in one agent's SQLite store, parsed, or null when the
+ * agent has no store or it cannot be read (logged). Rows whose `entry_json`
+ * is not a JSON object are left out — the core keeps `{}` placeholder rows
+ * for a retention window, and they describe no session.
  */
-export function sweepSessionEntries(
+export function readSessionEntries(
   agentId: string,
-  mutate: (sessionKey: string, entry: Record<string, unknown>) => boolean,
   agentsDir: string = AGENTS_DIR_DEFAULT,
-): SessionEntrySweepResult | null {
+): SessionEntryRow[] | null {
   const dbPath = sessionStorePath(agentId, agentsDir);
   if (!dbPath) return null;
-  let db: DatabaseSyncType;
+  const db = openOrNull(dbPath);
+  if (!db) return null;
   try {
-    db = openSqlite(dbPath, false);
-  } catch (err) {
-    console.error(`[session-store] could not open ${dbPath} for sweep:`, err);
-    return { updated: 0, ok: false };
-  }
-  try {
-    db.exec("BEGIN IMMEDIATE");
-    let updated = 0;
-    try {
-      // Inspect the schema only AFTER taking the write reservation. Otherwise
-      // another OpenClaw process can migrate v19 → v20 between this read and
-      // BEGIN IMMEDIATE, leaving this old writer to mutate a schema it never
-      // understood. OpenClaw's own store code refuses versions above its cap;
-      // this sweep must be no braver. 2026.8.1 stamps user_version 19.
-      const versionRow = db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined;
-      const schemaVersion = typeof versionRow?.user_version === "number" ? versionRow.user_version : 0;
-      if (schemaVersion > KNOWN_SESSION_SCHEMA_VERSION) {
-        console.error(
-          `[session-store] ${dbPath} carries schema v${schemaVersion}, newer than the v${KNOWN_SESSION_SCHEMA_VERSION} this sweep knows; refusing to write`,
-        );
-        db.exec("ROLLBACK");
-        return { updated: 0, ok: false, unsupportedSchema: schemaVersion };
-      }
-
-      const rows = db
-        .prepare("SELECT session_key AS key, entry_json AS entry FROM session_nodes")
-        .all() as Array<{ key?: string | null; entry?: string | null }>;
-      const write = db.prepare("UPDATE session_nodes SET entry_json = ?, updated_at = ? WHERE session_key = ?");
-      for (const row of rows) {
-        if (typeof row.key !== "string" || typeof row.entry !== "string") continue;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(row.entry);
-        } catch {
-          continue;
-        }
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-        const entry = parsed as Record<string, unknown>;
-        if (!mutate(row.key, entry)) continue;
-        write.run(JSON.stringify(entry), Date.now(), row.key);
-        updated += 1;
-      }
-      db.exec("COMMIT");
-    } catch (err) {
+    const rows = db
+      .prepare("SELECT session_key AS key, entry_json AS entry FROM session_nodes ORDER BY session_key")
+      .all() as Array<{ key?: string | null; entry?: string | null }>;
+    const entries: SessionEntryRow[] = [];
+    for (const row of rows) {
+      if (typeof row.key !== "string" || typeof row.entry !== "string") continue;
+      let parsed: unknown;
       try {
-        db.exec("ROLLBACK");
+        parsed = JSON.parse(row.entry);
       } catch {
-        /* the connection close below releases the transaction anyway */
+        continue;
       }
-      throw err;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      entries.push({ key: row.key, entry: parsed as Record<string, unknown> });
     }
-    return { updated, ok: true };
+    return entries;
   } catch (err) {
-    console.error(`[session-store] sweep failed for agent ${agentId}:`, err);
-    return { updated: 0, ok: false };
+    console.warn(`[session-store] could not read sessions of agent ${agentId}:`, err);
+    return null;
   } finally {
     db.close();
   }

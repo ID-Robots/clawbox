@@ -1,5 +1,6 @@
 import fs from "fs/promises";
-import { listAgentIds, sessionStorePath, sweepSessionEntries } from "./openclaw-session-store";
+import { listAgentIds, readSessionEntries, sessionStorePath } from "./openclaw-session-store";
+import { isPatchableSession, patchSessionModels, type GatewayRpcCall } from "./openclaw-session-model";
 import { clearPairingState, readPairingAllowEntries, readPairingRequests } from "./openclaw-state-store";
 import fsSync from "fs";
 import path from "path";
@@ -252,6 +253,55 @@ export function spawnOpenclawCli(
   options: SpawnOpenclawOptions = {},
 ): Promise<string> {
   return spawnOpenclaw(args, options);
+}
+
+/** Bound on the gateway round trip itself; the spawn budget adds the CLI's own start-up on top. */
+const GATEWAY_RPC_TIMEOUT_MS = 20_000;
+const GATEWAY_RPC_SPAWN_ALLOWANCE_MS = 30_000;
+
+/**
+ * One gateway RPC through the CLI: `openclaw gateway call <method> --params
+ * <json> --json`. The CLI is the gateway's own client — it holds the device
+ * identity, the token and the protocol version, so nothing here can drift
+ * from what the gateway accepts. With `--json` it prints the method's result
+ * object and nothing else on success; a failure is written as an error
+ * payload with exit 1, which `spawnOpenclaw` turns into a rejection carrying
+ * that text. The `ok === false` check is for a build that reports a refusal
+ * on exit 0.
+ *
+ * Costs one CLI start-up (10-12 s on a Jetson), so callers batch: a sweep
+ * over N sessions is one `sessions.patchMany`, not N calls.
+ */
+export async function callGatewayRpc(
+  method: string,
+  params: Record<string, unknown>,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const timeoutMs = options.timeoutMs ?? GATEWAY_RPC_TIMEOUT_MS;
+  const out = await spawnOpenclaw(
+    ["gateway", "call", method, "--params", JSON.stringify(params), "--json", "--timeout", String(timeoutMs)],
+    {
+      captureStdout: true,
+      timeoutMs: timeoutMs + GATEWAY_RPC_SPAWN_ALLOWANCE_MS,
+      // Session keys are not secrets, but a 100-target params blob is not a log line either.
+      labelArgs: ["gateway", "call", method, "--params", "<json>", "--json"],
+    },
+  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(out);
+  } catch {
+    throw new Error(`${method} returned no JSON`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${method} returned no object`);
+  }
+  const payload = parsed as Record<string, unknown>;
+  if (payload.ok === false) {
+    const error = payload.error as { message?: unknown } | undefined;
+    throw new Error(typeof error?.message === "string" ? error.message : `${method} failed`);
+  }
+  return payload;
 }
 
 /**
@@ -519,8 +569,33 @@ interface ApplyModelOverrideOpts {
    * chat). No such surface ships today, so this branch currently has
    * no production caller — kept for the test contract and as the
    * obvious extension point.
+   *
+   * Before that surface ships, note the contract is now backend-dependent:
+   * on an OpenClaw 2 agent the gateway records "pinned to the new default"
+   * by clearing the override (no `modelOverrideSource: "user"` survives),
+   * so a later soft sweep would not see that session as sticky, where the
+   * legacy file path leaves the tag in place.
    */
   skipUserTagged?: boolean;
+  /**
+   * The gateway transport for OpenClaw 2 agents (their sessions live in a
+   * store only the gateway may write). Defaults to the CLI-backed
+   * {@link callGatewayRpc}; tests inject a fake.
+   */
+  callGateway?: GatewayRpcCall;
+}
+
+export interface ApplyModelOverrideResult {
+  /** Agents whose sessions changed: one per store or sessions.json touched. */
+  filesUpdated: number;
+  sessionsUpdated: number;
+  /**
+   * OpenClaw 2 sessions the gateway would not repoint (each one logged with
+   * the gateway's reason). They keep their previous model; nothing else is
+   * tried, because the only other way to change them is the store rewrite
+   * that invalidates every row.
+   */
+  sessionsSkipped: number;
 }
 
 async function listAgentSessionsFiles(agentsDir: string): Promise<string[]> {
@@ -550,48 +625,60 @@ async function atomicWriteSessionsFile(filePath: string, data: unknown): Promise
 }
 
 /**
- * Rewrite every session's per-session model/provider override across
- * every agent on disk to the given target, tagged with the given
- * source. Returns how many sessions were touched.
+ * Repoint every existing session, across every agent on disk, to the given
+ * model, so the switch reaches the chats that are already open and not only
+ * the sessions born after it.
  *
- * Use `source: "user"` (also the default) when the caller is acting
- * on a direct user choice — chat-panel model dropdown, Local-only
- * toggle, etc. OpenClaw's per-turn model resolver explicitly returns
- * early for entries whose `modelOverrideSource === "user"`, which is
- * the only value that survives the auto-picker re-evaluating on
- * every message. `"manual"` looks reasonable but is not special-cased
- * anywhere in the OpenClaw dist and gets silently overwritten back
- * to `"auto"` on the next turn.
+ * Two store generations, two mechanisms:
+ *   - OpenClaw 2 agents (an `agent/openclaw-agent.sqlite`) are patched through
+ *     the gateway — `sessions.patchMany { model }` — which writes the override
+ *     fields itself, tags them `modelOverrideSource: "user"` and normalises a
+ *     stale `thinkingLevel`. The store is only READ, to learn the session keys.
+ *     A session the gateway refuses is counted in `sessionsSkipped` and left
+ *     alone; there is no fallback, because a direct `session_nodes` write is
+ *     what bricked chat on every switch (finding M-03).
+ *   - Legacy agents (`sessions/sessions.json`) get the atomic file rewrite,
+ *     with the fields below written by hand. `source: "user"` (the default) is
+ *     the only value OpenClaw's per-turn resolver treats as sticky; `"manual"`
+ *     is not special-cased anywhere and is overwritten back to `"auto"` on the
+ *     next turn.
  *
- * Writes are atomic (temp + rename). If any individual sessions.json
- * fails to parse/write, the error is logged and the sweep continues —
- * one bad file should not block the rest.
+ * One bad agent — an unreadable store, a corrupt file — is logged and the
+ * sweep continues with the rest.
  */
 export async function applyModelOverrideToAllAgentSessions(
   update: SessionOverrideUpdate,
   opts: ApplyModelOverrideOpts = {},
-): Promise<{ filesUpdated: number; sessionsUpdated: number }> {
+): Promise<ApplyModelOverrideResult> {
   const agentsDir = opts.agentsDir ?? AGENTS_DIR;
   const source = update.source ?? "user";
   const authProfile = update.authProfile ?? `${update.provider}:default`;
   const skipUserTagged = opts.skipUserTagged === true;
+  const callGateway = opts.callGateway ?? callGatewayRpc;
 
   let filesUpdated = 0;
   let sessionsUpdated = 0;
+  let sessionsSkipped = 0;
 
-  /** The per-entry mutation, shared verbatim by both store generations. */
+  /**
+   * The soft sweep's exclusion: a session the user pinned to something else.
+   * A pin that already matches the target is still swept so its source and
+   * auth profile converge.
+   */
+  const keepsUserPick = (session: Record<string, unknown>): boolean => {
+    if (!skipUserTagged || session.modelOverrideSource !== "user") return false;
+    const sameProvider =
+      session.providerOverride === update.provider ||
+      session.modelProvider === update.provider;
+    const sameModel =
+      session.modelOverride === update.modelId ||
+      session.model === update.modelId;
+    return !sameProvider || !sameModel;
+  };
+
+  /** The legacy-file mutation. */
   const applyToSession = (session: Record<string, unknown>): boolean => {
-    if (skipUserTagged && session.modelOverrideSource === "user") {
-      const sameProvider =
-        session.providerOverride === update.provider ||
-        session.modelProvider === update.provider;
-      const sameModel =
-        session.modelOverride === update.modelId ||
-        session.model === update.modelId;
-      if (!sameProvider || !sameModel) {
-        return false;
-      }
-    }
+    if (keepsUserPick(session)) return false;
     session.providerOverride = update.provider;
     session.modelOverride = update.modelId;
     session.modelOverrideSource = source;
@@ -599,6 +686,14 @@ export async function applyModelOverrideToAllAgentSessions(
     session.authProfileOverrideSource = source;
     session.modelProvider = update.provider;
     session.model = update.modelId;
+    // Normalise the sticky reasoning-effort override to the new model's
+    // capability. `thinkingLevel` is a per-session sticky the gateway keeps
+    // (set via `sessions.patch`); repointing the session to a model that
+    // can't honour the old level would otherwise leave e.g. a DeepSeek
+    // `high` on a local llama.cpp Gemma session, and the gateway rejects the
+    // next turn with `thinkingLevel "high" is not supported for llamacpp/…
+    // (use off)`. Only rewrite when the existing level is actually
+    // unsupported, so a compatible level (e.g. cloud→cloud) is left intact.
     if (isThinkingLevel(session.thinkingLevel)) {
       const reasoning = getProviderReasoningConfig(update.provider, `${update.provider}/${update.modelId}`);
       if (!reasoning.levels.includes(session.thinkingLevel)) {
@@ -608,23 +703,38 @@ export async function applyModelOverrideToAllAgentSessions(
     return true;
   };
 
-  // OpenClaw 2 agents keep their sessions in SQLite; an agent with a store is
-  // swept there and its (absent or archived) sessions.json is left alone.
+  // OpenClaw 2 agents: the store names the sessions, the gateway changes them.
+  // An agent with a store is served from it whatever else is on disk — its
+  // (absent or archived) sessions.json is an archive the gateway no longer
+  // reads, and is left alone below.
   const migratedAgents = new Set<string>();
+  const model = `${update.provider}/${update.modelId}`;
   for (const agentId of listAgentIds(agentsDir)) {
     if (!sessionStorePath(agentId, agentsDir)) continue;
-    const result = sweepSessionEntries(agentId, (_key, entry) => applyToSession(entry), agentsDir);
-    // A newer SQLite schema is still authoritative for this migrated agent.
-    // It refused our write on purpose; falling through to an old sessions.json
-    // would report success while the gateway keeps reading unchanged SQLite.
-    if (result?.unsupportedSchema !== undefined) migratedAgents.add(agentId);
-    // Other failed sweeps retain the established best-effort legacy behavior.
-    if (!result?.ok) continue;
     migratedAgents.add(agentId);
-    if (result.updated > 0) {
-      filesUpdated += 1;
-      sessionsUpdated += result.updated;
+    const rows = readSessionEntries(agentId, agentsDir);
+    if (!rows) {
+      console.warn(`[openclaw-config] could not list the sessions of agent ${agentId}; they keep their previous model`);
+      continue;
     }
+    const targets = rows
+      .filter(({ entry }) => isPatchableSession(entry) && !keepsUserPick(entry))
+      .map(({ key }) => ({ key, agentId }));
+    if (targets.length === 0) continue;
+    let patched = 0;
+    for (const outcome of await patchSessionModels(targets, model, { call: callGateway })) {
+      if (outcome.ok) {
+        patched += 1;
+        continue;
+      }
+      sessionsSkipped += 1;
+      console.warn(
+        `[openclaw-config] session ${outcome.key} (agent ${agentId}) keeps its previous model:`,
+        outcome.error,
+      );
+    }
+    sessionsUpdated += patched;
+    if (patched > 0) filesUpdated += 1;
   }
 
   const files = (await listAgentSessionsFiles(agentsDir)).filter(
@@ -644,21 +754,7 @@ export async function applyModelOverrideToAllAgentSessions(
     let touchedInFile = 0;
     for (const session of Object.values(sessions)) {
       if (!session || typeof session !== "object") continue;
-      // Preserve sticky per-session user choices when the caller asked
-      // for a soft sweep. A session whose existing override matches
-      // the new target is still touched so its source/authProfile
-      // converge with the target — only diverging user picks stay put.
-      if (!applyToSession(session)) {
-        continue;
-      }
-      // Normalise the sticky reasoning-effort override to the new model's
-      // capability. `thinkingLevel` is a per-session sticky the gateway keeps
-      // (set via `sessions.patch`); repointing the session to a model that
-      // can't honour the old level would otherwise leave e.g. a DeepSeek
-      // `high` on a local llama.cpp Gemma session, and the gateway rejects the
-      // next turn with `thinkingLevel "high" is not supported for llamacpp/…
-      // (use off)`. Only rewrite when the existing level is actually
-      // unsupported, so a compatible level (e.g. cloud→cloud) is left intact.
+      if (!applyToSession(session)) continue;
       touchedInFile += 1;
     }
 
@@ -672,7 +768,7 @@ export async function applyModelOverrideToAllAgentSessions(
     }
   }
 
-  return { filesUpdated, sessionsUpdated };
+  return { filesUpdated, sessionsUpdated, sessionsSkipped };
 }
 
 /**

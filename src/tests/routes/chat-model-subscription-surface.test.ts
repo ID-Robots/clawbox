@@ -150,7 +150,7 @@ describe("/setup-api/chat/model and the Claude subscription surface", () => {
 
     vi.mocked(promisify).mockReturnValue(vi.fn().mockResolvedValue({ stdout: "", stderr: "" }) as never);
     vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
-    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
+    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 0 });
     vi.mocked(parseFullyQualifiedModel).mockImplementation((fq: string) => {
       const idx = fq.indexOf("/");
       if (idx <= 0 || idx === fq.length - 1) return null;

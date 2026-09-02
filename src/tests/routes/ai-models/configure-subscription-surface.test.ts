@@ -246,7 +246,7 @@ async function primeConfigureRoute(): Promise<(request: Request) => Promise<Resp
   vi.mocked(restartGateway).mockResolvedValue();
   vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
   vi.mocked(runOpenclawConfigSetBatch).mockResolvedValue(undefined);
-  vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
+  vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 0 });
   vi.mocked(setProviderPlugins).mockResolvedValue(undefined);
   vi.mocked(unpairLocal).mockResolvedValue(undefined);
   mockSpawn.mockImplementation(() => successfulChild());
