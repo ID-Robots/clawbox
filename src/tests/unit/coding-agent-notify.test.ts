@@ -58,6 +58,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     activeSubagents: [],
     subagentsTotal: 0,
     commit: null,
+    pr: null,
     subagentsByType: {},
     modelsUsed: [],
     maxTurns: 400,
