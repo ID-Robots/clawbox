@@ -1235,12 +1235,15 @@ type GatewayState =
   /** Step 9 issued its restart — it came up, or step 9 answered its own 502. */
   | "restart-issued";
 
+/** Shared by reference: `configureModel` has too many exits to return it. */
+type GatewayTracker = { state: GatewayState };
+
 /** Folded into the error the owner sees when the restore itself fails. */
 const GATEWAY_OFFLINE_HINT =
   "The assistant is offline until the gateway restarts — use Restart in the system tray.";
 
 export async function POST(request: Request) {
-  const gateway: { state: GatewayState } = { state: "untouched" };
+  const gateway: GatewayTracker = { state: "untouched" };
   const response = await configureModel(request, gateway);
   if (gateway.state !== "stopped-for-doctor") return response;
   // An error exit between the doctor stop and step 9. Only `restart` is
@@ -1269,7 +1272,7 @@ async function withGatewayOfflineHint(response: Response): Promise<Response> {
   return NextResponse.json({ ...body, error }, { status: response.status });
 }
 
-async function configureModel(request: Request, gateway: { state: GatewayState }): Promise<Response> {
+async function configureModel(request: Request, gateway: GatewayTracker): Promise<Response> {
   // Hoisted so the catch can classify the failure without re-parsing the body —
   // a local-model or wrong-edition failure must not be reported as a credential
   // problem (there is no credential to check).
