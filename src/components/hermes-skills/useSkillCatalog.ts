@@ -2,14 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  type CliFailureCode,
+  type BrowseFailureCode,
   type BrowseResponse,
   type CatalogFacets,
   type CatalogMeta,
   type FacetScope,
   type HermesSkill,
   type SortOption,
-  isCliFailureCode,
+  isBrowseFailureCode,
 } from '@/lib/hermes-skills';
 
 // Browse-tab data: one endpoint (/browse) serves listing, search, the facet rail
@@ -97,7 +97,7 @@ export interface CatalogController {
    * Never the message — that is English composed on the server, and the one
    * place it belongs is the console.
    */
-  error: CliFailureCode | 'unknown' | null;
+  error: BrowseFailureCode | 'unknown' | null;
   degraded: boolean;
   catalog: CatalogMeta | null;
   facets: CatalogFacets;
@@ -122,7 +122,7 @@ export function useSkillCatalog(active: boolean): CatalogController {
   const [loading, setLoading] = useState(false);
   const [appending, setAppending] = useState(false);
   const [slow, setSlow] = useState(false);
-  const [error, setError] = useState<CliFailureCode | 'unknown' | null>(null);
+  const [error, setError] = useState<BrowseFailureCode | 'unknown' | null>(null);
   const [degraded, setDegraded] = useState(false);
   const [catalog, setCatalog] = useState<CatalogMeta | null>(null);
   const [facets, setFacets] = useState<CatalogFacets>(EMPTY_FACETS);
@@ -200,7 +200,7 @@ export function useSkillCatalog(active: boolean): CatalogController {
         setError(null);
       }
       const slowTimer = append ? null : setTimeout(() => setSlow(true), SLOW_AFTER_MS);
-      let failure: CliFailureCode | 'unknown' = 'unknown';
+      let failure: BrowseFailureCode | 'unknown' = 'unknown';
       try {
         const res = await fetch(buildUrl(targetPage), { signal: controller.signal, cache: 'no-store' });
         const data = (await res.json().catch(() => ({}))) as Partial<BrowseResponse> & {
@@ -208,7 +208,7 @@ export function useSkillCatalog(active: boolean): CatalogController {
           code?: string;
         };
         if (!res.ok) {
-          if (isCliFailureCode(data?.code)) failure = data.code;
+          if (isBrowseFailureCode(data?.code)) failure = data.code;
           throw new Error(data?.error || `HTTP ${res.status}`);
         }
         const incoming = Array.isArray(data.skills) ? data.skills : [];

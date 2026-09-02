@@ -88,6 +88,20 @@ describe("GET /setup-api/hermes/skills/browse — a CLI failure carries a code",
     expect(body.code).toBe("too_large");
   });
 
+  it("names a search the route will not run `bad_query`, without spawning anything", async () => {
+    // The one refusal on this route the OWNER caused: the search box accepts a
+    // leading "-", `isValidQuery` refuses it, and a 400 with no code read on
+    // the card as "couldn't load the catalogue, retry" — the wrong story under
+    // a button that re-sends the same rejected text.
+    mockCli.mockRejectedValue(new Error("should not spawn"));
+
+    const { status, body } = await browse("q=-rf&page=1&size=24");
+
+    expect(status).toBe(400);
+    expect(body.code).toBe("bad_query");
+    expect(mockCli).not.toHaveBeenCalled();
+  });
+
   it("names a request the client gave up on `cancelled`", async () => {
     // The gate drops a queued call whose signal is already aborted before it
     // ever spawns — so the CLI fake must not be reached at all.

@@ -7,7 +7,9 @@ import {
   type HermesSkillDetail,
   type SkillProvenance,
   type SkillRequirements,
+  CLI_FAILURE_SENTENCES,
   checkInstallIdentifier,
+  cliFailureCode,
   cliInstallIdentifier,
 } from "@/lib/hermes-skills";
 import { parseAmbiguousSkills } from "@/lib/hermes-skill-cli-outcome";
@@ -257,12 +259,13 @@ export async function GET(request: Request) {
   try {
     return wantDocs ? await remoteDocs(id, request.signal) : await localDetail(id, fromInstalled);
   } catch (err) {
-    // runHermesCli rejects with a sanitized message (e.g. "Hermes is not
-    // installed on this device") — surface that, never the binary path.
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Could not inspect skill" },
-      { status: 502 },
-    );
+    // runHermesCli's message is sanitised of the binary path but it is still
+    // ENGLISH, and the detail panel painted it verbatim under a localised
+    // header (HERMES-04). The code is the part the panel can say in the
+    // owner's language; the message goes to the log.
+    const code = cliFailureCode(err);
+    console.error("[hermes skills inspect] CLI failed", code, err instanceof Error ? err.message : err);
+    return NextResponse.json({ error: CLI_FAILURE_SENTENCES[code], code }, { status: 502 });
   }
 }
 
@@ -443,13 +446,16 @@ async function remoteDocs(id: string, signal: AbortSignal): Promise<NextResponse
     });
   } catch (err) {
     if (err instanceof Error && /timed out/i.test(err.message)) {
-      return NextResponse.json({ error: "Could not load the full documentation" }, { status: 504 });
+      return NextResponse.json(
+        { error: "Could not load the full documentation", code: "cli_timeout" },
+        { status: 504 },
+      );
     }
     throw err;
   }
   if (r.code !== 0) {
     // Never surface raw stderr (it can carry the binary path).
-    return NextResponse.json({ error: "Could not load skill details" }, { status: 502 });
+    return NextResponse.json({ error: "Could not load skill details", code: "cli_failed" }, { status: 502 });
   }
 
   const { fields, preview, hasSkillPanel } = parseInspect(r.stdout);

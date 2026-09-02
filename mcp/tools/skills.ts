@@ -221,6 +221,17 @@ const uninstallRules = (name: string): ErrorRule[] => [
 ];
 
 const CATALOG_RULES: ErrorRule[] = [
+  // Not the device failing: the search text itself is one the route will not
+  // run (it caps the length and refuses a leading "-"). Retrying it is the one
+  // thing that cannot work, so say so rather than letting the 400 fall through
+  // to a generic transport error.
+  {
+    status: 400,
+    match: /"code"\s*:\s*"bad_query"/,
+    code: "BAD_ARGUMENT",
+    message: "That search text cannot be used.",
+    next: "Search again with one plain keyword; it must not start with \"-\". Do not retry the same text.",
+  },
   // The browse route names its CLI-fallback deadline by code (HERMES-04).
   // Before it did, the status-only rule below sent the agent to wifi_status for
   // a device that was merely slow — and matchRule() takes the first rule that

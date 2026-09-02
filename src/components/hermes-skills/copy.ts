@@ -239,18 +239,36 @@ export function useCopy() {
        * them. The route sends this code for a "dangerous" verdict and nothing
        * else, so that is what a payload missing the verdict is assumed to say —
        * "caution" would describe a skill the device does install.
+       *
+       * The TRUST tier has no such single answer: the device refuses a
+       * dangerous verdict from a community OR a trusted source, and its own
+       * sentence says "third-party" when the scan carried no tier. Defaulting
+       * to the rail's `unknown` bucket told the owner where the skill came
+       * from, which is a claim this payload did not make — so a missing tier
+       * drops the clause instead.
        */
-      blockedByDevice: (name: string, verdict?: string, trust?: string) =>
-        t('skills.blockedByDevice', {
-          name,
-          verdict: safetyLabel(t, verdict || 'dangerous'),
-          trust: trustLabel(t, trust || 'unknown'),
-        }),
+      blockedByDevice: (name: string, verdict?: string, trust?: string) => {
+        const params = { name, verdict: safetyLabel(t, verdict || 'dangerous') };
+        return trust
+          ? t('skills.blockedByDevice', { ...params, trust: trustLabel(t, trust) })
+          : t('skills.blockedByDeviceUnknownSource', params);
+      },
       builtinSkill: (name: string) => t('skills.builtinSkill', { name }),
       notInstalled: (name: string) => t('skills.notInstalled', { name }),
       uninstallRefused: t('skills.uninstallRefused'),
       /** The browse route's failure code; one it did not name gets the generic line. */
       browseError: (code: string) => t(`skills.${BROWSE_ERROR_KEYS[code] ?? 'browseFailed'}`),
+      /**
+       * The detail panel's note. `docs` lost only the documentation body — the
+       * metadata is on screen behind the note — so it says so rather than
+       * claiming the skill could not be loaded. A device without Hermes is the
+       * one `meta` cause worth naming: nothing on that panel will load, and
+       * retrying is pointless.
+       */
+      detailError: (part: 'meta' | 'docs', code?: string | null) =>
+        part === 'docs'
+          ? t('skills.detailDocsFailed')
+          : t(code === 'cli_missing' ? 'skills.detailUnavailable' : 'skills.detailFailed'),
 
       // === TASK-452: enabled/disabled ===
       skillDisabled: t('skills.skillDisabled'),
@@ -323,6 +341,9 @@ const safetyLabel = (t: Translate, id: string) =>
 const BROWSE_ERROR_KEYS: Record<string, string> = {
   cli_timeout: 'browseTimeout',
   cli_missing: 'browseUnavailable',
+  // Not a device failure at all: the search itself is one the route will not
+  // run, so the line says what to change and the button clears it.
+  bad_query: 'browseBadQuery',
 };
 
 // The capability ids hermes-skill-capabilities.ts can emit. Kept as a set so a

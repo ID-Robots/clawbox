@@ -1,7 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { HermesSkill, HermesSkillDetail } from '@/lib/hermes-skills';
+import {
+  type CliFailureCode,
+  type HermesSkill,
+  type HermesSkillDetail,
+  isCliFailureCode,
+} from '@/lib/hermes-skills';
 
 // Two-phase detail fetch.
 //
@@ -17,6 +22,20 @@ const CACHE_LIMIT = 50;
 
 export type DetailPhase = 'idle' | 'meta' | 'docs' | 'done';
 
+/**
+ * Why the panel has a note on it, in the two parts the panel says differently:
+ * `docs` cost only the documentation body — the metadata is already on screen —
+ * while `meta` is the whole detail. The CODE, never the route's sentence: that
+ * sentence is English composed on the device, and it used to be painted
+ * verbatim under a localised header (HERMES-04). A failure that carried no code
+ * — an older device build, a transport error — is `null` and gets the generic
+ * line, the same rule the Browse tab applies.
+ */
+export interface DetailFailure {
+  part: 'meta' | 'docs';
+  code: CliFailureCode | null;
+}
+
 interface DetailDelta extends Partial<HermesSkillDetail> {
   provenance?: HermesSkillDetail['provenance'];
 }
@@ -24,7 +43,7 @@ interface DetailDelta extends Partial<HermesSkillDetail> {
 export interface DetailController {
   detail: HermesSkillDetail | null;
   phase: DetailPhase;
-  error: string | null;
+  error: DetailFailure | null;
   ambiguous: { query: string; candidates: HermesSkill[] } | null;
   /**
    * Drop the cached entries for these ids AND re-run the fetch for whatever is
@@ -42,7 +61,7 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
   const [phase, setPhase] = useState<DetailPhase>('idle');
   // Errors and ambiguity are tagged with the id they belong to, so switching
   // skills drops them by DERIVATION rather than by an extra state write.
-  const [errorState, setErrorState] = useState<{ id: string; message: string } | null>(null);
+  const [errorState, setErrorState] = useState<({ id: string } & DetailFailure) | null>(null);
   const [ambiguous, setAmbiguous] = useState<{ query: string; candidates: HermesSkill[] } | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const cache = useRef<Map<string, HermesSkillDetail>>(new Map());
@@ -100,6 +119,10 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
 
     (async () => {
       let base = cached ?? null;
+      // Set from the answer's own code before the throw below, so the catch —
+      // which also covers a transport failure that has no code at all — knows
+      // which of the two it is holding.
+      let metaCode: CliFailureCode | null = null;
       try {
         if (!base) {
           const res = await fetch(`${INSPECT_URL}?id=${encodeURIComponent(inspectId)}${scope}`, {
@@ -107,7 +130,10 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
             cache: 'no-store',
           });
           const data = await res.json().catch(() => ({}));
-          if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+          if (!res.ok) {
+            if (isCliFailureCode(data?.code)) metaCode = data.code;
+            throw new Error(data?.error || `HTTP ${res.status}`);
+          }
           base = data.skill as HermesSkillDetail;
           if (cancelled) return;
           setDetail(base);
@@ -131,8 +157,9 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
         if (!res.ok) {
           // The metadata is already on screen; a failed docs fetch only costs
           // the body, so it degrades to a note rather than an error page.
+          console.error('[skills detail] documentation', data?.code ?? 'no code', data?.error ?? res.status);
           setPhase('done');
-          setErrorState({ id: inspectId, message: data?.error || 'Could not load the full documentation' });
+          setErrorState({ id: inspectId, part: 'docs', code: isCliFailureCode(data?.code) ? data.code : null });
           return;
         }
         const delta = (data.delta || {}) as DetailDelta;
@@ -166,8 +193,9 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
         setPhase('done');
       } catch (err) {
         if ((err as Error).name === 'AbortError' || cancelled) return;
+        console.error('[skills detail]', err);
         setPhase('done');
-        setErrorState({ id: inspectId, message: err instanceof Error ? err.message : 'Couldn’t load details' });
+        setErrorState({ id: inspectId, part: 'meta', code: metaCode });
       }
     })();
 
@@ -188,7 +216,7 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
   return {
     detail: stale ? null : detail,
     phase: stale ? 'meta' : phase,
-    error: errorState && errorState.id === inspectId ? errorState.message : null,
+    error: errorState && errorState.id === inspectId ? errorState : null,
     ambiguous: ambiguous && ambiguous.query === inspectId ? ambiguous : null,
     refresh,
   };

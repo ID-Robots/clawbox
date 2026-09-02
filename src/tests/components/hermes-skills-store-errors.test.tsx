@@ -63,6 +63,15 @@ const BROWSE = {
   degraded: false,
 };
 
+/** What phase 1 of the inspect route answers for the card above. */
+const DETAIL = {
+  id: SKILL.id,
+  name: SKILL.name,
+  source: SKILL.source,
+  trust: SKILL.trust,
+  needsRemoteDocs: true,
+};
+
 const HUB_ROW = {
   id: "pdf-tools",
   name: "PDF Tools",
@@ -84,9 +93,18 @@ const reply = (status: number, body: unknown): Reply => ({
   json: async () => body,
 });
 
-function mockStore(opts: { installed?: unknown; browse?: Reply; action?: () => Reply }) {
+function mockStore(opts: {
+  installed?: unknown;
+  browse?: Reply;
+  action?: () => Reply;
+  /** The detail panel's two phases: `?id=` (metadata) and `?id=&docs=1`. */
+  inspect?: (docs: boolean) => Reply;
+}) {
   const fetchMock = vi.fn(async (input: unknown) => {
     const url = String(input);
+    if (url.includes("/skills/inspect")) {
+      return opts.inspect ? opts.inspect(url.includes("docs=1")) : reply(200, { skill: DETAIL });
+    }
     if (url.includes("/skills/browse")) return opts.browse ?? reply(200, BROWSE);
     // `/skills/installed` is a prefix match for `/skills/install`, so the list
     // endpoint has to be recognised first.
@@ -232,7 +250,12 @@ describe("an install refusal the route names by code is shown in the owner's lan
 
   it("dangerous_skill_blocked with no verdict in the payload still says dangerous — the only verdict that code is sent for", async () => {
     mockStore({
-      action: () => reply(409, { error: "The device's installer refused to install it.", code: "dangerous_skill_blocked" }),
+      action: () =>
+        reply(409, {
+          error: "The device's installer refused to install it.",
+          code: "dangerous_skill_blocked",
+          warning: { trust: "community" },
+        }),
     });
     await openBrowseTab();
     await installFromBrowse();
@@ -242,10 +265,32 @@ describe("an install refusal the route names by code is shown in the owner's lan
         bgCopy("skills.blockedByDevice", {
           name: "PDF Tools",
           verdict: bgCopy("skills.safetyBucket.dangerous"),
-          trust: bgCopy("skills.trustBucket.unknown"),
+          trust: bgCopy("skills.trustBucket.community"),
         }),
       ),
     ).toBeTruthy();
+  });
+
+  it("drops the source clause when the payload carried no trust tier — it is not an 'unknown' source", async () => {
+    // The device refuses a dangerous verdict from a COMMUNITY or a TRUSTED
+    // source, and its own sentence says "third-party" when the scan named no
+    // tier. Filling that gap with the rail's `unknown` bucket told the owner
+    // where the skill came from — a claim this payload never made.
+    mockStore({
+      action: () => reply(409, { error: "The device's installer refused to install it.", code: "dangerous_skill_blocked" }),
+    });
+    await openBrowseTab();
+    await installFromBrowse();
+
+    expect(
+      screen.getByText(
+        bgCopy("skills.blockedByDeviceUnknownSource", {
+          name: "PDF Tools",
+          verdict: bgCopy("skills.safetyBucket.dangerous"),
+        }),
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(new RegExp(bgCopy("skills.trustBucket.unknown")))).toBeNull();
   });
 
   it("keeps the route's sentence for a code this build does not know", async () => {
@@ -336,5 +381,77 @@ describe("a browse failure never paints the CLI's own words", () => {
 
     expect(screen.queryByText("Browse failed")).toBeNull();
     expect(screen.getByText(bgCopy("skills.browseFailed"))).toBeTruthy();
+  });
+});
+
+/**
+ * The search box takes any text; the browse route refuses some of it (a leading
+ * "-", or more than 128 characters) with a 400. That 400 carried no code, so
+ * the card said "couldn't load the catalogue" — a device failure the device did
+ * not have — under a Retry that re-sends the same rejected text.
+ */
+describe("a search the route will not run is the owner's to fix, not the device's", () => {
+  it("says the search cannot be used, in the owner's language", async () => {
+    mockStore({ browse: reply(400, { error: "Invalid query", code: "bad_query" }) });
+    await openBrowseTab();
+
+    expect(await screen.findByText(bgCopy("skills.browseBadQuery"))).toBeTruthy();
+    expect(screen.queryByText(bgCopy("skills.browseFailed"))).toBeNull();
+  });
+
+  it("offers to clear the search rather than to retry it", async () => {
+    mockStore({ browse: reply(400, { error: "Invalid query", code: "bad_query" }) });
+    await openBrowseTab();
+
+    expect(await screen.findByRole("button", { name: bgCopy("skills.clearSearch") })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: bgCopy("skills.retry") })).toBeNull();
+  });
+});
+
+/**
+ * The detail panel is the fourth surface of the same store, fed by the inspect
+ * route — whose catch answered runHermesCli's own English and had it painted in
+ * an Alert under a localised header.
+ */
+describe("the detail panel says its failures in the owner's language too", () => {
+  async function openFirstCard() {
+    await openBrowseTab();
+    const open = await screen.findByText("PDF Tools");
+    await act(async () => {
+      fireEvent.click(open);
+    });
+  }
+
+  it("a device with no Hermes is named as such, not by the CLI's sentence", async () => {
+    mockStore({
+      inspect: () => reply(502, { error: "Hermes is not installed on this device.", code: "cli_missing" }),
+    });
+    await openFirstCard();
+
+    expect(await screen.findByText(bgCopy("skills.detailUnavailable"))).toBeTruthy();
+    expect(screen.queryByText(/not installed on this device/i)).toBeNull();
+  });
+
+  it("any other metadata failure gets the generic line, code or no code", async () => {
+    mockStore({ inspect: () => reply(502, { error: "Could not load skill details" }) });
+    await openFirstCard();
+
+    expect(await screen.findByText(bgCopy("skills.detailFailed"))).toBeTruthy();
+    expect(screen.queryByText("Could not load skill details")).toBeNull();
+  });
+
+  it("a documentation-only failure says the body is missing, not the skill", async () => {
+    // Phase 1 answered: the metadata is on screen. Only the docs fetch failed,
+    // and claiming the skill could not be loaded would contradict the page.
+    mockStore({
+      inspect: (docs) =>
+        docs
+          ? reply(504, { error: "Could not load the full documentation", code: "cli_timeout" })
+          : reply(200, { skill: DETAIL }),
+    });
+    await openFirstCard();
+
+    expect(await screen.findByText(bgCopy("skills.detailDocsFailed"))).toBeTruthy();
+    expect(screen.queryByText(bgCopy("skills.detailFailed"))).toBeNull();
   });
 });

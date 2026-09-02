@@ -234,6 +234,7 @@ export const skillsEn: Record<string, string> = {
   "skills.downloadFailed": "The skill was found in the store, but none of its sources would serve it.",
   "skills.unresolved": "That skill could not be found — try its full identifier.",
   "skills.blockedByDevice": "The device refused to install “{name}”: its security scan rated it “{verdict}” and it comes from a {trust} source, which the device will not install even when confirmed.",
+  "skills.blockedByDeviceUnknownSource": "The device refused to install “{name}”: its security scan rated it “{verdict}”, which the device will not install even when confirmed.",
   "skills.builtinSkill": "“{name}” came with this device, so it cannot be removed.",
   "skills.notInstalled": "No store skill called “{name}” is installed on this device.",
   "skills.uninstallRefused": "The device refused to remove that skill.",
@@ -243,6 +244,10 @@ export const skillsEn: Record<string, string> = {
   "skills.browseTimeout": "Loading the skill catalogue took too long. Try again in a moment.",
   "skills.browseUnavailable": "Hermes is not installed on this device, so the skill catalogue cannot be loaded.",
   "skills.browseFailed": "Couldn’t load the skill catalogue. Try again.",
+  "skills.browseBadQuery": "That search can’t be used. Try different words.",
+  "skills.detailFailed": "Couldn’t load this skill’s details. Try again.",
+  "skills.detailUnavailable": "Hermes is not installed on this device, so this skill’s details cannot be loaded.",
+  "skills.detailDocsFailed": "Couldn’t load this skill’s full documentation. The details above come from the device.",
 
   // === TASK-452: enabled / disabled ===
   "skills.skillDisabled": "Disabled",

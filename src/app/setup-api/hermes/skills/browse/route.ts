@@ -189,7 +189,14 @@ export async function GET(request: Request) {
 
   if (page === null) return NextResponse.json({ error: "Invalid page" }, { status: 400 });
   if (pageSize === null) return NextResponse.json({ error: "Invalid size" }, { status: 400 });
-  if (q && !isValidQuery(q)) return NextResponse.json({ error: "Invalid query" }, { status: 400 });
+  // The one 400 on this route the OWNER can cause and undo: the search box
+  // accepts a leading `-` and any length, and `isValidQuery` refuses both. It
+  // carries a code so the store can say "change the search" rather than the
+  // catalogue's "could not load, retry" — the others below are the rail's own
+  // values and the hook's paging, which no typing can make invalid.
+  if (q && !isValidQuery(q)) {
+    return NextResponse.json({ error: "Invalid query", code: "bad_query" }, { status: 400 });
+  }
 
   // The in-memory filter accepts every source the catalog can contain; only the
   // CLI fallback is restricted to the flag allowlist (see below). `?source=`

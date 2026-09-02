@@ -876,7 +876,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
           skill={selected}
           detail={detail.detail}
           phase={detail.phase}
-          error={detail.error}
+          error={detail.error && COPY.detailError(detail.error.part, detail.error.code)}
           ambiguous={detail.ambiguous}
           action={action}
           breadcrumb={'origin' in selected ? COPY.breadcrumbInstalled : COPY.breadcrumbBrowse}
@@ -890,6 +890,8 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
 
   // ── Grid view ─────────────────────────────────────────────────────────────
   const q = catalog.query.trim();
+  /** The one browse refusal the owner caused, and the only one Retry cannot fix. */
+  const badQuery = catalog.error === 'bad_query';
   const rangeFrom = catalog.results.length ? 1 : 0;
   // Two ways to earn the first-run panel: the device says it is still building
   // the index (`preparing` — true even though the request has COMPLETED, which
@@ -1063,11 +1065,20 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
               </SkillGrid>
             )}
             {catalog.error && !catalog.loading && (
+              // A search the route would not run is the owner's to fix, not the
+              // device's: Retry re-sends the same rejected text, so that case
+              // gets the search's own icon and the button that empties it.
               <EmptyState
-                icon="error"
-                tone="danger"
+                icon={badQuery ? 'search_off' : 'error'}
+                tone={badQuery ? 'muted' : 'danger'}
                 title={COPY.browseError(catalog.error)}
-                action={<PrimaryButton onClick={catalog.reload}>{COPY.retry}</PrimaryButton>}
+                action={
+                  badQuery ? (
+                    <PrimaryButton onClick={() => catalog.setQuery('')}>{COPY.clearSearch}</PrimaryButton>
+                  ) : (
+                    <PrimaryButton onClick={catalog.reload}>{COPY.retry}</PrimaryButton>
+                  )
+                }
               />
             )}
             {/* "Nothing here" is a claim about the catalogue, so it may only be

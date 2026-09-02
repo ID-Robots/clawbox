@@ -977,6 +977,21 @@ describe("skill_search — a slow catalogue is not a dead network", () => {
     expect(e.next).not.toMatch(/wifi_status/);
   });
 
+  it("reads bad_query as its own search to fix, not as the device failing", async () => {
+    // The route caps the query and refuses a leading "-". Without a rule the
+    // 400 fell through to the transport's generic failure, and the agent had
+    // no way to know the one thing that cannot help is sending it again.
+    apiGet.mockRejectedValue(
+      new ApiError(400, JSON.stringify({ error: "Invalid query", code: "bad_query" })),
+    );
+
+    const e = await searchErr();
+
+    expect(e.code).toBe("BAD_ARGUMENT");
+    expect(e.next).toMatch(/do not retry the same text/i);
+    expect(e.next).not.toMatch(/wifi_status|clawbox_health/);
+  });
+
   it("reads cli_missing as a device without Hermes — not a network to check, not a retry", async () => {
     apiGet.mockRejectedValue(
       new ApiError(

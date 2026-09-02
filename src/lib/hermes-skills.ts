@@ -260,6 +260,20 @@ export function isCliFailureCode(value: unknown): value is CliFailureCode {
 }
 
 /**
+ * What the BROWSE route can refuse with: every CLI failure, plus the one
+ * refusal the owner caused and can undo. A search the route will not run — it
+ * caps the length and rejects a leading `-`, both of which the search box lets
+ * you type — is a 400, and a 400 carrying no code read as "the catalogue could
+ * not be loaded, retry": the wrong story and a button that cannot help.
+ */
+export const BROWSE_FAILURE_CODES = [...CLI_FAILURE_CODES, 'bad_query'] as const;
+export type BrowseFailureCode = (typeof BROWSE_FAILURE_CODES)[number];
+
+export function isBrowseFailureCode(value: unknown): value is BrowseFailureCode {
+  return typeof value === 'string' && (BROWSE_FAILURE_CODES as readonly string[]).includes(value);
+}
+
+/**
  * Classify a runHermesCli / skills-gate rejection by the message it settled
  * with — the test the install route applies to its own timeout. The messages
  * are runHermesCli's ("hermes timed out", "hermes call cancelled", the spawn
