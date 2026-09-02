@@ -828,17 +828,10 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
 }
 
 export async function readConfig(): Promise<OpenClawConfig> {
+  // Same file, same root rule as the writers' reader — an unreadable file is
+  // the one place they differ: a reader gets `{}`, a writer gets the throw.
   try {
-    const raw = await fs.readFile(CONFIG_PATH, "utf-8");
-    const parsed: unknown = JSON.parse(raw);
-    // The ROOT is a container too, and it is the one every helper below stands
-    // on. A file holding `[]` parses fine, so without this the writers attach
-    // their keys to an array and `JSON.stringify` drops all of them; a root
-    // string or number makes the first assignment throw in strict mode. Either
-    // way a caller that only ever reads gets `{}`, which is what this function
-    // already promises for every other unusable file. See
-    // {@link ensurePlainObject}.
-    return isPlainObject(parsed) ? (parsed as OpenClawConfig) : {};
+    return await readConfigForWrite();
   } catch {
     return {};
   }
@@ -863,14 +856,8 @@ export async function readConfig(): Promise<OpenClawConfig> {
  * and every other read or parse failure throws.
  */
 export async function readConfigStrict(): Promise<OpenClawConfig> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(CONFIG_PATH, "utf-8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return {};
-    throw err;
-  }
-  const parsed: unknown = JSON.parse(raw);
+  const parsed = await parseConfigFileIfPresent();
+  if (parsed === undefined) return {};
   // Deliberately the OPPOSITE of readConfig's answer for the same file. This
   // function exists so a caller about to skip a repair cannot be told "already
   // clean" by a config it could not read, and a root array or primitive is
@@ -881,6 +868,80 @@ export async function readConfigStrict(): Promise<OpenClawConfig> {
     throw new Error("openclaw.json does not contain a configuration object");
   }
   return parsed as OpenClawConfig;
+}
+
+/**
+ * The read half of a read-modify-write.
+ *
+ * `readConfig` answers `{}` to every failure alike, and a writer that starts
+ * from that `{}` and saves has just replaced the whole file with the one block
+ * it was asked to add — every model provider, auth profile and gateway setting
+ * gone, and the route answers 200. That is exactly what a momentarily
+ * unreadable file produces: an EACCES, a file caught half-written by a
+ * concurrent `openclaw config set`. So here a file that cannot be read or
+ * parsed THROWS, the route answers 500, and the config on disk is untouched.
+ *
+ * Two shapes are still forgiven, deliberately. ENOENT is the first-run
+ * contract: there is nothing to lose. And a parseable non-object root (`[]`,
+ * `"nope"`, `3`, `null`) is a file OpenClaw cannot load at all — the gateway
+ * exits 78/CONFIG on it — so there is no working configuration to protect, and
+ * the writers repair it inside the same atomic write (see
+ * {@link ensurePlainObject}). That last case is the one difference from
+ * {@link readConfigStrict}, whose callers are about to SKIP a repair and must
+ * not be told "already clean" by a root that is not a config.
+ */
+export async function readConfigForWrite(): Promise<OpenClawConfig> {
+  const parsed = await parseConfigFileIfPresent();
+  // The ROOT is a container too, and it is the one every helper below stands
+  // on. A file holding `[]` parses fine, so without this the writers attach
+  // their keys to an array and `JSON.stringify` drops all of them; a root
+  // string or number makes the first assignment throw in strict mode. See
+  // {@link ensurePlainObject}.
+  return isPlainObject(parsed) ? (parsed as OpenClawConfig) : {};
+}
+
+/**
+ * openclaw.json exists but could not be read or parsed. The message is the
+ * one the owner sees — the Telegram routes answer it as the 500 body — so it
+ * says what happened and what was (not) done, never the parser's internals or
+ * the file's absolute path. The underlying error is kept on `cause`.
+ */
+export class OpenclawConfigUnreadableError extends Error {
+  readonly code = "config_unreadable";
+
+  constructor(cause: unknown) {
+    const reason =
+      cause instanceof SyntaxError
+        ? "it is not valid JSON"
+        : (cause as NodeJS.ErrnoException)?.code ?? "read failed";
+    super(
+      `OpenClaw's configuration file (openclaw.json) could not be read (${reason}), so nothing was saved. Check the file and try again.`,
+      { cause },
+    );
+    this.name = "OpenclawConfigUnreadableError";
+  }
+}
+
+/**
+ * The file's parsed JSON, or `undefined` when there is no file (JSON.parse
+ * never yields `undefined`, so the sentinel cannot collide with content).
+ * Every other read error and every parse error surfaces as
+ * {@link OpenclawConfigUnreadableError} — the callers above exist to tell "no
+ * config" apart from "could not read the config".
+ */
+async function parseConfigFileIfPresent(): Promise<unknown> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(CONFIG_PATH, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+    throw new OpenclawConfigUnreadableError(err);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    throw new OpenclawConfigUnreadableError(err);
+  }
 }
 
 /**
@@ -1402,39 +1463,13 @@ export async function ensureLocalAiProxyUrls(): Promise<boolean> {
   return changed;
 }
 
-export async function ensureCompactionReserveFloor(
-  reserveTokensFloor = DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR
-): Promise<void> {
-  const config = await readConfig();
-  // OpenClaw 2 replaced the reserve-tuning keys with compaction.mode and
-  // fails config validation on reserveTokensFloor — writing it here would
-  // brick the next gateway load. The mode key is the generation marker the
-  // loader migration leaves behind; a config carrying it never gets the
-  // legacy write. (A fresh v2 box without it is covered by the writers all
-  // being gone: install.sh, the configure route and the reset seed are
-  // version-gated, so this repair is the last legacy writer standing.)
-  const compactionProbe = (config as { agents?: { defaults?: { compaction?: { mode?: unknown } } } })
-    .agents?.defaults?.compaction;
-  if (compactionProbe && typeof compactionProbe.mode === "string") return;
-  const agents = ensurePlainObject(asBag(config), "agents");
-  const defaults = ensurePlainObject(agents, "defaults");
-  const compaction = ensurePlainObject(defaults, "compaction");
-  if (
-    typeof compaction.reserveTokensFloor !== "number" ||
-    compaction.reserveTokensFloor < reserveTokensFloor
-  ) {
-    compaction.reserveTokensFloor = reserveTokensFloor;
-    await writeConfig(config);
-  }
-}
-
 /**
  * Set the OpenClaw gateway control-UI allowed origins to include the given
  * mDNS hostname. Always preserves the standard local origins so the device
  * remains reachable via IP and the AP captive portal even after a rename.
  */
 export async function setControlUiAllowedOrigins(hostname: string): Promise<void> {
-  const config = await readConfig();
+  const config = await readConfigForWrite();
   const gateway = ensurePlainObject(asBag(config), "gateway");
   const controlUi = ensurePlainObject(gateway, "controlUi");
   const existing = Array.isArray(controlUi.allowedOrigins)
@@ -1456,7 +1491,7 @@ export async function setControlUiAllowedOrigins(hostname: string): Promise<void
 const TELEGRAM_CHANNEL_ID = "telegram";
 
 export async function setTelegramToken(botToken: string): Promise<void> {
-  const config = await readConfig();
+  const config = await readConfigForWrite();
   const channels = ensurePlainObject(asBag(config), "channels");
   // Do NOT set `dmPolicy` or `allowFrom` here. OpenClaw's default
   // (`dmPolicy: "pairing"`) requires the owner to approve every new sender
@@ -1491,7 +1526,7 @@ export async function getTelegramProgressStreaming(): Promise<boolean> {
 }
 
 export async function setTelegramProgressStreaming(enabled: boolean): Promise<void> {
-  const config = await readConfig();
+  const config = await readConfigForWrite();
   const channels = ensurePlainObject(asBag(config), "channels");
   const existing = existingChannelBlock(channels, TELEGRAM_CHANNEL_ID);
   if (enabled) {
@@ -1748,7 +1783,7 @@ export function trustChannelPlugin(config: OpenClawConfig, channelId: string): v
 }
 
 export async function setDiscordToken(botToken: string): Promise<void> {
-  const config = await readConfig();
+  const config = await readConfigForWrite();
   const channels = ensurePlainObject(asBag(config), "channels");
   const {
     dmPolicy: _dmPolicy,

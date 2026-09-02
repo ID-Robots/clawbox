@@ -148,20 +148,6 @@ describe("openclaw-config", () => {
     });
   });
 
-  describe("ensureCompactionReserveFloor", () => {
-    it("writes the default reserve floor when compaction config is missing", async () => {
-      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({ agents: { defaults: {} } }) as never);
-
-      await openclawConfig.ensureCompactionReserveFloor();
-
-      expect(mockFs.writeFile).toHaveBeenCalledWith(
-        expect.stringContaining("openclaw.json.tmp"),
-        expect.stringContaining('"reserveTokensFloor": 24000'),
-        "utf-8"
-      );
-    });
-  });
-
   describe("compactionReserveFloorForContext", () => {
     it("scales the reserve down for small local windows (Ollama 32K → 8192)", () => {
       expect(openclawConfig.compactionReserveFloorForContext(32768)).toBe(8192);
@@ -333,7 +319,7 @@ describe("openclaw-config", () => {
     });
 
     it("handles missing config file", async () => {
-      mockFs.readFile.mockRejectedValue(new Error("ENOENT"));
+      mockFs.readFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
 
       await openclawConfig.setTelegramToken("123:abc");
 

@@ -174,7 +174,7 @@ export CLAWBOX_EXTRA_ORIGINS
 export CLAWBOX_DEVICE_STORE="$CLAWBOX_ROOT/data/config.json"
 
 python3 - "$OPENCLAW_CONFIG" <<'PY'
-import json, os, sys, tempfile, secrets
+import json, os, sys, tempfile, secrets, shutil, time
 
 # OpenClaw 2 config homes — see the bash block that computes this.
 CLAWBOX_OPENCLAW_V2 = os.environ.get("CLAWBOX_OPENCLAW_V2") == "1"
@@ -241,9 +241,27 @@ try:
         cfg = json.load(f)
 except FileNotFoundError:
     cfg = {}
-except json.JSONDecodeError:
-    # Corrupt file — start from an empty object and let the gateway
-    # re-seed on first write; the alternative is refusing to boot.
+except json.JSONDecodeError as err:
+    # Corrupt file — start from an empty object and let the gateway re-seed on
+    # first write; the alternative is refusing to boot. But that {} is written
+    # back below, and until it was copied first the write replaced every
+    # provider, auth profile and channel with an allowedOrigins-only file and
+    # logged "Updated gateway config" — the same fragment overwrite the setup
+    # writers refuse in src/lib/openclaw-config.ts. So the previous contents
+    # are kept beside the file as openclaw.json.corrupt-<utc> BEFORE anything
+    # replaces them. (src/tests/unit/gateway-pre-start-corrupt-config.test.ts
+    # extracts this block by its first and last lines.)
+    backup = f"{cfg_path}.corrupt-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
+    try:
+        shutil.copy2(cfg_path, backup)
+        kept = f"previous contents kept at {backup}"
+    except OSError as copy_err:
+        kept = f"previous contents could NOT be copied aside ({copy_err})"
+    print(
+        f"  WARN: {os.path.basename(cfg_path)} is not valid JSON ({err}); "
+        f"re-seeding from an empty object, {kept}",
+        file=sys.stderr,
+    )
     cfg = {}
 
 changed = False

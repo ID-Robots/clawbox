@@ -566,21 +566,6 @@ describe("config containers that arrive as something other than a plain object",
     ]);
   });
 
-  it("still writes the compaction floor when agents is an array", async () => {
-    // ensureCompactionReserveFloor decides it changed something and writes —
-    // and the floor it just set is dropped on the way to disk, so the next boot
-    // reads the same config back and repeats the whole no-op for ever.
-    mockFs.readFile.mockResolvedValue(JSON.stringify({ agents: [] }));
-
-    await openclawConfig.ensureCompactionReserveFloor(4096);
-
-    const written = writtenJsonConfig() as {
-      agents?: { defaults?: { compaction?: { reserveTokensFloor?: number } } };
-    };
-    expect(Array.isArray(written.agents)).toBe(false);
-    expect(written.agents?.defaults?.compaction?.reserveTokensFloor).toBe(4096);
-  });
-
   it("still writes the control-UI origins when gateway is an array", async () => {
     // A dropped allowedOrigins list is a box that stops answering on its own
     // hostname after a rename the route reported as done.
