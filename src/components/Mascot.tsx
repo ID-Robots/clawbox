@@ -1430,7 +1430,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       setState('idle')
       setSpeech('')
     } else {
-      // Remove power-up and resume action loop
+      // Remove power-up and resume action loop. The ref goes with the state —
+      // doAction only enters a power stance from `idle` when the ref is false,
+      // so leaving it set here would skip the transition until some non-idle
+      // action happened to clear it.
+      powerStanceRef.current = false
       setPowerStance(false)
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
       stateTimeout.current = setTimeout(() => doActionRef.current(), 1000)
