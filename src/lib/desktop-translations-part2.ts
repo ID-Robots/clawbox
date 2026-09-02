@@ -93,6 +93,7 @@ export const fr: Record<string, string> = {
   "chat.showLess": "Afficher moins",
   "chat.working": "En cours…",
   "chat.reasoning": "Raisonnement",
+  "chat.servedBy": "Répondu par",
   "chat.toolsUsed": "Outils utilisés",
   // === Full message view: the real email, opened from the chat ===
   "chat.email.openFull": "Ouvrir le message complet",
@@ -655,6 +656,7 @@ export const it: Record<string, string> = {
   "chat.showLess": "Mostra meno",
   "chat.working": "Al lavoro…",
   "chat.reasoning": "Ragionamento",
+  "chat.servedBy": "Risposta di",
   "chat.toolsUsed": "Strumenti usati",
   // === Full message view: the real email, opened from the chat ===
   "chat.email.openFull": "Apri il messaggio completo",
@@ -1217,6 +1219,7 @@ export const ja: Record<string, string> = {
   "chat.showLess": "折りたたむ",
   "chat.working": "作業中…",
   "chat.reasoning": "推論",
+  "chat.servedBy": "回答したモデル",
   "chat.toolsUsed": "使用したツール",
   // === Full message view: the real email, opened from the chat ===
   "chat.email.openFull": "メール全文を開く",

@@ -1,5 +1,6 @@
 import { WebSocket } from "ws";
 import { DASHBOARD_WS_ORIGIN, dashboardWsTicket } from "@/lib/hermes-dashboard-auth";
+import { isHermesCliProvider } from "@/lib/hermes-providers";
 
 /**
  * A Hermes turn driven through the dashboard's own JSON-RPC socket instead of a
@@ -362,6 +363,17 @@ export interface DashboardTurnRequest {
   readonly model?: string;
   readonly provider?: string;
   readonly reasoning?: string;
+  /**
+   * Whether `provider` is a user-defined provider (a `providers.<slug>` entry
+   * in config.yaml) rather than one of Hermes' built-ins — the catalogue's own
+   * `is_user_defined`, which the route has in hand and this process does not.
+   * Read only to resolve the dashboard's provider KIND; see servedProviderSlug.
+   *
+   * Three-state on purpose, and ABSENT is the common case: the route sends it
+   * only off a live `dashboard` catalogue that actually carried the field, so
+   * "not sent" means "nobody could say", not "no". Only `true` resolves a kind.
+   */
+  readonly providerIsUserDefined?: boolean;
   /** A stored session id to resume, or empty to start a new conversation. */
   readonly sessionId?: string;
   readonly signal?: AbortSignal;
@@ -482,6 +494,61 @@ function frameType(frame: GatewayFrame): string {
  * would be enough to undo it.
  */
 const COMMAND_SAFE_ID = /^[A-Za-z0-9_./:-]+$/;
+
+/**
+ * The provider a turn reports as having served it — a SLUG, or nothing.
+ *
+ * The dashboard names a user-defined provider by its KIND (`custom`), never
+ * its slug: `info.provider` and a completion's `provider` both read `custom`
+ * for clawai. Handed through as the served provider, that kind was persisted
+ * per turn and the chat labelled every resumed reply "custom · …" for the
+ * shipped default provider. So a reported value is trusted only when it is a
+ * slug the CLI defines, or the very slug this turn asked for. A kind is
+ * resolved to the requested slug only when the request named a user-defined
+ * provider and the session is on the model it asked for — the route already
+ * validated that pairing. A CANONICAL request against a `custom` session is a
+ * contradiction (the switch is skipped on the model id alone, so the session
+ * is still on whatever the kind stands for), and the honest answer is none.
+ *
+ * Two traps. `custom` is ALSO a real CLI slug (a generic OpenAI-compatible
+ * endpoint), so it passes the allowlist — and a dashboard that says `custom`
+ * of a session it did not just build for this request cannot be telling the
+ * two apart, so on such a session the literal `custom` provider is never
+ * asserted: the answer is none. (A session the request built, or switched, is
+ * on the requested provider by contract, and BOTH call sites keep that answer
+ * out of here rather than re-deriving it — `providerFromRequest`.)
+ * And the allowlist cannot say which slugs are user-defined (`clawai` is in
+ * Hermes' captured registry, `clawlocal` is not), so the kind is resolved only
+ * off the catalogue's own flag, carried on the request as
+ * `providerIsUserDefined`, and only when that flag says `true`. An ABSENT flag
+ * is not a licence: it used to be read as the benefit of the doubt, which made
+ * the whole contradiction rule inert on the shape the route produces most often
+ * — it passes the flag only off a live `dashboard` catalogue, and a stale
+ * `catalog-file` payload (up to 6 h after one `/api/model/options` failure, or a
+ * cold boot) carries none while the dashboard SOCKET this transport uses is
+ * healthy. A canonical request against a `custom` session then recorded the
+ * canonical slug: the very lie the rule three lines up forbids. Unknown means
+ * no label, here as everywhere else on this path.
+ *
+ * A report with NO provider in it resolves to nothing. The request cannot
+ * stand in: the route validated that the requested PAIR is installable, not
+ * that this session is on it — a resumed session holding the requested model
+ * id needs no switch, so it keeps whatever provider it was created with. The
+ * only two places the request IS the provider are a session this turn built
+ * and one it switched, and neither reaches this function (see
+ * `providerFromRequest`).
+ */
+const DASHBOARD_PROVIDER_KIND = "custom";
+function servedProviderSlug(reported: string, req: DashboardTurnRequest, onRequestedModel: boolean): string {
+  const requested = req.provider;
+  const reportedIsKind = reported === DASHBOARD_PROVIDER_KIND;
+  if (reported && !reportedIsKind && (isHermesCliProvider(reported) || reported === requested)) return reported;
+  if (!reported || !onRequestedModel || !requested) return "";
+  // The kind and the literal slug are the same word; nothing here can say
+  // which the session is on.
+  if (requested === DASHBOARD_PROVIDER_KIND) return "";
+  return reportedIsKind && req.providerIsUserDefined === true ? requested : "";
+}
 
 function commandSafe(value: string): boolean {
   return !value.startsWith("-") && COMMAND_SAFE_ID.test(value);
@@ -822,13 +889,20 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
     const info = (result.info || {}) as Record<string, unknown>;
     let activeModel = typeof info.model === "string" ? info.model : "";
     let activeProvider = typeof info.provider === "string" ? info.provider : "";
+    // Whether `activeProvider` is the REQUEST's slug (a session this turn
+    // built, or switched) rather than the dashboard's report — the former is
+    // true by contract and needs no resolving.
+    let providerFromRequest = false;
     const activeReasoning = typeof info.reasoning_effort === "string" ? info.reasoning_effort : "";
     // On a FRESH session the override is part of the create call itself and is
     // honoured by contract (`session.create` builds the agent with it), so the
     // request is the truth here even if `info` was assembled before the build.
     if (!wantResume && req.model) {
       activeModel = req.model;
-      if (req.provider) activeProvider = req.provider;
+      if (req.provider) {
+        activeProvider = req.provider;
+        providerFromRequest = true;
+      }
     }
 
     // ── Making a mid-conversation switch REAL ────────────────────────────
@@ -896,17 +970,29 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       //
       // Throwing lands in the catch below, which returns null, and the route
       // then spawns the CLI for this turn. That path passes `-m` and
-      // `--provider` as argv to a fresh process, with no session to re-point,
-      // and is proven to run both of them correctly. The turn is slower and
-      // not streamed, and it is ANSWERED BY THE MODEL THE CUSTOMER PICKED —
+      // `--provider` as argv rather than re-pointing the session — it does
+      // carry `--resume <sid>` on a threaded turn, so it is not the fresh
+      // process this comment used to claim, and whether argv beats a
+      // per-session override there is the one thing about it still unverified
+      // on a box (`cliServedPair` in the route says the same). The turn is
+      // slower and not streamed, and it is ANSWERED BY THE MODEL THE CUSTOMER PICKED —
       // which is the property that matters more.
       if (!modelSwitchTook(switched)) {
         throw new Error(`dashboard would not switch this session to ${req.model}`);
       }
       activeModel = req.model;
-      if (req.provider) activeProvider = req.provider;
+      if (req.provider) {
+        activeProvider = req.provider;
+        providerFromRequest = true;
+      }
       // The switch WIPES the session's reasoning effort — see below.
       switchedModel = true;
+    }
+    // What the DASHBOARD reported is resolved once, here, so the handle below
+    // and the completion frame report the same thing — see servedProviderSlug.
+    // What the request set stands as it is.
+    if (!providerFromRequest) {
+      activeProvider = servedProviderSlug(activeProvider, req, Boolean(activeModel) && activeModel === req.model);
     }
 
     // ── Putting the reasoning level back after a switch takes it away ────
@@ -1211,8 +1297,37 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                 // The turn may name the model that served it; otherwise the one
                 // this session was settled on above is the answer.
                 const servedModel = typeof payload.model === "string" && payload.model ? payload.model : activeModel;
-                const servedProvider =
-                  typeof payload.provider === "string" && payload.provider ? payload.provider : activeProvider;
+                // A completion's `provider` is the same field with the same
+                // kind-not-slug problem, and it is decided by the SAME rule the
+                // session site applies — that site's guard was missing here,
+                // which is how a session this turn BUILT on the literal
+                // `custom` provider lost it again on the way out: the frame
+                // reports `custom` (it must — the session is on custom), and
+                // the resolver cannot tell that word's two meanings apart.
+                //
+                // So, in order:
+                //   - off the settled model, the frame describes a pairing this
+                //     turn never established: only the frame's own provider can
+                //     speak for it, and a bare frame answers nothing;
+                //   - on the settled model, a session this turn built or
+                //     switched stands on the request's provider BY CONTRACT —
+                //     but only against a frame that says the KIND or says
+                //     nothing. A frame naming a different canonical SLUG is the
+                //     harness telling us where it actually routed, and the
+                //     harness's own word outranks our contract every time;
+                //   - otherwise the frame's report is resolved, and a frame that
+                //     names none defers to what the session was settled on —
+                //     NOT to the request, which the session may have contradicted.
+                const completionProvider = typeof payload.provider === "string" ? payload.provider : "";
+                const onSettledModel = servedModel === activeModel;
+                const frameNamesASlug = Boolean(completionProvider) && completionProvider !== DASHBOARD_PROVIDER_KIND;
+                const servedProvider = onSettledModel && providerFromRequest && !frameNamesASlug
+                  ? activeProvider
+                  : completionProvider
+                    ? servedProviderSlug(completionProvider, req, servedModel === req.model)
+                    : onSettledModel
+                      ? activeProvider
+                      : "";
                 return {
                   text: truncated ? `${finalText}\n\n[Reply truncated — it was too long to hold.]` : finalText,
                   reasoning: finalReasoning,

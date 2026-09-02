@@ -460,3 +460,200 @@ describe("putting the reasoning level back after a switch takes it away", () => 
     expect(socket.method("config.set")).toBeUndefined();
   });
 });
+
+/**
+ * HERMES-05 — what the turn reports as the provider that served it.
+ *
+ * The dashboard names a user-defined provider by its KIND (`custom`), never
+ * its slug — the fixtures above carry exactly that shape for clawai. On a
+ * resumed turn that needs no switch the transport used to hand that kind
+ * straight through as the served provider, the route persisted it, and the
+ * bubble read "custom · deepseek-v4-flash" from the second turn on, for the
+ * shipped default provider. A kind is not a provider; only a slug is.
+ */
+describe("the provider a turn reports as having served it", () => {
+  it("is the requested slug on a resumed turn the session was already on, never the dashboard's kind", async () => {
+    // The flag is what BUYS this: the dashboard reports the kind `custom`, and
+    // only the catalogue's `is_user_defined: true` says that kind can stand for
+    // the requested slug. Without it the honest answer is none — see the two
+    // absent-flag cases above.
+    const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5", providerIsUserDefined: true });
+    expect(socket.method("slash.exec")).toBeUndefined();
+    expect(turn?.model).toBe("deepseek-v4-flash");
+    expect(turn?.provider).toBe("clawai");
+  });
+
+  it("is a canonical slug the dashboard reports, as is", async () => {
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "claude-fable-5", provider: "anthropic" },
+      { model: "claude-fable-5", provider: "anthropic" },
+    );
+    expect(socket.method("slash.exec")).toBeUndefined();
+    expect(turn?.provider).toBe("anthropic");
+  });
+
+  it("is unknown, not the kind, when nothing was requested and the dashboard names only a kind", async () => {
+    const { turn } = await connect({ model: undefined, provider: undefined });
+    expect(turn?.model).toBe("deepseek-v4-flash");
+    expect(turn?.provider ?? "").toBe("");
+  });
+
+  it("is unknown when the request's canonical slug contradicts the session's kind", async () => {
+    // Same model id, different provider: the switch is skipped on the model id
+    // alone (see the transport), so the session is still on whatever
+    // user-defined provider `custom` stands for — not on the one requested.
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "deepseek-v4-flash", provider: "anthropic", providerIsUserDefined: false },
+      { model: "deepseek-v4-flash", provider: "custom" },
+    );
+    expect(socket.method("slash.exec")).toBeUndefined();
+    expect(turn?.provider ?? "").toBe("");
+  });
+
+  it("answers nothing when NO flag came with the request — absent is not a licence", async () => {
+    // The shape the route produces most often: it sends the flag only off a
+    // live `dashboard` catalogue, and a stale `catalog-file` payload (up to 6 h
+    // after one /api/model/options failure, or a cold boot) carries none while
+    // the dashboard socket this transport uses is healthy. Read as the benefit
+    // of the doubt, that made the contradiction rule above inert — a canonical
+    // request against a `custom` session recorded the canonical slug, with no
+    // `/model` ever issued, in the customer's durable transcript.
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "deepseek-v4-flash", provider: "anthropic" },
+      { model: "deepseek-v4-flash", provider: "custom" },
+    );
+    expect(socket.method("slash.exec")).toBeUndefined();
+    expect(turn?.provider ?? "").toBe("");
+  });
+
+  it("does not let a completion frame resolve the kind on an absent flag either", async () => {
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "deepseek-v4-flash", provider: "anthropic" },
+      { model: "deepseek-v4-flash", provider: "custom" },
+    );
+    const running = turn!.run(() => {});
+    await Promise.resolve();
+    socket.event("message.complete", { text: "one", status: "complete", provider: "custom" });
+    const final = await running;
+    expect(final.provider ?? "").toBe("");
+  });
+
+  it("resolves the kind to a user-defined slug the allowlist has never heard of", async () => {
+    // clawlocal is registered on the box, not in Hermes' captured registry;
+    // the catalogue's flag, not the allowlist, is what says it is user-defined.
+    const { turn } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "gemma", provider: "clawlocal", providerIsUserDefined: true },
+      { model: "gemma", provider: "custom" },
+    );
+    expect(turn?.provider).toBe("clawlocal");
+  });
+
+  it("keeps `custom` on a session this turn built for Hermes' literal custom provider", async () => {
+    // `custom` is a real CLI slug as well as the dashboard's kind for every
+    // user-defined provider. A session.create with `provider: custom` is on
+    // the literal one by contract.
+    const { turn } = await connect(
+      { model: "my-model", provider: "custom" },
+      { model: "my-model", provider: "custom" },
+    );
+    expect(turn?.provider).toBe("custom");
+  });
+
+  it("never asserts the literal `custom` provider on a resumed session the dashboard calls `custom`", async () => {
+    // The session may be on clawai (kind `custom`) serving the same model id;
+    // a request for the literal `custom` provider skips the switch on the
+    // model id alone, and nothing can tell the two apart. Unknown, not wrong.
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "my-model", provider: "custom" },
+      { model: "my-model", provider: "custom" },
+    );
+    expect(socket.method("slash.exec")).toBeUndefined();
+    expect(turn?.provider ?? "").toBe("");
+  });
+
+  it("does not let a completion that names no provider reinstate a request the session contradicted", async () => {
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "deepseek-v4-flash", provider: "anthropic", providerIsUserDefined: false },
+      { model: "deepseek-v4-flash", provider: "custom" },
+    );
+    expect(turn?.provider ?? "").toBe("");
+    const running = turn!.run(() => {});
+    await Promise.resolve();
+    socket.event("message.complete", { text: "one", status: "complete" });
+    const final = await running;
+    expect(final.provider ?? "").toBe("");
+  });
+
+  it("names no provider for a resumed session the dashboard described without one", async () => {
+    // The route validated that the requested PAIR is installable; it did not
+    // establish what THIS session is on. The session holds the requested model
+    // id, so no switch was issued and it is still on whatever provider it was
+    // created with — which a report carrying no provider does not name.
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "deepseek-v4-flash", provider: "clawai" },
+      { model: "deepseek-v4-flash" },
+    );
+    expect(socket.method("slash.exec")).toBeUndefined();
+    expect(turn?.model).toBe("deepseek-v4-flash");
+    expect(turn?.provider ?? "").toBe("");
+  });
+
+  it("drops the provider when the completion names a model the session was not settled on", async () => {
+    // The settled provider belongs to the settled MODEL. A frame that changes
+    // the model without naming a provider describes a pairing this turn never
+    // established, and carrying the old slug onto it invents one.
+    const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5", providerIsUserDefined: true });
+    expect(turn?.provider).toBe("clawai");
+    const running = turn!.run(() => {});
+    await Promise.resolve();
+    socket.event("message.complete", { text: "one", status: "complete", model: "gpt-5.6-sol" });
+    const final = await running;
+    expect(final.model).toBe("gpt-5.6-sol");
+    expect(final.provider ?? "").toBe("");
+  });
+
+  it("keeps the literal `custom` through the COMPLETION frame too, on a session this turn built", async () => {
+    // The session site knows the request IS the provider on a session it built
+    // (`providerFromRequest`); the completion site did not, so the frame — which
+    // reports `custom` because the session really is on custom — was handed to a
+    // resolver that cannot tell that word's two meanings apart, and the provider
+    // was lost on the way out. Only the route's `||` was hiding it.
+    const { turn, socket } = await connect(
+      { model: "my-model", provider: "custom" },
+      { model: "my-model", provider: "custom" },
+    );
+    expect(turn?.provider).toBe("custom");
+    const running = turn!.run(() => {});
+    await Promise.resolve();
+    socket.event("message.complete", { text: "one", status: "complete", provider: "custom" });
+    const final = await running;
+    expect(final.provider).toBe("custom");
+    expect(final.model).toBe("my-model");
+  });
+
+  it("still answers nothing when a built session's frame names a model it never settled on", async () => {
+    // The contract is about the session the request built, on the model it was
+    // built with. A frame naming another model describes a pairing this turn
+    // never established, and `providerFromRequest` says nothing about it.
+    const { turn, socket } = await connect(
+      { model: "my-model", provider: "custom" },
+      { model: "my-model", provider: "custom" },
+    );
+    const running = turn!.run(() => {});
+    await Promise.resolve();
+    socket.event("message.complete", { text: "one", status: "complete", model: "some-other-model" });
+    const final = await running;
+    expect(final.model).toBe("some-other-model");
+    expect(final.provider ?? "").toBe("");
+  });
+
+  it("does not let a completion's own kind overwrite the resolved slug", async () => {
+    const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5", providerIsUserDefined: true });
+    const running = turn!.run(() => {});
+    await Promise.resolve();
+    socket.event("message.complete", { text: "one", status: "complete", provider: "custom" });
+    const final = await running;
+    expect(final.provider).toBe("clawai");
+    expect(final.model).toBe("deepseek-v4-flash");
+  });
+});

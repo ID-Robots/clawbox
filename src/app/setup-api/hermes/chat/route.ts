@@ -33,6 +33,7 @@ import {
   isAllowedProvider,
   isPairAllowed,
   shouldEnforcePairing,
+  readCurrentFromCli,
   type ModelOptionsPayload,
 } from "@/lib/hermes-model-options";
 import { appendTranscript } from "@/lib/harness/transcript-store";
@@ -404,11 +405,21 @@ async function settleTurn(
     // collapse the monologue the same way the live turn did.
     ...(settledReasoning ? { reasoning: settledReasoning } : {}),
     ...(toolCalls?.length ? { toolCalls } : {}),
-    // Which model actually answered. `state.db`'s `messages` table has no model
-    // column, so the agent's turn record cannot supply this; the dashboard's
-    // own `info` for the session — read at the moment the turn was submitted,
-    // after any switch had been applied and acknowledged — is the authoritative
-    // answer available, and it is the one the transport hands back.
+    // Which model actually answered, from the transport rather than from the
+    // agent's own record — the dashboard's `info` for the session, read at the
+    // moment the turn was submitted, after any switch had been applied and
+    // acknowledged.
+    //
+    // UNVERIFIED, and worth stating as such: this rests on `state.db`'s
+    // `messages` table having no model column, which nothing here has ever
+    // asked. `readHermesTurn` selects an explicit column list
+    // (`hermes-turn-record.ts`), so the code neither proves nor disproves it.
+    // If that table — or `sessions` — does carry the model, the harness knows
+    // the answer natively and this reconstruction should be replaced by reading
+    // the row `readHermesTurn` already opens for reasoning and tool calls,
+    // which would be strictly more accurate and would retire `cliServedPair`
+    // with it. One read-only command settles it:
+    // `sqlite3 ~/.hermes/state.db 'PRAGMA table_info(messages)'`.
     ...(served.model ? { model: served.model } : {}),
     ...(served.provider ? { provider: served.provider } : {}),
   }, sessionKey);
@@ -469,6 +480,35 @@ async function settleTurn(
  * point is reported inside the stream rather than as an HTTP error. Everything
  * that could have produced a clean 4xx/5xx has already run before this is called.
  */
+/**
+ * What the dashboard transport says answered — taken WHOLE, never half from one
+ * source and half from the other.
+ *
+ * The transport works hard to answer NOTHING rather than a pairing the turn did
+ * not establish: `servedProviderSlug` declines a kind it cannot resolve, and a
+ * completion frame that changes the model gets no provider at all, because the
+ * settled provider belongs to the settled model. Reading the two halves with
+ * independent `||`s undid all of it at the one place the answer is persisted —
+ * a frame reporting `gpt-5.6-sol` with no provider was recorded as
+ * `gpt-5.6-sol` beside the session's `clawai`, the invented pairing, in the
+ * customer's durable transcript.
+ *
+ * So: a turn that reported a model owns both halves of the record, including
+ * the half it left empty. Only a turn that reported no model at all — a
+ * transport that never produced a frame, and the quiet-stream recovery, which
+ * passes `null` — falls back to what the session was settled on.
+ */
+function servedPair(
+  final: { model?: string; provider?: string } | null,
+  turn: DashboardTurn,
+): { model?: string; provider?: string } {
+  const source = final?.model ? final : { model: turn.model, provider: turn.provider };
+  return {
+    ...(source.model ? { model: source.model } : {}),
+    ...(source.provider ? { provider: source.provider } : {}),
+  };
+}
+
 function streamTurn(turn: DashboardTurn, fallbackSessionId: string, sessionKey: string): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -546,12 +586,7 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string, sessionKey: 
         } else {
           send(
             "done",
-            await settleTurn(threaded, sessionKey, final.text, final.reasoning, {
-              // What the transport says answered, preferring the turn's own
-              // report over the session's setting when it offers one.
-              ...(final.model || turn.model ? { model: final.model || turn.model } : {}),
-              ...(final.provider || turn.provider ? { provider: final.provider || turn.provider } : {}),
-            }),
+            await settleTurn(threaded, sessionKey, final.text, final.reasoning, servedPair(final, turn)),
           );
         }
       } catch (err) {
@@ -589,10 +624,7 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string, sessionKey: 
           if (recovered?.text) {
             send(
               "done",
-              await settleTurn(threaded, sessionKey, recovered.text, "", {
-                ...(turn.model ? { model: turn.model } : {}),
-                ...(turn.provider ? { provider: turn.provider } : {}),
-              }),
+              await settleTurn(threaded, sessionKey, recovered.text, "", servedPair(null, turn)),
             );
             return;
           }
@@ -636,6 +668,53 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string, sessionKey: 
 
 function isAbort(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError";
+}
+
+/**
+ * What a `hermes chat -q` run served: the named half of the pair as named, the
+ * other half as config.yaml has it. `-m` alone runs on the configured provider;
+ * `--provider` alone is refused above unless it IS the configured one. A
+ * default that cannot be read is left out rather than guessed.
+ *
+ * Read through `readCurrentFromCli`, never off the catalogue payload: that
+ * payload is memoised whole (fresh under 60 s, served stale for hours with a
+ * background refresh) and only ClawBox's own writers invalidate it — Hermes'
+ * own `/model` persist and a `hermes config set` from a terminal do not. The
+ * `hermes config get` read underneath is keyed on config.yaml's mtime, so it
+ * costs a stat when nothing changed and cannot lag a write.
+ *
+ * NOT on a RESUMED run, though — `resuming` is the whole of the difference.
+ * config.yaml's default is only what the run took when the run had nothing else
+ * to take: a `--resume`d session can be carrying a per-session override, which
+ * is exactly what the dashboard transport writes with `/model … --session`, and
+ * one conversation moves between the two transports routinely (every turn with
+ * an attachment is forced onto this one). So a resumed run records what argv
+ * named and nothing else: unknown beats wrong, the same rule the dashboard half
+ * follows.
+ *
+ * What argv named IS recorded there, and that is not the same guess. This
+ * fallback exists because the customer picked a model the dashboard would not
+ * switch to (see hermes-dashboard-turn.ts, the `slash.exec` refusal), and its
+ * whole justification is that the spawned run answers on the picked pair. If
+ * `-m` lost to a session override the ROUTING would be wrong, not just the
+ * label — a much larger defect than this function. So the record follows the
+ * assumption the fallback already rests on, rather than inventing a second one.
+ * Unverified on a box all the same, and it is one read: `hermes chat --help`
+ * plus one resumed turn with `-m`.
+ */
+async function cliServedPair(
+  model: string,
+  provider: string,
+  resuming: boolean,
+): Promise<{ model?: string; provider?: string }> {
+  const complete = Boolean(model && provider);
+  const current = complete || resuming ? null : await readCurrentFromCli();
+  const servedModel = model || current?.model || "";
+  const servedProvider = provider || current?.provider || "";
+  return {
+    ...(servedModel ? { model: servedModel } : {}),
+    ...(servedProvider ? { provider: servedProvider } : {}),
+  };
 }
 
 export async function POST(request: Request) {
@@ -949,16 +1028,39 @@ export async function POST(request: Request) {
   // `image.attach` handshake this route has not been taught. A turn carrying a
   // picture is rare and already slow; correctness first.
   if (wantsStream(request) && imagePaths.length === 0) {
+    // The catalogue knows which providers are user-defined; the transport
+    // needs that one bit to read the dashboard's provider KIND honestly. Only
+    // the LIVE catalogue knows it: the catalog-file fallback writes `false`
+    // for every row (the manifest has no such column) and cold-start writes
+    // `true` for its own — neither is the dashboard's `is_user_defined`, and a
+    // wrong `false` would blank the label on the box's own provider.
+    const providerRow = wantsProvider && payload?.source === "dashboard"
+      ? payload.providers.find((row) => row.id === rawProvider)
+      : undefined;
+    // `source === "dashboard"` says where the payload came from, not that the
+    // dashboard reported this field. A row that simply omits `is_user_defined`
+    // normalises to null, and passing that on as `false` would blank the label
+    // on the box's own provider — the hazard the comment above names.
+    const reportedUserDefined = typeof providerRow?.isUserDefined === "boolean"
+      ? providerRow.isUserDefined
+      : undefined;
     const turn = await openDashboardTurn({
       text: promptWithImages,
       ...(rawModel ? { model: rawModel } : {}),
       ...(wantsProvider ? { provider: rawProvider } : {}),
+      ...(reportedUserDefined === undefined ? {} : { providerIsUserDefined: reportedUserDefined }),
       ...(rawReasoning ? { reasoning: rawReasoning } : {}),
       ...(rawSessionId ? { sessionId: rawSessionId } : {}),
       signal: request.signal,
     });
     if (turn) return streamTurn(turn, rawSessionId, sessionKey);
   }
+
+  // Read BEFORE the run, not after: the default this turn used is the one on
+  // disk when it was spawned, and a switch made during the turn — ai_set_model
+  // does exactly that when told "switch to X" — must not become the record of
+  // the turn that was told.
+  const cliServed = await cliServedPair(rawModel, wantsProvider ? rawProvider : "", Boolean(rawSessionId));
 
   try {
     const { out: text, err } = await runHermes(args, request.signal);
@@ -967,12 +1069,11 @@ export async function POST(request: Request) {
     const threaded = parseSessionId(err) || rawSessionId;
     // The CLI path runs exactly what argv asked for — `-m` and `--provider` are
     // passed straight to the command, with no session to drift from — so the
-    // request IS the record here. When no model was named, the run used
-    // config.yaml's default and this route does not presume to name it.
-    const answered = await settleTurn(threaded, sessionKey, text, "", {
-      ...(rawModel ? { model: rawModel } : {}),
-      ...(wantsProvider ? { provider: rawProvider } : {}),
-    });
+    // request IS the record here. What it did NOT ask for, the run took from
+    // config.yaml's pairing, which is the same read the validation above makes
+    // when it has a reason to: recorded too, because a blank under a reply the
+    // box knows the model of is a false unknown, not modesty.
+    const answered = await settleTurn(threaded, sessionKey, text, "", cliServed);
     return NextResponse.json(answered);
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {

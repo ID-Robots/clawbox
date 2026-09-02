@@ -77,6 +77,10 @@ function toMessage(record: TranscriptRecord) {
     // would quietly downgrade every past answer to a bare bubble.
     ...(record.reasoning ? { reasoning: record.reasoning } : {}),
     ...(record.toolCalls?.length ? { toolCalls: record.toolCalls } : {}),
+    // Which model answered, so the bubble can say so. Same names on both
+    // sides; only a reply that recorded them carries them.
+    ...(record.model ? { model: record.model } : {}),
+    ...(record.provider ? { provider: record.provider } : {}),
     ...(record.turnId ? { idempotencyKey: record.turnId } : {}),
     ...(record.variant ? { variant: record.variant } : {}),
   };

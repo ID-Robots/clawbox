@@ -48,6 +48,9 @@ vi.mock("@/lib/hermes-model-options", () => ({
   // itself judge the pair, which is the path a box takes before the header has
   // warmed the cache.
   getModelOptions: vi.fn(async () => null),
+  // Same box, same story one layer down: no pairing to read, so the CLI path
+  // records nothing rather than guessing one.
+  readCurrentFromCli: vi.fn(async () => ({ provider: "", model: "", reasoning: "" })),
   isAllowedProvider: vi.fn(() => true),
   isPairAllowed: vi.fn(() => true),
   shouldEnforcePairing: vi.fn(() => false),
@@ -69,6 +72,9 @@ function fakeTurn(opts: {
   fail?: Error;
   model?: string;
   provider?: string;
+  /** What the completion frame itself reported, when it differs from the session's. */
+  finalModel?: string;
+  finalProvider?: string;
 }) {
   const closed = { value: false };
   return {
@@ -89,6 +95,14 @@ function fakeTurn(opts: {
           reasoning: opts.reasoning ?? "",
           status: opts.status ?? "complete",
           ...(opts.error ? { error: opts.error } : {}),
+          // The real transport answers with the pair it settled on, and
+          // deliberately answers a model with NO provider where it cannot name
+          // one honestly. Defaults to the handle's pair, which is what a frame
+          // that changed nothing produces.
+          ...((opts.finalModel ?? opts.model) ? { model: opts.finalModel ?? opts.model } : {}),
+          ...((opts.finalProvider ?? (opts.finalModel ? "" : opts.provider))
+            ? { provider: opts.finalProvider ?? opts.provider }
+            : {}),
         };
       },
       close() {
@@ -315,6 +329,31 @@ describe("saying which model actually answered", () => {
       .map(([record]) => record as Record<string, unknown>)
       .find((record) => record.role === "assistant");
     expect(assistant).toMatchObject({ model: "deepseek-v4-flash", provider: "clawai" });
+  });
+
+  it("keeps the transport's silence about the provider, beside the model it did name", async () => {
+    // The transport answers NOTHING for a provider it cannot establish — a
+    // completion frame that changes the model gets no provider, because the
+    // settled provider belongs to the settled model. Reading the two halves
+    // with independent `||`s put the session's provider back beside the new
+    // model and wrote that invented pairing to the durable transcript.
+    openTurnMock.mockResolvedValue(
+      fakeTurn({
+        deltas: ["ok"],
+        model: "deepseek-v4-flash",
+        provider: "clawai",
+        finalModel: "gpt-5.6-sol",
+      }).handle,
+    );
+    const events = await readEvents(await POST(post({ message: "Hey" })));
+    const [, done] = events[events.length - 1];
+    expect(done).toMatchObject({ model: "gpt-5.6-sol" });
+    expect(done).not.toHaveProperty("provider");
+    const assistant = appendMock.mock.calls
+      .map(([record]) => record as Record<string, unknown>)
+      .find((record) => record.role === "assistant");
+    expect(assistant).toMatchObject({ model: "gpt-5.6-sol" });
+    expect(assistant).not.toHaveProperty("provider");
   });
 
   it("omits the field entirely when the transport named no model", async () => {

@@ -5,12 +5,46 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { apiTry, apiToken, API_BASE, authHeader } from "../lib/api";
 import { DEFAULT_CWD } from "../lib/guard";
-import { json, text, type Registrar } from "../lib/register";
-import { reported } from "../lib/report";
+import { json, text, type Ed, type Registrar } from "../lib/register";
+import { CURRENT_CHAT_MODEL_NOTE, hermesDeviceDefault, reported, type HermesDefaultSource } from "../lib/report";
 import type { McpContext } from "../lib/context";
 import { WEBAPP_KV_CLIENT_SNIPPET } from "../../src/lib/webapp-sandbox";
 
 const FIELD_GUIDE_PATH = join(DEFAULT_CWD, "Clawbox.md");
+
+// The OpenClaw answer to CURRENT_CHAT_MODEL_NOTE, and it is the opposite one.
+// The chat header's pick is POSTed to /setup-api/chat/model, which writes
+// agents.defaults.model.primary AND repoints every agent session, and this
+// edition has neither a per-turn override nor a reply label — so the default
+// IS the chat's model, and saying "not visible" here would turn a right answer
+// into a shrug.
+const OPENCLAW_CURRENT_CHAT_NOTE =
+  "the device default above: on this edition the chat header writes it to the box and repoints every session, so it is what this chat runs.";
+
+// …but only where the edition is CERTAIN. `resolveEdition` asks
+// /setup-api/harness/active with a 3 s timeout and answers "openclaw" on any
+// failure, and this server is spawned at harness start — exactly when the web
+// app may not be up yet. On a locked SKU that fallback cannot be wrong; on
+// DUAL it can, and an affirmative "the default is what this chat runs" handed
+// to a Hermes chat reinstates the whole defect this note exists to remove
+// (the agent answers "which model are you" from the device default). A shrug
+// is safe on both editions; the claim is not. `ctx.install` is the raw value,
+// so "dual" is the one case that has to hedge.
+const UNCONFIRMED_EDITION_CHAT_NOTE =
+  "not established here: this device can run either harness and the tool server could not confirm which is active, so the device default above may not be what this chat runs. Where the ClawBox chat knows the model that served a reply, it prints it under that reply.";
+
+/**
+ * How the description qualifies the default, per edition — the Hermes chat can
+ * override it per session; the OpenClaw chat cannot.
+ *
+ * Keyed on `Ed`, not `string`: a third edition would then be a compile error
+ * here rather than the literal "(undefined)" inside a tool description every
+ * model reads.
+ */
+const DEFAULT_QUALIFIER: Record<Ed, string> = {
+  hermes: "not necessarily the one answering this chat",
+  openclaw: "which is also what the chat runs",
+};
 
 // Moved wholesale out of webapp_create / code_project_init: those descriptions
 // were 700+ chars of tutorial that a small model had to read on every
@@ -69,12 +103,6 @@ interface StatsPayload {
 interface VersionsPayload {
   clawbox?: { current?: string | null; target?: string | null; updateAvailable?: boolean };
   openclaw?: { current?: string | null; target?: string | null; updateAvailable?: boolean };
-}
-
-interface HermesModelsPayload {
-  current?: string;
-  provider?: string;
-  reasoning?: string;
 }
 
 interface ClawaiPayload {
@@ -146,7 +174,7 @@ function rootDisk(stats: StatsPayload | null) {
 export function registerOrientationTools(reg: Registrar, ctx: McpContext): void {
   reg.tool(
     "device_status",
-    "Report what this ClawBox is: edition, active agent, AI provider and model, the active model's configured context/output limits, thinking level, free disk space, and whether a software update is waiting. Call this before answering any question about the device itself or its model limits. Any part that cannot be read reports \"unknown\" instead of failing the whole call.",
+    `Report what this ClawBox is: edition, active agent, the device's default AI provider and model (${ctx.install === "dual" ? DEFAULT_QUALIFIER.hermes : DEFAULT_QUALIFIER[ctx.edition]}), the default model's configured context/output limits, thinking level, free disk space, and whether a software update is waiting. Call this before answering any question about the device itself or its model limits. Any part that cannot be read reports "unknown" instead of failing the whole call.`,
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core" },
     async () => {
@@ -156,7 +184,7 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
         apiTry<StatsPayload>("/setup-api/system/stats", { timeoutMs: 6_000 }),
         apiTry<VersionsPayload>("/setup-api/update/versions", { timeoutMs: 6_000 }),
         ctx.edition === "hermes"
-          ? apiTry<HermesModelsPayload>("/setup-api/hermes/models", { timeoutMs: 6_000 })
+          ? apiTry<HermesDefaultSource>("/setup-api/hermes/models", { timeoutMs: 6_000 })
           : Promise.resolve(null),
         ctx.edition === "hermes"
           ? apiTry<ClawaiPayload>("/setup-api/hermes/clawai", { timeoutMs: 6_000 })
@@ -170,11 +198,14 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
       // surface the server's instructions tell every model to call FIRST, so a
       // blank here is the likeliest of all of them to be filled in with a
       // plausible-sounding model name.
+      //
+      // `device_default`, not bare `provider`/`model`: the bare keys were read
+      // as "the model I am" on a live box — see CURRENT_CHAT_MODEL_NOTE.
       const ai =
         ctx.edition === "hermes"
           ? {
-              provider: reported(hermesModels?.provider),
-              model: reported(hermesModels?.current),
+              device_default: hermesDeviceDefault(hermesModels),
+              current_chat: CURRENT_CHAT_MODEL_NOTE,
               // The instructions tell the model to read `ai.limits` before
               // stating any context/output limit. Hermes has no configured-limit
               // source to read (readConfiguredModelLimits() parses the OpenClaw
@@ -183,19 +214,23 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
               // key is the one answer that sends the model back to its training
               // memory for a number.
               limits: "unknown",
-              thinking: reported(hermesModels?.reasoning),
               // READ ONLY. Changing the plan changes what the customer is
               // billed, so there is deliberately no tool that switches it:
-              // point the user at Settings -> AI instead.
+              // point the user at Settings -> AI instead. `is_device_default`,
+              // not `in_use`: `active` is whether config.yaml's provider is
+              // ClawBox AI — the same default, one key down.
               clawbox_ai: clawai
-                ? { signed_in: clawai.hasToken === true, tier: reported(clawai.tier), in_use: clawai.active === true }
+                ? { signed_in: clawai.hasToken === true, tier: reported(clawai.tier), is_device_default: clawai.active === true }
                 : "unknown",
             }
           : {
-              provider: reported(chatModel?.selected?.provider),
-              model: reported(chatModel?.selected?.model ?? chatModel?.current),
+              device_default: {
+                provider: reported(chatModel?.selected?.provider),
+                model: reported(chatModel?.selected?.model ?? chatModel?.current),
+                thinking: "unknown",
+              },
+              current_chat: ctx.install === "dual" ? UNCONFIRMED_EDITION_CHAT_NOTE : OPENCLAW_CURRENT_CHAT_NOTE,
               limits: readConfiguredModelLimits(),
-              thinking: "unknown",
             };
 
       return json({

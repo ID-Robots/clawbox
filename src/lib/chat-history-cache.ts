@@ -37,6 +37,10 @@ export interface ChatMessage {
   // already on the server" without comparing text or clocks. The gateway
   // suffixes its copy by role (`<runId>:user`); `runIdOf` normalises that.
   idempotencyKey?: string;
+  // Which model produced this reply, and the provider behind it — what
+  // answered, not what was asked for. Recorded per turn by the Hermes route.
+  model?: string;
+  provider?: string;
 }
 
 export function uuid(): string {

@@ -297,6 +297,11 @@ function sameTranscript(a: ChatMessage[], b: ChatMessage[]): boolean {
     const xa = x.audio ?? [], ya = y.audio ?? []
     if (xa.length !== ya.length) return false
     for (let j = 0; j < xa.length; j++) if (xa[j] !== ya[j]) return false
+    // Same rule as the audio above, for the same reason: a reply that gained
+    // the model that served it between two reads must repaint, or the label
+    // never appears. Declared here because this comparator is where a
+    // late-arriving per-message field has to be named to survive a reconcile.
+    if (x.model !== y.model || x.provider !== y.provider) return false
   }
   return true
 }
@@ -3350,6 +3355,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // replayed from the transcript have to be the same bubble.
       ...(result.reasoning ? { reasoning: result.reasoning } : {}),
       ...(result.toolCalls?.length ? { toolCalls: [...result.toolCalls] } : {}),
+      // What answered, as the harness recorded it — kept on the message so the
+      // live bubble and the one replayed from the transcript say the same.
+      ...(result.model ? { model: result.model } : {}),
+      ...(result.provider ? { provider: result.provider } : {}),
     }])
     // Pair the synchronous guard with the state on EVERY completion path, not
     // just the failing one: the drain effect and both send handlers decide from
@@ -4538,6 +4547,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const shownText = isLongUser && !userExpanded
             ? `${bodyText.slice(0, USER_CLAMP_CHARS).trimEnd()}…`
             : bodyText;
+          // Which model actually answered, as the turn recorded it. The header
+          // pills are a request; this is the record — the one thing on screen
+          // that settles "which model are you" after a mid-conversation
+          // switch. Provider by its full display name, model by its full id —
+          // a record, so nothing is trimmed off it; nothing when not recorded.
+          const served = msg.role === 'assistant' && msg.model
+            ? `${msg.provider ? `${hermesProviderName(msg.provider)} · ` : ''}${msg.model}`
+            : null;
           return (
             <div key={i} style={{
               display: 'flex',
@@ -4706,6 +4723,26 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 )}
                 {msg.role === 'assistant' && msg.reasoning && (
                   <ReasoningDisclosure reasoning={msg.reasoning} label={t("chat.reasoning")} />
+                )}
+                {served && (
+                  <div
+                    data-testid="chat-served-model"
+                    // Sighted readers get the answer from where the line sits —
+                    // under the reply, in the place the tool chips and the
+                    // monologue use. A screen reader gets two proper nouns and
+                    // a middot, so the label says what they are; the visible
+                    // text stays as short as the bubble needs it to be.
+                    aria-label={`${t("chat.servedBy")}: ${served}`}
+                    // 0.55 over the panel's #0d1117 is ~6:1 — AA. The quiet
+                    // 0.35 the tool chips use is ~3.2:1, which is fine for a
+                    // decoration and not for the one line that answers a
+                    // question. Wraps rather than clips: an id cut to an
+                    // ellipsis with the rest in a mouse-only title is not
+                    // visible.
+                    style={{ marginTop: 4, fontSize: 11, lineHeight: 1.3, color: 'rgba(255,255,255,0.55)', wordBreak: 'break-all' }}
+                  >
+                    {served}
+                  </div>
                 )}
               </div>
             </div>

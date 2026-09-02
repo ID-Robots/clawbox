@@ -1,5 +1,8 @@
-// Hermes provider / model configuration — "what model are you using" and
-// "switch to OpenAI".
+// Hermes provider / model configuration — "what model is this device set to"
+// and "switch to OpenAI".
+//
+// Everything here reads and writes the DEVICE DEFAULT (config.yaml), never the
+// chat a call arrives from — see CURRENT_CHAT_MODEL_NOTE in ../lib/report.ts.
 //
 // DELIBERATELY ABSENT:
 //   - a ClawBox AI plan switch. It changes what the customer is BILLED, and
@@ -15,7 +18,7 @@ import { isPlausibleHermesProviderId, isSafeHermesModelId } from "../../src/lib/
 import { apiGet, apiPost } from "../lib/api";
 import { ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
-import { reported } from "../lib/report";
+import { CURRENT_CHAT_MODEL_NOTE, hermesDeviceDefault, type HermesDefaultSource } from "../lib/report";
 import { zEnumOf, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
 
@@ -33,13 +36,33 @@ interface ProviderRow {
   total?: number;
 }
 
-interface ModelsBody {
+interface ModelsBody extends HermesDefaultSource {
   models?: ModelRow[];
-  current?: string;
-  provider?: string;
-  reasoning?: string;
   providers?: ProviderRow[];
   stale?: boolean;
+  /**
+   * Scoped form only: the device's saved pairing, whichever provider it belongs
+   * to. Named as the route names it (`ScopedModelsReply` in
+   * src/lib/hermes-model-options.ts) — this file cannot import from the app, so
+   * the two are kept honest by the name and by mcp-served-model-honesty.test.ts.
+   */
+  savedPair?: { provider?: string; model?: string } | null;
+}
+
+/**
+ * The device default as a SCOPED reply tells it. The route reuses `provider`
+ * for the filter it was given and `current` for the saved model IFF it belongs
+ * to that provider AND is in its list — so the pairing travels separately as
+ * `savedPair`. Read that way, a filtered call reports the same object an
+ * unfiltered one does — never the asked-about provider as the default, and
+ * never a prose string in a field that is an object everywhere else.
+ */
+function scopedDeviceDefault(body: ModelsBody) {
+  return hermesDeviceDefault({
+    provider: body.savedPair?.provider,
+    current: body.savedPair?.model,
+    reasoning: body.reasoning,
+  });
 }
 
 const MODEL_LIMIT = 40;
@@ -49,6 +72,15 @@ const MODEL_LIMIT = 40;
 // about, was what got cut. Only the usable providers are listed; the rest are a
 // count.
 const PROVIDER_LIMIT = 12;
+
+// Both setters change the default only. Said once in each description and
+// once in each answer — the answer is what the agent relays to the user.
+const DEFAULT_SCOPE = "what new chats start on; this chat keeps its header model";
+// "Where there is a header" is not padding: this answer also reaches Telegram
+// and cron sessions, which have no header to keep a model in — what is true of
+// all of them is that the setter moved the DEFAULT and not this conversation.
+const KEEPS_HEADER_MODEL =
+  "This conversation keeps the model it is already on; where it has a header, the user changes it there.";
 
 const SET_RULES: ErrorRule[] = [
   {
@@ -131,7 +163,7 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "ai_list_models",
-    "List the AI providers configured on this device and the models each one serves, plus which provider and model are in use right now. Call this before ai_set_provider or ai_set_model so you use ids that exist here.",
+    "List the AI providers configured on this device and the models each one serves, plus the device default provider and model (what a new chat starts on — this chat may be on a per-session override; the label under the reply says what answered). Call this before ai_set_provider or ai_set_model so you use ids that exist here.",
     {
       provider: zText(64, "Show only this provider's models. Omit to list every configured provider.").optional(),
     },
@@ -174,17 +206,12 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
       // KEY ORDER IS LOAD-BEARING. The output cap truncates from the end, so
       // what the caller asked about goes first and the provider directory last.
       return json({
-        // When a provider FILTER was given the route echoes that provider back
-        // in the same `provider` field it otherwise uses for "the one in use",
-        // so reading in_use off a filtered reply reported the device as running
-        // whatever was asked about. A filtered call now says so instead.
-        ...(provider
-          ? {
-              asked_about: provider,
-              in_use: "not reported for a filtered query — call ai_list_models with no arguments to see what this device is using",
-            }
-          : { in_use: { provider: reported(body.provider), model: reported(body.current) } }),
-        thinking: reported(body.reasoning),
+        // `device_default`, not `in_use`: config.yaml's pairing is not what
+        // the calling chat necessarily runs — `current_chat` says so. Same
+        // shape on both branches; see scopedDeviceDefault for the filtered one.
+        ...(provider ? { asked_about: provider } : {}),
+        device_default: provider ? scopedDeviceDefault(body) : hermesDeviceDefault(body),
+        current_chat: CURRENT_CHAT_MODEL_NOTE,
         models,
         models_truncated: (body.models ?? []).length > MODEL_LIMIT,
         catalogue_stale: body.stale === true,
@@ -211,7 +238,7 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "ai_set_provider",
-    "Switch which AI provider this device uses. Only call it when the user names a provider. The model resets to that provider's own default, so call ai_set_model afterwards if the user also named a model. Use ai_list_models first to see which providers have credentials here.",
+    `Switch the AI provider this device uses by default (${DEFAULT_SCOPE}). Only call it when the user names a provider. The default model resets to that provider's own default, so call ai_set_model afterwards if the user also named a model. Use ai_list_models first to see which providers have credentials here.`,
     { provider: providerParam },
     { editions: ["hermes"], readOnly: false },
     async ({ provider }: { provider: string }) => {
@@ -234,13 +261,15 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
         { provider },
         { timeoutMs: 30_000, rules: SET_RULES },
       );
-      return text(`Now using provider "${body.provider ?? provider}" with model "${body.model ?? "its default"}".`);
+      return text(
+        `Device default is now provider "${body.provider ?? provider}" with model "${body.model ?? "its default"}". ${KEEPS_HEADER_MODEL}`,
+      );
     },
   );
 
   reg.tool(
     "ai_set_model",
-    "Switch which model this device's AI uses, keeping the current provider. Only call it when the user names a model. To change provider instead, use ai_set_provider. Call ai_list_models first so you pass a model id this provider actually serves.",
+    `Switch the model this device uses by default (${DEFAULT_SCOPE}), keeping the current provider. Only call it when the user names a model. To change provider instead, use ai_set_provider. Call ai_list_models first so you pass a model id this provider actually serves.`,
     { model: zText(128, "Model id exactly as ai_list_models reports it") },
     { editions: ["hermes"], readOnly: false },
     async ({ model }: { model: string }) => {
@@ -256,7 +285,9 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
         { model },
         { timeoutMs: 30_000, rules: SET_RULES },
       );
-      return text(`Now using model "${body.model ?? model}" from provider "${body.provider ?? "the current provider"}".`);
+      return text(
+        `Device default is now model "${body.model ?? model}" from provider "${body.provider ?? "the current provider"}". ${KEEPS_HEADER_MODEL}`,
+      );
     },
   );
 }

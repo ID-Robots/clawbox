@@ -20,3 +20,36 @@
 export function reported(value: unknown): string {
   return typeof value === "string" && value.trim() ? value : "unknown";
 }
+
+/** The `/setup-api/hermes/models` fields that make up the box's saved pairing. */
+export interface HermesDefaultSource {
+  provider?: string;
+  current?: string;
+  reasoning?: string;
+}
+
+/**
+ * The device default as the tools report it: config.yaml's provider, model and
+ * reasoning, blanks as "unknown". One place, because two tools emit it and a
+ * route rename must not leave them disagreeing.
+ */
+export function hermesDeviceDefault(source: HermesDefaultSource | null | undefined) {
+  return {
+    provider: reported(source?.provider),
+    model: reported(source?.current),
+    thinking: reported(source?.reasoning),
+  };
+}
+
+/**
+ * What a tool says about the model answering the conversation it was called
+ * from — which is nothing it can read: this process is one stdio child shared
+ * by every Hermes session, started with a filtered environment (see
+ * mcp/lib/profile.ts) and called with no session id. It reads config.yaml's
+ * default, and the one time it reported that as "in use" the agent answered
+ * "which model are you" with it, wrongly. So the default is named for what it
+ * is, and the payload points at the record: the label the chat prints under a
+ * reply whose model it knows.
+ */
+export const CURRENT_CHAT_MODEL_NOTE =
+  "not visible here. device_default is what a new chat starts on; this chat may be on a per-session override no tool can read. Where the ClawBox chat knows the model that served a reply, it prints it under that reply.";

@@ -117,7 +117,17 @@ export interface HermesProviderRow {
    * longer read "has a key" as "works". TASK-446.
    */
   verified: boolean | null;
-  isUserDefined: boolean;
+  /**
+   * Whether the provider is one the OWNER defined (a custom OpenAI-compatible
+   * endpoint) rather than one Hermes ships. `null` when the source could not
+   * say — the same three-state rule the two fields above follow, and for the
+   * same reason: this one decides whether the chat may resolve the dashboard's
+   * `custom` KIND to a slug, and collapsing "not reported" into `false` blanks
+   * the served label on the box's OWN provider from the second turn on. No
+   * capture of a live `/api/model/options` row is held in this repo, so
+   * "absent" is a shape we cannot rule out.
+   */
+  isUserDefined: boolean | null;
   source: string;
   total: number;
   models: HermesModelOption[];
@@ -159,6 +169,26 @@ export interface ProviderScope {
   source: ModelOptionsSource;
   stale: boolean;
   fetchedAt: number;
+}
+
+/**
+ * What `/setup-api/hermes/models?provider=…` actually answers: a `ProviderScope`
+ * plus the two DEVICE-WIDE facts a scoped reader would otherwise have to report
+ * as unknown with the values one field away.
+ *
+ * Declared here, beside the scope it extends, because the MCP server reads this
+ * shape too and a route rename is only protected if every declaration of it
+ * moves together — the duplicate-type trap an earlier round of this PR
+ * consolidated into `HermesDefaultSource`.
+ *
+ * `savedPair` is the pairing itself, and is deliberately NOT called `saved`
+ * beside `savedElsewhere`: `current` is blank when the saved model is not in
+ * this provider's list and `savedElsewhere` is null when it IS this provider,
+ * so neither of them names the device default reliably and only this one does.
+ */
+export interface ScopedModelsReply extends ProviderScope {
+  reasoning: string;
+  savedPair: { provider: string; model: string };
 }
 
 // ── L1 cache (in-process, SWR) ───────────────────────────────────────────────
@@ -357,7 +387,7 @@ function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesPr
     name: asString(raw.name) || id,
     authenticated: typeof raw.authenticated === "boolean" ? raw.authenticated : null,
     verified: typeof raw.verified === "boolean" ? raw.verified : null,
-    isUserDefined: raw.is_user_defined === true,
+    isUserDefined: typeof raw.is_user_defined === "boolean" ? raw.is_user_defined : null,
     source: asString(raw.source) || "unknown",
     // `total_models` is the dashboard's count; after seeding it would understate
     // what we actually offer, so report the list we return.
@@ -457,7 +487,8 @@ async function readDiskCatalog(): Promise<HermesProviderRow[] | null> {
       // The manifest carries no credential state — say "unknown", never "yes".
       authenticated: null,
       verified: null,
-      isUserDefined: false,
+      // Nor any notion of who defined the provider. Unknown, not "built-in".
+      isUserDefined: null,
       source: "catalog-file",
       total: models.length,
       models,
@@ -471,7 +502,7 @@ async function readDiskCatalog(): Promise<HermesProviderRow[] | null> {
  *  the same store the dashboard reads, unlike the old config.yaml regex (whose
  *  `^\s*(?:default|model)\s*:` pattern matched the FIRST `model:` anywhere in
  *  the file, so it was order-dependent and wrong on some configs). */
-async function readCurrentFromCli(): Promise<{ provider: string; model: string; reasoning: string }> {
+export async function readCurrentFromCli(): Promise<{ provider: string; model: string; reasoning: string }> {
   // Three CLI spawns at ~600 ms each; memoised against config.yaml's mtime so
   // repeat reads (every chat open, every Settings visit) cost a stat.
   const [provider, model, reasoning] = await Promise.all([

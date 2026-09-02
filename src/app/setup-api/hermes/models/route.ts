@@ -15,6 +15,7 @@ import {
   scopeFromPayload,
   type HermesModelOption,
   type ModelOptionsPayload,
+  type ScopedModelsReply,
 } from "@/lib/hermes-model-options";
 
 // Hermes' provider/model configuration.
@@ -86,7 +87,17 @@ export async function GET(request: Request) {
       if (!isAllowedProvider(scoped, provider)) {
         return NextResponse.json({ error: "Unknown provider" }, { status: 400 });
       }
-      return NextResponse.json(await scopeFromPayload(scoped, provider));
+      // `reasoning` and `savedPair` ride along: both are device-wide, not per
+      // provider, and a reader of the scoped form (ai_list_models before a
+      // switch) otherwise reports them as unknown with the values one field
+      // away. The shape is `ScopedModelsReply`, declared beside the scope it
+      // extends so the MCP server's reader cannot drift from it.
+      const reply: ScopedModelsReply = {
+        ...(await scopeFromPayload(scoped, provider)),
+        reasoning: scoped.reasoning,
+        savedPair: scoped.current,
+      };
+      return NextResponse.json(reply);
     }
 
     const payload = await getModelOptions({ refresh });
