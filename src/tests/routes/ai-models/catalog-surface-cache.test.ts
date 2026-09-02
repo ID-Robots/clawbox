@@ -85,11 +85,11 @@ describe("catalog refresh — the subscription surface is cached", () => {
           .map((m) => [m.id, m.availableOnSubscription]),
       );
       expect(byId["claude-sonnet-4-6"]).toBe(true);
-      // ANTHROPIC_MODELS' curated entries get appended by
-      // augmentWithStaticCatalog for the thin-enumeration case, and they are
-      // stamped too — leaving one unstamped where the rest are stamped is a
-      // difference the pickers would render, for no reason the box can name.
-      expect(byId["claude-haiku-4-5"]).toBe(true);
+      // And nothing else. The curated ANTHROPIC_MODELS used to be appended to
+      // a thin enumeration like this one and persisted with it, which made a
+      // hand-maintained list indistinguishable from a device answer for the
+      // next six hours (M-05).
+      expect(Object.keys(byId)).toEqual(["claude-sonnet-4-6"]);
     });
 
     // Ask again. `refreshing` single-flights per provider and clears a tick

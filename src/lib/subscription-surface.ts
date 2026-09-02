@@ -78,22 +78,25 @@ export async function readSubscriptionSurfaceIds(
     const ids = parsed.models
       .map((m) => m?.id)
       .filter((id): id is string => typeof id === "string" && id.length > 0);
-    // Union the CURATED catalogue for the surface provider, because the
-    // catalog route serves its cached payload through `buildPayload` ->
-    // `augmentWithStaticCatalog`, which appends exactly these ids to whatever
-    // the live enumeration returned. Reading the raw file without them asks a
-    // different question than the picker answered: a ClawBox release that adds
-    // a model to PROVIDER_CATALOGS ships a picker offering it on day one,
-    // while the on-disk cache keeps the previous list for up to the route's
-    // 6h refresh interval — and in that window this guard refused the very row
-    // the customer had just been shown. `augmentWithStaticCatalog` is a no-op
-    // for a provider with no curated catalogue (a NARROWER named surface such
-    // as claude-cli), and so is this, which is what keeps a narrowed surface
-    // narrow.
+    // Union the CURATED catalogue for the surface provider, because that is
+    // what the picker renders whenever the catalog route has no live
+    // enumeration to serve: a cold start, or a box whose provider is not
+    // listable yet, gets the curated rows marked `fallback`. Reading the raw
+    // file without them asks a different question than the picker answered,
+    // and this guard would refuse the very row the customer had just been
+    // shown. It is a no-op for a provider with no curated catalogue (a
+    // NARROWER named surface such as claude-cli), which is what keeps a
+    // narrowed surface narrow.
     //
-    // The curated ids count BEFORE the empty check, for the same reason: a
-    // file holding `models: []` is served to the picker through that same
-    // augmentation, so the customer was shown the curated list, not nothing.
+    // The union is the PERMISSIVE direction, deliberately. Since M-05 the
+    // route no longer merges the curated list into a live enumeration or
+    // persists it, so a cache file is either a device answer or absent — this
+    // is the one place the two lists still meet, and it meets them by allowing
+    // a curated id rather than refusing a live one.
+    //
+    // The curated ids count BEFORE the empty check for the same reason: a file
+    // holding `models: []` leaves the picker on the curated list, so the
+    // customer was shown that list, not nothing.
     const curated = getProviderCatalog(surfaceProvider)?.models ?? [];
     if (ids.length === 0 && curated.length === 0) return null;
     for (const model of curated) {

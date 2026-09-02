@@ -60,16 +60,26 @@ export interface ProviderCatalog {
 // stable entries per provider) and let the live catalog fill in the
 // rest. If you find yourself adding the latest model here, stop —
 // that's the catalog route's job.
+//
+// They are DISPLAY ONLY, and they can never hide a live row: the route no
+// longer merges them into an enumeration, and never persists them. Whatever
+// renders them is holding a catalogue marked `fallback: true` and is expected
+// to ask again — see `ResolvedProviderCatalog` and `useProviderCatalog`. The
+// one thing they still contribute to a live row is a `hint`, which no
+// enumeration returns.
 export const ANTHROPIC_MODELS: readonly ProviderModelOption[] = [
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest, near-frontier." },
   { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Default. Speed + intelligence." },
   { id: "claude-opus-5", label: "Claude Opus 5", hint: "Most capable." },
 ] as const;
 
-// OpenAI API key models. Curated to the 5.4 + 5.5 generations only —
-// older gens (4.1, 5.0, 5.1, 5.2, 5.3) are filtered out at the catalog
-// route via ALLOWED_MODEL_RE_BY_PROVIDER. Power users can still hit
-// older models via the "custom" toggle.
+// OpenAI API key models — cold-start display only, like every list here.
+// There is no longer a generation allowlist at the catalog route for openai:
+// it matched none of the gpt-5.6 generation, so on a 2026.8.1 box it hid the
+// live catalogue behind these five ids instead of supplementing them. What a
+// box shows now is what `openclaw models list --provider openai --all --json`
+// returns, minus the non-chat SKUs. Power users can still type any id via the
+// "custom" toggle.
 export const OPENAI_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.5-pro", label: "GPT-5.5 Pro", hint: "Latest, max reasoning." },
   { id: "gpt-5.5", label: "GPT-5.5", hint: "Latest flagship." },
@@ -348,7 +358,25 @@ interface CatalogApiResponse {
   /** True when the route fell back to a stale cached payload because the
    * upstream catalog query just failed; UI may want to show a warning. */
   stale?: boolean;
+  /** True when no live device enumeration produced this payload — see
+   * `CatalogResponse.fallback` in the catalog route. */
+  fallback?: boolean;
 }
+
+/**
+ * A catalogue as a component actually receives it: the shape above plus the
+ * two things the picker has to know about the ANSWER rather than the models —
+ * whether it is old, and whether a device produced it at all.
+ */
+export type ResolvedProviderCatalog = ProviderCatalog & {
+  stale?: boolean;
+  /**
+   * True when these rows are the curated cold-start list rather than a device
+   * enumeration. A consumer that renders them must come back and ask again:
+   * they are a placeholder for an answer, not the answer.
+   */
+  fallback?: boolean;
+};
 
 /**
  * Fetch the live model catalog for `provider` from the catalog route.
@@ -365,11 +393,16 @@ interface CatalogApiResponse {
  */
 export async function fetchProviderCatalog(
   provider: string,
-  opts: { signal?: AbortSignal } = {},
-): Promise<ProviderCatalog & { stale?: boolean }> {
+  opts: { signal?: AbortSignal; refresh?: boolean } = {},
+): Promise<ResolvedProviderCatalog> {
   const fallback = getProviderCatalog(provider);
   try {
-    const url = `/setup-api/ai-models/catalog?provider=${encodeURIComponent(provider)}`;
+    // `?refresh=1` asks the route to re-enumerate NOW rather than wait out its
+    // 6h interval. It still answers from cache immediately — the refresh runs
+    // detached — so this costs the caller nothing and is what makes "connect a
+    // provider, see its models" work without a reload.
+    const url = `/setup-api/ai-models/catalog?provider=${encodeURIComponent(provider)}`
+      + (opts.refresh ? "&refresh=1" : "");
     const res = await fetch(url, { signal: opts.signal, cache: "no-store" });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
@@ -377,7 +410,7 @@ export async function fetchProviderCatalog(
     const body = (await res.json()) as CatalogApiResponse;
     if (!body.models || body.models.length === 0) {
       // Empty catalog — keep the fallback so the picker isn't blank.
-      if (fallback) return { ...fallback, stale: true };
+      if (fallback) return { ...fallback, stale: true, fallback: true };
       throw new Error("empty catalog");
     }
     return {
@@ -396,6 +429,11 @@ export async function fetchProviderCatalog(
         || "",
       allowCustom: body.allowCustom !== false,
       stale: body.stale,
+      // Carried through, never inferred: the route knows whether a device
+      // enumeration produced these rows, and the client cannot tell by looking
+      // at them — that is precisely how three hard-coded Claude entries passed
+      // for the box's own catalogue for a day.
+      fallback: body.fallback === true ? true : undefined,
     };
   } catch (err) {
     // AbortError isn't a real failure — the consumer cancelled because
@@ -411,7 +449,7 @@ export async function fetchProviderCatalog(
         `[provider-models] catalog fetch failed for ${provider}, using fallback:`,
         err instanceof Error ? err.message : err,
       );
-      return { ...fallback, stale: true };
+      return { ...fallback, stale: true, fallback: true };
     }
     throw err;
   }

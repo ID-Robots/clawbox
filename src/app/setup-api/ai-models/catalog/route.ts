@@ -27,12 +27,21 @@ export const dynamic = "force-dynamic";
 // * On boot, the first import of this module kicks off a refresh for
 //   every CATALOG_PROVIDERS entry so picker opens are instant from
 //   minute 4 onward.
-// * If both caches are empty (fresh install, first picker open), we
-//   return an empty payload with `warming: true`. The client then
-//   falls back to the static catalog in src/lib/provider-models.ts.
+// * If both caches are empty (fresh install, first picker open), we serve
+//   the curated cold-start list from src/lib/provider-models.ts with
+//   `warming: true` and `fallback: true`.
 //
 // Force-refresh via `?refresh=1` triggers a refresh in the background
 // and serves whatever's currently cached — the user never waits.
+//
+// THE ONE RULE THIS FILE EXISTS TO KEEP (M-05): a payload the harness did not
+// produce is never persisted, and never presented as though it were. Only a
+// live enumeration is written to the disk cache, and only such a payload is
+// stamped `source: "live"`; everything else is served marked `fallback` so the
+// client comes back for the real answer. An enumeration that returns ZERO
+// models is not an answer either — the previous good catalogue is kept and the
+// CLI's stderr is logged, because "0 models" means the plugin is off or the
+// provider id is gone, not that the box can run nothing.
 
 const OPENCLAW_BIN = findOpenclawBin();
 const REFRESH_TIMEOUT_MS = 5 * 60_000; // openclaw on Jetson is ~3min
@@ -61,6 +70,26 @@ interface CatalogResponse {
   stale?: boolean;
   /** Set when neither cache has anything yet — client falls back to static catalog. */
   warming?: boolean;
+  /**
+   * Where these models came from. `"live"` means a device enumeration
+   * answered — `openclaw models list --provider <p> --all --json`, or
+   * OpenRouter's own /api/v1/models — and ONLY such a payload is ever written
+   * to the disk cache.
+   *
+   * Absent is not a synonym for "old": a payload persisted by a build before
+   * this field existed is indistinguishable from one built out of the curated
+   * cold-start arrays, which is exactly the state that made three hard-coded
+   * Claude entries the truth on a box that could run eleven. Treating an
+   * unmarked file as NOT live re-enumerates it once and costs nothing else.
+   */
+  source?: "live";
+  /**
+   * Set on a response the route could not answer from a live enumeration —
+   * a cold start, or a cached payload no device produced. It is served (a
+   * blank picker helps nobody) but it says what it is, so the client keeps
+   * asking instead of settling on the curated list for the next six hours.
+   */
+  fallback?: boolean;
 }
 
 // Process-local hot cache. Survives request boundaries within a single
@@ -147,17 +176,37 @@ interface OpenclawListResponse {
     input?: string;
     contextWindow?: number;
     local?: boolean;
+    /**
+     * The harness's own verdict on the row, tristate: `true` = a route it can
+     * take, `false` = one it cannot, `null`/absent = not determined. See the
+     * note below the interface before reading it as a credential check.
+     */
+    available?: boolean | null;
     tags?: string[];
   }>;
 }
 
-// `openclaw models list` also returns an `available` boolean per model. It is
-// deliberately NOT read here: it answers "can THIS box's currently-configured
-// credentials route this model", and during setup no credential is written
-// yet, so every entry comes back false. Gating the picker on it would empty
-// the list at exactly the moment the customer needs it. The auth-mode surface
-// (SUBSCRIPTION_SURFACE) is the part that IS knowable in the wizard, and it is
-// what this route stamps instead.
+// `openclaw models list` returns an `available` field per model, and this route
+// now honours it — but ONLY when it is explicitly `false`.
+//
+// It is TRISTATE, and the third state is the whole point. It mirrors the CLI's
+// Auth column, which docs.openclaw.ai/cli/models describes as a read-only check
+// resolving each route to eligible profiles and credentials and reporting `ok`,
+// `unknown` or `unavailable`; in `--json` those arrive as `true`, `null` and
+// `false`. Measured, on an unconfigured host: every anthropic row comes back
+// `"available": null` while `openai/gpt-5.6-sol` comes back `true`. On a linked
+// box every row of both providers is `true`.
+//
+// So `false` is the harness saying this route is unavailable on this box — a
+// row a picker should not offer. `null` is the harness saying it did not
+// determine one, and treating THAT as "no" would empty the list on exactly the
+// boxes that have not finished setting up, which is the failure the previous
+// comment here (which read the field as a credential gate and skipped it
+// entirely) was written to avoid. Dropping only `false` keeps that promise and
+// still stops us offering a route the box has already said it cannot take.
+//
+// The auth-mode surface (SUBSCRIPTION_SURFACE) is the second, narrower
+// question, and it is what this route stamps on top.
 //
 // anthropic's surface, concretely: `openclaw models list --provider anthropic`
 // is the plugin's catalogue (9 models on 2026.7.1, claude-mythos-5 and
@@ -198,12 +247,9 @@ const DEPRECATED_MODEL_IDS: ReadonlySet<string> = new Set([
 ]);
 
 // Per-provider allowlist regex. When set, only model ids matching the
-// pattern survive the catalog filter. Used to curate noisy upstream
-// catalogs down to a useful set without the picker exploding to 40+
-// entries the user has to scroll past.
+// pattern survive the catalog filter.
 //
-// openai (API-key auth): all 5.4 + 5.5 SKUs including -pro variants.
-//   Pros require an API key and DO work on the api.openai.com path.
+// ONE entry, and it is a routing fact rather than curation.
 //
 // codex (ChatGPT-account auth): 5.4, 5.4-mini, 5.5, plus the 5.6
 //   gpt-5.6-{sol,terra,luna} models — NO -pro variants. Per
@@ -216,12 +262,16 @@ const DEPRECATED_MODEL_IDS: ReadonlySet<string> = new Set([
 //   accounts, so this allowlist just stops us from stripping them; boxes
 //   on plans without 5.6 never see the entries (no dead buttons).
 //
-// Older generations (4.1, 5.0, 5.1, 5.2, 5.3) are intentionally
-// excluded per user request. New generations matching the pattern
-// (e.g. a future gpt-5.6) will auto-appear; new families (gpt-6) will
-// require updating the regex.
+// `openai` USED to carry /^gpt-5\.[45](-pro|-mini)?$/, to keep older
+// generations out of the picker. It aged into the opposite of its purpose: on
+// OpenClaw 2026.8.1 the openai catalogue is already curated upstream — one row
+// on a stock host (`openai/gpt-5.6-sol`, tagged default), ten on a linked box —
+// and that pattern matched NONE of the 5.6 generation, so the newest models the
+// box could run were filtered out of their own catalogue and the picker fell
+// back to a hand-written list. A generation allowlist cannot know what the next
+// generation is called; the harness's catalogue can, and the whole point of
+// this route is to ask it.
 const ALLOWED_MODEL_RE_BY_PROVIDER: Record<string, RegExp> = {
-  openai: /^gpt-5\.[45](-pro|-mini)?$/,
   // Explicit alternation, not /^gpt-5\.[45](-mini)?$/ — that would also
   // accept gpt-5.5-mini (which doesn't exist on the Codex auth path
   // and would 400 the same way gpt-5.4-pro did). Per
@@ -231,6 +281,19 @@ const ALLOWED_MODEL_RE_BY_PROVIDER: Record<string, RegExp> = {
   // appear in the live catalog for accounts entitled to them).
   codex: /^(?:gpt-5\.5|gpt-5\.4(?:-mini)?|gpt-5\.6-(?:sol|terra|luna))$/,
 };
+
+// Model families that are not CHAT models, whatever provider lists them —
+// image generation, speech, embeddings. `openclaw models list` enumerates a
+// provider's whole catalogue and offers no capability filter to ask for the
+// chat ones (`--all`, `--local`, `--provider` and nothing else on 2026.8.1),
+// and the rows carry no capability field either: an image SKU comes back with
+// the same shape as a chat model — `openai/gpt-image-1-mini` alongside
+// `openai/gpt-5.6-sol`, `input` reported as "-" for both on a stock host. So
+// this is a modality exclusion, deliberately NOT a generation allowlist: it
+// cannot hide a chat model the box has learned about, only the SKUs a chat
+// picker has no way to talk to. If the harness grows a capability filter, this
+// should become a read of it.
+const NON_CHAT_MODEL_RE = /^(?:gpt-image|dall-e|whisper|tts-|text-embedding|omni-moderation)/;
 
 // Newest-first ordering: bigger context generally means newer model on
 // every catalog we ship today (claude 200k+, gpt-5 400k, gemini 1M).
@@ -268,7 +331,7 @@ async function fetchSubscriptionSurfaceIds(provider: string): Promise<Set<string
     return new Set(cached.models.map((m) => m.id));
   }
   try {
-    const models = await fetchOpenclawCatalog(surfaceProvider);
+    const { models } = await fetchOpenclawCatalog(surfaceProvider);
     if (models.length === 0) return null;
     const payload: CatalogResponse = {
       provider: surfaceProvider,
@@ -276,6 +339,7 @@ async function fetchSubscriptionSurfaceIds(provider: string): Promise<Set<string
       defaultModelId: models[0].id,
       allowCustom: false,
       fetchedAt: Date.now(),
+      source: "live",
     };
     memCache.set(surfaceProvider, payload);
     await writeDiskCache(surfaceProvider, payload);
@@ -289,6 +353,18 @@ async function fetchSubscriptionSurfaceIds(provider: string): Promise<Set<string
   }
 }
 
+/**
+ * `<provider>/<model>` split on the FIRST slash — the documented shape of a
+ * `key` (docs.openclaw.ai/concepts/models), and the only parsing this route
+ * does to a model name. It is split rather than prefix-stripped because the
+ * catalogue a picker is asked for is not always the provider that enumerates
+ * it: the ChatGPT surface is served from `openai/*` rows.
+ */
+function modelIdFromKey(key: string): string {
+  const slash = key.indexOf("/");
+  return slash > 0 ? key.slice(slash + 1) : key;
+}
+
 function transformOpenclawEntries(
   provider: string,
   entries: OpenclawListResponse["models"],
@@ -297,19 +373,26 @@ function transformOpenclawEntries(
   const out: CatalogModel[] = [];
   for (const entry of entries) {
     if (typeof entry.key !== "string") continue;
-    const idPrefix = `${provider}/`;
-    const id = entry.key.startsWith(idPrefix)
-      ? entry.key.slice(idPrefix.length)
-      : entry.key;
+    const id = modelIdFromKey(entry.key);
     if (!id) continue;
+    // Explicitly `false` only. `null`/absent is the harness saying it did not
+    // determine one, and hiding a row over that would empty the picker on
+    // exactly the boxes that have not finished setting up.
+    if (entry.available === false) continue;
     if (entry.tags?.includes("deprecated")) continue;
     if (DEPRECATED_MODEL_IDS.has(id)) continue;
+    if (NON_CHAT_MODEL_RE.test(id)) continue;
     if (allowed && !allowed.test(id)) continue;
     out.push({
       id,
       label: typeof entry.name === "string" && entry.name.trim() ? entry.name : id,
       contextWindow: typeof entry.contextWindow === "number" ? entry.contextWindow : 0,
       input: typeof entry.input === "string" ? entry.input : undefined,
+      // The live `name` is the label, and there is no live hint. Inventing one
+      // is how a picker ends up describing a model nobody measured, so a hint
+      // only survives where the curated entry for the SAME id already carried
+      // one — see `hintFor`.
+      hint: hintFor(provider, id),
     });
   }
   out.sort(compareCatalogModels);
@@ -320,6 +403,7 @@ function isAllowedCatalogModel(provider: string, model: CatalogModel): boolean {
   if (!model.id) return false;
   const allowed = ALLOWED_MODEL_RE_BY_PROVIDER[provider];
   if (allowed && !allowed.test(model.id)) return false;
+  if (NON_CHAT_MODEL_RE.test(model.id)) return false;
   if (DEPRECATED_MODEL_IDS.has(model.id)) return false;
   return true;
 }
@@ -357,10 +441,9 @@ const ALLOW_CUSTOM_BY_PROVIDER: Record<string, boolean> = {
   clawai: false,
 };
 
-// Context-window lookup for static-catalog entries we know about but the
-// live upstream enumeration didn't return. Values from each provider's
-// official model docs. Used only as a fallback for `augmentWithStaticCatalog`;
-// when the live catalog includes the same id its real contextWindow wins.
+// Context-window lookup for the curated cold-start entries. Values from each
+// provider's official model docs. Read ONLY when building a fallback payload —
+// a live row carries the window the device reported.
 const STATIC_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   // Anthropic — https://platform.claude.com/docs/en/about-claude/models
   "claude-opus-5": 1_000_000,
@@ -374,34 +457,44 @@ const STATIC_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "claude-haiku-4-5": 200_000,
 };
 
-// Merge the curated static list from PROVIDER_CATALOGS into the live
-// upstream models. Live entries take precedence (their contextWindow /
-// input / label reflect what the gateway actually negotiated). Static
-// entries with ids the live list doesn't include get appended — this
-// covers the case where a provider's OAuth scope returns a single
-// deprecated model (Anthropic Claude.ai consumer OAuth is the live
-// example: the docs list claude-opus-5 / claude-sonnet-5 /
-// claude-haiku-4-5 as current, but `openclaw models list --provider
-// anthropic` on a Claude.ai-OAuth device only returns the deprecated
-// claude-sonnet-4-20250514). The picker would otherwise force the
-// user to type custom model ids by hand.
-function augmentWithStaticCatalog(provider: string, live: CatalogModel[]): CatalogModel[] {
-  if (!isCatalogProvider(provider)) return live;
+/**
+ * The curated cold-start entry for one id, if the shipped list carries it.
+ *
+ * This is the ONLY thing the curated arrays contribute to a live row: a hint,
+ * which no catalogue enumeration returns. Anything else — a label, a context
+ * window, the existence of the row at all — comes from the device.
+ */
+function hintFor(provider: string, id: string): string | undefined {
+  if (!isCatalogProvider(provider)) return undefined;
+  const hint = PROVIDER_CATALOGS[provider]?.models.find((m) => m.id === id)?.hint;
+  return hint || undefined;
+}
+
+/**
+ * The curated cold-start list for `provider`, as catalog rows.
+ *
+ * It is a DISPLAY fallback and nothing more. It used to be merged into every
+ * live enumeration and then persisted with it, which is how a box whose
+ * Anthropic plugin was disabled at 07:13 came to hold a `catalog-cache`
+ * file that named three Claude models, wore a fresh `fetchedAt`, and was
+ * indistinguishable from a device answer for the next six hours — while the
+ * same box could run eleven. A hand-maintained list cannot know what a device
+ * can route; the harness's own catalogue can, and asking it again is cheap.
+ * So this list is served only while there is no live answer, always marked
+ * `fallback`, and never written to disk.
+ */
+function staticCatalogModels(provider: string): CatalogModel[] {
+  if (!isCatalogProvider(provider)) return [];
   const staticEntry = PROVIDER_CATALOGS[provider];
-  if (!staticEntry) return live;
-  const liveIds = new Set(live.map((m) => m.id));
-  const augmented: CatalogModel[] = [...live];
-  for (const sm of staticEntry.models) {
-    if (liveIds.has(sm.id)) continue;
-    augmented.push({
-      id: sm.id,
-      label: sm.label,
-      contextWindow: STATIC_MODEL_CONTEXT_WINDOWS[sm.id] ?? 200_000,
-      hint: sm.hint,
-    });
-  }
-  augmented.sort(compareCatalogModels);
-  return augmented;
+  if (!staticEntry) return [];
+  const models = staticEntry.models.map((sm) => ({
+    id: sm.id,
+    label: sm.label,
+    contextWindow: STATIC_MODEL_CONTEXT_WINDOWS[sm.id] ?? 200_000,
+    hint: sm.hint,
+  }));
+  models.sort(compareCatalogModels);
+  return models;
 }
 
 function buildPayload(
@@ -413,13 +506,11 @@ function buildPayload(
   // Codex/ChatGPT-account models like gpt-5.5-pro that the upstream
   // rejects at request time. Re-apply the current provider allowlist when
   // constructing every payload, including cached/stale ones.
-  let merged = sanitizeCatalogModels(provider, augmentWithStaticCatalog(provider, models));
-  // Stamped HERE, on the merged list, not on the live one: the curated
-  // entries `augmentWithStaticCatalog` appends exist precisely for the case
-  // where the live enumeration came back thin, and an unstamped curated entry
-  // (ANTHROPIC_MODELS carries claude-haiku-4-5, which the subscription
-  // surface does not) would be offered as pickable in exactly the scenario
-  // this stamp was built for.
+  let merged = sanitizeCatalogModels(provider, models);
+  // Stamped on whatever list is about to be served, live or fallback: a
+  // fallback row the customer can see is a row the customer can pick, so it
+  // has to carry the same verdict a live one would (ANTHROPIC_MODELS carries
+  // claude-haiku-4-5, which a narrowed subscription surface does not).
   if (surfaceIds) {
     merged = merged.map((m) => ({ ...m, availableOnSubscription: surfaceIds.has(m.id) }));
   } else if (subscriptionSurfaceProvider(provider) === provider) {
@@ -451,6 +542,23 @@ function buildPayload(
   };
 }
 
+/**
+ * A payload built from the curated cold-start list. Marked `fallback`, and
+ * — the whole point — never handed to `writeDiskCache`.
+ */
+function buildFallbackPayload(provider: string): CatalogResponse {
+  return {
+    ...buildPayload(provider, staticCatalogModels(provider)),
+    fetchedAt: 0,
+    fallback: true,
+  };
+}
+
+/** Did a device enumeration produce this payload? See `CatalogResponse.source`. */
+function isLivePayload(payload: CatalogResponse | null | undefined): boolean {
+  return payload?.source === "live";
+}
+
 function sanitizeCachedPayload(provider: string, cached: CatalogResponse): CatalogResponse {
   const next = buildPayload(provider, cached.models);
   return {
@@ -458,12 +566,42 @@ function sanitizeCachedPayload(provider: string, cached: CatalogResponse): Catal
     fetchedAt: cached.fetchedAt,
     stale: cached.stale,
     warming: cached.warming,
+    source: cached.source,
+    // An unmarked cache — written by a build from before `source` existed, or
+    // by the path that used to persist the curated list as though a device had
+    // answered — is served, and says so.
+    fallback: isLivePayload(cached) ? undefined : true,
   };
 }
 
-function fetchOpenclawCatalog(provider: string): Promise<CatalogModel[]> {
+/**
+ * Which provider id is ENUMERATED for a given catalogue id.
+ *
+ * `codex` was a provider in the OpenClaw core through 2026.6.x. It is gone in
+ * 2026.8.1 — `openclaw models list --provider codex` answers "Unknown provider
+ * filter" — and a ChatGPT subscription is an `openai` OAuth profile now
+ * (`openclaw models auth login --provider openai`, docs.openclaw.ai/cli/models)
+ * serving `openai/*`. So the rows a ChatGPT account can run are the `openai`
+ * catalogue narrowed by ALLOWED_MODEL_RE_BY_PROVIDER.codex, which is the
+ * documented ChatGPT-account set — not a list maintained by hand here.
+ *
+ * The `codex` CATALOGUE id itself is being retired separately (TASK-652); this
+ * entry keeps the picker showing real models until it is, and goes with it.
+ */
+const ENUMERATION_PROVIDER: Record<string, string> = {
+  codex: "openai",
+};
+
+interface CatalogFetchResult {
+  models: CatalogModel[];
+  /** The CLI's stderr, so a zero-model answer can say why it was empty. */
+  stderr: string;
+}
+
+function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
+  const enumerated = ENUMERATION_PROVIDER[provider] ?? provider;
   return new Promise((resolve, reject) => {
-    const child = spawn(OPENCLAW_BIN, ["models", "list", "--provider", provider, "--all", "--json"], {
+    const child = spawn(OPENCLAW_BIN, ["models", "list", "--provider", enumerated, "--all", "--json"], {
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
@@ -492,7 +630,10 @@ function fetchOpenclawCatalog(provider: string): Promise<CatalogModel[]> {
       try {
         const parsed = JSON.parse(stdout) as OpenclawListResponse;
         clearTimeout(timer);
-        finish(() => resolve(transformOpenclawEntries(provider, parsed.models ?? [])));
+        finish(() => resolve({
+          models: transformOpenclawEntries(provider, parsed.models ?? []),
+          stderr,
+        }));
       } catch {
         // Partial JSON — keep accumulating.
       }
@@ -512,7 +653,7 @@ function fetchOpenclawCatalog(provider: string): Promise<CatalogModel[]> {
       finish(() => {
         try {
           const parsed = JSON.parse(stdout) as OpenclawListResponse;
-          resolve(transformOpenclawEntries(provider, parsed.models ?? []));
+          resolve({ models: transformOpenclawEntries(provider, parsed.models ?? []), stderr });
         } catch {
           reject(new Error(`openclaw produced non-JSON output: ${stdout.slice(0, 200)}`));
         }
@@ -521,7 +662,7 @@ function fetchOpenclawCatalog(provider: string): Promise<CatalogModel[]> {
   });
 }
 
-async function fetchOpenRouterCatalog(): Promise<CatalogModel[]> {
+async function fetchOpenRouterCatalog(): Promise<CatalogFetchResult> {
   const res = await fetch(OPENROUTER_API, {
     headers: { Accept: "application/json" },
     signal: AbortSignal.timeout(8000),
@@ -530,7 +671,7 @@ async function fetchOpenRouterCatalog(): Promise<CatalogModel[]> {
     throw new Error(`openrouter ${res.status}`);
   }
   const data = (await res.json()) as OpenRouterListResponse;
-  return transformOpenRouterEntries(data.data ?? []);
+  return { models: transformOpenRouterEntries(data.data ?? []), stderr: "" };
 }
 
 // Refresh the catalog for `provider` in the background. Returns
@@ -556,11 +697,14 @@ export function refreshInBackground(provider: string): void {
 
   refreshing.add(provider);
 
-  let fetcher: Promise<CatalogModel[]>;
+  let fetcher: Promise<CatalogFetchResult>;
   if (provider === "openrouter") {
     fetcher = fetchOpenRouterCatalog();
   } else if (provider === "clawai") {
-    fetcher = Promise.resolve(CLAWAI_STATIC_MODELS);
+    // The only catalogue with no upstream to ask: Mike's gateway routes the
+    // two device tiers and nothing else, so these two rows ARE the device's
+    // answer rather than a stand-in for one.
+    fetcher = Promise.resolve({ models: CLAWAI_STATIC_MODELS, stderr: "" });
   } else {
     fetcher = fetchOpenclawCatalog(provider);
   }
@@ -578,7 +722,7 @@ export function refreshInBackground(provider: string): void {
   const surface = fetchSubscriptionSurfaceIds(provider);
 
   const publish = async (models: CatalogModel[], surfaceIds: Set<string> | null) => {
-    const payload = buildPayload(provider, models, surfaceIds);
+    const payload: CatalogResponse = { ...buildPayload(provider, models, surfaceIds), source: "live" };
     memCache.set(provider, payload);
     await writeDiskCache(provider, payload);
     console.log(
@@ -587,14 +731,41 @@ export function refreshInBackground(provider: string): void {
     );
   };
 
+  /**
+   * Keep whatever good payload this box already has, and mark it stale so the
+   * next request re-enumerates instead of sitting on it for the refresh
+   * interval. Deliberately in memory only: the disk copy is the last answer a
+   * device actually gave, and rewriting it here would spend a write to record
+   * that a LATER attempt failed.
+   */
+  const markStale = () => {
+    const cached = memCache.get(provider);
+    if (cached) memCache.set(provider, { ...cached, stale: true });
+  };
+
   fetcher
-    .then(async (models) => {
+    .then(async ({ models, stderr }) => {
+      if (models.length === 0) {
+        // NOT a success. "[catalog] refreshed codex: 0 models" used to be
+        // followed by a disk write of the curated list, which then read back
+        // as a device answer — a false success in the exact shape this
+        // codebase keeps producing. An empty enumeration says the plugin is
+        // disabled, the provider id is gone, or the CLI failed silently; none
+        // of those are facts about what the box can run.
+        console.warn(
+          `[catalog] ${provider}: live enumeration returned no models, keeping the previous catalogue`
+          + (stderr.trim() ? ` — ${stderr.slice(-300).trim()}` : " (no stderr)"),
+        );
+        markStale();
+        return;
+      }
       await publish(models, null);
       const surfaceIds = await surface;
       if (surfaceIds) await publish(models, surfaceIds);
     })
     .catch((err: unknown) => {
       console.error(`[catalog] refresh failed for ${provider}:`, err instanceof Error ? err.message : err);
+      markStale();
     })
     .finally(() => {
       refreshing.delete(provider);
@@ -650,8 +821,12 @@ export async function GET(req: NextRequest) {
   }
 
   const ageMs = cached ? Date.now() - cached.fetchedAt : Infinity;
-  const isStale = ageMs > REFRESH_INTERVAL_MS;
-  if (force || isStale || !cached) {
+  const isStale = ageMs > REFRESH_INTERVAL_MS || cached?.stale === true;
+  // A payload no device produced is a reason to ask AGAIN, not a reason to
+  // wait six hours. That includes a cache written before `source` existed —
+  // on an upgraded box those files hold the curated list a failed enumeration
+  // left behind, and nothing else would ever dislodge them.
+  if (force || isStale || !isLivePayload(cached)) {
     refreshInBackground(provider);
   }
 
@@ -662,15 +837,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(payload, { headers: noStore() });
   }
 
-  // No cache anywhere yet. The client picker falls back to the static
-  // catalog in src/lib/provider-models.ts when models[] is empty.
-  const empty: CatalogResponse = {
-    provider,
-    models: [],
-    defaultModelId: DEFAULT_MODEL_BY_PROVIDER[provider] ?? "",
-    allowCustom: ALLOW_CUSTOM_BY_PROVIDER[provider] ?? true,
-    fetchedAt: 0,
-    warming: true,
-  };
-  return NextResponse.json(empty, { headers: noStore() });
+  // Nothing cached yet — the first picker open after a restart, while the
+  // enumeration is still running. Serve the curated list so the picker is not
+  // blank, marked `fallback` so the client comes back for the real one.
+  const warming: CatalogResponse = { ...buildFallbackPayload(provider), warming: true };
+  return NextResponse.json(warming, { headers: noStore() });
 }

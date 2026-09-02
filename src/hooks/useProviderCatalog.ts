@@ -5,7 +5,9 @@ import {
   fetchProviderCatalog,
   getProviderCatalog,
   type ProviderCatalog,
+  type ResolvedProviderCatalog,
 } from "@/lib/provider-models";
+import { onProvidersChanged } from "@/lib/ui-events";
 
 /**
  * Resolve the live model catalog for `provider` via
@@ -27,8 +29,25 @@ import {
  */
 interface LiveCatalog {
   provider: string;
-  catalog: ProviderCatalog;
+  catalog: ResolvedProviderCatalog;
 }
+
+/**
+ * A catalogue marked `fallback` is a placeholder, not an answer: the box has
+ * not enumerated one yet (the refresh behind the route takes ~3 minutes on a
+ * Jetson), or the provider only just became listable. Asking once and keeping
+ * the curated three for the rest of the session is the defect this retry
+ * exists to end.
+ *
+ * Backed off rather than polled flat because the wait is minutes on the slow
+ * path and instant on the fast one, and capped so an unconfigurable provider —
+ * one that will never enumerate — does not leave a picker asking forever. The
+ * route answers each of these from cache and single-flights the refresh
+ * behind it, so a retry costs one cheap request.
+ */
+const FALLBACK_RETRY_BASE_MS = 2_000;
+const FALLBACK_RETRY_MAX_MS = 60_000;
+const FALLBACK_RETRY_ATTEMPTS = 12;
 
 export function useProviderCatalog(provider: string | null | undefined): ProviderCatalog | null {
   const fallback = useMemo(
@@ -36,21 +55,45 @@ export function useProviderCatalog(provider: string | null | undefined): Provide
     [provider],
   );
   const [live, setLive] = useState<LiveCatalog | null>(null);
+  // Bumped by the providers-changed signal. It is in the dependency list, so a
+  // connect re-runs the effect with `refresh` set instead of the effect having
+  // to reach a fetch that has already been torn down.
+  const [reloads, setReloads] = useState(0);
 
   useEffect(() => {
     if (!provider) return;
     const ctrl = new AbortController();
-    fetchProviderCatalog(provider, { signal: ctrl.signal })
-      .then((next) => {
-        if (ctrl.signal.aborted) return;
-        setLive({ provider, catalog: next });
-      })
-      .catch((err) => {
-        if (ctrl.signal.aborted) return;
-        console.warn(`[useProviderCatalog] fetch failed for ${provider}:`, err);
-      });
-    return () => ctrl.abort();
-  }, [provider]);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+
+    const load = (refresh: boolean) => {
+      fetchProviderCatalog(provider, { signal: ctrl.signal, refresh })
+        .then((next) => {
+          if (ctrl.signal.aborted) return;
+          setLive({ provider, catalog: next });
+          if (!next.fallback || attempt >= FALLBACK_RETRY_ATTEMPTS) return;
+          const delay = Math.min(FALLBACK_RETRY_BASE_MS * 2 ** attempt, FALLBACK_RETRY_MAX_MS);
+          attempt += 1;
+          timer = setTimeout(() => load(true), delay);
+        })
+        .catch((err) => {
+          if (ctrl.signal.aborted) return;
+          console.warn(`[useProviderCatalog] fetch failed for ${provider}:`, err);
+        });
+    };
+
+    // A connect is exactly when the catalogue becomes enumerable — the plugin
+    // is enabled and the credential is written — so that read asks the route
+    // to re-enumerate rather than serve the pre-connect snapshot.
+    load(reloads > 0);
+    const off = onProvidersChanged(() => setReloads((n) => n + 1));
+
+    return () => {
+      ctrl.abort();
+      if (timer) clearTimeout(timer);
+      off();
+    };
+  }, [provider, reloads]);
 
   if (!provider) return null;
   return live?.provider === provider ? live.catalog : fallback;
