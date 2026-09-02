@@ -405,8 +405,9 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     // A file holding `models: []` is served as an empty payload, and
     // `fetchProviderCatalog` renders the curated catalogue for an empty one, so
     // the customer was shown the curated rows — the guard judges by the same
-    // list rather than answering UNKNOWN. Only a MISSING cache (the test above)
-    // is unknown.
+    // list rather than answering UNKNOWN. What IS unknown is a cache the guard
+    // cannot read at all — missing, unreadable, or half-written; the test above
+    // covers the missing one.
     mockSurfaceRead.mockResolvedValue(surfaceCache([]) as never);
 
     const res = await configurePost(subscribe({ model: OFF_CATALOGUE_ID }));
