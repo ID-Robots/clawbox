@@ -1,6 +1,7 @@
 import { splitAssistantMedia } from "@/lib/chat-media";
-import type { ChatToolSummary } from "@/lib/chat-history-cache";
+import { uuid, type ChatToolSummary } from "@/lib/chat-history-cache";
 import { HERMES_AUTO_PROVIDER, hermesProviderLabel } from "@/lib/hermes-providers";
+import { transcriptKeyIsSafe } from "./transcript-key";
 import {
   asHarnessError,
   HarnessError,
@@ -29,7 +30,7 @@ import {
  * Here, "start a new chat" is one method call.
  */
 
-/** What the chat header knows that a turn needs, read at send time. */
+/** What the chat surface knows that the transport needs, read at call time. */
 export interface HermesTurnContext {
   /**
    * The device's own configured pairing (`config.yaml` model.provider /
@@ -39,6 +40,12 @@ export interface HermesTurnContext {
   devicePairing: { provider: string; model: string };
   /** Whether the selected provider's model list has arrived yet. */
   modelsReady: boolean;
+  /**
+   * The conversation the popup is showing: the desktop thread, or one of the
+   * tabs opened beside it. Names the transcript on the box and picks which
+   * Hermes session the next turn resumes.
+   */
+  sessionKey: string;
 }
 
 const CHAT_ROUTE = "/setup-api/hermes/chat";
@@ -303,13 +310,19 @@ export class HermesAdapter implements HarnessAdapter {
   readonly id = "hermes" as const;
 
   /**
-   * The Hermes session this chat is threaded through. Empty until the first
-   * reply reports one; every later turn resumes it, which is what gives the
-   * conversation memory.
+   * The Hermes session behind each conversation this surface has open, by
+   * session key. Empty until that conversation's first reply reports one;
+   * every later turn on the same key resumes it, which is what gives the
+   * conversation memory — and keeping them apart is what lets a second tab be
+   * a second conversation rather than a second view of the first.
    */
-  private sessionId = "";
-  /** The in-flight turn, so Stop can abort it. */
-  private inFlight: AbortController | null = null;
+  private readonly sessions = new Map<string, string>();
+  /**
+   * The in-flight turn per conversation, so Stop aborts the one the owner is
+   * looking at and closing a tab aborts its own. A turn left running in
+   * another tab is the point of a second tab, not collateral.
+   */
+  private readonly inFlight = new Map<string, AbortController>();
   private readonly statusListeners = new Set<(s: HarnessStatus, detail?: string) => void>();
 
   constructor(
@@ -334,8 +347,8 @@ export class HermesAdapter implements HarnessAdapter {
   }
 
   disconnect(): void {
-    this.inFlight?.abort();
-    this.inFlight = null;
+    for (const controller of this.inFlight.values()) controller.abort();
+    this.inFlight.clear();
   }
 
   onStatus(cb: (status: HarnessStatus, detail?: string) => void): () => void {
@@ -355,8 +368,14 @@ export class HermesAdapter implements HarnessAdapter {
     // route honours the header when it can and answers with ordinary JSON when
     // it cannot, so asking is never a commitment — see `readStreamedTurn`.
     const streaming = this.capabilities.streamsTurns && typeof onEvent === "function";
+    const ctx = this.context();
+    // Captured NOW: the owner may be in another tab by the time the reply
+    // lands, and the session id it reports belongs to the conversation that
+    // asked, not to the one on screen.
+    const key = ctx.sessionKey;
+    const resumed = this.sessions.get(key);
     const controller = new AbortController();
-    this.inFlight = controller;
+    this.inFlight.set(key, controller);
     const abortFromCaller = () => controller.abort();
     // A signal that is ALREADY aborted never fires its event again, so a Stop
     // that landed between building the turn and sending it would otherwise be
@@ -366,7 +385,6 @@ export class HermesAdapter implements HarnessAdapter {
     const provider = req.provider ?? "";
     const model = req.model ?? "";
     const reasoning = req.reasoning ?? "";
-    const ctx = this.context();
     try {
       if (provider && provider !== HERMES_AUTO_PROVIDER && !model && provider !== ctx.devicePairing.provider) {
         // Sending --provider without -m makes hermes fall back to config.yaml's
@@ -416,10 +434,13 @@ export class HermesAdapter implements HarnessAdapter {
           ...(model ? { model } : {}),
           ...(provider ? { provider } : {}),
           ...(reasoning ? { reasoning } : {}),
+          // Which transcript the route records this turn under. OURS — the
+          // agent's own id is `sessionId` below.
+          sessionKey: key,
           // Continue this conversation instead of starting a fresh agent every
           // turn — otherwise a follow-up like "is it removed now?" reaches an
           // agent with no idea what "it" is.
-          ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+          ...(resumed ? { sessionId: resumed } : {}),
         }),
         signal: controller.signal,
       });
@@ -450,7 +471,7 @@ export class HermesAdapter implements HarnessAdapter {
         );
       }
       if (typeof data.sessionId === "string" && data.sessionId) {
-        this.sessionId = data.sessionId;
+        this.sessions.set(key, data.sessionId);
       }
       // Same MEDIA: split as the gateway path, so a picture renders the same
       // way whichever edition answered.
@@ -474,14 +495,14 @@ export class HermesAdapter implements HarnessAdapter {
       throw asHarnessError(err, "upstream");
     } finally {
       req.signal?.removeEventListener("abort", abortFromCaller);
-      if (this.inFlight === controller) this.inFlight = null;
+      if (this.inFlight.get(key) === controller) this.inFlight.delete(key);
     }
   }
 
   /** Aborting the fetch makes the route see `request.signal` fire, which kills
    *  the child process and answers 499. Already wired end to end. */
   async abortTurn(): Promise<void> {
-    this.inFlight?.abort();
+    this.inFlight.get(this.context().sessionKey)?.abort();
   }
 
   /**
@@ -497,18 +518,49 @@ export class HermesAdapter implements HarnessAdapter {
    * there is no request here that could fail.
    */
   async resetSession(): Promise<void> {
-    this.sessionId = "";
+    const key = this.context().sessionKey;
+    this.sessions.delete(key);
     // …and the replay log with it. Clearing only the session id would make the
     // agent forget while the screen refilled with the old conversation on the
     // next refresh — the worst of both, and exactly the split the durable
     // transcript could introduce if the two halves of "forget" ever drifted.
-    //
-    // Deliberately not fatal. The agent has ALREADY forgotten by the time this
-    // runs (the three lines above are the reset that matters), so throwing here
-    // would report a failed reset that in fact succeeded, and the (+) button is
-    // double-clickable precisely so this stays idempotent.
+    await this.deleteTranscript(key);
+  }
+
+  /**
+   * `<main>-<id>`: a bare filename, because the transcript store turns it into
+   * one (`transcriptKeyIsSafe` is the contract). The Hermes session behind it
+   * is opened by the first turn — sent with no id to resume, `hermes chat -q`
+   * starts a fresh one and reports it back.
+   */
+  newSessionKey(mainSessionKey: string): string {
+    return `${mainSessionKey}-${uuid().replace(/-/g, "").slice(0, 12).toLowerCase()}`;
+  }
+
+  ownsSessionKey(key: string): boolean {
+    return transcriptKeyIsSafe(key);
+  }
+
+  /**
+   * Abort whatever the tab was still running, forget its session id, delete
+   * its transcript. Only the last is a request, and it is the same
+   * best-effort call a reset makes.
+   */
+  async deleteSession(key: string, opts: { running: boolean }): Promise<void> {
+    if (opts.running) this.inFlight.get(key)?.abort();
+    this.sessions.delete(key);
+    await this.deleteTranscript(key);
+  }
+
+  /**
+   * Deliberately not fatal. The agent has ALREADY forgotten by the time this
+   * runs (dropping the session id is the reset that matters), so throwing here
+   * would report a failed reset that in fact succeeded — and a restart is a
+   * double-clickable button, so this stays idempotent.
+   */
+  private async deleteTranscript(key: string): Promise<void> {
     try {
-      const res = await this.fetchImpl(TRANSCRIPT_ROUTE, {
+      const res = await this.fetchImpl(`${TRANSCRIPT_ROUTE}?sessionKey=${encodeURIComponent(key)}`, {
         method: "DELETE",
         signal: AbortSignal.timeout(TRANSCRIPT_TIMEOUT_MS),
       });
@@ -530,8 +582,9 @@ export class HermesAdapter implements HarnessAdapter {
    */
   async loadHistory(options?: HistoryOptions): Promise<HistoryPage> {
     const limit = options?.limit ?? 50;
+    const key = this.context().sessionKey;
     try {
-      const res = await this.fetchImpl(`${TRANSCRIPT_ROUTE}?limit=${encodeURIComponent(String(limit))}`, {
+      const res = await this.fetchImpl(`${TRANSCRIPT_ROUTE}?sessionKey=${encodeURIComponent(key)}&limit=${encodeURIComponent(String(limit))}`, {
         // The transcript is the one thing on this surface that MUST NOT be
         // served from a cache: a reset writes an empty store and a stale 200
         // would repaint the conversation the user just deleted.
@@ -585,7 +638,8 @@ export class HermesAdapter implements HarnessAdapter {
       res = await this.fetchImpl(IMAGES_ROUTE, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
+        // Recorded under the conversation that asked for it, like a turn.
+        body: JSON.stringify({ prompt, sessionKey: this.context().sessionKey }),
         ...(signal ? { signal } : {}),
       });
     } catch (err) {
@@ -633,8 +687,8 @@ export class HermesAdapter implements HarnessAdapter {
     throw new HarnessError("unsupported", "This harness has no sticky session defaults.");
   }
 
-  /** Test seam: the session id this chat is currently threaded through. */
+  /** Test seam: the session id the conversation on screen is threaded through. */
   get threadedSessionId(): string {
-    return this.sessionId;
+    return this.sessions.get(this.context().sessionKey) ?? "";
   }
 }

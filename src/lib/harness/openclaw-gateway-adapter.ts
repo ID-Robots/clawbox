@@ -1,3 +1,4 @@
+import { uuid } from "@/lib/chat-history-cache";
 import { isSentinel, isInterSessionEnvelope } from "@/lib/chat-sentinels";
 import {
   isInternalRoutingMessage,
@@ -350,6 +351,40 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
       });
     } catch (err) {
       throw gatewayError(err);
+    }
+  }
+
+  /**
+   * `agent:<agentId>:clawbox-<id>`, fully qualified on purpose: the gateway
+   * files a bare key under whichever agent is the default at the time, so this
+   * is the only form that names the same session for ever. Lowercase letters
+   * and digits only — the gateway lowercases keys and treats colons as
+   * structure (`cron:`, `dashboard:` and friends are reserved shapes).
+   */
+  newSessionKey(mainSessionKey: string): string {
+    const parts = mainSessionKey.split(":");
+    const agentId = parts[0] === "agent" && parts[1] ? parts[1] : "main";
+    return `agent:${agentId}:clawbox-${uuid().replace(/-/g, "").slice(0, 12).toLowerCase()}`;
+  }
+
+  ownsSessionKey(key: string): boolean {
+    return key.startsWith("agent:");
+  }
+
+  /**
+   * The gateway deletes the session behind the tab — one kept would only
+   * clutter it. A session still holding a run refuses deletion, so the run is
+   * aborted first and the delete gets one paced retry.
+   */
+  async deleteSession(key: string, opts: { running: boolean }): Promise<void> {
+    if (opts.running) {
+      await this.link.request("chat.abort", { sessionKey: key }).catch(() => { /* best effort */ });
+    }
+    try {
+      await this.link.request("sessions.delete", { key, deleteTranscript: true });
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await this.link.request("sessions.delete", { key, deleteTranscript: true }).catch(() => { /* best effort */ });
     }
   }
 

@@ -43,7 +43,8 @@ import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
 // wrapper tags, which is genuinely OpenClaw-specific. `boundedAudio` is not,
 // and now lives with the rest of the media helpers.
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
-import { HarnessError, type HarnessStatus, type TurnResult } from '@/lib/harness/transport'
+import { DESKTOP_TRANSCRIPT_KEY } from '@/lib/harness/transcript-key'
+import { HarnessError, type HarnessStatus, type TurnResult, type HarnessAdapter } from '@/lib/harness/transport'
 import { splitMediaDirectives, splitAssistantMedia, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments, boundedAudio } from '@/lib/chat-media'
 import { splitEmailRefs } from '@/lib/chat-email-refs'
 import { EmailCard, EmailFullView } from '@/lib/chat-email'
@@ -466,14 +467,16 @@ const SHELF_HEIGHT_PX = 56
 // (initialPanelWidth), persisted by page.tsx, so it is not repeated here.
 const SIZE_STORAGE_KEY = 'clawbox-chat-size'
 
-// ── Chat tabs (OpenClaw) ──
-// Every tab is its own gateway session under the same agent — a separate
-// conversation with the SAME assistant, not another agent. The main tab is the
-// gateway's main session (the one Telegram, the desktop and every other
-// surface share); the others are sessions this popup minted. The list and
-// which one is open survive a refresh; the transcripts live on the gateway.
+// ── Chat tabs ──
+// Every tab is its own session under the same agent — a separate conversation
+// with the SAME assistant, not another agent. The main tab is the harness's
+// main session: on OpenClaw the gateway's (the one Telegram, the desktop and
+// every other surface share), on Hermes the desktop transcript. The others are
+// sessions this popup minted through the adapter, which is what makes the
+// strip one thing on both editions. The list and which one is open survive a
+// refresh; the transcripts live with the transport.
 interface ChatTab {
-  /** The full gateway session key, `agent:<agentId>:clawbox-<id>`. */
+  /** The session key as the transport minted it — see `HarnessAdapter.newSessionKey`. */
   key: string
   label: string
   createdAt: number
@@ -496,7 +499,9 @@ function readStoredTabs(): { tabs: ChatTab[]; active: string | null } {
     const tabs = (Array.isArray(parsed.tabs) ? parsed.tabs : [])
       .filter((t): t is ChatTab =>
         !!t && typeof t === 'object'
-        && typeof (t as ChatTab).key === 'string' && (t as ChatTab).key.startsWith('agent:')
+        // Any non-empty key: which transport it belongs to is judged when the
+        // main session binds (`bindMainSession`), not here.
+        && typeof (t as ChatTab).key === 'string' && (t as ChatTab).key.length > 0
         && typeof (t as ChatTab).label === 'string')
       .map(t => ({ key: t.key, label: t.label, createdAt: typeof t.createdAt === 'number' ? t.createdAt : 0, autoLabel: t.autoLabel === true, seq: typeof t.seq === 'number' ? t.seq : undefined }))
     const active = typeof parsed.active === 'string' && tabs.some(t => t.key === parsed.active) ? parsed.active : null
@@ -504,22 +509,6 @@ function readStoredTabs(): { tabs: ChatTab[]; active: string | null } {
   } catch {
     return { tabs: [], active: null }
   }
-}
-
-/**
- * A fresh session key beside the main one. Fully qualified on purpose: the
- * gateway files a bare key under whichever agent is the default at the time,
- * so `agent:<agentId>:…` is the only form that names the same session for
- * ever. Lowercase letters and digits only — the gateway lowercases keys and
- * treats colons as structure (`cron:`, `dashboard:` and friends are reserved
- * shapes). The session itself is created by the first chat.send; chat.history
- * on a key the gateway has never seen answers an empty transcript, not an
- * error, so a new tab needs no round trip before it can be shown.
- */
-function buildTabSessionKey(mainSessionKey: string): string {
-  const parts = mainSessionKey.split(':')
-  const agentId = parts[0] === 'agent' && parts[1] ? parts[1] : 'main'
-  return `agent:${agentId}:clawbox-${uuid().replace(/-/g, '').slice(0, 12).toLowerCase()}`
 }
 
 function readStoredSize(): { w: number; h: number } {
@@ -1242,6 +1231,47 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => {
     try { window.localStorage?.setItem(TABS_STORAGE_KEY, JSON.stringify({ tabs, active: activeTabKey })) } catch { /* localStorage unavailable */ }
   }, [tabs, activeTabKey])
+  // The adapter, for the two stable callbacks below that run inside the socket
+  // handshake and cannot re-create themselves when it changes.
+  const adapterRef = useRef<HarnessAdapter | null>(null)
+  /**
+   * Bind the popup to its main session: the gateway's, named by the hello, or
+   * the desktop transcript on a harness with no handshake to name one.
+   *
+   * Tabs are minted beside a main key and only mean something to their own
+   * transport, and the stored list can hold the other one's — a dual box that
+   * switched harness — so what the adapter does not own is dropped here. The
+   * bound key is the open tab if it survived, else main. Idempotent: a re-bind
+   * (a reconnect, a capability re-probe) keeps the owner where they were.
+   */
+  const bindMainSession = useCallback((main: string): string => {
+    mainSessionKeyRef.current = main
+    setMainSessionKey(main)
+    const owns = (key: string) => adapterRef.current?.ownsSessionKey(key) ?? true
+    setTabs(prev => prev.every(tb => owns(tb.key)) ? prev : prev.filter(tb => owns(tb.key)))
+    if (activeTabKeyRef.current !== null && !owns(activeTabKeyRef.current)) {
+      activeTabKeyRef.current = null
+      setActiveTabKey(null)
+    }
+    const bound = activeTabKeyRef.current ?? main
+    sessionKeyRef.current = bound
+    return bound
+  }, [])
+  /**
+   * A run on `key` has ended. Its busy mark goes — a tab the owner left
+   * mid-run and came back to carries one too — and a tab they are NOT looking
+   * at also turns unread and keeps the error for their return: nothing in a
+   * transcript explains a run that died, so the line is client-side only.
+   * A key with no mark ended in the tab they never left, or in one they have
+   * since closed; nothing to mark either way.
+   */
+  const settleRun = useCallback((key: string, error?: string) => {
+    if (!busyKeysRef.current.delete(key)) return
+    setBusyKeys(new Set(busyKeysRef.current))
+    if (key === sessionKeyRef.current) return
+    setUnreadKeys(prev => new Set(prev).add(key))
+    if (error) tabErrorsRef.current.set(key, error)
+  }, [])
   const runIdRef = useRef<string | null>(null)
   /**
    * `dispatchTurn`, reachable from `loadHistory` above it.
@@ -1361,6 +1391,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const hermesContext = useCallback(() => ({
     devicePairing: hermesDeviceRef.current,
     modelsReady: hermesScopeReadyRef.current,
+    sessionKey: sessionKeyRef.current,
   }), [])
   // Stable by construction — see HarnessWiring. Everything that moves is read
   // through a ref inside these callbacks, so the object itself never changes
@@ -1371,6 +1402,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   )
   const { adapter, capabilities: caps, harnessId, resolved: harnessLoaded } =
     useHarnessAdapter(harnessWiring)
+  useEffect(() => { adapterRef.current = adapter }, [adapter])
   // The gateway's status is produced by the socket handlers below; publish it
   // so the adapter's subscribers see one stream whichever harness is running.
   useEffect(() => {
@@ -1576,13 +1608,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const snapshot = h.snapshot as Record<string, unknown> | undefined
           const sessionDefaults = snapshot?.sessionDefaults as Record<string, unknown> | undefined
           const mainSessionKey = (sessionDefaults?.mainSessionKey as string) || 'main'
-          mainSessionKeyRef.current = mainSessionKey
-          setMainSessionKey(mainSessionKey)
           // The tab the owner is on survives the reconnect. Before tabs this
           // line bound every hello to main, so a gateway bounce mid-conversation
           // in another tab would have reloaded main's transcript over it.
-          const boundKey = activeTabKeyRef.current ?? mainSessionKey
-          sessionKeyRef.current = boundKey
+          const boundKey = bindMainSession(mainSessionKey)
           // A reconnect: whatever a background tab was waiting on either died
           // with the gateway or finished while the socket was down — its
           // terminal event is gone, so a busy mark kept here could never be
@@ -1873,16 +1902,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const state = payload.state as string
           // A run the owner left behind in another tab has ended: the tab is
           // no longer busy and has something new to read. Checked BEFORE the
-          // session filter, which is what would otherwise drop the event.
-          if ((state === 'final' || state === 'aborted' || state === 'error') && busyKeysRef.current.has(sk)) {
-            busyKeysRef.current.delete(sk)
-            setBusyKeys(new Set(busyKeysRef.current))
-            if (sk !== sessionKeyRef.current) {
-              setUnreadKeys(prev => new Set(prev).add(sk))
-              // The error branch below never runs for a background session,
-              // and a history reload cannot recreate what was never stored.
-              if (state === 'error') tabErrorsRef.current.set(sk, describeChatFailure(payload.errorMessage))
-            }
+          // session filter, which is what would otherwise drop the event. The
+          // error branch below never runs for a background session, and a
+          // history reload cannot recreate what was never stored.
+          if (state === 'final' || state === 'aborted' || state === 'error') {
+            settleRun(sk, state === 'error' ? describeChatFailure(payload.errorMessage) : undefined)
           }
           if (sk !== sessionKeyRef.current) return
 
@@ -2249,10 +2273,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const resetSessionRef = useRef(resetSession)
   useEffect(() => { resetSessionRef.current = resetSession }, [resetSession])
 
-  // "New chat" — the Hermes edition's form of the strip's + button. There is
-  // no OpenClaw chat UI to open on that edition, so the button keeps its old
-  // meaning there: reset this popup's own thread (the Hermes adapter clears
-  // the transcript on disk without reaching for a gateway that is not there).
+  // Restart the main conversation in place — the ✕ on the main tab, which
+  // cannot be closed. The strip's + used to do this on the Hermes edition, on
+  // the belief that one transcript was all that harness could hold; it opens
+  // a tab there now, exactly as it does on OpenClaw (see newTab).
   const [startingSession, setStartingSession] = useState(false)
   const startNewSession = useCallback(async () => {
     setStartingSession(true)
@@ -2357,7 +2381,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const newTab = useCallback(() => {
     const main = mainSessionKeyRef.current
     if (!main) return
-    const key = buildTabSessionKey(main)
+    const key = adapter.newSessionKey(main)
     setTabs(prev => {
       const nextSeq = prev.reduce((m, tb) => Math.max(m, tb.seq ?? 1), 1) + 1
       return [...prev, {
@@ -2369,14 +2393,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }]
     })
     void switchSession(key)
-  }, [switchSession, t])
+  }, [adapter, switchSession, t])
 
   /**
-   * Close a tab: the popup forgets it and the gateway deletes the session
+   * Close a tab: the popup forgets it and the transport deletes the session
    * behind it — a closed tab cannot be reopened from here, so a session kept
-   * would only clutter the gateway. Main can never be closed. Both gateway
-   * calls are best effort: a session still holding a run refuses deletion and
-   * simply stays until the gateway's own cleanup.
+   * would only clutter it. Main can never be closed.
    */
   const closeTab = useCallback((key: string) => {
     const idx = tabs.findIndex(tb => tb.key === key)
@@ -2401,16 +2423,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // switchSession marks the key busy on the way out when its run is
       // live; the tab is gone now, so the mark must go too.
       if (busyKeysRef.current.delete(key)) setBusyKeys(new Set(busyKeysRef.current))
-      if (running) await wsRequest('chat.abort', { sessionKey: key }).catch(() => { /* best effort */ })
-      try {
-        await wsRequest('sessions.delete', { key, deleteTranscript: true })
-      } catch {
-        // A session whose run has not settled yet refuses deletion. One
-        // paced retry; a session that still refuses stays until the
-        // gateway's own cleanup.
-        await new Promise(resolve => setTimeout(resolve, 2000))
-        await wsRequest('sessions.delete', { key, deleteTranscript: true }).catch(() => { /* best effort */ })
-      }
+      await adapter.deleteSession(key, { running })
     }
     if (sessionKeyRef.current === key) {
       // The neighbour on the left, else the one that slid into its place, else main.
@@ -2419,7 +2432,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } else {
       void dispose()
     }
-  }, [tabs, switchSession, wsRequest])
+  }, [tabs, switchSession, adapter])
 
   // A new tab is named after the first thing the owner says in it, once.
   useEffect(() => {
@@ -3161,6 +3174,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     sendAttachments: ChatAttachment[],
     idempotencyKey: string,
   ) => {
+    // The conversation this turn belongs to. A harness that answers on this
+    // promise rather than on a keyed event stream needs it remembered: the
+    // owner may be in another tab by the time the reply lands, and painting
+    // it there would put one conversation inside another.
+    const keyAtSend = sessionKeyRef.current
     let result: TurnResult
     try {
       result = await adapter.sendTurn({
@@ -3187,14 +3205,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // A run that has already ended (Stop, or a late frame after the final)
         // must not reopen the caret, so a delta is only painted while this run
         // is still the live one.
-        if (event.kind === 'delta' && runIdRef.current !== null) setStreaming(event.text)
+        if (event.kind === 'delta' && runIdRef.current === idempotencyKey) setStreaming(event.text)
         // Live tool steps, through the SAME pills the gateway harness already
         // feeds. A hermes turn used to reach this callback with nothing but
         // text, so a turn that spent its time in `web_search` — measured at up
         // to four minutes on the box — showed an empty bubble and no reason to
         // believe anything was happening. `applyToolEvent` reads `toolCallId`,
         // so the transport's stable `id` is handed over under that name.
-        else if (event.kind === 'tool' && runIdRef.current !== null) {
+        else if (event.kind === 'tool' && runIdRef.current === idempotencyKey) {
           applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase })
           if (isCodingAgentTool(event.name)) nudgeCodingAgent()
           // Remember that this turn asked to send mail. Noted on `start` as
@@ -3207,7 +3225,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // A one-line "what I am doing" from the harness, painted on the status
         // line under the thread. Gated on the live run for the reason a delta
         // is: a status frame after the turn ended describes nothing.
-        else if (event.kind === 'status' && runIdRef.current !== null) {
+        else if (event.kind === 'status' && runIdRef.current === idempotencyKey) {
           setTurnStatus(event.text?.trim() ? event.text.trim() : null)
         }
         // The agent has parked on a question. Held by `requestId`, so a
@@ -3215,7 +3233,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // card already on screen instead of drawing a second one beside it —
         // and gated on the live run for the reason a delta is: a prompt that
         // arrives after the turn ended belongs to nothing anyone can answer.
-        else if (event.kind === 'clarify' && runIdRef.current !== null) {
+        else if (event.kind === 'clarify' && runIdRef.current === idempotencyKey) {
           setClarifies(prev => upsertClarifyCard(prev, event))
         }
         // NOT gated on the run: an expiry is precisely the frame that can
@@ -3226,6 +3244,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         }
       })
     } catch (err) {
+      // A user-initiated Stop shows nothing, not an error line. Never render a
+      // harness's own error text: it is written for an operator reading a log
+      // and has carried an absolute device path and a session UUID into the
+      // customer's transcript (TASK-440). Both harnesses funnel through here
+      // now, so this is the only gate left.
+      const failure = err instanceof HarnessError && err.code === 'aborted'
+        ? undefined
+        : describeChatFailure(err instanceof Error ? err.message : undefined)
+      settleRun(keyAtSend, failure)
+      // It failed in a tab the owner has left: the composer, the caret and
+      // the pills on screen belong to the tab they are looking at now, and
+      // the error waits in the left tab for their return (settleRun).
+      if (sessionKeyRef.current !== keyAtSend) return
       // Nothing is coming on either path, so the run ends here.
       sendingRef.current = false
       setSending(false)
@@ -3239,22 +3270,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // rather than only on the happy one.
       void settleEmailDrafts()
       runIdRef.current = null
-      // A user-initiated Stop shows nothing, not an error line.
-      if (err instanceof HarnessError && err.code === 'aborted') return
-      // Never render a harness's own error text: it is written for an
-      // operator reading a log and has carried an absolute device path and a
-      // session UUID into the customer's transcript (TASK-440). Both harnesses
-      // funnel through here now, so this is the only gate left.
-      setMessages(prev => [...prev, {
-        role: 'system',
-        text: describeChatFailure(err instanceof Error ? err.message : undefined),
-        timestamp: Date.now(),
-      }])
+      if (!failure) return
+      setMessages(prev => [...prev, { role: 'system', text: failure, timestamp: Date.now() }])
       return
     }
     // A harness that merely ACKNOWLEDGED the turn answers on its own event
     // stream; those handlers paint the reply and end the run.
     if (result.acknowledgedOnly) return
+    settleRun(keyAtSend)
+    // The reply belongs to a tab the owner has left. The box recorded it
+    // before answering, so that tab replays it on return; here it only went
+    // from busy to unread (settleRun).
+    if (sessionKeyRef.current !== keyAtSend) return
     const hasMedia = (result.media?.length ?? 0) > 0 || (result.audio?.length ?? 0) > 0
     setMessages(prev => [...prev, {
       role: 'assistant',
@@ -3288,7 +3315,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // where the batch card appears.
     void settleEmailDrafts()
     runIdRef.current = null
-  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts])
+  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts, settleRun])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[]) => {
@@ -3743,8 +3770,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // socket on a box that runs no gateway.
   useEffect(() => {
     if (!harnessLoaded) return
+    // No hello will name a main session on a harness with no live connection:
+    // the box's own transcript store is the thread, and its tabs are files
+    // beside it. Bound BEFORE the replay below reads it.
+    if (!caps.hasLiveConnection) bindMainSession(DESKTOP_TRANSCRIPT_KEY)
     void adapter.connect()
-  }, [adapter, harnessLoaded])
+  }, [adapter, harnessLoaded, caps.hasLiveConnection, bindMainSession])
 
   // Replay the stored conversation on a harness that has no handshake to hang
   // it on.
@@ -4107,153 +4138,141 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             and connected is the normal state. The per-tab dots remain — they
             carry per-conversation facts (busy / unread) the composer cannot. */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
-          {harnessId === 'hermes' ? (
-            // One thread per popup on this edition (its adapter keeps a single
-            // transcript), so the bar carries the name and nothing else.
-            <span style={{
-              fontSize: 12, fontWeight: 600, letterSpacing: 0.2,
-              color: 'rgba(255,255,255,0.8)',
-              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-            }}>
-              ClawBox
-            </span>
-          ) : (
-            /* The tabs: main first, then the popup's own sessions, in the
-               order they were opened. Alone, main wears no plate — it reads as
-               the title it used to be. The row scrolls sideways past ~4 tabs
-               rather than wrapping into a second header row. */
-            <div
-              role="tablist"
-              aria-label="Chats"
-              data-testid="chat-tabs"
-              style={{ display: 'flex', alignItems: 'center', gap: 2, minWidth: 0, flex: 1, overflowX: 'auto', scrollbarWidth: 'none' }}
-            >
-              {[{ key: mainSessionKey, label: 'ClawBox', main: true }, ...tabs.map(tb => ({ key: tb.key, label: tb.label, main: false }))].map(tab => {
-                const active = tab.main ? activeTabKey === null : activeTabKey === tab.key
-                const busy = !!tab.key && busyKeys.has(tab.key)
-                const unread = !!tab.key && !active && unreadKeys.has(tab.key)
-                const switchable = status === 'connected' && !active && !!tab.key
-                const select = () => { if (switchable) void switchSession(tab.key) }
-                return (
-                  /* The plate is the WRAPPER, and the tab and its control are
-                     siblings inside it. role="tab" makes its descendants
-                     presentational, so a close button nested in it was one opaque
-                     element to assistive tech and, at tabIndex -1, unreachable
-                     from the keyboard. Putting the background and hover on the
-                     wrapper keeps what the owner asked for — one plate, the ✕ part
-                     of it, not a separate control that happens to sit beside it —
-                     while each action keeps its own semantics and focus stop. */
+          {/* The tabs: main first, then the popup's own sessions, in the
+              order they were opened. Alone, main wears no plate — it reads as
+              the title it used to be. The row scrolls sideways past ~4 tabs
+              rather than wrapping into a second header row. */}
+          <div
+            role="tablist"
+            aria-label="Chats"
+            data-testid="chat-tabs"
+            style={{ display: 'flex', alignItems: 'center', gap: 2, minWidth: 0, flex: 1, overflowX: 'auto', scrollbarWidth: 'none' }}
+          >
+            {[{ key: mainSessionKey, label: 'ClawBox', main: true }, ...tabs.map(tb => ({ key: tb.key, label: tb.label, main: false }))].map(tab => {
+              const active = tab.main ? activeTabKey === null : activeTabKey === tab.key
+              const busy = !!tab.key && busyKeys.has(tab.key)
+              const unread = !!tab.key && !active && unreadKeys.has(tab.key)
+              const switchable = status === 'connected' && !active && !!tab.key
+              const select = () => { if (switchable) void switchSession(tab.key) }
+              return (
+                /* The plate is the WRAPPER, and the tab and its control are
+                   siblings inside it. role="tab" makes its descendants
+                   presentational, so a close button nested in it was one opaque
+                   element to assistive tech and, at tabIndex -1, unreachable
+                   from the keyboard. Putting the background and hover on the
+                   wrapper keeps what the owner asked for — one plate, the ✕ part
+                   of it, not a separate control that happens to sit beside it —
+                   while each action keeps its own semantics and focus stop. */
+                <div
+                  key={tab.main ? 'main' : tab.key}
+                  className="claw-tab-plate"
+                  data-active={active || undefined}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
+                    // minWidth so a short auto-label ("Chat 2") makes the same
+                    // plate as a long one: without it every tab was exactly as
+                    // wide as its text, and the whole strip re-flowed the moment
+                    // a tab was renamed from the owner's first message.
+                    padding: '4px 8px', borderRadius: 8, minWidth: 92, maxWidth: 150, minHeight: 24,
+                    background: active && tabs.length > 0 ? 'rgba(255,255,255,0.08)' : 'transparent',
+                    color: active ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.5)',
+                    fontSize: 12, fontWeight: 600, letterSpacing: 0.2,
+                    userSelect: 'none', transition: 'background 0.15s, color 0.15s',
+                  }}
+                  onMouseEnter={(e) => { if (switchable) { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = 'rgba(255,255,255,0.8)' } }}
+                  onMouseLeave={(e) => { if (!active) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.5)' } }}
+                >
                   <div
-                    key={tab.main ? 'main' : tab.key}
-                    className="claw-tab-plate"
-                    data-active={active || undefined}
+                    role="tab"
+                    tabIndex={0}
+                    aria-selected={active}
+                    data-testid="chat-tab"
+                    data-session-key={tab.key}
+                    title={tab.label}
+                    onPointerDown={stopHeaderDrag}
+                    onClick={select}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select() } }}
                     style={{
-                      display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
-                      // minWidth so a short auto-label ("Chat 2") makes the same
-                      // plate as a long one: without it every tab was exactly as
-                      // wide as its text, and the whole strip re-flowed the moment
-                      // a tab was renamed from the owner's first message.
-                      padding: '4px 8px', borderRadius: 8, minWidth: 92, maxWidth: 150, minHeight: 24,
-                      background: active && tabs.length > 0 ? 'rgba(255,255,255,0.08)' : 'transparent',
-                      color: active ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.5)',
-                      fontSize: 12, fontWeight: 600, letterSpacing: 0.2,
-                      userSelect: 'none', transition: 'background 0.15s, color 0.15s',
+                      display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1,
+                      cursor: switchable ? 'pointer' : 'default',
+                      // The plate's padding is on the wrapper, so push the focus
+                      // ring out to the plate's edge rather than hugging the text.
+                      outlineOffset: 4,
                     }}
-                    onMouseEnter={(e) => { if (switchable) { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = 'rgba(255,255,255,0.8)' } }}
-                    onMouseLeave={(e) => { if (!active) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.5)' } }}
                   >
-                    <div
-                      role="tab"
-                      tabIndex={0}
-                      aria-selected={active}
-                      data-testid="chat-tab"
-                      data-session-key={tab.key}
-                      title={tab.label}
-                      onPointerDown={stopHeaderDrag}
-                      onClick={select}
-                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select() } }}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1,
-                        cursor: switchable ? 'pointer' : 'default',
-                        // The plate's padding is on the wrapper, so push the focus
-                        // ring out to the plate's edge rather than hugging the text.
-                        outlineOffset: 4,
-                      }}
-                    >
-                      {busy && (
-                        <span data-testid="chat-tab-busy" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: '#f97316', flexShrink: 0, animation: 'clawHeaderPulse 1.2s ease-in-out infinite' }} />
-                      )}
-                      {!busy && unread && (
-                        <span data-testid="chat-tab-unread" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', flexShrink: 0 }} />
-                      )}
-                      <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, flex: 1 }}>{tab.label}</span>
-                    </div>
-                    {!tab.main && active && (
-                      /* ONE click closes — the old first tap only armed a red
-                         "Close tab?" in place, which is the confirmation the owner
-                         was seeing and did not want. Neutral, on the plate's own
-                         hover ladder rather than a raw red tint. A native button:
-                         focusable in the tab order, Enter and Space for free. */
-                      <button
-                        type="button"
-                        onPointerDown={stopHeaderDrag}
-                        onClick={(e) => { e.stopPropagation(); closeTab(tab.key) }}
-                        aria-label={t('chat.tabClose')}
-                        title={t('chat.tabClose')}
-                        data-testid="chat-tab-close"
-                        style={{
-                          background: 'none', border: 'none', padding: 0,
-                          marginLeft: 2, marginRight: -2, width: 18, height: 18, borderRadius: 5,
-                          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-                          color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
-                          transition: 'background 0.15s, color 0.15s',
-                        }}
-                        onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.9)'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
-                        onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'transparent' }}
-                      >
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
-                          <path d="M18 6L6 18M6 6l12 12" />
-                        </svg>
-                      </button>
+                    {busy && (
+                      <span data-testid="chat-tab-busy" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: '#f97316', flexShrink: 0, animation: 'clawHeaderPulse 1.2s ease-in-out infinite' }} />
                     )}
-                    {tab.main && active && (
-                      /* Revealed on hover of the PLATE (`.claw-tab-plate:hover`),
-                         which is the fix for a dead style: the reveal rule used
-                         to be `[role="tab"]:hover .claw-tab-hover-close` while the
-                         button sat beside role="tab", so the descendant selector
-                         never matched and the button stayed at opacity 0 —
-                         invisible, still clickable, and invisible to jsdom too,
-                         which is why the test passed. Scoping the rule to the
-                         wrapper keeps the button a sibling of the tab with its
-                         own focus stop; :focus-within shows it to the keyboard. */
-                      <button
-                        type="button"
-                        onPointerDown={stopHeaderDrag}
-                        onClick={(e) => { e.stopPropagation(); if (!startingSession) void startNewSession() }}
-                        aria-label={t('chat.tabRestart')}
-                        title={t('chat.tabRestart')}
-                        data-testid="chat-tab-restart"
-                        className="claw-tab-hover-close"
-                        style={{
-                          background: 'none', border: 'none', padding: 0,
-                          marginLeft: 2, marginRight: -2, width: 18, height: 18, borderRadius: 5,
-                          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-                          color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
-                          transition: 'background 0.15s, color 0.15s',
-                        }}
-                        onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.9)'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
-                        onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'transparent' }}
-                      >
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
-                          <path d="M18 6L6 18M6 6l12 12" />
-                        </svg>
-                      </button>
+                    {!busy && unread && (
+                      <span data-testid="chat-tab-unread" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', flexShrink: 0 }} />
                     )}
+                    <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, flex: 1 }}>{tab.label}</span>
                   </div>
-                )
-              })}
-            </div>
-          )}
+                  {!tab.main && active && (
+                    /* ONE click closes — the old first tap only armed a red
+                       "Close tab?" in place, which is the confirmation the owner
+                       was seeing and did not want. Neutral, on the plate's own
+                       hover ladder rather than a raw red tint. A native button:
+                       focusable in the tab order, Enter and Space for free. */
+                    <button
+                      type="button"
+                      onPointerDown={stopHeaderDrag}
+                      onClick={(e) => { e.stopPropagation(); closeTab(tab.key) }}
+                      aria-label={t('chat.tabClose')}
+                      title={t('chat.tabClose')}
+                      data-testid="chat-tab-close"
+                      style={{
+                        background: 'none', border: 'none', padding: 0,
+                        marginLeft: 2, marginRight: -2, width: 18, height: 18, borderRadius: 5,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                        color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
+                        transition: 'background 0.15s, color 0.15s',
+                      }}
+                      onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.9)'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
+                      onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'transparent' }}
+                    >
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                        <path d="M18 6L6 18M6 6l12 12" />
+                      </svg>
+                    </button>
+                  )}
+                  {tab.main && active && (
+                    /* Revealed on hover of the PLATE (`.claw-tab-plate:hover`),
+                       which is the fix for a dead style: the reveal rule used
+                       to be `[role="tab"]:hover .claw-tab-hover-close` while the
+                       button sat beside role="tab", so the descendant selector
+                       never matched and the button stayed at opacity 0 —
+                       invisible, still clickable, and invisible to jsdom too,
+                       which is why the test passed. Scoping the rule to the
+                       wrapper keeps the button a sibling of the tab with its
+                       own focus stop; :focus-within shows it to the keyboard. */
+                    <button
+                      type="button"
+                      onPointerDown={stopHeaderDrag}
+                      onClick={(e) => { e.stopPropagation(); if (!startingSession) void startNewSession() }}
+                      aria-label={t('chat.tabRestart')}
+                      title={t('chat.tabRestart')}
+                      data-testid="chat-tab-restart"
+                      className="claw-tab-hover-close"
+                      style={{
+                        background: 'none', border: 'none', padding: 0,
+                        marginLeft: 2, marginRight: -2, width: 18, height: 18, borderRadius: 5,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                        color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
+                        transition: 'background 0.15s, color 0.15s',
+                      }}
+                      onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.9)'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
+                      onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'transparent' }}
+                    >
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                        <path d="M18 6L6 18M6 6l12 12" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              )
+            })}
+          </div>
         </div>
         {onOpenFull && (
           <button
@@ -4275,10 +4294,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         )}
         <button
           onPointerDown={stopHeaderDrag}
-          onClick={harnessId === 'hermes' ? () => { void startNewSession() } : newTab}
-          // Hermes: the one thread is reset in place (see startNewSession).
-          // OpenClaw: a new tab, which needs the main key the hello brings.
-          disabled={harnessId === 'hermes' ? startingSession : status !== 'connected'}
+          onClick={newTab}
+          // A new tab needs the main key: the hello brings the gateway's, and
+          // a harness with no handshake binds its own on connect.
+          disabled={status !== 'connected'}
           title={t('chat.tabNew')}
           aria-label={t('chat.tabNew')}
           data-testid="chat-new-tab"

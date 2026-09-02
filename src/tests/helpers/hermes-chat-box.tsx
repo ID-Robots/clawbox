@@ -46,8 +46,25 @@ export interface HermesBox {
    * signal back.
    */
   storedTranscript: Record<string, unknown>[];
+  /**
+   * The transcripts of the conversations the surface opens BESIDE the desktop
+   * one, keyed by the session key it minted for each. Read for any key that is
+   * not the desktop's; a key never written answers an empty transcript, as the
+   * store does.
+   */
+  tabTranscripts: Record<string, Record<string, unknown>[]>;
   /** DELETEs of the stored transcript, so "new chat" can be shown to reach it. */
   transcriptDeletes: number;
+  /** The session key of every transcript DELETEd, in order. */
+  deletedKeys: string[];
+  /** The session key of every transcript READ, in order. */
+  historyReads: string[];
+  /**
+   * The Hermes session id the chat route reports for a turn on this session
+   * key. One fixed id by default; a test that needs to tell two conversations
+   * apart answers differently per key.
+   */
+  sessionIdFor: (sessionKey: string) => string;
   /** Prompts POSTed to the images route, in order. */
   imagePrompts: string[];
   /**
@@ -80,7 +97,11 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
       hasClawaiImageRoute: false,
     },
     storedTranscript: [{ role: "assistant", text: "Earlier in this chat.", timestamp: 1 }],
+    tabTranscripts: {},
     transcriptDeletes: 0,
+    deletedKeys: [],
+    historyReads: [],
+    sessionIdFor: () => HERMES_SESSION,
     imagePrompts: [],
     imageReply: () => ({
       ok: true,
@@ -143,19 +164,28 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
         return { ok: answer.ok, status: answer.status, json: async () => answer.payload };
       }
       if (url.includes("/setup-api/chat/history")) {
+        // The desktop thread unless the surface named another conversation —
+        // the route's own default.
+        const key = new URL(url, "http://box").searchParams.get("sessionKey") || "desktop";
+        const isDesktop = key === "desktop";
         if (init?.method === "DELETE") {
           box.transcriptDeletes += 1;
-          box.storedTranscript = [];
+          box.deletedKeys.push(key);
+          if (isDesktop) box.storedTranscript = [];
+          else delete box.tabTranscripts[key];
           return { ok: true, json: async () => ({ ok: true }) };
         }
-        return { ok: true, json: async () => ({ messages: box.storedTranscript }) };
+        box.historyReads.push(key);
+        const messages = isDesktop ? box.storedTranscript : box.tabTranscripts[key] ?? [];
+        return { ok: true, json: async () => ({ messages }) };
       }
       if (url.includes("/setup-api/hermes/chat")) {
         const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
         box.chatPosts.push(body);
+        const sessionId = box.sessionIdFor(typeof body.sessionKey === "string" ? body.sessionKey : "desktop");
         return {
           ok: true,
-          json: async () => ({ text: reply(String(body.message)), sessionId: HERMES_SESSION }),
+          json: async () => ({ text: reply(String(body.message)), sessionId }),
         };
       }
       return { ok: true, json: async () => ({}) };
