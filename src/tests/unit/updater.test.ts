@@ -431,6 +431,56 @@ describe("updater", () => {
       expect(subStateQueries.filter((index) => index < firstStop).length).toBeGreaterThanOrEqual(2);
     });
 
+    it("keeps waiting when the pre-start state cannot be read", async () => {
+      // A `systemctl show` that times out under a cold box's load says
+      // nothing about the pre-start. Treating "unanswered" as "finished"
+      // would stop the gateway mid-migration on exactly the boot this wait
+      // exists for. Ask again; stop only once the unit is seen out of
+      // `start-pre`.
+      const preStart = { stdout: "start-pre\n", stderr: "" };
+      setupExecFileMock({
+        "show clawbox-gateway.service -p SubState": preStart,
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+      const answer = mockExecFile.getMockImplementation()!;
+      const answers = [new Error("systemctl timed out"), { stdout: "start-pre\n", stderr: "" }, { stdout: "running\n", stderr: "" }];
+      let query = 0;
+      mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+        if (args.join(" ").includes("clawbox-gateway.service -p SubState")) {
+          const next = answers[Math.min(query++, answers.length - 1)];
+          if (next instanceof Error) {
+            const callback = rest.find((arg) => typeof arg === "function") as
+              ((error: Error | null, result: { stdout: string; stderr: string }) => void) | undefined;
+            callback?.(next, { stdout: "", stderr: "" });
+            return { then: (_: unknown, reject: (err: Error) => void) => reject(next) };
+          }
+          preStart.stdout = next.stdout;
+        }
+        return (answer as (...a: unknown[]) => unknown)(cmd, args, ...rest);
+      }) as unknown as typeof childProcess.execFile);
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("completed");
+      });
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      const firstStop = calls.findIndex((call) => call.includes("systemctl stop clawbox-gateway.service"));
+      const subStateQueriesBeforeStop = calls
+        .slice(0, firstStop)
+        .filter((call) => call.includes("show clawbox-gateway.service -p SubState --value"));
+      expect(firstStop).toBeGreaterThan(-1);
+      // Unanswered, then start-pre, then running — and only then stopped.
+      expect(subStateQueriesBeforeStop.length).toBeGreaterThanOrEqual(3);
+    });
+
     it("fails when an overrun post_update later settles with a systemd error result", async () => {
       const timeoutErr = Object.assign(new Error("Command failed"), { killed: true });
       setupExecFileMock({

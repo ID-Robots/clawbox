@@ -861,14 +861,16 @@ async function removeGatewayMaintenanceMask(): Promise<void> {
  * `start-pre` is the only sub-state that matters — `auto-restart` is also
  * `activating` but nothing runs in it, and Type=simple leaves `start` at once.
  *
- * A query that fails says nothing about the pre-start, so it does not hold
- * the update: the box carries on exactly as it did before this wait existed.
+ * A query that fails says nothing about the pre-start, so it is asked again:
+ * stopping on an unanswered query would kill the very migration this wait
+ * protects. A unit that cannot be seen out of `start-pre` by the ceiling is
+ * left running and the step fails instead.
  */
 async function waitForGatewayPreStart(): Promise<void> {
   const deadline = Date.now() + GATEWAY_PRE_START_TIMEOUT_MS;
   let announced = false;
   while (Date.now() < deadline) {
-    let subState: string;
+    let subState: string | null = null;
     try {
       const { stdout } = await execFile(
         "/usr/bin/systemctl",
@@ -877,16 +879,20 @@ async function waitForGatewayPreStart(): Promise<void> {
       );
       subState = stdout.trim();
     } catch {
-      return;
+      // Unanswered is not "finished": a query that times out under a cold
+      // box's load says nothing about the pre-start. Ask again.
     }
-    if (subState !== "start-pre") return;
+    if (subState !== null && subState !== "start-pre") return;
     if (!announced) {
       announced = true;
       console.log("[Updater] waiting for clawbox-gateway to finish its pre-start before stopping it");
     }
     await delay(GATEWAY_WAIT_INTERVAL_MS);
   }
-  console.warn("[Updater] clawbox-gateway pre-start did not finish within its ceiling — stopping anyway");
+  // systemd's own TimeoutStartSec has killed any pre-start by now, so this is
+  // a unit whose state could not be confirmed for ten minutes. Leave it alone:
+  // the step fails and the mask is lifted, the gateway is not stopped.
+  throw new Error("clawbox-gateway did not leave its pre-start within the unit's ceiling — not stopping it");
 }
 
 /**
