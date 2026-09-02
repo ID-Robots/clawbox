@@ -74,17 +74,25 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
   // device — it is why the route takes a `scope` at all). An id-only tag let
   // one tab's answer be painted for the other's skill.
   //
-  // The two that describe an ATTEMPT rather than a skill carry the attempt as
-  // well, so a re-ask hides them without clearing anything: `refresh()` bumps
-  // `reloadKey` and re-runs the effect, and a note from the attempt before it
-  // has no business sitting under the panel that is being reloaded.
+  // The two that describe an ATTEMPT rather than a skill carry the RUN of the
+  // effect they came from, so a re-ask hides them without clearing anything: a
+  // note from the attempt before has no business sitting under a panel that is
+  // being asked again. `reloadKey` cannot do that job — it moves only in
+  // `refresh()`, so Installed(id) -> Browse(id) -> Installed(id) came back with
+  // the same tag as the failure before it and showed that failure while the new
+  // request was still in flight. `epoch` moves for every run of the effect.
+  //
+  // A ref, not state, and read during render on purpose: it only ever changes
+  // inside the effect, and every run of the effect also writes `held` with a
+  // fresh object, so the render that sees the new value always happens.
   const [held, setHeld] = useState<{ key: string; skill: HermesSkillDetail } | null>(null);
   const [phase, setPhase] = useState<DetailPhase>('idle');
-  const [errorState, setErrorState] = useState<({ key: string; attempt: number } & DetailFailure) | null>(null);
+  const [errorState, setErrorState] = useState<({ key: string; run: number } & DetailFailure) | null>(null);
   const [ambiguous, setAmbiguous] = useState<
-    { key: string; attempt: number; query: string; candidates: HermesSkill[] } | null
+    { key: string; run: number; query: string; candidates: HermesSkill[] } | null
   >(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const epoch = useRef(0);
   const cache = useRef<Map<string, HermesSkillDetail>>(new Map());
 
   // Both scopes are dropped for an id: the same string can be a lock name in
@@ -125,6 +133,7 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
 
     const scope = fromInstalled ? '&scope=installed' : '';
     const cacheKey = detailKey(inspectId, fromInstalled);
+    const run = ++epoch.current;
     const controller = new AbortController();
     let cancelled = false;
 
@@ -173,7 +182,7 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
         if (res.ok && data?.ambiguous && Array.isArray(data.candidates)) {
           setAmbiguous({
             key: cacheKey,
-            attempt: reloadKey,
+            run,
             query: String(data.query || inspectId),
             candidates: data.candidates as HermesSkill[],
           });
@@ -187,7 +196,7 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
           setPhase('done');
           setErrorState({
             key: cacheKey,
-            attempt: reloadKey,
+            run,
             part: 'docs',
             code: isCliFailureCode(data?.code) ? data.code : null,
           });
@@ -226,7 +235,7 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
         if ((err as Error).name === 'AbortError' || cancelled) return;
         console.error('[skills detail]', err);
         setPhase('done');
-        setErrorState({ key: cacheKey, attempt: reloadKey, part: 'meta', code: metaCode });
+        setErrorState({ key: cacheKey, run, part: 'meta', code: metaCode });
       }
     })();
 
@@ -246,13 +255,12 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
   // tab's failure, or the ambiguity of a query this one already resolved.
   const heldFor = detailKey(inspectId, fromInstalled);
   const stale = !held || held.key !== heldFor || held.skill.id !== inspectId;
-  const forThisAttempt = (a: { key: string; attempt: number }) =>
-    a.key === heldFor && a.attempt === reloadKey;
+  const fromThisRun = (a: { key: string; run: number }) => a.key === heldFor && a.run === epoch.current;
   return {
     detail: stale ? null : held.skill,
     phase: stale ? 'meta' : phase,
-    error: errorState && forThisAttempt(errorState) ? errorState : null,
-    ambiguous: ambiguous && forThisAttempt(ambiguous) && ambiguous.query === inspectId ? ambiguous : null,
+    error: errorState && fromThisRun(errorState) ? errorState : null,
+    ambiguous: ambiguous && fromThisRun(ambiguous) && ambiguous.query === inspectId ? ambiguous : null,
     refresh,
   };
 }

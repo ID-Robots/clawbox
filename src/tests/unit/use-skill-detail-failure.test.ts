@@ -108,6 +108,43 @@ describe("which skill the PANEL's own state belongs to", () => {
     await waitFor(() => expect(result.current.detail?.name).toBe("The store one"));
   });
 
+  it("does not show the failure from the last visit while this visit is still asking", async () => {
+    // Installed(id) -> Browse(id) -> Installed(id). Both visits to Installed
+    // carry the same cache key, and `refresh()` was never called, so anything
+    // tagged by key plus reload count came back looking current — and sat under
+    // the panel for the whole of the second visit's request.
+    let installedFails = true;
+    answer = (url) => {
+      if (!url.includes("scope=installed")) return { ok: true, status: 200, body: { skill: DETAIL } };
+      return installedFails
+        ? { ok: false, status: 502, body: { error: "…", code: "cli_failed" } }
+        : { ok: true, status: 200, body: { skill: { ...DETAIL, name: "The installed one" } } };
+    };
+
+    const { result, rerender } = renderHook(
+      ({ installed }: { installed: boolean }) => useSkillDetail(ID, installed),
+      { initialProps: { installed: true } },
+    );
+
+    await waitFor(() => expect(result.current.error?.code).toBe("cli_failed"));
+
+    await act(async () => {
+      rerender({ installed: false });
+    });
+    await waitFor(() => expect(result.current.detail?.name).toBe("PDF Tools"));
+
+    // Back to the tab that failed. Its request is in flight again; the old
+    // note describes an attempt two visits ago.
+    installedFails = false;
+    await act(async () => {
+      rerender({ installed: true });
+    });
+    expect(result.current.error).toBeNull();
+
+    await waitFor(() => expect(result.current.detail?.name).toBe("The installed one"));
+    expect(result.current.error).toBeNull();
+  });
+
   it("does not keep one tab's ambiguity over the other tab's answer", async () => {
     // The ambiguity chooser is answered by the docs phase, and nothing clears
     // it: tagged by id alone it survived a switch to the other scope, where it
