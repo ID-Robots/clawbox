@@ -64,15 +64,26 @@ export interface DetailController {
 
 /** True when the id came from the Installed tab (see the inspect route). */
 export function useSkillDetail(inspectId: string | null, fromInstalled = false): DetailController {
-  const [detail, setDetail] = useState<HermesSkillDetail | null>(null);
+  // Every answer carries the request it belongs to, and the bottom of this hook
+  // hands back only the ones that still describe what is on screen — dropping a
+  // stale answer by DERIVATION rather than by an extra state write.
+  //
+  // The tag is the CACHE KEY, not the bare id: the same string is a lock name
+  // in the Installed tab and a registry identifier in Browse, and those are two
+  // DIFFERENT skills (40 ClawHub ids collide with a bundled skill on this
+  // device — it is why the route takes a `scope` at all). An id-only tag let
+  // one tab's answer be painted for the other's skill.
+  //
+  // The two that describe an ATTEMPT rather than a skill carry the attempt as
+  // well, so a re-ask hides them without clearing anything: `refresh()` bumps
+  // `reloadKey` and re-runs the effect, and a note from the attempt before it
+  // has no business sitting under the panel that is being reloaded.
+  const [held, setHeld] = useState<{ key: string; skill: HermesSkillDetail } | null>(null);
   const [phase, setPhase] = useState<DetailPhase>('idle');
-  // Errors and ambiguity are tagged with what they belong to, so switching
-  // skills drops them by DERIVATION rather than by an extra state write. The
-  // failure carries the CACHE KEY, not the bare id: the same string is a lock
-  // name in the Installed tab and a registry identifier in Browse — two
-  // different skills — so an id-only tag showed one tab's failure in the other.
-  const [errorState, setErrorState] = useState<({ key: string } & DetailFailure) | null>(null);
-  const [ambiguous, setAmbiguous] = useState<{ query: string; candidates: HermesSkill[] } | null>(null);
+  const [errorState, setErrorState] = useState<({ key: string; attempt: number } & DetailFailure) | null>(null);
+  const [ambiguous, setAmbiguous] = useState<
+    { key: string; attempt: number; query: string; candidates: HermesSkill[] } | null
+  >(null);
   const [reloadKey, setReloadKey] = useState(0);
   const cache = useRef<Map<string, HermesSkillDetail>>(new Map());
 
@@ -117,18 +128,13 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
     const controller = new AbortController();
     let cancelled = false;
 
-    // A run that is about to answer the question again owns the note: leaving
-    // the old one up left a failure sitting under a panel that had just loaded
-    // (refresh() after an install re-runs this effect with the same id).
-    setErrorState((held) => (held && held.key === cacheKey ? null : held));
-
     const cached = cache.current.get(cacheKey);
     if (cached) {
-      setDetail(cached);
+      setHeld({ key: cacheKey, skill: cached });
       setPhase(cached.needsRemoteDocs ? 'docs' : 'done');
       if (!cached.needsRemoteDocs) return;
     } else {
-      setDetail(null);
+      setHeld(null);
       setPhase('meta');
     }
 
@@ -151,7 +157,7 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
           }
           base = data.skill as HermesSkillDetail;
           if (cancelled) return;
-          setDetail(base);
+          setHeld({ key: cacheKey, skill: base });
           remember(cacheKey, base);
           setPhase(base.needsRemoteDocs ? 'docs' : 'done');
         }
@@ -165,7 +171,12 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
         const data = await res.json().catch(() => ({}));
         if (cancelled) return;
         if (res.ok && data?.ambiguous && Array.isArray(data.candidates)) {
-          setAmbiguous({ query: String(data.query || inspectId), candidates: data.candidates as HermesSkill[] });
+          setAmbiguous({
+            key: cacheKey,
+            attempt: reloadKey,
+            query: String(data.query || inspectId),
+            candidates: data.candidates as HermesSkill[],
+          });
           setPhase('done');
           return;
         }
@@ -174,7 +185,12 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
           // the body, so it degrades to a note rather than an error page.
           console.error('[skills detail] documentation', data?.code ?? 'no code', data?.error ?? res.status);
           setPhase('done');
-          setErrorState({ key: cacheKey, part: 'docs', code: isCliFailureCode(data?.code) ? data.code : null });
+          setErrorState({
+            key: cacheKey,
+            attempt: reloadKey,
+            part: 'docs',
+            code: isCliFailureCode(data?.code) ? data.code : null,
+          });
           return;
         }
         const delta = (data.delta || {}) as DetailDelta;
@@ -203,14 +219,14 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
                 : {}),
           },
         };
-        setDetail(merged);
+        setHeld({ key: cacheKey, skill: merged });
         remember(cacheKey, merged);
         setPhase('done');
       } catch (err) {
         if ((err as Error).name === 'AbortError' || cancelled) return;
         console.error('[skills detail]', err);
         setPhase('done');
-        setErrorState({ key: cacheKey, part: 'meta', code: metaCode });
+        setErrorState({ key: cacheKey, attempt: reloadKey, part: 'meta', code: metaCode });
       }
     })();
 
@@ -224,16 +240,19 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
     return { detail: null, phase: 'idle', error: null, ambiguous: null, refresh };
   }
   // The effect runs AFTER the render that changed the selection, so for one
-  // frame the state still describes the previous skill. Every payload carries
-  // the id it was fetched for, so a mismatch is reported as "still loading"
-  // rather than painting another skill's version/author into this header.
-  const stale = !detail || detail.id !== inspectId;
+  // frame the state still describes the previous request. Everything below is
+  // therefore checked against what is on screen NOW, and a mismatch reads as
+  // "still loading" rather than painting another skill's version, another
+  // tab's failure, or the ambiguity of a query this one already resolved.
   const heldFor = detailKey(inspectId, fromInstalled);
+  const stale = !held || held.key !== heldFor || held.skill.id !== inspectId;
+  const forThisAttempt = (a: { key: string; attempt: number }) =>
+    a.key === heldFor && a.attempt === reloadKey;
   return {
-    detail: stale ? null : detail,
+    detail: stale ? null : held.skill,
     phase: stale ? 'meta' : phase,
-    error: errorState && errorState.key === heldFor ? errorState : null,
-    ambiguous: ambiguous && ambiguous.query === inspectId ? ambiguous : null,
+    error: errorState && forThisAttempt(errorState) ? errorState : null,
+    ambiguous: ambiguous && forThisAttempt(ambiguous) && ambiguous.query === inspectId ? ambiguous : null,
     refresh,
   };
 }

@@ -75,3 +75,64 @@ describe("which skill a detail failure belongs to", () => {
     expect(result.current.error).toBeNull();
   });
 });
+
+describe("which skill the PANEL's own state belongs to", () => {
+  it("never paints one tab's skill for the other tab's id — not even for the frame before the fetch starts", async () => {
+    // 40 ClawHub ids collide with a bundled skill on this device, which is why
+    // the route takes a `scope` at all. The effect runs AFTER the render that
+    // switched tabs, so for that render the state still holds the other tab's
+    // answer — and its `id` matches, which is what used to let it through.
+    answer = (url) =>
+      url.includes("scope=installed")
+        ? { ok: true, status: 200, body: { skill: { ...DETAIL, name: "The installed one" } } }
+        : { ok: true, status: 200, body: { skill: { ...DETAIL, name: "The store one" } } };
+
+    const painted: (string | undefined)[] = [];
+    const { result, rerender } = renderHook(
+      ({ installed }: { installed: boolean }) => {
+        const controller = useSkillDetail(ID, installed);
+        painted.push(controller.detail?.name);
+        return controller;
+      },
+      { initialProps: { installed: true } },
+    );
+
+    await waitFor(() => expect(result.current.detail?.name).toBe("The installed one"));
+    const before = painted.length;
+
+    await act(async () => {
+      rerender({ installed: false });
+    });
+
+    expect(painted.slice(before)).not.toContain("The installed one");
+    await waitFor(() => expect(result.current.detail?.name).toBe("The store one"));
+  });
+
+  it("does not keep one tab's ambiguity over the other tab's answer", async () => {
+    // The ambiguity chooser is answered by the docs phase, and nothing clears
+    // it: tagged by id alone it survived a switch to the other scope, where it
+    // offered candidates for a question that scope never asked.
+    answer = (url) => {
+      if (url.includes("docs=1")) {
+        return { ok: true, status: 200, body: { ambiguous: true, query: ID, candidates: [{ id: "a/one" }] } };
+      }
+      return url.includes("scope=installed")
+        ? { ok: true, status: 200, body: { skill: { ...DETAIL, needsRemoteDocs: true } } }
+        : { ok: true, status: 200, body: { skill: DETAIL } };
+    };
+
+    const { result, rerender } = renderHook(
+      ({ installed }: { installed: boolean }) => useSkillDetail(ID, installed),
+      { initialProps: { installed: true } },
+    );
+
+    await waitFor(() => expect(result.current.ambiguous?.candidates).toHaveLength(1));
+
+    await act(async () => {
+      rerender({ installed: false });
+    });
+
+    await waitFor(() => expect(result.current.detail?.name).toBe("PDF Tools"));
+    expect(result.current.ambiguous).toBeNull();
+  });
+});
