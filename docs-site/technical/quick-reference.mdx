@@ -20,18 +20,24 @@ Everything load-bearing about a ClawBox on one page. Facts only — explanations
 
 ## Ports
 
+Inbound is **default-deny** (ufw). "LAN" below means *private IPv4 source ranges only* (10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10) — anything else on IPv4 is dropped. IPv6 is not source-scoped. Full rules: [Networking → Firewall](/technical/networking#firewall).
+
 | Port | Service | Exposure |
 |---|---|---|
 | 80 | Web OS (`clawbox-setup`) — UI, login, `/setup-api/*`, proxies to gateway | LAN |
+| 443 | HTTPS (only if certs are installed at `data/certs/`) | LAN (private ranges) |
 | 18789 | OpenClaw gateway — **OpenClaw/dual only** | LAN, token-gated — **never browse it directly**. Closed on Hermes |
 | 8090 | Hermes dashboard auth proxy — **Hermes/dual only** | LAN, ClawBox-session-gated |
 | 9119 | Hermes dashboard itself | `127.0.0.2` loopback |
 | 22 | SSH | LAN |
-| 3006 | Terminal WS (proxied at `/terminal-ws`) | LAN |
-| 5900/6080 | VNC (localhost) / noVNC (proxied at `/novnc-ws`) | localhost / LAN |
+| 3006 | Terminal WS — an **unauthenticated PTY** if reached directly | **Closed to the LAN** — use the session-gated `/terminal-ws` on port 80 |
+| 5900 / 6080 | VNC / noVNC websockify | localhost only — reach it through `/novnc-ws` on port 80 |
 | 18800 | Chromium CDP (AI browser) | localhost |
 | 11434 | Ollama | localhost |
 | 8080 / 8880 | llama.cpp / Kokoro TTS | localhost |
+| 5353/udp · 67/udp · 53 | mDNS (`clawbox.local`) · DHCP on the AP interface · captive-portal DNS | open (5353 from anywhere; 53 from `10.42.0.0/24`, `10.43.0.0/24`) |
+
+Also closed at the firewall: **631** CUPS (left running — loopback printing still works), **111** rpcbind (additionally disabled + masked), **8384** Syncthing if present, and anything else binding `0.0.0.0`.
 
 ## Paths
 

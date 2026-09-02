@@ -1043,7 +1043,7 @@ step_apt_update() {
   # filters those formats need (and pulls in libreoffice-common, which owns the
   # /usr/bin/libreoffice launcher) — the full `libreoffice` metapackage would add
   # Calc, Impress, Base and a Java runtime for nothing the box ever converts.
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 pipx gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables ufw iw python3 python3-pip python-is-python3 pipx gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer
   # Node.js for production server and OpenClaw. OpenClaw 2026.8.1 tightened
   # its engines to >=22.22.3; older ClawBox images may have v22.22.2, which
   # looks like "Node 22" but crashes the OpenClaw CLI after npm install.
@@ -3156,6 +3156,11 @@ step_system_config() {
   step_polkit_rules
   step_nm_dispatcher
   step_sysctl_linkdown
+  # Non-fatal here too, matching step_post_update. This runs under install.sh's
+  # `set -euo pipefail` on the fresh-flash path, so an unguarded failure would
+  # abort a first install before ollama, llama.cpp, Chromium, VNC and
+  # start_services ever ran. A hardening step must never brick a flash.
+  step_firewall || echo "  Warning: firewall step failed (non-fatal)"
   step_persistent_journal
 }
 
@@ -3700,6 +3705,45 @@ SYSCTL_EOF
   echo "  Linkdown routing sysctl installed"
 }
 
+step_firewall() {
+  # Default-deny inbound. See scripts/clawbox-firewall.sh for the policy and the
+  # reasoning behind every rule in it; this step only decides WHEN it runs.
+  #
+  # Called from step_system_config (fresh installs) AND step_post_update
+  # (in-app updates), because a box already in the field is exactly the box the
+  # 2026-07-28 review was written about — a fresh-install-only firewall would
+  # leave every shipped device exactly as exposed as it is today.
+  local SRC="$PROJECT_DIR/scripts/clawbox-firewall.sh"
+  if [ ! -f "$SRC" ]; then
+    echo "  Skipping firewall: $SRC missing"
+    return 0
+  fi
+
+  # A CI container has no netfilter to program and `ufw enable` fails there.
+  # The e2e-install job runs this installer for real on every PR, so the step
+  # has to stand down rather than take the whole run red.
+  if is_test_mode; then
+    echo "  Skipping firewall: test mode"
+    return 0
+  fi
+
+  # step_apt_update installs ufw and runs before this on both paths. This is
+  # only a backstop for a box that got here with it missing (an update that
+  # skipped apt because it was offline).
+  #
+  # Both halves are time-bounded on purpose. post_update runs inside the
+  # updater's step budget, and an apt that blocks on an unreachable mirror (or
+  # on another process holding the dpkg lock) would burn the whole budget here
+  # and push the `hermes_edition` step that follows into a hard failure. The
+  # firewall is worth a couple of minutes, not the update.
+  if ! command -v ufw >/dev/null 2>&1; then
+    wait_for_apt 60 || true
+    timeout 180 env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ufw || true
+  fi
+
+  bash "$SRC"
+}
+
 step_nm_dispatcher() {
   local DISPATCHER_DIR="/etc/NetworkManager/dispatcher.d"
   local SRC="$PROJECT_DIR/scripts/nm-dispatcher-failover.sh"
@@ -3735,6 +3779,10 @@ step_post_update() {
   step_set_hostname || echo "  Warning: set_hostname step failed (non-fatal)"
   step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"
   step_sysctl_linkdown || echo "  Warning: sysctl_linkdown step failed (non-fatal)"
+  # Without this call the firewall would be fresh-install-only and every box
+  # already in the field would keep its wide-open INPUT policy — which is the
+  # entire finding. Idempotent: the script converges its own rules on each run.
+  step_firewall || echo "  Warning: firewall step failed (non-fatal)"
   # Without this call the persistent journal would be fresh-install-only, and
   # every already-shipped box would keep losing its whole log on each reboot.
   step_persistent_journal || echo "  Warning: persistent_journal step failed (non-fatal)"
@@ -5508,6 +5556,13 @@ DISPATCH_STEPS=(
   directories_permissions captive_portal_dns desktop_theme
   fix_git_perms browser_launch cloudflared_install
   nm_dispatcher sysctl_linkdown persistent_journal resource_limits desktop_mode
+  # `firewall` is dispatchable so support can re-assert the policy by hand with
+  # `sudo bash install.sh --step firewall`. It is not added to
+  # clawbox-root-step.sh's ALLOWED_STEPS because it does not need to be — the
+  # updater reaches it transitively via post_update. Note this is NOT an
+  # isolation boundary: system_config and post_update are both allow-listed and
+  # both call step_firewall, so the web server can already cause it to run.
+  firewall
   post_update update_smoke validate_services
 )
 
