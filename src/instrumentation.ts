@@ -62,8 +62,8 @@ export async function repairOpenclawConfig(repairs: {
  * (2026-09-01). Nothing an update does should depend on being watched.
  *
  * The status route keeps its call as the fallback. The two never collide: the
- * check is single-flight (it claims the continuation before its first await),
- * so whichever asks first resumes and the other finds nothing to do.
+ * check is single-flight, so a poll that lands on the boot hook's read joins
+ * it and gets the same answer instead of resuming a second time.
  *
  * Waits for the boot-time config repair first. That repair restarts the
  * gateway when it changed something, and the resumed update's first act is to

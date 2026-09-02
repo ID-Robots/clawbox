@@ -1671,15 +1671,16 @@ function createInitialState(steps: UpdateStepDef[]): UpdateState {
 
 let state: UpdateState = createInitialState(applicableSteps());
 let running = false;
-// Taken before the first await in checkContinuation and released when it
-// returns. `running` covers a launched run; this covers the reads before it,
-// so two callers in one tick — the boot hook and a status poll — cannot both
-// find the flag set and both resume, and no full run can start underneath.
-let continuationClaimed = false;
+// The continuation being read, if one is. Assigned before that read's first
+// await and cleared when it settles: `running` covers a launched run, this
+// covers the reads before it, so two callers in one tick — the boot hook and
+// a status poll — share one resume instead of each running their own, and no
+// full run can start underneath it.
+let continuationInFlight: Promise<boolean> | null = null;
 
 /** An update owns the box: one is running, or a continuation is being read. */
 function updateOwned(): boolean {
-  return running || continuationClaimed;
+  return running || continuationInFlight !== null;
 }
 
 export function getUpdateState(): UpdateState {
@@ -1693,6 +1694,7 @@ export function getUpdateState(): UpdateState {
 export function resetUpdateState(): void {
   state = createInitialState(applicableSteps());
   running = false;
+  continuationInFlight = null;
 }
 
 export async function isUpdateCompleted(): Promise<boolean> {
@@ -1736,17 +1738,18 @@ export async function updateInFlight(): Promise<boolean> {
 /**
  * Check if a post-restart continuation is needed and trigger it.
  * Called once from the server boot path (src/instrumentation.ts) and from
- * the status route on every idle poll as the fallback. Single-flight: of two
- * overlapping callers only the first reads the flag; the other gets false.
+ * the status route on every idle poll as the fallback. Single-flight:
+ * overlapping callers share one resume and get its one answer, so a status
+ * poll that lands on the boot hook's read answers "running", not "idle".
  */
-export async function checkContinuation(): Promise<boolean> {
-  if (updateOwned()) return false;
-  continuationClaimed = true;
-  try {
-    return await resumeContinuation();
-  } finally {
-    continuationClaimed = false;
+export function checkContinuation(): Promise<boolean> {
+  if (running) return Promise.resolve(false);
+  if (!continuationInFlight) {
+    continuationInFlight = resumeContinuation().finally(() => {
+      continuationInFlight = null;
+    });
   }
+  return continuationInFlight;
 }
 
 async function resumeContinuation(): Promise<boolean> {

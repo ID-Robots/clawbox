@@ -958,11 +958,13 @@ describe("updater", () => {
       expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", undefined);
     });
 
-    it("resumes once when a boot check and a status poll overlap", async () => {
+    it("resumes once when a boot check and a status poll overlap, and tells both", async () => {
       // The boot hook and the status route can both ask within the same
       // tick. The flag read is an await, so without a claim taken BEFORE it
       // both callers read the flag as set and both launch the second half of
-      // the update — post_update twice, two gateway restarts.
+      // the update — post_update twice, two gateway restarts. The second
+      // caller joins the first's read: a poll that lands here must answer
+      // "running", not "idle", so it gets the same true.
       updater.resetUpdateState();
       const flagRead = deferred();
       mockGet.mockImplementation(async (key: string) =>
@@ -973,8 +975,9 @@ describe("updater", () => {
       const fromPoll = updater.checkContinuation();
       flagRead.resolve();
 
-      expect(await Promise.all([fromBoot, fromPoll])).toEqual([true, false]);
+      expect(await Promise.all([fromBoot, fromPoll])).toEqual([true, true]);
       expect(mockSet.mock.calls.filter(([key]) => key === "update_needs_continuation")).toHaveLength(1);
+      expect(mockGet.mock.calls.filter(([key]) => key === "update_needs_continuation")).toHaveLength(1);
     });
 
     it("refuses a full or scoped update while the continuation is being read", async () => {

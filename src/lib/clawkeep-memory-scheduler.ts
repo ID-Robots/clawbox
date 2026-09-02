@@ -20,6 +20,7 @@ import {
   startMemoryIndex,
   type MemoryIndexSchedule,
 } from "@/lib/clawkeep-memory";
+import { updateInFlight } from "@/lib/updater";
 
 let armed: NodeJS.Timeout | null = null;
 let armedFor = 0;
@@ -44,17 +45,7 @@ function fire(): void {
   // time that has already passed for as long as the index runs, and the panel
   // shows a "next run" in the past.
   clear();
-  // Incremental, never a full reindex: a scheduled run must not spend hours
-  // re-embedding everything unattended. The one exception is a box with no
-  // index at all, where an incremental pass cannot succeed — startMemoryIndex
-  // settles that through the same rule as the button, so the two agree. It
-  // is single-flight, and declines this slot before it asks anything of the
-  // CLI, so a manual run already in progress keeps its record; the one log
-  // line is the only trace a declined slot leaves.
-  void startMemoryIndex("incremental", "schedule")
-    .then(({ accepted }) => {
-      if (!accepted) console.log("[clawkeep-memory-scheduler] skipped: an index run is in progress");
-    })
+  void runSlot()
     .catch((err) => {
       console.warn(
         "[clawkeep-memory-scheduler] scheduled index failed:",
@@ -64,6 +55,27 @@ function fire(): void {
     .finally(() => {
       void rearm();
     });
+}
+
+async function runSlot(): Promise<void> {
+  // An update owns the OpenClaw store while it runs: post_update repairs it
+  // with the gateway masked and stopped so there is ONE writer, and
+  // `openclaw memory index` would be a second. A slot that lands inside an
+  // update is skipped — one missed incremental pass costs nothing (see the
+  // file comment) — and the next one runs as normal.
+  if (await updateInFlight()) {
+    console.log("[clawkeep-memory-scheduler] skipped: an update is in progress");
+    return;
+  }
+  // Incremental, never a full reindex: a scheduled run must not spend hours
+  // re-embedding everything unattended. The one exception is a box with no
+  // index at all, where an incremental pass cannot succeed — startMemoryIndex
+  // settles that through the same rule as the button, so the two agree. It
+  // is single-flight, and declines this slot before it asks anything of the
+  // CLI, so a manual run already in progress keeps its record; the one log
+  // line is the only trace a declined slot leaves.
+  const { accepted } = await startMemoryIndex("incremental", "schedule");
+  if (!accepted) console.log("[clawkeep-memory-scheduler] skipped: an index run is in progress");
 }
 
 async function rearm(): Promise<void> {

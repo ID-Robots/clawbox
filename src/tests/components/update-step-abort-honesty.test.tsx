@@ -3,6 +3,7 @@ import { StrictMode } from "react";
 import { act, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import UpdateStep from "@/components/UpdateStep";
+import { deferred } from "@/tests/helpers/deferred";
 
 // Resolve the real English strings the way the app does, so a renamed key
 // fails here instead of shipping a raw "update.foo" to the owner.
@@ -31,16 +32,6 @@ const IDLE_UP_TO_DATE = {
     openclaw: { current: "1.2.3", target: null },
   },
 };
-
-function deferred<T>() {
-  let resolve!: (v: T) => void;
-  let reject!: (e: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
 
 function okJson(json: () => Promise<unknown>) {
   return { ok: true, status: 200, json };
