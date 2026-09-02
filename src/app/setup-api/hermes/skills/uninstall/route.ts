@@ -11,12 +11,25 @@ import {
   isInHubLock,
   readBundledManifestNames,
   readHubLock,
+  resolveUninstallKey,
   verifySkillRemoval,
 } from "@/lib/hermes-skills-server";
 
 // Uninstall a Hermes skill. The positional argument is the skill NAME (the
 // lock.json key, e.g. "1password"), NOT the full registry identifier. There is
 // no `--yes` flag — the CLI prompts `Confirm [y/N]:`, so we pipe "y\n" on stdin.
+//
+// ── F-09: the argument is not always the lock key ───────────────────────────
+//
+// This route used to look up `id` as a lock key and nothing else, which is only
+// the same question the caller asked when the skill's SKILL.md name happens to
+// equal its key. For a ClawHub skill it does not: `martin-weather` installs
+// under that key and shows as `weather` everywhere a person or an agent reads
+// it, so `{"id":"weather"}` reached the CLI unchanged, was refused as "not a
+// hub-installed skill", and came back a 404 about a skill the device has and
+// the Skills page lists. Resolution now happens ONCE, here, in
+// resolveUninstallKey() — the store, the MCP tools and any later client get the
+// same answer instead of three hand-rolled rules that agree only by accident.
 //
 // ── TASK-547: the exit code is not an answer ────────────────────────────────
 //
@@ -56,12 +69,31 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const id = typeof body.id === "string" ? body.id.trim() : "";
-  if (!isValidSkillName(id)) {
+  const requested = typeof body.id === "string" ? body.id.trim() : "";
+  if (!isValidSkillName(requested)) {
     return NextResponse.json({ error: "Invalid skill name" }, { status: 400 });
   }
 
   try {
+    // Key, store identifier or display name — one lock key, before anything
+    // else looks at it, on the rule the agent's skill_uninstall applies to the
+    // same device state (matchRemovableSkill). A tie is answered, never broken,
+    // on both of the non-unique keys — two entries sharing an identifier, two
+    // cards showing one name — because this ends in a delete. An exact lock key
+    // is not a tie: it is a JSON object key and it settles the question.
+    const resolved = await resolveUninstallKey(requested);
+    if ("ambiguous" in resolved) {
+      return NextResponse.json(
+        {
+          error: `More than one installed skill on this device answers to "${requested}". `
+            + `Remove it by its own name: ${resolved.ambiguous.join(", ")}.`,
+          code: "ambiguous_name",
+          candidates: resolved.ambiguous,
+        },
+        { status: 409 },
+      );
+    }
+    const id = resolved.key;
     // Read the lock BEFORE the CLI runs: for a wording this parser has never
     // seen, an entry that was there and is gone afterwards is still a removal.
     // The ENTRY, not just the boolean — `install_path` is the only thing that
@@ -178,7 +210,10 @@ export async function POST(request: Request) {
         { status: 409 },
       );
     }
-    return NextResponse.json({ ok: true, id, name: id });
+    // `requested` so a caller that passed a display name or an identifier can
+    // see WHICH skill went. The MCP tool says so in its own words; the store and
+    // any later client only have the body.
+    return NextResponse.json({ ok: true, id, name: id, requested });
   } catch (err) {
     // This try covers the lock read, the spawn and the removal check, so an
     // I/O failure here names absolute device paths — the exception's message

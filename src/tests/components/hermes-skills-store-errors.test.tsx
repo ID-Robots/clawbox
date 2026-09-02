@@ -329,6 +329,44 @@ describe("an uninstall refusal the route names by code is shown in the owner's l
     expect(screen.queryByText(/refused to remove/i)).toBeNull();
     expect(screen.getByText(bgCopy("skills.uninstallRefused"))).toBeTruthy();
   });
+
+  it("ambiguous_name renders the translated copy, keeping the lock ids", async () => {
+    // F-09's refusal: two installed skills answer to one string, so the device
+    // removed neither. The candidate LOCK IDS are not translatable text — they
+    // are the only strings that separate the two on the next attempt — so the
+    // line is localised around them.
+    mockStore({
+      installed: ONE_INSTALLED,
+      action: () =>
+        reply(409, {
+          error: 'More than one installed skill on this device answers to "pdf-tools". '
+            + "Remove it by its own name: acme-pdf, pdf-tools.",
+          code: "ambiguous_name",
+          candidates: ["acme-pdf", "pdf-tools"],
+        }),
+    });
+    await removeFromInstalled();
+
+    expect(screen.queryByText(/More than one installed skill/i)).toBeNull();
+    expect(
+      screen.getByText(
+        bgCopy("skills.ambiguousName", { name: "pdf-tools", names: "acme-pdf, pdf-tools" }),
+      ),
+    ).toBeTruthy();
+  });
+
+  it("falls back to the route's sentence when ambiguous_name carries no candidates", async () => {
+    // Without the ids the localised line would say a choice is needed and give
+    // nothing to choose between; the route's own words at least name them.
+    mockStore({
+      installed: ONE_INSTALLED,
+      action: () =>
+        reply(409, { error: "Remove it by its own name: acme-pdf, pdf-tools.", code: "ambiguous_name" }),
+    });
+    await removeFromInstalled();
+
+    expect(screen.getByText(/Remove it by its own name/)).toBeTruthy();
+  });
 });
 
 describe("an uninstall failure with no code at all", () => {

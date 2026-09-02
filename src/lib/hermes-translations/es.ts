@@ -482,6 +482,7 @@ export const es: Record<string, string> = {
   "skills.builtinSkill": "«{name}» venía con este dispositivo, así que no se puede eliminar.",
   "skills.notInstalled": "No hay ninguna habilidad de la tienda llamada «{name}» instalada en este dispositivo.",
   "skills.uninstallRefused": "El dispositivo se negó a eliminar esa habilidad.",
+  "skills.ambiguousName": "Más de una habilidad instalada responde a «{name}». Elimínala por su propio nombre: {names}.",
 
   "skills.browseTimeout": "Cargar el catálogo de habilidades tardó demasiado. Inténtelo de nuevo en un momento.",
   "skills.browseUnavailable": "Hermes no está instalado en este dispositivo, así que el catálogo de habilidades no se puede cargar.",

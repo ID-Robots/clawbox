@@ -498,6 +498,7 @@ export const zh: Record<string, string> = {
   "skills.builtinSkill": "“{name}”是本设备自带的技能，无法移除。",
   "skills.notInstalled": "本设备上没有安装名为“{name}”的商店技能。",
   "skills.uninstallRefused": "本设备拒绝移除该技能。",
+  "skills.ambiguousName": "有多个已安装的技能都叫“{name}”。请用它自己的名称移除：{names}。",
 
   "skills.browseTimeout": "加载技能目录耗时过长。请稍后重试。",
   "skills.browseUnavailable": "本设备未安装 Hermes，因此无法加载技能目录。",

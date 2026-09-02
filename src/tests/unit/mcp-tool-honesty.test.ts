@@ -109,11 +109,11 @@ describe("skill_uninstall — a 200 is not proof anything was removed", () => {
     return h;
   }
 
-  const installed = (list: { name: string; origin?: string; identifier?: string }[]) =>
+  const installed = (list: { id: string; name: string; origin?: string; identifier?: string }[]) =>
     apiGet.mockResolvedValue({ skills: list });
 
   it("refuses a name the device has never installed, instead of reporting success", async () => {
-    installed([{ name: "pdf", origin: "hub" }]);
+    installed([{ id: "pdf", name: "pdf", origin: "hub" }]);
     const out = await skills().call("skill_uninstall", { name: "no-such-skill" });
 
     expect(out.isError).toBe(true);
@@ -125,7 +125,7 @@ describe("skill_uninstall — a 200 is not proof anything was removed", () => {
   });
 
   it("refuses a built-in skill, which the harness silently declines to remove", async () => {
-    installed([{ name: "memo", origin: "builtin" }]);
+    installed([{ id: "memo", name: "memo", origin: "builtin" }]);
     const out = await skills().call("skill_uninstall", { name: "memo" });
 
     expect(out.isError).toBe(true);
@@ -136,7 +136,7 @@ describe("skill_uninstall — a 200 is not proof anything was removed", () => {
   });
 
   it("reports failure when the skill is still installed afterwards", async () => {
-    installed([{ name: "pdf", origin: "hub" }]);
+    installed([{ id: "pdf", name: "pdf", origin: "hub" }]);
     apiPost.mockResolvedValue({ ok: true, id: "pdf", name: "pdf" });
 
     const out = await skills().call("skill_uninstall", { name: "pdf" });
@@ -149,7 +149,7 @@ describe("skill_uninstall — a 200 is not proof anything was removed", () => {
 
   it("still reports success when the skill really is gone", async () => {
     apiGet
-      .mockResolvedValueOnce({ skills: [{ name: "pdf", origin: "hub" }] })
+      .mockResolvedValueOnce({ skills: [{ id: "pdf", name: "pdf", origin: "hub" }] })
       .mockResolvedValueOnce({ skills: [] });
     apiPost.mockResolvedValue({ ok: true });
 
@@ -172,10 +172,10 @@ describe("skill_uninstall — a 200 is not proof anything was removed", () => {
   it("reports success when removing a store skill that was shadowing a builtin", async () => {
     apiGet
       .mockResolvedValueOnce({
-        skills: [{ name: "pdf", origin: "hub", identifier: "openai/skills/skills/.curated/pdf" }],
+        skills: [{ id: "pdf", name: "pdf", origin: "hub", identifier: "openai/skills/skills/.curated/pdf" }],
       })
       // The hub entry is gone; the bundled `pdf` is back under the same name.
-      .mockResolvedValueOnce({ skills: [{ name: "pdf", origin: "builtin" }] });
+      .mockResolvedValueOnce({ skills: [{ id: "pdf", name: "pdf", origin: "builtin" }] });
     apiPost.mockResolvedValue({ ok: true });
 
     const out = await skills().call("skill_uninstall", { name: "pdf" });
@@ -188,7 +188,7 @@ describe("skill_uninstall — a 200 is not proof anything was removed", () => {
   });
 
   it("still reports failure when the SAME store skill survives the uninstall", async () => {
-    const entry = { name: "pdf", origin: "hub", identifier: "openai/skills/skills/.curated/pdf" };
+    const entry = { id: "pdf", name: "pdf", origin: "hub", identifier: "openai/skills/skills/.curated/pdf" };
     apiGet.mockResolvedValueOnce({ skills: [entry] }).mockResolvedValueOnce({ skills: [entry] });
     apiPost.mockResolvedValue({ ok: true });
 
@@ -203,11 +203,11 @@ describe("skill_uninstall — a 200 is not proof anything was removed", () => {
     apiGet
       .mockResolvedValueOnce({
         skills: [
-          { name: "pdf", origin: "builtin" },
-          { name: "pdf", origin: "hub", identifier: "openai/skills/skills/.curated/pdf" },
+          { id: "pdf", name: "pdf", origin: "builtin" },
+          { id: "pdf", name: "pdf", origin: "hub", identifier: "openai/skills/skills/.curated/pdf" },
         ],
       })
-      .mockResolvedValueOnce({ skills: [{ name: "pdf", origin: "builtin" }] });
+      .mockResolvedValueOnce({ skills: [{ id: "pdf", name: "pdf", origin: "builtin" }] });
     apiPost.mockResolvedValue({ ok: true });
 
     const out = await skills().call("skill_uninstall", { name: "pdf" });
@@ -273,7 +273,7 @@ describe("skill_uninstall — a 200 is not proof anything was removed", () => {
       expect(out.error.code).toBe("NOT_FOUND");
       expect(out.error.message).toMatch(/no installed skill called "ghost"/i);
       expect(out.error.next).toMatch(/skill_list/);
-      expect(out.error.next).toMatch(/do not retry this name/i);
+      expect(out.error.next).toMatch(/do not retry this exact string/i);
       // The generic resource-404 offered tools that have nothing to do with skills.
       expect(out.error.next).not.toMatch(/ui_list_apps|code_project_list/);
     });
@@ -301,7 +301,7 @@ describe("skill_uninstall — a 200 is not proof anything was removed", () => {
      * whichever path noticed it, or the agent gets two stories about one fact.
      */
     it("says the same thing as the pre-condition for the same device state", async () => {
-      installed([{ name: "memo", origin: "builtin" }]);
+      installed([{ id: "memo", name: "memo", origin: "builtin" }]);
       const viaPrecondition = await skills().call("skill_uninstall", { name: "memo" });
 
       apiGet.mockReset();

@@ -483,6 +483,7 @@ export const sv: Record<string, string> = {
   "skills.builtinSkill": "”{name}” fanns redan på den här enheten och kan inte tas bort.",
   "skills.notInstalled": "Ingen butiksskill med namnet ”{name}” är installerad på den här enheten.",
   "skills.uninstallRefused": "Enheten vägrade ta bort den skillen.",
+  "skills.ambiguousName": "Fler än en installerad skill svarar på ”{name}”. Ta bort den med dess eget namn: {names}.",
 
   "skills.browseTimeout": "Det tog för lång tid att läsa in skillkatalogen. Försök igen om en stund.",
   "skills.browseUnavailable": "Hermes är inte installerat på den här enheten, så skillkatalogen kan inte läsas in.",

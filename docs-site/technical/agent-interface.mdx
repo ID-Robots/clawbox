@@ -64,8 +64,20 @@ startup — if the device cannot support one, it is simply not offered.
 ### Hermes skills — **Hermes edition only**
 `skill_search` · `skill_info` · `skill_install` · `skill_list` · `skill_uninstall`
 
-Installing takes the full registry identifier; uninstalling takes the short
-name. `skill_install` returns the name so the agent never has to guess it. See
+Installing takes the full registry identifier (`official/pdf`); uninstalling
+takes the short **lock id** — the first word of a `skill_list` line, which is
+not always the name the skill's own SKILL.md gives it (a ClawHub
+`martin-weather` shows as `weather`). `skill_install` returns the lock id so the
+agent never has to guess it, and `skill_list` prints it first, noting the
+display name when the two differ.
+
+A display name works too, and so does the store identifier the skill came from,
+as long as it is itself a valid skill name: 1–128 characters, starting with a
+letter or a digit, and made only of letters, digits, `.`, `_` and `-`. That rules
+out a card name with a space in it, such as the ClawHub shape `QR Code Decode` —
+pass the first word of its `skill_list` line instead. When two installed skills
+answer to one string, the device refuses and names both lock ids rather than
+removing either. See
 [Hermes Skills](/editions/hermes-skills).
 
 ### AI configuration — **Hermes edition only**

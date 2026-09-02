@@ -82,8 +82,36 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 `skill_search` · `skill_info` · `skill_install` · `skill_list` · `skill_uninstall`
 
 The **id vs name** split is the trap: `skill_install` takes the full store id
-(`official/pdf`), `skill_uninstall` takes the short lock name (`pdf`).
-`skill_install` returns the lock name so the model never has to guess it.
+(`official/pdf`), `skill_uninstall` takes the short lock id (`pdf`) — the first
+word of a `skill_list` line, which is NOT always the name the skill's own
+SKILL.md gives it (a ClawHub `martin-weather` shows as `weather`).
+`skill_install` returns the lock id so the model never has to guess it, and
+`skill_list` prints it first and notes the display name when that differs.
+
+A display name works too, and so does the store identifier the skill was
+installed from — as long as it is a valid skill name (no slash, no space, which
+rules out the documented ClawHub shape `QR Code Decode`).
+
+The **rule** for "which skill does this string name?" is one exported function,
+`matchRemovableSkill` (`src/lib/hermes-skills.ts`): the lock id first, then the
+identifier and the display name searched together. It is applied twice — by the
+**/uninstall route** over the hub lock and the disk walk (`resolveUninstallKey`,
+which is what actually decides), and by `skill_uninstall` over the `/installed`
+rows it has just read, so it can say *why* a skill cannot be removed and can
+send the lock id the route would land on anyway. Two rules for that one question
+is what let the tool refuse a `weather` the route resolved; one function is what
+stops it.
+
+An exact lock id settles the question — it is a lock-file key, unique by
+construction — and the success message says when another card shows that name
+too. Anything else is a tie the moment two rows answer to it, *including across
+the two keys* (one skill's identifier being another's card name), and a tie is
+refused: both lock ids are named and the user is asked which they meant. This
+tool deletes things, and picking one is not the tool's decision to make.
+
+When `/installed` cannot be read the tool sends the raw argument and the route
+resolves it; the 200 comes back carrying the lock key it acted on and the string
+it was asked for, and every message the tool prints is about **that** skill.
 
 The second trap is **which** installed skills can be removed. A device has three
 origins — `builtin` (shipped with it), `hub` (installed from the store) and

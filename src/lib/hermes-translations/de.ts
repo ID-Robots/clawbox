@@ -486,6 +486,7 @@ export const de: Record<string, string> = {
   "skills.builtinSkill": "„{name}“ ist auf diesem Gerät mitgeliefert und kann nicht entfernt werden.",
   "skills.notInstalled": "Auf diesem Gerät ist kein Store-Skill namens „{name}“ installiert.",
   "skills.uninstallRefused": "Das Gerät hat sich geweigert, diesen Skill zu entfernen.",
+  "skills.ambiguousName": "Mehr als ein installierter Skill hört auf „{name}“. Entfernen Sie ihn über seinen eigenen Namen: {names}.",
 
   "skills.browseTimeout": "Das Laden des Skill-Katalogs hat zu lange gedauert. Versuchen Sie es gleich noch einmal.",
   "skills.browseUnavailable": "Hermes ist auf diesem Gerät nicht installiert, daher kann der Skill-Katalog nicht geladen werden.",
