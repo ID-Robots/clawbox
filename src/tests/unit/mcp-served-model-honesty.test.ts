@@ -47,9 +47,9 @@ import { captureRegistrar } from "../helpers/mcp-registrar";
 import { registerAiTools } from "../../../mcp/tools/ai";
 import { registerOrientationTools } from "../../../mcp/tools/orientation";
 
-const ctx = (edition: "openclaw" | "hermes"): McpContext => ({
+const ctx = (edition: "openclaw" | "hermes", install: McpContext["install"] = edition): McpContext => ({
   edition,
-  install: edition,
+  install,
   profile: "full",
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
   providers: ["clawai", "openai"],
@@ -74,9 +74,9 @@ function ai() {
   return h;
 }
 
-function status(edition: "openclaw" | "hermes") {
+function status(edition: "openclaw" | "hermes", install: McpContext["install"] = edition) {
   const h = captureRegistrar(edition);
-  registerOrientationTools(h.reg, ctx(edition));
+  registerOrientationTools(h.reg, ctx(edition, install));
   return h;
 }
 
@@ -210,6 +210,29 @@ describe("device_status — the same honesty on the orientation tool", () => {
     const openclaw = status("openclaw").get("device_status").description;
     expect(openclaw).toMatch(/default/);
     expect(openclaw).not.toMatch(/not necessarily/);
+  });
+
+  it("does not claim the default is this chat's model on a DUAL box, where the edition may be a fallback", async () => {
+    // `resolveEdition` asks /setup-api/harness/active with a 3 s timeout and
+    // answers "openclaw" on any failure — and this server starts with the
+    // harness, exactly when the web app may not be up. On a locked SKU that
+    // cannot be wrong; on dual it can, and the affirmative note would tell a
+    // HERMES chat to answer "which model are you" from the device default,
+    // which is the whole defect TASK-648 opened for.
+    routes({ "/setup-api/chat/model": { selected: { provider: "anthropic", model: "claude-fable-5" }, current: "" } });
+    const { ai: report } = (await parsed(status("openclaw", "dual"), "device_status")) as {
+      ai: Record<string, unknown>;
+    };
+
+    expect(report.device_default).toMatchObject({ provider: "anthropic", model: "claude-fable-5" });
+    expect(String(report.current_chat)).not.toMatch(/so it is what this chat runs/);
+    expect(String(report.current_chat)).toMatch(/could not confirm which is active/);
+  });
+
+  it("hedges the dual box's description too, rather than promising the chat runs the default", () => {
+    const dual = status("openclaw", "dual").get("device_status").description;
+    expect(dual).not.toMatch(/which is also what the chat runs/);
+    expect(dual).toMatch(/not necessarily the one answering this chat/);
   });
 });
 

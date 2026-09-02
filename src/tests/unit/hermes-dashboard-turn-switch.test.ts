@@ -473,7 +473,11 @@ describe("putting the reasoning level back after a switch takes it away", () => 
  */
 describe("the provider a turn reports as having served it", () => {
   it("is the requested slug on a resumed turn the session was already on, never the dashboard's kind", async () => {
-    const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5" });
+    // The flag is what BUYS this: the dashboard reports the kind `custom`, and
+    // only the catalogue's `is_user_defined: true` says that kind can stand for
+    // the requested slug. Without it the honest answer is none — see the two
+    // absent-flag cases above.
+    const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5", providerIsUserDefined: true });
     expect(socket.method("slash.exec")).toBeUndefined();
     expect(turn?.model).toBe("deepseek-v4-flash");
     expect(turn?.provider).toBe("clawai");
@@ -504,6 +508,34 @@ describe("the provider a turn reports as having served it", () => {
     );
     expect(socket.method("slash.exec")).toBeUndefined();
     expect(turn?.provider ?? "").toBe("");
+  });
+
+  it("answers nothing when NO flag came with the request — absent is not a licence", async () => {
+    // The shape the route produces most often: it sends the flag only off a
+    // live `dashboard` catalogue, and a stale `catalog-file` payload (up to 6 h
+    // after one /api/model/options failure, or a cold boot) carries none while
+    // the dashboard socket this transport uses is healthy. Read as the benefit
+    // of the doubt, that made the contradiction rule above inert — a canonical
+    // request against a `custom` session recorded the canonical slug, with no
+    // `/model` ever issued, in the customer's durable transcript.
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "deepseek-v4-flash", provider: "anthropic" },
+      { model: "deepseek-v4-flash", provider: "custom" },
+    );
+    expect(socket.method("slash.exec")).toBeUndefined();
+    expect(turn?.provider ?? "").toBe("");
+  });
+
+  it("does not let a completion frame resolve the kind on an absent flag either", async () => {
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "deepseek-v4-flash", provider: "anthropic" },
+      { model: "deepseek-v4-flash", provider: "custom" },
+    );
+    const running = turn!.run(() => {});
+    await Promise.resolve();
+    socket.event("message.complete", { text: "one", status: "complete", provider: "custom" });
+    const final = await running;
+    expect(final.provider ?? "").toBe("");
   });
 
   it("resolves the kind to a user-defined slug the allowlist has never heard of", async () => {
@@ -570,7 +602,7 @@ describe("the provider a turn reports as having served it", () => {
     // The settled provider belongs to the settled MODEL. A frame that changes
     // the model without naming a provider describes a pairing this turn never
     // established, and carrying the old slug onto it invents one.
-    const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5" });
+    const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5", providerIsUserDefined: true });
     expect(turn?.provider).toBe("clawai");
     const running = turn!.run(() => {});
     await Promise.resolve();
@@ -616,7 +648,7 @@ describe("the provider a turn reports as having served it", () => {
   });
 
   it("does not let a completion's own kind overwrite the resolved slug", async () => {
-    const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5" });
+    const { turn, socket } = await connect({ sessionId: "20260823_185842_1eabd5", providerIsUserDefined: true });
     const running = turn!.run(() => {});
     await Promise.resolve();
     socket.event("message.complete", { text: "one", status: "complete", provider: "custom" });

@@ -21,6 +21,18 @@ const FIELD_GUIDE_PATH = join(DEFAULT_CWD, "Clawbox.md");
 const OPENCLAW_CURRENT_CHAT_NOTE =
   "the device default above: on this edition the chat header writes it to the box and repoints every session, so it is what this chat runs.";
 
+// …but only where the edition is CERTAIN. `resolveEdition` asks
+// /setup-api/harness/active with a 3 s timeout and answers "openclaw" on any
+// failure, and this server is spawned at harness start — exactly when the web
+// app may not be up yet. On a locked SKU that fallback cannot be wrong; on
+// DUAL it can, and an affirmative "the default is what this chat runs" handed
+// to a Hermes chat reinstates the whole defect this note exists to remove
+// (the agent answers "which model are you" from the device default). A shrug
+// is safe on both editions; the claim is not. `ctx.install` is the raw value,
+// so "dual" is the one case that has to hedge.
+const UNCONFIRMED_EDITION_CHAT_NOTE =
+  "not established here: this device can run either harness and the tool server could not confirm which is active, so the device default above may not be what this chat runs. Where the ClawBox chat knows the model that served a reply, it prints it under that reply.";
+
 /**
  * How the description qualifies the default, per edition — the Hermes chat can
  * override it per session; the OpenClaw chat cannot.
@@ -162,7 +174,7 @@ function rootDisk(stats: StatsPayload | null) {
 export function registerOrientationTools(reg: Registrar, ctx: McpContext): void {
   reg.tool(
     "device_status",
-    `Report what this ClawBox is: edition, active agent, the device's default AI provider and model (${DEFAULT_QUALIFIER[ctx.edition]}), the default model's configured context/output limits, thinking level, free disk space, and whether a software update is waiting. Call this before answering any question about the device itself or its model limits. Any part that cannot be read reports "unknown" instead of failing the whole call.`,
+    `Report what this ClawBox is: edition, active agent, the device's default AI provider and model (${ctx.install === "dual" ? DEFAULT_QUALIFIER.hermes : DEFAULT_QUALIFIER[ctx.edition]}), the default model's configured context/output limits, thinking level, free disk space, and whether a software update is waiting. Call this before answering any question about the device itself or its model limits. Any part that cannot be read reports "unknown" instead of failing the whole call.`,
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core" },
     async () => {
@@ -217,7 +229,7 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
                 model: reported(chatModel?.selected?.model ?? chatModel?.current),
                 thinking: "unknown",
               },
-              current_chat: OPENCLAW_CURRENT_CHAT_NOTE,
+              current_chat: ctx.install === "dual" ? UNCONFIRMED_EDITION_CHAT_NOTE : OPENCLAW_CURRENT_CHAT_NOTE,
               limits: readConfiguredModelLimits(),
             };
 

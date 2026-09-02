@@ -405,11 +405,21 @@ async function settleTurn(
     // collapse the monologue the same way the live turn did.
     ...(settledReasoning ? { reasoning: settledReasoning } : {}),
     ...(toolCalls?.length ? { toolCalls } : {}),
-    // Which model actually answered. `state.db`'s `messages` table has no model
-    // column, so the agent's turn record cannot supply this; the dashboard's
-    // own `info` for the session — read at the moment the turn was submitted,
-    // after any switch had been applied and acknowledged — is the authoritative
-    // answer available, and it is the one the transport hands back.
+    // Which model actually answered, from the transport rather than from the
+    // agent's own record — the dashboard's `info` for the session, read at the
+    // moment the turn was submitted, after any switch had been applied and
+    // acknowledged.
+    //
+    // UNVERIFIED, and worth stating as such: this rests on `state.db`'s
+    // `messages` table having no model column, which nothing here has ever
+    // asked. `readHermesTurn` selects an explicit column list
+    // (`hermes-turn-record.ts`), so the code neither proves nor disproves it.
+    // If that table — or `sessions` — does carry the model, the harness knows
+    // the answer natively and this reconstruction should be replaced by reading
+    // the row `readHermesTurn` already opens for reasoning and tool calls,
+    // which would be strictly more accurate and would retire `cliServedPair`
+    // with it. One read-only command settles it:
+    // `sqlite3 ~/.hermes/state.db 'PRAGMA table_info(messages)'`.
     ...(served.model ? { model: served.model } : {}),
     ...(served.provider ? { provider: served.provider } : {}),
   }, sessionKey);
@@ -678,9 +688,19 @@ function isAbort(err: unknown): boolean {
  * to take: a `--resume`d session can be carrying a per-session override, which
  * is exactly what the dashboard transport writes with `/model … --session`, and
  * one conversation moves between the two transports routinely (every turn with
- * an attachment is forced onto this one). Whether `-m` even beats such an
- * override is unverified on a box. So a resumed run records what argv named and
- * nothing else: unknown beats wrong, the same rule the dashboard half follows.
+ * an attachment is forced onto this one). So a resumed run records what argv
+ * named and nothing else: unknown beats wrong, the same rule the dashboard half
+ * follows.
+ *
+ * What argv named IS recorded there, and that is not the same guess. This
+ * fallback exists because the customer picked a model the dashboard would not
+ * switch to (see hermes-dashboard-turn.ts, the `slash.exec` refusal), and its
+ * whole justification is that the spawned run answers on the picked pair. If
+ * `-m` lost to a session override the ROUTING would be wrong, not just the
+ * label — a much larger defect than this function. So the record follows the
+ * assumption the fallback already rests on, rather than inventing a second one.
+ * Unverified on a box all the same, and it is one read: `hermes chat --help`
+ * plus one resumed turn with `-m`.
  */
 async function cliServedPair(
   model: string,

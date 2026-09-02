@@ -53,7 +53,7 @@ interface ModelsBody extends HermesDefaultSource {
  * The device default as a SCOPED reply tells it. The route reuses `provider`
  * for the filter it was given and `current` for the saved model IFF it belongs
  * to that provider AND is in its list — so the pairing travels separately as
- * `saved`. Read that way, a filtered call reports the same object an
+ * `savedPair`. Read that way, a filtered call reports the same object an
  * unfiltered one does — never the asked-about provider as the default, and
  * never a prose string in a field that is an object everywhere else.
  */
