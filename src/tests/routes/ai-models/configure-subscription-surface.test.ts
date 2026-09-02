@@ -402,10 +402,11 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
   });
 
   it("refuses a typed id an EMPTY cached surface plus the curated catalogue lacks", async () => {
-    // A file holding `models: []` leaves the picker on the curated list, so
-    // the customer was shown the curated rows —
-    // the guard judges by the same list rather than answering UNKNOWN. Only a
-    // MISSING cache (the test above) is unknown.
+    // A file holding `models: []` is served as an empty payload, and
+    // `fetchProviderCatalog` renders the curated catalogue for an empty one, so
+    // the customer was shown the curated rows — the guard judges by the same
+    // list rather than answering UNKNOWN. Only a MISSING cache (the test above)
+    // is unknown.
     mockSurfaceRead.mockResolvedValue(surfaceCache([]) as never);
 
     const res = await configurePost(subscribe({ model: OFF_CATALOGUE_ID }));

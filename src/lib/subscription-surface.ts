@@ -100,9 +100,10 @@ export async function readSubscriptionSurfaceIds(
     // is the one place the two lists still meet, and it meets them by allowing
     // a curated id rather than refusing a live one.
     //
-    // The curated ids count BEFORE the empty check for the same reason: a file
-    // holding `models: []` leaves the picker on the curated list, so the
-    // customer was shown that list, not nothing.
+    // The curated ids count BEFORE the empty check for the same reason: the
+    // route serves a file holding `models: []` as an empty payload, and
+    // `fetchProviderCatalog` renders the curated catalogue for an empty one, so
+    // the customer was shown that list, not nothing.
     const curated = getProviderCatalog(surfaceProvider)?.models ?? [];
     if (ids.length === 0 && curated.length === 0) return null;
     for (const model of curated) {
