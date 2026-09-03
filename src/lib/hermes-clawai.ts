@@ -1,7 +1,7 @@
 import { setMany } from "@/lib/config-store";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
-import { runHermesCli } from "@/lib/hermes-cli";
+import { runHermesCli, type HermesCliResult } from "@/lib/hermes-cli";
 import { hermesCliAnswered } from "@/lib/hermes-cli-answered";
 import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { refreshHermesImageTools } from "@/lib/hermes-image-refresh";
@@ -381,6 +381,7 @@ export async function applyClawaiToHermes(
 
 let clawaiModelsReconciled = false;
 let clawaiRetryAfter = 0;
+let clawaiUnverifiedWrites = 0;
 
 /**
  * How long a repair whose QUESTION failed waits before another request retries.
@@ -395,8 +396,41 @@ let clawaiRetryAfter = 0;
  * instead of once per process. Same number and the same reasoning as
  * `FAILED_READ_TTL_MS` in hermes-config-cache.ts, which exists so that a
  * hanging `hermes` cannot become one Python start per request.
+ *
+ * IT BOUNDS THE RATE, NOT THE TOTAL — see `REPAIR_MAX_UNVERIFIED_WRITES`.
  */
 const REPAIR_RETRY_MS = 60_000;
+
+/**
+ * How many writes this process may issue that it cannot read back.
+ *
+ * A RATE IS NOT A BOUND WHEN THE FAULT IS PERMANENT. `hermes config set` exits
+ * 0 for reasons that have nothing to do with the key landing — a config.yaml
+ * the web-server user cannot write, a full partition, a `save_config` that
+ * loses a filelock race, a refusal that still exits 0 — and a key that never
+ * landed reads back exactly like one that was never written: measured on the
+ * box, `hermes config get providers.clawai.models --json` exits 1 with
+ * `Config key not set: providers.clawai.models`. So the deciding read answers
+ * "write" again, and with only `REPAIR_RETRY_MS` in the way that is one
+ * customer config.yaml rewrite plus three Python starts every 60 s for the life
+ * of the web server — on `GET /setup-api/hermes/models`, which AWAITS this
+ * repair before it serves the chat header, the Settings panel or the agent's
+ * own `ai_list_models`.
+ *
+ * Three, because a repair that has issued three writes nobody could read back
+ * has proved as much as one whose literal came back as text.
+ *
+ * IT COUNTS WRITES, NOT FAILED QUESTIONS, which is what keeps it away from the
+ * case the unlatch exists for: a `step_hermes_install` rebuild exits 127 before
+ * reaching argparse, the deciding read answers "retry", NO write is issued and
+ * no attempt is spent — so a 90 s rebuild still costs nothing but the rate
+ * bound, however many requests arrive during it.
+ *
+ * The counter clears on a write that LANDS, and otherwise only on a restart:
+ * the journal says once that this box stopped trying, and the next process
+ * start tries again because the deciding read still finds the key missing.
+ */
+const REPAIR_MAX_UNVERIFIED_WRITES = 3;
 
 /**
  * Declare the ClawBox AI catalogue on a box that was linked before this code
@@ -416,11 +450,23 @@ const REPAIR_RETRY_MS = 60_000;
  * update that ships this fix the shim runs and exits 127 without reaching
  * argparse. Latching on that would mean the box never declares its catalogue
  * for the life of the process and the owner's `/model` keeps saying
- * "clawai (0)" on the release that was meant to fix it. Every exit that is a
- * failed QUESTION or a failed WRITE unlatches, so the next request retries;
- * only the real answers ("nothing to do", "written") stay latched — and a
- * retry is bounded by `REPAIR_RETRY_MS`, because a repair that keeps failing
- * must not become a Python start per request on the busiest route we serve.
+ * "clawai (0)" on the release that was meant to fix it.
+ *
+ * So a failed QUESTION unlatches and is asked again on a later request, no
+ * sooner than `REPAIR_RETRY_MS`: no write was issued, and a rebuild that exits
+ * 127 costs one Python start a minute until it finishes.
+ *
+ * A WRITE THIS PROCESS COULD NOT READ BACK unlatches too — and carries a SECOND
+ * bound, because a rate alone bounds nothing that is permanent. `config set`
+ * exits 0 for reasons that have nothing to do with the key landing, and a key
+ * that never landed reads back exactly like an absent one, so the deciding read
+ * answers "write" again on every pass. `REPAIR_MAX_UNVERIFIED_WRITES` is what
+ * makes that end: three writes nobody could read back, and then this process
+ * stops rewriting the customer's config.yaml and says so once.
+ *
+ * The two real answers ("nothing to do", "written") stay latched, and so does
+ * the one failed write this module can PROVE is final: a literal handed back as
+ * text will be handed back as text every 60 s for the life of the process.
  *
  * EVERY EXIT SAYS SOMETHING. A silent `return` on the one path the field will
  * actually reach is how a box ends up wrong with nothing in its journal, so
@@ -473,23 +519,21 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
     // for a wider reason than that band, though: an exit code is not an outcome
     // for ANY reason a write may fail to land, and this repair runs unattended
     // on every field box.
-    const outcome = written.code !== 0
-      ? "unverified"
+    const outcome: ClawaiWriteOutcome = written.code !== 0
+      ? { kind: "unverified", why: `the write exited ${written.code}` }
       : storedAsText
-        ? "stored-as-text"
+        ? { kind: "stored-as-text" }
         : await verifyClawaiCatalogue();
-    if (outcome !== "landed") {
+    if (outcome.kind !== "landed") {
       // A repair that could not be made is reported, never claimed: the picker
       // keeps showing what the box actually has. No credential is in this argv
       // — the value is a constant model list — so the stream can be logged
       // whole.
       console.warn(
         "[hermes/clawai] could not declare the ClawBox AI catalogue",
-        written.code !== 0
-          ? `exit ${written.code}`
-          : outcome === "stored-as-text"
-            ? "(this hermes stores a list as text — the same write cannot land, so it is not retried before the next restart)"
-            : "(it did not read back as the list we wrote)",
+        outcome.kind === "stored-as-text"
+          ? "(this hermes stores a list as text — the same write cannot land, so it is not retried before the next restart)"
+          : `(${outcome.why})`,
         written.stderr?.trim() || written.stdout?.trim() || "",
       );
       // A FAILURE WE HAVE PROVED IS FINAL DOES NOT GET A RETRY. `unlatch()` is
@@ -502,9 +546,33 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
       // residue is still in the file, and the verdict read finds it), and a
       // hand-run `hermes update` to a CLI that can store a list is picked up on
       // the restart that follows it.
-      if (outcome === "unverified") unlatch();
+      if (outcome.kind !== "unverified") return;
+      // A WRITE THAT NEVER REACHED ARGPARSE IS NOT AN ATTEMPT. 126 and 127 are
+      // the SHELL's codes (see `hermesCliAnswered`): the `hermes` shim ran
+      // while `step_hermes_install` was rebuilding the venv under it, so
+      // nothing was parsed, nothing was written and no config.yaml was
+      // re-serialised. That is a failed QUESTION wearing a write's clothes, and
+      // spending one of three attempts on it would burn the budget on exactly
+      // the transient the unlatch exists for.
+      if (!hermesCliAnswered(written)) return unlatch();
+      // AND A FAILURE WE CANNOT PROVE EITHER WAY GETS A FEW, NOT AN ENDLESS
+      // SUPPLY. `unverified` is the honest verdict for a question that did not
+      // answer — but it is also what a `config set` that exits 0 without
+      // landing produces on EVERY pass, and that fault is a property of the
+      // box, not a moment. Counting those writes is what turns "retry, rate
+      // limited" into a repair that ends: three attempts, then this process
+      // stops rewriting config.yaml and says so once.
+      clawaiUnverifiedWrites += 1;
+      if (clawaiUnverifiedWrites < REPAIR_MAX_UNVERIFIED_WRITES) return unlatch();
+      console.warn(
+        `[hermes/clawai] giving up on the ClawBox AI catalogue after ${clawaiUnverifiedWrites}`
+        + " writes that could not be read back — not retried before the next restart",
+      );
       return;
     }
+    // The write landed, so nothing is owed to the bound above any more: a later
+    // hand-back (a re-link) starts from a clean count.
+    clawaiUnverifiedWrites = 0;
     // The catalogue this device serves just changed — don't serve the old one.
     //
     // NO MCP RELOAD HERE, deliberately, and the same reason `reconcileLocalAiWithHermes`
@@ -522,15 +590,30 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
 }
 
 /**
- * Did the catalogue we just wrote actually land as a LIST?
+ * What a write to `providers.clawai.models` turned out to be.
  *
- *   "landed"         — the key reads back as exactly the ids we sent.
- *   "stored-as-text" — the CLI handed our own literal back as a STRING. Proof
- *                      that this build cannot store a list, and therefore that
- *                      re-issuing the identical write is futile.
- *   "unverified"     — the question failed, or answered something else. Says
- *                      nothing about the write either way, so the caller
- *                      retries on the ordinary cadence.
+ *   landed         — the key reads back as exactly the ids we sent.
+ *   stored-as-text — the CLI handed our own literal back as a STRING. Proof
+ *                    that this build cannot store a list, and therefore that
+ *                    re-issuing the identical write is futile.
+ *   unverified     — the question failed, or answered something else. Says
+ *                    nothing about the write either way, so the caller retries
+ *                    — on the ordinary cadence, and only until
+ *                    `REPAIR_MAX_UNVERIFIED_WRITES` of them have gone by.
+ *
+ * `why` IS THE HALF THE JOURNAL USED TO LOSE. "It did not read back as the list
+ * we wrote" is a DEFINITE claim, and this outcome is the one that knows least:
+ * a 15 s timeout, a SIGKILL, a decorated stdout and a genuine "key absent" all
+ * arrive here. So each carries the read's own exit code and first stderr line —
+ * and NEVER the value, which is why the leaf is read rather than the block.
+ */
+type ClawaiWriteOutcome =
+  | { kind: "landed" }
+  | { kind: "stored-as-text" }
+  | { kind: "unverified"; why: string };
+
+/**
+ * Did the catalogue we just wrote actually land as a LIST?
  *
  * `hermes config set` has no typed mode — `set_config_value(key, value: str,
  * force=False)` (hermes_cli/config.py:5383) is the only entry point, and a JSON
@@ -542,41 +625,74 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
  * `config set … --json` instead — see the PR body; the asymmetry is Hermes',
  * not ours.)
  *
+ * `force` IS NOT PASSED, DELIBERATELY. What that parameter gates has not been
+ * read on the build `HERMES_PIN_COMMIT` installs, and nothing here depends on
+ * knowing: if it does gate replacing an existing node, a refusal that still
+ * exits 0 is precisely the false success this read-back catches — reported with
+ * its cause and bounded by `REPAIR_MAX_UNVERIFIED_WRITES` rather than retried
+ * forever. Sending a flag whose effect we have not read on the build we ship
+ * would be the guess this function exists to remove.
+ *
  * THE LEAF, NOT THE BLOCK, and not only for the smaller parse: the entry this
  * repair read to decide carries `api_key`, and this key cannot. A verification
- * that need never hold a credential should not be given one.
+ * that need never hold a credential should not be given one — which is also
+ * what makes the read's stderr safe to put in the journal.
  *
  * IT NEVER THROWS. `runHermesCli` rejects on a spawn failure or a timeout, and
  * an unanswerable verification is not the repair failing — letting it reach the
  * caller's `catch` would log "catalogue reconcile failed" over a write that
  * landed.
  */
-type ClawaiWriteOutcome = "landed" | "stored-as-text" | "unverified";
-
 async function verifyClawaiCatalogue(): Promise<ClawaiWriteOutcome> {
   const declared = JSON.stringify(CLAWBOX_AI_CHAT_MODEL_IDS);
-  let value: unknown;
+  let read: HermesCliResult;
   try {
-    const read = await runHermesCli(
+    read = await runHermesCli(
       ["config", "get", `providers.${CLAWAI_PROVIDER}.models`, "--json"],
       { timeoutMs: 15_000 },
     );
-    if (!hermesCliAnswered(read) || read.code !== 0) return "unverified";
+  } catch (err) {
+    // Every rejection `runHermesCli` produces is one of its own fixed sentences
+    // — "hermes timed out", a `spawnFailureMessage` — so none of them can carry
+    // a value out of the store.
+    return unverified(err instanceof Error ? err.message : "the read-back could not be run");
+  }
+  // 126, 127 and a signal's `null` are all covered by this one test, so
+  // `hermesCliAnswered` would add nothing here: what separates them is the
+  // number in the journal line, not a second branch.
+  if (read.code !== 0) return unverified(`read exit ${read.code}${stderrCause(read.stderr)}`);
+  let value: unknown;
+  try {
     value = JSON.parse(read.stdout);
   } catch {
-    return "unverified";
+    // Our own words, never the `SyntaxError` — it quotes a prefix of its input.
+    return unverified("the read-back was not JSON");
   }
   if (
     Array.isArray(value)
     && value.length === CLAWBOX_AI_CHAT_MODEL_IDS.length
     && value.every((id, i) => id === CLAWBOX_AI_CHAT_MODEL_IDS[i])
   ) {
-    return "landed";
+    return { kind: "landed" };
   }
-  return value === declared ? "stored-as-text" : "unverified";
+  return value === declared ? { kind: "stored-as-text" } : unverified("the key holds something else");
 }
 
-/** Let a later request try the repair again, no sooner than `REPAIR_RETRY_MS`.
+/** An outcome that says nothing about the write, and why it could not say more. */
+function unverified(why: string): ClawaiWriteOutcome {
+  return { kind: "unverified", why: `could not be verified — ${why}` };
+}
+
+/** The CLI's first stderr line, for the journal: capped, and never a value —
+ *  the key this read names holds model ids, and the block that holds `api_key`
+ *  is deliberately not the one read here. */
+function stderrCause(stderr: string): string {
+  const line = stderr.trim().split(/\r?\n/, 1)[0]?.slice(0, 200);
+  return line ? `: ${line}` : "";
+}
+
+/** Let a later request try the repair again, no sooner than `REPAIR_RETRY_MS`
+ *  and no more often in total than `REPAIR_MAX_UNVERIFIED_WRITES`.
  *  @see reconcileClawaiModelsWithHermes */
 function unlatch(): void {
   clawaiModelsReconciled = false;
@@ -669,6 +785,12 @@ async function clawaiCatalogueVerdict(): Promise<ClawaiVerdict> {
 
   let entry: unknown;
   try {
+    // THIS CATCH IS LOAD-BEARING FOR A SECOND REASON. `JSON.parse` throws a
+    // `SyntaxError` whose message QUOTES A PREFIX OF ITS INPUT, and this input
+    // is the whole `providers.clawai` block — `api_key` and all. Letting it
+    // reach the caller's `catch (err)` would print that prefix through
+    // `console.error("[hermes/clawai] catalogue reconcile failed:", err)`. The
+    // reason below is our own words; nothing derived from the error is logged.
     entry = JSON.parse(read.stdout);
   } catch {
     return { action: "retry", reason: "the CLI printed a value this build could not parse" };
@@ -837,8 +959,10 @@ function isHermesAllowlist(value: unknown): boolean {
   });
 }
 
-/** Test seam. */
+/** Test seam. The counter is NOT part of the hand-back — a re-link is worth one
+ *  more attempt, not a fresh three — so it is cleared here explicitly. */
 export function _resetClawaiModelsReconcileForTests(): void {
+  clawaiUnverifiedWrites = 0;
   handClawaiRepairBack();
 }
 

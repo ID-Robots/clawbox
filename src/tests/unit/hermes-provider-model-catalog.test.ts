@@ -485,29 +485,153 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     }
   });
 
-  it("tries again when the write could not be VERIFIED rather than proved wrong", async () => {
-    // The other half of the same guard. A verification that did not answer —
-    // a wedged `hermes`, a `--json` this build rejects, a decorated stdout —
-    // says nothing about the write, so it is not proof of anything and the
-    // ordinary 60 s cadence applies. Only a value handed back as our own
-    // literal is final.
+  it("stops re-declaring after a bounded number of writes it cannot read back", async () => {
+    // THE RATE BOUND IS NOT A BOUND. `REPAIR_RETRY_MS` says how OFTEN a failed
+    // repair may run again; nothing said how MANY times. A `hermes config set`
+    // that exits 0 without the key landing — a config.yaml the web-server user
+    // cannot write, a full partition, a `save_config` that loses a filelock
+    // race, a refusal that still exits 0 — is a permanent property of that box,
+    // and it reads back exactly like an absent key.
+    //
+    // MEASURED ON THE BOX: `hermes config get providers.clawai.models --json`
+    // exits 1 with `Config key not set: providers.clawai.models` when the key
+    // is not there. So this fixture is the field shape, not an invention: the
+    // deciding read keeps answering "write", the verifying read keeps answering
+    // "not set", and without a TOTAL bound that is one customer config.yaml
+    // rewrite plus three Python starts every 60 s for the life of the web
+    // server — on `GET /setup-api/hermes/models`, which AWAITS this repair
+    // before it serves the chat header, the Settings panel or the agent's own
+    // `ai_list_models`.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const setCount = () => cliMock.mock.calls.filter((c) => (c[0] as string[])[1] === "set").length;
     try {
+      // A CLI that takes the write, exits 0, and persists nothing.
       cliMock.mockImplementation(async (args: string[]) => {
-        if (args[2] === `providers.${CLAWAI_PROVIDER}.models` && args[1] === "get") {
-          return { code: 2, stdout: "", stderr: "unrecognized arguments: --json" };
+        const [, verb, key] = args;
+        if (verb === "set") return { code: 0, stdout: "", stderr: "" };
+        if (verb === "get" && key === `providers.${CLAWAI_PROVIDER}`) {
+          return { code: 0, stdout: `${JSON.stringify(LINKED)}\n`, stderr: "" };
         }
-        if (args[1] === "set") return { code: 0, stdout: "", stderr: "" };
-        return { code: 0, stdout: `${JSON.stringify(LINKED)}\n`, stderr: "" };
+        return { code: 1, stdout: "", stderr: `Config key not set: ${key}` };
       });
-      await reconcileClawaiModelsWithHermes();
+      for (let minute = 0; minute < 10; minute += 1) {
+        await reconcileClawaiModelsWithHermes();
+        vi.advanceTimersByTime(60_001);
+      }
+      // Never claimed, in any of them.
       expect(invalidateMock).not.toHaveBeenCalled();
+      // And the tenth minute costs nothing: three writes nobody could read back
+      // have proved as much as one whose literal came back as text.
+      expect(setCount()).toBeLessThanOrEqual(3);
+      const journal = warn.mock.calls.flat().map(String).join(" ");
+      // Said ONCE, and distinctly — a box that has stopped trying must not look
+      // like one that is still trying.
+      expect(journal).toContain("giving up");
+      // With the cause of the LAST read, not a bare assertion that it did not
+      // read back: the exit code and the CLI's own first line.
+      expect(journal).toContain("exit 1");
+      expect(journal).toContain("Config key not set");
+    } finally {
+      warn.mockRestore();
+    }
+  });
 
-      const firstAttempt = setCount();
+  it("does not spend an attempt on a write that never reached argparse", async () => {
+    // 126 and 127 are the SHELL's codes, not the CLI's. `hermes` is a shim over
+    // a venv Python and `step_hermes_install` rebuilds it for about 90 s with
+    // NO web-server restart, so the shim runs and exits 127 without argparse
+    // ever seeing the key: nothing was parsed, nothing was written and no
+    // config.yaml was re-serialised. Counting that against the three attempts
+    // would spend the whole budget on the very transient the unlatch exists
+    // for — and the box would come out of its own update still saying
+    // "clawai (0)".
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      let rebuilding = true;
+      providerBlock(LINKED);
+      const cli = cliMock.getMockImplementation()!;
+      cliMock.mockImplementation(async (args: string[]) => {
+        // The deciding read still answers — the shim is only unlucky on the
+        // write. A CLI that is wedged for BOTH answers "retry" and issues no
+        // write at all.
+        if (rebuilding && args[1] === "set") return { code: 127, stdout: "", stderr: "" };
+        return cli(args);
+      });
+      for (let minute = 0; minute < 5; minute += 1) {
+        await reconcileClawaiModelsWithHermes();
+        vi.advanceTimersByTime(60_001);
+      }
+      expect(warn.mock.calls.flat().map(String).join(" ")).not.toContain("giving up");
+
+      // The rebuild finished. The box still gets its catalogue, which is the
+      // whole reason a failed question unlatches.
+      rebuilding = false;
+      await reconcileClawaiModelsWithHermes();
+      expect(invalidateMock).toHaveBeenCalled();
+      expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
+        CLAWBOX_AI_FLASH_MODEL_ID,
+        CLAWBOX_AI_PRO_MODEL_ID,
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("tries again when the write could not be VERIFIED rather than proved wrong", async () => {
+    // The other half of the same guard. A verification that did not ANSWER says
+    // nothing about the write, so it is not proof of anything: the repair stays
+    // unlatched and the next request looks again.
+    //
+    // LEAF-ONLY BY CAUSE, NOT BY ARGUMENT SHAPE, and the difference matters —
+    // an earlier version of this test used "a `--json` this build rejects",
+    // which cannot happen. `config get` is ONE argparse sub-command: a build
+    // that rejected the flag on the leaf would have rejected it on the block
+    // read first, and that answers "retry" with no write issued at all.
+    // (Measured on the box: the leaf form takes `--json`, and exits 1
+    // `Config key not set` when the key is absent.) A 15 s timeout IS per-call
+    // — `runHermesCli` rejects, and the deciding read a moment earlier answered
+    // fine — so that is what a transient verification failure really looks
+    // like: a filelock held by an interactive CLI, a box under load.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const setCount = () => cliMock.mock.calls.filter((c) => (c[0] as string[])[1] === "set").length;
+    const decidingReads = () => cliMock.mock.calls
+      .map((c) => c[0] as string[])
+      .filter((args) => args[1] === "get" && args[2] === `providers.${CLAWAI_PROVIDER}`)
+      .length;
+    try {
+      let readBackTimesOut = true;
+      providerBlock(LINKED);
+      const cli = cliMock.getMockImplementation()!;
+      cliMock.mockImplementation(async (args: string[]) => {
+        const [, verb, key] = args;
+        if (readBackTimesOut && verb === "get" && key === `providers.${CLAWAI_PROVIDER}.models`) {
+          throw new Error("hermes timed out");
+        }
+        return cli(args);
+      });
+
+      await reconcileClawaiModelsWithHermes();
+      // Nothing is claimed over a question that failed — and nothing is thrown
+      // over it either: the reject is caught inside the verification, so the
+      // caller's own catch never logs "reconcile failed" over a write that
+      // landed.
+      expect(invalidateMock).not.toHaveBeenCalled();
+      expect(setCount()).toBe(1);
+      expect(warn.mock.calls.flat().map(String).join(" ")).toContain("could not be verified");
+
+      // Not latched: the next request asks again.
+      readBackTimesOut = false;
       vi.advanceTimersByTime(60_001);
       await reconcileClawaiModelsWithHermes();
-      expect(setCount()).toBeGreaterThan(firstAttempt);
+      expect(decidingReads()).toBe(2);
+      // And what it finds is the write that DID land while the answer was lost,
+      // so it declares nothing a second time. An unverified write costs another
+      // question, not another rewrite of the customer's config.yaml.
+      expect(setCount()).toBe(1);
+      expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
+        CLAWBOX_AI_FLASH_MODEL_ID,
+        CLAWBOX_AI_PRO_MODEL_ID,
+      ]);
     } finally {
       warn.mockRestore();
     }
