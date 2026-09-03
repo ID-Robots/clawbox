@@ -695,7 +695,20 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only is cheap on re-run", () =
     const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "0" }, true);
     expect(res.status, res.stderr).toBe(0);
     expect(res.su.filter((c) => c.includes("pip3 install")), "the heavy pip work ran again").toEqual([]);
-    expect(res.su.filter((c) => c.includes("KPipeline")), "the warm-up ran again").toEqual([]);
+    expect(
+      res.su.filter((c) => c.includes("pipeline.model.parameters")),
+      "the model pre-download ran again",
+    ).toEqual([]);
+    // The phonemiser check is deliberately NOT skipped on this path. A box that
+    // already has the stack is exactly the box a broken espeakng-loader wheel is
+    // found on — `import kokoro, torch` succeeds either way — and skipping it
+    // here would mean the fleet update carrying the check never runs it. It
+    // costs a pipeline construction against an already-cached model, not a
+    // download; the curl assertion below is what pins that.
+    expect(
+      res.su.filter((c) => c.includes("zorblattic")),
+      "the phonemiser check was skipped on the box that most needs it",
+    ).toHaveLength(1);
     expect(res.curl, "something was downloaded on a no-op run").toEqual([]);
     expect(res.stdout).toContain("CLAWBOX_TTS_KOKORO=ready");
   });
