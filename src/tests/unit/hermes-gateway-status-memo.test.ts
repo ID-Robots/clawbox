@@ -144,6 +144,29 @@ describe("hermesGatewayStatus memo", () => {
     expect(after.running).toBe(false);
   });
 
+  it("does not turn a cancelled probe into 'there is no gateway'", async () => {
+    // Swallowing an abort would hand `ensureHermesGateway` an
+    // `installed: false` for a healthy box and send it down the privileged
+    // install path, carrying a signal that can no longer cancel anything.
+    const controller = new AbortController();
+    runHermesCliMock.mockImplementation(() => {
+      controller.abort();
+      return Promise.reject(new Error("aborted"));
+    });
+
+    await expect(lib.hermesGatewayStatus(controller.signal)).rejects.toThrow("aborted");
+  });
+
+  it("still degrades a genuine CLI failure that nobody cancelled", async () => {
+    runHermesCliMock.mockRejectedValue(new Error("hermes: command not found"));
+
+    await expect(lib.hermesGatewayStatus(new AbortController().signal)).resolves.toEqual({
+      installed: false,
+      running: false,
+      scope: null,
+    });
+  });
+
   it("does not join a read that started before an invalidation", async () => {
     let release: ((v: { stdout: string; stderr: string; code: number }) => void) | null = null;
     runHermesCliMock.mockReturnValueOnce(

@@ -418,7 +418,13 @@ async function readHermesGatewayStatus(
       signal,
     });
     return { value: parseHermesGatewayStatus(res.stdout), answered: true };
-  } catch {
+  } catch (err) {
+    // A CANCELLED probe is not an answer of "no gateway here". Swallowing it
+    // hands `ensureHermesGateway` an `installed: false` for a box whose gateway
+    // is fine, which sends it down the privileged INSTALL path — carrying the
+    // same already-aborted signal, which can no longer cancel anything, so the
+    // install runs to its own 180 s timeout. The caller asked to stop; stop.
+    if (signal?.aborted) throw err;
     return { value: { installed: false, running: false, scope: null }, answered: false };
   }
 }
