@@ -77,7 +77,7 @@ Use the box's own channel, not a hardcoded `main`. `.update-branch` is the updat
 device on `beta` that is hard-reset to `origin/main` is silently moved to a different release line.
 </Warning>
 
-Let `install.sh` finish completely (it prints numbered steps, `[1/26] … [26/26]`), then reboot. The box is back in ~2 minutes.
+Let `install.sh` finish completely — it prints numbered steps and ends on `[N/N]`, where N depends on your edition (hermes and dual boxes run one provisioning step more than openclaw) — then reboot. The box is back in ~2 minutes.
 
 <Info>
 Why this works when a normal update didn't: `install.sh` refreshes **everything** — the app build, your edition's agent core (the pinned OpenClaw version, or the Hermes edition steps), the systemd service files, and system packages. It reads `/etc/clawbox/edition.env` on every run and skips the steps that do not belong to your edition, so it cannot convert a Hermes box into an OpenClaw one. Partial updates (a bare `git pull`, an interrupted updater) can leave those out of sync.
