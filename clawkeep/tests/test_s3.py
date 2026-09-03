@@ -54,6 +54,8 @@ def test_upload_calls_put_with_correct_key(tmp_path: Path) -> None:
     transfer = fake_client.upload_file.call_args.kwargs["Config"]
     assert transfer.multipart_chunksize == s3.MULTIPART_CHUNK_BYTES
     assert transfer.max_concurrency == s3.MAX_UPLOAD_CONCURRENCY
+    assert transfer.multipart_threshold == s3.MULTIPART_THRESHOLD_BYTES
+    assert transfer.use_threads is True
 
 
 def test_upload_translates_botocore_error(tmp_path: Path) -> None:
