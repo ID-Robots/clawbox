@@ -409,16 +409,72 @@ export function parseHermesGatewayStatus(stdout: string): HermesGatewayStatus {
 }
 
 /** `hermes gateway status`, parsed. Reports "down" rather than throwing. */
-export async function hermesGatewayStatus(signal?: AbortSignal): Promise<HermesGatewayStatus> {
+async function readHermesGatewayStatus(
+  signal?: AbortSignal,
+): Promise<{ value: HermesGatewayStatus; answered: boolean }> {
   try {
     const res = await runHermesCli(["gateway", "status"], {
       timeoutMs: GATEWAY_TIMEOUT_MS,
       signal,
     });
-    return parseHermesGatewayStatus(res.stdout);
+    return { value: parseHermesGatewayStatus(res.stdout), answered: true };
   } catch {
-    return { installed: false, running: false, scope: null };
+    return { value: { installed: false, running: false, scope: null }, answered: false };
   }
+}
+
+/**
+ * ONE memo for `hermes gateway status`, shared by every caller.
+ *
+ * This is a Hermes CLI cold start (~2 s on a Jetson) and three separate status
+ * routes ask for it — Telegram, WhatsApp and Discord — each of which used to
+ * memoise the answer privately. Opening Settings → Channels asks all three at
+ * once, so the box paid for the SAME command three times concurrently while
+ * each route's own cache sat empty. The dedup belongs here, at the one place
+ * that runs the command, not in three copies downstream.
+ *
+ * A failed probe is remembered too, but briefly: caching only successes means
+ * the slower a wedged CLI gets, the more often the box re-enters it. Same
+ * success/failure split as the channel-row memo in `openclaw-channels.ts`.
+ */
+const GATEWAY_STATUS_TTL_MS = 15_000;
+const GATEWAY_STATUS_FAILURE_TTL_MS = 3_000;
+let cachedGatewayStatus: { value: HermesGatewayStatus; at: number; answered: boolean } | null = null;
+let inFlightGatewayStatus: Promise<HermesGatewayStatus> | null = null;
+
+/**
+ * Drop the remembered gateway status.
+ *
+ * Anything that restarts, installs or reconfigures the gateway must call this:
+ * a memo that outlives the thing it describes is how a probe-once bug is born,
+ * and this one would report the pre-restart process as the live one.
+ */
+export function invalidateHermesGatewayStatus(): void {
+  cachedGatewayStatus = null;
+}
+
+export async function hermesGatewayStatus(signal?: AbortSignal): Promise<HermesGatewayStatus> {
+  // A caller that brought its own deadline gets its own probe: it cannot be
+  // served a shared promise it has no way to abort, and the ensure/restart
+  // paths need the truth as of now, not as of fifteen seconds ago.
+  if (signal) return (await readHermesGatewayStatus(signal)).value;
+
+  const fresh =
+    cachedGatewayStatus
+    && Date.now() - cachedGatewayStatus.at
+      < (cachedGatewayStatus.answered ? GATEWAY_STATUS_TTL_MS : GATEWAY_STATUS_FAILURE_TTL_MS);
+  if (fresh && cachedGatewayStatus) return cachedGatewayStatus.value;
+  if (inFlightGatewayStatus) return inFlightGatewayStatus;
+
+  const pending = (async () => {
+    const { value, answered } = await readHermesGatewayStatus();
+    cachedGatewayStatus = { value, at: Date.now(), answered };
+    return value;
+  })().finally(() => {
+    inFlightGatewayStatus = null;
+  });
+  inFlightGatewayStatus = pending;
+  return pending;
 }
 
 /** Unix user the gateway system service should run as. */
@@ -530,6 +586,7 @@ export async function ensureHermesGateway(signal?: AbortSignal): Promise<HermesG
     const applied = before.scope === "system"
       ? await restartHermesGatewayUnit(signal)
       : await restartHermesGatewayUserService(signal);
+    invalidateHermesGatewayStatus();
     return { ...(await hermesGatewayStatus(signal)), applied };
   }
 
@@ -565,6 +622,7 @@ export async function ensureHermesGateway(signal?: AbortSignal): Promise<HermesG
   } catch (err) {
     console.error("[hermes] gateway install failed:", err);
   }
+  invalidateHermesGatewayStatus();
   return { ...(await hermesGatewayStatus(signal)), applied };
 }
 

@@ -392,6 +392,15 @@ export interface OpenclawWhatsappStatus {
   paired: boolean;
   /** The gateway says the transport is up. */
   connected: boolean;
+  /**
+   * Whether the gateway actually ANSWERED.
+   *
+   * `state: "not_configured"` is returned both when the gateway says there is
+   * no such channel and when the gateway could not be asked at all. Those are
+   * not the same claim, and a caller that cannot tell them apart draws "Not
+   * configured" over a paired phone whenever the gateway is restarting.
+   */
+  verified: boolean;
 }
 
 /**
@@ -413,8 +422,15 @@ export async function readOpenclawWhatsappStatus(): Promise<OpenclawWhatsappStat
   if (!row) {
     // Unknown, not "off". Reported as not_configured because that is the only
     // honest thing the panel can offer an action for, and the status card's
-    // `receiving: false` says the rest.
-    return { state: "not_configured", enabled: false, paired: false, connected: false };
+    // `receiving: false` says the rest — but `verified: false` says plainly
+    // that nobody answered, so a caller need not read this as "not set up".
+    return {
+      state: "not_configured",
+      enabled: false,
+      paired: false,
+      connected: false,
+      verified: false,
+    };
   }
 
   // `linked` is the ONLY honest answer to "is a phone paired". `configured`
@@ -452,6 +468,7 @@ export async function readOpenclawWhatsappStatus(): Promise<OpenclawWhatsappStat
     enabled,
     paired,
     connected,
+    verified: true,
   };
 }
 

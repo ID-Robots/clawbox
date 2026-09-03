@@ -193,6 +193,14 @@ type Section = typeof SECTIONS[number];
 /** Shape of GET /setup-api/whatsapp/status, normalised client-side. */
 interface WhatsappStatus {
   supported: boolean;
+  /**
+   * False when the gateway could not be asked at all. The route still has to
+   * answer `state: "not_configured"` (the panel needs something to offer an
+   * action for), so this is the only thing separating "there is no WhatsApp
+   * here" from "nobody could tell us" — and drawing the first over the second
+   * is the false failure this hub is being fixed for.
+   */
+  verified?: boolean;
   state?: "not_configured" | "enabled_not_paired" | "paired" | "unsupported";
   enabled?: boolean;
   paired?: boolean;
@@ -1319,10 +1327,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
    * opened each pane.
    *
    * The reader stays the harness's own edition-aware status route
-   * (/setup-api/<channel>/status); the hub and the pane just share it. One
-   * primitive flag per channel rather than one shared predicate, so that
-   * walking from the hub into a pane re-asks nothing: only the flag of a
-   * channel whose need actually changed flips, and only its effect re-runs.
+   * (/setup-api/<channel>/status); the hub and the pane just share it.
+   *
+   * ENTERING A PANE STILL RE-ASKS. An earlier revision gated each effect on a
+   * boolean that was already `true` on the hub and stayed `true` in the pane,
+   * so the channel was probed exactly once per Settings mount — and a status
+   * that failed on the cold read could never be retried: the pane it opened
+   * sat on its loading skeleton with no request outstanding. That is the
+   * probe-once class this file is supposed to be rid of. Each effect keeps
+   * `section` in its dependencies, as it did before the hub existed, so every
+   * arrival at a channel is a fresh read; the routes' own memos absorb the
+   * repeat.
    *
    * Cost: a cold hub open asks all four at once. The fan-out itself is not new
    * — `openclaw-channels.ts` already notes that on mobile, where the panels'
@@ -1334,11 +1349,30 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
    * none — it is a config read with no shell-out. Seeding every channel from
    * ONE `channels status` spawn is TASK-694.
    */
-  const channelsHubOpen = section === "channels";
-  const needTelegramStatus = isMobile || channelsHubOpen || section === "telegram";
-  const needEmailStatus = isMobile || channelsHubOpen || section === "email";
-  const needWhatsappStatus = isMobile || channelsHubOpen || section === "whatsapp";
-  const needDiscordStatus = isMobile || channelsHubOpen || section === "discord";
+  /**
+   * The newest status request per channel.
+   *
+   * The hub, the pane and every save can have reads in flight at once now that
+   * arriving at a pane re-asks. Responses are not ordered, so an older one
+   * landing last would write its stale answer over a newer one — turning a
+   * just-saved channel back into "not configured". Each refresher claims a
+   * generation before it fetches and writes nothing, not even the settled
+   * mark, once it has been superseded.
+   */
+  const channelReqRef = useRef<Record<ChannelSection, number>>({
+    telegram: 0,
+    email: 0,
+    whatsapp: 0,
+    discord: 0,
+  });
+  const claimChannelRead = useCallback(
+    (id: ChannelSection) => {
+      const gen = channelReqRef.current[id] + 1;
+      channelReqRef.current[id] = gen;
+      return () => channelReqRef.current[id] === gen;
+    },
+    [],
+  );
 
   /**
    * Channels whose status route has ANSWERED ONE WAY OR THE OTHER.
@@ -1386,8 +1420,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [tgPairingStatus, setTgPairingStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   const refreshTelegramStatus = useCallback(async () => {
+    const isCurrent = claimChannelRead("telegram");
     try {
       const r = await fetch("/setup-api/telegram/status", { cache: "no-store" });
+      if (!isCurrent()) return;
       if (!r.ok) {
         // Don't clobber existing state on a transient error (gateway
         // restarting, 5xx, etc.) — keep the last known bot info visible.
@@ -1395,6 +1431,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         return;
       }
       const d = await r.json();
+      if (!isCurrent()) return;
       setTgConfigured(d.configured ?? false);
       if (d.configured && d.username) {
         setTgBotInfo({ username: d.username, firstName: d.firstName, link: d.link });
@@ -1406,9 +1443,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       // flashing "not configured" at the user mid-restart.
       console.warn("[telegram] refresh failed:", err);
     } finally {
-      markChannelSettled("telegram");
+      if (isCurrent()) markChannelSettled("telegram");
     }
-  }, [markChannelSettled]);
+  }, [markChannelSettled, claimChannelRead]);
 
   const refreshPairing = useCallback(async () => {
     try {
@@ -1423,9 +1460,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   // The status the hub's dot and the pane's card both read.
   useEffect(() => {
-    if (!needTelegramStatus) return;
+    if (!isMobile && section !== "telegram" && section !== "channels") return;
     refreshTelegramStatus();
-  }, [needTelegramStatus, refreshTelegramStatus]);
+  }, [section, isMobile, refreshTelegramStatus]);
 
   // Pane-only detail — the approved list and the streaming toggle have no
   // reader on the hub, so the hub must not pay for them.
@@ -1640,10 +1677,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [chatApprovalBusy, setChatApprovalBusy] = useState(false);
 
   const refreshEmailStatus = useCallback(async () => {
+    const isCurrent = claimChannelRead("email");
     try {
       const r = await fetch("/setup-api/email/status", { cache: "no-store" });
-      if (!r.ok) return;
+      if (!isCurrent() || !r.ok) return;
       const d = await r.json();
+      if (!isCurrent()) return;
       // Every field is guarded: the component test's fetch stub answers unknown
       // URLs with {}, and a transient 5xx must not blank the panel either.
       setEmailStatus({
@@ -1667,9 +1706,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     } catch {
       // keep the last known state rather than flashing "not configured"
     } finally {
-      markChannelSettled("email");
+      if (isCurrent()) markChannelSettled("email");
     }
-  }, [markChannelSettled]);
+  }, [markChannelSettled, claimChannelRead]);
 
   /**
    * The approval queue. Session-gated server-side (the MCP bearer is refused
@@ -1710,9 +1749,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   // The status the hub's dot and the pane's card both read.
   useEffect(() => {
-    if (!needEmailStatus) return;
+    if (!isMobile && section !== "email" && section !== "channels") return;
     refreshEmailStatus();
-  }, [needEmailStatus, refreshEmailStatus]);
+  }, [section, isMobile, refreshEmailStatus]);
 
   // Pane-only detail — the approvals strip and the chat-approval bot.
   useEffect(() => {
@@ -1962,10 +2001,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [waMsg, setWaMsg] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   const refreshWhatsapp = useCallback(async () => {
+    const isCurrent = claimChannelRead("whatsapp");
     try {
       const r = await fetch("/setup-api/whatsapp/status", { cache: "no-store" });
-      if (!r.ok) return; // keep the last known state rather than flashing "off"
+      // keep the last known state rather than flashing "off"
+      if (!isCurrent() || !r.ok) return;
       const d = await r.json();
+      if (!isCurrent()) return;
       // Every field is defaulted: an older build (or a stubbed fetch) answering
       // `{}` must render as "no WhatsApp here", never as a half-populated panel.
       setWaStatus({
@@ -1979,18 +2021,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         bridgeReady: d?.bridgeReady ?? null,
         authorized: d?.authorized === true,
         receiving: d?.receiving === true,
+        // Absent means an older build that cannot tell us either way; treated
+        // as verified so an upgrade path never turns every row unreachable.
+        verified: d?.verified !== false,
       });
     } catch {
       // transient — keep the previous state
     } finally {
-      markChannelSettled("whatsapp");
+      if (isCurrent()) markChannelSettled("whatsapp");
     }
-  }, [markChannelSettled]);
+  }, [markChannelSettled, claimChannelRead]);
 
   useEffect(() => {
-    if (!needWhatsappStatus) return;
+    if (!isMobile && section !== "whatsapp" && section !== "channels") return;
     refreshWhatsapp();
-  }, [needWhatsappStatus, refreshWhatsapp]);
+  }, [section, isMobile, refreshWhatsapp]);
 
   const saveWhatsapp = useCallback(
     async (payload: { allowedUsers?: string[]; mode?: "bot" | "self-chat"; enabled?: boolean }) => {
@@ -2270,8 +2315,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const dcSaveControllerRef = useRef<AbortController | null>(null);
 
   const refreshDiscordStatus = useCallback(async () => {
+    const isCurrent = claimChannelRead("discord");
     try {
       const r = await fetch("/setup-api/discord/status", { cache: "no-store" });
+      if (!isCurrent()) return;
       if (!r.ok) {
         // Transient error — keep the last known state rather than flashing
         // "not configured" at someone whose bot is fine.
@@ -2279,6 +2326,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         return;
       }
       const d = await r.json();
+      if (!isCurrent()) return;
       setDcConfigured(d.configured ?? false);
       setDcBotName(typeof d.username === "string" ? d.username : null);
       setDcTokenRejected(d.tokenRejected === true);
@@ -2292,9 +2340,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     } catch (err) {
       console.warn("[discord] refresh failed:", err);
     } finally {
-      markChannelSettled("discord");
+      if (isCurrent()) markChannelSettled("discord");
     }
-  }, [markChannelSettled]);
+  }, [markChannelSettled, claimChannelRead]);
 
   // The member list costs Discord API calls, so it is fetched only while the
   // Discord section is actually open — never from the status poll that backs
@@ -2320,9 +2368,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, []);
 
   useEffect(() => {
-    if (!needDiscordStatus) return;
+    if (!isMobile && section !== "discord" && section !== "channels") return;
     refreshDiscordStatus();
-  }, [needDiscordStatus, refreshDiscordStatus]);
+  }, [section, isMobile, refreshDiscordStatus]);
 
   useEffect(() => {
     if (section !== "discord") return;
@@ -3602,6 +3650,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   const state = channelState(item.id);
                   const connected = state === "connected";
                   const { subtitle } = sectionStatus(item.id);
+                  const refreshChannel = {
+                    telegram: refreshTelegramStatus,
+                    email: refreshEmailStatus,
+                    whatsapp: refreshWhatsapp,
+                    discord: refreshDiscordStatus,
+                  }[item.id];
                   return (
                     <button
                       key={item.id}
@@ -3623,8 +3677,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                             alone reads like a description of a channel that is
                             not set up, which is how this list misled the owner
                             in the first place. */}
-                        <span className="block text-[11px] text-[var(--text-muted)] truncate">
-                          {subtitle ?? (state === "unknown" ? t("settings.checking") : t(item.hintKey))}
+                        <span
+                          className="block text-[11px] text-[var(--text-muted)] truncate"
+                          role={state === "unreachable" ? "status" : undefined}
+                        >
+                          {subtitle
+                            ?? (state === "unknown"
+                              ? t("settings.checking")
+                              : state === "unreachable"
+                                ? t("settings.statusUnavailable")
+                                : t(item.hintKey))}
                         </span>
                       </span>
                       {/* A mark per state: set up, still asking, and asked but
@@ -3643,6 +3705,28 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       ) : state === "unreachable" ? (
                         <span className="w-1.5 h-1.5 rounded-full bg-white/25 shrink-0" aria-hidden="true" />
                       ) : null}
+                      {/* A dead end needs a way out. Rendered as a real control
+                          rather than only a colour, because the row that could
+                          not be read is exactly the one the owner has to act
+                          on. `stopPropagation` so retrying does not also
+                          navigate into the pane. */}
+                      {state === "unreachable" && (
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          data-testid={`settings-channel-retry-${item.id}`}
+                          onClick={(e) => { e.stopPropagation(); void refreshChannel(); }}
+                          onKeyDown={(e) => {
+                            if (e.key !== "Enter" && e.key !== " ") return;
+                            e.preventDefault();
+                            e.stopPropagation();
+                            void refreshChannel();
+                          }}
+                          className="text-[11px] text-[var(--coral-bright)] shrink-0 px-1 cursor-pointer hover:underline"
+                        >
+                          {t("settings.retry")}
+                        </span>
+                      )}
                       <span className="material-symbols-rounded text-[var(--text-muted)] shrink-0" style={{ fontSize: 18 }} aria-hidden="true">
                         chevron_right
                       </span>
@@ -5652,7 +5736,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     switch (id) {
       case "telegram": return tgConfigured !== null;
       case "email": return emailStatus !== null;
-      case "whatsapp": return waStatus !== null;
+      // An unverified answer is the gateway failing to be asked, dressed up as
+      // "not configured" with a 200. It is not knowledge.
+      case "whatsapp": return waStatus !== null && waStatus.verified !== false;
       case "discord": return dcConfigured !== null;
     }
   };
@@ -5668,25 +5754,39 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     id: ChannelSection,
   ): "connected" | "not-configured" | "unknown" | "unreachable" => {
     if (channelStatusKnown(id)) return channelConnected(id) ? "connected" : "not-configured";
+    // A route that answered without being able to verify has settled — there
+    // is nothing still in flight to wait for.
+    if (id === "whatsapp" && waStatus?.verified === false) return "unreachable";
     return settledChannels.has(id) ? "unreachable" : "unknown";
   };
 
   const sectionStatus = (id: Section): SectionStatus => {
     switch (id) {
       case "channels": {
-        // Both halves of this row are a count, and a count is only true once
-        // every channel has answered. This said "Not configured" over a box
-        // with three live channels because the hub's fetches had not run yet;
-        // reporting "1 connected" off the one channel a deep link happened to
-        // load would be the same lie with a different number. Silence until
-        // the whole set is known, as `ai` and `localAi` below already do.
-        if (!CHANNEL_ITEMS.every((a) => channelStatusKnown(a.id))) return { subtitle: null };
+        // A count is only true once every channel has answered. This said "Not
+        // configured" over a box with three live channels because the hub's
+        // fetches had not run yet; reporting "1 connected" off the one channel
+        // a deep link happened to load is the same lie with a different
+        // number. So: silence while anything is still in flight, as `ai` and
+        // `localAi` below already do.
         const connected = CHANNEL_ITEMS.filter((a) => channelConnected(a.id)).length;
-        return {
-          subtitle: connected > 0
-            ? t("settings.channelsConnectedCount", { n: connected })
-            : (t("settings.notConfigured") || "Not configured"),
-        };
+        if (CHANNEL_ITEMS.every((a) => channelStatusKnown(a.id))) {
+          return {
+            subtitle: connected > 0
+              ? t("settings.channelsConnectedCount", { n: connected })
+              : (t("settings.notConfigured") || "Not configured"),
+          };
+        }
+        // Not everything is known, but nothing is still being asked either —
+        // one of the routes could not be reached. Report what was actually
+        // confirmed rather than going silent for the rest of the session; the
+        // count can only understate, and never says "Not configured" over a
+        // channel nobody managed to read.
+        const allSettled = CHANNEL_ITEMS.every((a) => channelState(a.id) !== "unknown");
+        if (allSettled && connected > 0) {
+          return { subtitle: t("settings.channelsConnectedCount", { n: connected }) };
+        }
+        return { subtitle: null };
       }
       case "appearance": {
         const sub = ui.wallpaperId.startsWith("custom-")

@@ -310,6 +310,7 @@ describe("readOpenclawWhatsappStatus", () => {
       enabled: true,
       paired: true,
       connected: true,
+      verified: true,
     });
   });
 
@@ -415,6 +416,11 @@ describe("readOpenclawWhatsappStatus", () => {
       enabled: false,
       paired: false,
       connected: false,
+      // The panel has to be told this "not_configured" is the gateway failing
+      // to answer, not the gateway saying there is no channel. Without it the
+      // Settings list draws "Not configured" over a paired phone whenever the
+      // gateway is restarting.
+      verified: false,
     });
   });
 });

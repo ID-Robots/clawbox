@@ -111,6 +111,7 @@ beforeEach(() => {
     enabled: true,
     paired: true,
     connected: true,
+    verified: true,
   });
   mockPairing.mockReturnValue({
     start: vi.fn(async () => ({ ...IDLE_SNAPSHOT, phase: "waiting" as const, qrImage: "data:image/png;base64,AAAA" })),
@@ -199,7 +200,13 @@ describe("GET /setup-api/whatsapp/status — OpenClaw", () => {
   });
 
   it("is receiving only when the gateway says the transport is up", async () => {
-    mockStatus.mockResolvedValue({ state: "paired", enabled: true, paired: true, connected: false });
+    mockStatus.mockResolvedValue({
+      state: "paired",
+      enabled: true,
+      paired: true,
+      connected: false,
+      verified: true,
+    });
 
     expect((await get()).body.receiving).toBe(false);
   });
@@ -214,6 +221,7 @@ describe("GET /setup-api/whatsapp/status — OpenClaw", () => {
       enabled: true,
       paired: false,
       connected: false,
+      verified: true,
     });
 
     const res = await get();

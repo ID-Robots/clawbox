@@ -68,6 +68,9 @@ export async function GET() {
         // ONLY when the transport is genuinely up. A stored link and an enabled
         // channel are not evidence that anything reaches the owner's phone.
         receiving: status.connected,
+        // `status.verified` is false when the gateway could not be asked at
+        // all. Without it the panel cannot tell that answer apart from a real
+        // "no such channel" and draws "Not configured" over a paired phone.
       });
     }
 
@@ -86,6 +89,9 @@ export async function GET() {
       // could report itself active while the gateway dropped every message it
       // received with "Unauthorized user".
       receiving: status.state === "paired" && gateway.running && status.authorized,
+      // The Hermes reader works off config plus `hermes gateway status`; if it
+      // had not answered we would be in the catch below, not here.
+      verified: true,
     });
   } catch (err) {
     // Fixed string out, real cause to the log — the same contract the other

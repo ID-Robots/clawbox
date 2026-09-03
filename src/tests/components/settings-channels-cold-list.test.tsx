@@ -19,7 +19,7 @@
 
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
-import { render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 
 vi.setConfig({ testTimeout: 20_000 });
@@ -213,6 +213,71 @@ describe("Settings → Channels on a cold open", () => {
     expect(hasDot(whatsapp)).toBe(false);
     expect(whatsapp).not.toHaveTextContent("settings.notConfigured");
     expect(whatsapp.querySelector(".animate-pulse")).toBeNull();
+  });
+
+  it("re-asks a channel when its pane is opened, so a failed hub read is never final", async () => {
+    // PROBE-ONCE. The hub reads every channel on open; entering a pane must
+    // still re-ask. Otherwise a status that failed on the cold read is treated
+    // as fact for the life of the Settings mount and the pane sits on its
+    // loading skeleton forever, with no request ever issued to clear it.
+    let waCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = input.toString();
+        if (url.startsWith("/setup-api/whatsapp/status")) {
+          waCalls += 1;
+          // The gateway is restarting: the cold hub read fails.
+          if (waCalls === 1) {
+            return Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) } as Response);
+          }
+        }
+        return boxFetch(input);
+      }),
+    );
+
+    openHub();
+    const list = await screen.findByTestId("settings-channels-list");
+    const whatsapp = within(list).getByTestId("settings-channel-whatsapp");
+    await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "unreachable"));
+    expect(waCalls).toBe(1);
+
+    // The owner clicks the row to find out what is wrong.
+    fireEvent.click(whatsapp);
+
+    await waitFor(() => expect(waCalls).toBeGreaterThan(1));
+  });
+
+  it("offers a retry on a channel whose status could not be read", async () => {
+    let waCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = input.toString();
+        if (url.startsWith("/setup-api/whatsapp/status")) {
+          waCalls += 1;
+          if (waCalls === 1) {
+            return Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) } as Response);
+          }
+        }
+        return boxFetch(input);
+      }),
+    );
+
+    openHub();
+    const list = await screen.findByTestId("settings-channels-list");
+    const whatsapp = within(list).getByTestId("settings-channel-whatsapp");
+    await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "unreachable"));
+
+    // The row must SAY the read failed, not fall back to the generic hint that
+    // reads exactly like a channel nobody has set up.
+    expect(whatsapp).toHaveTextContent("settings.statusUnavailable");
+    expect(whatsapp).not.toHaveTextContent("settings.channelsWhatsappHint");
+
+    const retry = within(whatsapp).getByTestId("settings-channel-retry-whatsapp");
+    fireEvent.click(retry);
+
+    await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "connected"));
   });
 
   it("never claims the sidebar entry is unconfigured before anything has been read", () => {
