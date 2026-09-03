@@ -7,7 +7,7 @@ import path from "path";
 import crypto from "crypto";
 import { runChild } from "@/lib/child-run";
 import { getActiveHarness } from "@/lib/harness";
-import { speakWithHermes } from "@/lib/hermes-tts";
+import { hermesProviderFor, readHermesVoice, speakWithHermes } from "@/lib/hermes-tts";
 import { readConfig } from "@/lib/openclaw-config";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { cloudSpeechTarget, localCommandPath, cloudVoiceFrom, type VoiceConfigView } from "@/lib/voice-output";
@@ -155,19 +155,49 @@ async function speakInCloud(config: VoiceConfigView, requestedVoice: unknown, te
 }
 
 /**
+ * The refusal codes said in terms of the engine that was auditioned.
+ *
+ * `speakWithHermes` names the TRANSPORT's failure, and on Hermes that
+ * transport carries both engines — so a Kokoro refusal came back as
+ * `cloud_refused`, which the panel renders as "The ClawBox cloud voice
+ * refused" on a box with no cloud voice at all. An audition must fail in the
+ * words of the thing the owner pressed play on.
+ */
+const LOCAL_CODE_FOR: Record<string, string> = {
+  cloud_no_answer: "local_failed",
+  cloud_refused: "local_failed",
+  cloud_no_audio: "local_failed",
+  no_voice: "no_local_voice",
+};
+
+/**
  * The audition on a box running Hermes.
  *
- * One engine is auditioned, as on the OpenClaw side — but the CHOOSING is
- * Hermes': `/api/audio/speak` speaks with whatever `tts.provider` names, and
- * that key is what the Voice tab's "Speak from" writes. So the sample and the
- * box's real replies can never disagree about which voice this is.
+ * `/api/audio/speak` speaks with whatever `tts.provider` names — it takes no
+ * per-request engine or voice — so the ONE thing this must not do is accept an
+ * audition of the engine the box is not set to. The owner would press play
+ * beside "This box" and hear the cloud voice under a 200, which is worse than
+ * a refusal: it is the panel describing a different box. So a mismatch is
+ * refused, and the sample the owner does get is by construction the same voice
+ * their real replies are spoken in.
  */
-async function speakWithHermesEngine(text: string): Promise<Response> {
+async function speakWithHermesEngine(text: string, engine: "local" | "cloud"): Promise<Response> {
+  const configured = (await readHermesVoice()).provider;
+  if (configured !== hermesProviderFor(engine)) {
+    return refuse(
+      "This box is not set to speak with that voice — choose it under Speak from first.",
+      "not_available",
+      409,
+    );
+  }
   const spoken = await speakWithHermes(text);
   if (!spoken.ok) {
+    const code = engine === "local" ? LOCAL_CODE_FOR[spoken.code] ?? spoken.code : spoken.code;
     return refuse(
-      "The voice on this box could not speak that.",
-      spoken.code,
+      engine === "local"
+        ? "The voice on this box could not speak that."
+        : "The cloud voice could not speak that.",
+      code,
       spoken.status,
       spoken.reason ? { reason: spoken.reason } : {},
     );
@@ -200,7 +230,7 @@ export async function POST(req: Request) {
     // `/api/audio/speak`, which resolves the very `tts.provider` the Voice tab
     // just wrote. Auditioning through a chain we built ourselves would be
     // auditioning a different box than the one that answers the customer.
-    if ((await getActiveHarness()) === "hermes") return await speakWithHermesEngine(text);
+    if ((await getActiveHarness()) === "hermes") return await speakWithHermesEngine(text, engine);
     const config = await readConfig();
     return engine === "local"
       ? await speakLocally(config, voice, text)

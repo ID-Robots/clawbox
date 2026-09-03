@@ -73,8 +73,10 @@ vi.mock("@/lib/voice-output-store", () => ({
   writeLocalVoice: (...a: unknown[]) => writeLocalVoiceMock(...a),
 }));
 
+/** `pref:ui_language` and `clawai_tier`; the box is on the plan that has a voice. */
+let storeValues: Record<string, unknown> = {};
 vi.mock("@/lib/config-store", () => ({
-  get: async () => null,
+  get: async (key: string) => storeValues[key] ?? null,
 }));
 
 vi.mock("fs", async (importOriginal) => {
@@ -115,16 +117,17 @@ beforeEach(() => {
   writeStateMock.mockResolvedValue(undefined);
   writeLocalVoiceMock.mockResolvedValue(undefined);
   tokenMock.mockResolvedValue("claw_a_linked_hermes_box");
+  storeValues = { clawai_tier: "pro" };
   hermesCliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-  // A linked Hermes box: install.sh registered the on-device command provider,
-  // and the cloud slot points at the ClawBox AI proxy.
+  // EXACTLY what install.sh writes on a freshly provisioned Hermes box, and
+  // nothing else. Seeding `tts.openai.base_url` here — the key only the cloud
+  // SELECTION writes — is what hid a deadlock: the cloud option was refused
+  // until that key existed, and nothing could write it until the option was
+  // accepted, so the whole cloud arm was unreachable on every real box.
   hermesConfig = {
     "tts.provider": "clawbox-local",
     "tts.providers.clawbox-local.type": "command",
-    "tts.providers.clawbox-local.command": "/opt/clawbox-tts.sh --voice {voice}",
-    "tts.openai.voice": "fable",
-    "tts.openai.model": "gpt-4o-mini-tts",
-    "tts.openai.base_url": "https://clawbox.test/api/ai",
+    "tts.providers.clawbox-local.command": "/opt/clawbox-tts.sh",
   };
 });
 
@@ -160,6 +163,36 @@ describe("GET /setup-api/tts on a linked Hermes box", () => {
 
     const local = body.engines.find((e: { id: string }) => e.id === "local");
     expect(local.configured).toBe(true);
+  });
+
+  /**
+   * The regression that made the cloud half dead code.
+   *
+   * `tts.openai.base_url` is written ONLY by the cloud selection, and the
+   * cloud selection was refused until that key existed — so on every box that
+   * had not somehow already been pointed at the proxy (i.e. all of them:
+   * install.sh writes only the local provider) the option was rendered
+   * disabled for ever. The endpoint is a derived constant on a ClawBox, not a
+   * fact to discover, so holding a `claw_` token IS being able to point there.
+   */
+  it("offers the cloud voice on a box that has only ever run install.sh", async () => {
+    const { GET } = await route();
+    const body = await (await GET()).json();
+
+    expect(Object.keys(hermesConfig)).not.toContain("tts.openai.base_url");
+    const cloud = body.engines.find((e: { id: string }) => e.id === "cloud");
+    expect(cloud.configured).toBe(true);
+  });
+
+  it("lets that box actually select the cloud voice", async () => {
+    const { POST } = await route();
+    const res = await POST(post({ action: "select", choice: "cloud" }));
+
+    // 409 here was the deadlock: refused for want of the very key this call is
+    // what writes.
+    expect(res.status).toBe(200);
+    const keys = hermesCliMock.mock.calls.map((c) => (c[0] as string[])[2]);
+    expect(keys).toContain("tts.openai.base_url");
   });
 
   it("keeps the edition fact for the half that really is OpenClaw's", async () => {
@@ -201,7 +234,6 @@ describe("POST /setup-api/tts on a Hermes box", () => {
   });
 
   it("writes the cloud endpoint and credential BEFORE selecting the provider", async () => {
-    hermesConfig["tts.provider"] = "clawbox-local";
     const { POST } = await route();
     const res = await POST(post({ action: "select", choice: "cloud" }));
 
@@ -288,6 +320,25 @@ describe("a factory Hermes box still on Edge", () => {
       ["config", "set", "tts.provider", "clawbox-local"],
       expect.anything(),
     );
+  });
+});
+
+describe("a Hermes box whose plan has no cloud voice", () => {
+  it("does not offer the cloud voice it would only be refused for", async () => {
+    // The proxy serves speech to `pro` and answers 403 below it —
+    // gateway-pre-start.sh gates the OpenClaw side on the same tier, and its
+    // comment says why: pointing an unentitled box at that route would have
+    // the panel call the cloud voice configured while every spoken reply paid
+    // a failed round trip.
+    storeValues = { clawai_tier: "flash" };
+    const { GET } = await route();
+    const body = await (await GET()).json();
+
+    const cloud = body.engines.find((e: { id: string }) => e.id === "cloud");
+    expect(cloud.configured).toBe(false);
+    // And it says the plan, not "no cloud voice is set up" — the box HAS a
+    // credential; what it lacks is the plan behind it.
+    expect(cloud.detail).toMatch(/Max/i);
   });
 });
 

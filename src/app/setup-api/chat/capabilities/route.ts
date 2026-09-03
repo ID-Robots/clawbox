@@ -13,7 +13,7 @@ import {
 } from "@/lib/harness/hermes-features";
 import { clawaiImageRouteReachable } from "@/lib/harness/clawai-images";
 import { hermesCanStreamTurns } from "@/lib/hermes-dashboard-turn";
-import { hermesSpeaksReplies } from "@/lib/hermes-tts";
+import { hermesSpeaksReplies, hermesVoiceProbePending } from "@/lib/hermes-tts";
 
 export const dynamic = "force-dynamic";
 
@@ -125,7 +125,10 @@ export async function GET() {
   // would mean claiming a precision that module does not have.
   const factsPending =
     harness === "hermes" &&
-    (hermesFeatureProbePending() || hermesVisionRoutePending() || hermesImageBackendPending());
+    (hermesFeatureProbePending()
+      || hermesVisionRoutePending()
+      || hermesImageBackendPending()
+      || hermesVoiceProbePending());
   return NextResponse.json({
     harness,
     facts,

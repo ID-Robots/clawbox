@@ -3,8 +3,9 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import { get as readPreference } from "@/lib/config-store";
+import { speechEntitledTier } from "@/lib/hermes-tts";
 import { getActiveHarness } from "@/lib/harness";
-import { resolveClawaiToken } from "@/lib/harness/credentials";
+import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "@/lib/harness/credentials";
 import {
   hermesVoiceConfigView,
   readHermesVoice,
@@ -98,8 +99,14 @@ async function exists(p: string): Promise<boolean> {
  */
 async function readVoiceConfig(harness: Awaited<ReturnType<typeof getActiveHarness>>): Promise<VoiceConfigView> {
   if (harness !== "hermes") return await readConfig();
-  const [probe, token] = await Promise.all([readHermesVoice(), resolveClawaiToken()]);
-  return hermesVoiceConfigView(probe, token);
+  const [probe, token, entitled] = await Promise.all([
+    readHermesVoice(),
+    resolveClawaiToken(),
+    speechEntitledTier(),
+  ]);
+  // The endpoint only for a box whose plan includes the cloud voice; see the
+  // parameter's own note for why that is said as a null URL.
+  return hermesVoiceConfigView(probe, token, entitled ? CLAWBOX_AI_PROXY_URL : null);
 }
 
 async function probeBox(harness: Awaited<ReturnType<typeof getActiveHarness>>) {
@@ -142,6 +149,22 @@ const CHANNELS_UNSUPPORTED = {
   error: "Spoken replies on channels are an OpenClaw feature and are not part of this edition.",
 } as const;
 
+/**
+ * Whether the box's CHANNEL replies can be spoken.
+ *
+ * Keyed on the ACTIVE harness, like every write on this route, and not on the
+ * edition. `openclawIsAbsent()` is only ever true for the `hermes` SKU, so on
+ * a licensed DUAL box switched to Hermes it said channels work — while every
+ * setting on this page was being written into Hermes' config, which serves no
+ * channel at all. The panel would have confirmed a voice change that the
+ * WhatsApp and Telegram replies never took.
+ */
+async function channelsSpeak(harness: Awaited<ReturnType<typeof getActiveHarness>>) {
+  return harness === "openclaw" && !openclawIsAbsent()
+    ? { supportedOnEdition: true as const }
+    : CHANNELS_UNSUPPORTED;
+}
+
 type VoiceStatusBody = VoiceOutputStatus & {
   channels: typeof CHANNELS_UNSUPPORTED | { supportedOnEdition: true };
 };
@@ -155,11 +178,11 @@ async function status(): Promise<VoiceStatusBody> {
   ]);
   return {
     ...buildVoiceOutputStatus(config, probe, state, localVoice),
-    channels: openclawIsAbsent() ? CHANNELS_UNSUPPORTED : { supportedOnEdition: true as const },
+    channels: await channelsSpeak(harness),
   };
 }
 
-/**
+/*
  * Every write below goes to the harness that will actually SPEAK — the
  * openclaw CLI (`config set tts.provider`, `…providers.<cloud>.voice`;
  * OpenClaw 2 moved the block from messages.tts to a top-level tts object and
@@ -210,10 +233,13 @@ export async function GET() {
 const withVoiceState = createSerialLock();
 
 /**
- * Which voice an engine speaks with. The on-device voice is the file the local
- * script reads, so the gateway's next utterance uses it with no restart; the
- * cloud voice is OpenClaw's own `providers.<cloud>.voice`, written the way the
- * provider itself is. Both are validated against the catalogue the engine
+ * Which voice an engine speaks with.
+ *
+ * The on-device voice is the file the local script reads, so the next
+ * utterance uses it with no restart — and it needs no harness branch, because
+ * both harnesses run that same script. The cloud voice is the harness's own
+ * per-provider key: OpenClaw's `providers.<cloud>.voice`, or Hermes'
+ * `tts.openai.voice`. Both are validated against the catalogue the engine
  * accepts, so an unknown id is refused here instead of failing at speech time.
  */
 async function handleVoice(engine: unknown, voice: unknown) {

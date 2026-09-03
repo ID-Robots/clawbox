@@ -1,6 +1,5 @@
-import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
+import { hermesConfigGet, hermesConfigGetMany, hermesConfigReadPending } from "@/lib/hermes-config-cache";
 import { runHermesCli } from "@/lib/hermes-cli";
-import { CLAWBOX_AI_PROXY_URL } from "@/lib/harness/credentials";
 import { LOCAL_TTS_PROVIDER_ID, type VoiceConfigView } from "@/lib/voice-output";
 
 /**
@@ -69,6 +68,7 @@ const KEYS = {
   cloudVoice: `tts.${HERMES_CLOUD_TTS_PROVIDER}.voice`,
   cloudModel: `tts.${HERMES_CLOUD_TTS_PROVIDER}.model`,
   cloudBaseUrl: `tts.${HERMES_CLOUD_TTS_PROVIDER}.base_url`,
+  cloudApiKey: `tts.${HERMES_CLOUD_TTS_PROVIDER}.api_key`,
 } as const;
 
 export interface HermesVoiceProbe {
@@ -82,6 +82,16 @@ export interface HermesVoiceProbe {
   cloudModel: string | null;
   /** Where the OpenAI-compatible slot points. Null until something writes it. */
   cloudBaseUrl: string | null;
+  /**
+   * Whether Hermes has a credential to authenticate the cloud voice with.
+   *
+   * Read as a PRESENCE, never carried: `writeHermesCloudTarget` writes three
+   * keys and `set` throws on the first failure, so a box can hold the endpoint
+   * while the credential never landed. Reporting that box as configured — off
+   * the endpoint alone — would be a cloud voice that 401s on every utterance
+   * under a panel calling it ready.
+   */
+  cloudHasKey: boolean;
 }
 
 function trimmed(value: string | undefined): string | null {
@@ -111,6 +121,7 @@ export async function readHermesVoice(): Promise<HermesVoiceProbe> {
     cloudVoice: trimmed(values[KEYS.cloudVoice]),
     cloudModel: trimmed(values[KEYS.cloudModel]),
     cloudBaseUrl: trimmed(values[KEYS.cloudBaseUrl]),
+    cloudHasKey: trimmed(values[KEYS.cloudApiKey]) !== null,
   };
 }
 
@@ -129,7 +140,25 @@ export async function readHermesVoice(): Promise<HermesVoiceProbe> {
  * which is edition-agnostic). Without one the cloud engine correctly reports
  * itself unconfigured, exactly as it does on an unlinked OpenClaw box.
  */
-export function hermesVoiceConfigView(probe: HermesVoiceProbe, token: string | null): VoiceConfigView {
+export function hermesVoiceConfigView(
+  probe: HermesVoiceProbe,
+  token: string | null,
+  /**
+   * The ClawBox AI speech endpoint, or NULL when this box's plan does not
+   * include the cloud voice.
+   *
+   * Null is how entitlement is said here, and it is deliberate rather than a
+   * shortcut: a `claw_` credential with no endpoint behind it is exactly the
+   * state `cloudCredentialIsUnusable` already describes, and the panel already
+   * has the right sentence for it ("The cloud voice comes with ClawBox AI Max,
+   * and this box is not set up to call one."). The OpenClaw side gates the
+   * same way — gateway-pre-start.sh writes the speech provider only for a
+   * portal-confirmed `pro` device — and its comment says why: pointing an
+   * unentitled box at a route that answers 403 would have the panel call the
+   * cloud voice configured and every spoken reply pay a failed round trip.
+   */
+  proxyUrl: string | null,
+): VoiceConfigView {
   const providers: Record<string, Record<string, unknown>> = {};
   if (probe.localRegistered && probe.localCommand) {
     providers[LOCAL_TTS_PROVIDER_ID] = { command: probe.localCommand };
@@ -137,12 +166,22 @@ export function hermesVoiceConfigView(probe: HermesVoiceProbe, token: string | n
   if (token) {
     providers[HERMES_CLOUD_TTS_PROVIDER] = {
       apiKey: token,
-      // The endpoint is what turns a `claw_` token from a credential with
-      // nowhere to go into a working one — the same rule
-      // `cloudCredentialIsUnusable` applies on the OpenClaw side. A box whose
-      // key is written but whose base_url is not is reported unusable, not
-      // configured, so the panel never offers a voice that would 401.
-      ...(probe.cloudBaseUrl ? { baseUrl: probe.cloudBaseUrl } : {}),
+      // The endpoint a ClawBox would use is a DERIVED CONSTANT, not a fact
+      // discovered on the box — which is the whole difference between this
+      // working and not.
+      //
+      // It read `probe.cloudBaseUrl` alone, and that was a deadlock: the key
+      // is written only by `writeHermesCloudTarget`, reached only from
+      // `selectHermesEngine("cloud")`, reached only after `selectionError`
+      // has passed — and that refuses `cloud` unless the engine is already
+      // `configured`, which needed the endpoint to be there. So on every real
+      // box (install.sh writes only the local provider) the cloud option was
+      // rendered disabled for ever and the whole cloud arm was unreachable.
+      //
+      // What `configured` should mean here is "this box CAN be pointed at the
+      // proxy", i.e. it holds a `claw_` token — and the selection is what
+      // actually points it. A box already pointed somewhere keeps that value.
+      ...(probe.cloudBaseUrl ?? proxyUrl ? { baseUrl: probe.cloudBaseUrl ?? proxyUrl } : {}),
       ...(probe.cloudVoice ? { voice: probe.cloudVoice } : {}),
       ...(probe.cloudModel ? { model: probe.cloudModel } : {}),
     };
@@ -207,6 +246,13 @@ async function set(key: string, value: string): Promise<void> {
  * can never be left pointing at a provider that has nowhere to send a request.
  */
 export async function writeHermesCloudTarget(token: string): Promise<void> {
+  // IMPORTED HERE, not at the top of the file, for the reason hermes-clawai.ts
+  // gives for the same move: `harness/credentials` reaches `openclaw-config`,
+  // which spawns the openclaw CLI, and a static import would put that whole
+  // machinery in the module graph of every route that merely READS the voice
+  // config — including the Hermes chat turn, which never links a box and on
+  // whose edition that CLI does not exist.
+  const { CLAWBOX_AI_PROXY_URL } = await import("@/lib/harness/credentials");
   await set(KEYS.cloudBaseUrl, CLAWBOX_AI_PROXY_URL);
   await set(`tts.${HERMES_CLOUD_TTS_PROVIDER}.api_key`, token);
   await set(KEYS.cloudModel, HERMES_CLOUD_TTS_MODEL);
@@ -324,14 +370,78 @@ export async function speakWithHermes(
  */
 export async function hermesSpeaksReplies(): Promise<boolean> {
   try {
-    const probe = await readHermesVoice();
-    if (probe.provider === HERMES_LOCAL_TTS_PROVIDER) {
-      return probe.localRegistered && probe.localCommand !== null;
+    // Read the SELECTION first and only then the one key that can confirm it,
+    // rather than the whole block through `readHermesVoice`. Every key is a
+    // `hermes config get`, i.e. a Python interpreter, and this runs on the chat
+    // turn: asking all six would start six of them on an 8 GB board the first
+    // time after any config write, five of which cannot change the answer.
+    // Two of the three cases below settle on the first read alone.
+    const provider = trimmed(await hermesConfigGet(KEYS.provider));
+    if (provider === HERMES_LOCAL_TTS_PROVIDER) {
+      // Both halves, because a provider NAMED is not a provider that can
+      // answer: a box that lost its command definition must report that it
+      // cannot speak rather than offer a player that plays nothing.
+      const [type, command] = await Promise.all([
+        hermesConfigGet(KEYS.localType),
+        hermesConfigGet(KEYS.localCommand),
+      ]);
+      return trimmed(type) === "command" && trimmed(command) !== null;
     }
-    if (probe.provider === HERMES_CLOUD_TTS_PROVIDER) return probe.cloudBaseUrl !== null;
+    // The endpoint AND the credential: `writeHermesCloudTarget` writes them
+    // separately and the first failure throws, so a box can hold one without
+    // the other — and either alone speaks nothing.
+    if (provider === HERMES_CLOUD_TTS_PROVIDER) {
+      const [baseUrl, apiKey] = await Promise.all([
+        hermesConfigGet(KEYS.cloudBaseUrl),
+        hermesConfigGet(KEYS.cloudApiKey),
+      ]);
+      return trimmed(baseUrl) !== null && trimmed(apiKey) !== null;
+    }
     // Anything else — unset, or Hermes' factory Edge — is not a voice ClawBox
     // offers, so this box speaks nothing the panel would claim.
     return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Did the voice probe FAIL rather than answer "no"?
+ *
+ * `hermesSpeaksReplies` fails closed, so "this box has no voice" and "the box
+ * could not be asked" leave by the same door — right for the capability, wrong
+ * for the page, which fetches these facts once on mount and on no timer. Its
+ * three sibling probes each contribute one of these to `factsPending`; without
+ * it a single timed-out `hermes config get` hid the box's voice until reload.
+ *
+ * Reads the memo without touching it, so it never starts a spawn of its own.
+ */
+export function hermesVoiceProbePending(): boolean {
+  return hermesConfigReadPending(KEYS.provider);
+}
+
+/**
+ * The device tier the ClawBox AI proxy serves speech to.
+ *
+ * `gateway-pre-start.sh` gates the OpenClaw side on exactly this value
+ * (`CLAWBOX_SPEECH_DEVICE_TIER = "pro"`), because the proxy answers 403 to
+ * anything below it. Named here so the two editions cannot drift into
+ * disagreeing about who has a cloud voice.
+ */
+export const CLAWBOX_AI_SPEECH_TIER = "pro";
+
+/**
+ * Does this box's plan include the cloud voice?
+ *
+ * Read from the tier the portal hand-off stamped (`clawai_tier`), the same
+ * fact the gateway pre-start reads. Fails CLOSED: a tier that cannot be read
+ * is not evidence of an entitlement, and claiming one would put the panel back
+ * to calling a 403 a configured voice.
+ */
+export async function speechEntitledTier(): Promise<boolean> {
+  try {
+    const { get } = await import("@/lib/config-store");
+    return (await get("clawai_tier")) === CLAWBOX_AI_SPEECH_TIER;
   } catch {
     return false;
   }

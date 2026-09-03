@@ -244,8 +244,29 @@ describe.skipIf(!hasBash)("the on-device voice is registered with Hermes nativel
     expect(calls, `the provider command is not Hermes-shaped:\n${res.out}`).toContain(
       `config set tts.providers.${HERMES_PROVIDER}.command ` +
         `${path.join(root, "project", "scripts", "openclaw", "clawbox-tts.sh")} ` +
-        "--voice {voice} --text-file {input_path} -- {output_path}",
+        "--text-file={input_path} -- {output_path}",
     );
+  });
+
+  it("does not pass --voice, so the Voice tab's own pick is what speaks", () => {
+    // clawbox-tts.sh's resolve_voice gives --voice precedence over the saved
+    // voice file, and an UNKNOWN --voice falls back to the script default
+    // rather than to that file. Hermes substitutes its own per-provider voice
+    // for {voice} and ClawBox writes no voice key for this provider, so
+    // passing it would make the Voice tab's voice dropdown a no-op: the owner
+    // picks af_bella, gets a 200 and a panel showing af_bella, and the box
+    // keeps speaking af_heart. The OpenClaw provider passes no --voice for the
+    // same reason; both harnesses read $CLAWBOX_TTS_VOICE_FILE instead.
+    const res = runStep("hermes");
+    const command = res.hermesCalls.find((c) => c.includes(`${HERMES_PROVIDER}.command`)) ?? "";
+    expect(command, `the provider command was not written:\n${res.out}`).not.toBe("");
+    expect(command, `--voice would override the saved voice:\n${res.out}`).not.toContain("--voice");
+    // And the `=` spelling, because the placeholders are interpolated UNQUOTED
+    // into a shell-interpreted string: an empty {input_path} in the separated
+    // form collapses to `--text-file -- /out.wav`, and the script would take
+    // `--` as the flag's value and go on to speak a file path aloud.
+    expect(command, `a separated flag can swallow the next token:\n${res.out}`)
+      .toContain("--text-file={input_path}");
   });
 
   it("registers with BOTH harnesses on the dual SKU", () => {

@@ -30,6 +30,9 @@ import { speakWithHermes } from "@/lib/hermes-tts";
 /** The longest reply worth speaking. */
 const MAX_SPOKEN_CHARS = 4000;
 
+/** Owner-only, matching the sibling media directories. */
+const DIR_MODE = 0o700;
+
 /**
  * How long the TURN may wait for its own audio.
  *
@@ -71,7 +74,16 @@ export async function speakHermesReply(text: string): Promise<string | null> {
   // to outlive the turn.
   if (!trimmed || trimmed.length > MAX_SPOKEN_CHARS) return null;
 
-  const spoken = await speakWithHermes(trimmed, { timeoutMs: REPLY_SPEECH_TIMEOUT_MS });
+  // ONE deadline over the whole thing, not just the synthesis. `dashboardFetch`
+  // logs in before it applies its own timeout (8 s), and retries once on a 401
+  // with a second login behind it — so a dashboard that restarted mid-chat used
+  // to cost login + speak + login + speak on top of this constant, ~50 s of the
+  // composer sitting disabled after the customer had already read the answer.
+  // The signal bounds all of it, so the number below means what it says.
+  const spoken = await speakWithHermes(trimmed, {
+    timeoutMs: REPLY_SPEECH_TIMEOUT_MS,
+    signal: AbortSignal.timeout(REPLY_SPEECH_TIMEOUT_MS),
+  });
   if (!spoken.ok) {
     // Named, not swallowed silently: a box whose voice is configured and
     // refusing is worth one line in the journal. Never the text.
@@ -81,7 +93,12 @@ export async function speakHermesReply(text: string): Promise<string | null> {
 
   try {
     const dir = await chatSpokenReplyDir();
-    await fsp.mkdir(dir, { recursive: true });
+    // 0700 and an explicit chmod, like both sibling media directories:
+    // `mkdir`'s mode is ignored for a directory that already exists, so a tree
+    // created earlier at the umask default would keep leaking its listing —
+    // the timing, count and size of every reply the box spoke.
+    await fsp.mkdir(dir, { recursive: true, mode: DIR_MODE });
+    await fsp.chmod(dir, DIR_MODE).catch(() => {});
     // Both parts are ours: the directory comes from `chatSpokenReplyDir` and
     // the name is a uuid. Nothing the model or the customer influenced reaches
     // this path, which is why it can be written before it is checked.
@@ -114,10 +131,26 @@ export async function speakHermesReply(text: string): Promise<string | null> {
   }
 }
 
-/** The extension `/setup-api/chat/media` will serve this clip under. */
+/**
+ * The extension `/setup-api/chat/media` will serve this clip under.
+ *
+ * Every arm has to be an extension BOTH allowlists claim — `AUDIO_EXT_RE` in
+ * chat-media.ts, which decides whether a `MEDIA:` line is audio at all, and
+ * `CONTENT_TYPES` in the media route, which decides what it is served as. A
+ * clip written under an extension only one of them knows is stored, announced,
+ * matched by neither `isImageMedia` nor `isAudioMedia`, and dropped from the
+ * reply in silence — the bubble renders with no player and nothing is logged.
+ *
+ * `.weba`, not `.webm`, for exactly that reason: the media route says in as
+ * many words that `isAudioMedia` "deliberately does NOT claim" `.webm`, so a
+ * WebM clip named that way would vanish on every reply.
+ */
 function extensionFor(mime: string): string {
   if (mime.includes("mpeg") || mime.includes("mp3")) return ".mp3";
   if (mime.includes("ogg") || mime.includes("opus")) return ".ogg";
-  if (mime.includes("webm")) return ".webm";
+  if (mime.includes("webm")) return ".weba";
+  if (mime.includes("mp4") || mime.includes("m4a")) return ".m4a";
+  if (mime.includes("aac")) return ".aac";
+  if (mime.includes("flac")) return ".flac";
   return ".wav";
 }

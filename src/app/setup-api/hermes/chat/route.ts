@@ -400,6 +400,9 @@ async function settleTurn(
   // Fail-soft and bounded (see speakHermesReply): a reply that could not be
   // spoken still renders, silently. Losing the answer to a busy voice would be
   // a far worse trade than losing the audio.
+  // The capability read is inside the try/catch of neither — `hermesSpeaksReplies`
+  // fails closed and `speakHermesReply` never throws — so a box that cannot
+  // answer the question simply does not speak, and the turn is unaffected.
   const spokenClip = (await hermesSpeaksReplies()) ? await speakHermesReply(caption) : null;
   const answer = [
     caption,

@@ -2990,8 +2990,26 @@ step_openclaw_tts() {
     local HERMES_TTS_PROVIDER="clawbox-local"
     # The command Hermes will run. The placeholders are Hermes' own; the
     # example in its tool ships them unquoted, so they are unquoted here too.
-    local HERMES_TTS_COMMAND="$TTS_SCRIPT --voice {voice} --text-file {input_path} -- {output_path}"
-    local HERMES_TTS_FAIL=""
+    # NO `--voice`. Two reasons, both verified:
+    #
+    #  1. clawbox-tts.sh's resolve_voice gives --voice precedence over the saved
+    #     voice file, and an UNKNOWN --voice falls back to the script default
+    #     rather than to that file. Hermes substitutes its own per-provider
+    #     voice (or nothing) for {voice}, and ClawBox writes no voice key for
+    #     this provider — so passing it would make the Voice tab's own voice
+    #     dropdown a no-op: the owner picks af_bella, gets a 200 and a panel
+    #     showing af_bella, and the box keeps speaking af_heart.
+    #  2. The OpenClaw provider passes no --voice either, for exactly that
+    #     reason. `POST /setup-api/tts {action:"voice",engine:"local"}` writes
+    #     $CLAWBOX_TTS_VOICE_FILE and the script reads it on every utterance;
+    #     that is the mechanism, and both harnesses now share it.
+    #
+    # `=` spellings, because the placeholders are interpolated UNQUOTED into a
+    # shell-interpreted string: an empty {input_path} in the separated form
+    # collapses to `--text-file -- /out.wav`, and the script would take `--` as
+    # the flag's value and then speak a file path aloud.
+    local HERMES_TTS_COMMAND="$TTS_SCRIPT --text-file={input_path} -- {output_path}"
+    local HERMES_TTS_FAIL="" HERMES_TTS_READ_FAILED=false
     # Rule (a), the same one the OpenClaw arm applies below: never point a
     # harness at a command that is not executable. It looks like a working
     # install right up until someone asks the box to speak.
@@ -3005,9 +3023,25 @@ step_openclaw_tts() {
       # decision below is made against what the owner actually has. An unset
       # key exits 1 with `Config key not set: <key>` on stderr and prints
       # nothing, so a failed read and an unset key both arrive here as "".
-      local CURRENT_HERMES_TTS
-      CURRENT_HERMES_TTS=$(as_clawbox "$HERMES_TTS_BIN" config get tts.provider 2>/dev/null || echo "")
-      CURRENT_HERMES_TTS=$(printf '%s' "$CURRENT_HERMES_TTS" | tr -d '\r' | tail -1)
+      # AN UNSET KEY IS NOT A FAILED READ, and the difference decides whether
+      # the owner keeps their voice. `hermes config get` exits non-zero for
+      # both, and treating the two alike is the defect hermes-config-cache.ts
+      # documents at length for the TypeScript side ("storing '' for it …
+      # remembers a failed QUESTION as a negative ANSWER"). An owner who chose
+      # ElevenLabs, plus one OOM-killed Python start on a loaded Jetson, would
+      # otherwise have that choice silently replaced — on every update.
+      #
+      # So only the "not set" wording, or a clean exit, counts as an answer.
+      # Anything else leaves tts.provider alone and says so.
+      local CURRENT_HERMES_TTS="" HERMES_TTS_READ_OUT HERMES_TTS_READ_RC=0
+      HERMES_TTS_READ_OUT=$(as_clawbox "$HERMES_TTS_BIN" config get tts.provider 2>&1) || HERMES_TTS_READ_RC=$?
+      if [ "$HERMES_TTS_READ_RC" -eq 0 ]; then
+        CURRENT_HERMES_TTS=$(printf '%s' "$HERMES_TTS_READ_OUT" | tr -d '\r' | tail -1)
+      elif printf '%s' "$HERMES_TTS_READ_OUT" | grep -qi "config key not set"; then
+        CURRENT_HERMES_TTS=""
+      else
+        HERMES_TTS_READ_FAILED=true
+      fi
 
       # Rule (b): the DEFINITION lands before the provider is selected, and a
       # definition that did not land is never selected — pointing the harness
@@ -3037,6 +3071,13 @@ step_openclaw_tts() {
         # owner added by hand — is the owner's own choice and is preserved
         # untouched, exactly as the OpenClaw arm below preserves theirs, and
         # this step re-runs on every update.
+        if [ "$HERMES_TTS_READ_FAILED" = true ]; then
+          # The provider definition above still landed, which is the half that
+          # is safe to repeat. What is refused here is CHOOSING for an owner
+          # whose current choice could not be read.
+          echo "  Warning: could not read tts.provider from Hermes — leaving the selection alone rather than overwriting a choice we could not read" >&2
+          return "$TTS_RC"
+        fi
         case "$CURRENT_HERMES_TTS" in
           ""|null|edge|"$HERMES_TTS_PROVIDER")
             if as_clawbox "$HERMES_TTS_BIN" config set tts.provider "$HERMES_TTS_PROVIDER"; then
@@ -3964,6 +4005,22 @@ step_post_update() {
   # `|| echo "(non-fatal)"` — indistinguishable from the fourteen lines around
   # it — reported "this box has no working TTS engine" in the same words as a
   # skipped VNC refresh, on the very path that reaches ALREADY-SHIPPED boxes.
+  # ── The Hermes agent FIRST, for the same reason the fresh-install path was
+  # reordered ──────────────────────────────────────────────────────────────
+  # step_openclaw_tts registers the on-device voice with every harness the box
+  # runs, and the Hermes half of that is written through ~/.local/bin/hermes.
+  # The repair below is exactly the population that needs it: a box whose
+  # factory reset (pre-fix build) deleted ~/.hermes/hermes-agent still HAS the
+  # executable shim, so the `-x` guard passes, both `hermes config set` calls
+  # fail against the missing venv, and the update ends with a recorded
+  # provisioning failure and a scary "Hermes will not speak on this box" — over
+  # a box that step_hermes_install repairs perfectly forty lines later, and
+  # which would then have no voice registered until the NEXT update.
+  #
+  # Idempotent and self-gated on has_hermes_harness (a no-op on openclaw), so
+  # moving it up costs nothing on any other SKU.
+  step_hermes_install || echo "  Warning: hermes_install step failed (non-fatal)"
+
   local TTS_UPDATE_RC=0
   step_openclaw_tts || TTS_UPDATE_RC=$?
   case "$TTS_UPDATE_RC" in
@@ -4001,9 +4058,10 @@ step_post_update() {
   # off it by a hand-run `hermes update`, which reattaches to main): that box
   # takes the reversible pinned upgrade ONCE — a clone plus venv build, ~90s
   # measured — and is a no-op on every update after it.
-  # step_hermes_install self-gates on has_hermes_harness; step_llamacpp_model
-  # deliberately does not (see its comment).
-  step_hermes_install || echo "  Warning: hermes_install step failed (non-fatal)"
+  # step_hermes_install has already run ABOVE, before step_openclaw_tts, because
+  # the voice registration writes through the Hermes CLI — see the comment
+  # there. It is idempotent, so the move is a reordering and not a second run.
+  # step_llamacpp_model deliberately does not self-gate (see its comment).
   step_llamacpp_model || echo "  Warning: llamacpp_model step failed (non-fatal)"
   # Hermes re-provisioning is deliberately NOT called here. The in-app updater
   # dispatches `hermes_edition` as its own step immediately after this one, so a

@@ -137,8 +137,12 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     try {
       const res = await fetch("/setup-api/tts", { cache: "no-store" });
       const data = await res.json();
-      setNoChannelSpeech(channelsUnavailable(data));
+      // Both pieces of state follow the same "keep the last good reading" rule.
+      // Set before the guard, an error body — `res.ok` is never checked — would
+      // read as `channelsUnavailable: false` and quietly clear a note the box
+      // had already given us, while `status` correctly kept its last value.
       if (!isVoiceStatus(data)) return;
+      setNoChannelSpeech(channelsUnavailable(data));
       setStatus(data);
     } catch {
       /* keep the last good reading rather than blanking the panel */
