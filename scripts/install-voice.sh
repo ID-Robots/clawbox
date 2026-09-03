@@ -10,7 +10,9 @@
 # `KPipeline(lang_code='a').g2p.fallback` is still an EspeakFallback that
 # phonemises out-of-vocabulary words. The header used to claim the apt package
 # was required and install.sh has never installed it (TASK-686); what the claim
-# was standing in for is now CHECKED, in kokoro_predownload_model below.
+# was standing in for is now CHECKED on every run, by kokoro_check_phonemiser
+# below -- outside the idempotence gate, because a box that already has the
+# stack is exactly the box a broken wheel would be found on.
 #
 # Usage:
 #   install-voice.sh              full STT+TTS install (CTranslate2 source
@@ -332,16 +334,50 @@ kokoro_predownload_model() {
 from kokoro import KPipeline
 pipeline = KPipeline(lang_code='a')
 print('Kokoro model ready on', next(pipeline.model.parameters()).device)
-# kokoro builds the espeak phonemiser fallback inside a try/except and degrades
-# to logger.warning('EspeakFallback not Enabled: OOD words will be skipped')
-# plus fallback=None. Nothing downstream reads that warning, so a box in that
-# arm published KOKORO=ready and then silently dropped every out-of-vocabulary
-# word -- a name, a brand, 'ClawBox' itself -- from every spoken reply. Fail the
-# warm-up instead, so the verdict says the engine is not usable.
-if getattr(pipeline.g2p, 'fallback', None) is None:
-    raise SystemExit('espeak phonemiser fallback unavailable: out-of-vocabulary words would be dropped from speech (the espeakng-loader wheel that kokoro pulls in is missing or broken)')
 " 2>&1) || rc=$?
   printf '%s\n' "$out" | tail -5
+  return "$rc"
+}
+
+# Can this box turn a word it has never seen into phonemes?
+#
+# kokoro builds its espeak fallback inside a try/except and degrades to
+# logger.warning('EspeakFallback not Enabled: OOD words will be skipped') plus
+# fallback=None (kokoro/pipeline.py). Nothing downstream reads that warning, so
+# a box in that arm published KOKORO=ready and then silently dropped every
+# out-of-vocabulary word -- a name, a brand, 'ClawBox' itself -- from every
+# spoken reply.
+#
+# BEHAVIOUR, not structure: it phonemises a word no lexicon has, which is the
+# thing that actually matters and which survives an upstream rename. `kokoro` is
+# installed unpinned, so a check written against today's attribute names would
+# start failing WORKING boxes the day misaki moves one. An empty result, or the
+# unknown-token marker misaki emits when it has no fallback, is the failure; a
+# shape this cannot read at all is a warning, never a verdict.
+#
+# It costs a pipeline construction against an already-cached model, so it runs on
+# EVERY run -- including the box that skips the whole GPU install because it is
+# already stamped, which is precisely the box a broken wheel would be found on.
+kokoro_check_phonemiser() {
+  local out rc=0
+  echo "  Checking the phonemiser..."
+  out=$(clawbox_python "
+from kokoro import KPipeline
+pipeline = KPipeline(lang_code='a')
+try:
+    g2p = pipeline.g2p
+    phonemes = g2p('zorblattic frobnicator squibbled')[0] or ''
+except Exception as exc:
+    print('WARN: could not exercise the phonemiser (' + type(exc).__name__ + ': ' + str(exc) + ') -- not treating that as a verdict')
+    raise SystemExit(0)
+# Nothing in that line is in any lexicon, so with a working espeak fallback it
+# is all phonemes. Without one misaki emits its unknown marker, or nothing at
+# all when kokoro built the G2P with unk='' -- strip both before judging.
+if not phonemes.replace(chr(10067), '').strip():
+    raise SystemExit('espeak phonemiser unavailable: out-of-vocabulary words are dropped from speech (the espeakng-loader wheel kokoro pulls in is missing or broken)')
+print('Phonemiser OK (out-of-vocabulary words phonemise)')
+" 2>&1) || rc=$?
+  printf '%s\n' "$out" | tail -3
   return "$rc"
 }
 
@@ -591,6 +627,18 @@ install_kokoro_tts() {
     kokoro_mark_installed
   fi
 
+  # Outside the gate above, deliberately. `kokoro_stack_present` proves `import
+  # kokoro, torch` works, which a broken espeakng-loader does not disturb --
+  # misaki degrades rather than raising -- so an already-stamped box would take
+  # the skip arm and reach `ready` with a phonemiser that drops every
+  # out-of-vocabulary word. --tts-only runs on every in-app update, so that is
+  # every box on the fleet, including the one this fix is being shipped to.
+  if ! kokoro_check_phonemiser; then
+    echo "  ERROR: Kokoro cannot phonemise out-of-vocabulary words — names and brands would be dropped from speech" >&2
+    kokoro_report "failed:phonemiser"
+    return 12
+  fi
+
   # Refreshed on every run, present or not: the unit points at a script
   # deploy_voice_scripts just re-copied, and a stale unit is how a working box
   # stops working after an update.
@@ -802,6 +850,11 @@ else
 fi
 
 # ── Step 7: Deploy scripts ───────────────────────────────────────────────────
+
+if ! kokoro_check_phonemiser; then
+  KOKORO_FULL_OK=false
+  echo "  Warning: Kokoro cannot phonemise out-of-vocabulary words — names and brands would be dropped from speech"
+fi
 
 echo "[7/7] Deploying voice server scripts..."
 SCRIPTS_DST="$WORKSPACE/scripts"
