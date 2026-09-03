@@ -112,7 +112,7 @@ describe("the cloud speech endpoint", () => {
   } as unknown as VoiceConfigView);
 
   it("refuses plain http off the box, and never sends the credential there", async () => {
-    const fetchMock = vi.fn(async () => new Response(new Uint8Array(4096), { status: 200, headers: { "Content-Type": "audio/wav" } }));
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response(new Uint8Array(4096), { status: 200, headers: { "Content-Type": "audio/wav" } }));
     vi.stubGlobal("fetch", fetchMock);
     try {
       const res = await speakInCloud(configWith("http://evil.example/api/ai"), null, "hi");
