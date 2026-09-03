@@ -332,9 +332,12 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     // picker answered, and refused the box's OWN default on every update until
     // the refresh landed. `readSubscriptionSurfaceIds` unions the curated
     // catalogue for exactly this window.
-    mockSurfaceRead.mockResolvedValue(
-      surfaceCache(SURFACE_IDS.filter((id) => id !== "claude-sonnet-5")) as never,
-    );
+    // The precondition, asserted rather than assumed: the shipped default is
+    // absent from this cached surface, and that absence is the whole window
+    // the union covers. A later refresh of SURFACE_IDS from a real box would
+    // add claude-opus-5 and silently retire this regression otherwise.
+    expect(SURFACE_IDS).not.toContain("claude-opus-5");
+    mockSurfaceRead.mockResolvedValue(surfaceCache(SURFACE_IDS) as never);
 
     const res = await configurePost(subscribe());
 
@@ -345,7 +348,7 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
         vi.mocked(runOpenclawConfigSetBatch),
         "agents.defaults.model.primary",
       )?.value,
-    ).toBe("anthropic/claude-sonnet-5");
+    ).toBe("anthropic/claude-opus-5");
   });
 
   it("still judges the settled default, not only a typed id", async () => {
@@ -358,14 +361,13 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     // Once-only: `vi.clearAllMocks()` clears calls, not implementations, so a
     // sticky override would follow this test into the next one.
     vi.mocked(getProviderCatalog).mockReturnValueOnce(null);
-    mockSurfaceRead.mockResolvedValue(
-      surfaceCache(SURFACE_IDS.filter((id) => id !== "claude-sonnet-5")) as never,
-    );
+    expect(SURFACE_IDS).not.toContain("claude-opus-5");
+    mockSurfaceRead.mockResolvedValue(surfaceCache(SURFACE_IDS) as never);
 
     const res = await configurePost(subscribe());
 
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toContain("claude-sonnet-5");
+    expect((await res.json()).error).toContain("claude-opus-5");
     expectNoSideEffects();
   });
 

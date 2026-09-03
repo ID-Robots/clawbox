@@ -1360,7 +1360,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands.some((command) => command.includes("config set models.providers.anthropic"))).toBe(true);
-    expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-sonnet-5");
+    expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-opus-5");
 
     const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.anthropic");
     const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
@@ -1409,7 +1409,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     // ...and the rest of the save is unchanged: the subscription still becomes
     // the primary, in merge mode, with an oauth auth profile.
-    expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-sonnet-5");
+    expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-opus-5");
     expect(commands).toContain("config set models.mode merge");
 
     const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
@@ -2218,8 +2218,8 @@ describe("POST /setup-api/ai-models/configure", () => {
   // the flag as it was.
   describe("the anthropic plugin around the primary write", () => {
     const UNKNOWN_MODEL =
-      'Cannot set model reference "anthropic/claude-sonnet-5" at agents.defaults.model.primary: '
-      + "Unknown model: anthropic/claude-sonnet-5. Run openclaw models list to list available models.";
+      'Cannot set model reference "anthropic/claude-opus-5" at agents.defaults.model.primary: '
+      + "Unknown model: anthropic/claude-opus-5. Run openclaw models list to list available models.";
     const ENABLE_OP = ["plugins.entries.anthropic.enabled", "true", "--json"];
 
     /** Where in vitest's global call sequence the first call `pick` accepts sits. */
@@ -2290,7 +2290,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
       const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-test123" }));
       expect(res.status).toBe(200);
-      expect(vi.mocked(setPrimaryModelWithoutCatalogValidation)).toHaveBeenCalledWith("anthropic/claude-sonnet-5");
+      expect(vi.mocked(setPrimaryModelWithoutCatalogValidation)).toHaveBeenCalledWith("anthropic/claude-opus-5");
       const batches = vi.mocked(runOpenclawConfigSetBatch).mock.calls;
       expect(batches.length).toBeGreaterThanOrEqual(2);
       const retry = batches[1][0];

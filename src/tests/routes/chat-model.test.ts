@@ -210,7 +210,9 @@ describe("/setup-api/chat/model", () => {
     expect(body.options.map((option: { model: string | null }) => option.model)).toEqual([
       "deepseek/deepseek-v4-flash",
       "openai/gpt-5.4",
-      "anthropic/claude-sonnet-5",
+      // The row POST /setup-api/providers/default reads for "Make default ->
+      // Anthropic" when the box has no Anthropic model of its own.
+      "anthropic/claude-opus-5",
       "llamacpp/gemma4-e2b-it-q4_0",
     ]);
   });
@@ -913,8 +915,8 @@ describe("/setup-api/chat/model", () => {
 
   describe("the anthropic plugin around the primary write", () => {
     const UNKNOWN_MODEL =
-      'Cannot set model reference "anthropic/claude-sonnet-5" at agents.defaults.model.primary: '
-      + "Unknown model: anthropic/claude-sonnet-5. Run openclaw models list to list available models.";
+      'Cannot set model reference "anthropic/claude-opus-5" at agents.defaults.model.primary: '
+      + "Unknown model: anthropic/claude-opus-5. Run openclaw models list to list available models.";
     const ENABLE_OP = ["plugins.entries.anthropic.enabled", "true", "--json"];
 
     /** Where in vitest's global call sequence the first call `pick` accepts sits. */
@@ -955,7 +957,7 @@ describe("/setup-api/chat/model", () => {
       const response = await POST(new Request("http://localhost/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+        body: JSON.stringify({ model: "anthropic/claude-opus-5" }),
       }));
       const body = await response.json();
 
@@ -963,7 +965,7 @@ describe("/setup-api/chat/model", () => {
       expect(response.status).toBe(200);
       expect(runOpenclawConfigSetBatch).toHaveBeenCalledWith([
         ENABLE_OP,
-        ["agents.defaults.model.primary", "anthropic/claude-sonnet-5"],
+        ["agents.defaults.model.primary", "anthropic/claude-opus-5"],
       ]);
       // A plugin enabled by the batch loads on the next gateway start, so the
       // restart that already follows the switch has to stay after it.
@@ -979,7 +981,7 @@ describe("/setup-api/chat/model", () => {
       const response = await POST(new Request("http://localhost/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+        body: JSON.stringify({ model: "anthropic/claude-opus-5" }),
       }));
       const body = await response.json();
 
@@ -1029,7 +1031,7 @@ describe("/setup-api/chat/model", () => {
         const response = await POST(new Request("http://localhost/test", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+          body: JSON.stringify({ model: "anthropic/claude-opus-5" }),
         }));
 
         expect(response.status).toBe(200);
@@ -1046,7 +1048,7 @@ describe("/setup-api/chat/model", () => {
         const response = await POST(new Request("http://localhost/test", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+          body: JSON.stringify({ model: "anthropic/claude-opus-5" }),
         }));
 
         expect(response.status).toBe(200);
@@ -1064,7 +1066,7 @@ describe("/setup-api/chat/model", () => {
         const response = await POST(new Request("http://localhost/test", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+          body: JSON.stringify({ model: "anthropic/claude-opus-5" }),
         }));
 
         expect(response.status).toBe(200);
@@ -1081,7 +1083,7 @@ describe("/setup-api/chat/model", () => {
         const response = await POST(new Request("http://localhost/test", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+          body: JSON.stringify({ model: "anthropic/claude-opus-5" }),
         }));
 
         expect(response.status).toBe(409);
@@ -1098,7 +1100,7 @@ describe("/setup-api/chat/model", () => {
       await POST(new Request("http://localhost/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+        body: JSON.stringify({ model: "anthropic/claude-opus-5" }),
       }));
 
       const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls.at(-1)?.[0] as string[][];

@@ -135,9 +135,34 @@ export interface ProviderCatalog {
 // enumeration returns.
 export const ANTHROPIC_MODELS: readonly ProviderModelOption[] = [
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest, near-frontier." },
-  { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Default. Speed + intelligence." },
-  { id: "claude-opus-5", label: "Claude Opus 5", hint: "Most capable." },
+  { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Speed + intelligence." },
+  { id: "claude-opus-5", label: "Claude Opus 5", hint: "Default. Most capable." },
 ] as const;
+
+/**
+ * The Anthropic model this box lands on when nothing named one.
+ *
+ * Exported so the two routes that WRITE `agents.defaults.model.primary` for a
+ * provider the caller did not pick a model for — ai-models/configure's
+ * PROVIDERS table and chat/model's DEFAULT_PROVIDER_MODELS — name one id
+ * instead of a copy each. Those two are final: neither consults the box's own
+ * enumeration. The catalog route reads the same answer through
+ * `getProviderCatalog(...).defaultModelId` below, but only as its fallback —
+ * a row the harness tags `default` outranks it there (`isDefault` in
+ * src/app/setup-api/ai-models/catalog/route.ts).
+ *
+ * The two agree on the pinned core: `openclaw models list --provider anthropic
+ * --all --json` on 2026.8.1 answers eleven rows with an empty `tags` on every
+ * one (measured 2026-09-03), claude-opus-5 among them, so nothing outranks
+ * this and the picker pre-selects what "Make default -> Anthropic" writes. A
+ * later core that starts tagging an Anthropic row would show that row in the
+ * picker while these two still write this id — deliberate, per the ruling that
+ * put Opus 5 here, and the point to revisit if it happens.
+ *
+ * Hermes never reads it: there the recommendation comes from the harness's own
+ * `/api/model/recommended-default` (src/lib/hermes-model-options.ts).
+ */
+export const ANTHROPIC_DEFAULT_MODEL_ID = "claude-opus-5";
 
 // OpenAI API key models — cold-start display only, like every list here.
 // There is no longer a generation allowlist at the catalog route for openai:
@@ -357,7 +382,7 @@ export const PROVIDER_CATALOGS = Object.freeze({
   anthropic: {
     provider: "anthropic",
     models: ANTHROPIC_MODELS,
-    defaultModelId: "claude-sonnet-5",
+    defaultModelId: ANTHROPIC_DEFAULT_MODEL_ID,
     allowCustom: true,
   },
   openai: {

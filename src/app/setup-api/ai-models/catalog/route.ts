@@ -66,9 +66,9 @@ interface CatalogModel {
    * The harness tagged this row `default` for its provider.
    *
    * Carried rather than dropped because it is the box's own answer to the same
-   * question `DEFAULT_MODEL_BY_PROVIDER` answers by hand, and a hand-written
-   * default is the identical defect to a hand-written list: on a 2026.8.1 host
-   * `openclaw models list --provider openai` tags `gpt-5.6-sol`, while the map
+   * question `PROVIDER_CATALOGS` answers by hand, and a hand-written default is
+   * the identical defect to a hand-written list: on a 2026.8.1 host `openclaw
+   * models list --provider openai` tags `gpt-5.6-sol`, while the curated table
    * says `gpt-5.4`. Only a live enumeration ever sets it — the curated
    * cold-start rows carry no such claim.
    */
@@ -271,16 +271,6 @@ function recordSuccessfulRefresh(provider: string): void {
 function clearFailedRefresh(provider: string): void {
   failedRefreshes.delete(provider);
 }
-
-const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
-  clawai: "deepseek-v4-flash",
-  anthropic: "claude-sonnet-5",
-  openai: "gpt-5.4",
-  // Newest model on every ChatGPT tier including Free; gpt-5.6 is plan-gated.
-  codex: "gpt-5.5",
-  google: "gemini-2.5-flash",
-  openrouter: "anthropic/claude-haiku-4.5",
-};
 
 // ClawBox AI catalog is hardcoded — Mike's gateway routes via DeepSeek
 // upstream but the only end-user-pickable variants are the two device
@@ -516,7 +506,7 @@ async function fetchSubscriptionSurfaceIds(provider: string): Promise<Set<string
     const { models } = await fetchOpenclawCatalog(surfaceProvider);
     if (models.length === 0) return null;
     // Through `buildPayload`, not hand-assembled beside it. The hand-built
-    // version skipped `sanitizeCatalogModels`, `DEFAULT_MODEL_BY_PROVIDER` and
+    // version skipped `sanitizeCatalogModels`, the default resolution and
     // `ALLOW_CUSTOM_BY_PROVIDER` while writing to the very file the picker and
     // the server-side guard read back — a second, quieter way for this route to
     // persist something no other path would have produced.
@@ -787,12 +777,13 @@ function buildPayload(
     merged = merged.map((m) => ({ ...m, availableOnSubscription: true }));
   }
   // The BOX's answer first. `openclaw models list` tags one row `default` per
-  // provider, and preferring the hand-written map over it is the same defect
+  // provider, and preferring the curated default over it is the same defect
   // this change exists to fix, pointed at the default instead of the list: on a
-  // stock 2026.8.1 host the map picks `gpt-5.4` while the box says
-  // `gpt-5.6-sol`. The map stays as the fallback for a catalogue that tags
-  // nothing and for the curated cold-start rows, which carry no tag at all.
-  const fallbackDefault = DEFAULT_MODEL_BY_PROVIDER[provider];
+  // stock 2026.8.1 host the curated table picks `gpt-5.4` while the box says
+  // `gpt-5.6-sol`. `PROVIDER_CATALOGS` stays as the fallback for a catalogue
+  // that tags nothing and for the curated cold-start rows, which carry no tag
+  // at all — one table, the same one the picker renders.
+  const fallbackDefault = getProviderCatalog(provider)?.defaultModelId;
   const defaultModelId = merged.find((m) => m.isDefault)?.id
     ?? merged.find((m) => m.id === fallbackDefault)?.id
     ?? merged[0]?.id
