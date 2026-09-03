@@ -42,6 +42,7 @@ type Translate = (key: string, params?: Record<string, string | number>) => stri
 function shellScanWarning(
   scan: ShellScanRow | null | undefined,
   t: Translate,
+  locale: string,
 ): { title: string; detail: string; severe: boolean } | null {
   if (!scan || scan.state === "on") return null;
   if (scan.state === "unknown") {
@@ -53,7 +54,9 @@ function shellScanWarning(
   // Upstream suppresses the re-download for 24 h after a failure, so "connect
   // it to the internet" is not the whole story and the owner has to be told.
   const until = scan.retrySuppressedUntil
-    ? ` ${t("shellScan.retryAfter", { time: new Date(scan.retrySuppressedUntil).toLocaleString() })}`
+    // The UI locale, not the runtime default: the rest of this sentence is
+    // already in the owner's language, so the timestamp inside it has to be.
+    ? ` ${t("shellScan.retryAfter", { time: new Date(scan.retrySuppressedUntil).toLocaleString(locale) })}`
     : "";
   // The two outcomes are opposites, not degrees: fail-open runs the command
   // unchecked, fail-closed refuses to run it at all.
@@ -66,7 +69,7 @@ function shellScanWarning(
 // Both share one identity; providers stay per-harness. Self-contained so it
 // drops into Settings → System with a single import.
 export default function HarnessPicker() {
-  const { t } = useT();
+  const { t, locale } = useT();
   const [status, setStatus] = useState<HarnessStatus | null>(null);
   const [switching, setSwitching] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -113,7 +116,7 @@ export default function HarnessPicker() {
   );
 
   const activeEntry = status?.harnesses?.find((h) => h.id === status.active);
-  const warning = shellScanWarning(status?.shellScan, t);
+  const warning = shellScanWarning(status?.shellScan, t, locale);
 
   return (
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">

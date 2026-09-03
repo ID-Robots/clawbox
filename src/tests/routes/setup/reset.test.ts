@@ -519,8 +519,11 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     "state.db",
     "projects.db",
   ];
-  // What ~/.hermes/bin holds: the upstream tirith binary.
-  const HERMES_BIN_ENTRIES = ["tirith"];
+  // What ~/.hermes/bin holds: the upstream tirith binary, plus a second entry
+  // so the assertion below pins the WHOLE directory rather than one name — a
+  // future narrowing that kept `tirith` and removed its neighbour would
+  // otherwise slip through.
+  const HERMES_BIN_ENTRIES = ["tirith", "future-helper"];
   // The reset preserves the agent install and the bin/ the scanner lives in.
   // Everything else under ~/.hermes is previous-owner state and must go.
   const KEPT_ENTRIES = ["hermes-agent", "bin"];

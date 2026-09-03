@@ -45,13 +45,24 @@ let configText: string | null | Error = "";
 const enoent = () => Object.assign(new Error("ENOENT"), { code: "ENOENT" });
 
 const stat = vi.fn(async (p: string) => {
-  if (p === MARKER) {
-    if (markerMtimeMs === null) throw enoent();
-    return { mtimeMs: markerMtimeMs, isFile: () => true };
-  }
   if (directories.has(p)) return { mtimeMs: 0, isFile: () => false };
   if (executables.has(p) || plainFiles.has(p)) return { mtimeMs: 0, isFile: () => true };
   throw enoent();
+});
+/**
+ * The marker is read through ONE descriptor — its age and its reason together
+ * decide what the owner is told, and reading them by name twice is a TOCTOU
+ * (CodeQL js/file-system-race). The mock mirrors that: no `stat(MARKER)` path
+ * exists, so a regression back to stat-then-read fails here.
+ */
+const open = vi.fn(async (p: string) => {
+  if (p !== MARKER || markerMtimeMs === null) throw enoent();
+  const mtimeMs = markerMtimeMs;
+  return {
+    stat: async () => ({ mtimeMs, isFile: () => true }),
+    readFile: async () => markerReason,
+    close: async () => {},
+  };
 });
 const access = vi.fn(async (p: string) => {
   if (!executables.has(p)) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
@@ -62,10 +73,6 @@ const readFile = vi.fn(async (p: string) => {
     if (configText instanceof Error) throw configText;
     return configText;
   }
-  if (p === MARKER) {
-    if (markerMtimeMs === null) throw enoent();
-    return markerReason;
-  }
   throw enoent();
 });
 vi.mock("fs/promises", () => ({
@@ -73,6 +80,7 @@ vi.mock("fs/promises", () => ({
     stat: (p: string) => stat(p),
     access: (p: string) => access(p),
     readFile: (p: string) => readFile(p),
+    open: (p: string) => open(p),
   },
 }));
 

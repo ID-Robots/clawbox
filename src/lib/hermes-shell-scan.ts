@@ -59,6 +59,7 @@
  */
 
 import fs from "fs/promises";
+import type { FileHandle } from "fs/promises";
 import { constants as fsConstants } from "fs";
 import path from "path";
 
@@ -193,6 +194,7 @@ async function resolveScanner(configuredPath: string): Promise<string | null> {
   return (await which(DEFAULT_PATH)) ?? (await onlyIfExecutable(path.join(hermesHome(), "bin", DEFAULT_PATH)));
 }
 
+/** `p` when it is an executable regular file, otherwise null. */
 async function onlyIfExecutable(p: string): Promise<string | null> {
   return (await isExecutableFile(p)) ? p : null;
 }
@@ -206,16 +208,30 @@ async function onlyIfExecutable(p: string): Promise<string | null> {
  */
 async function readRetrySuppressedUntil(): Promise<string | null> {
   const marker = path.join(hermesHome(), INSTALL_FAILED_MARKER);
+  // ONE descriptor for both the age and the reason. Reading the mtime by name
+  // and then the contents by name lets the path mean two different files
+  // between the calls (CWE-367), and those two answers together decide what the
+  // owner is told about a security control. O_NONBLOCK because the regular-file
+  // check happens after the open: a fifo dropped here would otherwise park this
+  // request until someone opened the write end. Same open, for the same two
+  // reasons, as `readEnvText` in hermes-env.ts.
+  let handle: FileHandle;
   try {
-    const [stat, reason] = await Promise.all([
-      fs.stat(marker),
-      fs.readFile(marker, "utf-8").catch(() => ""),
-    ]);
+    handle = await fs.open(marker, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  } catch {
+    return null; // No marker — upstream retries on the next command.
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) return null;
+    const reason = await handle.readFile("utf-8");
     if (reason.trim() === RETRYABLE_MARKER_REASON) return null;
     const until = stat.mtimeMs + MARKER_TTL_MS;
     return until > Date.now() ? new Date(until).toISOString() : null;
   } catch {
     return null;
+  } finally {
+    await handle.close().catch(() => {});
   }
 }
 

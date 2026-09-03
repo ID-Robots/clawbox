@@ -103,7 +103,7 @@ The script defaults to `main`; `CLAWBOX_BRANCH` keeps a box on its own channel.
 internet and could not re-download them:
 
 - `data/network.env` and `data/llamacpp/models/` — the offline on-device model weights (several GB).
-- `~/.hermes/hermes-agent/` and `~/.hermes/bin/tirith` on the Hermes edition — the agent checkout and its Python venv (`~/.local/bin/hermes` is a shim that execs the interpreter inside it), plus the pre-exec shell scanner the agent runs every command past. The scanner is downloaded from a GitHub release on first use, so a box that lost it and has no internet runs commands unscanned.
+- `~/.hermes/hermes-agent/` and the whole of `~/.hermes/bin/` on the Hermes edition — the agent checkout and its Python venv (`~/.local/bin/hermes` is a shim that execs the interpreter inside it), plus everything in `bin/`, which is where the agent installs `tirith`, the pre-exec shell scanner it runs every command past. The scanner is downloaded from a GitHub release on first use, so a box that lost it and has no internet runs commands unscanned. The reset keeps `bin/` entire rather than filtering it down to `tirith`: nothing on the device has an authoritative inventory of that directory, so removing its other entries could brick a box with no internet to restore them.
 - `~/.cache/huggingface` voice models (only the `token` / `stored_tokens` credential files are removed).
 
 The device's **portal identity is also not cleared**: the cached id in `data/cloudflared/device-id`
@@ -172,9 +172,10 @@ step fails you can stop and retry without stranding the box.
     # OpenClaw state and ClawKeep backup pairing (both editions — harmless if empty).
     find ~/.openclaw ~/.clawkeep -maxdepth 1 -mindepth 1 -exec rm -rf {} + 2>/dev/null || true
 
-    # Hermes edition only — everything except the agent install and the shell scanner.
+    # Hermes edition only — everything except the agent install and bin/, which
+    # holds the pre-exec shell scanner. Both are kept whole, exactly as the UI
+    # reset keeps them.
     find ~/.hermes -maxdepth 1 -mindepth 1 ! -name hermes-agent ! -name bin -exec rm -rf {} +
-    find ~/.hermes/bin -maxdepth 1 -mindepth 1 ! -name tirith -exec rm -rf {} + 2>/dev/null || true
     ```
 
     `~/.hermes` is where a Hermes box keeps its `config.yaml` (billing token, dashboard signing
