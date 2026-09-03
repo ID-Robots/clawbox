@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
+import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
 
 /**
  * The anthropic plugin toggle is two halves around the primary write: the
@@ -100,6 +100,44 @@ describe("enableProviderPluginOps — the ops that ride in the primary batch, ah
     expect(enableProviderPluginOps(["openai/gpt-5.5", "anthropic/claude-sonnet-5", "anthropic/claude-haiku-4-5"])).toEqual([
       ["plugins.entries.anthropic.enabled", "true", "--json"],
     ]);
+  });
+});
+
+// A plugin that is off enumerates NOTHING: `openclaw models list --provider
+// anthropic` is empty until it is switched back on. So the ON half is a
+// provider-set change exactly as the OFF half is, and the catalogue has to
+// count it — an empty enumeration is recorded as a failed refresh, and that
+// wait doubles up to the six-hour refresh interval, so a provider whose plugin
+// has been off for a while would not be re-asked for six hours after the very
+// pick that made it listable. Nothing could see that transition: the enable
+// rides in the batch, so by the time `setProviderPlugins` re-reads the config
+// the flag is already true and it correctly reports no flip.
+describe("providerPluginSwitchedOnBy — which provider the batch actually switches ON", () => {
+  const OFF = { plugins: { entries: { anthropic: { enabled: false } } } } as never;
+  const ON = { plugins: { entries: { anthropic: { enabled: true } } } } as never;
+
+  it("names the provider when the flag was off", () => {
+    expect(providerPluginSwitchedOnBy(["anthropic/claude-sonnet-5"], OFF)).toBe("anthropic");
+    // A fallback names it too, and is validated exactly like the primary.
+    expect(providerPluginSwitchedOnBy(["llamacpp/gemma", "anthropic/claude-haiku-4-5"], OFF)).toBe("anthropic");
+  });
+
+  it("stays silent when the flag was already on, however it was spelled", () => {
+    // The ops are emitted whether or not the flag is already true — that is
+    // deliberate, because the enable is also what makes the core validate the
+    // reference. Their presence is not a state change, and announcing one per
+    // Claude pick would spend a ~3-minute `openclaw models list` on a Jetson.
+    expect(providerPluginSwitchedOnBy(["anthropic/claude-sonnet-5"], ON)).toBeNull();
+    // An ABSENT flag is enabled: the plugin declares `enabledByDefault: true`.
+    expect(providerPluginSwitchedOnBy(["anthropic/claude-sonnet-5"], {})).toBeNull();
+    // And a config that could not be read must not be reported as a change.
+    expect(providerPluginSwitchedOnBy(["anthropic/claude-sonnet-5"], null)).toBeNull();
+  });
+
+  it("stays silent when the batch names no gated provider at all", () => {
+    expect(providerPluginSwitchedOnBy(["openai/gpt-5.5", "llamacpp/gemma"], OFF)).toBeNull();
+    expect(providerPluginSwitchedOnBy([], OFF)).toBeNull();
+    expect(providerPluginSwitchedOnBy([null, undefined, "no-slash"], OFF)).toBeNull();
   });
 });
 

@@ -25,7 +25,7 @@ vi.mock("@/lib/openclaw-config", () => ({
 const DATA_DIR = "/tmp/clawbox-catalog-provider-change-test";
 vi.mock("@/lib/config-store", () => ({ DATA_DIR: "/tmp/clawbox-catalog-provider-change-test" }));
 
-import { GET, refreshInBackground } from "@/app/setup-api/ai-models/catalog/route";
+import { GET, notifyProviderSetChanged, refreshInBackground } from "@/app/setup-api/ai-models/catalog/route";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 
@@ -378,5 +378,72 @@ describe("catalog — the change generation, not a one-shot flag", () => {
     const settled = await get("openai");
     expect(settled.warming).toBeUndefined();
     expect(settled.source).toBe("live");
+  });
+});
+
+// `notifyProviderSetChanged` is the seam between the two halves of this fix:
+// every server-side write counts its change through it, and the catalogue is
+// what answers. Every route test mocks it out — a mocked call proves the
+// caller and nothing about the answer — so this is where it runs for real,
+// against no client request at all. It is also the only place the two facts
+// it owns are pinned: openclaw's provider id is not always the catalogue's,
+// and a write about a provider this route cannot enumerate is not a change it
+// can act on.
+describe("catalog — the one entry point every server-side write counts through", () => {
+  /** Which providers `openclaw models list` was actually forked for. */
+  function spawnedProviders(): string[] {
+    return mockSpawn.mock.calls.map(([, args]) => {
+      const argv = args as string[];
+      return argv[argv.indexOf("--provider") + 1];
+    });
+  }
+
+  it("enumerates and publishes with no client request anywhere", async () => {
+    mockSpawn.mockImplementation(
+      () => fakeChild(LINKED) as unknown as ReturnType<typeof childProcess.spawn>,
+    );
+
+    // Exactly what `POST /setup-api/providers/enabled` now does, and nothing
+    // else: no browser has to be open, and a caller that is not a browser
+    // sends no `?refresh=1` at all — which is why that route's flip used to
+    // reach the catalogue through nothing.
+    notifyProviderSetChanged("openai");
+
+    await vi.waitFor(
+      () => expect(fs.existsSync(cacheFile("openai"))).toBe(true),
+      { timeout: 4000, interval: 25 },
+    );
+    const published = readCache("openai");
+    expect(published.models.map((m) => m.id).sort()).toEqual(["gpt-5.4", "gpt-5.5", "gpt-5.6-sol"]);
+    expect(published.source).toBe("live");
+  });
+
+  it("counts the change against the catalogue's id for a provider, not openclaw's", async () => {
+    // openclaw calls ClawBox AI `deepseek` in its config, and the routes hand
+    // this the id they hold; the catalogue's row — and its cache file — is
+    // `clawai`. The mapping lives here so no call site has to remember it.
+    notifyProviderSetChanged("deepseek");
+
+    await vi.waitFor(
+      () => expect(fs.existsSync(cacheFile("clawai"))).toBe(true),
+      { timeout: 4000, interval: 25 },
+    );
+    expect(fs.existsSync(cacheFile("deepseek"))).toBe(false);
+  });
+
+  it("ignores a write about a provider this catalogue does not enumerate", async () => {
+    mockSpawn.mockImplementation(
+      () => fakeChild(LINKED) as unknown as ReturnType<typeof childProcess.spawn>,
+    );
+
+    // A local-only provider has no catalogue here, and the two empty shapes
+    // are what a caller passing a provider it could not resolve hands over.
+    notifyProviderSetChanged("llamacpp");
+    notifyProviderSetChanged(null);
+    notifyProviderSetChanged("");
+    await settle();
+
+    expect(spawnedProviders()).not.toContain("llamacpp");
+    expect(fs.existsSync(cacheFile("llamacpp"))).toBe(false);
   });
 });

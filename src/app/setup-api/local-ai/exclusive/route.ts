@@ -19,7 +19,8 @@ import {
   runOpenclawConfigSetBatch,
   type OpenclawConfigSetArgs,
 } from "@/lib/openclaw-config";
-import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
+import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
+import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
 
 const SAVED_PRIMARY_KEY = "local_only_saved_primary";
@@ -486,6 +487,12 @@ export async function POST(request: Request) {
         ? savedFallbacks.filter((ref) => !isClawboxAiImageModelRef(ref))
         : savedFallbacks;
       const restoreFallbacks = Array.isArray(keptFallbacks) && keptFallbacks.length > 0 ? keptFallbacks : null;
+      // Read BEFORE the write, because what the catalogue needs to know is the
+      // transition: the enables below can switch a plugin back ON, and a
+      // provider whose plugin is off enumerates nothing. An unreadable config
+      // answers `{}` here and so reads as already-on — silence rather than a
+      // change that may not have happened.
+      const configBeforeRestore = await readConfig();
       const restoreOps: OpenclawConfigSetArgs[] = [
         ...enableProviderPluginOps([restorablePrimary, ...(restoreFallbacks ?? [])]),
         ...(restorablePrimary
@@ -497,6 +504,17 @@ export async function POST(request: Request) {
       ];
       if (restoreOps.length > 0) {
         await setConfigBatch(restoreOps);
+        // The third site that switches a provider plugin on, and the third
+        // that has to count it: this restore is what makes that provider
+        // listable again, and nothing else will tell the catalogue. After the
+        // batch, because a refused one leaves the flag exactly as it was —
+        // `setConfigBatch` throws rather than swallowing, so reaching this line
+        // means the write landed.
+        const pluginSwitchedOn = providerPluginSwitchedOnBy(
+          [restorablePrimary, ...(restoreFallbacks ?? [])],
+          configBeforeRestore,
+        );
+        if (pluginSwitchedOn) notifyProviderSetChanged(pluginSwitchedOn);
       }
       const restore = savedSessionOverrides
         ? await restoreSessionOverrides(savedSessionOverrides)

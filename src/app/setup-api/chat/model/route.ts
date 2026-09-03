@@ -12,7 +12,7 @@ import {
   setProviderPlugins,
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
-import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
+import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import {
@@ -1007,6 +1007,15 @@ export async function POST(request: Request) {
                   { status: 502 },
                 );
               }
+              // A row added to this array IS the provider's catalogue changing:
+              // "configured providers in openclaw.json override the plugin's
+              // modelCatalog entirely" (ai-models/configure), so what
+              // `openclaw models list --provider <p>` answers for a compat
+              // provider is exactly this list. Counted here rather than beside
+              // the write above, because only the branch that actually
+              // appended reaches this line — a pick already in the list writes
+              // nothing and must announce nothing.
+              notifyProviderSetChanged(providerId);
             }
           }
         }
@@ -1170,6 +1179,24 @@ export async function POST(request: Request) {
       if (unresolvable) return unresolvable;
       throw err;
     }
+
+    // 1b. The ON half of the plugin gate, counted. The batch above is the only
+    //     thing that switches a plugin back on, and a provider whose plugin is
+    //     off enumerates NOTHING — so this is the same provider-set change as
+    //     the OFF half below, in the other direction, and the catalogue was
+    //     told about neither. Worse than a one-off staleness: an enumeration
+    //     that comes back empty is recorded as a failed refresh, and that wait
+    //     DOUBLES up to the six-hour refresh interval, so a provider whose
+    //     plugin has been off for a while is not even re-asked for six hours
+    //     after the pick that made it listable. Counting the change is what
+    //     drops that wait back to the floor.
+    //
+    //     After the batch, never before it: a refused batch changed no flag
+    //     (it is applied to one snapshot and validated as a whole), and
+    //     announcing a change that did not happen would spend a ~3-minute
+    //     `openclaw models list` on a Jetson for nothing.
+    const pluginSwitchedOn = providerPluginSwitchedOnBy([targetModel], preloadedConfig);
+    if (pluginSwitchedOn) notifyProviderSetChanged(pluginSwitchedOn);
 
     // 1c. The other side of the arm: a pick that is NOT the subscription's, on
     //     a reference an earlier ChatGPT pick armed, has to clear it — a

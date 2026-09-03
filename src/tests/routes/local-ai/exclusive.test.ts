@@ -23,6 +23,13 @@ vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(async () => {}),
 }));
 
+// The catalogue is told out-of-band when a restore switches a provider plugin
+// back on; the real module forks `openclaw models list`.
+vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
+  notifyProviderSetChanged: vi.fn(),
+  refreshInBackground: vi.fn(),
+}));
+
 vi.mock("@/lib/openclaw-session-store", () => ({
   listAgentIds: vi.fn(() => []),
   sessionStorePath: vi.fn(() => null),
@@ -39,7 +46,8 @@ vi.mock("@/lib/openclaw-config", () => ({
 }));
 
 import { get, setMany } from "@/lib/config-store";
-import { restartGateway, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { readConfig, restartGateway, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 
 const UNKNOWN_MODEL =
   'Cannot set model reference "anthropic/claude-sonnet-5" at agents.defaults.model.primary: '
@@ -128,6 +136,45 @@ describe("POST /setup-api/local-ai/exclusive — restoring the saved primary and
       ["agents.defaults.model.primary", JSON.stringify("openai/gpt-5.5"), "--json"],
       ["agents.defaults.model.fallbacks", JSON.stringify(["anthropic/claude-sonnet-5"]), "--json"],
     ]);
+  });
+
+  // A plugin that is off enumerates NOTHING, and the comment above these
+  // enables says why this route is where it can be off: "a provider save made
+  // while Local-only was on may have switched that plugin off". So this
+  // restore is a provider-set change, it is the only write on this route that
+  // makes one, and nothing else can tell the catalogue — an enumeration that
+  // came back empty is recorded as a failed refresh whose wait doubles up to
+  // the six-hour interval, so without this the provider is not even re-asked
+  // for six hours after the toggle that made it listable again.
+  it("tells the catalogue when the restore switched the plugin back on", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      plugins: { entries: { anthropic: { enabled: false } } },
+    } as never);
+
+    const response = await turnOff();
+
+    expect(response.status).toBe(200);
+    expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("anthropic");
+  });
+
+  it("says nothing when the flag was already on, or the restore named no gated provider", async () => {
+    // The enable op rides in the batch whether or not the flag is already
+    // true — it is what makes the core validate the reference — so its
+    // presence is not a state change, and announcing one would spend a
+    // ~3-minute `openclaw models list` on a Jetson for a box that did not
+    // change.
+    vi.mocked(readConfig).mockResolvedValue({
+      plugins: { entries: { anthropic: { enabled: true } } },
+    } as never);
+    await turnOff();
+    expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
+
+    vi.mocked(readConfig).mockResolvedValue({
+      plugins: { entries: { anthropic: { enabled: false } } },
+    } as never);
+    store.local_only_saved_primary = "openai/gpt-5.5";
+    await turnOff();
+    expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
   });
 
   it("does not restore a saved primary that is the ClawBox AI image entry", async () => {
