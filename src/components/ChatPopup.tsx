@@ -233,7 +233,11 @@ import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 // get mixed. The MODEL list is scoped by the same server contract the Hermes
 // settings panel uses (GET /setup-api/hermes/models?provider=…) — no parallel
 // client-side filtering exists.
-import { useHermesModelOptions } from '@/hooks/useHermesModelOptions'
+import {
+  useHermesModelOptions,
+  DEGRADED_RETRY_ATTEMPTS,
+  degradedRetryDelayMs,
+} from '@/hooks/useHermesModelOptions'
 import {
   hermesProviderLabel,
   hermesProviderPillLabel,
@@ -3753,10 +3757,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // writes only if it is still the newest when its answer lands.
   const seedGenerationRef = useRef(0)
   const seedControllerRef = useRef<AbortController | null>(null)
+  // The pending "ask again, the box was still booting" timer, and the seed it
+  // calls. A ref rather than a direct recursive call because `seedHermesHeader`
+  // is a stable useCallback and cannot name itself.
+  const seedRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const seedRef = useRef<(signal?: AbortSignal, attempt?: number) => Promise<void>>(async () => {})
+  const clearSeedRetry = useCallback(() => {
+    if (!seedRetryTimerRef.current) return
+    clearTimeout(seedRetryTimerRef.current)
+    seedRetryTimerRef.current = null
+  }, [])
 
-  const seedHermesHeader = useCallback(async (signal?: AbortSignal) => {
+  const seedHermesHeader = useCallback(async (signal?: AbortSignal, attempt = 0) => {
     const generation = ++seedGenerationRef.current
     seedControllerRef.current?.abort()
+    clearSeedRetry()
     const controller = new AbortController()
     seedControllerRef.current = controller
     // The caller's signal still cancels this seed (unmount, harness switch).
@@ -3770,14 +3785,31 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         provider?: unknown
         current?: unknown
         reasoning?: unknown
+        stale?: unknown
       }
       // `aborted` alone is not enough: a response can resolve before the abort
       // lands, and `json()` adds a second await for a newer seed to start in.
       if (controller.signal.aborted || generation !== seedGenerationRef.current) return
+      // `stale` means the box could not reach its Hermes dashboard and answered
+      // from the on-disk manifest instead — a file from the docs site that only
+      // ever carries `openrouter` and `nous` and knows nothing about THIS
+      // device's credentials. Its rows arrive `authenticated: null` ("the
+      // source couldn't tell"), which the filter below keeps, so the header
+      // used to offer two providers the box has no key for: on the settled box
+      // both report `authenticated: false`, and picking one gives an empty
+      // model list and a failing turn. That is the "OpenAI Codex / OpenRouter /
+      // Nous Portal" header the owner photographed.
+      //
+      // So a degraded seed contributes NO rows. The device's own configured
+      // provider is still added below — the CLI read behind it is a fact about
+      // this box either way — and the retry at the end of this function goes
+      // back for the real list.
+      const degraded = mData?.stale === true
+      const reported = !degraded && Array.isArray(mData?.providers) ? mData.providers : []
       // Offer only providers Hermes has credentials for (`authenticated:
       // false` rows would give an empty model list and a failing turn).
       // `null` means the source couldn't tell — keep those.
-      const rows: HermesChatProvider[] = (Array.isArray(mData?.providers) ? mData.providers : [])
+      const rows: HermesChatProvider[] = reported
         .filter(p => typeof p?.id === 'string' && p.id && p.authenticated !== false)
         .map(p => ({
           id: p.id as string,
@@ -3807,12 +3839,24 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         ?? (isHermesReasoningLevel(mData?.reasoning) ? mData.reasoning : null)
       hermesReasoningKnownRef.current = knownReasoning !== null
       setHermesReasoning(knownReasoning ?? HERMES_REASONING_DEFAULT)
+
+      // Go back for the real list, with backoff — the same loop the scoped hook
+      // runs, and the same one #587 gave the OpenClaw picker for `warming`.
+      // Without it a chat opened during the ~11-12 s the Hermes dashboard needs
+      // to come up after a reboot kept the placeholder for the whole session.
+      if (degraded && attempt < DEGRADED_RETRY_ATTEMPTS) {
+        seedRetryTimerRef.current = setTimeout(
+          () => { void seedRef.current(signal, attempt + 1) },
+          degradedRetryDelayMs(attempt),
+        )
+      }
     } catch { /* header falls back to a plain label */ }
     finally {
       signal?.removeEventListener('abort', abortThis)
       if (seedControllerRef.current === controller) seedControllerRef.current = null
     }
   }, [])
+  useEffect(() => { seedRef.current = seedHermesHeader }, [seedHermesHeader])
 
   // Seed the Hermes header once the harness is known. This is the one place
   // left that asks WHICH harness is running rather than what it can do, and
@@ -3822,8 +3866,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (harnessId !== 'hermes') return
     const controller = new AbortController()
     void seedHermesHeader(controller.signal)
-    return () => { controller.abort() }
-  }, [harnessId, seedHermesHeader])
+    return () => {
+      controller.abort()
+      // A seed's retry is scheduled OUTSIDE any fetch, so aborting the signal
+      // does not by itself cancel one that is already pending.
+      clearSeedRetry()
+    }
+  }, [harnessId, seedHermesHeader, clearSeedRetry])
 
   // Re-seed when the settings panel changes the device's provider/model/tier or
   // adds a credential. Without this the header keeps naming the OLD provider
@@ -3847,8 +3896,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     return () => {
       controller.abort()
       unsubscribe()
+      clearSeedRetry()
     }
-  }, [harnessId, seedHermesHeader])
+  }, [harnessId, seedHermesHeader, clearSeedRetry])
 
   // Pre-warm the transport on mount so opening chat is instant. Gated on the
   // harness resolving: connecting before that is what would open a gateway

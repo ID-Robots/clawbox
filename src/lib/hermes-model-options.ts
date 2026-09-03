@@ -625,11 +625,12 @@ function load(refresh: boolean): Promise<ModelOptionsPayload> {
 
 /**
  * Serve the provider/model catalogue.
- *   fresh (<60 s)  → cached, no network
- *   stale (<6 h)   → cached instantly + background refresh (never awaited)
- *   older / absent → await a live fetch
- *   { refresh }    → await a live fetch that also busts Hermes' per-provider
- *                    disk cache (throttled to one per 10 s per process)
+ *   live, fresh (<60 s)  → cached, no network
+ *   live, stale (<6 h)   → cached instantly + background refresh (never awaited)
+ *   fallback (`stale`)   → await a live fetch; it is not an answer to keep
+ *   older / absent       → await a live fetch
+ *   { refresh }          → await a live fetch that also busts Hermes'
+ *                          per-provider disk cache (one per 10 s per process)
  */
 export async function getModelOptions(opts: { refresh?: boolean } = {}): Promise<ModelOptionsPayload> {
   const now = Date.now();
@@ -642,6 +643,29 @@ export async function getModelOptions(opts: { refresh?: boolean } = {}): Promise
 
   if (cached) {
     const age = now - cached.fetchedAt;
+    // A FALLBACK IS NOT AN ANSWER, so it gets no answer's freshness window.
+    //
+    // It is Hermes' on-disk manifest (`openrouter` + `nous`, and nothing about
+    // this device) or the cold-start floor, and it is served precisely because
+    // the dashboard could not be reached. Holding it for `FRESH_MS` turned
+    // every reboot's ~11-12 s window — `clawbox-setup` answers in 0 ms,
+    // `clawbox-hermes-dashboard` needs another eleven seconds — into a full
+    // MINUTE of a device that appeared to have two providers and no models,
+    // for the chat header, the Settings panel and the MCP tools alike.
+    // `isDowngrade` cannot help there: it compares against the previous CACHED
+    // payload, and on a cold process there is none.
+    //
+    // Awaited rather than served-and-refreshed-behind, because the caller does
+    // NOT already have a usable payload — that is the whole difference from the
+    // branch below. `load()` single-flights, so concurrent callers still share
+    // one round-trip, and a dashboard that is down refuses the connection
+    // rather than spending the timeout.
+    //
+    // The flag read here is `payload.stale` — "did not come from the live
+    // dashboard" — and NOT the `degraded` marker: a payload the downgrade guard
+    // KEPT is a live catalogue whose refresh failed, and holding on to that is
+    // the whole point of the guard.
+    if (cached.stale) return load(false);
     if (age < FRESH_MS) return cached;
     if (age < STALE_MS) {
       // Serve stale immediately; refresh behind the request. Failures here are
