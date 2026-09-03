@@ -408,7 +408,11 @@ export function parseHermesGatewayStatus(stdout: string): HermesGatewayStatus {
   return { installed: false, running: MANUAL_RUNNING_RE.test(stdout), scope: null };
 }
 
-/** `hermes gateway status`, parsed. Reports "down" rather than throwing. */
+/**
+ * `hermes gateway status`, parsed. Reports "down" rather than throwing — with
+ * ONE exception: a probe the caller CANCELLED is rethrown, because "down" is an
+ * answer and a cancellation is not (see the catch below).
+ */
 async function readHermesGatewayStatus(
   signal?: AbortSignal,
 ): Promise<{ value: HermesGatewayStatus; answered: boolean }> {
@@ -421,9 +425,10 @@ async function readHermesGatewayStatus(
   } catch (err) {
     // A CANCELLED probe is not an answer of "no gateway here". Swallowing it
     // hands `ensureHermesGateway` an `installed: false` for a box whose gateway
-    // is fine, which sends it down the privileged INSTALL path — carrying the
-    // same already-aborted signal, which can no longer cancel anything, so the
-    // install runs to its own 180 s timeout. The caller asked to stop; stop.
+    // is fine, which sends it down the privileged INSTALL path. The caller
+    // asked to stop; stop. (`runHermesCli` refuses a call whose signal is
+    // already aborted before it spawns, so this covers both an abort that lands
+    // mid-probe and one that landed before it started.)
     if (signal?.aborted) throw err;
     return { value: { installed: false, running: false, scope: null }, answered: false };
   }
