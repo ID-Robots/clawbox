@@ -25,6 +25,9 @@ vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
 vi.mock("@/lib/openclaw-config", () => ({
   inferConfiguredLocalModel: vi.fn(),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
+  // Strict: the ON half of the plugin gate decides from ABSENCE, and plain
+  // `readConfig` cannot tell an unreadable config from one carrying no flag.
+  readConfigStrict: vi.fn(async () => ({})),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
   runOpenclawConfigSet: configSetMock,
@@ -54,7 +57,7 @@ vi.mock("@/lib/sqlite-store", () => ({
 }));
 
 import { getAll } from "@/lib/config-store";
-import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { promisify } from "util";
@@ -1002,8 +1005,11 @@ describe("/setup-api/chat/model", () => {
     // off for a while is not re-asked for six hours after the pick that made
     // it listable.
     describe("counting the ON half for the catalogue", () => {
+      // The handler's state comes from `readConfig`; the ON half reads the flag
+      // again, STRICTLY, at the last moment before the batch — so both are set
+      // here, and the strict one is what decides the announcement.
       const pluginOff = (enabled: boolean) => {
-        vi.mocked(readConfig).mockResolvedValue({
+        const config = {
           auth: {
             profiles: {
               "deepseek:default": { provider: "deepseek", mode: "api_key" },
@@ -1012,7 +1018,9 @@ describe("/setup-api/chat/model", () => {
           },
           agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
           plugins: { entries: { anthropic: { enabled } } },
-        } as never);
+        };
+        vi.mocked(readConfig).mockResolvedValue(config as never);
+        vi.mocked(readConfigStrict).mockResolvedValue(config as never);
       };
 
       it("counts the change when the batch switched the plugin on", async () => {
@@ -1043,6 +1051,24 @@ describe("/setup-api/chat/model", () => {
 
         expect(response.status).toBe(200);
         expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
+      });
+
+      it("counts it when the flag could not be read at all", async () => {
+        // The strict read throws on an EACCES or a config caught half-written,
+        // and the batch still lands. Unknown is not "already on": silence would
+        // leave the catalogue on the pre-enable enumeration, whose failed-
+        // refresh wait doubles toward six hours.
+        pluginOff(true);
+        vi.mocked(readConfigStrict).mockRejectedValue(new Error("EACCES"));
+
+        const response = await POST(new Request("http://localhost/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+        }));
+
+        expect(response.status).toBe(200);
+        expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("anthropic");
       });
 
       it("says nothing when the batch was refused", async () => {

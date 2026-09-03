@@ -431,9 +431,15 @@ describe("catalog — the one entry point every server-side write counts through
     notifyProviderSetChanged("deepseek");
     await settle();
 
-    expect(vi.mocked(globalThis.fetch as unknown as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
-    expect(fs.existsSync(cacheFile("openrouter"))).toBe(false);
+    // `clawai` carries the proof, because it is the deterministic one: a
+    // counted `clawai` resolves from a constant and publishes inside this
+    // window, with no network and no pending warmup timer (its warmup slot is
+    // the first, and fired in an earlier test). The global `fetch` stub is
+    // deliberately NOT asserted on — the warmup schedules `openrouter` on a
+    // real 25 s timer, so a stray call could come from that rather than from
+    // anything this test did.
     expect(fs.existsSync(cacheFile("clawai"))).toBe(false);
+    expect(fs.existsSync(cacheFile("openrouter"))).toBe(false);
     expect(fs.existsSync(cacheFile("deepseek"))).toBe(false);
   });
 

@@ -3,6 +3,7 @@ import { getAll } from "@/lib/config-store";
 import {
   inferConfiguredLocalModel,
   readConfig,
+  readConfigStrict,
   restartGateway,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
@@ -1163,6 +1164,19 @@ export async function POST(request: Request) {
     const armOps = chatgptRouted && !chatgptRuntimeArmed(preloadedConfig, targetModel)
       ? [chatgptRuntimeArmOp(targetModel)]
       : [];
+    // The plugin flag as it stands at the last moment before the batch, for the
+    // ON half below. Not `preloadedConfig`: that was read at the top of the
+    // handler, and the auto-extend between here and there is its own ~10 s CLI
+    // spawn on a Jetson — a provider save landing in that window switches the
+    // flag off through its own gate, and a stale "it was already on" reading
+    // would swallow the switch-on this batch then performs. A file read, not a
+    // spawn, next to writes that cost seconds.
+    //
+    // STRICT and `null` on failure, for the reason the OFF half reads strictly:
+    // the decision is about ABSENCE, and plain `readConfig` answers `{}` to an
+    // EACCES exactly as it does to a box with no config at all. An absent flag
+    // IS enabled, so `{}` must stay silent; "could not read" must not.
+    const configBeforeBatch = await readConfigStrict().catch(() => null);
     try {
       await runOpenclawConfigSetBatch([
         ...enableProviderPluginOps([targetModel]),
@@ -1196,13 +1210,6 @@ export async function POST(request: Request) {
     //     announcing a change that did not happen would spend a ~3-minute
     //     `openclaw models list` on a Jetson for nothing.
     //
-    //     `preloadedConfig` is the right snapshot even though it was read at
-    //     the top of the handler: the only write between there and here is the
-    //     auto-extend, which touches `models.providers.<p>.models` and no
-    //     plugin flag. Its `{}`-on-failure is not a blind spot either — an
-    //     unreadable config leaves `loadChatModelState` with no options, and
-    //     the pick is refused above long before this line.
-    //
     //     One request CAN announce the same provider twice — the auto-extend
     //     above, then this — which costs one superseded ~3-minute fork in the
     //     narrow case where both fire. Deliberately not deferred into a single
@@ -1211,7 +1218,7 @@ export async function POST(request: Request) {
     //     a flush that misses one of them trades a bounded cost for six hours
     //     of a catalogue that says `source: "live"` about a box that moved.
     //     Each announcement therefore sits at the write it describes.
-    const pluginSwitchedOn = providerPluginSwitchedOnBy([targetModel], preloadedConfig);
+    const pluginSwitchedOn = providerPluginSwitchedOnBy([targetModel], configBeforeBatch);
     if (pluginSwitchedOn) notifyProviderSetChanged(pluginSwitchedOn);
 
     // 1c. The other side of the arm: a pick that is NOT the subscription's, on

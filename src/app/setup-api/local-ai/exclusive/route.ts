@@ -15,7 +15,6 @@ import {
   callGatewayRpc,
   gatewayIsAbsent,
   readConfig,
-  readConfigStrict,
   restartGateway,
   runOpenclawConfigSetBatch,
   type OpenclawConfigSetArgs,
@@ -488,19 +487,6 @@ export async function POST(request: Request) {
         ? savedFallbacks.filter((ref) => !isClawboxAiImageModelRef(ref))
         : savedFallbacks;
       const restoreFallbacks = Array.isArray(keptFallbacks) && keptFallbacks.length > 0 ? keptFallbacks : null;
-      // Read BEFORE the write, because what the catalogue needs to know is the
-      // transition: the enables below can switch a plugin back ON, and a
-      // provider whose plugin is off enumerates nothing.
-      //
-      // STRICT, and `null` when it fails, for the same reason the OFF half of
-      // this gate reads strictly (`setProviderPlugins`): the decision is about
-      // ABSENCE, and plain `readConfig` answers `{}` to an EACCES or a file
-      // caught half-written exactly as it does to a box that has no config at
-      // all. Those two need opposite answers — an absent flag IS enabled, so
-      // `{}` means no transition, while "could not read" means unknown, and
-      // silence there would cost six hours of a catalogue serving a list the
-      // box has stopped agreeing with.
-      const configBeforeRestore = await readConfigStrict().catch(() => null);
       const restoreOps: OpenclawConfigSetArgs[] = [
         ...enableProviderPluginOps([restorablePrimary, ...(restoreFallbacks ?? [])]),
         ...(restorablePrimary
@@ -512,15 +498,29 @@ export async function POST(request: Request) {
       ];
       if (restoreOps.length > 0) {
         await setConfigBatch(restoreOps);
-        // The third site that switches a provider plugin on, and the third
-        // that has to count it: this restore is what makes that provider
-        // listable again, and nothing else will tell the catalogue. After the
-        // batch, because a refused one leaves the flag exactly as it was —
+        // The third site that switches a provider plugin on, and the third that
+        // has to count it: this restore is what makes that provider listable
+        // again, and nothing else will tell the catalogue. After the batch,
+        // because a refused one leaves the flag exactly as it was —
         // `setConfigBatch` throws rather than swallowing, so reaching this line
         // means the write landed.
+        //
+        // `null` for the pre-write state on purpose: it is the honest answer
+        // here, not a shortcut. Any snapshot this route could read would be
+        // read BEFORE a `config set --batch-json` that takes ~10 s on a Jetson,
+        // and a provider save landing in that window (which switches the plugin
+        // off through its own gate) would leave a stale "it was already on"
+        // reading and swallow the switch-on this batch then performs. Nothing
+        // available here makes the read atomic with the write. So this site
+        // says "I cannot know", which counts the change: this path runs once
+        // per Local-only exit and only when the saved primary or a fallback
+        // names the gated provider, it already restarts the gateway and
+        // re-patches every session, so at worst it spends one enumeration —
+        // against a silent miss that would leave the catalogue behind until a
+        // doubling backoff expired.
         const pluginSwitchedOn = providerPluginSwitchedOnBy(
           [restorablePrimary, ...(restoreFallbacks ?? [])],
-          configBeforeRestore,
+          null,
         );
         if (pluginSwitchedOn) notifyProviderSetChanged(pluginSwitchedOn);
       }
