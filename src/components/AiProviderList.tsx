@@ -99,6 +99,16 @@ export default function AiProviderList() {
 
       {loading || awaitingProbe ? (
         <div className="space-y-2" data-testid="ai-provider-list-loading">
+          {/* Three grey bars are indistinguishable from a hung page, and the
+              wait they stand for is the unit's own start window — up to
+              `TimeoutStartSec` on a box whose ExecStartPre is grinding. Say
+              which of the two it is, in the owner's language, with the word the
+              rows below already use. */}
+          {awaitingProbe && (
+            <p className="text-[11px] text-[var(--text-muted)]" data-testid="ai-provider-list-checking">
+              {t("settings.checking")}
+            </p>
+          )}
           {[0, 1, 2].map((i) => (
             <div key={i} className="h-12 rounded-xl bg-white/[0.04] motion-safe:animate-pulse" />
           ))}

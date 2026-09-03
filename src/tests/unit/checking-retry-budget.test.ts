@@ -1,11 +1,7 @@
 import { readFileSync } from "fs";
 import path from "path";
 import { describe, expect, it } from "vitest";
-import {
-  MAX_CHECKING_WINDOW_MS,
-  PROBE_GRACE_MS,
-  UNIT_START_BUDGET_MS,
-} from "@/lib/hermes-model-options";
+import { MAX_CHECKING_WINDOW_MS, UNIT_START_BUDGET_MS } from "@/lib/hermes-model-options";
 import { DEGRADED_RETRY_MAX_MS, degradedRetryDelayMs } from "@/lib/degraded-retry";
 
 /**
@@ -26,11 +22,13 @@ import { DEGRADED_RETRY_MAX_MS, degradedRetryDelayMs } from "@/lib/degraded-retr
  *      "still checking", and the panel held spinner rows with no banner for the
  *      life of the mount.
  *
- * (1)'s per-branch half lives in `hermes-model-options-probe-owed.test.ts`,
- * which can drive the predicate; what is pinned here is where its number comes
- * from. (2)'s behaviour is pinned in `ai-provider-list.test.tsx`, which can
- * watch a real panel poll; what is pinned here is that the rate it settles at
- * is finite.
+ * (1) is driven through `probeStillOwed` itself in
+ * `hermes-model-options-probe-owed.test.ts`, one case per branch plus the
+ * `starting -> running` hand-over; what is pinned HERE is the one number in it
+ * that must not be invented — the start budget, which belongs to the shipped
+ * unit file. (2)'s behaviour is pinned in `ai-provider-list.test.tsx`, which can
+ * watch a real panel poll; what is pinned here is that the rate it settles at is
+ * finite and shorter than the window it has to cover.
  */
 describe("the checking window is bounded, and the panel outlives it", () => {
   it("takes the systemd branch's budget from the unit's own start timeout", () => {
@@ -46,11 +44,6 @@ describe("the checking window is bounded, and the panel outlives it", () => {
     const timeout = /^TimeoutStartSec=(\d+)$/m.exec(unit);
     expect(timeout, "the shipped unit must declare TimeoutStartSec").not.toBeNull();
     expect(UNIT_START_BUDGET_MS).toBe(Number(timeout![1]) * 1_000);
-  });
-
-  it("publishes a worst case that really is the worst of every branch", () => {
-    expect(MAX_CHECKING_WINDOW_MS).toBeGreaterThanOrEqual(PROBE_GRACE_MS);
-    expect(MAX_CHECKING_WINDOW_MS).toBeGreaterThanOrEqual(UNIT_START_BUDGET_MS);
   });
 
   it("leaves the panel a finite wait between polls, however long it waits", () => {

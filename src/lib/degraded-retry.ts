@@ -9,20 +9,20 @@
  * server's own window. A hook importing another hook also breaks every test
  * that replaces that hook wholesale, which is how this moved.
  *
- * Exponential, and BOUNDED, for the reason every one of those callers shares: a
- * box whose harness is not coming back must not be polled forever, and while
- * the retries run the surfaces read as LOADING. 1+2+4+8+8 spans ~23 s — twice
- * the measured boot window (`clawbox-setup` logs "Ready in 0ms" and starts
- * serving while `clawbox-hermes-dashboard` needs another 11-12 s) and short
- * enough that a box whose dashboard is genuinely gone reaches the honest empty
- * state promptly rather than sitting on a spinner.
+ * Exponential and SATURATING, so no caller can end up hammering the box: the
+ * delay settles at `DEGRADED_RETRY_MAX_MS` however many times it is asked.
  *
- * `DEGRADED_RETRY_ATTEMPTS` is the CATALOGUE's budget, and it is a COUNT
- * because that caller is waiting on nothing that reports its own progress. A
- * caller that IS — `useProviderStatus`, waiting on a server-side `checking`
- * window bounded by the dashboard unit's own start timeout — takes the delays
- * from here and bounds itself by that answer instead, so the rate is shared and
- * the stopping condition is not.
+ * How long to keep going is each caller's own question, and the two answers
+ * differ because the waits do. `DEGRADED_RETRY_ATTEMPTS` is the CATALOGUE's
+ * budget — a COUNT, because that caller waits on nothing that reports its own
+ * progress, and a box whose harness is not coming back must not be polled for
+ * ever. 1+2+4+8+8 spans ~23 s, twice the measured boot window (`clawbox-setup`
+ * logs "Ready in 0ms" and starts serving while `clawbox-hermes-dashboard` needs
+ * another 11-12 s), so a box whose dashboard is genuinely gone reaches the
+ * honest empty state promptly rather than sitting on a spinner. The other
+ * caller, `useProviderStatus`, waits on a server-side `checking` window that IS
+ * bounded and reported — so it takes the delays from here and stops on the
+ * answer instead of on a count.
  */
 export const DEGRADED_RETRY_BASE_MS = 1_000;
 export const DEGRADED_RETRY_MAX_MS = 8_000;

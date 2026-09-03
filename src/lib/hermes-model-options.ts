@@ -238,9 +238,9 @@ export const PROBE_GRACE_MS = 25_000;
  * because that is systemd's OWN deadline for the same question — past it
  * systemd kills the start and the unit goes `failed`, which this module already
  * reads as "nothing is coming". So the clock is a backstop for a transition we
- * might not see, never a second opinion: it can only agree with systemd late,
- * never contradict it early. `checking-retry-budget.test.ts` pins it to the
- * shipped unit file so the two cannot drift apart.
+ * might not see rather than a second opinion about a start systemd is still
+ * running. `checking-retry-budget.test.ts` pins it to the shipped unit file so
+ * the two cannot drift apart.
  *
  * Long, and that is the point: `ExecStartPre` re-provisions the dashboard's auth
  * on every start and a loaded Jetson can take a while over it. Waiting is
@@ -253,8 +253,13 @@ export const UNIT_START_BUDGET_MS = 300_000;
  * The longest any row can read `checking`, over EVERY branch — what the client
  * has to keep polling through, and the number that makes "checking always
  * resolves" a fact rather than a hope.
+ *
+ * The sum, not the larger: a unit may spend its whole start budget in
+ * `ExecStartPre` and only then fork, and the socket clock starts there (see
+ * {@link probeStillOwed}). Nothing can extend it further — the start budget runs
+ * from the first unanswered read and is never renewed.
  */
-export const MAX_CHECKING_WINDOW_MS = Math.max(PROBE_GRACE_MS, UNIT_START_BUDGET_MS);
+export const MAX_CHECKING_WINDOW_MS = UNIT_START_BUDGET_MS + PROBE_GRACE_MS;
 
 /** How long a systemd answer may be reused. One `systemctl` fork per second at
  *  worst, instead of one per request: two panels poll `/providers/status`
@@ -265,13 +270,21 @@ export const MAX_CHECKING_WINDOW_MS = Math.max(PROBE_GRACE_MS, UNIT_START_BUDGET
 const UNIT_STATE_TTL_MS = 1_000;
 let unitStateCached: HermesDashboardUnitState | null = null;
 let unitStateAt = 0;
+let unitStateInflight: Promise<HermesDashboardUnitState> | null = null;
 
-async function cachedUnitState() {
-  const now = Date.now();
-  if (unitStateCached && now - unitStateAt < UNIT_STATE_TTL_MS) return unitStateCached;
-  unitStateCached = await hermesDashboardUnitState();
-  unitStateAt = now;
-  return unitStateCached;
+async function cachedUnitState(): Promise<HermesDashboardUnitState> {
+  if (unitStateCached && Date.now() - unitStateAt < UNIT_STATE_TTL_MS) return unitStateCached;
+  // The PROMISE is shared, not just the value, so concurrent polls join one
+  // fork instead of racing an empty cache — and the clock is stamped when the
+  // answer LANDS, so a read that took the systemctl timeout is not born already
+  // expired.
+  unitStateInflight ??= hermesDashboardUnitState().finally(() => {
+    unitStateInflight = null;
+  });
+  const state = await unitStateInflight;
+  unitStateCached = state;
+  unitStateAt = Date.now();
+  return state;
 }
 
 /** When the live dashboard first failed to answer, or 0 while it is answering.
@@ -279,6 +292,16 @@ async function cachedUnitState() {
  *  by a later failure in the same outage, or the grace above would renew
  *  itself once a second and never expire. */
 let firstUnansweredAt = 0;
+/** When the unit was last SEEN to be starting, or 0.
+ *  The socket-bind clock has to run from the moment the unit stopped starting,
+ *  not from the first unanswered read: `Type=simple` reports `active/running`
+ *  when ExecStart forks, so a start that spent a minute in `ExecStartPre` would
+ *  otherwise arrive in `running` with its whole grace already spent and degrade
+ *  a healthy boot on the last eleven seconds of it. Only ever advanced while
+ *  systemd itself says the unit is starting, which is capped by
+ *  {@link UNIT_START_BUDGET_MS} — so this can lengthen the window by one
+ *  {@link PROBE_GRACE_MS} at most, never renew it indefinitely. */
+let lastSeenStartingAt = 0;
 /** Sequence of every dashboard read, and of the newest one that ANSWERED.
  *  Two reads overlap whenever an explicit refresh lands on top of a plain load
  *  (`load()` single-flights per mode, not across them), and they can settle out
@@ -316,27 +339,34 @@ export async function probeStillOwed(): Promise<boolean> {
   // has not asked yet, where there is nothing to wait for either.
   if (!firstUnansweredAt) return false;
   const unit = await cachedUnitState();
-  // Failed, masked, crash-looping, or stopped and disabled (which is what an
-  // OpenClaw box does to this unit): nothing is coming, so stop promising it and
-  // let the rows degrade now rather than after a grace that means nothing here.
+  // Failed, masked, or stopped and disabled (which is what an OpenClaw box does
+  // to this unit): nothing is coming, so stop promising it and let the rows
+  // degrade now rather than after a grace that means nothing here.
   if (unit === "down") return false;
-  const waited = Date.now() - firstUnansweredAt;
+  const now = Date.now();
   // BOUNDED IN EVERY BRANCH, which is the whole property. systemd's answer says
   // WHETHER the dashboard is still starting; the budget says how long we are
   // willing to call that "checking" before we degrade honestly. An unbounded
   // branch — any unbounded branch — turns "Checking..." into the same lie as the
   // degraded banner it replaces, pointing the other way.
   //
-  // Both budgets run from the first UNANSWERED READ, not from the unit's own
-  // start timestamp, because the question the panel is asking is how long WE
-  // have been unable to answer it. The cost is one case in the honest
-  // direction: a unit that starts fresh at the end of a long outage is called
-  // degraded for the ~11 s until it answers, which is exactly what a box that
-  // has been broken for ten minutes should say.
-  if (unit === "starting") return waited < UNIT_START_BUDGET_MS;
-  // `running` — up, but a just-started process still has to bind its socket —
-  // or `unknown`, where systemd could not be asked at all. Both are the clock's.
-  return waited < PROBE_GRACE_MS;
+  // The start budget runs from the first UNANSWERED READ, because the question
+  // the panel is asking is how long WE have been unable to answer it. The cost
+  // is one case in the honest direction: a unit that starts fresh at the end of
+  // a long outage is called degraded for the ~11 s until it answers, which is
+  // exactly what a box that has been broken for ten minutes should say.
+  if (unit === "starting") {
+    lastSeenStartingAt = now;
+    return now - firstUnansweredAt < UNIT_START_BUDGET_MS;
+  }
+  // `running` (up, but a just-started process still has to bind its socket),
+  // `restarting` (it died and systemd will start it again in RestartSec — this
+  // app's own dashboard bounce and a crash loop look identical from one sample,
+  // and this is the budget that serves both honestly), or `unknown`, where
+  // systemd could not be asked at all. All three are the clock's, measured from
+  // whichever came later: our first unanswered read, or the unit leaving the
+  // start it was still in a moment ago.
+  return now - Math.max(firstUnansweredAt, lastSeenStartingAt) < PROBE_GRACE_MS;
 }
 
 let cached: ModelOptionsPayload | null = null;
@@ -677,6 +707,7 @@ async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
   // it would paint "Checking..." over a live box.
   if (dash) {
     firstUnansweredAt = 0;
+    lastSeenStartingAt = 0;
     lastAnsweredSeq = seq;
   } else if (!firstUnansweredAt && lastAnsweredSeq < seq) {
     firstUnansweredAt = Date.now();

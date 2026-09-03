@@ -25,11 +25,11 @@ import {
   hermesDashboardUnitState,
 } from "@/lib/hermes-dashboard-control";
 
-/** `systemctl show … --property=Restart --value` prints `value`. */
+/** `systemctl show … --property=Restart` prints `Restart=value`. */
 function systemdRestartPolicy(value: string): void {
   execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: unknown) => {
     (cb as (e: Error | null, out: { stdout: string; stderr: string }) => void)(null, {
-      stdout: `${value}\n`,
+      stdout: `Restart=${value}\n`,
       stderr: "",
     });
   });
@@ -60,11 +60,12 @@ describe("bounceHermesDashboard", () => {
     // Absolute path, like every other systemctl call site in the repo, and a
     // READ — this module must never need a privilege it cannot have.
     expect(bin).toBe("/usr/bin/systemctl");
+    // By NAME, like every read in this module — never a bare value whose
+    // meaning depends on the order systemd chose to print it in.
     expect(args).toEqual([
       "show",
       "clawbox-hermes-dashboard.service",
       "--property=Restart",
-      "--value",
     ]);
   });
 
@@ -150,9 +151,10 @@ describe("hermesDashboardUnitState", () => {
   });
 
   it("keys the answer by property NAME, not by the order it asked in", async () => {
-    // systemd's own order for these three, which is not the order the query
-    // lists them in. A positional read of `--value` output calls this "down".
-    systemdShow({ LoadState: "loaded", ActiveState: "activating", SubState: "start-pre" });
+    // Shuffled on purpose: systemd prints in its OWN order, which is the whole
+    // reason the read cannot be positional. A positional read of this calls a
+    // starting unit "down".
+    systemdShow({ SubState: "start-pre", LoadState: "loaded", ActiveState: "activating" });
     expect(await hermesDashboardUnitState()).toBe("starting");
   });
 
@@ -185,7 +187,7 @@ describe("hermesDashboardUnitState", () => {
     // ...but NOT the gap between crashes. `Restart=always` + `RestartSec=5`
     // with no StartLimitBurst that can trip means a broken dashboard sits here
     // for ever, and a process that has already run and died is not starting.
-    ["loaded", "activating", "auto-restart", "down"],
+    ["loaded", "activating", "auto-restart", "restarting"],
     // Up as far as systemd is concerned — the socket is the caller's clock.
     ["loaded", "active", "running", "running"],
     // Nothing is going to answer. Note an OpenClaw box stops and disables this

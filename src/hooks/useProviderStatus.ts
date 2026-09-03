@@ -45,21 +45,19 @@ import type { ProviderStatusSummary } from "@/lib/provider-status";
  * stops coming (`MAX_CHECKING_WINDOW_MS`, pinned by
  * `src/tests/unit/checking-retry-budget.test.ts`). The rate is the shared
  * degraded schedule, which settles at `DEGRADED_RETRY_MAX_MS`, and the loop
- * ends with the mount.
+ * ends with the mount — nothing else ends it, deliberately.
+ *
+ * A FAILED read does not end it either, and that is the same rule rather than an
+ * exception to it: a read that failed is no evidence the probe finished, so the
+ * last thing the box actually said still stands. A count of failures was tried
+ * here and it recreated the bug one door along — the setup server restarting
+ * itself (an in-app update does exactly that) spends the count in under a
+ * minute, and the panel then holds "Checking..." rows for the life of the mount
+ * with `HermesProviderConfig` showing no message at all, since its read-error
+ * line needs a NULL summary. The endpoint is this same server, served to this
+ * same page: if it is gone the page is already broken, and one poll every eight
+ * seconds is how it notices when it comes back.
  */
-
-/**
- * A FAILED read is bounded, though, and separately: it is not the box saying
- * "still checking", it is no answer at all, and nothing bounds how long a
- * gone setup server keeps not answering. Retried a few times so a transient 500
- * — this server restarting itself is one — does not end the loop, then left
- * alone with the read error on screen.
- */
-const FAILED_READ_RETRIES = 7;
-
-/** Where the backoff counter stops growing. `degradedRetryDelayMs` saturates
- *  well before this; the clamp is only so an open panel cannot count for ever. */
-const MAX_BACKOFF_STEP = 8;
 
 export interface UseProviderStatus {
   /** Null until the first load lands. */
@@ -89,8 +87,6 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
   // answer with nothing left to check, so a later boot (a gateway restart from
   // Settings) starts again at the fast end rather than at the slow one.
   const backoffStepRef = useRef(0);
-  // Consecutive FAILED reads, which unlike checking answers are bounded.
-  const failuresRef = useRef(0);
   // Whether the last answer we actually got had a row still being checked. Read
   // by the FAILURE path, which has no body to look at: a read that failed is no
   // evidence the probe finished, and booking no retry there would end the loop
@@ -109,12 +105,10 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
     const scheduleRetry = () => {
       if (!checkingRef.current) {
         backoffStepRef.current = 0;
-        failuresRef.current = 0;
         return;
       }
-      if (failuresRef.current > FAILED_READ_RETRIES) return;
       retryTimer = setTimeout(refresh, degradedRetryDelayMs(backoffStepRef.current));
-      backoffStepRef.current = Math.min(backoffStepRef.current + 1, MAX_BACKOFF_STEP);
+      backoffStepRef.current += 1;
     };
 
     fetch("/setup-api/providers/status", { cache: "no-store", signal: controller.signal })
@@ -133,7 +127,6 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
         // booting. Asked again for as long as that promise stands — see the
         // rule at the top of this file.
         checkingRef.current = data.providers.some((row) => row.state === "checking");
-        failuresRef.current = 0;
         scheduleRetry();
       })
       .catch((err) => {
@@ -142,7 +135,6 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
         // transient failure reads as "everything disconnected", which is the one
         // thing it must never say by accident.
         setError(true);
-        failuresRef.current += 1;
         scheduleRetry();
       });
 

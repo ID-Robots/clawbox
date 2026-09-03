@@ -165,6 +165,11 @@ describe("AiProviderList", () => {
 
     expect(await screen.findByTestId("ai-provider-list-loading")).toBeInTheDocument();
     expect(screen.queryByText(translations.en["settings.providers.empty"])).not.toBeInTheDocument();
+    // ...and it says WHICH wait this is. The window can run to the unit's own
+    // TimeoutStartSec, and three unlabelled grey bars for that long are
+    // indistinguishable from a page that has hung.
+    expect(screen.getByTestId("ai-provider-list-checking"))
+      .toHaveTextContent(translations.en["settings.checking"]);
   });
 
   // The other half of TASK-663, and the reason `checking` cannot be a state
@@ -299,6 +304,49 @@ describe("a checking answer that outlasts any fixed retry budget", () => {
     }
   }
 
+  it("keeps asking after a long run of failed reads, because a failed read is not an answer", async () => {
+    // The setup server restarting itself — an in-app update does exactly this —
+    // while the panel is open on a booting box. A failed read is no evidence the
+    // probe finished, so the rows still say `checking`; a client that gives up
+    // after N of them leaves the panel exactly where the fixed checking budget
+    // used to: spinner rows, and (in `HermesProviderConfig`, whose error line
+    // needs a NULL summary) no message at all.
+    let answer: "checking" | "down" | "settled" = "checking";
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      const json = (body: unknown, status = 200) =>
+        new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+      if (url.startsWith("/setup-api/preferences")) return json({});
+      if (url.startsWith("/setup-api/providers/status")) {
+        if (answer === "down") return json({ error: "restarting" }, 503);
+        const rows = answer === "checking"
+          ? ROWS.map((r) => ({ ...r, state: "checking", isDefault: false }))
+          : ROWS;
+        return json({ harness: "hermes", providers: rows, defaultProvider: "clawai", degraded: false });
+      }
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const statusCalls = () =>
+      fetchMock.mock.calls.filter(([u]) => String(u).startsWith("/setup-api/providers/status")).length;
+
+    renderList();
+    await advance(1_000);
+    expect(screen.getByTestId("ai-provider-list-loading")).toBeInTheDocument();
+
+    // Two minutes of 503s — far more consecutive failures than any fixed budget.
+    answer = "down";
+    await advance(120_000);
+    const gaveUpAt = statusCalls();
+    await advance(40_000);
+    expect(statusCalls()).toBeGreaterThan(gaveUpAt);
+
+    // ...and the box comes back, with nobody having navigated away.
+    answer = "settled";
+    await advance(30_000);
+    expect(screen.getByTestId("ai-provider-openai")).toBeInTheDocument();
+  });
+
   it("keeps asking for as long as the box says checking, and never freezes on the spinner", async () => {
     let answer: "checking" | "settled" = "checking";
     const statusCalls = stubSlowBoot(() => answer);
@@ -308,9 +356,15 @@ describe("a checking answer that outlasts any fixed retry budget", () => {
     expect(screen.getByTestId("ai-provider-list-loading")).toBeInTheDocument();
 
     // Two minutes of `checking` — well inside what the unit's TimeoutStartSec
-    // allows, and three times the fixed budget the panel used to have.
+    // allows, and three times the fixed budget the panel used to have. The
+    // assertion is that the count keeps GROWING rather than that it passed some
+    // threshold: any reinstated count would eventually be passed by a big
+    // enough number and this would go green again.
     await advance(120_000);
-    expect(statusCalls()).toBeGreaterThanOrEqual(12);
+    const afterTwoMinutes = statusCalls();
+    expect(afterTwoMinutes).toBeGreaterThanOrEqual(12);
+    await advance(120_000);
+    expect(statusCalls()).toBeGreaterThan(afterTwoMinutes);
 
     // ...and when the box finally answers, the panel shows it. Nobody navigated
     // away and back; nothing emitted a signal.

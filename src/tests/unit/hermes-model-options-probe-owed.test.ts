@@ -189,7 +189,56 @@ describe("probeStillOwed — a dashboard that is still booting is not a dashboar
     expect(await mod.probeStillOwed()).toBe(false);
   });
 
-  it.each(["starting", "running", "unknown"] as const)(
+  it("does not degrade the moment a slow start FORKS, which is not the moment it answers", async () => {
+    // The unit is `Type=simple`, so systemd says `active/running` when ExecStart
+    // forks — with the web-dist build and the socket bind still ahead of it. The
+    // socket clock therefore has to start when the unit STOPPED starting, not
+    // when our first read failed, or a start-up that spent longer than the
+    // backstop in ExecStartPre lands in `running` with its grace already spent
+    // and flashes "Unknown" under the degraded banner for the last eleven
+    // seconds of a perfectly healthy boot.
+    dashboardDown();
+    await mod.getModelOptions();
+    unitStateMock.mockResolvedValue("starting");
+
+    const realNow = Date.now();
+    let offset = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow + offset);
+
+    // Forty seconds of ExecStartPre — well past the socket backstop, well inside
+    // the unit's own start budget.
+    offset = 40_000;
+    expect(await mod.probeStillOwed()).toBe(true);
+
+    // ...and now it forks.
+    offset = 41_000;
+    unitStateMock.mockResolvedValue("running");
+    expect(await mod.probeStillOwed()).toBe(true);
+
+    // The socket window is still bounded, just measured from the right moment.
+    offset = 41_000 + mod.PROBE_GRACE_MS + 1_000;
+    expect(await mod.probeStillOwed()).toBe(false);
+  });
+
+  it("gives the app's OWN dashboard bounce the same benefit as any other restart", async () => {
+    // `bounceHermesDashboard` stops the dashboard so `Restart=always` brings it
+    // back, and the unit then sits in activating/auto-restart for the whole
+    // RestartSec=5. Reading that as "nothing is coming" paints the red banner
+    // over a restart the owner's own click asked for.
+    dashboardDown();
+    await mod.getModelOptions();
+    unitStateMock.mockResolvedValue("restarting");
+
+    expect(await mod.probeStillOwed()).toBe(true);
+
+    // Bounded, though: a crash loop is the same state seen for ever, and it must
+    // reach the honest banner rather than spinning.
+    const realNow = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => realNow + mod.PROBE_GRACE_MS + 1_000);
+    expect(await mod.probeStillOwed()).toBe(false);
+  });
+
+  it.each(["starting", "restarting", "running", "unknown"] as const)(
     "stops owing an answer past the worst case whatever systemd says (%s)",
     async (unit) => {
       // The property the whole state depends on: there is NO branch in which
