@@ -27,6 +27,10 @@ import fs from "fs/promises";
 import path from "path";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
 import { hermesConfigGet, invalidateHermesConfigCache } from "@/lib/hermes-config-cache";
+import {
+  hermesDashboardUnitState,
+  type HermesDashboardUnitState,
+} from "@/lib/hermes-dashboard-control";
 import { get } from "@/lib/config-store";
 import { CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-models";
 import {
@@ -211,6 +215,170 @@ const DEGRADED_REFRESH_GAP_MS = 1_000;
 // A click-spammer on "Refresh" must not fan out into 40 upstream /v1/models
 // calls, so an explicit refresh is throttled per process.
 const EXPLICIT_REFRESH_MIN_GAP_MS = 10_000;
+/**
+ * The BACKSTOP for "is the dashboard still coming up?", used wherever systemd
+ * cannot say (see {@link probeStillOwed}).
+ *
+ * It is NOT up when this server is: `clawbox-setup` answers in 0 ms and
+ * `clawbox-hermes-dashboard` needs another ~11-12 s — after every boot, and
+ * again after every restart this app itself triggers. About twice that window.
+ *
+ * It also covers the largest slice of a NORMAL boot, not just the exotic cases:
+ * the unit is `Type=simple`, so systemd reports `active/running` from the moment
+ * `ExecStart` forks, and the seconds the dashboard then spends building its web
+ * dist and binding :9119 are seconds no unit state describes.
+ */
+export const PROBE_GRACE_MS = 25_000;
+
+/**
+ * The other bound: how long a unit systemd reports as `activating` may be
+ * called "checking".
+ *
+ * Tied to `TimeoutStartSec=300` in `config/clawbox-hermes-dashboard.service`,
+ * because that is systemd's OWN deadline for the same question — past it
+ * systemd kills the start and the unit goes `failed`, which this module already
+ * reads as "nothing is coming". So the clock is a backstop for a transition we
+ * might not see rather than a second opinion about a start systemd is still
+ * running. `checking-retry-budget.test.ts` pins it to the shipped unit file so
+ * the two cannot drift apart.
+ *
+ * Long, and that is the point: `ExecStartPre` re-provisions the dashboard's auth
+ * on every start and a loaded Jetson can take a while over it. Waiting is
+ * honest there; "Checking..." with a live poll behind it is what the owner
+ * should see, and the poll flips to the truth the moment systemd gives up.
+ */
+export const UNIT_START_BUDGET_MS = 300_000;
+
+/**
+ * The longest any row can read `checking`, over EVERY branch — what the client
+ * has to keep polling through, and the number that makes "checking always
+ * resolves" a fact rather than a hope.
+ *
+ * The sum, not the larger: a unit may spend its whole start budget in
+ * `ExecStartPre` and only then fork, and the socket clock starts there (see
+ * {@link probeStillOwed}). Nothing can extend it further — the start budget runs
+ * from the first unanswered read and is never renewed.
+ */
+export const MAX_CHECKING_WINDOW_MS = UNIT_START_BUDGET_MS + PROBE_GRACE_MS;
+
+/** How long a systemd answer may be reused. One `systemctl` fork per second at
+ *  worst, instead of one per request: two panels poll `/providers/status`
+ *  independently and each re-asks while a row is checking, so the unmemoised
+ *  read forked several times a second during exactly the window this feature
+ *  exists for. The client's fastest retry step is 1 s, so a 1 s answer is never
+ *  staler than the thing it is compared against. */
+const UNIT_STATE_TTL_MS = 1_000;
+let unitStateCached: HermesDashboardUnitState | null = null;
+let unitStateAt = 0;
+let unitStateInflight: Promise<HermesDashboardUnitState> | null = null;
+
+async function cachedUnitState(): Promise<HermesDashboardUnitState> {
+  if (unitStateCached && Date.now() - unitStateAt < UNIT_STATE_TTL_MS) return unitStateCached;
+  // The PROMISE is shared, not just the value, so concurrent polls join one
+  // fork instead of racing an empty cache — and the clock is stamped when the
+  // answer LANDS, so a read that took the systemctl timeout is not born already
+  // expired.
+  unitStateInflight ??= hermesDashboardUnitState().finally(() => {
+    unitStateInflight = null;
+  });
+  const state = await unitStateInflight;
+  unitStateCached = state;
+  unitStateAt = Date.now();
+  return state;
+}
+
+/** When the live dashboard first failed to answer, or 0 while it is answering.
+ *  Started by the first failure, cleared by the next success — never restarted
+ *  by a later failure in the same outage, or the grace above would renew
+ *  itself once a second and never expire. */
+let firstUnansweredAt = 0;
+/** When the unit was last SEEN to be starting, or 0.
+ *  The socket-bind clock has to run from the moment the unit stopped starting,
+ *  not from the first unanswered read: `Type=simple` reports `active/running`
+ *  when ExecStart forks, so a start that spent a minute in `ExecStartPre` would
+ *  otherwise arrive in `running` with its whole grace already spent and degrade
+ *  a healthy boot on the last eleven seconds of it. Advanced ONLY while the
+ *  start budget is still unspent (`probeStillOwed` checks the budget before it
+ *  stamps, not after), so it can never exceed
+ *  `firstUnansweredAt + `{@link UNIT_START_BUDGET_MS} — which is what makes
+ *  {@link MAX_CHECKING_WINDOW_MS} a sum rather than an open end. */
+let lastSeenStartingAt = 0;
+/** Sequence of every dashboard read, and of the newest one that ANSWERED.
+ *  Two reads overlap whenever an explicit refresh lands on top of a plain load
+ *  (`load()` single-flights per mode, not across them), and they can settle out
+ *  of order: an 8 s timeout from before the dashboard came up finishing after a
+ *  refresh that just succeeded. Without this, that stale failure opens a debt
+ *  against a box that is answering, and the panel says "Checking..." over a live
+ *  dashboard until the next read clears it. Monotonic: only a read NEWER than
+ *  the last answered one may advance it, so it cannot walk backwards and hand
+ *  an already-answered sequence back to the failure guard. */
+let readSeq = 0;
+let lastAnsweredSeq = 0;
+
+/**
+ * Is an answer from the dashboard still OWED, rather than overdue?
+ *
+ * The difference between "we have not been able to ask yet" and "we asked and
+ * it is broken" — `/setup-api/providers/status` turns a true here into the row
+ * state `checking` instead of `unknown` plus a degraded banner (TASK-663).
+ *
+ * TWO FACTS, AND BOTH ARE NEEDED. SYSTEMD says WHETHER the dashboard is still
+ * starting — the unit that starts it is the thing that knows, and no clock
+ * beside it can tell a slow `ExecStartPre` from a crash loop. A BUDGET says how
+ * long we are willing to call that "checking" before degrading honestly: the
+ * unit's own `TimeoutStartSec` where systemd is starting it, and
+ * {@link PROBE_GRACE_MS} everywhere systemd's answer does not cover the wait —
+ * a `Type=simple` unit already `running` while its socket is not up yet, and a
+ * box whose systemd cannot be asked at all.
+ *
+ * Read at CALL time, never frozen into a payload. `getModelOptions` serves a
+ * degraded payload from cache and refreshes behind the request, so a flag
+ * stamped when the payload was BUILT reports the window as it stood a poll ago
+ * — and the client's last retry would then be answered "still checking" by a
+ * window that had already closed, leaving the panel spinning for good.
+ */
+export async function probeStillOwed(): Promise<boolean> {
+  // Nothing has failed, so nothing is outstanding — including on a process that
+  // has not asked yet, where there is nothing to wait for either.
+  if (!firstUnansweredAt) return false;
+  const unit = await cachedUnitState();
+  // Failed, masked, or stopped and disabled (which is what an OpenClaw box does
+  // to this unit): nothing is coming, so stop promising it and let the rows
+  // degrade now rather than after a grace that means nothing here.
+  if (unit === "down") return false;
+  const now = Date.now();
+  // BOUNDED IN EVERY BRANCH, which is the whole property. systemd's answer says
+  // WHETHER the dashboard is still starting; the budget says how long we are
+  // willing to call that "checking" before we degrade honestly. An unbounded
+  // branch — any unbounded branch — turns "Checking..." into the same lie as the
+  // degraded banner it replaces, pointing the other way.
+  //
+  // The start budget runs from the first UNANSWERED READ, because the question
+  // the panel is asking is how long WE have been unable to answer it. The cost
+  // is one case in the honest direction: a unit that starts fresh at the end of
+  // a long outage is called degraded for the ~11 s until it answers, which is
+  // exactly what a box that has been broken for ten minutes should say.
+  if (unit === "starting") {
+    // Checked BEFORE the latch is stamped, never after. A start we have already
+    // given up on must not hand the socket clock below a fresh
+    // `PROBE_GRACE_MS`: a unit that sits in `activating` for an hour would
+    // otherwise buy back a `checking` window every time it finally forked, and
+    // the panel would come back to "Checking..." long after it had honestly
+    // degraded — the same unbounded window as before, reached from the far side
+    // of the bound instead of through it.
+    if (now - firstUnansweredAt >= UNIT_START_BUDGET_MS) return false;
+    lastSeenStartingAt = now;
+    return true;
+  }
+  // `running` (up, but a just-started process still has to bind its socket),
+  // `restarting` (it died and systemd will start it again in RestartSec — this
+  // app's own dashboard bounce and a crash loop look identical from one sample,
+  // and this is the budget that serves both honestly), or `unknown`, where
+  // systemd could not be asked at all. All three are the clock's, measured from
+  // whichever came later: our first unanswered read, or the unit leaving the
+  // start it was still in a moment ago.
+  return now - Math.max(firstUnansweredAt, lastSeenStartingAt) < PROBE_GRACE_MS;
+}
 
 let cached: ModelOptionsPayload | null = null;
 let inflight: Promise<ModelOptionsPayload> | null = null;
@@ -534,12 +702,32 @@ export async function readCurrentFromCli(): Promise<{ provider: string; model: s
 }
 
 async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
+  const seq = ++readSeq;
   // `agent.reasoning_effort` is not in the dashboard envelope, so it always
   // comes from the CLI. Run it alongside the dashboard call rather than after.
   const [dash, cli] = await Promise.all([
     fetchFromDashboard(refresh),
     readCurrentFromCli(),
   ]);
+
+  // One live answer clears the debt; the first failure after an answer opens
+  // it. See `probeStillOwed`, which is what reads this.
+  //
+  // BOTH writes are ordered, because reads settle out of order in both
+  // directions. A failure older than an answer is stale news about a dashboard
+  // that is demonstrably up, and opening a debt on it paints "Checking..." over
+  // a live box. A SUCCESS older than an answer is stale news too: it must not
+  // clear a debt the newest read just opened — that flaps the panel
+  // `checking -> degraded -> checking`, and dragging `lastAnsweredSeq` backwards
+  // re-opens the guard below so the next failure buys a second full
+  // `MAX_CHECKING_WINDOW_MS` on the same outage.
+  if (dash && seq > lastAnsweredSeq) {
+    firstUnansweredAt = 0;
+    lastSeenStartingAt = 0;
+    lastAnsweredSeq = seq;
+  } else if (!dash && !firstUnansweredAt && lastAnsweredSeq < seq) {
+    firstUnansweredAt = Date.now();
+  }
 
   if (dash) {
     return {

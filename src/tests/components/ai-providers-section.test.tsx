@@ -259,6 +259,42 @@ describe("every row is honest about its own connection", () => {
     render(<HermesProviderConfig embedded testId="hermes-ai" />);
     expect(await screen.findByText(/some states may be out of date/i)).toBeInTheDocument();
   });
+
+  // TASK-663. Before the box's first probe lands there is nothing to be right
+  // OR wrong about, and the panel used to say the two most alarming things it
+  // knows — every row "Unknown" under a "couldn't reach the agent" banner — for
+  // the whole boot window. "Checking…" is the honest word, and it comes with
+  // motion so it reads as a state in progress rather than a verdict.
+  it("says Checking, with a spinner, for a row nobody has probed yet", async () => {
+    statusBody = summary({
+      degraded: false,
+      providers: summary().providers.map((p) =>
+        p.id === "nous" ? { ...p, state: "checking" as const } : p,
+      ),
+    });
+    render(<HermesProviderConfig embedded testId="hermes-ai" />);
+
+    const nous = within(await row("Nous Portal"));
+    expect(nous.getByText("Checking...")).toBeInTheDocument();
+    expect(nous.queryByText("Unknown")).not.toBeInTheDocument();
+    expect(nous.getByTestId("provider-state-spinner")).toBeInTheDocument();
+    expect(screen.queryByText(/some states may be out of date/i)).not.toBeInTheDocument();
+  });
+
+  // The other direction, so "checking" cannot become a blanket excuse: a probe
+  // that actually ran and failed still says degraded.
+  it("still shows degraded when a real probe came back bad", async () => {
+    statusBody = summary({
+      degraded: true,
+      providers: summary().providers.map((p) =>
+        p.id === "nous" ? { ...p, state: "unknown" as const } : p,
+      ),
+    });
+    render(<HermesProviderConfig embedded testId="hermes-ai" />);
+
+    expect(await screen.findByText(/some states may be out of date/i)).toBeInTheDocument();
+    expect(within(await row("Nous Portal")).getByText("Unknown")).toBeInTheDocument();
+  });
 });
 
 describe("the radio's two verbs", () => {

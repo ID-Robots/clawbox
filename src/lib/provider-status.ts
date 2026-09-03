@@ -23,10 +23,10 @@ import {
   HERMES_PANEL_PROVIDERS,
   hermesProviderLabel,
 } from "@/lib/hermes-providers";
-import { getModelOptions } from "@/lib/hermes-model-options";
+import { getModelOptions, probeStillOwed } from "@/lib/hermes-model-options";
 
 /**
- * What the strip paints, and the only four things it may say.
+ * What the strip paints, and the only five things it may say.
  *
  * `needs-reauth` is NOT a guess. It is the one genuinely diagnosable failure:
  * the box is POINTED AT this provider as its default and cannot authenticate to
@@ -34,11 +34,27 @@ import { getModelOptions } from "@/lib/hermes-model-options";
  * colour, because chat is broken until it is fixed. Anything else we cannot
  * tell apart from "never set up" gets `disconnected`, and anything we could not
  * ask about at all gets `unknown` rather than a cheerful default.
+ *
+ * `checking` and `unknown` are the two halves of what used to be one word, and
+ * the split is the whole of TASK-663. `unknown` is a RESULT — we asked and the
+ * source could not tell us. `checking` is the absence of a result: the harness
+ * has not been reachable yet and no probe has happened at all. They looked the
+ * same on the wire, so a box in its first seconds after a reboot painted every
+ * provider "Unknown" under a "couldn't reach the agent" banner — a healthy box
+ * reported as broken. A `checking` row therefore also counts for NOTHING
+ * toward {@link ProviderStatusSummary.degraded}: there is no bad answer yet,
+ * only no answer. It is time-bounded at the source, in EVERY branch, so a
+ * harness that never comes back falls back to `unknown` and a degraded summary
+ * rather than spinning for ever — see `probeStillOwed` in
+ * `hermes-model-options.ts`, which asks systemd whether the dashboard's unit is
+ * actually still starting and then bounds even that answer by the unit's own
+ * `TimeoutStartSec` (`MAX_CHECKING_WINDOW_MS`).
  */
 export type ProviderConnectionState =
   | "connected"
   | "disconnected"
   | "needs-reauth"
+  | "checking"
   | "unknown";
 
 export interface ProviderStatusRow {
@@ -74,6 +90,10 @@ export interface ProviderStatusSummary {
    * True when the answer came from a fallback rather than from the live box —
    * a Hermes dashboard that did not respond, or an unreadable config. The strip
    * says so rather than painting a stale answer as fact.
+   *
+   * A harness that is merely still STARTING is not degraded: those rows say
+   * `checking` and this stays false until the wait outlives the boot window.
+   * See {@link ProviderConnectionState}.
    */
   degraded: boolean;
 }
@@ -161,7 +181,7 @@ interface UnstampedSummary extends Omit<ProviderStatusSummary, "providers"> {
 }
 
 /**
- * The one place the four states are decided, so the two harness paths cannot
+ * The one place the five states are decided, so the two harness paths cannot
  * drift into disagreeing about what "connected" means.
  *
  * `credentialed === null` means the source could not tell us (Hermes' on-disk
@@ -169,9 +189,15 @@ interface UnstampedSummary extends Omit<ProviderStatusSummary, "providers"> {
  * Painting "not connected" over a provider we simply failed to ask about is the
  * failure mode most likely to send someone to re-enter a key that was fine.
  */
-function stateFor(credentialed: boolean | null, isDefault: boolean): ProviderConnectionState {
+function stateFor(
+  credentialed: boolean | null,
+  isDefault: boolean,
+  /** True while the harness has not been reachable YET — see
+   *  {@link ProviderConnectionState}. Only ever splits the `null` case. */
+  awaitingProbe = false,
+): ProviderConnectionState {
   if (credentialed === true) return "connected";
-  if (credentialed === null) return "unknown";
+  if (credentialed === null) return awaitingProbe ? "checking" : "unknown";
   return isDefault ? "needs-reauth" : "disconnected";
 }
 
@@ -204,6 +230,20 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
   // stores.
   const probeAnswered = !payload.stale;
 
+  // ...and if it did not, has it simply not had a chance yet? The dashboard is
+  // not up when this server is (~11-12 s after every boot and after every
+  // restart we ourselves trigger). `probeStillOwed` is the one place that
+  // knows: it asks systemd whether the unit is still starting, and bounds that
+  // answer as well as its own clock. Within the window a row with no auth state
+  // is `checking`, not `unknown`, and the summary is not degraded — there is no
+  // bad answer yet, only no answer. Once the unit has died, or either bound is
+  // spent, every row goes back to today's behaviour.
+  //
+  // Guarded on `stale` as well: `probeStillOwed` describes the DASHBOARD, and
+  // on a payload that did come from the live dashboard a row it declined to
+  // judge is a real result that keeps its own word.
+  const awaitingProbe = payload.stale === true && await probeStillOwed();
+
   const providers = ids.map((id) => {
     const isDefault = id === defaultProvider;
     const reported = byId.get(id)?.authenticated ?? null;
@@ -231,13 +271,13 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
     return {
       id,
       label: hermesProviderLabel(id, byId.get(id)?.name),
-      state: stateFor(credentialed, isDefault),
+      state: stateFor(credentialed, isDefault, awaitingProbe),
       isDefault,
       section: sectionFor(id),
     };
   });
 
-  return { harness: "hermes", providers, defaultProvider, degraded: payload.stale };
+  return { harness: "hermes", providers, defaultProvider, degraded: payload.stale && !awaitingProbe };
 }
 
 /** The `claw_` prefix is the ClawBox AI portal token format (see clawkeep.ts). */
@@ -309,6 +349,21 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
     return {
       id,
       label,
+      // No `awaitingProbe` here, deliberately: this reader PROBES NOTHING. It
+      // answers from whatever `openclaw.json` it just read, so `credentialed`
+      // is a definite yes or no for every row and there is no window in which
+      // a probe answer is owed. OpenClaw's gateway has no equivalent to ask
+      // either — its only non-WebSocket endpoints are the `/healthz`,
+      // `/readyz` and `/startupz` liveness probes, none of which carries
+      // provider auth.
+      //
+      // A separate question, deliberately NOT answered here: `readConfig`
+      // collapses every read failure (EACCES, a file caught half-written by a
+      // concurrent `config set`) into `{}`, so an unreadable config reads as
+      // "nothing configured" rather than as `degraded` — which is what the
+      // summary's own doc promises. Same shape of false failure as the one
+      // this fix addresses, different reader, and it needs `readConfigStrict`
+      // rather than a probe state.
       state: stateFor(credentialed.has(id), isDefault),
       isDefault,
       section: sectionFor(id),

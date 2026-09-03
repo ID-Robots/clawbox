@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import { forgetHermesProviderPreference } from "@/lib/hermes-chat-prefs";
+import { degradedRetryDelayMs } from "@/lib/degraded-retry";
 import type { ProviderStatusSummary } from "@/lib/provider-status";
 
 /**
@@ -17,6 +18,45 @@ import type { ProviderStatusSummary } from "@/lib/provider-status";
  * than for the other listeners: on Hermes this endpoint's answer comes from the
  * dashboard, and saving a key legitimately emits the signal twice (once for the
  * credential, once for the pairing).
+ *
+ * ...and it re-reads ON ITS OWN while any row is `checking`. Nothing emits a
+ * signal when a harness finishes booting, so without this the panel that
+ * happened to open during those seconds would sit on a spinner until the
+ * customer navigated away and back — which is how a state that resolves in
+ * eleven seconds server-side was on screen for minutes.
+ */
+
+/**
+ * The self-polling rule, in one place because it is the half of TASK-663 the
+ * server cannot enforce.
+ *
+ * BOUNDED IN RATE, NEVER IN COUNT, while the box says `checking`. The server's
+ * checking window belongs to the unit, not to a constant here: a dashboard in
+ * `ExecStartPre` on a loaded box is legitimately starting for as long as its
+ * `TimeoutStartSec` allows. A fixed number of polls is therefore a promise this
+ * side cannot keep, and breaking it produces the worst outcome of the three —
+ * the last poll is answered "still checking", nothing books another read, and
+ * the panel holds spinner rows with NO banner for the life of the mount, on a
+ * box that answers fine seconds later. Worse than the "Unknown + degraded"
+ * this feature replaced, because that at least said something.
+ *
+ * What makes unbounded polling safe is the server's side of the same contract:
+ * `probeStillOwed` is bounded in every branch, so a `checking` answer always
+ * stops coming (`MAX_CHECKING_WINDOW_MS`, pinned by
+ * `src/tests/unit/checking-retry-budget.test.ts`). The rate is the shared
+ * degraded schedule, which settles at `DEGRADED_RETRY_MAX_MS`, and the loop
+ * ends with the mount — nothing else ends it, deliberately.
+ *
+ * A FAILED read does not end it either, and that is the same rule rather than an
+ * exception to it: a read that failed is no evidence the probe finished, so the
+ * last thing the box actually said still stands. A count of failures was tried
+ * here and it recreated the bug one door along — the setup server restarting
+ * itself (an in-app update does exactly that) spends the count in under a
+ * minute, and the panel then holds "Checking..." rows for the life of the mount
+ * with `HermesProviderConfig` showing no message at all, since its read-error
+ * line needs a NULL summary. The endpoint is this same server, served to this
+ * same page: if it is gone the page is already broken, and one poll every eight
+ * seconds is how it notices when it comes back.
  */
 
 export interface UseProviderStatus {
@@ -43,6 +83,15 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
   // Guards a setState after unmount, and lets a slow answer for a previous
   // nonce be discarded rather than overwriting a newer one.
   const controllerRef = useRef<AbortController | null>(null);
+  // Which step of the backoff the next self-poll is on. Reset by the first
+  // answer with nothing left to check, so a later boot (a gateway restart from
+  // Settings) starts again at the fast end rather than at the slow one.
+  const backoffStepRef = useRef(0);
+  // Whether the last answer we actually got had a row still being checked. Read
+  // by the FAILURE path, which has no body to look at: a read that failed is no
+  // evidence the probe finished, and booking no retry there would end the loop
+  // on the first transient 500 with the spinner frozen on screen.
+  const checkingRef = useRef(false);
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
 
@@ -51,6 +100,16 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    // Booked from BOTH the success and the failure path — see `checkingRef`.
+    const scheduleRetry = () => {
+      if (!checkingRef.current) {
+        backoffStepRef.current = 0;
+        return;
+      }
+      retryTimer = setTimeout(refresh, degradedRetryDelayMs(backoffStepRef.current));
+      backoffStepRef.current += 1;
+    };
 
     fetch("/setup-api/providers/status", { cache: "no-store", signal: controller.signal })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
@@ -63,6 +122,12 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
         if (!data || !Array.isArray(data.providers)) throw new Error("Malformed status");
         setSummary(data);
         setError(false);
+        // A `checking` row is a promise that this answer is going to change,
+        // and nothing else on the page emits a signal when a harness finishes
+        // booting. Asked again for as long as that promise stands — see the
+        // rule at the top of this file.
+        checkingRef.current = data.providers.some((row) => row.state === "checking");
+        scheduleRetry();
       })
       .catch((err) => {
         if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) return;
@@ -70,10 +135,14 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
         // transient failure reads as "everything disconnected", which is the one
         // thing it must never say by accident.
         setError(true);
+        scheduleRetry();
       });
 
-    return () => controller.abort();
-  }, [enabled, nonce]);
+    return () => {
+      controller.abort();
+      if (retryTimer) clearTimeout(retryTimer);
+    };
+  }, [enabled, nonce, refresh]);
 
   useEffect(() => {
     if (!enabled) return;

@@ -4,7 +4,10 @@ vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({ readConfig: vi.fn() }));
 vi.mock("@/lib/config-store", () => ({ get: vi.fn() }));
-vi.mock("@/lib/hermes-model-options", () => ({ getModelOptions: vi.fn() }));
+vi.mock("@/lib/hermes-model-options", () => ({
+  getModelOptions: vi.fn(),
+  probeStillOwed: vi.fn(),
+}));
 
 let GET: () => Promise<Response>;
 let getActiveHarness: Mock;
@@ -12,6 +15,7 @@ let hasClawaiToken: Mock;
 let readConfig: Mock;
 let getConfigValue: Mock;
 let getModelOptions: Mock;
+let probeStillOwed: Mock;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -20,9 +24,14 @@ beforeEach(async () => {
   ({ hasClawaiToken } = (await import("@/lib/harness/credentials")) as unknown as { hasClawaiToken: Mock });
   ({ readConfig } = (await import("@/lib/openclaw-config")) as unknown as { readConfig: Mock });
   ({ get: getConfigValue } = (await import("@/lib/config-store")) as unknown as { get: Mock });
-  ({ getModelOptions } = (await import("@/lib/hermes-model-options")) as unknown as { getModelOptions: Mock });
+  ({ getModelOptions, probeStillOwed } = (await import("@/lib/hermes-model-options")) as unknown as {
+    getModelOptions: Mock;
+    probeStillOwed: Mock;
+  });
   getConfigValue.mockResolvedValue(null);
   hasClawaiToken.mockResolvedValue(false);
+  // The settled box: the dashboard has answered, so nothing is outstanding.
+  probeStillOwed.mockResolvedValue(false);
   ({ GET } = await import("@/app/setup-api/providers/status/route"));
 });
 
@@ -172,6 +181,73 @@ describe("GET /setup-api/providers/status — Hermes", () => {
     expect((await (await GET()).json()).degraded).toBe(true);
   });
 
+  // ── TASK-663: "checking…" is a state, and it is not a failure ──────────────
+  //
+  // Right after a reboot the Hermes dashboard is not up yet — `clawbox-setup`
+  // answers in 0 ms and `clawbox-hermes-dashboard` needs another ~11-12 s — so
+  // `getModelOptions` answers from the on-disk manifest, which carries no auth
+  // state for any row. Reporting THAT as `degraded: true` with every provider
+  // "Unknown" paints a healthy box as broken over an answer nobody has been
+  // able to ask for yet: a false failure, and the one the Providers panel
+  // opened on.
+  //
+  // `probeStillOwed` is `hermes-model-options`' answer to "is the dashboard
+  // still coming up?" — asked of systemd, read at CALL time so a cached payload
+  // cannot report the window as it stood a poll ago.
+  function unprobedPayload() {
+    return hermesPayload({
+      providers: [
+        { id: "anthropic", name: "anthropic", authenticated: null, verified: null, isUserDefined: null, source: "catalog-file", total: 0, models: [] },
+      ],
+      source: "catalog-file",
+      stale: true,
+    });
+  }
+
+  it("says CHECKING, not degraded, while the first probe is still owed", async () => {
+    getModelOptions.mockResolvedValue(unprobedPayload());
+    probeStillOwed.mockResolvedValue(true);
+    const body = await (await GET()).json();
+
+    expect(body.degraded).toBe(false);
+    expect(rowFor(body, "anthropic")!.state).toBe("checking");
+    // Every row, not only the default one: none of them has been probed.
+    expect(rowFor(body, "gemini")!.state).toBe("checking");
+    // ClawBox AI has no live answer and no token of our own either, and that
+    // is still "not asked yet" rather than "not linked".
+    expect(rowFor(body, "clawai")!.state).toBe("checking");
+  });
+
+  // The other half, and the reason `awaitingProbe` is time-bounded rather than
+  // a plain "have we ever succeeded": a dashboard that never comes back must
+  // stop reading as "Checking…" and go back to reading as degraded. A probe
+  // that failed shown as checking forever is the same lie in the other
+  // direction.
+  it("stops checking and degrades once the probe is no longer owed", async () => {
+    getModelOptions.mockResolvedValue(unprobedPayload());
+    probeStillOwed.mockResolvedValue(false);
+    const body = await (await GET()).json();
+
+    expect(body.degraded).toBe(true);
+    expect(rowFor(body, "anthropic")!.state).toBe("unknown");
+  });
+
+  // A LIVE answer that says "this provider could not be judged" is a real probe
+  // result and keeps its own word. `checking` is only ever about the absence of
+  // a probe, never about what one returned.
+  it("still says unknown for a row the live dashboard could not judge", async () => {
+    // The shape the `stale` half of the guard exists for: the dashboard ANSWERED
+    // (so `gemini`'s null is a result), while a concurrent outage has the probe
+    // predicate saying an answer is owed. Without that half this row would be
+    // repainted "checking" on the strength of a fact about a different read.
+    getModelOptions.mockResolvedValue(hermesPayload({ stale: false }));
+    probeStillOwed.mockResolvedValue(true);
+    const body = await (await GET()).json();
+
+    expect(body.degraded).toBe(false);
+    expect(rowFor(body, "gemini")!.state).toBe("unknown");
+  });
+
   it("keys the owner's switch by Hermes' own id, not a folded one", async () => {
     // `openai-codex` is what the Hermes row is called; folding it onto
     // `openai` the way OpenClaw's normaliser does would leave a switch flipped
@@ -263,6 +339,27 @@ describe("GET /setup-api/providers/status — OpenClaw", () => {
     expect(rowFor(body, "llamacpp")!.section).toBe("localAi");
     expect(rowFor(body, "anthropic")!.section).toBe("ai");
   });
+
+  // TASK-663, the OpenClaw leg. This path reads `openclaw.json` off disk and
+  // performs NO probe at all, so it has no window in which an answer is owed:
+  // it must never emit `checking`, and it must never degrade over a cold box.
+  it("never says checking on OpenClaw, which probes nothing", async () => {
+    readConfig.mockResolvedValue({});
+    // The predicate says an answer IS owed — the shape that would repaint every
+    // unjudged row on the Hermes leg. Left at its `false` default this test
+    // passed on its own fixture and would have gone on passing if a later edit
+    // wired the probe into this reader, which is the one thing it is named for.
+    // Nothing on this path may consult it: `probeStillOwed` is also the only
+    // route from here to the systemd read, so not calling it is what keeps an
+    // OpenClaw box from forking `systemctl` over a Hermes unit it has stopped
+    // and disabled.
+    probeStillOwed.mockResolvedValue(true);
+    const body = await (await GET()).json();
+
+    expect(body.degraded).toBe(false);
+    expect(body.providers.map((p: Row) => p.state)).not.toContain("checking");
+    expect(probeStillOwed).not.toHaveBeenCalled();
+  });
 });
 
 describe("the owner's switch", () => {
@@ -349,8 +446,26 @@ describe("the response carries statuses, never credentials", () => {
       expect(Object.keys(row).sort()).toEqual(["enabled", "id", "isDefault", "label", "section", "state"]);
       expect(typeof row.isDefault).toBe("boolean");
       expect(typeof row.enabled).toBe("boolean");
-      // The owner's switch is a fifth, orthogonal field — never a fifth state.
-      expect(["connected", "disconnected", "needs-reauth", "unknown"]).toContain(row.state);
+      // The owner's switch is an orthogonal FIELD — never a state.
+      expect(["connected", "disconnected", "needs-reauth", "checking", "unknown"]).toContain(row.state);
+    }
+  });
+
+  // ...and the same contract on the answer a booting box gives, which is the
+  // one shape the fixture above cannot produce.
+  it("emits only those fields while the box is still being checked", async () => {
+    getActiveHarness.mockResolvedValue("hermes");
+    getModelOptions.mockResolvedValue(hermesPayload({ stale: true }));
+    probeStillOwed.mockResolvedValue(true);
+    const body = await (await GET()).json();
+
+    expect(Object.keys(body).sort()).toEqual(
+      ["defaultProvider", "degraded", "harness", "providers"],
+    );
+    expect(body.providers.some((row: Row) => row.state === "checking")).toBe(true);
+    for (const row of body.providers) {
+      expect(Object.keys(row).sort()).toEqual(["enabled", "id", "isDefault", "label", "section", "state"]);
+      expect(["connected", "disconnected", "needs-reauth", "checking", "unknown"]).toContain(row.state);
     }
   });
 });

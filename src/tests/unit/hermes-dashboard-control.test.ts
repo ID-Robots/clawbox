@@ -19,13 +19,17 @@ const execFileMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("child_process", () => ({ execFile: execFileMock }));
 
-import { bounceHermesDashboard } from "@/lib/hermes-dashboard-control";
+import {
+  bounceHermesDashboard,
+  classifyUnitState,
+  hermesDashboardUnitState,
+} from "@/lib/hermes-dashboard-control";
 
-/** `systemctl show … --property=Restart --value` prints `value`. */
+/** `systemctl show … --property=Restart` prints `Restart=value`. */
 function systemdRestartPolicy(value: string): void {
   execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: unknown) => {
     (cb as (e: Error | null, out: { stdout: string; stderr: string }) => void)(null, {
-      stdout: `${value}\n`,
+      stdout: `Restart=${value}\n`,
       stderr: "",
     });
   });
@@ -56,11 +60,12 @@ describe("bounceHermesDashboard", () => {
     // Absolute path, like every other systemctl call site in the repo, and a
     // READ — this module must never need a privilege it cannot have.
     expect(bin).toBe("/usr/bin/systemctl");
+    // By NAME, like every read in this module — never a bare value whose
+    // meaning depends on the order systemd chose to print it in.
     expect(args).toEqual([
       "show",
       "clawbox-hermes-dashboard.service",
       "--property=Restart",
-      "--value",
     ]);
   });
 
@@ -91,5 +96,113 @@ describe("bounceHermesDashboard", () => {
   it("does not throw when the CLI is missing entirely", async () => {
     cliMock.mockRejectedValue(new Error("ENOENT"));
     await expect(bounceHermesDashboard()).resolves.toBe(false);
+  });
+});
+
+/**
+ * TASK-663 — the second, read-only question this module answers: is the
+ * dashboard still COMING UP?
+ *
+ * The Providers panel used to report a booting box as degraded with every
+ * provider "Unknown". Whether the unit is starting is systemd's fact, not
+ * something to approximate with a wall clock beside it, and `systemctl show`
+ * is a read — the same unprivileged call the restart guard above already makes.
+ *
+ * Two of systemd's actual behaviours are pinned here because guessing at them
+ * is what made the first attempt wrong, and both were reproduced on a real host
+ * rather than reasoned about:
+ *   - `systemctl show` prints properties in SYSTEMD's order, not the order the
+ *     query asked for, so the fields have to be keyed by name;
+ *   - it answers `inactive`/`dead` with exit 0 for a unit that does not exist,
+ *     which is indistinguishable from an installed, stopped unit until you also
+ *     read `LoadState`.
+ */
+describe("hermesDashboardUnitState", () => {
+  /** Real output: `Key=Value` lines, in systemd's own order. */
+  function systemdShow(props: Record<string, string>): void {
+    const body = Object.entries(props).map(([k, v]) => `${k}=${v}`).join("\n");
+    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: unknown) => {
+      (cb as (e: Error | null, out: { stdout: string; stderr: string }) => void)(null, {
+        stdout: `${body}\n`,
+        stderr: "",
+      });
+    });
+  }
+
+  it("asks systemd for the unit, with a read that needs no privilege", async () => {
+    systemdShow({ LoadState: "loaded", ActiveState: "active", SubState: "running" });
+    await hermesDashboardUnitState();
+
+    const [bin, args] = systemctlCall();
+    expect(bin).toBe("/usr/bin/systemctl");
+    expect(args[0]).toBe("show");
+    expect(args).toContain("--property=LoadState,ActiveState,SubState");
+    // No `--value`: the values alone cannot be told apart once there is more
+    // than one of them (see below).
+    expect(args).not.toContain("--value");
+    expect(args).not.toContain("restart");
+  });
+
+  it("answers unknown — never a guess — when systemd cannot be asked", async () => {
+    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: unknown) => {
+      (cb as (e: Error) => void)(new Error("systemctl: not found"));
+    });
+    expect(await hermesDashboardUnitState()).toBe("unknown");
+  });
+
+  it("keys the answer by property NAME, not by the order it asked in", async () => {
+    // Shuffled on purpose: systemd prints in its OWN order, which is the whole
+    // reason the read cannot be positional. A positional read of this calls a
+    // starting unit "down".
+    systemdShow({ SubState: "start-pre", LoadState: "loaded", ActiveState: "activating" });
+    expect(await hermesDashboardUnitState()).toBe("starting");
+  });
+
+  it("does not call a unit systemd has never heard of 'down'", async () => {
+    // A dev checkout, CI, a container, and — the one that matters — a box
+    // mid-update between the unit-file replace and `daemon-reload`. `down`
+    // there means "degrade the panel now", on a box whose dashboard may be
+    // seconds from answering.
+    systemdShow({ LoadState: "not-found", ActiveState: "inactive", SubState: "dead" });
+    expect(await hermesDashboardUnitState()).toBe("unknown");
+  });
+
+  it("still reads an installed, stopped unit as down", async () => {
+    // The same two properties, the other LoadState: an OpenClaw box stops and
+    // disables this unit on purpose, and nothing is coming back.
+    systemdShow({ LoadState: "loaded", ActiveState: "inactive", SubState: "dead" });
+    expect(await hermesDashboardUnitState()).toBe("down");
+  });
+
+  // The vocabulary itself, pinned so a rename upstream cannot silently turn a
+  // failed unit into "still starting".
+  it.each([
+    // On its way. `Type=simple` means `active` arrives when ExecStart FORKS, so
+    // what `activating` really covers here is the unit's two ExecStartPre lines
+    // — bounded by its own TimeoutStartSec, which is where the caller's budget
+    // comes from.
+    ["loaded", "activating", "start-pre", "starting"],
+    ["loaded", "activating", "start", "starting"],
+    ["loaded", "reloading", "reload", "starting"],
+    // ...but NOT the gap between crashes. `Restart=always` + `RestartSec=5`
+    // with no StartLimitBurst that can trip means a broken dashboard sits here
+    // for ever, and a process that has already run and died is not starting.
+    ["loaded", "activating", "auto-restart", "restarting"],
+    // Up as far as systemd is concerned — the socket is the caller's clock.
+    ["loaded", "active", "running", "running"],
+    // Nothing is going to answer. Note an OpenClaw box stops and disables this
+    // unit deliberately, so "down" is not by itself a fault.
+    ["loaded", "failed", "failed", "down"],
+    ["loaded", "inactive", "dead", "down"],
+    ["masked", "inactive", "dead", "down"],
+    // Cannot be asked, in its three shapes: no such unit, mid-transition (which
+    // is what this app's own dashboard bounce passes through, and reading it as
+    // `down` flashed the degraded banner over a restart we asked for), and no
+    // systemd at all.
+    ["not-found", "inactive", "dead", "unknown"],
+    ["loaded", "deactivating", "stop-sigterm", "unknown"],
+    ["", "", "", "unknown"],
+  ])("reads %s %s/%s as %s", (loadState, activeState, subState, expected) => {
+    expect(classifyUnitState({ loadState, activeState, subState })).toBe(expected);
   });
 });
