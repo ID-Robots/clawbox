@@ -30,6 +30,12 @@ const LLAMACPP_RESTART_MIN_MS = 5_000
  * `register()` runs once per process, so there is never a child to replace.
  */
 const TERMINAL_REPLACE_GRACE_MS = 2_000
+/**
+ * How often to look again for a server file that is not there. Same duration as
+ * the backoff ceiling, but a different question — a missing file is not a crash
+ * loop — so it gets its own name rather than borrowing that constant's meaning.
+ */
+const TERMINAL_MISSING_FILE_RECHECK_MS = 60_000
 
 /**
  * What scripts/terminal-server.mjs answers on GET /. The "is it already up?"
@@ -81,20 +87,31 @@ let llamaCppRestartTimer: ReturnType<typeof setTimeout> | null = null
  */
 let llamaCppStopGeneration = 0
 let llamaCppStartPromise: Promise<LlamaCppStartStatus> | null = null
+/** The stop generation {@link llamaCppStartPromise} was created under. */
+let llamaCppStartGeneration = -1
 let cleanupRegistered = false
 
 /**
- * The supervision chain is over: cancel an armed restart, disown a start that
- * is already in flight, and put the backoff back at its floor. Deliberate
- * stops only — a retry must NOT come through here, or the delay would reset on
- * every attempt and the crash loop would be flat 5 s again, which is the defect
- * this file was rewritten for.
+ * Drop the armed retry, and nothing else. Safe to call whenever a retry has
+ * become pointless — a child is running again — because it does NOT touch the
+ * backoff.
  */
-function endLlamaCppSupervision() {
+function cancelPendingLlamaCppRestart() {
   if (llamaCppRestartTimer) {
     clearTimeout(llamaCppRestartTimer)
     llamaCppRestartTimer = null
   }
+}
+
+/**
+ * The supervision chain is over: cancel the armed restart, disown any start
+ * already in flight, and put the backoff back at its floor. Deliberate stops
+ * only — a retry must NOT come through here, or the delay would reset on every
+ * attempt and the crash loop would be flat 5 s again, which is the defect this
+ * file was rewritten for.
+ */
+function endLlamaCppSupervision() {
+  cancelPendingLlamaCppRestart()
   llamaCppStopGeneration++
   llamaCppRestartDelayMs = LLAMACPP_RESTART_MIN_MS
 }
@@ -130,6 +147,10 @@ export function startTerminalServer() {
   // is a build artefact that only refreshes on a full rebuild.
   const serverPath = path.join(CONFIG_ROOT, 'scripts', 'terminal-server.mjs')
   const generation = ++terminalGeneration
+  // Per call, deliberately unlike the llama.cpp counter, which is module state:
+  // a second call here only ever happens on a dev hot-reload, and that is a new
+  // supervision chain rather than a continuing crash loop. Production has one
+  // generation for the life of the process.
   let restartDelayMs = TERMINAL_RESTART_MIN_MS
   terminalStopping = false
 
@@ -205,7 +226,7 @@ export function startTerminalServer() {
       // A minute between looks, and deliberately WITHOUT touching
       // restartDelayMs: a missing file is not a crash loop, so the child that
       // spawns once it returns must still get the 2 s floor if it then dies.
-      setTimeout(startServer, CHILD_RESTART_MAX_MS)
+      setTimeout(startServer, TERMINAL_MISSING_FILE_RECHECK_MS)
       return
     }
 
@@ -279,12 +300,24 @@ export type LlamaCppStartStatus =
 export async function startLlamaCppServer(alias?: string): Promise<LlamaCppStartStatus> {
   llamaCppStopping = false
   registerCleanupHandlers()
-  if (llamaCppStartPromise) return await llamaCppStartPromise
+  // Share an in-flight start only while it belongs to the CURRENT decision. A
+  // boot begun before a stop is now certain to reject at its pre-spawn check,
+  // so handing it to a caller who asked after the owner switched Local AI back
+  // ON would answer them with a failure from a decision that is no longer
+  // theirs — "stopped while it was starting", over a request to start.
+  if (llamaCppStartPromise && llamaCppStartGeneration === llamaCppStopGeneration) {
+    return await llamaCppStartPromise
+  }
 
-  llamaCppStartPromise = bootLlamaCppServer(alias).finally(() => {
-    llamaCppStartPromise = null
+  const generation = llamaCppStopGeneration
+  const startPromise = bootLlamaCppServer(alias).finally(() => {
+    // Only if it is still ours: a superseded boot settling later must not clear
+    // the promise that replaced it.
+    if (llamaCppStartPromise === startPromise) llamaCppStartPromise = null
   })
-  return await llamaCppStartPromise
+  llamaCppStartPromise = startPromise
+  llamaCppStartGeneration = generation
+  return await startPromise
 }
 
 async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStartStatus> {
@@ -383,6 +416,12 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
   }
 
   llamaCppChild = child
+  // A retry armed by an earlier death is stale the moment a child is running
+  // again — its job is done, by this. Deliberately NOT through
+  // endLlamaCppSupervision: that resets the backoff, and this is the crash
+  // loop's own restart path, so resetting here would flatten 5→60 s back to a
+  // flat 5 s, which is the defect this file was rewritten for.
+  cancelPendingLlamaCppRestart()
   const startedAt = uptimeClockMs()
   await llamaCpp.writeLlamaCppPid(child.pid, spec.pidPath)
   console.log(`[instrumentation] llama.cpp auto-starting ${alias} (pid=${child.pid})`)
@@ -431,8 +470,19 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
         const delayMs = llamaCppRestartDelayMs
         llamaCppRestartDelayMs = Math.min(llamaCppRestartDelayMs * 2, CHILD_RESTART_MAX_MS)
         console.log(`[instrumentation] llama.cpp exited (code=${code}), retrying in ${delayMs / 1000}s...`)
-        llamaCppRestartTimer = setTimeout(() => {
-          llamaCppRestartTimer = null
+        const timer = setTimeout(() => {
+          // Only clear the slot if it still points at THIS timer. More than one
+          // retry can be pending — two children can be alive at once, and the
+          // second death overwrites the handle — so nulling it unconditionally
+          // would orphan the newer one in turn.
+          if (llamaCppRestartTimer === timer) llamaCppRestartTimer = null
+          // The generation this retry was armed under, re-read at the moment it
+          // fires. A retry orphaned by a later death is not reachable through
+          // the handle any more, and it cannot be caught downstream either:
+          // startLlamaCppServer clears `llamaCppStopping` as its first act and
+          // the boot it starts captures the POST-stop generation. This callback
+          // is the last place the owner's "off" can still be honoured.
+          if (llamaCppStopping || stopGeneration !== llamaCppStopGeneration) return
           // Restart the SAME alias. Re-deriving it would send the crash-restart
           // back through the configuration gate, which on a Hermes device is a
           // different question from "what was just running".
@@ -440,11 +490,20 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
             console.error('[instrumentation] Failed to restart llama.cpp:', err instanceof Error ? err.message : err)
           })
         }, delayMs)
+        llamaCppRestartTimer = timer
       } catch (err) {
         console.error('[instrumentation] llama.cpp exit handling failed:', err instanceof Error ? err.message : err)
       }
     })()
   })
+
+  // One last look before reporting success. `writeLlamaCppPid` above is an
+  // await, and a stop landing inside it kills the child correctly — but this
+  // function would otherwise run on and tell its caller 'started' about a child
+  // that is already dead.
+  if (stopGeneration !== llamaCppStopGeneration) {
+    throw new Error('llama.cpp was stopped while it was starting')
+  }
 
   return 'started'
 }

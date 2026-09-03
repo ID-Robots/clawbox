@@ -359,4 +359,82 @@ describe("llama.cpp child supervision", () => {
       "the dying child unlinked the replacement's pid record",
     ).not.toHaveBeenCalled();
   });
+
+  /**
+   * The retry handle is one slot, but more than one retry can be pending: two
+   * children can be alive at once, and the second death overwrites the handle.
+   * The owner's "off" then cancels only the newest, and the orphan restarts a
+   * runtime that was switched off — the PR's own headline defect, in a
+   * two-death interleaving. The flag cannot catch it either, because
+   * startLlamaCppServer clears it as its first act.
+   */
+  it("does not let a retry orphaned by a second death survive the owner's stop", async () => {
+    vi.useFakeTimers();
+    const childA = emittingChild(4242);
+    spawnMock.mockReturnValue(childA);
+
+    const mod = await loadModule();
+    expect(await mod.startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
+
+    // A second child starts while the first is still alive.
+    const childB = emittingChild(4243);
+    spawnMock.mockReturnValue(childB);
+    expect(await mod.startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+
+    // A dies -> arms its retry. B dies -> arms another, overwriting the handle.
+    childA.emit("exit", 1);
+    await vi.advanceTimersByTimeAsync(0);
+    childB.emit("exit", 1);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The owner switches Local AI off. Only the newest handle is cancellable.
+    await mod.stopLlamaCppServer();
+    spawnMock.mockReturnValue(emittingChild(4244));
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    expect(
+      spawnMock,
+      "an orphaned retry restarted a runtime the owner had switched off",
+    ).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * "Off, then straight back on." The in-flight boot is doomed by the stop, so
+   * handing it to the caller who asked AFTER the owner turned it back on
+   * answers a request to START with a failure from a decision that is not
+   * theirs — and spawns nothing.
+   */
+  it("gives a start that follows a stop its own attempt, not the stopped one's failure", async () => {
+    spawnMock.mockReturnValue(emittingChild(4242));
+    const mod = await loadModule();
+
+    // Park the first start mid-boot, on the model query — past the dynamic
+    // imports, so the boot is genuinely in flight when the stop lands.
+    let releaseQuery!: () => void;
+    let reachedQuery: boolean = false;
+    llamaCppMocks.queryLlamaCppModels.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        releaseQuery = () => resolve([]);
+        reachedQuery = true;
+      }),
+    );
+    const parked = mod.startLlamaCppServer("gemma4-e2b-it-q4_0");
+    await new Promise<void>((resolve) => {
+      const wait = () => (reachedQuery ? resolve() : setTimeout(wait, 1));
+      wait();
+    });
+
+    // Off, then straight back on, while that first boot is still parked.
+    await mod.stopLlamaCppServer();
+    const reopened = mod.startLlamaCppServer("gemma4-e2b-it-q4_0");
+
+    releaseQuery();
+    await expect(parked).rejects.toThrow(/stopped while it was starting/);
+    await expect(
+      reopened,
+      "the owner's fresh 'on' inherited the previous 'off' as a failure",
+    ).resolves.toBe("started");
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
 });
