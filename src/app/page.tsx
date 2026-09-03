@@ -4,9 +4,9 @@ import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react"
 import dynamic from "next/dynamic";
 import * as kv from "@/lib/client-kv";
 import { useModalDialog } from "@/hooks/useModalDialog";
+import { useClawkeepShieldStatus } from "@/hooks/useClawkeepShieldStatus";
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
-import { deriveProtection, isBackupRunning, type Protection, type ProtectionInput } from "@/lib/clawkeep-protection";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT,
   NEW_APP_EVENT, notifyCodingRunStarted } from "@/lib/ui-events";
@@ -543,110 +543,15 @@ function ChromeDesktopInner() {
       .catch(() => { prefsLoaded.current = true; });
   }, []);
 
-  // The shared protection verdict. Null until the first answer arrives.
-  const [clawkeepProtection, setClawkeepProtection] = useState<Protection | null>(null);
-  const [clawkeepUnconfigured, setClawkeepUnconfigured] = useState(false);
-  const [clawkeepBusy, setClawkeepBusy] = useState(false);
-  const [clawkeepRestoring, setClawkeepRestoring] = useState(false);
-  // The last facts that arrived, so the verdict can keep ageing without them.
-  const clawkeepFacts = useRef<ProtectionInput | null>(null);
-  // Publish a verdict for `facts` as of `nowMs`. Keeps the previous object when
-  // the answer has not moved, so a poll every 5 s does not re-render the whole
-  // desktop for an unchanged one.
-  const publishClawkeepVerdict = useCallback((facts: ProtectionInput, nowMs: number) => {
-    const next = deriveProtection(facts, nowMs);
-    setClawkeepProtection((prev) => (
-      prev && prev.state === next.state && prev.reason === next.reason ? prev : next
-    ));
-    setClawkeepBusy(isBackupRunning(facts, nowMs));
-  }, []);
-  // A verdict that only moves when a response arrives is a verdict that stops
-  // ageing the moment the box stops answering — and the answer it freezes on
-  // is green on every box where this matters. `check()` re-derives on success
-  // only (a failed poll deliberately keeps the last state so the shield does
-  // not flicker on a network blip), so the clock needs a tick of its own. It
-  // re-derives from the last facts that ARRIVED, never from invented ones; the
-  // ClawKeep card ages on its own tick for the same reason.
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      const facts = clawkeepFacts.current;
-      if (facts) publishClawkeepVerdict(facts, Date.now());
-    }, 60_000);
-    return () => window.clearInterval(id);
-  }, [publishClawkeepVerdict]);
-  useEffect(() => {
-    let aborted = false;
-    let inFlight = false;
-    const check = async () => {
-      // Skip ticks while a previous fetch is still outstanding so a slow
-      // device doesn't pile up overlapping requests.
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const res = await fetch("/setup-api/clawkeep", { cache: "no-store" });
-        if (!res.ok) return;
-        const data = await res.json() as {
-          paired?: boolean;
-          lastBackupAtMs?: number;
-          lastHeartbeatAtMs?: number;
-          lastHeartbeatStatus?: string;
-          schedule?: { enabled: boolean; frequency: "daily" | "weekly" };
-          scheduleArmedAtMs?: number;
-          encryptionConfigured?: boolean;
-          restoring?: boolean;
-        };
-        if (aborted) return;
-        // A box that was never paired has no backup that could be "overdue";
-        // it gets the calm not-set-up-yet shield, not the red alert. Only an
-        // explicit `paired: false` counts — a response missing the field keeps
-        // the old alert fallback rather than silencing a real overdue backup.
-        const unconfigured = data.paired === false;
-        // One judgement for both shields. ClawKeep's own shield and this one
-        // must never disagree about whether the box is protected, so the age
-        // term, the schedule window and every explicit failure come from the
-        // shared deriveProtection() rather than a second rule written here.
-        const now = Date.now();
-        const facts: ProtectionInput = {
-          lastBackupAtMs: data.lastBackupAtMs ?? 0,
-          lastHeartbeatAtMs: data.lastHeartbeatAtMs,
-          lastHeartbeatStatus: data.lastHeartbeatStatus,
-          schedule: data.schedule,
-          scheduleArmedAtMs: data.scheduleArmedAtMs,
-          encryptionConfigured: data.encryptionConfigured,
-        };
-        // Kept so the verdict goes on ageing if the polls stop landing.
-        clawkeepFacts.current = unconfigured ? null : facts;
-        setClawkeepUnconfigured(unconfigured);
-        // The whole verdict travels, not a pair of booleans: the shelf paints
-        // a drifted box amber and a never-protected one red, and it has to say
-        // WHICH out loud — colour alone is not an announcement. A box that is
-        // not paired publishes no verdict at all: `paired: false` is the opt-in
-        // that has not happened, and it earns the calm setup shield rather than
-        // an alarm about a backup nobody asked for (TASK-510). Its progress
-        // pulse still answers, because a first backup can be running on it.
-        if (unconfigured) {
-          setClawkeepProtection(null);
-          setClawkeepBusy(isBackupRunning(facts, now));
-        } else {
-          publishClawkeepVerdict(facts, now);
-        }
-        setClawkeepRestoring(!!data.restoring);
-      } catch {
-        // Leave last-known state alone on transient failures so the shield
-        // doesn't flicker on a brief network blip.
-      } finally {
-        inFlight = false;
-      }
-    };
-    void check();
-    // Poll often enough for the shelf shield to start/stop pulsing within
-    // a few seconds of a backup beginning or finishing.
-    const id = window.setInterval(() => { void check(); }, 5_000);
-    return () => {
-      aborted = true;
-      window.clearInterval(id);
-    };
-  }, [publishClawkeepVerdict]);
+  // The desktop shelf's ClawKeep shield: one verdict, shared with the ClawKeep
+  // card and the `backup_status` tool, and re-judged on a clock of its own so
+  // it keeps ageing when the box stops answering. See the hook.
+  const {
+    protection: clawkeepProtection,
+    unconfigured: clawkeepUnconfigured,
+    busy: clawkeepBusy,
+    restoring: clawkeepRestoring,
+  } = useClawkeepShieldStatus();
 
   const wpFitStyle: React.CSSProperties = wpFit === "fill"
     ? { backgroundSize: "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat" }

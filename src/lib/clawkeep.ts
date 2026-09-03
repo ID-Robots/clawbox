@@ -245,62 +245,76 @@ function sanitiseSchedule(input: unknown): ClawKeepSchedule {
   };
 }
 
-/**
- * The schedule and its arm stamp, from ONE read of `schedule.json`.
- *
- * They are two halves of a single verdict — `deriveProtection` takes the age
- * window from the schedule and the grace anchor from the stamp — so reading
- * them separately lets a `writeSchedule()` rename land between the two reads
- * and pair the cadence of one version with the stamp of the next. That pair is
- * a verdict neither version would have given.
- */
-export async function readScheduleSnapshot(): Promise<{
+/** Everything `schedule.json` says, from one read of it. */
+export interface ClawKeepScheduleSnapshot {
   schedule: ClawKeepSchedule;
+  /**
+   * When auto-backup was last *armed*, as unix ms; 0 if the file does not say.
+   *
+   * The protection shield needs it: arming auto-backup shrinks the tolerated
+   * backup age from a week to 36 h, and applying that retroactively would lapse
+   * a box on the same click for a run that is not due yet.
+   *
+   * The stamp lives inside `schedule.json` rather than being its mtime, because
+   * an mtime answers "when was this file written" and the question here is
+   * "when was a window started". The same file carries the retention count and
+   * the time of day, so on the mtime a box whose backups died ten days ago went
+   * green the moment its owner nudged either — and a `cp -a` or an image
+   * restore of `~/.clawkeep` did it too.
+   *
+   * A file written before the stamp existed therefore answers 0, NOT its mtime:
+   * falling back would carry exactly that defect onto every box that upgrades.
+   * 0 costs a box armed shortly before the update its remaining grace; the
+   * mtime would cost a dead box's owner the alarm.
+   *
+   * 0 means "no window is running", which is the safe answer for a reader. It
+   * does NOT mean "this box has never armed a schedule" — an enabled file
+   * without a stamp was armed, by definition, and {@link nextArmedAtMs} is
+   * where that distinction is made, because it is the only place a stamp is
+   * minted.
+   */
   armedAtMs: number;
-}> {
+  /**
+   * The file is there and says nothing we can read — a truncated write, a
+   * power cut mid-rename. Distinct from "no file", which is a box that has
+   * never had a schedule: this one may have had any schedule at all, so it is
+   * evidence of nothing rather than evidence of "off".
+   */
+  unreadable: boolean;
+}
+
+/**
+ * Everything the schedule file says, from ONE read of it.
+ *
+ * The schedule and the stamp are two halves of a single verdict —
+ * `deriveProtection` takes the age window from the schedule and the grace
+ * anchor from the stamp — so reading them separately lets a `writeSchedule()`
+ * rename land between the two reads and pair the cadence of one version with
+ * the stamp of the next. That pair is a verdict neither version would give.
+ */
+export async function readScheduleSnapshot(): Promise<ClawKeepScheduleSnapshot> {
+  let raw: string;
   try {
-    const parsed = JSON.parse(await fs.readFile(SCHEDULE_PATH, "utf8")) as { armedAtMs?: unknown };
+    raw = await fs.readFile(SCHEDULE_PATH, "utf8");
+  } catch {
+    // No file: no schedule, and no window has ever been started here.
+    return { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0, unreadable: false };
+  }
+  try {
+    const parsed = JSON.parse(raw) as { armedAtMs?: unknown };
     const stamp = Number(parsed?.armedAtMs);
     return {
       schedule: sanitiseSchedule(parsed),
       armedAtMs: Number.isFinite(stamp) && stamp > 0 ? Math.round(stamp) : 0,
+      unreadable: false,
     };
   } catch {
-    // Missing, unreadable or not JSON — no schedule, and no window running.
-    return { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0 };
+    return { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0, unreadable: true };
   }
 }
 
 export async function readSchedule(): Promise<ClawKeepSchedule> {
   return (await readScheduleSnapshot()).schedule;
-}
-
-/**
- * When auto-backup was last *armed*, as unix ms; 0 if it never has been.
- *
- * The protection shield needs it: arming auto-backup shrinks the tolerated
- * backup age from a week to 36 h, and applying that retroactively would lapse
- * a box on the same click for a run that is not due yet.
- *
- * The stamp lives inside `schedule.json` rather than being its mtime, because
- * an mtime answers "when was this file written" and the question here is "when
- * was a window started". The same file carries the retention count and the time
- * of day, so on the mtime a box whose backups died ten days ago went green the
- * moment its owner nudged either — and a `cp -a` or an image restore of
- * `~/.clawkeep` did it too.
- *
- * A file written before the stamp existed therefore answers 0, NOT its mtime:
- * falling back would carry exactly that defect onto every box that upgrades. 0
- * costs a box armed shortly before the update its remaining grace; the mtime
- * would cost a dead box's owner the alarm.
- *
- * 0 here means "no window is running", which is the safe answer for a reader.
- * It does NOT mean "this box has never armed a schedule" — an enabled file
- * without a stamp was armed, by definition, and {@link nextArmedAtMs} is where
- * that distinction is made, because it is the only place a stamp is minted.
- */
-export async function readScheduleArmedAtMs(): Promise<number> {
-  return (await readScheduleSnapshot()).armedAtMs;
 }
 
 /**
@@ -354,18 +368,26 @@ function armsTheSchedule(prev: ClawKeepSchedule, next: ClawKeepSchedule): boolea
  * place that knows the window the box was being judged against a moment ago.
  */
 async function nextArmedAtMs(
-  prev: ClawKeepSchedule,
+  prevSnapshot: ClawKeepScheduleSnapshot,
   next: ClawKeepSchedule,
-  fileArmedAtMs: number,
 ): Promise<number> {
-  // "No stamp" is two different facts: no window is running (a box that has
-  // never armed one) and no window was recorded (a schedule.json written
-  // before the stamp existed). Only the first may be granted a fresh window,
-  // and every deployed box is the second the moment it updates — read as the
-  // first, the off→on toggle below hands a box whose backups are dead the very
-  // rescue this function exists to refuse. An enabled schedule is evidence of
-  // its own arming, so carry that rather than a claim the file cannot make.
-  const prevArmedAtMs = fileArmedAtMs === 0 && prev.enabled ? LEGACY_ARM_STAMP_MS : fileArmedAtMs;
+  const prev = prevSnapshot.schedule;
+  // "No stamp" is three different facts, and only one of them may be granted a
+  // fresh window:
+  //   - no window is running — a box that has never armed one. Grant.
+  //   - no window was RECORDED — a schedule.json written before the stamp
+  //     existed. Every deployed box is this one the moment it updates, and an
+  //     enabled schedule is evidence of its own arming: read as a first arm,
+  //     the off→on toggle below hands a box whose backups are dead the very
+  //     rescue this function exists to refuse.
+  //   - nothing could be read at all — a file truncated by a power cut. That
+  //     is evidence of NOTHING, not evidence of "off", so it is read the same
+  //     way: the cost of withholding a window is one amber card until the next
+  //     run, the cost of granting one is 36 h of green over a dead box.
+  const armedBefore = prev.enabled || prevSnapshot.unreadable;
+  const prevArmedAtMs = prevSnapshot.armedAtMs === 0 && armedBefore
+    ? LEGACY_ARM_STAMP_MS
+    : prevSnapshot.armedAtMs;
   if (!armsTheSchedule(prev, next)) return prevArmedAtMs;
   const now = Date.now();
   const lastBackupAtMs = (await readStateFile()).last_backup_at_ms ?? 0;
@@ -388,8 +410,7 @@ export async function writeSchedule(next: ClawKeepSchedule): Promise<{
 }> {
   await ensureDataDir();
   const sanitised = sanitiseSchedule(next);
-  const { schedule: prev, armedAtMs: prevArmedAtMs } = await readScheduleSnapshot();
-  const armedAtMs = await nextArmedAtMs(prev, sanitised, prevArmedAtMs);
+  const armedAtMs = await nextArmedAtMs(await readScheduleSnapshot(), sanitised);
   // Per-call temp name (pid + monotonic counter), like writeStateFile: this is
   // a read-modify-write now, and two saves from the same card must not
   // interleave into one temp file and rename a torn schedule into place —

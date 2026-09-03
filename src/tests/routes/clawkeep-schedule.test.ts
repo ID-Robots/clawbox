@@ -183,17 +183,49 @@ describe("/setup-api/clawkeep/schedule", () => {
     it("reads the cadence and the stamp off one version of the file", async () => {
       // The two are halves of one verdict — the window comes from the schedule,
       // the grace anchor from the stamp — so a `writeSchedule()` rename landing
-      // between two separate reads could pair the cadence of one version with
-      // the stamp of the next, a verdict neither version would give.
-      const now = Date.now();
+      // between two separate reads pairs the cadence of one version with the
+      // stamp of the next, a verdict neither version would give. A returned
+      // pair that happens to agree proves nothing about that; the guarantee is
+      // that there is only ever one read to interleave with.
       await PUT(jsonReq(ARMED_DAILY));
-      await backdateArm(now - 60 * DAY_MS);
-      await clawkeep.writeSchedule({ ...ARMED_DAILY, frequency: "weekly" });
-
+      const readFile = vi.spyOn(fs, "readFile");
       const body = await (await GET()).json();
+      const scheduleReads = readFile.mock.calls
+        .filter((args) => String(args[0]) === SCHEDULE_FILE).length;
+      readFile.mockRestore();
+
+      expect(scheduleReads).toBe(1);
       const onDisk = JSON.parse(await fs.readFile(SCHEDULE_FILE, "utf8"));
       expect(body.schedule.frequency).toBe(onDisk.frequency);
       expect(body.scheduleArmedAtMs).toBe(onDisk.armedAtMs);
+    });
+
+    it("depends on auto-backup shipping OFF by default", () => {
+      // `nextArmedAtMs` reads an enabled schedule as evidence of its own
+      // arming. A box with no `schedule.json` at all is judged on
+      // DEFAULT_SCHEDULE, so shipping that as `enabled: true` would make every
+      // fresh box read as "already armed" and lose the first-arm grace —
+      // lapsing on the very click that arms it. Load-bearing, so pinned.
+      expect(clawkeep.DEFAULT_SCHEDULE.enabled).toBe(false);
+    });
+
+    it("does not read an unreadable schedule.json as 'never armed'", async () => {
+      const now = Date.now();
+      // A truncated write or a power cut mid-rename leaves the file there and
+      // unparseable, and `readSchedule()` falls back to DEFAULT_SCHEDULE —
+      // which says auto-backup is off. But a file nobody can read is evidence
+      // of NOTHING, not evidence that this box never armed a schedule, and the
+      // owner's re-arming click must not buy 36 h of green on a box whose
+      // backups have been dead for five days.
+      const lastBackupAtMs = now - 5 * DAY_MS;
+      for (const corpse of ["{not-json", ""]) {
+        await writeLastBackup(lastBackupAtMs);
+        await fs.writeFile(SCHEDULE_FILE, corpse);
+
+        const armed = await (await PUT(jsonReq(ARMED_DAILY))).json();
+        expect(deriveProtection({ ...armed, ...deadBox, lastBackupAtMs }, now))
+          .toEqual({ state: "lapsed", reason: "stale" });
+      }
     });
 
     it("does not regrant the window when an armed schedule is merely re-saved", async () => {
