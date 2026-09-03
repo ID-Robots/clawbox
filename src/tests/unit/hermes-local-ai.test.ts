@@ -344,7 +344,8 @@ describe("reconciling an already-configured device", () => {
     await applyLocalAiToHermes({ provider: "ollama", model: "qwen3:8b" });
     expect(sets().some((kv) => kv.startsWith(`providers.${HERMES_LOCAL_PROVIDER}.models=`))).toBe(false);
 
-    vi.advanceTimersByTime(60_001);
+    // No clock advance: nothing FAILED here, the enable simply could not read
+    // the key, so the very next read must be allowed to repair it.
     registered({ baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama/v1", models: null });
     await reconcileLocalAiWithHermes();
     expect(sets()).toContain(`providers.${HERMES_LOCAL_PROVIDER}.models=qwen3:8b`);

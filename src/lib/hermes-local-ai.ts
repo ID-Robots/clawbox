@@ -67,8 +67,9 @@ async function applyLocalAi(options: {
   // `models` below is right — an unreadable key is not an absent one — but the
   // picker's own repair latches once per process and may already have run, so
   // nothing would ever come back for it and the key would stay missing until
-  // the web server restarted. Hand the repair back to the next request.
-  if (catalogue === "unknown") retryLater();
+  // the web server restarted. Hand the repair back to the next read — with no
+  // backoff, because the repair did not fail here, this enable did.
+  if (catalogue === "unknown") handRepairBack();
 
   const set: Record<string, string> = {
     // The OpenAI-compatible root, NOT the bare proxy root: Hermes appends
@@ -149,10 +150,21 @@ let retryAfter = 0;
  */
 const REPAIR_RETRY_MS = 60_000;
 
-/** Let a later request try the repair again, no sooner than `REPAIR_RETRY_MS`. */
+/** A repair ATTEMPT failed: let a later request try again, but not for a
+ *  minute. */
 function retryLater(): void {
   reconciled = false;
   retryAfter = Date.now() + REPAIR_RETRY_MS;
+}
+
+/** Something OTHER than the repair noticed the key may be missing: let the very
+ *  next read try, with no backoff. Nothing failed here, so there is nothing to
+ *  back off from — and this runs on an explicit customer action rather than on
+ *  every request, so it cannot become a spawn per request the way an unbounded
+ *  `retryLater` could. */
+function handRepairBack(): void {
+  reconciled = false;
+  retryAfter = 0;
 }
 
 /**
