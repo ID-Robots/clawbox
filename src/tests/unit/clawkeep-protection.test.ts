@@ -272,4 +272,21 @@ describe("isBackupRunning", () => {
     expect(STALE_RUNNING_MS).toBe(BACKUP_RUN_CAP_MS);
     expect(BACKUP_RUN_CAP_MS).toBe(60 * MINUTE);
   });
+
+  it("does not let a clock-skewed heartbeat pulse for as long as the skew", () => {
+    // These boxes have no battery-backed clock and the reader is a browser, so
+    // the stamp can land ahead of `nowMs`. A few minutes of that is the gap
+    // between the two reads on a run that has just started — believe it.
+    expect(isBackupRunning(
+      { lastHeartbeatStatus: "running", lastHeartbeatAtMs: NOW + 5 * MINUTE },
+      NOW,
+    )).toBe(true);
+    // A month ahead is not a longer backup. A SIGKILLed run leaves "running"
+    // in state.json for ever, so without this the shelf pulses and the card
+    // shows a progress panel over a dead daemon until wall-clock catches up.
+    expect(isBackupRunning(
+      { lastHeartbeatStatus: "running", lastHeartbeatAtMs: NOW + 30 * DAY },
+      NOW,
+    )).toBe(false);
+  });
 });

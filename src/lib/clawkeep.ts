@@ -245,13 +245,34 @@ function sanitiseSchedule(input: unknown): ClawKeepSchedule {
   };
 }
 
-export async function readSchedule(): Promise<ClawKeepSchedule> {
+/**
+ * The schedule and its arm stamp, from ONE read of `schedule.json`.
+ *
+ * They are two halves of a single verdict — `deriveProtection` takes the age
+ * window from the schedule and the grace anchor from the stamp — so reading
+ * them separately lets a `writeSchedule()` rename land between the two reads
+ * and pair the cadence of one version with the stamp of the next. That pair is
+ * a verdict neither version would have given.
+ */
+export async function readScheduleSnapshot(): Promise<{
+  schedule: ClawKeepSchedule;
+  armedAtMs: number;
+}> {
   try {
-    const raw = await fs.readFile(SCHEDULE_PATH, "utf8");
-    return sanitiseSchedule(JSON.parse(raw));
+    const parsed = JSON.parse(await fs.readFile(SCHEDULE_PATH, "utf8")) as { armedAtMs?: unknown };
+    const stamp = Number(parsed?.armedAtMs);
+    return {
+      schedule: sanitiseSchedule(parsed),
+      armedAtMs: Number.isFinite(stamp) && stamp > 0 ? Math.round(stamp) : 0,
+    };
   } catch {
-    return { ...DEFAULT_SCHEDULE };
+    // Missing, unreadable or not JSON — no schedule, and no window running.
+    return { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0 };
   }
+}
+
+export async function readSchedule(): Promise<ClawKeepSchedule> {
+  return (await readScheduleSnapshot()).schedule;
 }
 
 /**
@@ -279,14 +300,7 @@ export async function readSchedule(): Promise<ClawKeepSchedule> {
  * that distinction is made, because it is the only place a stamp is minted.
  */
 export async function readScheduleArmedAtMs(): Promise<number> {
-  try {
-    const raw = JSON.parse(await fs.readFile(SCHEDULE_PATH, "utf8")) as { armedAtMs?: unknown };
-    const stamp = Number(raw?.armedAtMs);
-    if (Number.isFinite(stamp) && stamp > 0) return Math.round(stamp);
-  } catch {
-    // Missing, unreadable or not JSON — no schedule has been armed here.
-  }
-  return 0;
+  return (await readScheduleSnapshot()).armedAtMs;
 }
 
 /**
@@ -374,8 +388,8 @@ export async function writeSchedule(next: ClawKeepSchedule): Promise<{
 }> {
   await ensureDataDir();
   const sanitised = sanitiseSchedule(next);
-  const prev = await readSchedule();
-  const armedAtMs = await nextArmedAtMs(prev, sanitised, await readScheduleArmedAtMs());
+  const { schedule: prev, armedAtMs: prevArmedAtMs } = await readScheduleSnapshot();
+  const armedAtMs = await nextArmedAtMs(prev, sanitised, prevArmedAtMs);
   // Per-call temp name (pid + monotonic counter), like writeStateFile: this is
   // a read-modify-write now, and two saves from the same card must not
   // interleave into one temp file and rename a torn schedule into place —
@@ -838,17 +852,19 @@ export async function clearPassphrase(): Promise<{ removed: boolean }> {
 
 export async function getStatus(): Promise<ClawKeepStatus> {
   await ensureDataDir();
-  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, schedule, scheduleArmedAtMs, encryptionConfigured] = await Promise.all([
+  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, scheduleSnapshot, encryptionConfigured] = await Promise.all([
     readToken(),
     readConfigToml(),
     readStateFile(),
     getOpenclawInstalled(),
     getDaemonBin(),
     isRestoring(),
-    readSchedule(),
-    readScheduleArmedAtMs(),
+    readScheduleSnapshot(),
     isEncryptionConfigured(),
   ]);
+  // Both halves off one read: the pair decides the verdict, so they must be
+  // the same version of the file. See readScheduleSnapshot().
+  const { schedule, armedAtMs: scheduleArmedAtMs } = scheduleSnapshot;
 
   const server = readServer(configToml);
   // A single-harness edition names its own agent. "dual" installs both and

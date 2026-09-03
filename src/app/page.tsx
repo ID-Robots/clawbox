@@ -6,7 +6,7 @@ import * as kv from "@/lib/client-kv";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
-import { deriveProtection, isBackupRunning, type Protection } from "@/lib/clawkeep-protection";
+import { deriveProtection, isBackupRunning, type Protection, type ProtectionInput } from "@/lib/clawkeep-protection";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT,
   NEW_APP_EVENT, notifyCodingRunStarted } from "@/lib/ui-events";
@@ -548,6 +548,32 @@ function ChromeDesktopInner() {
   const [clawkeepUnconfigured, setClawkeepUnconfigured] = useState(false);
   const [clawkeepBusy, setClawkeepBusy] = useState(false);
   const [clawkeepRestoring, setClawkeepRestoring] = useState(false);
+  // The last facts that arrived, so the verdict can keep ageing without them.
+  const clawkeepFacts = useRef<ProtectionInput | null>(null);
+  // Publish a verdict for `facts` as of `nowMs`. Keeps the previous object when
+  // the answer has not moved, so a poll every 5 s does not re-render the whole
+  // desktop for an unchanged one.
+  const publishClawkeepVerdict = useCallback((facts: ProtectionInput, nowMs: number) => {
+    const next = deriveProtection(facts, nowMs);
+    setClawkeepProtection((prev) => (
+      prev && prev.state === next.state && prev.reason === next.reason ? prev : next
+    ));
+    setClawkeepBusy(isBackupRunning(facts, nowMs));
+  }, []);
+  // A verdict that only moves when a response arrives is a verdict that stops
+  // ageing the moment the box stops answering — and the answer it freezes on
+  // is green on every box where this matters. `check()` re-derives on success
+  // only (a failed poll deliberately keeps the last state so the shield does
+  // not flicker on a network blip), so the clock needs a tick of its own. It
+  // re-derives from the last facts that ARRIVED, never from invented ones; the
+  // ClawKeep card ages on its own tick for the same reason.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const facts = clawkeepFacts.current;
+      if (facts) publishClawkeepVerdict(facts, Date.now());
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, [publishClawkeepVerdict]);
   useEffect(() => {
     let aborted = false;
     let inFlight = false;
@@ -580,36 +606,30 @@ function ChromeDesktopInner() {
         // term, the schedule window and every explicit failure come from the
         // shared deriveProtection() rather than a second rule written here.
         const now = Date.now();
-        const protection = deriveProtection({
+        const facts: ProtectionInput = {
           lastBackupAtMs: data.lastBackupAtMs ?? 0,
           lastHeartbeatAtMs: data.lastHeartbeatAtMs,
           lastHeartbeatStatus: data.lastHeartbeatStatus,
           schedule: data.schedule,
           scheduleArmedAtMs: data.scheduleArmedAtMs,
           encryptionConfigured: data.encryptionConfigured,
-        }, now);
+        };
+        // Kept so the verdict goes on ageing if the polls stop landing.
+        clawkeepFacts.current = unconfigured ? null : facts;
         setClawkeepUnconfigured(unconfigured);
         // The whole verdict travels, not a pair of booleans: the shelf paints
         // a drifted box amber and a never-protected one red, and it has to say
         // WHICH out loud — colour alone is not an announcement. A box that is
         // not paired publishes no verdict at all: `paired: false` is the opt-in
         // that has not happened, and it earns the calm setup shield rather than
-        // an alarm about a backup nobody asked for (TASK-510).
-        //
-        // Keep the previous object when the verdict has not moved, so a poll
-        // every 5 s does not re-render the whole desktop for an unchanged
-        // answer.
-        setClawkeepProtection((prev) => {
-          const next = unconfigured ? null : protection;
-          if (prev === next) return prev;
-          if (prev && next && prev.state === next.state && prev.reason === next.reason) return prev;
-          return next;
-        });
-        // A "running" heartbeat older than the cap `runBackup()` enforces is
-        // a run that has been SIGKILLed, not progress — the same rule the card
-        // uses. Without it the shelf pulses green for ever and the protection
-        // verdict can never reach it.
-        setClawkeepBusy(isBackupRunning(data, now));
+        // an alarm about a backup nobody asked for (TASK-510). Its progress
+        // pulse still answers, because a first backup can be running on it.
+        if (unconfigured) {
+          setClawkeepProtection(null);
+          setClawkeepBusy(isBackupRunning(facts, now));
+        } else {
+          publishClawkeepVerdict(facts, now);
+        }
         setClawkeepRestoring(!!data.restoring);
       } catch {
         // Leave last-known state alone on transient failures so the shield
@@ -626,7 +646,7 @@ function ChromeDesktopInner() {
       aborted = true;
       window.clearInterval(id);
     };
-  }, []);
+  }, [publishClawkeepVerdict]);
 
   const wpFitStyle: React.CSSProperties = wpFit === "fill"
     ? { backgroundSize: "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat" }

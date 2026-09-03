@@ -164,6 +164,15 @@ export function isBackupRunning(
   if (!status) return false;
   if (status.lastHeartbeatStatus !== "running") return false;
   if (!status.lastHeartbeatAtMs) return false;
+  // A heartbeat AHEAD of the reader's clock is skew, not a longer run: the
+  // stamp comes off a box with no battery-backed RTC and is judged against a
+  // browser's. A little of it is the gap between the two reads and belongs to
+  // a run that has genuinely just started; a stamp further ahead than a whole
+  // run may last is a broken clock. Believing that one pins the shelf's pulse
+  // — and the card's progress panel, which hides the verdict behind it — for
+  // as long as the skew lasts, over a run that was SIGKILLed at the cap and
+  // can never publish a terminal status to end it.
+  if (status.lastHeartbeatAtMs - nowMs > STALE_RUNNING_MS) return false;
   return nowMs - status.lastHeartbeatAtMs < STALE_RUNNING_MS;
 }
 

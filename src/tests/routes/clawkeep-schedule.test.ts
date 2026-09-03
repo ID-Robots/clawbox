@@ -180,6 +180,22 @@ describe("/setup-api/clawkeep/schedule", () => {
     // of the last good backup is the only thing that gives it away.
     const deadBox = { lastHeartbeatStatus: "ok", encryptionConfigured: true };
 
+    it("reads the cadence and the stamp off one version of the file", async () => {
+      // The two are halves of one verdict — the window comes from the schedule,
+      // the grace anchor from the stamp — so a `writeSchedule()` rename landing
+      // between two separate reads could pair the cadence of one version with
+      // the stamp of the next, a verdict neither version would give.
+      const now = Date.now();
+      await PUT(jsonReq(ARMED_DAILY));
+      await backdateArm(now - 60 * DAY_MS);
+      await clawkeep.writeSchedule({ ...ARMED_DAILY, frequency: "weekly" });
+
+      const body = await (await GET()).json();
+      const onDisk = JSON.parse(await fs.readFile(SCHEDULE_FILE, "utf8"));
+      expect(body.schedule.frequency).toBe(onDisk.frequency);
+      expect(body.scheduleArmedAtMs).toBe(onDisk.armedAtMs);
+    });
+
     it("does not regrant the window when an armed schedule is merely re-saved", async () => {
       const now = Date.now();
       const lastBackupAtMs = now - 10 * DAY_MS;
