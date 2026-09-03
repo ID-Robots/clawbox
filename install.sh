@@ -2987,6 +2987,14 @@ step_openclaw_tts() {
   # this block needs the Hermes CLI to exist.)
   if has_hermes_harness; then
     local HERMES_TTS_BIN="${HERMES_BIN:-$CLAWBOX_HOME/.local/bin/hermes}"
+    # HOME EXPLICITLY, on every call. `as_clawbox` is `sudo -u`, and whether
+    # that resets HOME to the target user's home or preserves root's depends on
+    # the sudoers `always_set_home`/`env_reset` configuration — not something a
+    # provisioning step should be resting on. With root's HOME preserved the
+    # CLI would read and write /root/.hermes/config.yaml while the dashboard
+    # serves /home/clawbox/.hermes/config.yaml: every write "succeeds", and the
+    # box never speaks. `runHermesCli` pins HOME for the same reason.
+    hermes_tts_cli() { as_clawbox env HOME="$CLAWBOX_HOME" "$HERMES_TTS_BIN" "$@"; }
     local HERMES_TTS_PROVIDER="clawbox-local"
     # The command Hermes will run. The placeholders are Hermes' own; the
     # example in its tool ships them unquoted, so they are unquoted here too.
@@ -3036,7 +3044,7 @@ step_openclaw_tts() {
       # So only the "not set" wording, or a clean exit, counts as an answer.
       # Anything else leaves tts.provider alone and says so.
       local CURRENT_HERMES_TTS="" HERMES_TTS_READ_OUT HERMES_TTS_READ_RC=0
-      HERMES_TTS_READ_OUT=$(as_clawbox "$HERMES_TTS_BIN" config get tts.provider 2>&1) || HERMES_TTS_READ_RC=$?
+      HERMES_TTS_READ_OUT=$(hermes_tts_cli config get tts.provider 2>&1) || HERMES_TTS_READ_RC=$?
       if [ "$HERMES_TTS_READ_RC" -eq 0 ]; then
         CURRENT_HERMES_TTS=$(printf '%s' "$HERMES_TTS_READ_OUT" | tr -d '\r' | tail -1)
       elif printf '%s' "$HERMES_TTS_READ_OUT" | grep -qi "config key not set"; then
@@ -3076,9 +3084,9 @@ step_openclaw_tts() {
       # screen below — same script, same reason ("Kokoro emits WAV natively,
       # so the happy path needs no ffmpeg at all"). The two harnesses must not
       # be configured to disagree about one script.
-      if as_clawbox "$HERMES_TTS_BIN" config set "tts.providers.$HERMES_TTS_PROVIDER.command" "$HERMES_TTS_COMMAND" \
-        && as_clawbox "$HERMES_TTS_BIN" config set "tts.providers.$HERMES_TTS_PROVIDER.output_format" wav \
-        && as_clawbox "$HERMES_TTS_BIN" config set "tts.providers.$HERMES_TTS_PROVIDER.type" command; then
+      if hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.command" "$HERMES_TTS_COMMAND" \
+        && hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.output_format" wav \
+        && hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.type" command; then
         echo "  Hermes on-device TTS provider defined ($HERMES_TTS_PROVIDER)"
         # ── Seed-if-unset, with ONE extra value counted as unset: `edge` ──────
         #
@@ -3105,7 +3113,7 @@ step_openclaw_tts() {
         else
         case "$CURRENT_HERMES_TTS" in
           ""|null|edge|"$HERMES_TTS_PROVIDER")
-            if as_clawbox "$HERMES_TTS_BIN" config set tts.provider "$HERMES_TTS_PROVIDER"; then
+            if hermes_tts_cli config set tts.provider "$HERMES_TTS_PROVIDER"; then
               if [ "$CURRENT_HERMES_TTS" = "edge" ]; then
                 echo "  Hermes TTS provider set to $HERMES_TTS_PROVIDER (replacing Hermes' factory 'edge' cloud default)"
               else

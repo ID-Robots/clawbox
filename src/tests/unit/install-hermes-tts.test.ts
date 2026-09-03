@@ -117,6 +117,7 @@ function runStep(edition: string, opts: StepOpts = {}) {
   const voiceArgs = path.join(root, "voice-args.log");
   const openclawLog = path.join(root, "openclaw.log");
   const hermesLog = path.join(root, "hermes.log");
+  const hermesHomeLog = path.join(root, "hermes-home.log");
   const provisionLog = path.join(root, "provision-failures.log");
 
   const deployedTts = path.join(projectDir, "scripts", "openclaw", "clawbox-tts.sh");
@@ -150,6 +151,9 @@ function runStep(edition: string, opts: StepOpts = {}) {
       hermesBin,
       [
         `printf '%s\\n' "$*" >> "${hermesLog}"`,
+        // HOME as the CLI actually sees it, so the test can prove the step
+        // does not rest on sudoers' always_set_home.
+        `printf '%s\\n' "\${HOME:-}" >> "${hermesHomeLog}"`,
         'if [ "$1" = "config" ] && [ "$2" = "get" ]; then',
         // Hermes answers an unset key with exit 1 and `Config key not set` on
         // stderr — verified on the live box, see src/lib/hermes-config-cache.ts.
@@ -214,6 +218,8 @@ function runStep(edition: string, opts: StepOpts = {}) {
     voiceArgs: lines(voiceArgs),
     openclawCalls: lines(openclawLog),
     hermesCalls: lines(hermesLog),
+    hermesEnvHomes: lines(hermesHomeLog),
+    clawboxHome,
     provisionFailures: lines(provisionLog),
   };
 }
@@ -258,6 +264,19 @@ describe.skipIf(!hasBash)("the on-device voice is registered with Hermes nativel
         `${path.join(root, "project", "scripts", "openclaw", "clawbox-tts.sh")} ` +
         "--text-file={input_path} -- {output_path}",
     );
+  });
+
+  it("pins HOME on every Hermes CLI call, so the writes land where the dashboard reads", () => {
+    // `as_clawbox` is `sudo -u`, and whether that resets HOME or preserves
+    // root's depends on sudoers. With root's HOME preserved the CLI would read
+    // and write /root/.hermes/config.yaml while the dashboard serves
+    // /home/clawbox/.hermes/config.yaml — every write "succeeds" and the box
+    // never speaks.
+    const res = runStep("hermes");
+    expect(res.hermesEnvHomes.length, `no Hermes CLI call was made:\n${res.out}`).toBeGreaterThan(0);
+    for (const home of res.hermesEnvHomes) {
+      expect(home, `a Hermes call ran with the wrong HOME:\n${res.out}`).toBe(res.clawboxHome);
+    }
   });
 
   it("pins the output format to wav, so no utterance needs ffmpeg", () => {
