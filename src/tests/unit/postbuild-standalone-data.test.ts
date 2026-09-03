@@ -131,7 +131,11 @@ d("postbuild step", () => {
   });
 
   it("leaves scripts/ alone — it is resolved from the process cwd at runtime", () => {
-    runPostbuild();
+    // The exit code first: buildFixture() plants this file, so without it the
+    // case passes on its own fixture — a postbuild that died before reaching
+    // the data/ removal would look like one that deliberately spared scripts/.
+    const res = runPostbuild();
+    expect(res.status, res.stderr).toBe(0);
     expect(fs.existsSync(path.join(standalone, "scripts", "start-llamacpp.sh"))).toBe(true);
   });
 
