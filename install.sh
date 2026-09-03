@@ -4514,49 +4514,84 @@ step_ollama_install() {
     as_clawbox_login "$ENSURE_EMBEDDINGS" || true
     # The helper exits 0 on every soft failure by design (a missing Ollama must
     # not abort an install), so its exit code says nothing about the outcome.
-    # Read the config it was supposed to write instead — from the ACTIVE home.
     #
-    # Read the ONE key the installed core will parse. OpenClaw 2 reads
-    # memory.search and ignores agents.defaults.memorySearch entirely; a v1
-    # core does the reverse. Reading whichever block happened to name a
-    # provider printed "ready, needs no API key" over a v2 box whose
-    # memory.search was still empty and whose stale OpenClaw 1 block said
-    # "ollama" — a box on the default cloud embedder (TASK-659). The gate is
-    # the same 2026.8 boundary scripts/ensure-local-embeddings.sh writes
-    # through and src/lib/memory-shard.ts (embeddingConfigHome) reads through.
-    local EMBED_KEY="agents.defaults.memorySearch"
-    if openclaw_is_v2; then EMBED_KEY="memory.search"; fi
-    local EMBED_STATE
-    EMBED_STATE="$(as_clawbox python3 - "$CLAWBOX_HOME/.openclaw/openclaw.json" "$EMBED_KEY" <<'PY' 2>/dev/null || true
+    # Ask the CORE which embedder it resolved instead of re-deriving it from
+    # openclaw.json. `openclaw memory status --agent main --deep --json` is the
+    # core's own answer, and it is the call src/lib/clawkeep-memory.ts already
+    # makes; the provider is read with the same rule providerLocation() uses
+    # there, so ClawBox cannot tell the operator one thing at install time and
+    # the owner another in the Memory Shard panel.
+    #
+    # Re-deriving it is what produced TASK-659: OpenClaw 2 reads memory.search
+    # and ignores agents.defaults.memorySearch, a v1 core does the reverse, and
+    # a check that took "whichever block names a provider" printed "ready,
+    # needs no API key" over a v2 box that was on the default cloud embedder. A
+    # config read can only ever prove what was WRITTEN, never what the core
+    # does with it -- it cannot see a dimension mismatch or a fail-closed index.
+    #
+    # Measured on a shipped Orin: rc=0 in ~8 s for 3.3 KB of JSON, so it also
+    # costs less than the `openclaw --version` probe it replaces. Bounded and
+    # best-effort throughout: a CLI that hangs, is absent or answers nothing
+    # must neither stall nor abort the install, and "could not ask" is reported
+    # as itself rather than as a verdict.
+    if ! has_openclaw_harness; then
+      # No core on this SKU, so there is no memory search to have an embedder.
+      # Same answer src/app/setup-api/local-models/route.ts gives the UI.
+      echo "  Memory search is an OpenClaw feature; this edition does not include it."
+    else
+      local EMBED_JSON EMBED_STATE
+      EMBED_JSON="$(as_clawbox timeout 60 "$OPENCLAW_BIN" memory status --agent main --deep --json 2>/dev/null || true)"
+      EMBED_STATE="$(python3 - "$EMBED_JSON" <<'PY' 2>/dev/null || true
 import json, sys
 try:
-    node = json.load(open(sys.argv[1]))
+    doc = json.loads(sys.argv[1])
 except Exception:
-    node = {}
-for part in sys.argv[2].split("."):
-    node = node.get(part) if isinstance(node, dict) else None
-home = node if isinstance(node, dict) else {}
-provider = home.get("provider") or ""
-model = home.get("model") or ""
-if provider == "ollama" and model == "qwen3-embedding:0.6b":
-    print("local")
-elif provider in ("", "auto"):
-    print("unset")
+    raise SystemExit(0)
+rows = doc if isinstance(doc, list) else [doc]
+row = {}
+for entry in rows:
+    if isinstance(entry, dict) and entry.get("agentId") == "main":
+        row = entry
+        break
+if not row and rows and isinstance(rows[0], dict):
+    row = rows[0]
+status = row.get("status")
+status = status if isinstance(status, dict) else {}
+provider = status.get("provider")
+provider = provider if isinstance(provider, str) else ""
+model = status.get("model")
+model = model if isinstance(model, str) else ""
+if not provider:
+    raise SystemExit(0)
+if provider == "none":
+    print("disabled")
+elif provider in ("ollama", "local"):
+    print("local:%s" % model)
 else:
     print("cloud:%s" % provider)
 PY
 )"
-    case "$EMBED_STATE" in
-      local)
-        echo "  Local embeddings ready (qwen3-embedding:0.6b, semantic memory needs no API key)"
-        ;;
-      cloud:*)
-        echo "  WARN: semantic memory is on a CLOUD embedder ($EMBED_KEY.provider=${EMBED_STATE#cloud:}) — every indexed note is embedded off the box and it needs that provider's API key; re-run scripts/ensure-local-embeddings.sh to move it on-device (non-fatal)"
-        ;;
-      *)
-        echo "  WARN: local embeddings are not configured ($EMBED_KEY is unset), so semantic memory falls back to the core's default cloud embedder — which needs an API key, and without one memory search stays on lexical FTS; the next boot retries the switch (non-fatal)"
-        ;;
-    esac
+      case "$EMBED_STATE" in
+        local:qwen3-embedding:0.6b)
+          echo "  Local embeddings ready (qwen3-embedding:0.6b, semantic memory needs no API key)"
+          ;;
+        local:*)
+          # On-device and keyless, so not a warning -- but the index belongs to
+          # a different model than ClawBox provisions, and the two have
+          # different vector dimensions.
+          echo "  Local embeddings ready on ${EMBED_STATE#local:}, not qwen3-embedding:0.6b (on-device, no API key; the index belongs to that model)"
+          ;;
+        cloud:*)
+          echo "  WARN: semantic memory is on a CLOUD embedder (${EMBED_STATE#cloud:}) — every indexed note is embedded off the box and it needs that provider's API key; the Memory Shard app moves it back on-device (non-fatal)"
+          ;;
+        disabled)
+          echo "  WARN: memory search is switched off on this box (the core reports provider \"none\"); semantic memory stays on lexical FTS (non-fatal)"
+          ;;
+        *)
+          echo "  WARN: could not ask the core which embedder it resolved (openclaw memory status did not answer), so this run publishes no embedding verdict; the Memory Shard app shows the live one (non-fatal)"
+          ;;
+      esac
+    fi
   elif ollama pull qwen3-embedding:0.6b >/dev/null 2>&1; then
     echo "  Pulled local embedding model qwen3-embedding:0.6b (semantic memory, no API key)"
   else

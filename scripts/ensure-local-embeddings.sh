@@ -95,9 +95,10 @@ PROVIDER="$(read_cfg provider)"
 # box upgraded to OpenClaw 2 whose config `doctor --fix` has not migrated yet,
 # that choice still sits in agents.defaults.memorySearch while memory.search is
 # empty; reading only the live home saw "unset", overwrote it with ollama, and
-# the later migration then had nothing left to carry forward. install.sh's
-# post-run check applies the same rule — the legacy block speaks when the live
-# home is silent. Everything AFTER this guard (the "already configured" test
+# the later migration then had nothing left to carry forward. The rule belongs
+# HERE, where it decides whether to WRITE; install.sh's post-run check no longer
+# re-derives anything — it asks the core what it resolved
+# (`openclaw memory status --json`, TASK-659). Everything AFTER this guard (the "already configured" test
 # and both writes) stays on the live home, so a legacy "ollama" on a v2 box is
 # migrated, not mistaken for done.
 RECORDED_PROVIDER="$PROVIDER"
