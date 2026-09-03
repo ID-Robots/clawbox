@@ -28,6 +28,7 @@ import path from "path";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
 import { hermesConfigGet, invalidateHermesConfigCache } from "@/lib/hermes-config-cache";
 import { get } from "@/lib/config-store";
+import { CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-models";
 import {
   CLAWAI_PROVIDER,
   HERMES_AUTO_PROVIDER,
@@ -54,17 +55,20 @@ export const isSafeModelId = isSafeHermesModelId;
  * models (a vendor-prefixed slug gets HTTP 400 "Model not allowed" from the
  * proxy). Used twice:
  *   1. cold start — a factory device with no dashboard and no catalog on disk;
- *   2. to seed the ClawBox AI row (see normalizeRow), because Hermes can only
- *      report the single id our custom-provider config declares, while the
- *      product actually serves both — which is what OpenClaw's picker shows.
+ *   2. to seed the ClawBox AI row (see normalizeRow), for a box whose Hermes
+ *      config does not declare them yet.
+ *
+ * The SAME list `applyClawaiToHermes` writes into `providers.clawai.models`,
+ * imported rather than re-typed: that block is what Hermes' own pickers read,
+ * so a second spelling here would be the two surfaces disagreeing again.
  *
  * We deliberately do NOT ship guesses for providers we cannot query: the old
  * fallback listed OpenRouter slugs like "anthropic/claude-opus-4.8" which would
  * then be offered — and saved — under the direct Anthropic provider, i.e.
  * exactly the provider/model mismatch this module exists to stop.
  */
-const COLD_START_MODELS: Record<string, string[]> = {
-  [CLAWAI_PROVIDER]: ["deepseek-v4-flash", "deepseek-v4-pro"],
+const COLD_START_MODELS: Record<string, readonly string[]> = {
+  [CLAWAI_PROVIDER]: CLAWBOX_AI_CHAT_MODEL_IDS,
 };
 
 export type ModelOptionsSource = "dashboard" | "catalog-file" | "cold-start";
@@ -356,12 +360,14 @@ function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesPr
     });
   }
 
-  // ClawBox AI is a CUSTOM provider, so Hermes can only report what our own
-  // config declares — and that is a single id (`model.default`, the current
-  // tier's model). The product actually serves both tier models, which is why
-  // OpenClaw's chat header offers a model picker for it. Without this, the
-  // Hermes header hides the model pill entirely (it needs >1 option) and the
-  // two harnesses disagree about the same provider.
+  // ClawBox AI is a CUSTOM provider, so Hermes reports what our own config
+  // declares plus whatever `<base_url>/models` answers — and the proxy answers
+  // that probe in a shape Hermes cannot read, so on a box whose
+  // `providers.clawai.models` has not been written yet the row arrives EMPTY.
+  // `applyClawaiToHermes` is what writes it, and `reconcileClawaiModelsWithHermes`
+  // backfills a box linked before it did; this seed is the fallback for the
+  // window in between, not the source of truth. On a declared box every id is
+  // already in `seen` and the loop does nothing.
   //
   // Only ClawBox AI is seeded: these are ids we have PROVEN route on this
   // hardware. We never invent ids for a third-party provider — that is the

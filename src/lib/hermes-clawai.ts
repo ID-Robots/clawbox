@@ -14,6 +14,7 @@ import {
   mergePluginsEnabled,
 } from "@/lib/hermes-image-plugin";
 import {
+  CLAWBOX_AI_CHAT_MODEL_IDS,
   CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_IMAGE_MODEL_ID,
   CLAWBOX_AI_PRO_MODEL_ID,
@@ -161,6 +162,32 @@ export async function applyClawaiToHermes(
     ["config", "set", `providers.${CLAWAI_PROVIDER}.base_url`, CLAWBOX_AI_PROXY_URL],
     ["config", "set", `providers.${CLAWAI_PROVIDER}.api_key`, trimmed],
     ["config", "set", `providers.${CLAWAI_PROVIDER}.api_mode`, "openai"],
+    // ── Telling Hermes what this provider serves ────────────────────────────
+    //
+    // Without this line the box's OWN pickers offer nothing: the Telegram /
+    // Discord `/model` keyboard and the Hermes dashboard's Models page are both
+    // built by `list_authenticated_providers` (hermes_cli/model_switch.py:2571,
+    // Hermes 0.20.5), which reads a custom provider's model set out of THIS
+    // block and then probes `<base_url>/models` for a live one.
+    //
+    // The probe cannot help us. `probe_api_models` (hermes_cli/models.py:5668)
+    // reads the OpenAI envelope, `data[].id`; the ClawBox AI proxy answers
+    // `200 {"status":"ok","service":"ClawBox AI Proxy","models":[…]}`. So Hermes
+    // parses an EMPTY list, and an empty probe with nothing declared beside it
+    // is what rendered as "clawai (0)" on the owner's phone while our own chat
+    // header showed two models — the same box, two answers.
+    //
+    // A LIST, not the singular `model`/`default_model` key: only a list (or a
+    // string) counts as an allowlist (`_models_config_is_allowlist`,
+    // model_switch.py:136), and only an allowlist stops that empty probe from
+    // replacing the declared ids (model_switch.py:3423-3431). It is a floor and
+    // never a ceiling — a probe that DOES answer still wins, so the day the
+    // proxy speaks the OpenAI envelope this stops mattering on its own.
+    //
+    // JSON is how `hermes config set` is told to store a list rather than a
+    // string (hermes_cli/config.py:5515), the same way `plugins.enabled` is
+    // written below.
+    ["config", "set", `providers.${CLAWAI_PROVIDER}.models`, JSON.stringify(CLAWBOX_AI_CHAT_MODEL_IDS)],
     ["config", "set", "model.provider", CLAWAI_PROVIDER],
     ["config", "set", "model.default", model],
     // Clear any global custom-endpoint override a prior provider may have left,
@@ -336,6 +363,76 @@ export async function applyClawaiToHermes(
   }
 
   return { provider: CLAWAI_PROVIDER, model, tier };
+}
+
+let clawaiModelsReconciled = false;
+
+/**
+ * Declare the ClawBox AI catalogue on a box that was linked before this code
+ * existed — once per process, and a no-op on every other device.
+ *
+ * Every box already in the field has `providers.clawai` with a URL, a key and a
+ * mode, and no `models:` at all, and nothing re-links it: the owner would keep
+ * seeing "clawai (0)" in their bot for as long as the box stayed paired. Same
+ * shape of repair, and the same reasoning, as `reconcileLocalAiWithHermes`.
+ *
+ * Deliberately narrower than a re-link: it writes ONE key and needs no token.
+ *
+ * THREE ANSWERS, NOT TWO. `hermes config get` exits non-zero both for a key
+ * that is unset and for a config it could not read, and only the first is ours
+ * to fill in — an unreadable config is not an empty one, so anything but the
+ * "not set" wording leaves the file alone. And an existing value of ANY shape
+ * is left alone too: it may be Hermes' own discovered catalogue, which is
+ * richer than ours.
+ */
+export async function reconcileClawaiModelsWithHermes(): Promise<void> {
+  if (clawaiModelsReconciled) return;
+  clawaiModelsReconciled = true;
+  try {
+    // The catalogue first, because on a settled box it is the answer: one
+    // `hermes config get` (~0.6 s of process spawn) and we are done, rather than
+    // two on every cold process for a repair that will never be needed again.
+    const declared = await runHermesCli(
+      ["config", "get", `providers.${CLAWAI_PROVIDER}.models`],
+      { timeoutMs: 15_000 },
+    );
+    if (declared.code === 0) return;
+    const listing = `${declared.stdout ?? ""}\n${declared.stderr ?? ""}`;
+    if (!/config key not set/i.test(listing)) return;
+
+    // Only now ask whether there is a provider to describe. Not "is a token
+    // stored" — the question is whether HERMES has the block, which is what its
+    // pickers read. Without this a box that has never been linked would get a
+    // `providers.clawai.models` with no endpoint beside it, which Hermes renders
+    // as a picker row offering two models with nowhere to send them — the same
+    // orphan the local provider's removal exists to avoid.
+    const linked = await runHermesCli(
+      ["config", "get", `providers.${CLAWAI_PROVIDER}.base_url`],
+      { timeoutMs: 15_000 },
+    );
+    if (linked.code !== 0 || !linked.stdout.trim()) return;
+
+    const written = await runHermesCli(
+      ["config", "set", `providers.${CLAWAI_PROVIDER}.models`, JSON.stringify(CLAWBOX_AI_CHAT_MODEL_IDS)],
+      { timeoutMs: 15_000 },
+    );
+    if (written.code !== 0) {
+      // A repair that could not be made is reported, never claimed: the picker
+      // keeps showing what the box actually has.
+      console.warn("[hermes/clawai] could not declare the ClawBox AI catalogue", written.code);
+      return;
+    }
+    // The catalogue this device serves just changed — don't serve the old one.
+    invalidateModelOptions();
+  } catch (err) {
+    console.error("[hermes/clawai] catalogue reconcile failed:", err);
+    clawaiModelsReconciled = false;
+  }
+}
+
+/** Test seam. */
+export function _resetClawaiModelsReconcileForTests(): void {
+  clawaiModelsReconciled = false;
 }
 
 /**

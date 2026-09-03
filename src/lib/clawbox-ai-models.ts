@@ -35,6 +35,26 @@ export const CLAWBOX_AI_MODEL_BY_TIER: Record<ClawboxAiTier, string> = {
   pro: `${CLAWBOX_AI_PROVIDER}/${CLAWBOX_AI_PRO_MODEL_ID}`,
 };
 
+/**
+ * The BARE ids the ClawBox AI proxy serves as CHAT models, in the order a
+ * picker should show them. The device runs one of them (its tier's), and the
+ * subscription covers both, so both belong in every catalogue.
+ *
+ * Deliberately excludes the image and vision ids: those exist so a picture can
+ * be drawn or looked at, and offering them as something to talk to is a turn
+ * the proxy answers with "Model not allowed".
+ *
+ * This is the list every surface must agree on, which is why it lives beside
+ * the ids rather than being re-typed per writer: `applyClawaiToHermes` declares
+ * it in Hermes' own `providers.clawai.models` (the block Hermes' `/model`
+ * picker and its dashboard both read), and hermes-model-options.ts uses it as
+ * the cold-start floor for the same provider.
+ */
+export const CLAWBOX_AI_CHAT_MODEL_IDS: readonly string[] = [
+  CLAWBOX_AI_FLASH_MODEL_ID,
+  CLAWBOX_AI_PRO_MODEL_ID,
+];
+
 // Device-tier badge label rendered in the chat header / Settings. Mirrors
 // the subscription plan names ("Pro plan" / "Max plan") so users don't see
 // a different word on the device than they paid for. Keep in sync with

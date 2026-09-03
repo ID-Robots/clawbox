@@ -70,6 +70,24 @@ async function applyLocalAi(options: {
     [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: getLocalAiOpenAiBaseUrl(options.provider),
     [`providers.${HERMES_LOCAL_PROVIDER}.api_key`]: getLocalAiToken(),
     [`providers.${HERMES_LOCAL_PROVIDER}.api_mode`]: "openai",
+    // What this endpoint serves, for the pickers Hermes builds ITSELF — the
+    // Telegram/Discord `/model` keyboard and the Hermes dashboard's Models page,
+    // both from `list_authenticated_providers` (hermes_cli/model_switch.py:2571).
+    //
+    // Those probe `<base_url>/models` for a live list, and standby is the point
+    // of the local model: asleep, it answers nothing, so the row arrives with an
+    // empty list and there is no model to select — the same hole
+    // `normalizeRow` already patches for OUR chat header, on the surface we do
+    // not serve. Declaring the id is what Hermes reads instead of the probe when
+    // the probe comes back empty (model_switch.py:3423-3431), and a probe that
+    // DOES answer still wins, so a woken box still shows whatever it is running.
+    //
+    // A plain scalar rather than a list: there is exactly one configured local
+    // model, and a string is an allowlist shape as far as Hermes is concerned
+    // (`_declared_model_ids` at model_switch.py:61, `_models_config_is_allowlist`
+    // at :136) — which also keeps it inside what the comment-preserving YAML
+    // writer can splice.
+    [`providers.${HERMES_LOCAL_PROVIDER}.models`]: model,
   };
   if (options.makeDefault) {
     set["model.provider"] = HERMES_LOCAL_PROVIDER;
@@ -99,6 +117,24 @@ async function applyLocalAi(options: {
 }
 
 let reconciled = false;
+
+/**
+ * True only when Hermes has NO model declared for our local provider.
+ *
+ * Three answers, not two: `hermes config get` exits non-zero both for a key
+ * that is unset and for a config it could not read, and repairing off a failed
+ * read would overwrite whatever is really in the file — so only the "not set"
+ * wording counts as missing. A value of any shape is left alone; it may be
+ * Hermes' own discovered catalogue, which is richer than the one id we know.
+ */
+async function localCatalogueMissing(): Promise<boolean> {
+  const declared = await runHermesCli(
+    ["config", "get", `providers.${HERMES_LOCAL_PROVIDER}.models`],
+    { timeoutMs: 15_000 },
+  );
+  if (declared.code === 0) return false;
+  return /config key not set/i.test(`${declared.stdout ?? ""}\n${declared.stderr ?? ""}`);
+}
 
 /**
  * Register the local model if it was configured BEFORE this code existed.
@@ -133,7 +169,7 @@ export async function reconcileLocalAiWithHermes(): Promise<void> {
     const ourStaleUrl =
       registered.startsWith(`${getLocalAiProxyRootUrl()}/setup-api/local-ai/`)
       && registered !== getLocalAiOpenAiBaseUrl(provider);
-    if (registered && !ourStaleUrl) return;
+    if (registered && !ourStaleUrl && !(await localCatalogueMissing())) return;
 
     const stored = await get("local_ai_model");
     // Stored as "llamacpp/gemma4-e2b-it-q4_0"; Hermes wants the bare id.
@@ -188,7 +224,12 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
   const wasDefault = activeProvider === HERMES_LOCAL_PROVIDER;
   const model = wasDefault ? await readHermesConfigValue("model.default").catch(() => null) : null;
 
-  const unset = ["base_url", "api_key", "api_mode"].map(
+  // `models` rides with the endpoint it describes. Left behind, it is a
+  // `providers.clawlocal` block naming a model with nowhere to send it — and
+  // Hermes renders a row for any entry that has models, so the picker would go
+  // on offering the stopped model, which is the exact state this function
+  // exists to end.
+  const unset = ["base_url", "api_key", "api_mode", "models"].map(
     (key) => `providers.${HERMES_LOCAL_PROVIDER}.${key}`,
   );
   if (wasDefault) {

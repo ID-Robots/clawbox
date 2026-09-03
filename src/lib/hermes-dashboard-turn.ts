@@ -969,10 +969,15 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       //
       // There is a real case for it, found on the box: switching TO a
       // user-defined provider is refused, because the switch validates the
-      // model against the target provider's model listing and a
-      // `providers.<slug>` entry in config.yaml carries none. On this device
-      // that is `clawai` — the DEFAULT provider — so "go back to ClawBox AI
-      // mid-conversation" is exactly the combination that cannot be made here.
+      // model against the target provider's model listing, and a
+      // `providers.<slug>` entry in config.yaml used to carry none. On this
+      // device that is `clawai` — the DEFAULT provider — so "go back to ClawBox
+      // AI mid-conversation" was exactly the combination that could not be made
+      // here. `applyClawaiToHermes` now declares that listing, so the clawai
+      // case should no longer arise on a box this code has written; the guard
+      // stays because a refusal is a thing the transport must read either way —
+      // for a model outside the declared list, or a provider we never wrote —
+      // and because nothing in this process can prove the switch took.
       //
       // Throwing lands in the catch below, which returns null, and the route
       // then spawns the CLI for this turn. That path passes `-m` and

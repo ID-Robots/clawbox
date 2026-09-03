@@ -79,6 +79,17 @@ describe("registering the local model with Hermes", () => {
     expect(sets()).toContain(`providers.${HERMES_LOCAL_PROVIDER}.api_key=local-token-xyz`);
   });
 
+  it("declares the model so Hermes' own picker has one while it sleeps", async () => {
+    // Standby is the local model's normal resting state, and a sleeping model
+    // answers no /v1/models — so Hermes' `/model` keyboard (which builds its
+    // rows from the `providers:` block, hermes_cli/model_switch.py:3220) offers
+    // "clawlocal (0)" and the customer cannot select the one model they have.
+    // A declared id is what Hermes reads instead; a live probe that DOES answer
+    // still wins (model_switch.py:3423-3431).
+    await applyLocalAiToHermes({ provider: "llamacpp", model: "gemma4-e2b-it-q4_0" });
+    expect(sets()).toContain(`providers.${HERMES_LOCAL_PROVIDER}.models=gemma4-e2b-it-q4_0`);
+  });
+
   it("uses the ollama proxy when ollama is the local provider", async () => {
     await applyLocalAiToHermes({ provider: "ollama", model: "llama3.2:3b" });
     expect(sets()).toContain(
@@ -122,10 +133,14 @@ describe("registering the local model with Hermes", () => {
 
   it("unregisters on disable so the picker stops offering a stopped model", async () => {
     await removeLocalAiFromHermes();
+    // `models` rides with the rest: left behind, it is a `providers.clawlocal`
+    // block with a model id and no endpoint, which Hermes still renders as a
+    // picker row — the dead-model-in-the-list state this removal exists to end.
     expect(unsets()).toEqual([
       `providers.${HERMES_LOCAL_PROVIDER}.base_url`,
       `providers.${HERMES_LOCAL_PROVIDER}.api_key`,
       `providers.${HERMES_LOCAL_PROVIDER}.api_mode`,
+      `providers.${HERMES_LOCAL_PROVIDER}.models`,
     ]);
   });
 
@@ -167,9 +182,25 @@ describe("reconciling an already-configured device", () => {
     });
   });
 
-  /** What `hermes config get providers.clawlocal.base_url` answers. */
+  /**
+   * What `hermes config get providers.clawlocal.<key>` answers. `models`
+   * defaults to "already declared" so each test states only the fact it is
+   * about.
+   */
+  function registered(opts: { baseUrl: string; models?: string | null }) {
+    const models = opts.models === undefined ? "qwen3:8b" : opts.models;
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (args[2] === `providers.${HERMES_LOCAL_PROVIDER}.models`) {
+        return models === null
+          ? { code: 1, stdout: "", stderr: "config key not set" }
+          : { code: 0, stdout: `${models}\n`, stderr: "" };
+      }
+      return { code: 0, stdout: `${opts.baseUrl}\n`, stderr: "" };
+    });
+  }
+
   function registeredBaseUrl(value: string) {
-    cliMock.mockResolvedValue({ code: 0, stdout: `${value}\n`, stderr: "" });
+    registered({ baseUrl: value });
   }
 
   it("re-registers a device that got the bare (pre-/v1) Ollama root", async () => {
@@ -202,5 +233,25 @@ describe("reconciling an already-configured device", () => {
     expect(sets()).toContain(
       `providers.${HERMES_LOCAL_PROVIDER}.base_url=http://127.0.0.1/setup-api/local-ai/ollama/v1`,
     );
+  });
+
+  it("declares the model on a device registered before the catalogue existed", async () => {
+    // The endpoint is right, so the old reconcile stopped here — and the box
+    // kept showing "clawlocal (0)" in Hermes' own picker whenever the model was
+    // asleep, which is most of the time.
+    registered({ baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama/v1", models: null });
+    await reconcileLocalAiWithHermes();
+    expect(sets()).toContain(`providers.${HERMES_LOCAL_PROVIDER}.models=qwen3:8b`);
+  });
+
+  it("leaves a config it could not read alone", async () => {
+    // Unreadable is not unset: repairing off a failed read would overwrite
+    // whatever is actually in the file.
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[2] === `providers.${HERMES_LOCAL_PROVIDER}.models`
+        ? { code: 1, stdout: "", stderr: "permission denied" }
+        : { code: 0, stdout: "http://127.0.0.1/setup-api/local-ai/ollama/v1\n", stderr: "" });
+    await reconcileLocalAiWithHermes();
+    expect(patchMock).not.toHaveBeenCalled();
   });
 });

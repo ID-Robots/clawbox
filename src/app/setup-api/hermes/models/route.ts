@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { requireSession } from "@/lib/route-auth";
+import { reconcileClawaiModelsWithHermes } from "@/lib/hermes-clawai";
 import { reconcileLocalAiWithHermes } from "@/lib/hermes-local-ai";
 import {
   getModelOptions,
@@ -80,6 +81,11 @@ export async function GET(request: Request) {
   // A device whose local model was enabled before Hermes knew how to host it
   // repairs itself here — once per process, and a no-op on every other device.
   await reconcileLocalAiWithHermes();
+  // And the same for the ClawBox AI catalogue, which a box linked before Hermes
+  // was told what the proxy serves does not have. Both repairs write the
+  // `providers:` block Hermes' OWN pickers read, so a box fixes its Telegram
+  // `/model` keyboard by being asked this question once.
+  await reconcileClawaiModelsWithHermes();
 
   try {
     if (provider) {
