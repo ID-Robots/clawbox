@@ -62,11 +62,13 @@ vi.mock("../../../mcp/lib/guard", async (importOriginal) => {
 import { ApiError, classifyError } from "../../../mcp/lib/errors";
 import type { McpContext } from "../../../mcp/lib/context";
 import { captureRegistrar } from "../helpers/mcp-registrar";
+import { contractViolations } from "../../../mcp/lib/register";
 import { registerAiTools } from "../../../mcp/tools/ai";
 import { registerBrowserTools } from "../../../mcp/tools/browser";
 import { registerSkillTools } from "../../../mcp/tools/skills";
 import { buildContext } from "../../../mcp/lib/context";
 import { registerOrientationTools } from "../../../mcp/tools/orientation";
+import { registerDesktopTools } from "../../../mcp/tools/desktop";
 import { desktopDisplay, registerSystemTools } from "../../../mcp/tools/system";
 
 const ctx = (
@@ -570,16 +572,179 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     expect(h.has("backup_status")).toBe(true);
   });
 
-  it("says a protected verdict with the schedule off is not a promise of a newer backup", () => {
-    // Turning auto-backup off widens the tolerated backup age to the
-    // no-schedule week, so a five-day-stale nightly box answers
-    // {protected, ok} on one click. The ClawKeep card says so in prose; the
-    // agent reading this tool has only the verdict unless the description
-    // ranks it, and "you're protected" over a box nothing will back up again
-    // is the same false success the rest of this description exists to stop.
+  it("keeps every system and desktop tool inside the contract check:mcp-tools enforces", () => {
+    // backup_status shipped at 1002 chars on beta — over MAX_DESCRIPTION_CHARS,
+    // which `npm run check:mcp-tools` fails on. No CI job runs that checker
+    // (TASK-708 covers adding it) and the registrar logs a violation without
+    // failing, by design, so nothing caught it. Assert the repo's own contract
+    // function over the whole file rather than one tool's length: the next
+    // description to grow is not going to be this one.
+    //
+    // Both capability postures, because four system tools register only when a
+    // probe says yes — disk_usage/disk_cleanup on `du`, logs_tail on `journal`,
+    // screen_capture on a grabber — and ctx()'s defaults have every probe off.
+    // A guard that skips whatever a device happens to have is a guard that
+    // green-lights the description it exists to catch. registerDesktopTools
+    // rides along for app_uninstall, the one description written per edition.
+    const postures: Partial<McpContext>[] = [
+      {}, // ctx()'s own defaults: every probe off
+      { capabilities: { screenGrabber: "scrot", imageConvert: true, journal: true, du: true } },
+    ];
+    const checked = new Set<string>();
+    for (const edition of ["openclaw", "hermes"] as const) {
+      for (const overrides of postures) {
+        const h = captureRegistrar(edition);
+        registerSystemTools(h.reg, ctx(edition, [], overrides));
+        registerDesktopTools(h.reg, ctx(edition, [], overrides));
+        for (const tool of h.reg.list()) {
+          checked.add(tool.name);
+          expect({ [tool.name]: contractViolations(tool) }).toEqual({ [tool.name]: [] });
+        }
+      }
+    }
+    // Name the probe-gated four: a gate rewritten so its tool no longer
+    // registers would otherwise shrink this loop back to what it used to cover,
+    // silently and while staying green.
+    for (const name of ["disk_usage", "disk_cleanup", "logs_tail", "screen_capture", "app_uninstall"]) {
+      expect([...checked]).toContain(name);
+    }
+    // What the length budget must never cost: the verdict vocabulary the
+    // agent answers from.
     const desc = system("openclaw").get("backup_status").description;
-    expect(desc).toMatch(/schedule\.enabled/);
-    expect(desc).toMatch(/nothing is scheduled to make a newer one/i);
+    expect(desc).toMatch(/protected\|lapsed\|unprotected/);
+    expect(desc).toMatch(/ok\|error\|blocked\|stale\|never/);
+  });
+
+  it("says a protected verdict with the schedule off is not a promise of a newer backup", async () => {
+    // Turning auto-backup off widens the tolerated backup age to the
+    // no-schedule week, so a six-day-stale nightly box answers
+    // {protected, ok} on one click. The ClawKeep card says so in prose; the
+    // agent reading this tool has only the verdict unless something ranks it,
+    // and "you're protected" over a box nothing will back up again is the same
+    // false success the rest of this tool exists to stop.
+    //
+    // Six days is chosen, not rounded: it brackets the only two windows the
+    // verdict could be judged against — 36 h (DAY_MS + BACKUP_GRACE_MS, the
+    // armed-daily window) < 6 d < 7 d (UNSCHEDULED_MAX_AGE_MS). Anything under
+    // 36 h reads {protected, ok} whether or not expectedBackupWindowMs()
+    // honours `enabled: false`, so it would prove nothing about the widening
+    // this test is named for.
+    //
+    // The caveat rides on the RESULT, not the description: it is true of some
+    // boxes and not others, and description text is paid for on every turn.
+    apiGet.mockResolvedValue({
+      paired: true,
+      configured: true,
+      supportedOnEdition: true,
+      encryptionConfigured: true,
+      lastBackupAtMs: Date.now() - 6 * 24 * 60 * 60 * 1000,
+      lastHeartbeatStatus: "ok",
+      schedule: { enabled: false, frequency: "daily" },
+    });
+
+    const out = await system("openclaw").call("backup_status", {});
+    if (out.isError) throw new Error("backup_status failed");
+    const body = JSON.parse(out.text);
+    expect(body.protection).toEqual({ state: "protected", reason: "ok" });
+    const notes = (body.notes as string[]).join("\n");
+    expect(notes).toMatch(/No backup schedule is armed/);
+    expect(notes).toMatch(/nothing is scheduled to make a newer one/i);
+  });
+
+  it("caveats a missing schedule the same as a disabled one", async () => {
+    // expectedBackupWindowMs() widens to the no-schedule week on
+    // `!schedule?.enabled` — false OR null OR absent — and the ClawKeep card
+    // switches its copy on the same predicate. A note gated on `=== false`
+    // would let a null schedule take the lenient window with no caveat, so the
+    // two shapes that are not `false` are both walked here. Six days again,
+    // for the reason spelled out above: under 36 h neither shape would prove
+    // the widened window was the one taken.
+    for (const [shape, schedule] of [["null", { schedule: null }], ["omitted", {}]] as const) {
+      apiGet.mockResolvedValue({
+        paired: true,
+        configured: true,
+        supportedOnEdition: true,
+        encryptionConfigured: true,
+        lastBackupAtMs: Date.now() - 6 * 24 * 60 * 60 * 1000,
+        lastHeartbeatStatus: "ok",
+        ...schedule,
+      });
+
+      const out = await system("openclaw").call("backup_status", {});
+      if (out.isError) throw new Error("backup_status failed");
+      const body = JSON.parse(out.text);
+      expect(body.protection, `schedule ${shape}`).toEqual({ state: "protected", reason: "ok" });
+      expect((body.notes as string[]).join("\n"), `schedule ${shape}`)
+        .toMatch(/nothing is scheduled to make a newer one/i);
+    }
+  });
+
+  it("never hands the agent lastHeartbeatStatus without saying it is not an outcome", async () => {
+    // The exact live failure: backups died days ago, the daemon never wrote a
+    // heartbeat about it, so the last one still reads "ok". Read literally the
+    // agent tells the owner the last run succeeded.
+    const staleBox = {
+      paired: true,
+      configured: true,
+      supportedOnEdition: true,
+      encryptionConfigured: true,
+      lastBackupAtMs: Date.now() - 30 * 24 * 60 * 60 * 1000,
+      schedule: { enabled: true, frequency: "daily" },
+    };
+    apiGet.mockResolvedValue({ ...staleBox, lastHeartbeatStatus: "ok" });
+
+    const out = await system("openclaw").call("backup_status", {});
+    if (out.isError) throw new Error("backup_status failed");
+    const body = JSON.parse(out.text);
+    expect(body.protection.state).not.toBe("protected");
+    const notes = (body.notes as string[]).join("\n");
+    expect(notes).toMatch(/not the outcome by itself/i);
+    expect(notes).toMatch(/Answer from protection/i);
+
+    // The value itself is never interpolated into the note: it is already in
+    // the body, and result text is screened by neither the description length
+    // cap nor BANNED_DESCRIPTION_RE. "ok" cannot show that — the note quotes
+    // the word as its own literal example ('can still read "ok"'), so an
+    // absence check on it would read a coincidence as a passing contract. Ask
+    // again with a value nothing but an interpolation could have put there.
+    const sentinel = "zzz-heartbeat-sentinel-622";
+    apiGet.mockResolvedValue({ ...staleBox, lastHeartbeatStatus: sentinel });
+    const probe = await system("openclaw").call("backup_status", {});
+    if (probe.isError) throw new Error("backup_status failed");
+    const probeBody = JSON.parse(probe.text);
+    // The fixture did arrive — otherwise the sentinel's absence from the notes
+    // below would only be saying the mock never landed.
+    expect(probeBody.lastHeartbeatStatus).toBe(sentinel);
+    const probeNotes = (probeBody.notes as string[]).join("\n");
+    expect(probeNotes).toMatch(/not the outcome by itself/i);
+    expect(probeNotes).not.toContain(sentinel);
+  });
+
+  it("publishes no verdict for an unpaired box, the way the shelf shield does not", async () => {
+    // unpairLocal() deliberately KEEPS the last successful stats, and
+    // deriveProtection() judges lastBackupAtMs alone — it never sees `paired`.
+    // So a box unpaired one minute ago still has a fresh lastBackupAtMs, and
+    // deriving a verdict from it answered "you're protected" over a box that
+    // can never back up again, while the shelf drew the calm setup shield.
+    // `useClawkeepShieldStatus` publishes protection: null there; so does this.
+    apiGet.mockResolvedValue({
+      paired: false,
+      configured: false,
+      supportedOnEdition: true,
+      encryptionConfigured: true,
+      lastBackupAtMs: Date.now() - 60 * 1000,
+      lastHeartbeatStatus: "ok",
+      schedule: { enabled: true, frequency: "daily" },
+    });
+
+    const out = await system("openclaw").call("backup_status", {});
+    if (out.isError) throw new Error("backup_status failed");
+    const body = JSON.parse(out.text);
+    expect(body.protection).toBeNull();
+    const notes = (body.notes as string[]).join("\n");
+    expect(notes).toMatch(/not paired/i);
+    expect(notes).toMatch(/Settings -> Backup/);
+    expect(notes).toMatch(/no tool here can pair it/i);
   });
 
   it("answers backup_status honestly when the edition cannot run ClawKeep", async () => {

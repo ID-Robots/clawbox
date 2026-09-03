@@ -197,6 +197,17 @@ pair: `backup_list` and `backup_now` are not registered there, and
 `backup_status` answers "not available on this edition" rather than a status
 object the agent reads as "not paired yet".
 
+`backup_status` returns the shared `protection` verdict plus a `notes` array —
+the caveats that apply to *this* box (a `lastHeartbeatStatus` that is not the
+outcome by itself, a protected verdict with no schedule behind it). They are on
+the result rather than in the tool description because they are conditional,
+and because description text is paid for in the `tools/list` payload on every
+turn. The key is always present on a status result, and the array is often
+empty: a box no caveat applies to gets `notes: []`, never a missing field. An
+unpaired box gets `protection: null` and a note saying so, the same way the
+shelf shield publishes no verdict for one — and the edition that cannot run
+ClawKeep (above) answers in prose, with no `protection` and no `notes` at all.
+
 `screen_capture` resolves the display from `CLAWBOX_VNC_DISPLAY`, then
 `~/.cache/clawbox/vnc-display.env`, then `:0` — the harness spawns this server
 with no `DISPLAY`, and the desktop is the VNC Xvfb, not `:0`.
