@@ -28,7 +28,8 @@ const nextConfig: NextConfig = {
   // Nothing imported sharp before, so nothing noticed. The pet thumbnail route
   // does, so name the .so explicitly. Both libc variants are listed because the
   // trace is resolved at build time and a musl image would need the other one.
-  // Never trace the runtime data directory into the standalone bundle.
+  // Keep the runtime data directory out of the ROUTE traces — and know what
+  // that does and does not buy.
   //
   // data/ holds the owner's live state — config, code projects, built webapps
   // — and it CHANGES WHILE THE BUILD RUNS. On 2026-08-26 a build died with
@@ -36,9 +37,24 @@ const nextConfig: NextConfig = {
   // deleted between the trace and the copy, and the box was left with no
   // standalone output at all: the site went down until the next build.
   //
-  // Nothing needs it there. Every reader resolves data/ from CLAWBOX_ROOT as
-  // an absolute path at runtime, so a copy inside .next/standalone would be a
-  // stale duplicate even when the copy succeeded.
+  // Nothing needs it there either. Every reader resolves data/ from
+  // CLAWBOX_ROOT (or the absolute /home/clawbox/clawbox default) at runtime,
+  // so a copy inside .next/standalone is a stale duplicate even when the copy
+  // succeeded.
+  //
+  // THIS EXCLUDE ONLY REACHES ROUTES, so data/ IS still traced into the
+  // standalone bundle and the postbuild step in package.json is what removes
+  // it. Next applies outputFileTracingExcludes per route entry; the middleware
+  // and instrumentation traces are built separately and NO key reaches them.
+  // Measured on Next 16.3.3 with a minimal app: with the exclude below, a
+  // route's .nft.json is cleaned of data/ while middleware.js.nft.json keeps
+  // its `../../data/config.json` entry and .next/standalone/data is created
+  // anyway — and "*" vs "**" vs "middleware" vs "/middleware" changes nothing.
+  // So do not "fix the glob" here: it already does its job, which is the route
+  // half of the ENOENT hazard above. The middleware and instrumentation halves
+  // are still open — Next copies those two traces with no error handling,
+  // where the page traces are wrapped — and closing them means keeping the
+  // paths out of the trace at the source, not another glob.
   outputFileTracingExcludes: {
     // No "./" prefix: Next matches these globs relative to the tracing root,
     // and "./data/**" silently matched nothing — the build kept dying on
