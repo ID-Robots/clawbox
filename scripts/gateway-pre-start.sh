@@ -2234,16 +2234,23 @@ fi
 # we mirror that here so the gateway can register the MCP server even
 # if it comes up before clawbox-setup on a fresh boot.
 MCP_TOKEN_FILE="$CLAWBOX_ROOT/data/.mcp-token"
+# One writer, used by the seed below and by the re-harden beneath it, so the two
+# cannot drift on entropy source or on mode. `umask 077` rather than a chmod
+# afterwards: the file must never exist readable, and on the re-harden path
+# chmod is precisely what has just failed.
+mcp_write_token() {
+  if command -v openssl >/dev/null 2>&1; then
+    ( umask 077; openssl rand -hex 32 > "$1" ) 2>/dev/null
+  else
+    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$1" ) 2>/dev/null
+  fi
+}
 if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$(wc -c < "$MCP_TOKEN_FILE" 2>/dev/null || echo 0)" -lt 32 ]; then
   # Every write here is guarded so a full or read-only filesystem cannot abort
   # the boot. Nothing is lost by falling through: the token's readability and
   # length are checked below, and that check is the deliberate hard failure.
   mkdir -p "$(dirname "$MCP_TOKEN_FILE")" 2>/dev/null || true
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex 32 > "$MCP_TOKEN_FILE" || true
-  else
-    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MCP_TOKEN_FILE" || true
-  fi
+  mcp_write_token "$MCP_TOKEN_FILE" || true
 fi
 # Re-harden mode unconditionally: chmod only ran on the regeneration
 # path before, so a file with drifted permissions (manual edit, upgrade
@@ -2252,10 +2259,40 @@ fi
 # Guarded: this runs on EVERY boot, and the file is also seeded by
 # production-server.js. One created under another uid (a root update step, a
 # manual repair) makes chmod return EPERM, and an unguarded failure here cost
-# the box its gateway on every boot from then on. The token's own state is
-# checked below, which is where a real problem is reported. TASK-657.
-chmod 600 "$MCP_TOKEN_FILE" 2>/dev/null \
-  || echo "  WARN: could not re-harden $MCP_TOKEN_FILE to 0600" >&2
+# the box its gateway on every boot from then on. TASK-657.
+chmod 600 "$MCP_TOKEN_FILE" 2>/dev/null || true
+# But the MODE is the outcome, not chmod's exit code, and grading the call was
+# wrong in both directions: it warned over a root-owned file that was ALREADY
+# 0600, and it stayed quiet about the case that matters -- a file this uid
+# cannot chmod whose mode is 0644, which is what root's umask gives
+# `openssl rand > file`. The bearer then reaches every local user on the box.
+#
+# Replacing it is the only remedy available here that is neither exposure nor a
+# brick. The DIRECTORY is clawbox's own (install.sh chowns $PROJECT_DIR/data),
+# and a rename is governed by the directory, not by the file's owner -- so a
+# file this uid cannot chmod can still be swapped for one it owns at 0600. That
+# rotates the token, which the reconcile immediately below already handles: it
+# rewrites openclaw.json from whatever the file now holds, exactly as it does
+# for the seeding path above. One boot rotates; every boot after it the file is
+# ours and chmod succeeds.
+MCP_TOKEN_MODE="$(stat -c '%a' "$MCP_TOKEN_FILE" 2>/dev/null || echo unknown)"
+case "$MCP_TOKEN_MODE" in
+  600|unknown)
+    # 0600, or a box that cannot report a mode at all -- for the latter the
+    # readability and length checks below stay the backstop. Neither is a
+    # reason to rotate a working token.
+    ;;
+  *)
+    MCP_TOKEN_TMP="$(mktemp "$(dirname "$MCP_TOKEN_FILE")/.mcp-token.XXXXXX" 2>/dev/null || true)"
+    if [ -n "$MCP_TOKEN_TMP" ] && mcp_write_token "$MCP_TOKEN_TMP" \
+      && mv -f "$MCP_TOKEN_TMP" "$MCP_TOKEN_FILE" 2>/dev/null; then
+      echo "  WARN: $MCP_TOKEN_FILE was mode $MCP_TOKEN_MODE and could not be re-hardened (it belongs to another user); replaced it with a fresh 0600 token this boot owns" >&2
+    else
+      if [ -n "$MCP_TOKEN_TMP" ]; then rm -f "$MCP_TOKEN_TMP" 2>/dev/null || true; fi
+      echo "  WARN: $MCP_TOKEN_FILE is mode $MCP_TOKEN_MODE and could be neither re-hardened nor replaced — the MCP bearer for /setup-api/* is readable by other local users on this box" >&2
+    fi
+    ;;
+esac
 
 # Always reconcile the MCP server registration in openclaw.json with
 # the current token. Done in Python so the atomic-rename pattern used

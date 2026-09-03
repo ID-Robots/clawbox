@@ -1,5 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  chmodSync,
+  existsSync,
+  statSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -77,7 +86,15 @@ function run(program: string): { status: number | null; out: string; stderr: str
   const file = path.join(root, "block.sh");
   writeFileSync(file, `#!/usr/bin/env bash\nset -euo pipefail\n${program}\n`);
   chmodSync(file, 0o755);
-  const r = spawnSync("bash", [file], { encoding: "utf-8", timeout: 30_000 });
+  // `spawnSync` inherits process.env, and an explicit CLAWBOX_OPENCLAW_V2 WINS
+  // over everything the probe derives — by design, and the shipped script says
+  // so. A runner (or a shell on a box) that exports it would make every derived
+  // generation here read back as the override instead, so the tests that pin
+  // v1 and the ones that pin "wrote nothing" would pass on any script at all.
+  // Deleted rather than emptied: "unset" is the state a device is in.
+  const env = { ...process.env };
+  delete env.CLAWBOX_OPENCLAW_V2;
+  const r = spawnSync("bash", [file], { encoding: "utf-8", timeout: 30_000, env });
   return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, stderr: r.stderr ?? "" };
 }
 
@@ -165,10 +182,23 @@ describe.runIf(canRun)("gateway-pre-start's OpenClaw generation probe", () => {
     expect(r.v2).toBe("1");
   });
 
-  it("time-boxes that call, so a wedged CLI cannot hold the boot", () => {
-    expect(block('OPENCLAW_TARGET=""', "export CLAWBOX_OPENCLAW_V2")).toMatch(
-      /timeout \d+ "\$OPENCLAW_BIN" --version/,
-    );
+  it("time-boxes that call with a value the boot can actually afford", () => {
+    const m = /timeout (\d+) "\$OPENCLAW_BIN" --version/.exec(block('OPENCLAW_TARGET=""', "export CLAWBOX_OPENCLAW_V2"));
+    expect(m, "the version probe is no longer time-boxed at all").not.toBeNull();
+    const seconds = Number(m![1]);
+    // 45, matching the other bounded `openclaw` CLI call this script makes.
+    // `\d+` alone accepted `timeout 1` — which cuts off the healthy 7.9-8.0 s
+    // this call measures on a shipped Orin, making the fallback useless exactly
+    // when it is needed — and `timeout 600`, which would spend the unit's whole
+    // start budget inside one optional probe.
+    expect(seconds).toBe(45);
+    // And it has to stay inside the unit's own ceiling, read from the shipped
+    // unit rather than repeated here: ExecStartPre running out of time is a
+    // gateway that never starts, so a lowered TimeoutStartSec has to fail here.
+    const unit = readFileSync(path.join(REPO, "config", "clawbox-gateway.service"), "utf-8");
+    const budget = Number(/^TimeoutStartSec=(\d+)$/m.exec(unit)?.[1]);
+    expect(budget, "clawbox-gateway.service no longer states TimeoutStartSec in seconds").toBeGreaterThan(0);
+    expect(seconds).toBeLessThan(budget);
   });
 
   it("still calls a v1 core v1, whatever the pin says", () => {
@@ -338,5 +368,110 @@ describe.runIf(canRun)("gateway-pre-start's mDNS hostname read", () => {
     // fallback drops the configured origin and the Control UI stops being
     // reachable by the name the owner uses.
     expect(r.out).toMatch(/WARN/);
+  });
+});
+
+// The MCP token is the SOLE credential for `/setup-api/*`: `mcp/lib/api.ts`
+// sends it as a bearer and `src/middleware.ts` accepts it. Its `chmod 600` used
+// to run unguarded under `set -euo pipefail`, so a token file another uid owns
+// — a root update step, a manual repair — returned EPERM and cost the box its
+// gateway on EVERY boot from then on (TASK-657). Guarding it turned that into a
+// warning, which is the opposite failure: the unit runs as User=clawbox
+// (config/clawbox-gateway.service), root's umask gives `openssl rand > file`
+// mode 0644, and the block below then read that file and exported it.
+//
+// So the outcome that matters is the MODE, not the chmod's exit code.
+describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
+  /** 64 hex chars: long enough that the seeding branch above leaves it alone. */
+  const EXISTING = "a".repeat(64);
+
+  function token(opts: { contents?: string; mode?: number; chmodFails?: boolean }): {
+    status: number | null;
+    out: string;
+    /** The file's permission bits after the block ran, or null if it is gone. */
+    mode: number | null;
+    /** Its contents after the block ran. */
+    contents: string | null;
+    /** What the block exported, which is what reaches the MCP subprocess. */
+    exported: string | null;
+  } {
+    const clawboxRoot = path.join(root, "clawbox");
+    mkdirSync(path.join(clawboxRoot, "data"), { recursive: true });
+    const file = path.join(clawboxRoot, "data", ".mcp-token");
+    if (opts.contents !== undefined) {
+      writeFileSync(file, opts.contents);
+      chmodSync(file, opts.mode ?? 0o600);
+    }
+    // A `chmod` that fails is the only way to reproduce EPERM without being two
+    // different users; everything else on PATH stays real, because the recovery
+    // has to work with the chmod that just failed.
+    const stubBin = path.join(root, "stub-bin");
+    mkdirSync(stubBin, { recursive: true });
+    if (opts.chmodFails) {
+      const stub = path.join(stubBin, "chmod");
+      writeFileSync(stub, "#!/bin/sh\necho \"chmod: changing permissions: Operation not permitted\" >&2\nexit 1\n");
+      chmodSync(stub, 0o755);
+    }
+    const r = run(
+      [
+        `CLAWBOX_ROOT=${JSON.stringify(clawboxRoot)}`,
+        `PATH=${JSON.stringify(stubBin)}:$PATH`,
+        block('MCP_TOKEN_FILE="$CLAWBOX_ROOT/data/.mcp-token"', "export CLAWBOX_MCP_TOKEN_VAL"),
+        'echo "EXPORTED=${CLAWBOX_MCP_TOKEN_VAL}"',
+        'echo "REACHED_END=1"',
+      ].join("\n"),
+    );
+    return {
+      status: r.status,
+      out: r.out,
+      mode: existsSync(file) ? statSync(file).mode & 0o777 : null,
+      contents: existsSync(file) ? readFileSync(file, "utf-8") : null,
+      exported: /EXPORTED=(.*)/.exec(r.out)?.[1] ?? null,
+    };
+  }
+
+  it("hardens an existing token and leaves it exactly as it was", () => {
+    const r = token({ contents: EXISTING, mode: 0o644 });
+    expect(r.status).toBe(0);
+    expect(r.mode).toBe(0o600);
+    // The control for the rotation below: a chmod that WORKS must not rotate.
+    expect(r.contents).toBe(EXISTING);
+    expect(r.exported).toBe(EXISTING);
+  });
+
+  it.skipIf(isRoot)("never exports a token other local users can read", () => {
+    // The file root created at 0644 and clawbox cannot chmod. Warning and
+    // carrying on hands the only /setup-api/* credential to every local user.
+    const r = token({ contents: EXISTING, mode: 0o644, chmodFails: true });
+    expect(r.status, `the pre-start aborted:\n${r.out}`).toBe(0);
+    expect(r.mode, "the token was left readable by group/other").not.toBeNull();
+    expect(r.mode! & 0o077, `token left at mode ${r.mode!.toString(8)}`).toBe(0);
+    // Not silently: the operator has a root-owned file to clean up.
+    expect(r.out).toMatch(/WARN/);
+    // And the box still has a working MCP token — the alternative to exposure
+    // is not a gateway that never starts.
+    expect(r.exported).toHaveLength(64);
+    // What the file holds is what reaches the MCP subprocess (`openssl rand`
+    // leaves a trailing newline; `$(cat …)` strips it).
+    expect(r.exported).toBe(r.contents!.trim());
+    expect(r.exported).not.toBe(EXISTING);
+    expect(r.out).toContain("REACHED_END=1");
+  });
+
+  it.skipIf(isRoot)("does not rotate, or warn, over a file that is already 0600", () => {
+    // chmod on a root-owned file fails whatever its mode is. The old warning
+    // fired here too, over a box with nothing wrong with it.
+    const r = token({ contents: EXISTING, mode: 0o600, chmodFails: true });
+    expect(r.status).toBe(0);
+    expect(r.mode).toBe(0o600);
+    expect(r.contents).toBe(EXISTING);
+    expect(r.out).not.toMatch(/WARN/);
+  });
+
+  it("seeds a missing token at 0600 without a chmod to do it", () => {
+    const r = token({ chmodFails: true });
+    expect(r.status, `the pre-start aborted:\n${r.out}`).toBe(0);
+    expect(r.mode! & 0o077).toBe(0);
+    expect(r.exported).toHaveLength(64);
   });
 });
