@@ -197,3 +197,39 @@ clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-desktop-mode.sh 
 clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-desktop-mode.sh --disable
 clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-power-mode.sh --balanced
 clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-power-mode.sh --performance
+
+# System timezone (TASK-514). Issued by src/lib/timezone.ts setTimezone(), for
+# the setup wizard's one-shot and Settings -> System -> Time zone. The box
+# shipped on Etc/UTC and nothing ever asked, so the agent answered three hours
+# off the clock rendered on the same screen.
+#
+# NO ARGUMENT SPEC, and that is the whole reason the script exists.
+#
+# The narrow rule one would want here — "timedatectl, set-timezone subcommand,
+# one IANA zone" — is not expressible. sudoers(5) matches a Cmnd's arguments as
+# one concatenated string, with no way to say "one more word", so the only
+# spellings available are:
+#
+#   /usr/bin/timedatectl set-timezone Europe/Sofia
+#       one line per zone: ~500 of them, and a tzdata update away from being
+#       wrong in a file nobody re-reviews.
+#   /usr/bin/timedatectl set-timezone *
+#       a wildcard, and `*` spans whitespace — the exact construction TASK-445
+#       removed from this file. See the note at lines 126-147.
+#   /usr/bin/timedatectl
+#       grants set-time, set-ntp and set-local-rtc along with it.
+#
+# So the grant names a root-owned SCRIPT that takes the zone and checks it
+# itself — refusing anything that is not a plain relative IANA name, then
+# anything absent from `timedatectl list-timezones` — before timedatectl ever
+# sees it. Arguments validated by root-owned code rather than by string
+# matching: the same shape as the clawbox-run-root-step.sh grant above, and for
+# the same reason. The result is a narrower PRIVILEGE than any spelling of a
+# timedatectl grant could be — this target can set a timezone and do nothing
+# else.
+#
+# `--check` and `--list` are deliberately ABSENT. They only read timedatectl
+# state and run fine unprivileged, so src/lib/timezone.ts calls them with no
+# sudo at all and the sudo surface stays limited to the one action that changes
+# something — the same split as the `--check` modes above.
+clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-timezone.sh

@@ -3474,7 +3474,7 @@ install_root_libexec() {
   # Everything the web server may invoke as root via a NOPASSWD grant. Same
   # rule as above: the copy that runs must not be the one clawbox can rewrite.
   for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
-             clawbox-resource-limits.sh; do
+             clawbox-resource-limits.sh clawbox-timezone.sh; do
     if [ -f "$PROJECT_DIR/scripts/$src" ]; then
       install -o root -g root -m 0755 "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src"
     fi

@@ -203,6 +203,30 @@ my %DECLARED_ARGV = (
             . 'no sudo at all.',
     },
   },
+  # src/lib/timezone.ts — setTimezone() runs the root-owned helper with the zone
+  # the caller asked for. Neither dynamic item is enumerated, for the same
+  # reason the root-step launcher's step name is not: the grant names the script
+  # with NO argument spec because the script validates its own argument in
+  # root-owned code (validate_zone in scripts/clawbox-timezone.sh refuses
+  # anything that is not a plain relative IANA name, then anything `timedatectl
+  # list-timezones` does not know). Enumerating ~500 IANA zones in a sudoers
+  # Cmnd_Spec would be 500 lines of string matching doing worse than one
+  # root-side check, and would go stale on the next tzdata update.
+  'src/lib/timezone.ts :: "-n", script, "--set", zone' => {
+    argv => [
+      ['-n', '/usr/local/libexec/clawbox/clawbox-timezone.sh', '--set', 'Europe/Sofia'],
+    ],
+    unverified => {
+      script => 'resolveScript("clawbox-timezone.sh") with no repo fallback, so it is the '
+              . 'installed /usr/local/libexec/clawbox copy or setTimezone() throws before '
+              . 'the call — the same resolution src/lib/system-profile.ts uses for its '
+              . 'mutating modes.',
+      zone   => 'the IANA zone the owner picked. Deliberately not enumerated: the grant '
+              . 'carries no argument spec and the zone is checked by root-owned code '
+              . 'instead (validate_zone in scripts/clawbox-timezone.sh), which is what '
+              . 'makes this grant narrower than any /usr/bin/timedatectl spelling could be.',
+    },
+  },
   # src/lib/local-models.ts — verb is enable|disable; unit is constrained to
   # SYSTEM_UNITS by the `allowed.has(unit)` guard immediately above the call.
   'src/lib/local-models.ts :: "/usr/bin/systemctl", verb, "--now", unit' => {
