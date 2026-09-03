@@ -22,7 +22,7 @@ Rows marked **OpenClaw/dual** or **Hermes/dual** exist only on those editions. C
 | `…/clawbox/config/openclaw-target.txt` | Pinned OpenClaw version for the fleet |
 | `…/clawbox/.next/` | Production build output (`BUILD_ID` = fingerprint of the running build) |
 | `~/.openclaw/` — **OpenClaw/dual** | **OpenClaw state**: `openclaw.json` (gateway config), `agents/` (per-agent credentials — exact paths in the table below), `credentials/` (Telegram pairing approvals), `workspace/` (agent working dir), `npm/` (plugins) |
-| `~/.hermes/` — **Hermes/dual** | **Hermes state** — the Hermes equivalent of `~/.openclaw`, and the densest secret store on the box: `config.yaml` (0600 — billing token, dashboard session signing secret, scrypt password hash, `mcp_servers.clawbox`), `config.yaml.bak-*`, `.env` (provider keys), `auth.json` (OAuth tokens), `memories/`, `sessions/`, `skills/`, `pairing/`, `cron/`, `logs/`, `state.db`, and `hermes-agent/` — the agent checkout + Python venv |
+| `~/.hermes/` — **Hermes/dual** | **Hermes state** — the Hermes equivalent of `~/.openclaw`, and the densest secret store on the box: `config.yaml` (0600 — billing token, dashboard session signing secret, scrypt password hash, `mcp_servers.clawbox`), `config.yaml.bak-*`, `.env` (provider keys), `auth.json` (OAuth tokens), `memories/`, `sessions/`, `skills/`, `pairing/`, `cron/`, `logs/`, `state.db`, `hermes-agent/` — the agent checkout + Python venv — and `bin/tirith`, the upstream pre-exec shell scanner the agent downloads on first use |
 | `~/.local/bin/hermes` — **Hermes/dual** | 4-line shim that execs `~/.hermes/hermes-agent/venv/bin/python` |
 | `/etc/clawbox/edition.env` | Root-owned edition lock (`openclaw` \| `hermes` \| `dual`) — the authority for the SKU; survives updates **and** factory reset |
 | `~/.codex/auth.json` | Codex CLI auth (kept in sync with the agent copies) |
@@ -57,7 +57,7 @@ Rows marked **OpenClaw/dual** or **Hermes/dual** exist only on those editions. C
 | `.env` | ✅ kept | ✅ kept (gitignored, not in wipe list) |
 | `.update-branch` (channel pin) | ✅ kept | ✅ kept |
 | `~/.openclaw` (AI config, credentials, chats) | ✅ kept | ❌ wiped |
-| `~/.hermes` (Hermes config, chats, agent install) | ✅ kept | ❌ wiped, except `hermes-agent` (the agent install — can't be re-downloaded in AP mode) |
+| `~/.hermes` (Hermes config, chats, agent install) | ✅ kept | ❌ wiped, except `hermes-agent` (the agent install) and `bin/tirith` (the pre-exec shell scanner) — neither can be re-downloaded in AP mode |
 | `~/.clawkeep` (backup pairing) | ✅ kept | ❌ wiped |
 | `~/.codex` (Codex CLI auth) | ✅ kept | ❌ wiped |
 | `~/Documents`, `~/Downloads`, `~/Desktop` | ✅ kept | ❌ contents wiped, directories kept |
