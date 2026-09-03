@@ -537,7 +537,10 @@ EMAIL:4471`;
     // does not read "EMAIL 4471" aloud after it. The recorded audio is a second
     // copy: on Hermes ClawBox synthesises it and now strips the directives
     // there too (src/tests/routes/hermes/chat-spoken-reply.test.ts); on
-    // OpenClaw the gateway makes it and still speaks the id — TASK-697's half.
+    // OpenClaw the gateway makes it — with a cloud voice ClawBox never touches,
+    // or by running ClawBox's own scripts/openclaw/clawbox-tts.sh for on-device
+    // Kokoro — and neither engine strips the id, so it is still spoken there.
+    // TASK-697's half, on the outbound hook that covers both.
     const label = players()[0].getAttribute("aria-label") ?? "";
     expect(label).toContain(summary);
     expect(label).not.toContain("EMAIL:4471");

@@ -399,13 +399,20 @@ async function settleTurn(
   // machinery, and a box reading a file path aloud would be absurd.
   //
   // `EMAIL:` is machinery for the same reason and loses the same way, so it
-  // comes off the SPOKEN copy only. This is the one edition where the rule has
-  // to be applied here: on OpenClaw the gateway synthesises the reply and
-  // ClawBox never sees the text on its way to the voice, but on Hermes the clip
-  // is built right here — so a caption that kept its directives had the box say
-  // "EMAIL four four seven one" after the summary. `caption` itself is left
-  // alone: `answer` below is the transcript, and the bubble's card is made from
-  // exactly those lines.
+  // comes off the SPOKEN copy only. This is the one edition where the rule can
+  // be applied HERE: on Hermes the clip is built right here, so a caption that
+  // kept its directives had the box say "EMAIL four four seven one" after the
+  // summary. On OpenClaw the GATEWAY picks the engine, and ClawBox's reach
+  // depends on which one it picks — a cloud provider gets text ClawBox never
+  // touches, while the on-device Kokoro voice is spoken by running ClawBox's
+  // own scripts/openclaw/clawbox-tts.sh, which install.sh (step_openclaw_tts)
+  // wires as the `tts-local-cli` provider command with `{{Text}}` in argv. So
+  // on that one engine ClawBox IS handed the reply with the directive still in
+  // it — but as an engine's input, not as the reply: it covers one of the two
+  // voices and would put chat semantics in a speech script. Both engines still
+  // read the id aloud, and fixing that is TASK-697's outbound hook, which
+  // covers both at once. `caption` itself is left alone: `answer` below is the
+  // transcript, and the bubble's card is made from exactly those lines.
   //
   // Fail-soft and bounded (see speakHermesReply): a reply that could not be
   // spoken still renders, silently. Losing the answer to a busy voice would be

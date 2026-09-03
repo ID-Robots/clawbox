@@ -321,8 +321,16 @@ The **spoken** reply divides the same way. On Hermes ClawBox synthesises the
 clip itself, so the route strips the directive before speaking it
 (`src/app/setup-api/hermes/chat/route.ts`) — the rule the same function already
 applied to `MEDIA:`, "a box reading a file path aloud would be absurd". On
-OpenClaw the gateway speaks the reply and ClawBox never sees that text, so the
-id is still read aloud there; that half belongs to TASK-697 with the channels.
+OpenClaw the gateway picks the engine, and how far ClawBox can reach depends on
+which one it picks: a cloud provider gets text ClawBox never touches, while the
+on-device Kokoro voice is spoken by running ClawBox's own
+`scripts/openclaw/clawbox-tts.sh`, which `install.sh` (`step_openclaw_tts`)
+wires as the `tts-local-cli` provider command with `{{Text}}` in argv — so on
+that engine ClawBox IS handed the reply, directive included. It is still the
+wrong layer to strip at: it covers one of the two voices and would put chat
+semantics in a speech script. The id is read aloud on both engines today; that
+half belongs to TASK-697 with the channels, where `clawbox-tts.sh` is recorded
+as the one OpenClaw-side chokepoint that exists so far.
 
 So the instruction leans towards the card — the card is the feature, the stray
 line is one line — and the two dashboards keep showing the line, as they did

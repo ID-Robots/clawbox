@@ -4792,9 +4792,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                         // and WHERE it is made decides who strips them. On
                         // Hermes ClawBox makes it, so the route strips there
                         // too (setup-api/hermes/chat/route.ts). On OpenClaw the
-                        // gateway synthesises it from the reply and ClawBox
-                        // never sees that text, so the id is still spoken on
-                        // that edition — the outbound half, TASK-697.
+                        // gateway picks the engine: a cloud voice, whose text
+                        // ClawBox never touches, or on-device Kokoro, which it
+                        // speaks by running ClawBox's own
+                        // scripts/openclaw/clawbox-tts.sh with the reply in
+                        // argv. Neither engine strips the id, so it is still
+                        // spoken on that edition — the outbound half, TASK-697,
+                        // which covers both voices at once.
                         aria-label={audioLabel(bodyText, t("chat.audioReply"))}
                         controls
                         preload="metadata"

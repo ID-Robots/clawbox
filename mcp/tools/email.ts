@@ -78,9 +78,16 @@ const NOT_READABLE_NEXT =
  *
  * The SPOKEN reply is a surface of its own, and it splits by edition. On Hermes
  * ClawBox synthesises the clip itself and strips the line before speaking it
- * (src/app/setup-api/hermes/chat/route.ts); on OpenClaw the gateway speaks the
- * reply and ClawBox never sees that text, so the id is still read aloud there.
- * That half is TASK-697's, like the channels.
+ * (src/app/setup-api/hermes/chat/route.ts). On OpenClaw the gateway chooses the
+ * engine: a cloud provider, whose text ClawBox never touches, or the on-device
+ * Kokoro voice, which it speaks by running ClawBox's own
+ * scripts/openclaw/clawbox-tts.sh with `{{Text}}` in argv (install.sh,
+ * step_openclaw_tts). So ClawBox does see that text on one of the two engines,
+ * but as an engine's INPUT rather than as the reply — stripping there would fix
+ * one voice and put chat semantics in a speech script. The id is read aloud on
+ * both engines today; that half is TASK-697's, like the channels, and
+ * clawbox-tts.sh is named there as the only OpenClaw-side chokepoint that
+ * exists so far.
  *
  * The condition is stated HERE because a reply on its way to a CHANNEL reaches
  * the platform adapter without passing through any ClawBox code on either
@@ -134,13 +141,15 @@ const NOT_READABLE_NEXT =
  * prompt builder), and OpenClaw states the channel three ways per turn — a
  * trusted `### Message Context` JSON block carrying `channel`/`provider`/
  * `surface`, a `channel=<id>` token in the `## Runtime` prompt line, and the
- * `[<Channel> …]` envelope on the message body. Those two paragraphs describe
- * the HARNESS, not this repository: they were read off the core this box pins
- * (the version in config/openclaw-target.txt, which holds that string and
- * nothing else) and none of it is checkable from a grep here — see the PR for
- * which claims are verified and which are not. What the model is NOT told is what the
- * line means downstream of itself, which is why half two — the outbound hook —
- * is the guarantee and this is only the ask.
+ * `[<Channel> …]` envelope on the message body. This paragraph's platform-hint
+ * and channel claims, and the `### Message Context` and outbound-hook field
+ * lists under "`webchat` IS NOT EXCLUSIVE" above, describe the HARNESS, not
+ * this repository: they were read off the core this box pins (the version in
+ * config/openclaw-target.txt, which holds that string and nothing else) and
+ * none of it is checkable from a grep here — see the PR for which claims are
+ * verified and which are not. What the model is NOT told is what the line means
+ * downstream of itself, which is why half two — the outbound hook — is the
+ * guarantee and this is only the ask.
  */
 const EMAIL_DIRECTIVE_NEXT =
   "The user cannot see this tool result — only what you write. So that they can open the real email, put a line reading `EMAIL:<id>` (for example `EMAIL:4471`) on its own at the END of your reply, one per message you referred to, using the ids above. Write nothing else on those lines and do not mention them in your prose: ClawBox's chat replaces each one with an \"open full message\" card. Summarise as usual above them. ALWAYS write these lines when you are answering in ClawBox's own chat — including when the channel you are told you are on is `webchat`, and including when the session looks to you like a CLI, a terminal or a TUI. ClawBox's own chat is what those look like from where you sit, and ClawBox's own chat is where the card is made. There is ONE exception: a reply being delivered to the person over Telegram, WhatsApp, Discord or Slack, or one that is itself being sent as an email. Nothing there turns the line into a card and all they see is a number they cannot open, so write no `EMAIL:` lines and name each message in your prose instead, by who it is from and its subject.";
