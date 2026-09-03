@@ -794,8 +794,10 @@ describe("SettingsApp Telegram progress streaming — saved but not live yet", (
     await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
     fireEvent.click(toggle);
 
-    const notice = await screen.findByTestId("telegram-streaming-notice");
-    expect(notice.textContent).toMatch(/has not finished restarting/);
+    // waitFor on the TEXT: the region is mounted in every state, so finding the
+    // node proves nothing.
+    await waitFor(() =>
+      expect(screen.getByTestId("telegram-streaming-notice")).toHaveTextContent(/has not finished restarting/));
     expect(toggle).toHaveAttribute("aria-checked", "false");
   });
 
@@ -811,6 +813,8 @@ describe("SettingsApp Telegram progress streaming — saved but not live yet", (
     fireEvent.click(toggle);
 
     await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
-    expect(screen.queryByTestId("telegram-streaming-notice")).not.toBeInTheDocument();
+    // The region stays mounted; what must be absent is the SENTENCE. A bare
+    // proxy 502 is an error, not a save that landed.
+    expect(screen.getByTestId("telegram-streaming-notice").textContent).toBe("");
   });
 });

@@ -3962,14 +3962,19 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   )}
                   {/* Mounted in every state so the announcement is a text
                       change rather than a node insertion; polite, because the
-                      save landed and only the switch-over is pending. */}
-                  <div role="status" aria-live="polite" className="mb-4 empty:mb-0">
-                    {tgStreamingNotice && (
-                      <p data-testid="telegram-streaming-notice" className="text-xs text-amber-300/90">
-                        {tgStreamingNotice}
-                      </p>
-                    )}
-                  </div>
+                      save landed and only the switch-over is pending. The TEXT
+                      is the live region's own child — a conditional <p> inside
+                      a mounted <div> is still a node insertion, which is the
+                      failure this pattern exists to avoid. Same shape as
+                      AiProviderList, HermesProviderConfig and LocalAiPanel. */}
+                  <p
+                    role="status"
+                    aria-live="polite"
+                    data-testid="telegram-streaming-notice"
+                    className={tgStreamingNotice ? "mb-4 text-xs text-amber-300/90" : ""}
+                  >
+                    {tgStreamingNotice ?? ""}
+                  </p>
                   <button
                     onClick={() => { setTgReconfigure(true); setTgStatus(null); }}
                     className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
