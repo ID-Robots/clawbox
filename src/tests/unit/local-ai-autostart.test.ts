@@ -191,11 +191,12 @@ describe("llama.cpp auto-start gate", () => {
 /**
  * What happens to the web server when the llama.cpp child goes wrong.
  *
- * Both of these are about the same thing: the supervisor has to hear about the
- * child through an event that is actually delivered. A `spawn` that fails
- * before a process exists emits 'error' — and an 'error' event with no listener
- * is an uncaught exception, so a child that merely could not be created used to
- * take the whole ClawBox web server down with it.
+ * A `spawn` that fails before a process exists emits 'error' — and an 'error'
+ * event with no listener is an uncaught exception, so a child that merely could
+ * not be created used to take the whole ClawBox web server down with it. The
+ * failure is still the caller's to see, not the supervisor's to retry: the
+ * second case pins that a child which really ran is respawned once per death,
+ * not once per ending event Node delivers for it.
  */
 describe("llama.cpp child supervision", () => {
   beforeEach(() => {
@@ -229,7 +230,7 @@ describe("llama.cpp child supervision", () => {
     expect(() => child.emit("error", new Error("spawn EAGAIN"))).not.toThrow();
   });
 
-  it("schedules exactly one retry however the child went away", async () => {
+  it("retries a child that ran exactly once, not once per ending event", async () => {
     vi.useFakeTimers();
     const child = emittingChild(4242);
     spawnMock.mockReturnValue(child);

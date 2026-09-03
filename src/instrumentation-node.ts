@@ -304,10 +304,16 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
   await llamaCpp.writeLlamaCppPid(child.pid, spec.pidPath)
   console.log(`[instrumentation] llama.cpp auto-starting ${alias} (pid=${child.pid})`)
 
-  // 'close' rather than 'exit', for the same reason the terminal server uses
-  // it: it is the one ending every child reaches, so the pid file is cleared
-  // and the retry scheduled exactly once however the child went away.
-  child.on('close', (code) => {
+  // 'exit', not 'close' — the opposite of the terminal server above, because
+  // the two children are supervised for different reasons. The terminal server
+  // has nobody to report to, so it must also recover a child that never
+  // spawned, and only 'close' is delivered for that. This one is demand-started
+  // by ensureLocalAiReady, which awaits it: a spawn that failed is reported to
+  // that caller by the pid check above, so there is no supervision to restore
+  // and a retry behind the caller's back would be new behaviour. Past that
+  // check the child really exists, and 'exit' is guaranteed for it — one
+  // listener, one retry per death, no double-schedule guard needed.
+  child.on('exit', (code) => {
     void (async () => {
       try {
         if (llamaCppChild === child) {
