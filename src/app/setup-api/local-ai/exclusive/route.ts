@@ -14,6 +14,7 @@ import { get, set, setMany } from "@/lib/config-store";
 import {
   callGatewayRpc,
   gatewayIsAbsent,
+  GatewayNotReadyError,
   readConfig,
   restartGateway,
   runOpenclawConfigSetBatch,
@@ -579,7 +580,17 @@ export async function POST(request: Request) {
     try {
       await restartGateway();
     } catch (err) {
-      warnings.push(`Gateway restart failed: ${err instanceof Error ? err.message : String(err)}`);
+      // `warning` is rendered by LocalAiPanel in its amber "the change landed"
+      // notice, so the sentence has to be true of a change that landed. A
+      // gateway still coming back is not a failed restart, and the raw message
+      // ("gateway did not come back") read as one — the false failure this
+      // whole task removes. A REFUSED restart keeps the old wording, minus the
+      // raw error text, which was CLI internals in an owner-facing string.
+      warnings.push(
+        err instanceof GatewayNotReadyError
+          ? "Saved, but the gateway has not finished restarting — local-only mode applies once it is serving again."
+          : "Saved, but the gateway restart failed — local-only mode applies at the next restart.",
+      );
       console.error("Failed to restart gateway after exclusive config change:", err);
     }
 

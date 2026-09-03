@@ -13,6 +13,16 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 vi.mock("@/lib/config-store", () => ({ set: vi.fn(), get: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({
+  // A REAL class: both channel routes narrow on `instanceof GatewayNotReadyError`
+  // to tell "the gateway has not finished binding" from "the restart was
+  // refused", and `instanceof undefined` throws a TypeError the first time a
+  // test makes the mocked restart reject.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
   setDiscordToken: vi.fn(),
   restartGateway: vi.fn(),
 }));
@@ -43,7 +53,7 @@ vi.mock("@/lib/hermes-discord", async () => {
 
 import { set } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
-import { setDiscordToken, restartGateway } from "@/lib/openclaw-config";
+import { GatewayNotReadyError, setDiscordToken, restartGateway } from "@/lib/openclaw-config";
 import { ensureChannelPlugin, waitForChannelConnected } from "@/lib/openclaw-channels";
 import { setHermesDiscordToken } from "@/lib/hermes-discord";
 
@@ -214,6 +224,23 @@ describe("POST /setup-api/discord/configure", () => {
       await POST(req({ botToken: TOKEN }));
 
       expect(order).toEqual(["store", "harness"]);
+    });
+
+    it("does not call a slow-but-healthy restart a failed save, and still asks the gateway", async () => {
+      // TASK-608. `systemctl restart` returned 0 and the gateway is starting;
+      // only the readiness poll gave up. Reporting `restart_pending` here would
+      // BOTH call a landed save a failure and skip `waitForChannelConnected` —
+      // the live check this route is cleared on, and the one thing that can
+      // actually say whether the bot came up.
+      mockRestartGateway.mockRejectedValue(new GatewayNotReadyError());
+
+      const res = await POST(req({ botToken: TOKEN }));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(mockWaitForChannel).toHaveBeenCalled();
+      expect(body).toMatchObject({ success: true, restarted: true });
+      expect(body.code).toBeUndefined();
     });
 
     it("reports a restart failure as restart_pending, and not as a success", async () => {

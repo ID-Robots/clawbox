@@ -1,6 +1,6 @@
 import net from "net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { isPortOpen, waitForPortOpen } from "@/lib/port-probe";
+import { envPort, isPortOpen, waitForPortOpen } from "@/lib/port-probe";
 
 /**
  * The polling loop three readiness waits now share: the updater's
@@ -130,5 +130,37 @@ describe("waitForPortOpen", () => {
       waitForPortOpen(port, HOST, { timeoutMs: Number("thirty-seconds"), probeTimeoutMs: 200 }),
     ).resolves.toBe(false);
     expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});
+
+/**
+ * The ports every readiness wait and every local baseUrl is built from come out
+ * of the environment, and `Number(x) || default` was not enough: `-1`, `1.5` and
+ * `70000` are truthy, so they survived the fallback, and Node then throws
+ * ERR_SOCKET_BAD_PORT synchronously — outside `isPortOpen`'s error handler, so
+ * the probe REJECTS instead of answering false, and `restartGateway` reports a
+ * restart that worked as a failed one.
+ */
+describe("envPort", () => {
+  it("takes a valid port", () => {
+    expect(envPort("9119", 1)).toBe(9119);
+    expect(envPort("1", 9119)).toBe(1);
+    expect(envPort("65535", 9119)).toBe(65535);
+  });
+
+  it("falls back on anything Node would refuse at the socket", () => {
+    for (const bad of [undefined, "", "  ", "oops", "9119abc", "0", "-1", "1.5", "65536", "70000", "NaN", "Infinity"]) {
+      expect(envPort(bad, 9119)).toBe(9119);
+    }
+  });
+
+  it("agrees with the socket about which ports are usable", async () => {
+    // Not a restatement of the rule: the values the guard rejects are exactly
+    // the ones `net.Socket.connect` throws on, and a throw here does not become
+    // `false` — it escapes isPortOpen's error handler and rejects.
+    for (const bad of [-1, 1.5, 70000]) {
+      await expect(isPortOpen(bad, HOST, 50)).rejects.toThrow();
+      expect(envPort(String(bad), 9119)).toBe(9119);
+    }
   });
 });

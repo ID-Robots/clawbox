@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getGatewayToken } from "@/lib/gateway-proxy";
 import { getGatewayServiceHealth, type GatewayServiceHealth } from "@/lib/gateway-health";
+import { envPort } from "@/lib/port-probe";
 
 export const dynamic = "force-dynamic";
 
-const GATEWAY_PORT = process.env.GATEWAY_PORT || "18789";
+const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
 
 export async function GET(request: NextRequest) {
   try {

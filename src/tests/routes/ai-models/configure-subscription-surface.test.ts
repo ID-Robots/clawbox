@@ -35,6 +35,17 @@ vi.mock("fs", async () => {
   };
 });
 
+const readSetupGateFacts = vi.fn<() => { setupComplete: boolean; passwordConfigured: boolean }>();
+
+// PARTIAL mock — only the setup-gate read is replaceable. The configure route
+// asks it whether the first-run wizard is still driving the box, which decides
+// whether step 9 waits for the gateway to bind; everything else in route-auth
+// (session checks other modules in this graph import) keeps its real behaviour.
+vi.mock("@/lib/route-auth", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/route-auth")>("@/lib/route-auth");
+  return { ...actual, readSetupGateFacts: () => readSetupGateFacts() };
+});
+
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
@@ -250,9 +261,10 @@ async function primeConfigureRoute(): Promise<(request: Request) => Promise<Resp
     ((filePath: string) => Promise.resolve(cacheFileFor(String(filePath)))) as never,
   );
 
+  vi.mocked(getAll).mockResolvedValue({});
   // Past the wizard: the shape these cases mean, and the one where step 9
   // still waits for the gateway (the first-run skip is pinned in configure.test).
-  vi.mocked(getAll).mockResolvedValue({ setup_complete: true });
+  readSetupGateFacts.mockReturnValue({ setupComplete: true, passwordConfigured: true });
   vi.mocked(setMany).mockResolvedValue();
   vi.mocked(readConfig).mockResolvedValue({} as never);
   vi.mocked(readConfigStrict).mockResolvedValue({} as never);

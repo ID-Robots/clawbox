@@ -15,7 +15,7 @@ import { get as getConfigStoreValue } from "@/lib/config-store";
 import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-status";
 import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
 import { isSafeDiscordToken } from "@/lib/discord-api";
-import { waitForPortOpen } from "@/lib/port-probe";
+import { envPort, waitForPortOpen } from "@/lib/port-probe";
 
 const exec = promisify(execFile);
 
@@ -2553,7 +2553,11 @@ export function gatewayReadyWaitMs(): number {
   return Number.isFinite(override) && override > 0 ? override : 30000;
 }
 
-export const GATEWAY_PORT = Number(process.env.GATEWAY_PORT || "18789");
+// Validated: this is the port awaitGatewayReady hands to waitForPortOpen, and
+// `net.Socket.connect` throws ERR_SOCKET_BAD_PORT synchronously on a malformed
+// or out-of-range one — which would surface as "the gateway failed to restart"
+// over a restart that worked.
+export const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
 
 export interface RestartGatewayOptions {
   /**

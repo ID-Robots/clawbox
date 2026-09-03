@@ -36,7 +36,19 @@ vi.mock("@/lib/openclaw-whatsapp", () => ({
   readOpenclawWhatsappStatus: vi.fn(),
   setOpenclawWhatsappEnabled: vi.fn(),
 }));
-vi.mock("@/lib/openclaw-config", () => ({ restartGateway: vi.fn() }));
+vi.mock("@/lib/openclaw-config", () => ({
+  // A REAL class: both channel routes narrow on `instanceof GatewayNotReadyError`
+  // to tell "the gateway has not finished binding" from "the restart was
+  // refused", and `instanceof undefined` throws a TypeError the first time a
+  // test makes the mocked restart reject.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
+  restartGateway: vi.fn(),
+}));
 vi.mock("@/lib/hermes-whatsapp", () => ({
   isWhatsappMode: (v: unknown) => v === "personal" || v === "business",
   normalizeWhatsappNumber: (v: string) => (/^\+?\d{6,15}$/.test(v) ? v.replace(/^\+/, "") : null),
@@ -55,7 +67,7 @@ vi.mock("@/lib/whatsapp-pairing", () => ({
 }));
 
 import { getActiveHarness } from "@/lib/harness";
-import { restartGateway } from "@/lib/openclaw-config";
+import { GatewayNotReadyError, restartGateway } from "@/lib/openclaw-config";
 import { ensureChannelPlugin, waitForChannelConnected } from "@/lib/openclaw-channels";
 import {
   getOpenclawWhatsappPairing,
@@ -157,6 +169,31 @@ describe("POST /setup-api/whatsapp/configure — OpenClaw", () => {
 
     expect(res.body.success).toBe(false);
     expect(res.body.warning).toBe("not_connected");
+  });
+
+  it("does not call a slow-but-healthy restart a failed save, and still asks the gateway", async () => {
+    // TASK-608, the same split /discord/configure gets. `systemctl restart`
+    // returned 0 and the gateway is starting; only the readiness poll gave up.
+    // Answering `restart_pending` would call a landed save a failure AND skip
+    // `waitForChannelConnected`, the live check that can actually settle it.
+    mockRestart.mockRejectedValue(new GatewayNotReadyError());
+
+    const res = await post({ enabled: true });
+
+    expect(mockWait).toHaveBeenCalled();
+    expect(res.body).toMatchObject({ success: true, restarted: true });
+    expect(res.body.warning).toBeUndefined();
+  });
+
+  it("still reports a refused restart as restart_pending", async () => {
+    // Nothing is coming back on its own, so the live check would only spend its
+    // attempts confirming that. This half must not move.
+    mockRestart.mockRejectedValue(new Error("Unit clawbox-gateway.service is masked."));
+
+    const res = await post({ enabled: true });
+
+    expect(res.body).toMatchObject({ success: false, restarted: false, warning: "restart_pending" });
+    expect(mockWait).not.toHaveBeenCalled();
   });
 
   it("names a failed plugin install", async () => {

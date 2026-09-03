@@ -1444,14 +1444,19 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: next }),
       });
-      // 502 = saved but gateway restart failed; the setting still persisted,
-      // so keep the optimistic value rather than reverting.
-      if (!res.ok && res.status !== 502) {
+      const body = (await res.json().catch(() => ({}))) as { warning?: unknown };
+      const warning = typeof body.warning === "string" && body.warning ? body.warning : null;
+      // 502 = saved, but not serving it yet; the setting IS persisted, so keep
+      // the optimistic value rather than reverting. The WARNING is required, not
+      // the status alone — a cloudflared or nginx 502 has an HTML body that the
+      // `.catch` turns into `{}`, and a request that may never have reached the
+      // box must not be rendered as a save. Same guard as
+      // /setup-api/providers/default and ChatPopup apply to the same hazard.
+      if (!res.ok && !(res.status === 502 && warning)) {
         setTgStreaming(prev); // revert on a real failure
         return;
       }
-      const body = (await res.json().catch(() => ({}))) as { warning?: unknown };
-      if (typeof body.warning === "string" && body.warning) setTgStreamingNotice(body.warning);
+      if (warning) setTgStreamingNotice(warning);
     } catch {
       setTgStreaming(prev);
     } finally {

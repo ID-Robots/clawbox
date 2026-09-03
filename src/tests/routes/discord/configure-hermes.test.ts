@@ -12,6 +12,16 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 vi.mock("@/lib/config-store", () => ({ set: vi.fn(), get: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({
+  // A REAL class: the route narrows on `instanceof GatewayNotReadyError` to tell
+  // "the gateway has not finished binding" from "the restart was refused", and
+  // `instanceof undefined` throws a TypeError the first time a test makes the
+  // mocked restart reject.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
   setDiscordToken: vi.fn(),
   restartGateway: vi.fn(),
 }));

@@ -90,7 +90,10 @@ export async function POST(request: Request) {
       }
     }
 
-    await restartGateway().catch(() => {});
+    // No readiness wait: this answer is discarded, and the route answers
+    // `{success:true}` for the config change either way — so the poll would only
+    // add up to the whole budget to an owner's "Turn off Local AI" click.
+    await restartGateway({ awaitReady: false }).catch(() => {});
 
     return NextResponse.json({ success: true });
   } catch (err) {

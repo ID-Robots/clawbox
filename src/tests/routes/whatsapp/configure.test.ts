@@ -10,7 +10,19 @@ vi.mock("@/lib/openclaw-channels", () => ({
   invalidateChannelStatus: vi.fn(),
   waitForChannelConnected: vi.fn(async () => null),
 }));
-vi.mock("@/lib/openclaw-config", () => ({ restartGateway: vi.fn(async () => {}) }));
+vi.mock("@/lib/openclaw-config", () => ({
+  // A REAL class: both channel routes narrow on `instanceof GatewayNotReadyError`
+  // to tell "the gateway has not finished binding" from "the restart was
+  // refused", and `instanceof undefined` throws a TypeError the first time a
+  // test makes the mocked restart reject.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
+  restartGateway: vi.fn(async () => {}),
+}));
 vi.mock("@/lib/hermes-telegram", () => ({ ensureHermesGateway: vi.fn() }));
 vi.mock("@/lib/hermes-whatsapp", async () => {
   // The pure helpers are the contract under test in the unit suite; re-use the

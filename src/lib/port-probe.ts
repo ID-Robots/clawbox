@@ -1,6 +1,26 @@
 import net from "net";
 
 /**
+ * A port read from the environment, or the caller's default.
+ *
+ * `Number(process.env.X) || 9119` handles unset, "" and a typo, and every port
+ * here used to stop there. It is not enough: `-1`, `1.5` and `70000` are all
+ * truthy numbers, and `net.Socket.connect` throws ERR_SOCKET_BAD_PORT for them
+ * SYNCHRONOUSLY — outside `isPortOpen`'s `error` handler, so the probe rejects
+ * instead of answering false. In `restartGateway` that arrives as a plain Error
+ * rather than a GatewayNotReadyError, and a restart that succeeded is reported
+ * as a failed one. Same class for the URLs: `http://127.0.0.1:70000` fails every
+ * request rather than falling back to the default the `||` promises.
+ *
+ * So: an integer in 1-65535, or the default. One place, because the ports are
+ * read in seven.
+ */
+export function envPort(value: string | undefined, fallback: number): number {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : fallback;
+}
+
+/**
  * Resolves true if a TCP connection to `host:port` completes within
  * `timeoutMs`. The kernel handles the 3-way handshake without involving
  * the target process's event loop, so this answers "is the listener

@@ -23,6 +23,17 @@ vi.mock("fs/promises", () => ({
   },
 }));
 
+const readSetupGateFacts = vi.fn<() => { setupComplete: boolean; passwordConfigured: boolean }>();
+
+// PARTIAL mock — only the setup-gate read is replaceable. The configure route
+// asks it whether the first-run wizard is still driving the box, which decides
+// whether step 9 waits for the gateway to bind; everything else in route-auth
+// (session checks other modules in this graph import) keeps its real behaviour.
+vi.mock("@/lib/route-auth", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/route-auth")>("@/lib/route-auth");
+  return { ...actual, readSetupGateFacts: () => readSetupGateFacts() };
+});
+
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
@@ -256,9 +267,10 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockFs.readdir.mockResolvedValue([]);
     mockFs.rm.mockResolvedValue(undefined);
     mockFs.unlink.mockResolvedValue(undefined);
+    mockGetAll.mockResolvedValue({});
     // A provisioned box, past the wizard: that is the shape every case here
     // means, and it is the one where step 9 waits for the gateway to come back.
-    mockGetAll.mockResolvedValue({ setup_complete: true });
+    readSetupGateFacts.mockReturnValue({ setupComplete: true, passwordConfigured: true });
     mockReadOpenClawConfig.mockResolvedValue({});
     mockReadOpenClawConfigStrict.mockResolvedValue({});
     mockInferConfiguredLocalModel.mockReturnValue(null);
@@ -1057,7 +1069,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     // its absence is the first-run path — the one AIModelsStep discards the
     // warning on, and the one e2e-install measured at 52.9 s (23 s of writes,
     // then the whole 30 s budget, expired). Waiting there buys latency only.
-    mockGetAll.mockResolvedValue({});
+    readSetupGateFacts.mockReturnValue({ setupComplete: false, passwordConfigured: true });
 
     const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
 
@@ -1069,7 +1081,7 @@ describe("POST /setup-api/ai-models/configure", () => {
   it("still reports a refused restart during the first-run wizard", async () => {
     // Skipping the poll must not swallow the fact that nothing is coming: the
     // exec failure is still a 502, wizard or not.
-    mockGetAll.mockResolvedValue({});
+    readSetupGateFacts.mockReturnValue({ setupComplete: false, passwordConfigured: true });
     mockRestartGateway.mockRejectedValue(new Error("Unit clawbox-gateway.service is masked."));
 
     const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));

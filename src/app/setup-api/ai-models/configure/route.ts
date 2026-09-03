@@ -5,6 +5,7 @@ import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
 import { getAll, setMany } from "@/lib/config-store";
+import { readSetupGateFacts } from "@/lib/route-auth";
 import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
@@ -2872,9 +2873,17 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     let gatewayWarning: string | undefined;
     // `setup_complete` flips at the very end of the wizard
     // (/setup-api/setup/complete), so "not true" is exactly "the first-run
-    // wizard is still driving this box". Read off the request snapshot taken
-    // at the top, like every other config fact on this path.
-    const firstRunWizard = configStore.setup_complete !== true;
+    // wizard is still driving this box".
+    //
+    // Read through route-auth, NOT through the config-store snapshot above.
+    // `readConfig()` there is fail-OPEN — a damaged config.json reads as `{}` —
+    // and route-auth exists precisely to say that must not decide this key: it
+    // fails CLOSED, so an unreadable config is "provisioned", which is also
+    // what `/setup-api/setup/status` and middleware serve. Fail open here and a
+    // box whose config.json is truncated renders Settings while this route
+    // treats it as the wizard and silently drops the notice Settings is the one
+    // branch that renders. Re-read per request; nothing is cached.
+    const firstRunWizard = !readSetupGateFacts().setupComplete;
     try {
       // The readiness answer is worth waiting for only where something reads
       // it, and in the wizard nothing does: AIModelsStep's wizard branch logs
@@ -2889,8 +2898,8 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       //
       // Only the poll is skipped, never the restart: a REFUSED restart still
       // throws from the exec below and still 502s, in the wizard too. And a
-      // gateway that never comes back is not silent either — the wizard's chat
-      // step cannot open a session without one.
+      // gateway that never comes back is not silent either — the chat the
+      // wizard hands off to cannot open a session without one.
       await restartGateway({ awaitReady: !firstRunWizard });
     } catch (err) {
       console.error("[configure] Gateway restart failed after configuring", ocProvider, ":", err instanceof Error ? logSafe(err.message) : err);

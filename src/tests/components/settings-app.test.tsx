@@ -740,3 +740,77 @@ describe("SettingsApp providers and Local AI pages", () => {
     expect(local.className).toContain("coral-bright");
   });
 });
+
+/**
+ * TASK-608. The Telegram progress-streaming switch keeps its new position when
+ * the route answers "saved, but the gateway is not serving it yet" — which is
+ * right, the setting IS on disk. What was missing is the half that says so: the
+ * client read the status code and never the body, so the toggle moved and
+ * nothing on screen explained that it was not live.
+ */
+describe("SettingsApp Telegram progress streaming — saved but not live yet", () => {
+  function stubFetch(streamingPost: () => Response) {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+      if (url === "/setup-api/telegram/status") {
+        return jsonResponse({ configured: true, username: "clawbot", firstName: "Claw", link: "https://t.me/clawbot" });
+      }
+      if (url === "/setup-api/telegram/streaming") {
+        return init?.method === "POST" ? Promise.resolve(streamingPost()) : jsonResponse({ enabled: true });
+      }
+      return jsonResponse({});
+    }));
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function openTelegramPane() {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const nav = container.querySelector("nav");
+    if (!nav) throw new Error("desktop sidebar nav did not render");
+    const accounts = [...nav.querySelectorAll(":scope > button")].find(
+      (b) => (b.textContent ?? "").includes("settings.channels"),
+    ) as HTMLElement | undefined;
+    if (!accounts) throw new Error("Messaging Channels nav entry did not render");
+    fireEvent.click(accounts);
+    fireEvent.click(await screen.findByTestId("settings-channel-telegram"));
+    return screen.findByRole("switch", { name: "settings.telegramProgress" });
+  }
+
+  it("says the switch is not live yet when the gateway has not finished restarting", async () => {
+    // 200 + warning: the route's answer for a restart that WAS taken and is
+    // still binding. The switch must stay where the owner put it, and the
+    // sentence must reach them.
+    stubFetch(() => jsonResponse({
+      success: true,
+      restarted: false,
+      warning: "Saved, but the gateway has not finished restarting — progress streaming applies once it is serving again.",
+    }) as unknown as Response);
+
+    const toggle = await openTelegramPane();
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+    fireEvent.click(toggle);
+
+    const notice = await screen.findByTestId("telegram-streaming-notice");
+    expect(notice.textContent).toMatch(/has not finished restarting/);
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("does not render a bare proxy 502 as a save", async () => {
+    // cloudflared and nginx both answer 502 with an HTML body, which the
+    // client's `.catch` turns into `{}`. That request may never have reached the
+    // box, so the optimistic switch has to go back — the same guard
+    // /setup-api/providers/default and ChatPopup apply to the same hazard.
+    stubFetch(() => new Response("<html>502 Bad Gateway</html>", { status: 502 }));
+
+    const toggle = await openTelegramPane();
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+    expect(screen.queryByTestId("telegram-streaming-notice")).not.toBeInTheDocument();
+  });
+});

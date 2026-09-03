@@ -5,13 +5,14 @@ import os from "os";
 import net from "net";
 import crypto from "crypto";
 import { statSync } from "node:fs";
+import { envPort } from "./port-probe";
 import {
   loadConfiguredOrigins,
   normalizeOrigin,
   resolveOriginsPath,
 } from "./control-ui-origins";
 
-const GATEWAY_PORT = process.env.GATEWAY_PORT || "18789";
+const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
 const OPENCLAW_CONFIG_PATH = `${
   process.env.CLAWBOX_OPENCLAW_HOME
   || process.env.OPENCLAW_HOME

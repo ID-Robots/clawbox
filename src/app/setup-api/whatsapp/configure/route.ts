@@ -6,7 +6,7 @@ import {
   invalidateChannelStatus,
   waitForChannelConnected,
 } from "@/lib/openclaw-channels";
-import { restartGateway } from "@/lib/openclaw-config";
+import { GatewayNotReadyError, restartGateway } from "@/lib/openclaw-config";
 import {
   WHATSAPP_CHANNEL_ID,
   setOpenclawWhatsappEnabled,
@@ -38,6 +38,12 @@ async function applyRestart(): Promise<boolean> {
     await restartGateway();
     return true;
   } catch (err) {
+    // Same split as /discord/configure. A gateway that has not finished binding
+    // took the restart and is starting, which is what beta reported as `true`;
+    // the caller's `waitForChannelConnected` is the probe that settles it, and
+    // reporting `false` here would skip that probe AND call a landed save a
+    // failure (TASK-608). Only a REFUSED restart is `false`.
+    if (err instanceof GatewayNotReadyError) return true;
     // The config change is already on disk, so a service failure is a warning
     // rather than a failed save — the contract every channel route here shares.
     console.error("[whatsapp/configure] gateway restart failed:", err);
