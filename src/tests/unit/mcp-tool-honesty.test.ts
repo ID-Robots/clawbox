@@ -591,19 +591,21 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
   });
 
   it("reports a failed backup as a failure, with the reason the route carried", async () => {
-    // The route answers 200 with ok:false, so nothing ever threw.
+    // A backup that RAN and failed still answers 200 with ok:false, so nothing
+    // throws. (The unpaired case is no longer one of these — the route refuses
+    // it with 409, which BACKUP_RULES maps to CONFLICT.)
     apiPost.mockResolvedValue({
       exitCode: 1,
       ok: false,
       stdoutTail: "",
-      stderrTail: "token error: No token at ~/.clawkeep/token; run 'clawkeep pair' first",
+      stderrTail: "openclaw backup create failed: no space left on device",
     });
 
     const out = await system("openclaw").call("backup_now", {});
     expect(out.isError).toBe(true);
     if (!out.isError) return;
     expect(out.error.message).toMatch(/did not run/i);
-    expect(out.error.message).toMatch(/clawkeep pair/);
+    expect(out.error.message).toMatch(/no space left on device/);
     expect(out.error.next).toMatch(/do not start another one/i);
   });
 

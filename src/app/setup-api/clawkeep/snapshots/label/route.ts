@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { ClawKeepError, setSnapshotLabel } from "@/lib/clawkeep";
+import { ClawKeepError, clawKeepErrorBody, setSnapshotLabel } from "@/lib/clawkeep";
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
   } catch (err) {
     const status = err instanceof ClawKeepError ? err.status : 500;
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to set label" },
+      clawKeepErrorBody(err, "Failed to set label"),
       { status, headers: { "Cache-Control": "no-store" } },
     );
   }

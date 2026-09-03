@@ -3,7 +3,12 @@ import { promisify } from "node:util";
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { ClawKeepError, RestoreNeedsPassphraseError, runRestore } from "@/lib/clawkeep";
+import {
+  ClawKeepError,
+  clawKeepErrorBody,
+  RestoreNeedsPassphraseError,
+  runRestore,
+} from "@/lib/clawkeep";
 import { getEdition } from "@/lib/harness";
 import { HERMES_DASHBOARD_UNIT } from "@/lib/hermes-dashboard-auth";
 import { bounceHermesDashboard } from "@/lib/hermes-dashboard-control";
@@ -141,7 +146,7 @@ export async function POST(request: NextRequest) {
     }
     const status = err instanceof ClawKeepError ? err.status : 500;
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Restore failed" },
+      clawKeepErrorBody(err, "Restore failed"),
       { status, headers: { "Cache-Control": "no-store" } },
     );
   }

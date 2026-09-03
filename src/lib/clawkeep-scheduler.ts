@@ -36,6 +36,21 @@ function fireBackup(): void {
   // so it would silently never back anything up. The manual "Backup now" path
   // uses idle:false; the scheduler must too.
   void runBackup({ idle: false })
+    .then((result) => {
+      // `runBackup` rejects only for an unpaired box; every other failure —
+      // the daemon missing from PATH (127), a bad config (64), a token error
+      // (65), the kill-timer (124) — RESOLVES carrying the exit code, so the
+      // `.catch` below never sees it. Unlogged, those were a nightly no-op:
+      // this is the scheduler's only voice, since the Settings card's backup
+      // button is gated on `daemonInstalled` and never reaches this path.
+      if (result.exitCode !== 0) {
+        const tail = result.stderr.trim().slice(-500);
+        console.warn(
+          "[clawkeep-scheduler] auto-backup failed:",
+          `clawkeepd exited ${result.exitCode}${tail ? ` — ${tail}` : ""}`,
+        );
+      }
+    })
     .catch((err) => {
       console.warn("[clawkeep-scheduler] auto-backup failed:", err instanceof Error ? err.message : err);
     })

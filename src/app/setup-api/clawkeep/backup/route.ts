@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { ClawKeepError, runBackup } from "@/lib/clawkeep";
+import { ClawKeepError, clawKeepErrorBody, runBackup } from "@/lib/clawkeep";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +12,17 @@ export const dynamic = "force-dynamic";
 // On Jetson a real backup can take minutes — the request stays open until
 // the daemon finishes. The UI should call this with no client-side timeout
 // (or an explicit one matching the systemd unit's TimeoutStartSec=4h).
+//
+// A box with no pairing is refused with 409 `not_paired` before the daemon is
+// started: `clawkeepd` would have loaded the token, failed and exited 65, and
+// returning that exit code inside a 200 body made a backup that never began
+// arrive as a success.
+//
+// 65 is not the only pre-run exit — `daemon.py` returns 64 for a bad config
+// before it reaches the token at all — so a non-zero `exitCode` in a 200 body
+// still means "the daemon ran and failed", which is what the result card
+// reports. Classifying the rest of the daemon's `EXIT_*` taxonomy into HTTP
+// statuses is a separate change to the backup result path.
 export async function POST(request: NextRequest) {
   try {
     let body: unknown = {};
@@ -62,7 +73,7 @@ export async function POST(request: NextRequest) {
   } catch (err) {
     const status = err instanceof ClawKeepError ? err.status : 500;
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Backup failed" },
+      clawKeepErrorBody(err, "Backup failed"),
       { status, headers: { "Cache-Control": "no-store" } },
     );
   }

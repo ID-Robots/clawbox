@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { ClawKeepError, deleteSnapshot, SnapshotLockedError } from "@/lib/clawkeep";
+import {
+  ClawKeepError,
+  clawKeepErrorBody,
+  deleteSnapshot,
+  SnapshotLockedError,
+} from "@/lib/clawkeep";
 
 export const dynamic = "force-dynamic";
 
@@ -35,7 +40,7 @@ export async function POST(request: NextRequest) {
     }
     const status = err instanceof ClawKeepError ? err.status : 500;
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to delete snapshot" },
+      clawKeepErrorBody(err, "Failed to delete snapshot"),
       { status, headers: { "Cache-Control": "no-store" } },
     );
   }

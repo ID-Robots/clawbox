@@ -163,10 +163,36 @@ export class ClawKeepError extends Error {
   constructor(
     message: string,
     readonly status: number = 500,
+    /** Machine-readable reason, echoed by the routes as `code`. Present only
+     * where a caller has to branch on the failure; a client must never have to
+     * match on the English sentence to do it. */
+    readonly code?: string,
   ) {
     super(message);
     this.name = "ClawKeepError";
   }
+}
+
+/** The one sentence, and the one code, for "this box has no ClawKeep pairing".
+ * Every path that needs the daemon answers exactly this, so the app, the MCP
+ * tools and the scheduler all see one failure instead of six. */
+class ClawKeepNotPairedError extends ClawKeepError {
+  constructor() {
+    super("ClawKeep is not paired with an account", 409, "not_paired");
+    this.name = "ClawKeepNotPairedError";
+  }
+}
+
+/** The body a ClawKeep route answers a failure with: the sentence, plus the
+ * `code` when the error carries one. One helper so every route in the folder
+ * reports a failure the same way and a caller never has to read the English. */
+export function clawKeepErrorBody(err: unknown, fallback: string): {
+  error: string;
+  code?: string;
+} {
+  const error = err instanceof Error && err.message ? err.message : fallback;
+  const code = err instanceof ClawKeepError ? err.code : undefined;
+  return code ? { error, code } : { error };
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -538,6 +564,27 @@ async function getDaemonBin(): Promise<string | null> {
   }
 }
 
+/**
+ * The daemon binary for a call that needs the pairing token, refused before it
+ * can spawn anything when the device has none.
+ *
+ * The pairing signal is the daemon's own: `clawkeep/clawkeep/token.py`
+ * `read_token()` raises `TokenError("No token at <path>; run 'clawkeep pair'
+ * first")`, which `clawkeepd` returns as exit 65 and every token-taking
+ * `clawkeep` subcommand as `{"ok":false,"error":"No token at <path>…"}`.
+ * Reading the same file first is what lets a route answer the owner one
+ * sentence instead of quoting a daemon log line that names a path on the box.
+ *
+ * Everything that reaches the portal comes through here — `clawkeepd` itself
+ * and `snapshots`, `restore`, `label`, `lock`, `delete`, `prune`. The
+ * `*-passphrase` subcommands deliberately do NOT: they are device-local, and a
+ * box has to be able to set its encryption passphrase before it is paired.
+ */
+async function pairedDaemonBin(): Promise<string> {
+  if (!(await readToken())) throw new ClawKeepNotPairedError();
+  return (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+}
+
 /** Build the env for spawning the Python daemon/CLI. Augments PATH with the
  *  resolved openclaw bin's directory + the user-local bin dirs so the daemon's
  *  own `subprocess.run(["openclaw", ...])` resolves under systemd's stripped
@@ -766,7 +813,13 @@ function mapSnapshotsError(resp: SnapshotsResponse): ClawKeepError {
     case "unpaired":
     case "no_token":
     case "not_paired":
-      return new ClawKeepError("ClawKeep is not paired with an account", 409);
+      // Same answer as the pre-flight check, IF the daemon ever says so: today
+      // `clawkeep snapshots` classifies nothing — `cli.py::_emit_err` prints
+      // `{"ok":false,"error":…}` with no `kind` for `TokenError` too, so these
+      // cases are unreached and the token vanishing mid-session still falls to
+      // `default:` (502). Kept as the mapping to use when the daemon starts
+      // carrying the `kind` it already owns internally (`api.ApiError.kind`).
+      return new ClawKeepNotPairedError();
     case "auth":
     case "unauthorized":
     case "revoked":
@@ -903,11 +956,7 @@ function spawnCliJson<T>(
 async function fetchCloudSnapshots(): Promise<SnapshotsResponse> {
   // Fail fast + friendly on the unpaired case rather than shelling out and
   // surfacing the daemon's raw "no token" error as a 502.
-  const token = await readToken();
-  if (!token) {
-    throw new ClawKeepError("ClawKeep is not paired with an account", 409);
-  }
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   const resp = await spawnCliJson<SnapshotsResponse>(bin, "snapshots", [], { timeoutMs: 60_000 });
   if (!resp.ok) {
     throw mapSnapshotsError(resp);
@@ -999,7 +1048,7 @@ interface MutationResponse {
 /** Set (or clear, when `text` is empty) a snapshot's human label. */
 export async function setSnapshotLabel(name: string, text: string): Promise<void> {
   assertSnapshotName(name);
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   const resp = await spawnCliJson<MutationResponse>(
     bin,
     "label",
@@ -1014,7 +1063,7 @@ export async function setSnapshotLabel(name: string, text: string): Promise<void
 /** Mark a snapshot as protected (locked) — exempt from delete + retention. */
 export async function lockSnapshot(name: string): Promise<void> {
   assertSnapshotName(name);
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   const resp = await spawnCliJson<MutationResponse>(bin, "lock", [name], { timeoutMs: 30_000 });
   if (!resp.ok) {
     throw new ClawKeepError(resp.error ?? "lock failed", 502);
@@ -1024,7 +1073,7 @@ export async function lockSnapshot(name: string): Promise<void> {
 /** Remove a snapshot's protected flag. */
 export async function unlockSnapshot(name: string): Promise<void> {
   assertSnapshotName(name);
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   const resp = await spawnCliJson<MutationResponse>(bin, "unlock", [name], { timeoutMs: 30_000 });
   if (!resp.ok) {
     throw new ClawKeepError(resp.error ?? "unlock failed", 502);
@@ -1034,7 +1083,7 @@ export async function unlockSnapshot(name: string): Promise<void> {
 /** Delete a snapshot. Refused (SnapshotLockedError) if it's locked. */
 export async function deleteSnapshot(name: string): Promise<void> {
   assertSnapshotName(name);
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   const resp = await spawnCliJson<MutationResponse>(bin, "delete", [name], { timeoutMs: 60_000 });
   if (!resp.ok) {
     if (resp.kind === "locked") {
@@ -1046,7 +1095,7 @@ export async function deleteSnapshot(name: string): Promise<void> {
 
 /** Run retention on demand: keep the newest `keepLast` unlocked snapshots. */
 export async function pruneSnapshots(keepLast: number): Promise<string[]> {
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   const resp = await spawnCliJson<MutationResponse & { deleted?: string[] }>(
     bin,
     "prune",
@@ -1070,7 +1119,7 @@ export async function runRestore(
   // the new encrypted form (`.tar.gz.enc`) and the legacy unencrypted one
   // (`.tar.gz`); the daemon detects which is which on its end too.
   assertSnapshotName(name);
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   await setRestoring(true);
   try {
     const runWith = async (extraArgs: string[]) => {
@@ -1105,7 +1154,7 @@ export async function runRestore(
 export async function runBackup(
   opts: { idle?: boolean; label?: string } = {},
 ): Promise<BackupResult> {
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   return new Promise((resolve) => {
     const env = buildSpawnEnv();
     const args = ["--config", CLAWKEEP_CONFIG_PATH];

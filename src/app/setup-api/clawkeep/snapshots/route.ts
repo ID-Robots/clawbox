@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { ClawKeepError, listCloudSnapshots } from "@/lib/clawkeep";
+import { ClawKeepError, clawKeepErrorBody, listCloudSnapshots } from "@/lib/clawkeep";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +17,7 @@ export async function GET() {
   } catch (err) {
     const status = err instanceof ClawKeepError ? err.status : 500;
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to list snapshots" },
+      clawKeepErrorBody(err, "Failed to list snapshots"),
       { status, headers: { "Cache-Control": "no-store" } },
     );
   }
