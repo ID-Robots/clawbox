@@ -24,6 +24,12 @@ import { CONFIG_ROOT } from './lib/config-store'
 const CHILD_RESTART_MAX_MS = 60_000
 const TERMINAL_RESTART_MIN_MS = 2_000
 const LLAMACPP_RESTART_MIN_MS = 5_000
+/**
+ * How long a replacement waits for the child it just SIGTERM'd to actually go
+ * before starting anyway. Only a dev hot-reload gets here — in production
+ * `register()` runs once per process, so there is never a child to replace.
+ */
+const TERMINAL_REPLACE_GRACE_MS = 2_000
 
 /**
  * What scripts/terminal-server.mjs answers on GET /. The "is it already up?"
@@ -65,20 +71,31 @@ let llamaCppRestartDelayMs = LLAMACPP_RESTART_MIN_MS
  * now rather than raced.
  */
 let llamaCppRestartTimer: ReturnType<typeof setTimeout> | null = null
+/**
+ * Bumped by every deliberate stop. bootLlamaCppServer takes a copy on the way
+ * in and refuses to spawn if it has moved, because cancelling a timer cannot
+ * cancel a start that has ALREADY begun: the dynamic imports, the config read
+ * and the pid probe all await, and startLlamaCppServer clears
+ * `llamaCppStopping` before any of them. Without this, an owner's "off" that
+ * lands a few hundred milliseconds behind a retry is simply overtaken by it.
+ */
+let llamaCppStopGeneration = 0
 let llamaCppStartPromise: Promise<LlamaCppStartStatus> | null = null
 let cleanupRegistered = false
 
 /**
- * The supervision chain is over: drop any armed restart and put the backoff
- * back at its floor. Deliberate stops only — a retry must NOT come through
- * here, or the delay would reset on every attempt and the crash loop would be
- * flat 5 s again, which is the defect this file was rewritten for.
+ * The supervision chain is over: cancel an armed restart, disown a start that
+ * is already in flight, and put the backoff back at its floor. Deliberate
+ * stops only — a retry must NOT come through here, or the delay would reset on
+ * every attempt and the crash loop would be flat 5 s again, which is the defect
+ * this file was rewritten for.
  */
-function endLlamaCppRestartChain() {
+function endLlamaCppSupervision() {
   if (llamaCppRestartTimer) {
     clearTimeout(llamaCppRestartTimer)
     llamaCppRestartTimer = null
   }
+  llamaCppStopGeneration++
   llamaCppRestartDelayMs = LLAMACPP_RESTART_MIN_MS
 }
 
@@ -89,7 +106,7 @@ function cleanupChildren() {
     terminalChild = null
   }
   llamaCppStopping = true
-  endLlamaCppRestartChain()
+  endLlamaCppSupervision()
   if (llamaCppChild) {
     try { llamaCppChild.kill('SIGTERM') } catch {}
     llamaCppChild = null
@@ -117,9 +134,28 @@ export function startTerminalServer() {
   terminalStopping = false
 
   // Kill any leftover child from previous hot-reload
-  if (terminalChild) {
-    try { terminalChild.kill('SIGTERM') } catch {}
+  const replaced = terminalChild
+  if (replaced) {
+    try { replaced.kill('SIGTERM') } catch {}
     terminalChild = null
+  }
+
+  if (replaced) {
+    // Replacing OUR OWN child, so the probe below must not run: a child that
+    // has been signalled but has not finished dying still answers the banner,
+    // and "already running" would then leave this generation with no child at
+    // all — the dying one's `close` is discarded as stale by the generation
+    // guard. Wait for it to go instead, and start anyway after a grace period
+    // so a child that ignores SIGTERM cannot strand the Terminal.
+    let launched = false
+    const launch = () => {
+      if (launched) return
+      launched = true
+      startServer()
+    }
+    replaced.once('close', launch)
+    setTimeout(launch, TERMINAL_REPLACE_GRACE_MS)
+    return
   }
 
   // Is it already up? Only OUR server counts: :3006 is loopback, but anything
@@ -249,6 +285,7 @@ export async function startLlamaCppServer(alias?: string): Promise<LlamaCppStart
 }
 
 async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStartStatus> {
+  const stopGeneration = llamaCppStopGeneration
   const [{ getAll }, { readConfig }, llamaCpp] = await Promise.all([
     import('./lib/config-store'),
     import('./lib/openclaw-config'),
@@ -293,6 +330,14 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
   }
 
   await llamaCpp.ensureLlamaCppRuntimeDir()
+
+  // Last look before the point of no return, and deliberately with no `await`
+  // between it and the spawn. Everything above this line yields, so a stop the
+  // owner asked for can land anywhere in it; the timer cancellation in
+  // endLlamaCppSupervision cannot reach a start that is already running.
+  if (stopGeneration !== llamaCppStopGeneration) {
+    throw new Error('llama.cpp was stopped while it was starting')
+  }
 
   const child = spawn(
     'bash',
@@ -388,7 +433,7 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
 
 export async function stopLlamaCppServer() {
   llamaCppStopping = true
-  endLlamaCppRestartChain()
+  endLlamaCppSupervision()
 
   const llamaCpp = await import('./lib/llamacpp-server')
   const spec = llamaCpp.getLlamaCppLaunchSpec()

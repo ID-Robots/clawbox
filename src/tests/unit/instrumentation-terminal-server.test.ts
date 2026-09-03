@@ -162,6 +162,50 @@ describe("startTerminalServer", () => {
     expect(spawnMock).toHaveBeenCalledTimes(3);
   });
 
+  /**
+   * A hot reload SIGTERMs the tracked child and then probes :3006. The child it
+   * just signalled has not finished dying and still answers our own banner — so
+   * believing the probe left the new generation with no child at all, while the
+   * dying one's `close` was discarded as stale. The Terminal stayed dead until
+   * the next reload.
+   */
+  it("does not mistake the child it just killed for a server already running", async () => {
+    startTerminalServer();
+    await settle();
+    const first = childFromCall(0);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+
+    // The reload. Our own dying child answers the banner.
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({
+      ok: true,
+      text: () => Promise.resolve(BANNER),
+    })));
+    startTerminalServer();
+    await settle();
+
+    // It goes, as asked — its close belongs to the previous generation.
+    die(first, 0);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(spawnMock, "the hot reload left no terminal server running").toHaveBeenCalledTimes(2);
+  });
+
+  it("starts a replacement even if the child it killed never closes", async () => {
+    startTerminalServer();
+    await settle();
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({
+      ok: true,
+      text: () => Promise.resolve(BANNER),
+    })));
+    startTerminalServer();
+    // The old child ignores SIGTERM and never emits 'close'.
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(spawnMock, "a child that would not die stranded the Terminal").toHaveBeenCalledTimes(2);
+  });
+
   it("retries a child that could not be spawned at all", async () => {
     startTerminalServer();
     await settle();

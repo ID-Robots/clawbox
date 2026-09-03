@@ -278,4 +278,24 @@ describe("llama.cpp child supervision", () => {
 
     expect(spawnMock, "a runtime the owner stopped restarted itself anyway").toHaveBeenCalledTimes(1);
   });
+
+  /**
+   * The other half of the same race. Cancelling the timer cannot cancel a start
+   * that has already begun: the dynamic imports, the config read and the pid
+   * probe all await, and startLlamaCppServer clears `llamaCppStopping` before
+   * any of them — so an "off" landing mid-boot used to be simply overtaken.
+   */
+  it("does not spawn a runtime that was stopped while it was starting", async () => {
+    spawnMock.mockReturnValue(emittingChild(4242));
+
+    const mod = await loadModule();
+    // The owner's stop lands while boot is still awaiting its config read.
+    readConfigMock.mockImplementation(async () => {
+      await mod.stopLlamaCppServer();
+      return {};
+    });
+
+    await expect(mod.startLlamaCppServer("gemma4-e2b-it-q4_0")).rejects.toThrow(/stopped while it was starting/);
+    expect(spawnMock, "a start the owner cancelled spawned anyway").not.toHaveBeenCalled();
+  });
 });
