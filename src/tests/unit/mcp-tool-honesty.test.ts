@@ -591,20 +591,59 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
   });
 
   it("reports a failed backup as a failure, with the reason the route carried", async () => {
-    // The route answers 200 with ok:false, so nothing ever threw.
+    // A backup that RAN and failed still answers 200 with ok:false, so nothing
+    // throws. (The unpaired case is no longer one of these — the route refuses
+    // it with 409, which BACKUP_RULES maps to CONFLICT.)
     apiPost.mockResolvedValue({
       exitCode: 1,
       ok: false,
       stdoutTail: "",
-      stderrTail: "token error: No token at ~/.clawkeep/token; run 'clawkeep pair' first",
+      stderrTail: "openclaw backup create failed: no space left on device",
     });
 
     const out = await system("openclaw").call("backup_now", {});
     expect(out.isError).toBe(true);
     if (!out.isError) return;
     expect(out.error.message).toMatch(/did not run/i);
-    expect(out.error.message).toMatch(/clawkeep pair/);
+    expect(out.error.message).toMatch(/no space left on device/);
     expect(out.error.next).toMatch(/do not start another one/i);
+  });
+
+  it("tells the agent to get the box paired when backup_now hits an unpaired one", async () => {
+    // The route refuses an unpaired box with 409 `not_paired` before it spawns
+    // the daemon, and BACKUP_RULES is what turns that into an instruction the
+    // agent can act on. Without this the contract lives only in a comment: drop
+    // `rules: BACKUP_RULES` from the apiPost call, or reorder the rules, and
+    // the agent gets a bare 409 with no idea what to tell the user.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        409,
+        JSON.stringify({ error: "ClawKeep is not paired with an account", code: "not_paired" }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/not set up on this device/i);
+    expect(out.error.next).toMatch(/Settings -> Backup/);
+    expect(out.error.next).toMatch(/do not retry/i);
+  });
+
+  it("says the same thing for backup_list, which reaches the same 409", async () => {
+    apiGet.mockRejectedValue(
+      new ApiError(
+        409,
+        JSON.stringify({ error: "ClawKeep is not paired with an account", code: "not_paired" }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_list", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.next).toMatch(/Settings -> Backup/);
   });
 
   it("reports a successful backup as one", async () => {

@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { ClawKeepError, lockSnapshot, unlockSnapshot } from "@/lib/clawkeep";
+import {
+  ClawKeepError,
+  clawKeepErrorBody,
+  lockSnapshot,
+  unlockSnapshot,
+} from "@/lib/clawkeep";
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +42,7 @@ export async function POST(request: NextRequest) {
   } catch (err) {
     const status = err instanceof ClawKeepError ? err.status : 500;
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to update lock" },
+      clawKeepErrorBody(err, "Failed to update lock"),
       { status, headers: { "Cache-Control": "no-store" } },
     );
   }

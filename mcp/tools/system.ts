@@ -569,10 +569,12 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
           "Use letters, digits, spaces, dots, dashes or underscores, starting with a letter or digit.",
         );
       }
-      // The route answers HTTP 200 even when the backup FAILED — ok:false plus
-      // the real reason in stderrTail ("No token at ~/.clawkeep/token; run
-      // 'clawkeep pair' first"). A 200 never raises, so the tool used to return
-      // prose with no isError flag: a failed backup that reads as a success.
+      // An unpaired box is a 409 `not_paired`, which BACKUP_RULES above turns
+      // into CONFLICT + "tell the user to pair it in Settings -> Backup".
+      // Everything else the daemon can fail at still comes back as HTTP 200
+      // with ok:false and the reason in stderrTail; a 200 never raises, so the
+      // tool used to return prose with no isError flag — a failed backup that
+      // reads as a success. Hence the explicit check below.
       const body = await apiPost<{ ok?: boolean; exitCode?: number; stderrTail?: string }>(
         "/setup-api/clawkeep/backup",
         { ...(label ? { label } : {}) },
