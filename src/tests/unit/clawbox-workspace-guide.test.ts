@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
  * today, so the proposal sat unanswered until the run ended or a gateway
  * restart cancelled it (`operator_approval_cancelled_gateway_restart`), and
  * the owner was told the restart was waiting for an approval they had nowhere
- * to give. Until that card exists (follow-up under TASK-604), the guide has to
+ * to give. Until that card exists (TASK-704, under TASK-604), the guide has to
  * forbid the queue and name the owner's real path — the power menu in the
  * desktop tray, NOT Settings -> System, which carries no power control at all.
  *

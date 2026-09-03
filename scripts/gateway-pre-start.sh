@@ -2325,7 +2325,7 @@ CLAWBOX_GUIDE_TOPUP="## System actions and restarts"
 # gateway would burn StartLimitBurst=20 in about a hundred seconds and then sit
 # failed for the rest of the StartLimitIntervalSec=3600 window — the box loses
 # its assistant over an advisory text file. So each write warns and boots on.
-if [ -d "$CLAWBOX_WORKSPACE" ] && [ -f "$CLAWBOX_GUIDE_SRC" ]; then
+if [ -d "$CLAWBOX_WORKSPACE" ]; then
   # Seed-if-missing rather than overwrite-on-diff. The agent and the
   # user may personalize CLAWBOX.md (add device-specific notes, remove
   # sections that don't apply). Overwriting on every gateway start
@@ -2333,10 +2333,14 @@ if [ -d "$CLAWBOX_WORKSPACE" ] && [ -f "$CLAWBOX_GUIDE_SRC" ]; then
   # operator wants to pull it in, they can delete the file; the next
   # gateway start will re-seed.
   #
-  # `-r` rather than the enclosing `-f`: this template is only ever read, and an
-  # existing-but-unreadable one is exactly what `-f` waves through into a write
-  # that then fails. Tested here and not in the condition above, so that the
-  # AGENTS.md rule further down — which needs no template at all — still lands.
+  # The template is tested with `-r`, HERE rather than in the condition above.
+  # It is only ever read, so `-r` covers both the missing file the old enclosing
+  # `-f` tested for and the existing-but-unreadable one `-f` waved through into a
+  # write that then fails. Testing it inside this chain is what keeps the promise
+  # the next block relies on: the AGENTS.md rule needs no template at all, and it
+  # is the copy the harness actually injects, so it must still land when the
+  # template is missing or unreadable — which the enclosing `-f` silently
+  # prevented, with no warning at all.
   if [ ! -r "$CLAWBOX_GUIDE_SRC" ]; then
     echo "  WARNING: could not read $CLAWBOX_GUIDE_SRC; leaving CLAWBOX.md as it is" >&2
   elif [ ! -f "$CLAWBOX_GUIDE_DST" ]; then
@@ -2367,6 +2371,10 @@ if [ -d "$CLAWBOX_WORKSPACE" ] && [ -f "$CLAWBOX_GUIDE_SRC" ]; then
     # append supplies its own separator and carrying the template's too ends the
     # topped-up guide on a dangling rule.
     #
+    # The heading is matched as a WHOLE line (modulo a CR), not as a prefix: a
+    # later `## System actions and restarts (advanced)` would otherwise open the
+    # extraction and then fail to close it, swallowing every section after it.
+    #
     # The heading reaches awk through the environment rather than `-v`, which
     # runs its value through escape processing: a heading that ever grew a
     # backslash would quietly stop matching and the section would go missing
@@ -2376,8 +2384,9 @@ if [ -d "$CLAWBOX_WORKSPACE" ] && [ -f "$CLAWBOX_GUIDE_SRC" ]; then
     # two send an operator to different files.
     CLAWBOX_GUIDE_SECTION=""
     if CLAWBOX_GUIDE_SECTION="$(heading="$CLAWBOX_GUIDE_TOPUP" awk '
-      index($0, ENVIRON["heading"]) == 1 { inside = 1 }
-      inside && /^## / && index($0, ENVIRON["heading"]) != 1 { exit }
+      { line = $0; sub(/\r$/, "", line) }
+      line == ENVIRON["heading"] { inside = 1; lines[++n] = $0; next }
+      inside && /^## / { exit }
       inside { lines[++n] = $0 }
       END {
         while (n > 0) {

@@ -117,19 +117,35 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     expect(res.stderr).toContain("could not seed CLAWBOX.md");
   });
 
-  it("starts no statement in the seeding block with a bare copy, whatever the uid", () => {
+  it("leaves no write in the seeding block unguarded, whatever the uid", () => {
     // The case above needs a `skipIf`: root bypasses directory mode bits, and no
     // permission trick is uid-independent here — GNU `install` unlinks and
     // recreates its destination, so a read-only or dangling destination does not
-    // fail either. This one is structural, so it still holds in a root container:
-    // a write that opens a statement runs with `set -e` armed, and its failure is
-    // the whole unit's failure. Inside an `if`, `set -e` is suspended.
-    const bareWrites = seedingBlock()
+    // fail either. This one is structural, so it still holds in a root container,
+    // where both `skipIf` cases skip and nothing else covers the appends.
+    //
+    // A write that OPENS a statement runs with `set -e` armed, and its failure is
+    // the whole unit's failure. Both sanctioned forms put the write in a
+    // condition instead — `if printf … >> f; then` or `elif { …; } >> f; then` —
+    // where `set -e` is suspended and an else branch can warn. `… || true` is
+    // deliberately NOT sanctioned here: it keeps the boot alive but lets the
+    // success line print over a write that failed, which is the false-success
+    // class this block exists to avoid.
+    const lines = seedingBlock()
       .split("\n")
       .map((line) => line.trim())
-      .filter((line) => /^(install|cp|mv|tee)\b/.test(line));
+      .filter((line) => line && !line.startsWith("#"));
+    // Every line that writes: a copy verb, or an append redirection.
+    const writes = lines.filter((line) => /^(if |elif )?(install|cp|mv|tee)\b/.test(line) || />>/.test(line));
+    // Guarded means the write sits in a condition — the line opens with
+    // `if`/`elif`, or it closes a brace group the condition consumes
+    // (`…; } >> file; then`). Anything else runs with `set -e` armed.
+    const unguarded = writes.filter((line) => !/^(if|elif)\b/.test(line) && !/;\s*then$/.test(line));
 
-    expect(bareWrites).toEqual([]);
+    // Sanity: the filter has to be finding this block's four writes (the seed
+    // and the three appends), or an empty `unguarded` would prove nothing.
+    expect(writes.length).toBeGreaterThanOrEqual(4);
+    expect(unguarded).toEqual([]);
   });
 
   it("appends the system-actions section to a guide written before it existed", () => {
@@ -289,6 +305,18 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     // The gateway restart and the device restart must not be conflated: one is
     // refused, the other is the agent's own tool.
     expect(after).toMatch(/gateway is not yours|not yours to do/i);
+
+    // THIS text is the copy that reaches the model — AGENTS.md is what the
+    // harness injects; CLAWBOX.md is read only if the agent opens it. So the
+    // screens it names are pinned here as hard as they are in the guide's own
+    // test, and for a stronger reason. Without these, the rule could be
+    // regressed back to "Settings -> AI" and "Their own control is
+    // Settings -> System" with the whole suite still green, and the box would
+    // ship the exact defect this PR exists to remove.
+    expect(after).toMatch(/Settings -> Providers/);
+    expect(after).not.toMatch(/Settings -> AI\b/);
+    expect(after).toMatch(/power menu in the desktop tray/);
+    expect(after).toMatch(/not Settings -> System/);
   });
 
   it("appends the rule once, however many times the gateway starts", () => {
@@ -321,6 +349,24 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     expect(after).toContain("CLAWBOX.md");
     expect(after).toMatch(/system actions are the owner/i);
     expect(after).toContain(RULE);
+  });
+
+  it("still lands the rule when the guide template is missing entirely", () => {
+    // The rule needs no template — it is a printf in the script — and it is the
+    // copy the harness injects. Gating it on the template (the block used to be
+    // wrapped in `[ -f "$CLAWBOX_GUIDE_SRC" ]`) meant a half-finished update or a
+    // renamed template withheld the deliverable with exit 0 and no output at all.
+    writeFileSync(agents, "# AGENTS\n");
+    const root = mkdtempSync(path.join(dir, "empty-root-"));
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    const script = `set -euo pipefail\nCLAWBOX_ROOT=${JSON.stringify(root)}\nCLAWBOX_WORKSPACE=${JSON.stringify(workspace)}\n${seedingBlock()}`;
+    const res = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+
+    expect(res.status).toBe(0);
+    // The missing template is reported rather than passed over in silence...
+    expect(res.stderr).toContain("could not read");
+    // ...and the rule still reaches the file the harness loads.
+    expect(readFileSync(agents, "utf-8")).toContain(RULE);
   });
 
   it("appends the pointer even when the rule already put the literal CLAWBOX.md in the file", () => {
