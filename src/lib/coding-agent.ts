@@ -1903,7 +1903,11 @@ export const HEADLESS_BRIEF = [
 
 const FILE_TOOLS = ["Read", "Edit", "Write"] as const;
 /** Always denied under data/, whether or not they exist yet. */
-const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "coding-agent-runs.json"];
+// email-outcomes.json sits beside email-pending.json for the same reason: it
+// names who the owner mailed and what about. A run has no business reading
+// either, and a file that only exists once mail has been approved is exactly
+// the kind that gets added to the store and forgotten here.
+const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "coding-agent-runs.json"];
 
 /**
  * Claude Code's Read/Edit/Write rules for the paths a run must not open.

@@ -10,8 +10,12 @@
 // That is false in four reachable ways, and each one left the owner with mail
 // on disk and no way to approve it without leaving the conversation:
 //
-//   1. The card was cancelled. `cancelEmailBatch` drops the card and says so —
-//      "the drafts stay queued" — and nothing ever offered them again.
+//   1. The card was cancelled. `cancelEmailBatch` dropped the card and left the
+//      drafts queued, and nothing ever offered them again. (That half is now
+//      gone the other way: cancelling DELETES the drafts, because leaving them
+//      to be re-offered fifteen seconds later is what the owner reported as
+//      "dismiss does nothing; it returns after 20 secs". The remaining three
+//      are what this schedule is still for.)
 //   2. The page reloaded. `emailBatches` is component state.
 //   3. The turn belonged to somebody else: a cron run, an inbound-email
 //      auto-answer, another session, Telegram. This browser never saw it.
@@ -60,7 +64,21 @@ function installBoxWithMailQueue(): HermesBox {
       const url = String(input);
       if (url.includes("/setup-api/email/pending")) {
         if ((init?.method ?? "GET").toUpperCase() === "POST") {
-          approvalPosts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          approvalPosts.push(body);
+          if (body.action === "reject_batch") {
+            const drafts = (body.drafts ?? []) as { id: string }[];
+            // The device really drops them, the way the route does — otherwise
+            // "cancelled" cannot be told from "cancelled and still queued".
+            queued = queued.filter((d) => !drafts.some((e) => e.id === d.id));
+            const payload = {
+              success: true,
+              rejected: drafts.length,
+              failed: 0,
+              results: drafts.map((d) => ({ id: d.id, ok: true })),
+            };
+            return { ok: true, status: 200, json: async () => payload };
+          }
           return { ok: true, status: 200, json: async () => ({ success: true, sent: 1, failed: 0, results: [] }) };
         }
         return { ok: true, status: 200, json: async () => ({ pending: queued }) };
@@ -127,20 +145,26 @@ describe("mail queued where this browser could not see it", () => {
     expect(bodiesOnScreen()).toEqual(["The body of message 7."]);
   });
 
-  it("CANCELLED CARD: drafts left queued by a cancel are offered again", async () => {
+  it("CANCELLED CARD: a cancel deletes the drafts, so nothing is offered again", async () => {
+    // This case used to assert the opposite — that cancelling left the drafts
+    // queued and the next look offered them again. That was the design, and the
+    // owner met it as a bug: "when I click dismiss nothing happens; it returns
+    // after 20 secs." The re-offer was this very mechanism doing its job over a
+    // gesture that had changed nothing. Cancelling is a deletion now, so there
+    // is nothing left for the schedule to find.
     queued = [pendingDraft(1)];
     const box = installBoxWithMailQueue();
     await mountHermesChat(box);
     await waitFor(() => expect(screen.getByTestId("chat-email-batch")).toBeTruthy());
 
-    // "Send nothing" — the card goes, the draft stays on disk.
     fireEvent.click(screen.getByTestId("chat-email-batch-cancel"));
-    await waitFor(() => expect(screen.queryByTestId("chat-email-batch")).toBeNull());
+    await waitFor(() => expect(approvalPosts).toHaveLength(1));
+    expect(approvalPosts[0].action).toBe("reject_batch");
 
-    // Coming back to the tab must find it again, because it is still waiting.
+    // The 20 seconds the owner counted, and no live card at the end of them.
     fireEvent.focus(window);
-    await waitFor(() => expect(screen.getByTestId("chat-email-batch")).toBeTruthy());
-    expect(bodiesOnScreen()).toEqual(["The body of message 1."]);
+    await waitFor(() => expect(queueReads()).toBeGreaterThan(1));
+    expect(screen.queryByTestId("chat-email-batch-approve")).toBeNull();
   });
 
   it("the visibility-gated tick finds mail that arrives while the chat sits open", async () => {

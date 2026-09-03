@@ -64,6 +64,8 @@ beforeEach(async () => {
   mockQueue.mockReturnValue({
     ok: true,
     draft: { id: "draft-1", to: ["owner@example.com"], subject: "Hello", body: "Text", createdAt: 0 },
+    // A first queue, not a retry folded into a draft already waiting.
+    deduped: false,
   });
   storeWith(CONFIGURED);
   POST = (await import("@/app/setup-api/email/send/route")).POST;
@@ -237,6 +239,29 @@ describe("ask me before sending", () => {
     storeWith(GATED);
     await POST(sendRequest(VALID_BODY));
     expect(mockNotify).toHaveBeenCalledTimes(1);
+  });
+
+  it("says when the queue folded a retry into the draft it already had", async () => {
+    // The 60 s budget in the email_send tool can run out while this route is
+    // still working, and the tool used to be told to retry — which queued the
+    // same message twice. The queue now hands back the id it already holds,
+    // and the answer has to carry that, or the agent reports two waiting
+    // messages when there is one.
+    storeWith(GATED);
+    mockQueue.mockReturnValue({
+      ok: true,
+      draft: { id: "draft-1", to: ["owner@example.com"], subject: "Hello", body: "Text", createdAt: 0 },
+      deduped: true,
+    });
+    const res = await POST(sendRequest(VALID_BODY));
+    expect(res.status).toBe(202);
+    expect(await res.json()).toMatchObject({ queued: true, duplicate: true, pendingId: "draft-1" });
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it("does not call a first queue a duplicate", async () => {
+    storeWith(GATED);
+    expect((await (await POST(sendRequest(VALID_BODY))).json()).duplicate).toBe(false);
   });
 
   it("still queues when the desktop notification fails", async () => {

@@ -20,6 +20,10 @@ import VoiceOutputPanel from "./VoiceOutputPanel";
 import SystemProfilePanel from "./SystemProfilePanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { copyToClipboard } from "@/lib/clipboard";
+// The ending vocabulary and the gesture table, from the module that owns the
+// outcome shape — never a second copy of either. Both are plain functions on a
+// const list; the card component beside them is not pulled in by naming these.
+import { emailEnding, endingAsAsked, type EmailEnding } from "@/lib/chat-email-batch";
 import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
 import { installPendingRefresh } from "@/lib/email-pending-refresh";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
@@ -92,6 +96,35 @@ interface PendingEmail {
 }
 
 /**
+ * A draft that is no longer waiting, and what became of it.
+ *
+ * The strip above used to just stop listing such a draft, which is honest about
+ * the queue and silent about the mail: an owner who approved on Telegram opened
+ * this panel to nothing at all and could not tell "it went out" from "it was
+ * deleted" from "this box never had it". The queue is where he comes to find
+ * out, so it is where the answer belongs.
+ */
+interface HandledEmail {
+  id: string;
+  /**
+   * DERIVED from `EMAIL_ENDINGS`, never spelled out again.
+   *
+   * That list exists so a sixth ending cannot be added in one place and go
+   * unread in another — its own comment calls a partial copy "how a real ending
+   * quietly becomes 'no idea'". A hand-written union here made this strip the
+   * one reader the compiler could not warn; the renderer below carries the
+   * other half of that promise, an exhaustive chain ending in `never`, because
+   * the type alone would have let a sixth ending render as "Failed: " with no
+   * reason.
+   */
+  kind: EmailEnding;
+  at: number;
+  to: string[];
+  subject: string;
+  error?: string;
+}
+
+/**
  * A draft that was approved, claimed out of the queue and then failed to send.
  * /setup-api/email/pending hands the whole message back for exactly this, so
  * the owner's approved mail is not lost to a transient SMTP error.
@@ -100,6 +133,17 @@ interface LostDraft {
   to: string[];
   subject: string;
   body: string;
+  /**
+   * The send was never confirmed one way or the other, so the heading over this
+   * draft must not say it was not sent.
+   *
+   * The route computes which failure it was and sends the receipt's word back
+   * (`ending`). A dropped connection after DATA leaves nobody able to say
+   * whether the message arrived, and a confident "This message was not sent" is
+   * precisely how an owner is talked into sending it a second time — while the
+   * handled strip on the same screen was about to say "could not be confirmed".
+   */
+  unconfirmed: boolean;
 }
 
 /**
@@ -1696,12 +1740,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [emailAllowedSenders, setEmailAllowedSenders] = useState("");
   const [emailAskBeforeSend, setEmailAskBeforeSend] = useState(true);
   const [emailPending, setEmailPending] = useState<PendingEmail[]>([]);
+  const [emailHandled, setEmailHandled] = useState<HandledEmail[]>([]);
   const [emailPendingBusy, setEmailPendingBusy] = useState<string | null>(null);
   const [emailLostDraft, setEmailLostDraft] = useState<LostDraft | null>(null);
   const [emailSaving, setEmailSaving] = useState(false);
   const [emailTesting, setEmailTesting] = useState(false);
   const [emailReconfigure, setEmailReconfigure] = useState(false);
-  const [emailMsg, setEmailMsg] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  // `info` is the third tone, and it exists because two are not enough here: a
+  // send the box handed over and never heard back is neither a success nor a
+  // failure, and both of the other two are a claim nothing can support.
+  const [emailMsg, setEmailMsg] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
   const emailSaveControllerRef = useRef<AbortController | null>(null);
   const [chatApproval, setChatApproval] = useState<ChatApprovalState | null>(null);
   const [chatApprovalToken, setChatApprovalToken] = useState("");
@@ -1761,6 +1809,32 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 preview: typeof p.preview === "string" ? p.preview : "",
                 createdAt: typeof p.createdAt === "number" ? p.createdAt : 0,
               }))
+          : [],
+      );
+      // Read out of the SAME response as the queue, never a second request:
+      // two requests can catch a draft in neither answer, and the panel would
+      // then show the one state that is never true — no draft, and no word
+      // about where it went.
+      setEmailHandled(
+        Array.isArray(d?.outcomes)
+          ? d.outcomes
+              .filter((o: unknown): o is Record<string, unknown> => typeof o === "object" && o !== null)
+              // `emailEnding` is the vocabulary, so the wire is read through it
+              // rather than against a fourth hand-written copy of the same five
+              // words — and it NARROWS, which is what removes the cast the row
+              // below used to need.
+              .flatMap((o: Record<string, unknown>): HandledEmail[] => {
+                const kind = emailEnding(o.kind);
+                if (typeof o.id !== "string" || typeof o.at !== "number" || !kind) return [];
+                return [{
+                  id: o.id,
+                  kind,
+                  at: o.at,
+                  to: Array.isArray(o.to) ? o.to.filter((x): x is string => typeof x === "string") : [],
+                  subject: typeof o.subject === "string" ? o.subject : "",
+                  ...(typeof o.error === "string" ? { error: o.error } : {}),
+                }];
+              })
           : [],
       );
     } catch {
@@ -1897,7 +1971,96 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
-        setEmailMsg({ type: "error", message: data?.error || t("settings.emailApproveFailed") });
+        /**
+         * A decision somebody already made is NOT this click failing — but only
+         * when it is the decision this click was asking for.
+         *
+         * The owner tapped *Approve & send* in Telegram, the message went out,
+         * and this row was still on screen because the queue is re-read on a
+         * schedule. The route answers 404 "no longer waiting" — correctly, this
+         * request did nothing — and painting that red put a failure over a send
+         * that succeeded, directly above the green "Sent ✓" the handled strip
+         * was about to show for the same message.
+         *
+         * KEYED ON THE GESTURE, because the two directions are not symmetric and
+         * reading the ending alone gets both of the crossed cases backwards.
+         * *Discard* answered `sent` is the worst outcome available on that click
+         * — the owner asked for a message NOT to go out and it went out — and a
+         * green banner there congratulates him for it. *Approve & send* answered
+         * `rejected` means nothing was sent and nothing will be; the words are
+         * honest, and the colour is what is read first.
+         *
+         * `duplicate` is good news either way: an identical message reached the
+         * recipient, so the send happened and this copy is not waiting. An
+         * ending of `failed` or `unconfirmed`, and a 404 with no ending at all,
+         * stay red — all three are something to look at.
+         */
+        const ending = emailEnding(data?.ending);
+        // THE SHARED TABLE, not a second copy of it. The chat card weighs an
+        // ending against a gesture with the same two lines, and the one time
+        // these two surfaces each kept their own reading of a single message is
+        // the defect this whole change exists to remove. `reject` is this
+        // panel's word for the gesture the card calls `delete`; the endings and
+        // the verdict are identical.
+        const asAsked = ending !== undefined && endingAsAsked(ending, action === "approve" ? "approve" : "delete");
+        /**
+         * Neither a success nor a failure, and it needs its own tone.
+         *
+         * The 502 from an approve carries the receipt's ending too, and
+         * `unconfirmed` means the box handed the message over and never heard
+         * back. Red "Could not send the message." there is a positive claim
+         * nothing in this process can support — and one `refreshEmailPending()`
+         * later the handled strip below says "Could not be confirmed — check
+         * your Sent folder" about the very same draft. Two verdicts on one
+         * screen, and the definite one is the one the owner acts on, by mailing
+         * the recipient twice. `info` is the amber StatusMessage already has;
+         * the words are the strip's own.
+         */
+        const unconfirmed = ending === "unconfirmed";
+        /**
+         * The other event that is neither, and the one the chat card had
+         * already ruled on.
+         *
+         * He pressed *Discard* and the message had gone out from Telegram
+         * seconds earlier. Red is defensible — the deletion genuinely did not
+         * happen — but there is nothing here to fix and everything to look at,
+         * and the card settled on amber for this exact event in the same
+         * change. Two screens speaking differently about one message is what
+         * this whole thing is against, so they say it the same way. The WORDS
+         * are the route's and unchanged: "That message was already sent."
+         */
+        const sentAnyway = action === "reject" && ending === "sent";
+        /**
+         * The third of them: a 404 the receipts could not explain.
+         *
+         * `whatBecameOf` found nothing, and THREE different things put it
+         * there, which is why the amber says "no idea" rather than naming one:
+         *
+         *   - another surface is between claiming the draft and the end of its
+         *     SMTP conversation, so the message may be going out this second;
+         *   - the receipt EXPIRED — they live 24 h (`route.ts`), and a draft
+         *     decided before that is indistinguishable here from one that was
+         *     never queued;
+         *   - `email-pending.json` could not be read at all, so the claim
+         *     failed and produced this identical 404.
+         *
+         * Only the first is a race. The other two are recorded as filed-not-
+         * fixed in the PR that introduced this branch: the way out of both is a
+         * `kind` of its own from the route, which would let the strip say which
+         * one it is instead of guessing. Red "That draft is no longer waiting."
+         * over any of the three is a failure claimed over an unknown, and the
+         * chat card renders the identical row muted. Narrowed to the stale
+         * answer by `kind === "gone"`: a 409 with no account, a 400 or a 502 the
+         * mail server spoke carry their own kinds and stay red, because those
+         * really are this click failing.
+         */
+        const endingUnknown = data?.kind === "gone" && ending === undefined;
+        setEmailMsg({
+          type: unconfirmed || sentAnyway || endingUnknown ? "info" : asAsked ? "success" : "error",
+          message: unconfirmed
+            ? t("settings.emailHandledUnconfirmed")
+            : data?.error || t("settings.emailApproveFailed"),
+        });
         // The route claims a draft before it sends, so a failed send has
         // already taken it out of the queue and refreshEmailPending() is about
         // to remove the row. Hold what it handed back, or the message the
@@ -1906,7 +2069,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         if (lost && typeof lost === "object") {
           const d = lost as Partial<LostDraft>;
           if (Array.isArray(d.to) && typeof d.subject === "string" && typeof d.body === "string") {
-            setEmailLostDraft({ to: d.to.map(String), subject: d.subject, body: d.body });
+            setEmailLostDraft({ to: d.to.map(String), subject: d.subject, body: d.body, unconfirmed });
           }
         }
       } else {
@@ -2013,6 +2176,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       setEmailReconfigure(false);
       setEmailMode("send");
       setEmailPending([]);
+      // The receipts go with the queue — the route clears them server-side for
+      // the same reason, and leaving them on screen would keep the disconnected
+      // account's recipients and subjects up until the next poll.
+      setEmailHandled([]);
+      // And the same for the one draft this panel keeps in full. It is rendered
+      // on its own condition, not on `configured`, so a failed send from the
+      // account just disconnected would sit there — recipients, subject and
+      // body — until another approval happened to fail.
+      setEmailLostDraft(null);
       setEmailMsg({ type: "success", message: t("settings.emailDisconnected") });
       refreshEmailStatus();
     } catch (err) {
@@ -4238,7 +4410,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="rounded-2xl border border-amber-400/30 bg-amber-500/[0.06] p-5" data-testid="settings-email-lost-draft">
                 <div className="flex items-center gap-2 mb-3">
                   <span className="material-symbols-rounded text-amber-300" style={{ fontSize: 18 }} aria-hidden="true">warning</span>
-                  <span className="text-sm text-[var(--text-primary)]">{t("settings.emailApproveFailedDraft")}</span>
+                  {/* The heading is a verdict of its own, and there are two of
+                      them. "This message was not sent" is right over a refusal
+                      the mail server spoke and wrong over a dropped connection,
+                      where nobody knows — and the wrong one is the one that
+                      gets the recipient mailed twice. */}
+                  <span className="text-sm text-[var(--text-primary)]">
+                    {t(emailLostDraft.unconfirmed ? "settings.emailApproveUnconfirmedDraft" : "settings.emailApproveFailedDraft")}
+                  </span>
                 </div>
                 <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
                   <div className="text-xs text-[var(--text-muted)] break-words">
@@ -4286,6 +4465,76 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         >
                           {t("settings.emailReject")}
                         </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* What became of the drafts that are no longer waiting.
+                Shown only when there is something to say — an empty
+                strip is not news — and it fades on its own, because
+                the receipts behind it expire after a day. Every
+                string here is agent-composed text and is rendered as
+                text, exactly like the queue above it. */}
+            {emailHandled.length > 0 && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-handled">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">history</span>
+                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailHandled")}</label>
+                </div>
+                <div className="space-y-3">
+                  {emailHandled.map((entry) => (
+                    <div
+                      key={entry.id}
+                      data-outcome-id={entry.id}
+                      data-outcome-kind={entry.kind}
+                      className="rounded-xl bg-white/[0.02] border border-white/[0.06] px-4 py-3"
+                    >
+                      <div className="text-xs text-[var(--text-muted)] truncate">
+                        {t("settings.emailPendingTo")}: {entry.to.join(", ")}
+                      </div>
+                      <div className="text-sm text-[var(--text-primary)] font-medium mt-1 break-words">{entry.subject}</div>
+                      <div
+                        className={`text-xs mt-1 break-words ${entry.kind === "sent" ? "text-emerald-300" : entry.kind === "failed" ? "text-red-300" : entry.kind === "unconfirmed" ? "text-amber-300" : "text-[var(--text-muted)]"}`}
+                      >
+                        {/* Each ending in its own words. "Not sent" over a
+                            deletion, a duplicate and a mail-server refusal
+                            alike would send the owner looking for a fault in
+                            two cases where there is none. */}
+                        {entry.kind === "sent"
+                          ? t("settings.emailHandledSent", {
+                              time: new Date(entry.at).toLocaleTimeString(undefined, {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              }),
+                            })
+                          : entry.kind === "rejected"
+                            ? t("settings.emailHandledDeleted")
+                            : entry.kind === "duplicate"
+                              ? t("settings.emailHandledDuplicate")
+                              : entry.kind === "unconfirmed"
+                                // Never "Not sent": the box handed the message
+                                // over and never heard back, and a confident
+                                // "not sent" is how a person sends it twice.
+                                ? t("settings.emailHandledUnconfirmed")
+                                : entry.kind === "failed"
+                                  ? t("settings.emailHandledFailed", { reason: entry.error || "" })
+                                  // `entry.kind` is `never` here, so a sixth
+                                  // member of `EMAIL_ENDINGS` is a COMPILE
+                                  // ERROR rather than a row announced as
+                                  // "Failed: " with an empty reason. Reading
+                                  // the wire through `emailEnding` is what lets
+                                  // an unknown ending reach this renderer at
+                                  // all — the hand-written filter dropped it —
+                                  // so the guard has to travel with it. If it
+                                  // were ever reached it answers with the one
+                                  // sentence that claims nothing.
+                                  : ((unreachable: never) => {
+                                      void unreachable;
+                                      return t("settings.emailHandledUnconfirmed");
+                                    })(entry.kind)}
                       </div>
                     </div>
                   ))}

@@ -500,3 +500,68 @@ describe("email_read registration", () => {
     expect(schema.safeParse(7).success).toBe(true);
   });
 });
+
+// ── The retry that duplicated a draft ────────────────────────────────────────
+//
+// mcp/lib/api.ts turns any timed-out call into a TIMEOUT ToolError whose advice
+// is "Retry once", and that is right for a READ. `email_send` is not a read: by
+// the time the 60 s budget runs out the POST may already have queued the draft
+// — or, with the approval gate off, already have put the message on the wire.
+// The owner's box produced two identical drafts from one request exactly this
+// way, which is the FALSE FAILURE class: an error reported over an operation
+// that succeeded.
+//
+// The queue now folds an identical retry into the draft already waiting, so the
+// duplicate cannot come back. This is the other half: the tool must stop asking
+// for the retry in the first place, because with the gate OFF there is no queue
+// to fold anything into and the second attempt is a second real email.
+
+describe("email_send after a timeout", () => {
+  it("does not tell the agent to try again", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("The operation was aborted due to timeout");
+      }),
+    );
+    const { handler } = collect().get("email_send")!;
+    const err = (await Promise.resolve(handler({ to: "a@b.com", subject: "s", body: "b" })).catch(
+      (e: unknown) => e,
+    )) as ToolError;
+
+    expect(err).toBeInstanceOf(ToolError);
+    expect(err.code).toBe("TIMEOUT");
+    expect(err.next).toMatch(/Do not retry/i);
+    expect(err.next).not.toMatch(/Retry once/i);
+    // The person is the one who can see whether it went; say where to look.
+    expect(err.next).toMatch(/Settings/);
+    // And never claim it failed: it may well have been queued or sent.
+    expect(err.message).toMatch(/may already/i);
+  });
+
+  it("reports a folded retry as the draft already waiting, not as a second one", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(202, {
+          success: true,
+          queued: true,
+          duplicate: true,
+          pendingId: "draft-1",
+          recipients: 1,
+          approvalPrompt: "off",
+        }),
+      ),
+    );
+    const { handler } = collect().get("email_send")!;
+    const result = await Promise.resolve(handler({ to: "a@b.com", subject: "s", body: "b" }));
+    const payload = JSON.parse(result.content[0].type === "text" ? result.content[0].text : "{}");
+
+    expect(payload).toMatchObject({
+      sent: false,
+      queued_for_owner_approval: true,
+      already_waiting: true,
+    });
+    expect(String(payload.what_happens_next)).toMatch(/already waiting/i);
+  });
+});

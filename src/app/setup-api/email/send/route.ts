@@ -115,11 +115,17 @@ export async function POST(request: Request) {
       );
     }
 
+    // The budget bounds what the AGENT may ask for, and it is spent here — on
+    // the request — rather than on a message leaving the box. That is why it
+    // does not say "sent": under the approval gate nothing has been, and a
+    // retry that folds into the draft already waiting still costs a slot. Both
+    // readings err the same way, towards fewer emails, which is the safe
+    // direction for a bound on mail the owner did not type.
     if (!checkRateLimit("email-send", SEND_BUDGET_KEY, SEND_BUDGET)) {
       console.error("[email/send] refused: agent send budget exhausted");
       return NextResponse.json(
         {
-          error: `This ClawBox has already sent ${SEND_BUDGET.max} emails in the last hour and will not send more for now.`,
+          error: `This ClawBox has already handled ${SEND_BUDGET.max} email requests from the assistant in the last hour and will not take more for now.`,
           kind: "rate_limited",
         },
         { status: 429 },
@@ -139,6 +145,13 @@ export async function POST(request: Request) {
           { status: queued.reason === "full" ? 429 : 400 },
         );
       }
+      // A retry of a call that had already landed. Nothing new was written and
+      // nothing new is asked about — sendApprovalPrompt below is idempotent per
+      // draft — so this is logged and reported, never treated as a second
+      // message. See DEDUPE_WINDOW_MS for why the queue can say this.
+      if (queued.deduped) {
+        console.error("[email/send] folded into the identical draft already waiting");
+      }
       // Ask in chat when the owner has turned that on. Awaited rather than
       // fired and forgotten because the answer below has to be TRUE: an agent
       // told "I asked them on Telegram" when Telegram was unreachable will tell
@@ -147,14 +160,26 @@ export async function POST(request: Request) {
       const prompt = await sendApprovalPrompt(queued.draft);
       // Best effort: a notification that does not appear must not turn a
       // successfully-queued draft into a failed send.
-      await notifyOwner(
-        `The assistant wants to send an email. Open Settings → Email to approve or delete it.`,
-      ).catch(() => undefined);
+      //
+      // NOT on a fold. There is no new draft to be told about, and a second
+      // "the assistant wants to send an email" toast for one message is the
+      // duplicate this whole change exists to stop, wearing a different coat.
+      // (`sendApprovalPrompt` above is already idempotent per draft; this was
+      // the half that was not.)
+      if (!queued.deduped) {
+        await notifyOwner(
+          `The assistant wants to send an email. Open Settings → Email to approve or delete it.`,
+        ).catch(() => undefined);
+      }
       console.error(`[email/send] queued for owner approval (chat prompt: ${prompt.kind})`);
       return NextResponse.json(
         {
           success: true,
           queued: true,
+          // True when this call added nothing: the id is a draft that was
+          // already waiting. The agent has to be told, or it reports two
+          // messages queued when there is one.
+          duplicate: queued.deduped,
           pendingId: queued.draft.id,
           recipients: recipients.length,
           // What the agent may say to the person. A kind, never a chat id and

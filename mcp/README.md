@@ -360,6 +360,21 @@ draft in `data/email-pending.json`, the desktop shows a notification, and the
 tool answers `sent: false, queued_for_owner_approval: true` — which the agent
 must not report as a delivered message.
 
+**Queueing is idempotent.** A message identical in recipients, subject and body
+to one still waiting, inside five minutes, folds into the draft already on disk:
+the same `pendingId` comes back with `already_waiting: true`, no second draft is
+written and no second notification fires. It exists because a timed-out
+`email_send` retry produced two identical drafts from one request. For the same
+reason **a timeout on this tool is not a retry**: every other timed-out call in
+`mcp/lib/api.ts` answers "retry once", and this one answers "do not retry and do
+not claim it was sent" — with the gate off there is no queue to fold into and a
+second attempt is a second real email.
+
+A draft that leaves the queue leaves a receipt in `data/email-outcomes.json`
+(sent / rejected / failed / unconfirmed / duplicate, 24 h), which is what lets
+every surface say whether a message is still waiting instead of guessing from
+its own frozen copy.
+
 Approving happens at `/setup-api/email/pending`, which is the one route in this
 subtree that **refuses the MCP bearer**. Middleware admits callers to
 `/setup-api/*` on either a session cookie or that bearer, and the agent holds the
@@ -375,7 +390,8 @@ the person at the keyboard out. The credentials never enter the MCP process, an
 unconfigured device answers `CONFLICT` with "do not retry, tell the user to open
 Settings → Email". An exhausted budget answers `CONFLICT` too — the generic 429
 mapping is `ENDPOINT_DOWN` ("retry once"), which is the loop the budget exists
-to stop.
+to stop. The budget counts REQUESTS, not deliveries: under the approval gate
+nothing has been sent when it refuses, and a folded retry still spends a slot.
 
 ### Browser
 `browser_open` · `browser_navigate` · `browser_screenshot` · `browser_close`
