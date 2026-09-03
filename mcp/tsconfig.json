@@ -10,6 +10,7 @@
   },
   "include": [
     "**/*.ts",
+    "../src/lib/clawkeep-protection.ts",
     "../src/lib/edition-source.ts",
     "../src/lib/file-guard.ts",
     "../src/lib/config-store.ts",

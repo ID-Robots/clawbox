@@ -23,6 +23,7 @@ import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
+import { BACKUP_RUN_CAP_MS, expectedBackupWindowMs } from "@/lib/clawkeep-protection";
 import { findOpenclawBin } from "@/lib/openclaw-config";
 import { getEdition } from "@/lib/harness";
 import { backupSourceFor } from "@/lib/harness/backup-source";
@@ -153,6 +154,12 @@ export interface ClawKeepStatus {
   schedule: ClawKeepSchedule;
   /** Wall-clock ms of the next scheduled run, or 0 when disabled. */
   nextRunAtMs: number;
+  /** When auto-backup was last armed — switched on, or tightened to a shorter
+   * cadence — or 0. Read by the protection shield so arming a schedule does not
+   * lapse a box for a run that has not come round yet. Deliberately NOT "when
+   * schedule.json was last saved": the same file holds the retention count and
+   * the time of day. */
+  scheduleArmedAtMs: number;
   /** True when the device-local passphrase file is present (and non-empty).
    * `paired && !encryptionConfigured` is the gate the UI watches to surface
    * the "Set encryption passphrase" CTA before the first backup. */
@@ -238,23 +245,203 @@ function sanitiseSchedule(input: unknown): ClawKeepSchedule {
   };
 }
 
-export async function readSchedule(): Promise<ClawKeepSchedule> {
-  try {
-    const raw = await fs.readFile(SCHEDULE_PATH, "utf8");
-    return sanitiseSchedule(JSON.parse(raw));
-  } catch {
-    return { ...DEFAULT_SCHEDULE };
-  }
+/** Everything `schedule.json` says, from one read of it. */
+export interface ClawKeepScheduleSnapshot {
+  schedule: ClawKeepSchedule;
+  /**
+   * When auto-backup was last *armed*, as unix ms; 0 if the file does not say.
+   *
+   * The protection shield needs it: arming auto-backup shrinks the tolerated
+   * backup age from a week to 36 h, and applying that retroactively would lapse
+   * a box on the same click for a run that is not due yet.
+   *
+   * The stamp lives inside `schedule.json` rather than being its mtime, because
+   * an mtime answers "when was this file written" and the question here is
+   * "when was a window started". The same file carries the retention count and
+   * the time of day, so on the mtime a box whose backups died ten days ago went
+   * green the moment its owner nudged either — and a `cp -a` or an image
+   * restore of `~/.clawkeep` did it too.
+   *
+   * A file written before the stamp existed therefore answers 0, NOT its mtime:
+   * falling back would carry exactly that defect onto every box that upgrades.
+   * 0 costs a box armed shortly before the update its remaining grace; the
+   * mtime would cost a dead box's owner the alarm.
+   *
+   * 0 means "no window is running", which is the safe answer for a reader. It
+   * does NOT mean "this box has never armed a schedule" — an enabled file
+   * without a stamp was armed, by definition, and {@link nextArmedAtMs} is
+   * where that distinction is made, because it is the only place a stamp is
+   * minted.
+   */
+  armedAtMs: number;
+  /**
+   * The file is there and says nothing we can read — a truncated write, a
+   * power cut mid-rename. Distinct from "no file", which is a box that has
+   * never had a schedule: this one may have had any schedule at all, so it is
+   * evidence of nothing rather than evidence of "off".
+   */
+  unreadable: boolean;
 }
 
-export async function writeSchedule(next: ClawKeepSchedule): Promise<ClawKeepSchedule> {
+/**
+ * Everything the schedule file says, from ONE read of it.
+ *
+ * The schedule and the stamp are two halves of a single verdict —
+ * `deriveProtection` takes the age window from the schedule and the grace
+ * anchor from the stamp — so reading them separately lets a `writeSchedule()`
+ * rename land between the two reads and pair the cadence of one version with
+ * the stamp of the next. That pair is a verdict neither version would give.
+ */
+export async function readScheduleSnapshot(): Promise<ClawKeepScheduleSnapshot> {
+  const unknownFile = { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0, unreadable: true };
+  let raw: string;
+  try {
+    raw = await fs.readFile(SCHEDULE_PATH, "utf8");
+  } catch (err) {
+    // "No file" is one error code, not all of them. ENOENT — and ENOTDIR on a
+    // broken parent — really does mean no schedule has ever been written here.
+    // EACCES on a file left root-owned, EIO on failing storage (the box that
+    // needs the alarm most), EMFILE on a loaded Jetson: each is a file that IS
+    // there and says nothing we can read, which is evidence of nothing.
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") return unknownFile;
+    return { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0, unreadable: false };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return unknownFile;
+  }
+  // `sanitiseSchedule` coerces rather than throwing (`r.enabled === true`), so
+  // a file holding `null`, an array or a bare string would otherwise come back
+  // as a perfectly readable "auto-backup is off" — and buy the next arming
+  // click a fresh window. Parsing is not the same as being a schedule.
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return unknownFile;
+  const stamp = Number((parsed as { armedAtMs?: unknown }).armedAtMs);
+  return {
+    schedule: sanitiseSchedule(parsed),
+    armedAtMs: Number.isFinite(stamp) && stamp > 0 ? Math.round(stamp) : 0,
+    unreadable: false,
+  };
+}
+
+export async function readSchedule(): Promise<ClawKeepSchedule> {
+  return (await readScheduleSnapshot()).schedule;
+}
+
+/**
+ * The stamp given to a schedule that was armed before stamps existed. Any
+ * value above 0 answers "a window has been started on this box"; 1 ms past the
+ * epoch adds "too long ago to be worth anything", which is the honest reading
+ * of a file that was armed but does not say when.
+ *
+ * It is inert in the verdict: `deriveProtection` anchors on
+ * `Math.max(lastBackupAtMs, armedAtMs)`, and every real backup is newer.
+ */
+const LEGACY_ARM_STAMP_MS = 1;
+
+/**
+ * Does this save start a window that was not running before? Switching
+ * auto-backup on does; so does tightening the cadence, which shrinks the
+ * tolerated age and would otherwise lapse the box on the click. Loosening it
+ * cannot lapse a box the tighter cadence already allowed, and a plain re-save —
+ * retention, time of day, weekday — changes no window at all.
+ */
+function armsTheSchedule(prev: ClawKeepSchedule, next: ClawKeepSchedule): boolean {
+  if (!next.enabled) return false;
+  if (!prev.enabled) return true;
+  return expectedBackupWindowMs(next) < expectedBackupWindowMs(prev);
+}
+
+/**
+ * The arm stamp to persist with this save.
+ *
+ * Arming must not lapse a box for a run that is not due yet — but it must not
+ * un-lapse one either, and those are different things. Only the first buys
+ * anything, so only the first is granted:
+ *
+ *   - a plain re-save (retention, time of day, weekday) arms nothing and keeps
+ *     the stamp it had — otherwise nudging either would hand a box whose
+ *     backups died ten days ago a fresh 36 h of green, on the very card the
+ *     lapsed copy sends its owner to;
+ *   - switching auto-backup ON only mints a stamp on a box that has never had a
+ *     schedule. Switching it OFF widens the tolerated age from the cadence's own
+ *     window to the no-schedule week, so a box that was amber under its nightly
+ *     schedule reads green the moment the switch goes off; minting on the way
+ *     back on would make that round trip permanent — two clicks, another 36 h,
+ *     repeatable for ever. A box that has been armed before keeps its stamp,
+ *     and an enabled schedule with no stamp — every box in the field, the
+ *     moment it takes this build — HAS been armed before;
+ *   - and what it mints, first arm or tightened cadence alike, it mints only
+ *     for a box the PREVIOUS window still called protected. One already past
+ *     it stays lapsed.
+ *
+ * This is the one place those questions can be asked, because it is the only
+ * place that knows the window the box was being judged against a moment ago.
+ */
+async function nextArmedAtMs(
+  prevSnapshot: ClawKeepScheduleSnapshot,
+  next: ClawKeepSchedule,
+): Promise<number> {
+  const prev = prevSnapshot.schedule;
+  // "No stamp" is three different facts, and only one of them may be granted a
+  // fresh window:
+  //   - no window is running — a box that has never armed one. Grant.
+  //   - no window was RECORDED — a schedule.json written before the stamp
+  //     existed. Every deployed box is this one the moment it updates, and an
+  //     enabled schedule is evidence of its own arming: read as a first arm,
+  //     the off→on toggle below hands a box whose backups are dead the very
+  //     rescue this function exists to refuse.
+  //   - nothing could be read at all — a file truncated by a power cut. That
+  //     is evidence of NOTHING, not evidence of "off", so it is read the same
+  //     way: the cost of withholding a window is one amber card until the next
+  //     run, the cost of granting one is 36 h of green over a dead box.
+  const armedBefore = prev.enabled || prevSnapshot.unreadable;
+  const prevArmedAtMs = prevSnapshot.armedAtMs === 0 && armedBefore
+    ? LEGACY_ARM_STAMP_MS
+    : prevSnapshot.armedAtMs;
+  if (!armsTheSchedule(prev, next)) return prevArmedAtMs;
+  const now = Date.now();
+  const lastBackupAtMs = (await readStateFile()).last_backup_at_ms ?? 0;
+  // Nothing has ever backed this box up: it reads "Not Protected" on its own
+  // account and never reaches the age term, so there is no verdict to rescue.
+  if (lastBackupAtMs <= 0) return now;
+  // Switching back ON is not a new window for a box that has had one. The
+  // window it is leaving is the one OFF widened, so measuring the return trip
+  // against that would forgive precisely the box the widening had flattered.
+  if (!prev.enabled && prevArmedAtMs > 0) return prevArmedAtMs;
+  // A first arm is owed a window only where applying the new one retroactively
+  // would lapse a box the old one still called protected. Past that, arming is
+  // not evidence of anything and the box keeps the stamp it had.
+  return now - lastBackupAtMs > expectedBackupWindowMs(prev) ? prevArmedAtMs : now;
+}
+
+export async function writeSchedule(next: ClawKeepSchedule): Promise<{
+  schedule: ClawKeepSchedule;
+  armedAtMs: number;
+}> {
   await ensureDataDir();
   const sanitised = sanitiseSchedule(next);
-  const tmp = `${SCHEDULE_PATH}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(sanitised, null, 2), { mode: 0o600 });
+  const armedAtMs = await nextArmedAtMs(await readScheduleSnapshot(), sanitised);
+  // Per-call temp name (pid + monotonic counter), like writeStateFile: this is
+  // a read-modify-write now, and two saves from the same card must not
+  // interleave into one temp file and rename a torn schedule into place —
+  // readSchedule() would then fall back to DEFAULT_SCHEDULE and silently turn
+  // auto-backup off.
+  const tmp = `${SCHEDULE_PATH}.tmp.${process.pid}.${++scheduleWriteSeq}`;
+  // `armedAtMs` rides alongside the schedule rather than in it: it is not a
+  // setting the owner edits, and `sanitiseSchedule` drops it on the way back
+  // out so `ClawKeepSchedule` stays exactly what the PUT body may contain.
+  await fs.writeFile(tmp, JSON.stringify({ ...sanitised, armedAtMs }, null, 2), { mode: 0o600 });
   await fs.rename(tmp, SCHEDULE_PATH);
-  return sanitised;
+  // The stamp comes back with the schedule rather than being re-read: a second
+  // save landing between the rename and a re-read would pair this schedule with
+  // that one's stamp, and the card folds the pair into its local status.
+  return { schedule: sanitised, armedAtMs };
 }
+
+let scheduleWriteSeq = 0;
 
 /** Compute the next wall-clock ms a backup should fire, given a schedule
  * and a "now" reference. Pure function — exported for unit tests. */
@@ -699,16 +886,19 @@ export async function clearPassphrase(): Promise<{ removed: boolean }> {
 
 export async function getStatus(): Promise<ClawKeepStatus> {
   await ensureDataDir();
-  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, schedule, encryptionConfigured] = await Promise.all([
+  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, scheduleSnapshot, encryptionConfigured] = await Promise.all([
     readToken(),
     readConfigToml(),
     readStateFile(),
     getOpenclawInstalled(),
     getDaemonBin(),
     isRestoring(),
-    readSchedule(),
+    readScheduleSnapshot(),
     isEncryptionConfigured(),
   ]);
+  // Both halves off one read: the pair decides the verdict, so they must be
+  // the same version of the file. See readScheduleSnapshot().
+  const { schedule, armedAtMs: scheduleArmedAtMs } = scheduleSnapshot;
 
   const server = readServer(configToml);
   // A single-harness edition names its own agent. "dual" installs both and
@@ -754,6 +944,7 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     restoring,
     schedule,
     nextRunAtMs: computeNextRunMs(schedule, new Date()),
+    scheduleArmedAtMs,
     encryptionConfigured,
   };
 }
@@ -878,8 +1069,10 @@ export class RestoreNeedsPassphraseError extends ClawKeepError {
 
 const RESTORE_TIMEOUT_MS = 30 * 60 * 1000; // hard cap matches openclaw verify + multipart download
 // Generous cap for a full backup (openclaw backup create + multipart upload).
-// A hung clawkeepd must not hold a Next.js worker open forever.
-const BACKUP_TIMEOUT_MS = 60 * 60 * 1000;
+// A hung clawkeepd must not hold a Next.js worker open forever. Shared with
+// the UI's "is this `running` heartbeat still alive" rule, which is only
+// honest if it is the same number as the kill timer below.
+const BACKUP_TIMEOUT_MS = BACKUP_RUN_CAP_MS;
 
 function spawnCliJson<T>(
   bin: string,

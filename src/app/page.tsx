@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react"
 import dynamic from "next/dynamic";
 import * as kv from "@/lib/client-kv";
 import { useModalDialog } from "@/hooks/useModalDialog";
+import { useClawkeepShieldStatus } from "@/hooks/useClawkeepShieldStatus";
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
@@ -542,58 +543,15 @@ function ChromeDesktopInner() {
       .catch(() => { prefsLoaded.current = true; });
   }, []);
 
-  const [clawkeepStale, setClawkeepStale] = useState(false);
-  const [clawkeepUnconfigured, setClawkeepUnconfigured] = useState(false);
-  const [clawkeepBusy, setClawkeepBusy] = useState(false);
-  const [clawkeepRestoring, setClawkeepRestoring] = useState(false);
-  useEffect(() => {
-    let aborted = false;
-    let inFlight = false;
-    const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
-    const check = async () => {
-      // Skip ticks while a previous fetch is still outstanding so a slow
-      // device doesn't pile up overlapping requests.
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const res = await fetch("/setup-api/clawkeep", { cache: "no-store" });
-        if (!res.ok) return;
-        const data = await res.json() as {
-          paired?: boolean;
-          lastBackupAtMs?: number;
-          lastHeartbeatStatus?: string;
-          restoring?: boolean;
-        };
-        if (aborted) return;
-        // A box that was never paired has no backup that could be "overdue";
-        // it gets the calm not-set-up-yet shield, not the red alert. Only an
-        // explicit `paired: false` counts — a response missing the field keeps
-        // the old alert fallback rather than silencing a real overdue backup.
-        const unconfigured = data.paired === false;
-        const stale =
-          !unconfigured
-          && (!data.lastBackupAtMs
-            || Date.now() - data.lastBackupAtMs > STALE_AFTER_MS);
-        setClawkeepUnconfigured(unconfigured);
-        setClawkeepStale(stale);
-        setClawkeepBusy(data.lastHeartbeatStatus === "running");
-        setClawkeepRestoring(!!data.restoring);
-      } catch {
-        // Leave last-known state alone on transient failures so the shield
-        // doesn't flicker on a brief network blip.
-      } finally {
-        inFlight = false;
-      }
-    };
-    void check();
-    // Poll often enough for the shelf shield to start/stop pulsing within
-    // a few seconds of a backup beginning or finishing.
-    const id = window.setInterval(() => { void check(); }, 5_000);
-    return () => {
-      aborted = true;
-      window.clearInterval(id);
-    };
-  }, []);
+  // The desktop shelf's ClawKeep shield: one verdict, shared with the ClawKeep
+  // card and the `backup_status` tool, and re-judged on a clock of its own so
+  // it keeps ageing when the box stops answering. See the hook.
+  const {
+    protection: clawkeepProtection,
+    unconfigured: clawkeepUnconfigured,
+    busy: clawkeepBusy,
+    restoring: clawkeepRestoring,
+  } = useClawkeepShieldStatus();
 
   const wpFitStyle: React.CSSProperties = wpFit === "fill"
     ? { backgroundSize: "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat" }
@@ -2590,7 +2548,7 @@ function ChromeDesktopInner() {
           openSettingsSection("system");
         }}
         onClawKeepShieldClick={openClawKeepOrAiProvider}
-        clawkeepStatus={{ stale: clawkeepStale, unconfigured: clawkeepUnconfigured, busy: clawkeepBusy, restoring: clawkeepRestoring }}
+        clawkeepStatus={{ protection: clawkeepProtection, unconfigured: clawkeepUnconfigured, busy: clawkeepBusy, restoring: clawkeepRestoring }}
         onPowerClick={() => {
           setLauncherOpen(false);
           setTrayOpen((prev) => !prev);
