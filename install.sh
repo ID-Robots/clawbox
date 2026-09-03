@@ -5890,9 +5890,12 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-# Upper bound (the Hermes provisioning step only runs on hermes/dual), so the
-# progress counter never prints "[26/23]".
+# 26 unconditional steps, plus the Hermes provisioning step below, which runs
+# only on the hermes and dual editions. Edition-aware rather than a constant:
+# the openclaw constant made those editions print "[27/26]" on their last step,
+# and an upper bound would leave openclaw finishing at "[26/27]".
 TOTAL_STEPS=26
+if has_hermes_harness; then TOTAL_STEPS=$((TOTAL_STEPS + 1)); fi
 step=0
 log() {
   step=$((step + 1))
