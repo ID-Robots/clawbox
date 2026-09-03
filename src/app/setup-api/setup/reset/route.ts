@@ -58,7 +58,15 @@ const DATA_KEEP: ReadonlyArray<{ rel: string; keep?: ReadonlySet<string> }> = [
 ];
 const DATA_KEEP_NAMES = new Set(DATA_KEEP.map((entry) => entry.rel));
 
-const HERMES_KEEP = new Set(["hermes-agent"]);
+// The two named exceptions to the ~/.hermes wipe. Neither is owner state and
+// neither can be re-fetched on a reset device — it reboots into AP mode with no
+// internet. `bin` survives this pass as a CONTAINER only: HERMES_BIN_KEEP below
+// then wipes it down to the scanner. Rationale for both is at the
+// HOME_CONTENT_WIPE_KEEP entries.
+const HERMES_KEEP = new Set(["hermes-agent", "bin"]);
+
+/** The upstream pre-exec shell scanner, and nothing else in ~/.hermes/bin. */
+const HERMES_BIN_KEEP = new Set(["tirith"]);
 
 /** Delete all Ollama models so a factory reset starts with a clean slate. */
 async function deleteOllamaModels(): Promise<void> {
@@ -312,6 +320,28 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
     // agent already half deleted.
     rel: ".hermes",
     keep: HERMES_KEEP,
+  },
+  {
+    // ~/.hermes/bin holds `tirith`, the ~33 MB upstream binary the Hermes agent
+    // runs BEFORE every shell command (`security.tirith_*` in config.yaml). It
+    // is an upstream release artefact, not owner state, and the agent
+    // re-downloads it from a GitHub release only once the box has internet
+    // again — which a reset box does not have, because it reboots into AP mode.
+    // Wiping it therefore left the next owner's agent executing shell commands
+    // with pre-exec scanning off (upstream's default is fail-OPEN), for as long
+    // as the box stayed offline, and nothing on the device said so.
+    //
+    // The exception is the SCANNER, not the directory: unlike hermes-agent/,
+    // this one is wiped entry-by-entry down to `tirith`, so nothing a previous
+    // owner dropped beside it is inherited and no second whole preserved
+    // directory is created. An upstream binary that appears here later is
+    // removed by default and re-downloaded, which is the right way round.
+    //
+    // SAME KNOWN RESIDUAL as hermes-agent/ and no worse: a previous owner with
+    // a shell can overwrite the preserved file itself. Detecting that needs a
+    // trusted checksum the device does not have offline.
+    rel: ".hermes/bin",
+    keep: HERMES_BIN_KEEP,
   },
 ];
 

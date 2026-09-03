@@ -75,3 +75,54 @@ describe("HarnessPicker locked badge", () => {
     expect(screen.getByText("hermes")).toBeTruthy();
   });
 });
+
+/**
+ * The card is also where a Hermes box says whether the agent is scanning shell
+ * commands before it runs them. Both directions matter: a box whose scanner was
+ * wiped by a factory reset has to say so, and a box whose scanner is ready must
+ * stay silent, or the warning stops being read.
+ */
+describe("HarnessPicker shell-scan warning", () => {
+  const withScan = (shellScan: unknown) => ({ ...locked(true), shellScan });
+
+  it("warns when the agent is running shell commands without the scanner", async () => {
+    mockStatus(withScan({ state: "off", reason: "not-installed", failOpen: true, retrySuppressedUntil: null }));
+    render(<HarnessPicker />);
+
+    const warning = await screen.findByTestId("shell-scan-warning");
+    expect(warning.textContent).toContain("Shell command scanning is off");
+    expect(warning.textContent).toContain("without scanning");
+  });
+
+  it("says commands are BLOCKED, not merely unscanned, when the box fails closed", async () => {
+    mockStatus(withScan({ state: "off", reason: "not-installed", failOpen: false, retrySuppressedUntil: null }));
+    render(<HarnessPicker />);
+
+    const warning = await screen.findByTestId("shell-scan-warning");
+    expect(warning.textContent).toContain("Shell commands are blocked");
+  });
+
+  it("names the config switch when scanning was turned off deliberately", async () => {
+    mockStatus(withScan({ state: "off", reason: "disabled-by-config", failOpen: true, retrySuppressedUntil: null }));
+    render(<HarnessPicker />);
+
+    expect((await screen.findByTestId("shell-scan-warning")).textContent).toContain("tirith_enabled");
+  });
+
+  it("does NOT warn when the scanner is ready", async () => {
+    mockStatus(withScan({ state: "on", reason: "ok", failOpen: true, retrySuppressedUntil: null }));
+    render(<HarnessPicker />);
+
+    await screen.findByTestId("harness-locked-dot");
+    expect(screen.queryByTestId("shell-scan-warning")).toBeNull();
+  });
+
+  it("does NOT warn on a harness the route reports no scanner for", async () => {
+    // OpenClaw has no tirith; the route answers null and the card must be quiet.
+    mockStatus({ ...locked(true), shellScan: null });
+    render(<HarnessPicker />);
+
+    await screen.findByTestId("harness-locked-dot");
+    expect(screen.queryByTestId("shell-scan-warning")).toBeNull();
+  });
+});

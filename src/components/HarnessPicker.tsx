@@ -15,6 +15,47 @@ interface HarnessStatus {
   /** Single-harness edition (or dual without a premium license) → no switcher. */
   locked?: boolean;
   edition?: string;
+  /** Hermes pre-exec shell scanning. Null/absent on a harness that has none. */
+  shellScan?: ShellScanRow | null;
+}
+
+interface ShellScanRow {
+  state?: string;
+  reason?: string;
+  failOpen?: boolean;
+  retrySuppressedUntil?: string | null;
+}
+
+/**
+ * What to say about pre-exec shell scanning, or null when there is nothing to
+ * say. Returning null for a healthy box is the point: a box whose scanner is
+ * ready must not be warned at, or the warning stops meaning anything.
+ */
+function shellScanWarning(scan: ShellScanRow | null | undefined): { title: string; detail: string } | null {
+  if (!scan || scan.state === "on") return null;
+  if (scan.state === "unknown") {
+    return {
+      title: "Shell command scanning: unknown",
+      detail: "The agent's security settings could not be read, so this box cannot confirm that commands are scanned before they run.",
+    };
+  }
+  if (scan.reason === "disabled-by-config") {
+    return {
+      title: "Shell command scanning is off",
+      detail: "It was turned off in the agent's settings (security.tirith_enabled). Commands run without a pre-execution safety check.",
+    };
+  }
+  const until = scan.retrySuppressedUntil
+    ? ` The agent will not retry the download before ${new Date(scan.retrySuppressedUntil).toLocaleString()}.`
+    : "";
+  return {
+    title: scan.failOpen ? "Shell command scanning is off" : "Shell commands are blocked",
+    detail: scan.failOpen
+      // The honest wording for the factory-reset case: the control is off, the
+      // agent still runs commands, and the box needs internet to fix itself.
+      ? `The safety scanner is not installed. The agent downloads it the first time the box is online, and until then it runs shell commands without scanning them.${until}`
+      : `The safety scanner is not installed, and the agent is set to refuse shell commands without it. Connect the box to the internet so it can download the scanner.${until}`,
+  };
 }
 
 // Lets the user pick which agent harness (OpenClaw / Hermes) backs the device.
@@ -67,6 +108,7 @@ export default function HarnessPicker() {
   );
 
   const activeEntry = status?.harnesses?.find((h) => h.id === status.active);
+  const warning = shellScanWarning(status?.shellScan);
 
   return (
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
@@ -132,6 +174,21 @@ export default function HarnessPicker() {
           );
         })}
       </div>
+      )}
+      {warning && (
+        <div
+          data-testid="shell-scan-warning"
+          role="status"
+          className="mt-3 flex items-start gap-2 rounded-xl border border-amber-400/40 bg-amber-400/10 p-3"
+        >
+          <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 16 }} aria-hidden="true">
+            shield_with_heart
+          </span>
+          <span className="text-xs text-[var(--text-secondary)]">
+            <span className="block font-medium text-[var(--text-primary)]">{warning.title}</span>
+            {warning.detail}
+          </span>
+        </div>
       )}
       {error && <p className="text-xs text-red-400 mt-3">{error}</p>}
     </div>
