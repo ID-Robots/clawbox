@@ -80,8 +80,13 @@ vi.mock("@/lib/harness", async (importOriginal) => ({
  * that has to fall back to the console text rather than lose the reply.
  */
 let turnRecord: unknown = null;
+// Answering "" for the billing read keeps this file about reasoning, and
+// keeps the mock complete: an omitted export the route imports fails as a
+// missing-export error rather than as the assertion it was written for.
 vi.mock("@/lib/harness/hermes-turn-record", () => ({
   readHermesTurn: async () => turnRecord,
+  readHermesUsageMarks: async () => null,
+  readHermesBillingProvider: async () => "",
 }));
 
 let root: string;

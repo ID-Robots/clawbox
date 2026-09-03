@@ -22,6 +22,7 @@ const openTurnMock = vi.hoisted(() => vi.fn());
 const spawnMock = vi.hoisted(() => vi.fn());
 const appendMock = vi.hoisted(() => vi.fn());
 const readTurnMock = vi.hoisted(() => vi.fn());
+const billedMock = vi.hoisted(() => vi.fn());
 
 // Only the OPENING is faked. The rest of the module — `isQuietStreamError` and
 // the error class it recognises — is the real thing, because the route's
@@ -34,7 +35,19 @@ vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => ({
 }));
 vi.mock("child_process", () => ({ spawn: spawnMock }));
 vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock }));
-vi.mock("@/lib/harness/hermes-turn-record", () => ({ readHermesTurn: readTurnMock }));
+// `readHermesBillingProvider` answers "" throughout this file, which is a box
+// whose usage record cannot be read. That is deliberate and it is a CONDITION,
+// not a constant: the transport's silence about a provider is now the final
+// answer only when the harness has nothing to add, and where it does the route
+// fills the half (see `chat-served-model-dashboard.test.ts`). These cases are
+// about what the TRANSPORT says, so the other source is held quiet.
+vi.mock("@/lib/harness/hermes-turn-record", () => ({
+  readHermesTurn: readTurnMock,
+  // An empty baseline rather than null, so the route really does consult the
+  // billing record and `billedMock` is the thing deciding, not a skipped call.
+  readHermesUsageMarks: async () => new Set<string>(),
+  readHermesBillingProvider: billedMock,
+}));
 // `chatMediaRoot` is named here as well as `resolveInMediaRoot` because the
 // settle path asks for it now. Left out, the CALL throws synchronously rather
 // than rejecting, which `servableMediaRoot` survives — but then every case in
@@ -145,6 +158,8 @@ beforeEach(() => {
   appendMock.mockResolvedValue(true);
   readTurnMock.mockReset();
   readTurnMock.mockResolvedValue(null);
+  billedMock.mockReset();
+  billedMock.mockResolvedValue("");
 });
 
 describe("a streamed chat turn", () => {

@@ -653,6 +653,26 @@ export async function getModelOptions(opts: { refresh?: boolean } = {}): Promise
   return load(false);
 }
 
+/**
+ * The catalogue ONLY if this process already has it, and null otherwise. Never
+ * fetches, never starts a background refresh.
+ *
+ * For a caller that would rather answer without the catalogue than wait for it:
+ * a turn that has already been answered and is only deciding what to LABEL it
+ * (`billedProviderFor` in the chat route). `getModelOptions` awaits a live fetch
+ * on a cold process — a dashboard call plus three `hermes config get` spawns —
+ * and doing that after the reply has streamed holds the `done` frame, and the
+ * durable transcript write with it, for a check the same code waives whenever
+ * the fetch fails. Absent is treated exactly like failed there.
+ *
+ * The same `STALE_MS` bound `getModelOptions` uses to stop serving from cache:
+ * past it, this process's copy is not evidence about anything.
+ */
+export function cachedModelOptions(): ModelOptionsPayload | null {
+  if (!cached) return null;
+  return Date.now() - cached.fetchedAt < STALE_MS ? cached : null;
+}
+
 // ── Scoping (REQ 1) ──────────────────────────────────────────────────────────
 
 /** Every provider id the device currently accepts: the static allowlist plus
