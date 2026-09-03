@@ -11,8 +11,9 @@ describe("speechTextFor", () => {
     expect(speechTextFor(md)).toBe("Done\nBuilt the app\nSee the docs and npm test\nquoted");
   });
 
-  it("does not read out the mail-reference directives the bubble hides", () => {
+  it("does not read out the mail-reference directives the bubble hides, but reads prose about email", () => {
     expect(speechTextFor("Here are your last two emails.\nEMAIL:4471\nEMAIL:4468")).toBe("Here are your last two emails.");
+    expect(speechTextFor("Email: the invoice went out this morning.")).toBe("Email: the invoice went out this morning.");
   });
 
   it("drops bare URLs", () => {

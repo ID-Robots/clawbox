@@ -91,8 +91,8 @@ A project with its own server (a Next.js app on a port, a game engine) is
 still opened from a desktop icon: register a webapp (webapp_create, or the
 project's build) whose HTML sends the frame to the server, on the BOX'S OWN
 HOST — never localhost, which is the phone or laptop the desktop is viewed
-from:
-  <script>location.replace(location.protocol + "//" + location.hostname + ":4199/");</script>
+from — with PORT being the port that server really listens on:
+  <script>location.replace(location.protocol + "//" + location.hostname + ":" + PORT + "/");</script>
 The desktop frames the box's own host on any port. Keep the server listening
 on 0.0.0.0, and say in the reply which port it serves on.`;
 

@@ -187,7 +187,10 @@ export async function withSpeechLock(work: () => Promise<Response>): Promise<Res
 
 /** Run `work` as the one synthesis once the ones before it are done; 429 `busy` only when the queue is full. */
 export async function withSpeechQueue(work: () => Promise<Response>): Promise<Response> {
-  if (waiting >= MAX_WAITING) return refuse("The box is still speaking earlier replies — try again in a moment.", "busy", 429);
+  // `waiting` counts every reply that has entered the queue, the one being
+  // spoken included; the ones actually waiting are the rest.
+  const queued = waiting - (inFlight ? 1 : 0);
+  if (queued >= MAX_WAITING) return refuse("The box is still speaking earlier replies — try again in a moment.", "busy", 429);
   waiting += 1;
   try {
     return await asTheOneSynthesis(work);

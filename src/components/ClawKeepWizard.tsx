@@ -74,15 +74,25 @@ export default function ClawKeepWizard({
 
   useEffect(() => {
     if (!challenge || (pairPhase !== "pending" && pairPhase !== "configuring")) return;
+    // One poll at a time, and none of them outlives this challenge: a slow
+    // poll must not overlap the next tick, and an old challenge's late
+    // "complete" (after Cancel, or a new code) must not end the new one.
+    let disposed = false;
+    let inFlight = false;
+    const controller = new AbortController();
     const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const ps = await jsonOrError<PairPollResponse>(
           await fetch("/setup-api/clawkeep/pair/poll", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: "{}",
+            signal: controller.signal,
           }),
         );
+        if (disposed) return;
         if (ps.status === "complete") {
           stopPolling();
           setChallenge(null);
@@ -99,11 +109,17 @@ export default function ClawKeepWizard({
         }
       } catch {
         // the next tick retries
+      } finally {
+        inFlight = false;
       }
     };
     pollRef.current = window.setInterval(tick, Math.max(2, challenge.interval) * 1000);
     void tick();
-    return stopPolling;
+    return () => {
+      disposed = true;
+      controller.abort();
+      stopPolling();
+    };
   }, [challenge, pairPhase, onStatusChanged, stopPolling, t]);
 
   const startPairing = async () => {

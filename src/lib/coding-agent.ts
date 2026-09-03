@@ -2706,11 +2706,16 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         const n = (k: string) => (typeof u[k] === "number" ? (u[k] as number) : 0);
         return sum + n("inputTokens") + n("outputTokens") + n("cacheReadInputTokens") + n("cacheCreationInputTokens");
       }, 0);
-      // Reconciliation only: this segment has already reported its outcome,
-      // so crossing the ceiling here must not turn a finished run into a
-      // device stop (noteTokens would, and finishRun would then discard the
-      // outcome and settle the run as stopped and resumable).
-      if (total > run.tokensUsed) run.tokensUsed = total;
+      // A result with helpers still out is a SEGMENT: the process runs on
+      // and another segment follows, so the ceiling stays armed through it.
+      // The last result — nothing out — is reconciliation only: the run has
+      // reported its outcome, and crossing the ceiling here must not turn a
+      // finished run into a device stop (noteTokens would, and finishRun
+      // would then discard the outcome and settle it as stopped, resumable).
+      if (total > run.tokensUsed) {
+        if (state.openSubagents.size > 0) noteTokens(run, state, total - run.tokensUsed);
+        else run.tokensUsed = total;
+      }
     }
     if (Array.isArray(event.permission_denials)) {
       const described = event.permission_denials.map(describeDenial);

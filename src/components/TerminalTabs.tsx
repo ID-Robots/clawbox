@@ -103,12 +103,30 @@ export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
   const onAdd = useCallback(() => setState(addTab), []);
   const onClose = useCallback((id: number) => setState((prev) => closeTab(prev, id)), []);
   const onSelect = useCallback((id: number) => setState((prev) => (prev.activeId === id ? prev : { ...prev, activeId: id })), []);
+  // A tab list is one tab stop: the active tab is tabbable and the arrow
+  // keys walk the rest (roving tabindex), Home/End go to the ends. Moving
+  // selects, so the shell behind the tab comes to the front as the focus
+  // moves — the same as a click.
+  const onTabKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+    e.preventDefault();
+    setState((prev) => {
+      const index = prev.tabs.findIndex((tab) => tab.id === prev.activeId);
+      if (index < 0) return prev;
+      const next = e.key === "Home" ? 0
+        : e.key === "End" ? prev.tabs.length - 1
+        : e.key === "ArrowRight" ? (index + 1) % prev.tabs.length
+        : (index - 1 + prev.tabs.length) % prev.tabs.length;
+      return next === index ? prev : { ...prev, activeId: prev.tabs[next].id };
+    });
+  }, []);
 
   return (
     <div className="flex flex-col h-full" style={{ background: "#0d0d1a" }} data-testid="terminal-tabs">
       <div
         role="tablist"
         aria-label="Terminal tabs"
+        onKeyDown={onTabKeyDown}
         className="flex items-stretch shrink-0 overflow-x-auto border-b"
         style={{ background: "#12122a", borderColor: "rgba(255,255,255,0.06)" }}
       >
@@ -129,6 +147,7 @@ export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
                 data-testid={`terminal-tab-${tab.id}`}
                 data-active={selected ? "true" : "false"}
                 tabIndex={selected ? 0 : -1}
+                ref={(el) => { if (selected && el && document.activeElement?.getAttribute("role") === "tab") el.focus(); }}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => onSelect(tab.id)}
                 onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(tab.id); } }}

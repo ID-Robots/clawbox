@@ -76,8 +76,8 @@ describe("NewAppWizardCard — an existing project", () => {
   it("lists the owner's projects, and hands the chat a message that resumes the chosen one", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(PROJECTS), { status: 200, headers: { "content-type": "application/json" } })));
     const heard: string[] = [];
-    const listener = (e: Event) => heard.push(String((e as CustomEvent<{ text?: string }>).detail?.text ?? ""));
-    window.addEventListener(CHAT_MESSAGE_EVENT, listener);
+    const onChatMessage = (e: Event) => heard.push(String((e as CustomEvent<{ text?: string }>).detail?.text ?? ""));
+    window.addEventListener(CHAT_MESSAGE_EVENT, onChatMessage);
     const onClose = vi.fn();
     try {
       render(<NewAppWizardCard onClose={onClose} />);
@@ -96,7 +96,7 @@ describe("NewAppWizardCard — an existing project", () => {
       expect(heard[0]).not.toContain("Create a new ClawBox app");
       expect(onClose).toHaveBeenCalledTimes(1);
     } finally {
-      window.removeEventListener(CHAT_MESSAGE_EVENT, listener);
+      window.removeEventListener(CHAT_MESSAGE_EVENT, onChatMessage);
     }
   });
 

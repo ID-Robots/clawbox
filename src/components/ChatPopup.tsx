@@ -78,6 +78,8 @@ const MAX_QUEUED_SENDS = 20
 
 /** How many spoken replies' audio the chat keeps alive at once; older ones lose their player. */
 const SPOKEN_REPLIES_KEPT = 12
+/** The most one ask for a spoken reply may take, queue and cold start included. */
+const SPEAK_REPLY_TIMEOUT_MS = 150_000
 
 /** A turn waiting its go: what to send, and whether it was SPOKEN (then the reply is spoken back). */
 type QueuedSend = { id: string; text: string; attachments: ChatAttachment[]; voice?: boolean }
@@ -2856,6 +2858,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: words }),
+          // A deadline, so a stalled synthesis cannot hold the chain of
+          // spoken replies forever: the box's own budget is a cold Kokoro
+          // (up to 40 s) behind up to three queued replies.
+          signal: AbortSignal.timeout(SPEAK_REPLY_TIMEOUT_MS),
         })
         if (res.status !== 429) break
         await new Promise((resolve) => setTimeout(resolve, 3000 * (attempt + 1)))
