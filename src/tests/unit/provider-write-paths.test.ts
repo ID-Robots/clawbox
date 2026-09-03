@@ -39,10 +39,11 @@ vi.mock("@/lib/local-ai-runtime", () => ({
   getLocalAiProxyRootUrl: () => "http://127.0.0.1",
   getLocalAiOpenAiBaseUrl: () => "http://127.0.0.1/setup-api/local-ai/ollama/v1",
 }));
+const invalidateMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-model-options", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-model-options")>()),
   getModelOptions: optionsMock,
-  invalidateModelOptions: vi.fn(),
+  invalidateModelOptions: invalidateMock,
 }));
 
 import { applyCloudProviderKeyToHermes } from "@/lib/hermes-cloud-provider";
@@ -99,6 +100,7 @@ beforeEach(() => {
   readConfigMock.mockResolvedValue(null);
   storeGetMock.mockReset();
   storeGetMock.mockResolvedValue(null);
+  invalidateMock.mockClear();
   _resetLocalAiReconcileForTests();
   _resetClawaiModelsReconcileForTests();
 });
@@ -170,6 +172,11 @@ describe("declaring a catalogue Hermes' own pickers read", () => {
   // models it lists change. Invalidate the browser's catalogue, ask the agent
   // for nothing. This is the same rule `reconcileLocalAiWithHermes` already
   // followed by calling the INNER write.
+  //
+  // BOTH HALVES ARE ASSERTED, because "ask the agent for nothing" on its own is
+  // also what a repair that invalidated NOTHING looks like: the browser would
+  // keep serving the catalogue from before the write, and this suite — which
+  // exists to own that population — would not notice.
   it("asks the agent for nothing when the ClawBox AI catalogue is declared", async () => {
     catalogueGrows(["openrouter", "clawai"], ["openrouter", "clawai"], "clawai");
     // ONE read of the whole `providers.clawai` block: Hermes decides what
@@ -191,6 +198,7 @@ describe("declaring a catalogue Hermes' own pickers read", () => {
     await reconcileClawaiModelsWithHermes();
     expect(cliMock.mock.calls.some((c) => (c[0] as string[])[1] === "set")).toBe(true);
     expect(reloadCount()).toBe(0);
+    expect(invalidateMock).toHaveBeenCalled();
   });
 
   it("asks the agent for nothing when the local catalogue is declared", async () => {
@@ -208,5 +216,6 @@ describe("declaring a catalogue Hermes' own pickers read", () => {
     await reconcileLocalAiWithHermes();
     expect(patchMock).toHaveBeenCalledWith({ set: { "providers.clawlocal.models": "qwen3:8b" } });
     expect(reloadCount()).toBe(0);
+    expect(invalidateMock).toHaveBeenCalled();
   });
 });

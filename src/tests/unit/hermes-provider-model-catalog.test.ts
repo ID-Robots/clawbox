@@ -37,7 +37,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const cliMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
-vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
+const invalidateMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: invalidateMock }));
 vi.mock("@/lib/config-store", () => ({ setMany: vi.fn() }));
 vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: vi.fn() }));
 vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn(async () => ({ ready: false })) }));
@@ -159,6 +160,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     _resetClawaiModelsReconcileForTests();
     cliMock.mockReset();
     cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
+    invalidateMock.mockClear();
     // The repair holds a FAILED attempt for a minute, so a test that proves a
     // retry has to say how much later that retry is.
     vi.useFakeTimers();
@@ -296,6 +298,104 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
       CLAWBOX_AI_FLASH_MODEL_ID,
       CLAWBOX_AI_PRO_MODEL_ID,
     ]);
+  });
+
+  it("declares a catalogue for a pin that pins nothing", async () => {
+    // `discover_models: false` with NO `models:` is not a pin — there is
+    // nothing there to honour. Hermes takes `_discovery_allowed = false`
+    // (model_switch.py:3788), runs no probe, and `_declared_model_ids` finds no
+    // id, so the row is EMPTY: the exact "clawai (0)" this PR exists to fix,
+    // reached by the one path that used to walk away logging "pinned".
+    providerBlock({ ...LINKED, discover_models: false });
+    await reconcileClawaiModelsWithHermes();
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
+      CLAWBOX_AI_FLASH_MODEL_ID,
+      CLAWBOX_AI_PRO_MODEL_ID,
+    ]);
+  });
+
+  it("declares a catalogue for a pin holding an empty list", async () => {
+    // Same hole, the other spelling.
+    providerBlock({ ...LINKED, discover_models: false, models: [] });
+    await reconcileClawaiModelsWithHermes();
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
+      CLAWBOX_AI_FLASH_MODEL_ID,
+      CLAWBOX_AI_PRO_MODEL_ID,
+    ]);
+  });
+
+  it("still honours a pin that actually pins something", async () => {
+    // The boundary the two above must not move: with discovery off AND ids
+    // present, `_declared_model_ids` reads even a mapping's keys, so the
+    // keyboard shows them and this owner has nothing wrong with their box.
+    providerBlock({
+      ...LINKED,
+      discover_models: false,
+      models: { [CLAWBOX_AI_FLASH_MODEL_ID]: { context_length: 65536 } },
+    });
+    await reconcileClawaiModelsWithHermes();
+    expect(wrote()).toBe(false);
+  });
+
+  it("reads `discover_models` exactly as Hermes coerces it", async () => {
+    // Hermes does a bare `discover.lower() not in {"false","no","0"}`
+    // (model_switch.py:3371 and :3603) — no trim. So a quoted " false " is
+    // discovery ON to Hermes, which means the empty probe wipes the block and
+    // the repair is needed. A mirror that trimmed would decline to touch it.
+    providerBlock({
+      ...LINKED,
+      discover_models: " false ",
+      models: { [CLAWBOX_AI_FLASH_MODEL_ID]: { context_length: 65536 } },
+    });
+    await reconcileClawaiModelsWithHermes();
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
+      CLAWBOX_AI_FLASH_MODEL_ID,
+      CLAWBOX_AI_PRO_MODEL_ID,
+    ]);
+  });
+
+  it("says so when the block carries no endpoint", async () => {
+    // A `providers.clawai` with no `base_url` is not an ordinary box — it is an
+    // invalid state — so unlike the two ordinary verdicts it earns a line. The
+    // line names the provider and nothing else: the block it came from carries
+    // `api_key`.
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      providerBlock({ api_mode: "openai" });
+      await reconcileClawaiModelsWithHermes();
+      expect(wrote()).toBe(false);
+      expect(log).toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("treats a write the CLI stored as a STRING as a failure", async () => {
+    // `hermes config set k '["a","b"]'` exits 0 EVEN WHEN its structured parse
+    // did not yield a list — it prints `…storing as string.` to stderr and
+    // saves the literal text (hermes_cli/config.py:5518-5530). Hermes then
+    // reads that string as a one-id allowlist and the keyboard offers a single
+    // bogus model. An exit code is not an outcome.
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (args[1] === "set") {
+        return {
+          code: 0,
+          stdout: "",
+          stderr: "Warning: value for 'providers.clawai.models' looks like a"
+            + " list/mapping but parsed as str; storing as string.",
+        };
+      }
+      return { code: 0, stdout: `${JSON.stringify(LINKED)}\n`, stderr: "" };
+    });
+    await reconcileClawaiModelsWithHermes();
+    // Not claimed: the catalogue cache is only dropped for a write that landed.
+    expect(invalidateMock).not.toHaveBeenCalled();
+
+    const firstAttempt = cliMock.mock.calls.filter((c) => (c[0] as string[])[1] === "set").length;
+    vi.advanceTimersByTime(60_001);
+    await reconcileClawaiModelsWithHermes();
+    expect(cliMock.mock.calls.filter((c) => (c[0] as string[])[1] === "set").length)
+      .toBeGreaterThan(firstAttempt);
   });
 
   it("declares the catalogue over an empty list", async () => {

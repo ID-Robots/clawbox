@@ -441,14 +441,23 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
       ["config", "set", `providers.${CLAWAI_PROVIDER}.models`, JSON.stringify(CLAWBOX_AI_CHAT_MODEL_IDS)],
       { timeoutMs: 15_000 },
     );
-    if (written.code !== 0) {
+    // AN EXIT CODE IS NOT AN OUTCOME. `hermes config set k '["a","b"]'` exits 0
+    // even when its structured parse did not yield a list: it prints
+    // "…storing as string." to stderr and saves the literal text
+    // (hermes_cli/config.py:5518-5530). Hermes then reads that string as a
+    // ONE-ID allowlist, so the keyboard would offer a single bogus model and
+    // this repair would have latched "done" over it. Not reachable on the build
+    // `HERMES_PIN_COMMIT` installs — the coercion chain there yields a real
+    // list — which is exactly why it is worth a guard rather than a comment.
+    const storedAsText = /storing as string/i.test(written.stderr ?? "");
+    if (written.code !== 0 || storedAsText) {
       // A repair that could not be made is reported, never claimed: the picker
-      // keeps showing what the box actually has, and the next request tries
+      // keeps showing what the box actually has, and a later request tries
       // again. No credential is in this argv — the value is a constant model
       // list — so the stream can be logged whole.
       console.warn(
         "[hermes/clawai] could not declare the ClawBox AI catalogue",
-        written.code,
+        storedAsText ? "(the CLI stored it as text, not a list)" : `exit ${written.code}`,
         written.stderr?.trim() || written.stdout?.trim() || "",
       );
       return unlatch();
@@ -557,9 +566,24 @@ async function clawaiCatalogueVerdict(): Promise<ClawaiVerdict> {
   const row = entry as Record<string, unknown>;
 
   if (!(typeof row.base_url === "string" && row.base_url.trim())) {
-    return { action: "leave", reason: "" };
+    // `models:` beside no endpoint is a picker row offering models with nowhere
+    // to send them — the orphan the local provider's removal exists to avoid —
+    // so this is still "leave". But a block that exists with no `base_url` is
+    // an INVALID state, not an ordinary one, and the two verdicts that stay
+    // silent are silent because every box on the fleet is in them. The line
+    // names the provider and nothing else: the block it came from carries
+    // `api_key`.
+    return { action: "leave", reason: `providers.${CLAWAI_PROVIDER} carries no endpoint` };
   }
-  if (!hermesDiscoversModels(row)) {
+  // A PIN THAT PINS NOTHING IS NOT A PIN. `discover_models: false` only protects
+  // something if there is something to protect: with discovery off Hermes runs
+  // no probe (`_discovery_allowed`, model_switch.py:3788) and shows exactly the
+  // ids `_declared_model_ids` finds, so the flag beside an absent or empty
+  // `models:` leaves the row EMPTY — the "clawai (0)" this repair exists to
+  // fix, reached down the one path that used to walk away calling it a pin.
+  // `_declared_model_ids` is the right question here rather than the allowlist
+  // one, because with discovery off even a mapping's keys are shown.
+  if (!hermesDiscoversModels(row) && hermesDeclaresAnyId(row.models)) {
     return { action: "leave", reason: "the catalogue is pinned with discover_models: false" };
   }
   if (hermesOwnsCatalogue(row)) {
@@ -579,8 +603,30 @@ async function clawaiCatalogueVerdict(): Promise<ClawaiVerdict> {
 function hermesDiscoversModels(row: Record<string, unknown>): boolean {
   const flag = row.discover_models;
   if (flag === undefined) return true;
-  if (typeof flag === "string") return !["false", "no", "0"].includes(flag.trim().toLowerCase());
+  // `discover.lower() not in {"false","no","0"}` — NO trim, deliberately. A
+  // quoted " false " is discovery ON to Hermes, so the empty probe wipes the
+  // block and the repair IS needed; trimming here would have ClawBox decline to
+  // touch a box Hermes is about to empty.
+  if (typeof flag === "string") return !["false", "no", "0"].includes(flag.toLowerCase());
   return Boolean(flag);
+}
+
+/**
+ * Does this `models:` yield any id at all? `_declared_model_ids`,
+ * model_switch.py:61 — a non-empty string, any list entry that resolves to an
+ * id, or a mapping's keys, skipping the two sentinel keys Hermes writes for
+ * itself.
+ *
+ * Deliberately WIDER than `isHermesAllowlist`: a mapping is not an allowlist,
+ * but its keys are still what a pinned (discovery-off) row displays, and the
+ * only question here is whether anything would be shown.
+ */
+function hermesDeclaresAnyId(value: unknown): boolean {
+  if (isHermesAllowlist(value)) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.keys(value).some(
+    (key) => key !== "__explicit_model_allowlist__" && key !== "__discovered_model_catalog__",
+  );
 }
 
 /**
