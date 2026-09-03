@@ -22,7 +22,7 @@
  * SERVER ONLY.
  */
 import { get, set } from "@/lib/config-store";
-import { readConfig, writeConfig, type OpenClawConfig } from "@/lib/openclaw-config";
+import { openclawIsAbsent, readConfigForWrite, writeConfig, type OpenClawConfig } from "@/lib/openclaw-config";
 
 /** The config-store key. */
 export const VOICE_AUTO_REPLY_KEY = "voice_auto_reply";
@@ -72,9 +72,19 @@ function ttsBlockOf(config: OpenClawConfig, home: "tts" | "messages.tts"): Recor
  * there is either this switch's own last write or the owner's hand edit
  * ("always", "tagged"), and neither is overwritten at boot. Answers whether
  * it wrote, so the caller knows whether a gateway restart is owed.
+ *
+ * Read with the WRITER's reader: `readConfig` answers `{}` to every failure
+ * (EACCES, a file caught half-written by a concurrent `config set`, a hand
+ * edit with a trailing comma), and writing that `{}` back would replace the
+ * whole config with one key. `readConfigForWrite` throws instead, which the
+ * boot loop logs. A box with no config yet (`{}` after an ENOENT — nothing
+ * to seed into) and the Hermes edition (no openclaw.json at all) are left
+ * to onboarding.
  */
 export async function ensureVoiceAutoReplyMode(): Promise<boolean> {
-  const config = await readConfig();
+  if (openclawIsAbsent()) return false;
+  const config = await readConfigForWrite();
+  if (Object.keys(config).length === 0) return false;
   const home = ttsHomeOf(config);
   const block = ttsBlockOf(config, home);
   if (block && typeof block.auto === "string" && block.auto) return false;

@@ -86,7 +86,7 @@ export function PairChallengeCard({
         <div className="px-4 py-3 bg-[var(--bg-surface)] rounded-lg inline-flex items-center gap-2">
           <span
             className="text-2xl font-mono font-bold text-gray-100 tracking-widest select-all"
-            aria-label={t("clawkeep.pair.codeAriaLabel")}
+            aria-label={`${t("clawkeep.pair.codeAriaLabel")}: ${code}`}
           >
             {code}
           </span>

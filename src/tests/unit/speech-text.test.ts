@@ -11,6 +11,10 @@ describe("speechTextFor", () => {
     expect(speechTextFor(md)).toBe("Done\nBuilt the app\nSee the docs and npm test\nquoted");
   });
 
+  it("does not read out the mail-reference directives the bubble hides", () => {
+    expect(speechTextFor("Here are your last two emails.\nEMAIL:4471\nEMAIL:4468")).toBe("Here are your last two emails.");
+  });
+
   it("drops bare URLs", () => {
     expect(speechTextFor("go to https://clawbox.com/x now ok")).toBe("go to now ok");
   });

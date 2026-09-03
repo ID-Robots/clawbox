@@ -53,8 +53,13 @@ export async function readLocalTtsTimeoutMs(script: string = LOCAL_TTS_SCRIPT): 
     env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: process.env.HOME ?? "/home/clawbox" },
   });
   if (run.code !== 0) return null;
-  const value = Number.parseInt(run.stdout.trim(), 10);
-  return Number.isFinite(value) && value > 0 ? value : null;
+  // Decimal digits only, positive, a safe integer: `1.5` and `100ms` are not
+  // timeouts, and `0` would let OpenClaw kill the script at once. The same
+  // rule install.sh's helper applies, so both writers refuse the same output.
+  const raw = run.stdout.trim();
+  if (!/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 export type WireLocalVoiceResult =

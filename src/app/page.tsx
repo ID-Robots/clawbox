@@ -1183,7 +1183,7 @@ function ChromeDesktopInner() {
     return visibleWindows.reduce((a, b) => (a.zIndex > b.zIndex ? a : b)).id;
   }, [openWindows]);
 
-  const openApp = useCallback((appId: string, forceNew = false) => {
+  const openApp = useCallback((appId: string, forceNew = false, meta?: Record<string, string>) => {
     const allApps = getAllApps();
     const app = allApps.find((a) => a.id === appId);
     if (!app) return;
@@ -1250,7 +1250,7 @@ function ChromeDesktopInner() {
     const windowId = `${appId}-${Date.now()}`;
     setOpenWindows((prev) => [
       ...prev,
-      { id: windowId, appId, zIndex: nextZIndex, minimized: false },
+      { id: windowId, appId, zIndex: nextZIndex, minimized: false, ...(meta ? { meta } : {}) },
     ]);
     setNextZIndex((z) => z + 1);
   }, [openWindows, nextZIndex, getAllApps]);
@@ -1322,9 +1322,6 @@ function ChromeDesktopInner() {
     return () => window.removeEventListener(OPEN_APP_EVENT, handler);
   }, []);
 
-  // Typed into the next terminal window that opens — see clawbox:open-terminal.
-  const [terminalCommand, setTerminalCommand] = useState<string | null>(null);
-
   // The Coding Agent app asks for a terminal on a specific run: a live tail
   // while it works, or `claude-ds --resume` once it has finished. Through
   // openAppRef like the OPEN_APP_EVENT handler above: this listener used to
@@ -1336,10 +1333,12 @@ function ChromeDesktopInner() {
     const handleOpenTerminal = (e: Event) => {
       const command = (e as CustomEvent<{ command?: string }>).detail?.command;
       if (typeof command !== "string" || !command) return;
-      setTerminalCommand(command);
       // forceNew: a second run must get its own terminal rather than typing
-      // into one already busy following the first.
-      openAppRef.current("terminal", true);
+      // into one already busy following the first. The command rides on THAT
+      // window's record — it used to sit in shared state, so every Terminal
+      // opened later, a plain one from the shelf included, retyped the last
+      // run's command into its shell.
+      openAppRef.current("terminal", true, { command });
     };
     window.addEventListener("clawbox:open-terminal", handleOpenTerminal);
     return () => window.removeEventListener("clawbox:open-terminal", handleOpenTerminal);
@@ -1781,7 +1780,7 @@ function ChromeDesktopInner() {
           </div>
         );
       case "terminal":
-        return <TerminalTabs initialCommand={terminalCommand ?? undefined} />;
+        return <TerminalTabs initialCommand={_meta?.command} />;
       case "coding":
         return <CodingAgentApp />;
       case "store":

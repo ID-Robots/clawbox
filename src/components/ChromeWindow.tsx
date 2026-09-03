@@ -15,15 +15,14 @@ import {
 /** Flat fallback for the CSS `calc()` that maximizes a window. */
 const SHELF_HEIGHT = 56;
 /**
- * The breathing room around a window while the chat is docked. With the chat
- * on the right the desktop is a two-pane layout, and every window fills the
- * other pane — like a terminal beside an editor — rather than floating at
- * whatever size it last had: the owner asked for exactly this, "make all
- * windows expand with a small margin around all corners". The margin keeps
- * the rounded corners and the wallpaper edge, so a filled pane still reads as
- * a window and not as a second desktop.
+ * The breathing room between a MAXIMIZED window and a docked chat. A docked
+ * chat narrows the desktop by `rightInset`; a maximized window used to run
+ * right up to the chat's edge, and for a while every window was laid out to
+ * fill the pane whether or not it was maximized — the owner asked for the
+ * windows back (their own size and place while the chat is docked) and for
+ * this gap on the one that is maximized.
  */
-export const DOCK_FILL_MARGIN = 10;
+export const DOCK_GAP = 10;
 
 interface ChromeWindowProps {
   title: string;
@@ -83,10 +82,6 @@ export default function ChromeWindow({
   const [size, setSize] = useState(() => initialSize || getSavedSize(appId, defaultWidth, defaultHeight));
   const [position, setPosition] = useState(() => initialPosition || getInitialPosition(size.width, size.height, rightInset));
   const [maximized, setMaximized] = useState(false);
-  // A docked chat lays every window out itself (see DOCK_FILL_MARGIN): no
-  // dragging, no resizing, no snapping while it is. The window's own
-  // geometry is kept underneath and comes back the moment the chat undocks.
-  const dockFill = rightInset > 0;
   const [snapped, setSnapped] = useState<SnapZone>(null);
   const [snapPreview, setSnapPreview] = useState<SnapZone>(null);
   const [closing, setClosing] = useState(false);
@@ -161,7 +156,7 @@ export default function ChromeWindow({
   }, [minimized]);
 
   const handleDragStart = useCallback((e: React.MouseEvent | React.TouchEvent) => {
-    if (maximized || dockFill) return;
+    if (maximized) return;
     e.preventDefault();
     const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
     const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
@@ -193,10 +188,10 @@ export default function ChromeWindow({
     }
     setIsDragging(true);
     onFocus();
-  }, [maximized, dockFill, snapped, position.x, position.y, onFocus]);
+  }, [maximized, snapped, position.x, position.y, onFocus]);
 
   const handleResizeStart = useCallback((edge: string, e: React.MouseEvent | React.TouchEvent) => {
-    if (maximized || dockFill) return;
+    if (maximized) return;
     e.preventDefault();
     e.stopPropagation();
     const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
@@ -213,7 +208,7 @@ export default function ChromeWindow({
     };
     if (snapped) setSnapped(null);
     onFocus();
-  }, [maximized, dockFill, snapped, size.width, size.height, position.x, position.y, onFocus]);
+  }, [maximized, snapped, size.width, size.height, position.x, position.y, onFocus]);
 
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -375,24 +370,17 @@ export default function ChromeWindow({
 
   if (minimized && !restoring) return null;
 
-  const windowStyle = dockFill
-    // The right margin is the gap the chat floats in, already inside
-    // rightInset; the other three are DOCK_FILL_MARGIN.
-    ? {
-      left: DOCK_FILL_MARGIN,
-      top: DOCK_FILL_MARGIN,
-      width: `calc(100% - ${rightInset + DOCK_FILL_MARGIN}px)`,
-      height: `calc(100vh - ${SHELF_HEIGHT}px - env(safe-area-inset-bottom, 0px) - ${DOCK_FILL_MARGIN * 2}px)`,
-    }
-    : maximized
-      ? { left: 0, top: 0, width: `calc(100% - ${rightInset}px)`, height: `calc(100vh - ${SHELF_HEIGHT}px - env(safe-area-inset-bottom, 0px))` }
+  // Maximized beside a docked chat: the chat's inset plus DOCK_GAP, so the
+  // window does not touch the chat.
+  const maximizedWidth = `calc(100% - ${rightInset > 0 ? rightInset + DOCK_GAP : 0}px)`;
+  const windowStyle = maximized
+    ? { left: 0, top: 0, width: maximizedWidth, height: `calc(100vh - ${SHELF_HEIGHT}px - env(safe-area-inset-bottom, 0px))` }
       : { left: position.x, top: position.y, width: size.width, height: size.height };
 
   return (
     <div
       ref={windowRef}
       data-testid={appId ? `chrome-window-${appId}` : undefined}
-      data-dock-fill={dockFill ? "true" : undefined}
       className={`fixed flex flex-col overflow-hidden ${
         opening ? "chrome-window-opening" : ""
       } ${closing ? "chrome-window-closing" : ""} ${
@@ -401,7 +389,7 @@ export default function ChromeWindow({
       style={{
         ...windowStyle,
         zIndex,
-        borderRadius: (maximized || snapped) && !dockFill ? 0 : 8,
+        borderRadius: maximized || snapped ? 0 : 8,
         boxShadow: isActive
           ? "0 12px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08)"
           : "0 4px 20px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.04)",
@@ -420,11 +408,11 @@ export default function ChromeWindow({
             ? "linear-gradient(180deg, #292d36 0%, #242830 100%)"
             : "#1f2228",
           borderBottom: "1px solid rgba(255, 255, 255, 0.06)",
-          borderRadius: (maximized || snapped) && !dockFill ? 0 : "8px 8px 0 0",
+          borderRadius: maximized || snapped ? 0 : "8px 8px 0 0",
         }}
         onMouseDown={handleDragStart}
         onTouchStart={handleDragStart}
-        onDoubleClick={dockFill ? undefined : handleMaximize}
+        onDoubleClick={handleMaximize}
       >
         {/* Left: title */}
         <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -443,9 +431,7 @@ export default function ChromeWindow({
             <span className="material-symbols-rounded text-white/60" style={{ fontSize: 16 }}>minimize</span>
           </button>
 
-          {/* Maximize — not offered while a docked chat lays the window out:
-              it already fills the pane, and the button would toggle nothing. */}
-          {!dockFill && (
+          {/* Maximize */}
           <button
             onClick={handleMaximize}
             className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
@@ -454,7 +440,6 @@ export default function ChromeWindow({
           >
             <span className="material-symbols-rounded text-white/60" style={{ fontSize: 16 }}>{maximized ? "filter_none" : "crop_square"}</span>
           </button>
-          )}
 
           {/* Close */}
           <button
@@ -471,9 +456,8 @@ export default function ChromeWindow({
       {/* Content */}
       <div ref={contentRef} data-chrome-window-content="true" className="flex-1 overflow-hidden bg-[#181c22]">{children}</div>
 
-      {/* Resize handles — hidden when maximized/snapped, and while a docked
-          chat lays the window out. */}
-      {!maximized && !snapped && !dockFill && (
+      {/* Resize handles — hidden when maximized/snapped */}
+      {!maximized && !snapped && (
         <>
           {/* Edges */}
           <div className="absolute top-0 left-2 right-2 h-1 cursor-n-resize" onMouseDown={(e) => handleResizeStart("t", e)} onTouchStart={(e) => handleResizeStart("t", e)} />

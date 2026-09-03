@@ -5,7 +5,8 @@ import { buildTtsInventory, KOKORO_STAMP } from "@/lib/local-models";
 import { openclawIsAbsent, readConfig } from "@/lib/openclaw-config";
 import { speechTextFor, SPEECH_MAX_CHARS } from "@/lib/speech-text";
 import { getVoiceAutoReply } from "@/lib/voice-reply";
-import { refuse, speakThroughChain, withSpeechLock } from "@/lib/voice-speak";
+import { isSameOriginRequest } from "@/lib/same-origin";
+import { refuse, speakThroughChain, withSpeechQueue } from "@/lib/voice-speak";
 import { buildVoiceOutputStatus, localCommandPath, type LocalVoiceProbe } from "@/lib/voice-output";
 import { readVoiceState } from "@/lib/voice-output-store";
 
@@ -38,6 +39,11 @@ async function exists(p: string): Promise<boolean> {
 export async function POST(req: Request) {
   if (openclawIsAbsent()) return refuse("Voice output is not part of this edition.", "edition", 409);
   if (!(await getVoiceAutoReply())) return refuse("Spoken replies are switched off in Settings → Voice.", "switched_off", 409);
+  // From OUR page only: the owner's cookie rides on a POST any other site
+  // fires at the box, and a spoken reply through the cloud voice is billed
+  // per character (same-origin.ts). curl and the MCP server send no Origin
+  // and pass; they are gated by their own credential.
+  if (!isSameOriginRequest(req)) return refuse("Spoken replies only work from this ClawBox's own pages.", "cross_origin", 403);
   let body: unknown;
   try {
     body = await req.json();
@@ -48,7 +54,8 @@ export async function POST(req: Request) {
   const text = typeof raw === "string" ? speechTextFor(raw, SPEECH_MAX_CHARS) : "";
   if (!text) return refuse("Nothing to say.", "bad_text", 400);
 
-  return withSpeechLock(async () => {
+  // Waits for an earlier reply rather than refusing: see withSpeechQueue.
+  return withSpeechQueue(async () => {
     try {
       const [config, models, state] = await Promise.all([readConfig(), buildTtsInventory(), readVoiceState()]);
       const installed = models.filter((m) => m.kind === "tts" && m.installed);

@@ -188,10 +188,19 @@ describe("routing to ClawBox AI", () => {
     expect(capturedEnv().ANTHROPIC_AUTH_TOKEN).toBe("claw_test_token");
   });
 
+  it("keeps a cloned repository's own settings out of the terminal, unless the caller chose its sources", () => {
+    // The trust answer is seeded for whatever folder the harness starts in,
+    // so a project's .claude/settings.json (its hooks, its grants) would load
+    // into the owner's terminal the moment it opens there; the delegated runs
+    // already restrict sources the same way.
+    runWrapper({}, ["--setting-sources", "project", "-p", "x"]);
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n--setting-sources\nproject\n-p\nx\n");
+  });
+
   it("passes its arguments through to Claude Code untouched on a pinned level", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_effort: "max" });
     runWrapper({}, ["-p", "explain this repo"]);
-    expect(readFileSync(claudeLog, "utf-8")).toBe("-p\nexplain this repo\n");
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--setting-sources\nuser\n-p\nexplain this repo\n");
   });
 });
 
@@ -208,7 +217,7 @@ describe("routing to ClawBox AI", () => {
 describe("effort", () => {
   it("asks for ultracode with the flag and no env pin when nothing else was chosen", () => {
     runWrapper({}, ["-p", "explain this repo"]);
-    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n-p\nexplain this repo\n");
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n--setting-sources\nuser\n-p\nexplain this repo\n");
     expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
   });
 
@@ -216,25 +225,25 @@ describe("effort", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_effort: "max" });
     runWrapper({}, ["--resume", "abc"]);
     expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBe("max");
-    expect(readFileSync(claudeLog, "utf-8")).toBe("--resume\nabc\n");
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--setting-sources\nuser\n--resume\nabc\n");
   });
 
   it("lets the run's own setting outrank the stored one", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_effort: "ultracode" });
     runWrapper({ CLAUDE_DS_EFFORT: "low" }, ["-p", "x"]);
     expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBe("low");
-    expect(readFileSync(claudeLog, "utf-8")).toBe("-p\nx\n");
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--setting-sources\nuser\n-p\nx\n");
   });
 
   it("drops an inherited pin, which would block the mode", () => {
     runWrapper({ CLAUDE_CODE_EFFORT_LEVEL: "max", CLAUDE_DS_EFFORT: "ultracode" }, ["-p", "x"]);
     expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
-    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n-p\nx\n");
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n--setting-sources\nuser\n-p\nx\n");
   });
 
   it("never doubles a --effort the caller passed itself", () => {
     runWrapper({ CLAUDE_DS_EFFORT: "ultracode" }, ["--effort", "low", "-p", "x"]);
-    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nlow\n-p\nx\n");
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--setting-sources\nuser\n--effort\nlow\n-p\nx\n");
     expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
   });
 
@@ -245,7 +254,7 @@ describe("effort", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_effort: "max" });
     runWrapper({ CLAUDE_CODE_EFFORT_LEVEL: "max" }, ["--effort", "ultracode", "-p", "x"]);
     expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
-    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n-p\nx\n");
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--setting-sources\nuser\n--effort\nultracode\n-p\nx\n");
   });
 });
 

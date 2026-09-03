@@ -26,6 +26,7 @@ import os from "os";
 import path from "path";
 import crypto from "crypto";
 import { runChild } from "@/lib/child-run";
+import { createSerialLock } from "@/lib/serial-lock";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { cloudSpeechTarget, localCommandPath, cloudVoiceFrom, resolvePreferredEngine, type VoiceConfigView, type VoiceEngine, type VoiceEngineId } from "@/lib/voice-output";
 import { readLocalVoice } from "@/lib/voice-output-store";
@@ -148,19 +149,50 @@ export async function speakInCloud(config: VoiceConfigView, requestedVoice: unkn
 
 /**
  * One synthesis at a time, box-wide. Two local syntheses at once would fight
- * over the GPU on an 8 GB board, and the second press is almost always the
- * first one heard as "nothing happened".
+ * over the GPU on an 8 GB board. Everything speaks through one queue; the
+ * two callers differ in what they do while it is taken:
+ *
+ *  - an AUDITION (`tts/sample`) is refused at once with 429 `busy` — the
+ *    second press of Play is almost always the first one heard as "nothing
+ *    happened", and a queued audition would play over the owner's next
+ *    click;
+ *  - a REPLY (`tts/speak`) WAITS its turn. Two questions spoken back to back
+ *    have their replies land seconds apart, inside the window a cold Kokoro
+ *    takes for the first, and a reply refused there was simply never heard
+ *    (the chat had nothing to show for it either). A queue that piles up
+ *    beyond a few replies is refused after all: a box that far behind is
+ *    not going to catch up.
  */
+const speechQueue = createSerialLock();
 let inFlight = false;
+let waiting = 0;
+const MAX_WAITING = 3;
+
+async function asTheOneSynthesis(work: () => Promise<Response>): Promise<Response> {
+  return speechQueue(async () => {
+    inFlight = true;
+    try {
+      return await work();
+    } finally {
+      inFlight = false;
+    }
+  });
+}
 
 /** Run `work` as the one synthesis; answers 429 `busy` when another is speaking. */
 export async function withSpeechLock(work: () => Promise<Response>): Promise<Response> {
-  if (inFlight) return refuse("Still speaking the last sample — try again in a moment.", "busy", 429);
-  inFlight = true;
+  if (inFlight || waiting > 0) return refuse("Still speaking the last sample — try again in a moment.", "busy", 429);
+  return asTheOneSynthesis(work);
+}
+
+/** Run `work` as the one synthesis once the ones before it are done; 429 `busy` only when the queue is full. */
+export async function withSpeechQueue(work: () => Promise<Response>): Promise<Response> {
+  if (waiting >= MAX_WAITING) return refuse("The box is still speaking earlier replies — try again in a moment.", "busy", 429);
+  waiting += 1;
   try {
-    return await work();
+    return await asTheOneSynthesis(work);
   } finally {
-    inFlight = false;
+    waiting -= 1;
   }
 }
 

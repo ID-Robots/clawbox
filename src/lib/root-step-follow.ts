@@ -51,18 +51,42 @@ async function unitState(unit: string): Promise<{ active: string; result: string
   }
 }
 
-async function lastJournalLine(unit: string, lines: number): Promise<string | null> {
+async function journalLines(unit: string, lines: number): Promise<string[]> {
   try {
     const { stdout } = await execFile(
       "/usr/bin/journalctl",
       ["-u", unit, "-n", String(lines), "--no-pager", "-o", "cat"],
       { timeout: 10_000 },
     );
-    const all = stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    return all.length > 0 ? all[all.length - 1] : null;
+    return stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   } catch {
-    return null;
+    return [];
   }
+}
+
+async function lastJournalLine(unit: string, lines: number): Promise<string | null> {
+  const all = await journalLines(unit, lines);
+  return all.length > 0 ? all[all.length - 1] : null;
+}
+
+/** install.sh's --step EXIT trap ends a failed run with these; none of them is the reason. */
+const MARKER = /^(\[provision-(status|run)\]|#{3,}|# )/;
+
+/**
+ * The line that says WHY a failed step failed. install.sh's dispatch trap
+ * prints a banner and two `[provision-…]` markers after the real error, so
+ * the last line of the journal is a run id, never the reason. Prefer the last
+ * line that names an error or the engine; else the last line that is not a
+ * marker; else nothing.
+ */
+export function failureReason(lines: readonly string[]): string | null {
+  const said = lines.filter((line) => !MARKER.test(line));
+  const telling = [...said].reverse().find((line) => /error|kokoro/i.test(line));
+  return telling ?? (said.length > 0 ? said[said.length - 1] : null);
+}
+
+async function failureLine(unit: string): Promise<string | null> {
+  return failureReason(await journalLines(unit, 40));
 }
 
 function running(active: string): boolean {
@@ -90,17 +114,20 @@ export async function followRootStep(step: string, opts: FollowRootStepOptions):
     const line = await lastJournalLine(unit, 5);
     if (line && line !== lastLine) {
       lastLine = line;
-      opts.onStatus(line);
+      // A listener that is gone (the stream's client cancelled) must not
+      // end the follow: the root unit runs on regardless, and whoever holds
+      // the "one install at a time" flag needs its real end.
+      try { opts.onStatus(line); } catch { /* nobody listening */ }
     }
 
     if (active === "failed") {
-      return { ok: false, error: lastLine || `${opts.label} failed (${result || "unknown"})` };
+      return { ok: false, error: (await failureLine(unit)) || `${opts.label} failed (${result || "unknown"})` };
     }
 
     if (!running(active)) {
       if (sawRunning || gracePolls >= START_GRACE_POLLS) {
         if (result && result !== "success") {
-          return { ok: false, error: lastLine || `${opts.label} failed (${result})` };
+          return { ok: false, error: (await failureLine(unit)) || `${opts.label} failed (${result})` };
         }
         return { ok: true };
       }

@@ -2771,12 +2771,19 @@ tts_write_local_provider_definition() {
   local TTS_HOME="$1" TTS_SCRIPT="$2"
   local TTS_TIMEOUT_MS
   TTS_TIMEOUT_MS=$(bash "$TTS_SCRIPT" --provider-timeout-ms 2>/dev/null || echo "")
+  # Decimal digits, and more than zero: a 0 would let OpenClaw kill the
+  # script the instant it starts. src/lib/voice-local-wiring.ts applies the
+  # same rule when it writes this entry from the tts route.
   case "$TTS_TIMEOUT_MS" in
     ''|*[!0-9]*)
       echo "  ERROR: $TTS_SCRIPT did not report a usable provider timeout (got '${TTS_TIMEOUT_MS}')" >&2
       return 1
       ;;
   esac
+  if [ "$TTS_TIMEOUT_MS" -le 0 ] 2>/dev/null; then
+    echo "  ERROR: $TTS_SCRIPT reported a provider timeout of ${TTS_TIMEOUT_MS} ms, which would kill it at once" >&2
+    return 1
+  fi
   local TTS_PROVIDER_JSON
   TTS_PROVIDER_JSON=$(node -e 'process.stdout.write(JSON.stringify({command:process.argv[1],args:["--","{{Text}}","{{OutputPath}}"],outputFormat:"wav",timeoutMs:Number(process.argv[2])}));' "$TTS_SCRIPT" "$TTS_TIMEOUT_MS")
   oc_config_set "$TTS_HOME.providers.tts-local-cli" "$TTS_PROVIDER_JSON" --json

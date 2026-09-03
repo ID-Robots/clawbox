@@ -230,6 +230,46 @@ export function buildNewAppPrompt(req: NewAppRequest): string {
   ].join("\n");
 }
 
+/** An existing project the wizard can point the next run at — the projects route's row, trimmed. */
+export interface ResumeProjectRequest {
+  name: string;
+  directory: string;
+  kind: "folder" | "codeProject";
+  /** For a code project: its id under data/code-projects, what code_project_build takes. */
+  folder: string;
+  /** What the next run should do, in the owner's words. */
+  instructions: string;
+  /** The newest run that worked in this folder, if any has. */
+  latestRun?: { id: string; status: string; task: string } | null;
+}
+
+/**
+ * The one message the wizard hands to the chat for an EXISTING project.
+ *
+ * English, addressed to the assistant like buildNewAppPrompt, and it names
+ * the steps that make a second run pick up where the first left off: the
+ * folder (never a fresh scaffold), the last run's summary and the commits
+ * before any change, the verification and commit after, and — for a code
+ * project — the rebuild that puts the result back on the desktop.
+ */
+export function buildResumeProjectPrompt(req: ResumeProjectRequest): string {
+  const what = req.instructions.trim().replace(/[.\s]+$/u, "");
+  const last = req.latestRun;
+  const lastTask = last ? last.task.trim().split(/\r?\n/)[0].slice(0, 160) : "";
+  const lines = [
+    `Continue the existing ClawBox project "${req.name.trim()}" in ${req.directory}: ${what}.`,
+    `Start a coding agent run in that folder (coding_agent_run with directory "${req.directory}") — do not scaffold a new project.`,
+    last
+      ? `Its last run (${last.id}, ${last.status}) was: "${lastTask}". Read that run's summary and the project's recent commits before changing anything, so this run picks up where it left off.`
+      : "Read the project's recent commits and its files before changing anything, so this run picks up where the last work left off.",
+    req.kind === "codeProject"
+      ? `This is a code project (id "${req.folder}"): when the run is done, rebuild it with code_project_build so the desktop app shows the change.`
+      : "When the run is done, tell me what changed, what was verified, and what is left for the next run.",
+  ];
+  if (req.kind === "codeProject") lines.push("Then tell me what changed, what was verified, and what is left for the next run.");
+  return lines.join("\n");
+}
+
 export function buildFixErrorPrompt(ctx: FixErrorContext): string {
   const lines = [
     `I just hit an error in the ${ctx.source || "ClawBox UI"}. Please investigate why and fix it.`,

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import SystemUpdateApp from "@/components/SystemUpdateApp";
+import SystemUpdateApp, { componentNeedsUpdate } from "@/components/SystemUpdateApp";
 import Image from "next/image";
 import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
@@ -5425,7 +5425,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       case "update": {
         const cb = versionInfo?.clawbox;
         if (!cb) return { subtitle: null };
-        const needs = cb.updateAvailable ?? (!!cb.target && cb.target !== cb.current);
+        // The same predicate the update page decides with, so the sidebar
+        // never offers an update the page then denies (a `v` prefix, a
+        // target older than current).
+        const needs = componentNeedsUpdate(cb);
         return { subtitle: needs && cb.target ? `${cleanVersion(cb.current) ?? cb.current} → ${cleanVersion(cb.target) ?? cb.target}` : t("settings.upToDate") };
       }
       case "about":

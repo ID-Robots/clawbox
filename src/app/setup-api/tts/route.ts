@@ -30,6 +30,7 @@ import { readLocalVoice, readVoiceState, writeLocalVoice, writeVoiceState } from
 import { wireLocalVoice } from "@/lib/voice-local-wiring";
 import { getVoiceAutoReply, setVoiceAutoReply, ttsAutoModeFor } from "@/lib/voice-reply";
 import { hasOwnerSession } from "@/lib/owner-session";
+import { isSameOriginRequest } from "@/lib/same-origin";
 import { isCloudVoice, isCloudVoiceFor, isLocalVoice, isVoiceLanguage } from "@/lib/voice-catalog";
 import { createSerialLock } from "@/lib/serial-lock";
 
@@ -338,6 +339,12 @@ export async function POST(req: Request) {
   if (action === "autoReply" && !(await hasOwnerSession(req))) {
     return NextResponse.json(
       { error: "Changing spoken replies needs a signed-in browser session.", kind: "owner_only", code: "owner_only" },
+      { status: 403, headers: NO_STORE },
+    );
+  }
+  if (action === "autoReply" && !isSameOriginRequest(req)) {
+    return NextResponse.json(
+      { error: "Changing spoken replies only works from this ClawBox's own pages.", kind: "cross_origin", code: "cross_origin" },
       { status: 403, headers: NO_STORE },
     );
   }

@@ -552,7 +552,10 @@ export default function ClawKeepApp() {
         full-width buttons between the cards. */}
     <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-deep)] text-gray-200 @container" data-testid="clawkeep-panel">
       <div className="mx-auto w-full max-w-2xl px-5 py-4">
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pb-3 mb-4 border-b border-white/[0.06]">
+        {/* `relative`: the backup-contents popover hangs from this row, the
+            full content width, so it cannot run off a phone's screen the way
+            a popover anchored to the ? button 200 px in did. */}
+        <div className="relative flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pb-3 mb-4 border-b border-white/[0.06]">
           <div className="flex items-center gap-2 min-w-0">
             <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20, fontVariationSettings: "'FILL' 1" }} aria-hidden="true">shield_lock</span>
             <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">ClawKeep</h1>
@@ -1276,7 +1279,7 @@ function BackupContentsInfo({ status }: { status: ClawKeepStatus }) {
   }, [open]);
 
   return (
-    <div ref={rootRef} className="relative shrink-0">
+    <div ref={rootRef} className="shrink-0">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -1293,7 +1296,7 @@ function BackupContentsInfo({ status }: { status: ClawKeepStatus }) {
           role="dialog"
           aria-label={t("clawkeep.contents.title")}
           data-testid="clawkeep-contents-popover"
-          className="absolute left-0 top-8 z-30 w-[min(22rem,calc(100vw-3rem))] rounded-xl border border-white/10 bg-[var(--bg-elevated)] p-4 shadow-2xl space-y-2"
+          className="absolute left-0 top-full z-30 mt-2 w-full max-w-[22rem] rounded-xl border border-white/10 bg-[var(--bg-elevated)] p-4 shadow-2xl space-y-2"
         >
           <div className="flex items-center gap-2">
             <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">

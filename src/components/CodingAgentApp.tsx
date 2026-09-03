@@ -518,10 +518,19 @@ export default function CodingAgentApp() {
    */
   useEffect(() => {
     const pending = takePendingCodingRun();
+    // A handoff parked on `window` before this window existed; the effect is
+    // the one place it can be read, and reading it is one render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (pending) { setOpenRunId(pending); setPage("home"); }
     const handler = (e: Event) => {
       const id = (e as CustomEvent<{ runId?: unknown }>).detail?.runId;
-      if (typeof id === "string" && id) { setOpenRunId(id); setPage("home"); }
+      if (typeof id === "string" && id) {
+        // The dispatcher also parks the id on `window` for a cold open; this
+        // window is up, so take it back rather than leave it for a later mount.
+        takePendingCodingRun();
+        setOpenRunId(id);
+        setPage("home");
+      }
     };
     window.addEventListener(OPEN_CODING_RUN_EVENT, handler);
     return () => window.removeEventListener(OPEN_CODING_RUN_EVENT, handler);
@@ -982,7 +991,9 @@ export default function CodingAgentApp() {
     <div className="h-full flex flex-col bg-[var(--bg-deep)] text-white overflow-y-auto @container" data-testid="coding-agent-panel" data-help-bounds>
       {/* flex-1 so a face can ask for the remaining height — the wizard's
           intro centres itself in it. min-h-0 keeps the scroll on the parent. */}
-      <div className="mx-auto w-full max-w-2xl px-5 py-4 flex-1 flex flex-col min-h-0">
+      {/* A run's page is data — figures, files, a summary, an activity log —
+          and reads better wide; the home and project pages stay a column. */}
+      <div className={`mx-auto w-full ${view.face === "run" ? "max-w-5xl" : "max-w-2xl"} px-5 py-4 flex-1 flex flex-col min-h-0`}>
 
         {/* One row: what this is, whether it is on, and everything you can do
             from here. The primary action used to sit on its own line below,
@@ -1295,7 +1306,7 @@ export default function CodingAgentApp() {
           const title = run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 160);
           const fullTask = !run.reviewOf && run.task.trim() !== firstLine(run.task, 160) ? run.task : null;
           return (
-            <div className="mt-4" data-testid="coding-agent-run-page" data-run-id={run.id}>
+            <div className="mt-4 pb-6" data-testid="coding-agent-run-page" data-run-id={run.id}>
               <button
                 type="button"
                 onClick={() => setOpenRunId(null)}
@@ -1396,7 +1407,7 @@ export default function CodingAgentApp() {
               </div>
 
               {/* The figures. */}
-              <div className="mt-3 grid grid-cols-2 @md:grid-cols-4 gap-2" data-testid="coding-agent-run-figures">
+              <div className="mt-3 grid grid-cols-2 @md:grid-cols-4 @3xl:grid-cols-8 gap-2" data-testid="coding-agent-run-figures">
                 <StatTile label={t("codingAgent.statSteps")} value={started ? String(run.numTurns) : "—"} />
                 <StatTile label={t("codingAgent.statFiles")} value={String(run.filesTouched.length)} />
                 <StatTile label={t("codingAgent.statDuration")} value={started ? duration(run) : "—"} />

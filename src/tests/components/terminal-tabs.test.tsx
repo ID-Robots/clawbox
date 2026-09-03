@@ -154,14 +154,16 @@ describe("TerminalTabs", () => {
   it("answers the shell's tab shortcuts", async () => {
     render(<TerminalTabs />);
     await waitFor(() => expect(terms.length).toBe(1));
-    act(() => { terms[0].press({ ctrlKey: true, shiftKey: true, key: "T" }); });
+    act(() => { terms[0].press({ altKey: true, shiftKey: true, key: "T" }); });
     await waitFor(() => expect(screen.getByTestId("terminal-tab-2")).toHaveAttribute("aria-selected", "true"));
     await waitFor(() => expect(terms.length).toBe(2));
-    act(() => { terms[1].press({ ctrlKey: true, key: "PageUp" }); });
+    act(() => { terms[1].press({ altKey: true, shiftKey: true, key: "PageUp" }); });
     expect(screen.getByTestId("terminal-tab-1")).toHaveAttribute("aria-selected", "true");
-    act(() => { terms[0].press({ ctrlKey: true, key: "PageDown" }); });
+    act(() => { terms[0].press({ altKey: true, shiftKey: true, key: "PageDown" }); });
     expect(screen.getByTestId("terminal-tab-2")).toHaveAttribute("aria-selected", "true");
-    act(() => { terms[1].press({ ctrlKey: true, shiftKey: true, key: "W" }); });
+    // The browser's own Ctrl+Shift+W (close the window) is never claimed.
+    expect(terms[1].press({ ctrlKey: true, shiftKey: true, key: "W" })).toBe(true);
+    act(() => { terms[1].press({ altKey: true, shiftKey: true, key: "W" }); });
     await waitFor(() => expect(screen.queryByTestId("terminal-tab-2")).not.toBeInTheDocument());
     expect(screen.getByTestId("terminal-tab-1")).toHaveAttribute("aria-selected", "true");
   });
@@ -198,6 +200,21 @@ describe("the terminal's right-click menu", () => {
     fireEvent.click(screen.getByTestId("terminal-menu-clear"));
     expect(terms[0].clear).toHaveBeenCalled();
     // (clear() is also called on connect; the menu's call is the last one.)
+  });
+
+  it("closes on Escape without handing the key to the shell", async () => {
+    const { container } = render(<TerminalApp />);
+    await waitFor(() => expect(terms.length).toBe(1));
+    const surface = container.querySelector("[tabindex='0']") as HTMLElement;
+    fireEvent.contextMenu(surface, { clientX: 10, clientY: 10 });
+    expect(screen.getByTestId("terminal-context-menu")).toBeInTheDocument();
+    // xterm asks the custom handler first; `false` means "not for the shell".
+    let handled: boolean | undefined;
+    act(() => { handled = terms[0].press({ key: "Escape" }); });
+    expect(handled).toBe(false);
+    await waitFor(() => expect(screen.queryByTestId("terminal-context-menu")).not.toBeInTheDocument());
+    // With the menu closed, Escape is the shell's again.
+    expect(terms[0].press({ key: "Escape" })).toBe(true);
   });
 
   it("pastes through the terminal when the clipboard can be read", async () => {

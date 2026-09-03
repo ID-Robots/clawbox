@@ -2706,7 +2706,11 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         const n = (k: string) => (typeof u[k] === "number" ? (u[k] as number) : 0);
         return sum + n("inputTokens") + n("outputTokens") + n("cacheReadInputTokens") + n("cacheCreationInputTokens");
       }, 0);
-      if (total > run.tokensUsed) noteTokens(run, state, total - run.tokensUsed);
+      // Reconciliation only: this segment has already reported its outcome,
+      // so crossing the ceiling here must not turn a finished run into a
+      // device stop (noteTokens would, and finishRun would then discard the
+      // outcome and settle the run as stopped and resumable).
+      if (total > run.tokensUsed) run.tokensUsed = total;
     }
     if (Array.isArray(event.permission_denials)) {
       const described = event.permission_denials.map(describeDenial);

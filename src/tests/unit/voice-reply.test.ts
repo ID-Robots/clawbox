@@ -16,8 +16,10 @@ vi.mock("@/lib/config-store", () => ({
   get: (...a: unknown[]) => getMock(...a),
   set: (...a: unknown[]) => setMock(...a),
 }));
+let absent = false;
 vi.mock("@/lib/openclaw-config", () => ({
-  readConfig: (...a: unknown[]) => readConfigMock(...a),
+  openclawIsAbsent: () => absent,
+  readConfigForWrite: (...a: unknown[]) => readConfigMock(...a),
   writeConfig: (...a: unknown[]) => writeConfigMock(...a),
 }));
 
@@ -27,6 +29,7 @@ async function lib() {
 
 beforeEach(() => {
   vi.resetModules();
+  absent = false;
   getMock.mockReset().mockResolvedValue(undefined);
   setMock.mockReset().mockResolvedValue(undefined);
   readConfigMock.mockReset();
@@ -77,9 +80,31 @@ describe("ensureVoiceAutoReplyMode", () => {
   });
 
   it("creates the v2 block on a box with no speech config at all", async () => {
-    readConfigMock.mockResolvedValue({});
+    readConfigMock.mockResolvedValue({ agents: { defaults: {} } });
     const { ensureVoiceAutoReplyMode } = await lib();
     expect(await ensureVoiceAutoReplyMode()).toBe(true);
-    expect(writeConfigMock.mock.calls[0][0].tts).toEqual({ auto: "inbound" });
+    const written = writeConfigMock.mock.calls[0][0];
+    expect(written.tts).toEqual({ auto: "inbound" });
+    expect(written.agents).toEqual({ defaults: {} });
+  });
+
+  it("never writes a config it could not read, or one that is not there yet", async () => {
+    // readConfig answers {} to every failure; writing that back would leave
+    // openclaw.json holding one key. The writer's reader throws instead.
+    readConfigMock.mockRejectedValue(new Error("openclaw.json could not be read"));
+    const { ensureVoiceAutoReplyMode } = await lib();
+    await expect(ensureVoiceAutoReplyMode()).rejects.toThrow();
+    expect(writeConfigMock).not.toHaveBeenCalled();
+    // ENOENT reads as {}: nothing to seed into — onboarding creates the file.
+    readConfigMock.mockResolvedValue({});
+    expect(await ensureVoiceAutoReplyMode()).toBe(false);
+    expect(writeConfigMock).not.toHaveBeenCalled();
+  });
+
+  it("does nothing on the Hermes edition", async () => {
+    absent = true;
+    const { ensureVoiceAutoReplyMode } = await lib();
+    expect(await ensureVoiceAutoReplyMode()).toBe(false);
+    expect(readConfigMock).not.toHaveBeenCalled();
   });
 });

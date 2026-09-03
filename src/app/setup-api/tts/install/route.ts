@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
 import { hasOwnerSession } from "@/lib/owner-session";
+import { isSameOriginRequest } from "@/lib/same-origin";
 import { followRootStep } from "@/lib/root-step-follow";
 
 /**
@@ -23,11 +24,18 @@ import { followRootStep } from "@/lib/root-step-follow";
  */
 
 const encoder = new TextEncoder();
-/** Below config/clawbox-root-update@.service's TimeoutStartSec (2 h): systemd owns the kill. */
-const INSTALL_TIMEOUT_MS = 90 * 60 * 1000;
+/**
+ * Not below config/clawbox-root-update@.service's TimeoutStartSec (2 h), so
+ * systemd, not this stream, owns the kill: a stream that gave up first would
+ * show a red error over an install that was still running and about to
+ * finish. Same rule the llama.cpp install route keeps.
+ */
+const INSTALL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 
 function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: Record<string, unknown>) {
-  controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
+  // A cancelled stream refuses further writes; the install itself goes on
+  // (a root unit), and the follow below has to reach its real end.
+  try { controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`)); } catch { /* client gone */ }
 }
 
 /** One install at a time: two would fight over pip, the GPU and the config file. */
@@ -41,6 +49,9 @@ export async function POST(req: Request) {
   // agent holds the MCP bearer the middleware also admits here.
   if (!(await hasOwnerSession(req))) {
     return NextResponse.json({ error: "Installing the voice needs a signed-in browser session.", kind: "owner_only" }, { status: 403 });
+  }
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "Installing the voice only works from this ClawBox's own pages.", kind: "cross_origin" }, { status: 403 });
   }
   if (inFlight) {
     return NextResponse.json({ error: "The voice is already being installed.", code: "busy" }, { status: 409 });
@@ -65,7 +76,7 @@ export async function POST(req: Request) {
         emit(controller, { error: err instanceof Error ? err.message : "The voice install failed." });
       } finally {
         inFlight = false;
-        controller.close();
+        try { controller.close(); } catch { /* already closed */ }
       }
     },
   });

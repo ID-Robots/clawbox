@@ -83,7 +83,18 @@ An app written earlier against fetch('/setup-api/kv') no longer reaches its
 saved data; move it to window.clawboxKv with webapp_update or a rebuild.
 
 Style single-file apps dark: background #1a1a2e, text #e0e0e0, accent #f97316.
-No CDN links — the device may be offline.`;
+No CDN links — the device may be offline.
+
+## An app that runs its own server
+
+A project with its own server (a Next.js app on a port, a game engine) is
+still opened from a desktop icon: register a webapp (webapp_create, or the
+project's build) whose HTML sends the frame to the server, on the BOX'S OWN
+HOST — never localhost, which is the phone or laptop the desktop is viewed
+from:
+  <script>location.replace(location.protocol + "//" + location.hostname + ":4199/");</script>
+The desktop frames the box's own host on any port. Keep the server listening
+on 0.0.0.0, and say in the reply which port it serves on.`;
 
 function loadFieldGuide(): string | null {
   try {

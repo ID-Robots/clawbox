@@ -13,6 +13,10 @@
  * `claude-ds --resume …`, a run's live tail — and is named after it; the
  * tabs the owner adds are plain shells named by number. Numbers come from
  * the tab's own id, so closing a tab never renames the others.
+ *
+ * Clicking anything in the strip keeps the keyboard in the terminal
+ * (mousedown's default would move focus to the tab or the button, and
+ * clicking the tab that is already in front refocuses nothing).
  */
 
 import { useCallback, useState } from "react";
@@ -47,8 +51,16 @@ interface TabState {
   nextId: number;
 }
 
+/**
+ * How many shells one window may hold. Every tab is a PTY, a WebSocket and
+ * an xterm instance kept alive on an 8 GB board; eight is more than a person
+ * uses and far fewer than would hurt.
+ */
+export const MAX_TERMINAL_TABS = 8;
+
 /** One object, so every change is a pure function of the last state. */
 function addTab(state: TabState): TabState {
+  if (state.tabs.length >= MAX_TERMINAL_TABS) return state;
   return { tabs: [...state.tabs, { id: state.nextId }], activeId: state.nextId, nextId: state.nextId + 1 };
 }
 
@@ -103,30 +115,38 @@ export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
         {tabs.map((tab) => {
           const selected = tab.id === activeId;
           return (
+            // The tab and its close button are siblings: a control nested
+            // inside a role="tab" is flattened away by assistive technology.
             <div
               key={tab.id}
-              role="tab"
-              aria-selected={selected}
-              data-testid={`terminal-tab-${tab.id}`}
-              data-active={selected ? "true" : "false"}
-              tabIndex={selected ? 0 : -1}
-              onClick={() => onSelect(tab.id)}
-              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(tab.id); } }}
-              onAuxClick={(e) => { if (e.button === 1) { e.preventDefault(); onClose(tab.id); } }}
-              className={`group flex items-center gap-1.5 pl-3 pr-1.5 py-1.5 text-xs font-mono cursor-pointer border-r select-none max-w-[14rem] ${
-                selected ? "text-white bg-[#0d0d1a]" : "text-white/50 hover:text-white/80 hover:bg-white/[0.04]"
-              }`}
+              className={`flex items-stretch border-r max-w-[14rem] ${selected ? "bg-[#0d0d1a]" : "hover:bg-white/[0.04]"}`}
               style={{ borderColor: "rgba(255,255,255,0.06)" }}
+              onAuxClick={(e) => { if (e.button === 1) { e.preventDefault(); onClose(tab.id); } }}
             >
-              <span className="material-symbols-rounded shrink-0" style={{ fontSize: 14, color: selected ? "#22c55e" : "rgba(255,255,255,0.35)" }} aria-hidden="true">terminal</span>
-              <span className="truncate">{terminalTabTitle(tab, t)}</span>
+              <div
+                role="tab"
+                aria-selected={selected}
+                data-testid={`terminal-tab-${tab.id}`}
+                data-active={selected ? "true" : "false"}
+                tabIndex={selected ? 0 : -1}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => onSelect(tab.id)}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(tab.id); } }}
+                className={`flex items-center gap-1.5 pl-3 pr-1 py-1.5 text-xs font-mono cursor-pointer select-none min-w-0 ${
+                  selected ? "text-white" : "text-white/50 hover:text-white/80"
+                }`}
+              >
+                <span className="material-symbols-rounded shrink-0" style={{ fontSize: 14, color: selected ? "#22c55e" : "rgba(255,255,255,0.35)" }} aria-hidden="true">terminal</span>
+                <span className="truncate">{terminalTabTitle(tab, t)}</span>
+              </div>
               <button
                 type="button"
                 aria-label={t("terminal.closeTab")}
                 title={t("terminal.closeTab")}
                 data-testid={`terminal-tab-close-${tab.id}`}
-                onClick={(e) => { e.stopPropagation(); onClose(tab.id); }}
-                className="ml-0.5 w-5 h-5 rounded flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 bg-transparent border-none cursor-pointer shrink-0"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => onClose(tab.id)}
+                className="my-1 mr-1.5 w-5 rounded flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 bg-transparent border-none cursor-pointer shrink-0"
               >
                 <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">close</span>
               </button>
@@ -136,10 +156,12 @@ export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
         <button
           type="button"
           aria-label={t("terminal.newTab")}
-          title={`${t("terminal.newTab")} (Ctrl+Shift+T)`}
+          title={`${t("terminal.newTab")} (Alt+Shift+T)`}
           data-testid="terminal-tab-new"
+          disabled={tabs.length >= MAX_TERMINAL_TABS}
+          onMouseDown={(e) => e.preventDefault()}
           onClick={onAdd}
-          className="px-2.5 flex items-center justify-center text-white/50 hover:text-white hover:bg-white/[0.06] bg-transparent border-none cursor-pointer shrink-0"
+          className="px-2.5 flex items-center justify-center text-white/50 hover:text-white hover:bg-white/[0.06] disabled:opacity-30 disabled:hover:bg-transparent bg-transparent border-none cursor-pointer disabled:cursor-default shrink-0"
         >
           <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">add</span>
         </button>

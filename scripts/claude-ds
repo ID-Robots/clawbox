@@ -191,11 +191,24 @@ fi
 EFFORT="${CLAUDE_DS_EFFORT:-${OWNER_EFFORT:-ultracode}}"
 EFFORT_ARGS=()
 wants_own_effort=0
+wants_own_sources=0
 for arg in "$@"; do
   case "$arg" in
     --effort|--effort=*) wants_own_effort=1 ;;
+    --setting-sources|--setting-sources=*) wants_own_sources=1 ;;
   esac
 done
+# SETTING SOURCES: the user's, never the project's. The trust answer above is
+# seeded for whatever folder the harness starts in, so a cloned repository's
+# own .claude/settings.json — its hooks, its permission grants — would
+# otherwise load into the owner's terminal the moment it opens there. The
+# delegated runs already pass `--setting-sources user` for the same reason
+# (src/lib/coding-agent.ts); a terminal gets the same unless the caller chose
+# its own sources.
+SOURCES_ARGS=()
+if [ "$wants_own_sources" = 0 ]; then
+  SOURCES_ARGS=(--setting-sources user)
+fi
 if [ "$EFFORT" = "ultracode" ]; then
   unset CLAUDE_CODE_EFFORT_LEVEL
   if [ "$wants_own_effort" = 0 ]; then
@@ -315,4 +328,4 @@ seed_harness_config "$PWD"
 # question this banner exists to close: the plan, not the wrapper, picks it.
 printf 'claude-ds: ClawBox AI (%s) — state in %s\n' "$MODEL" "$CLAUDE_CONFIG_DIR" >&2
 
-exec claude "${EFFORT_ARGS[@]}" "$@"
+exec claude "${EFFORT_ARGS[@]}" "${SOURCES_ARGS[@]}" "$@"

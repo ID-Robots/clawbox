@@ -34,7 +34,7 @@ export interface TerminalAppProps {
    */
   active?: boolean;
   /**
-   * Tab shortcuts — Ctrl+Shift+T, Ctrl+Shift+W, Ctrl+PageDown/PageUp —
+   * Tab shortcuts — Alt+Shift+T, Alt+Shift+W, Alt+Shift+PageDown/PageUp —
    * handed to whoever owns the tabs. Without a handler the keys reach the
    * shell as they always did.
    */
@@ -88,6 +88,10 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
   const [canReadClipboard] = useState(() => typeof navigator !== "undefined" && typeof navigator.clipboard?.readText === "function");
   const onTabActionRef = useRef(onTabAction);
   useEffect(() => { onTabActionRef.current = onTabAction; }, [onTabAction]);
+  // Read by the key handler xterm calls before it forwards a key to the
+  // shell, so an Escape meant for the menu never reaches the PTY.
+  const menuOpenRef = useRef(false);
+  useEffect(() => { menuOpenRef.current = menu !== null; }, [menu]);
   const termRef = useRef<import("@xterm/xterm").Terminal | null>(null);
   const fitAddonRef = useRef<import("@xterm/addon-fit").FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -200,21 +204,31 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
       //   so it fires a native "paste" event on xterm's hidden textarea (the
       //   only way to read the clipboard over plain HTTP).
       term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
+        // An Escape while the right-click menu is open is for the menu. xterm
+        // sees the key before the document does, so without this the menu
+        // closed AND the shell got \x1b — which aborts a running claude-ds
+        // turn, or leaves insert mode in vim.
+        if (menuOpenRef.current && ev.key === "Escape") {
+          if (ev.type === "keydown") setMenu(null);
+          return false;
+        }
         if (ev.ctrlKey && ev.shiftKey && ev.key === "C" && ev.type === "keydown") {
           const sel = term.getSelection();
           if (sel) copyText(sel);
           return false;
         }
-        // Tab shortcuts, only when somebody owns the tabs. Ctrl+Shift+T/W
-        // rather than Ctrl+T/W: the browser takes the bare ones for its own
-        // tabs before the page ever sees them.
+        // Tab shortcuts, only when somebody owns the tabs. Alt+Shift, not
+        // Ctrl+Shift: Ctrl+Shift+T/W and Ctrl+PageUp/PageDown are the
+        // browser's own accelerators (reopen tab, CLOSE THE WINDOW, switch
+        // tab), handled before the page ever sees the key — preventDefault
+        // cannot claim them. Alt+Shift+letter is bound by no browser.
         const tabs = onTabActionRef.current;
-        if (tabs && ev.type === "keydown") {
+        if (tabs && ev.type === "keydown" && ev.altKey && ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
           let action: TerminalTabAction | null = null;
-          if (ev.ctrlKey && ev.shiftKey && (ev.key === "T" || ev.key === "t")) action = "newTab";
-          else if (ev.ctrlKey && ev.shiftKey && (ev.key === "W" || ev.key === "w")) action = "closeTab";
-          else if (ev.ctrlKey && !ev.shiftKey && ev.key === "PageDown") action = "nextTab";
-          else if (ev.ctrlKey && !ev.shiftKey && ev.key === "PageUp") action = "prevTab";
+          if (ev.key === "T" || ev.key === "t") action = "newTab";
+          else if (ev.key === "W" || ev.key === "w") action = "closeTab";
+          else if (ev.key === "PageDown") action = "nextTab";
+          else if (ev.key === "PageUp") action = "prevTab";
           if (action) {
             ev.preventDefault();
             tabs(action);
@@ -399,7 +413,30 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     const y = Math.min(e.clientY, Math.max(0, window.innerHeight - MENU_H));
     setMenu({ x, y, hasSelection: Boolean(term?.getSelection()) });
   }, []);
-  const closeMenu = useCallback(() => setMenu(null), []);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const closeMenu = useCallback(() => {
+    setMenu(null);
+    termRef.current?.focus();
+  }, []);
+  // A role="menu" must be enterable: the first item that can be used takes
+  // focus when the menu opens (Shift+F10 and the Menu key open it too).
+  useEffect(() => {
+    if (!menu) return;
+    menuRef.current?.querySelector<HTMLButtonElement>('button[role="menuitem"]:not([disabled])')?.focus();
+  }, [menu]);
+  const onMenuKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "Tab") { e.preventDefault(); closeMenu(); return; }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+    e.preventDefault();
+    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]:not([disabled])') ?? []);
+    if (items.length === 0) return;
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = e.key === "Home" ? 0
+      : e.key === "End" ? items.length - 1
+      : e.key === "ArrowDown" ? (current + 1) % items.length
+      : (current - 1 + items.length) % items.length;
+    items[next].focus();
+  }, [closeMenu]);
   useEffect(() => {
     if (!menu) return;
     const onKey = (ev: KeyboardEvent) => { if (ev.key === "Escape") closeMenu(); };
@@ -546,11 +583,13 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
 
       {menu && (
         <div
+          ref={menuRef}
           role="menu"
           data-terminal-menu
           data-testid="terminal-context-menu"
           className="fixed z-[99999] min-w-[200px] py-1 bg-[#1c1c30] rounded-lg shadow-2xl border border-white/10 text-sm text-white/90"
           style={{ left: menu.x, top: menu.y }}
+          onKeyDown={onMenuKeyDown}
         >
           <button type="button" role="menuitem" data-testid="terminal-menu-copy" disabled={!menu.hasSelection} onClick={menuCopy} className={MENU_ITEM}>
             <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">content_copy</span>
@@ -562,7 +601,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
             {t("terminal.paste")}
             <span className="ml-auto text-[11px] text-white/40 font-mono">Ctrl+Shift+V</span>
           </button>
-          <div className="my-1 border-t border-white/10" />
+          <div role="separator" className="my-1 border-t border-white/10" />
           <button type="button" role="menuitem" data-testid="terminal-menu-select-all" onClick={menuSelectAll} className={MENU_ITEM}>
             <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">select_all</span>
             {t("terminal.selectAll")}

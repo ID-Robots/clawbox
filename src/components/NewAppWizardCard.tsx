@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import {
   buildNewAppPrompt,
+  buildResumeProjectPrompt,
   DEFAULT_NEW_APP_TEMPLATE,
   NEW_APP_TEMPLATES,
   dispatchChatMessage,
@@ -23,6 +24,12 @@ import {
  * It used to be inlined in the Coding Agent app. The chat composer's Create
  * button opens the same card, so the form lives here and both render it —
  * one set of fields, one validation, one message.
+ *
+ * Two modes since the owner asked for it: a NEW app, or an EXISTING project
+ * (the same list the Coding Agent app shows — git folders under the project
+ * folder and code projects) with "what should the next run do?", composed
+ * as a message that tells the assistant how to resume that project rather
+ * than scaffold a new one (buildResumeProjectPrompt).
  */
 
 /**
@@ -64,6 +71,30 @@ const FIELD =
 
 const LABEL = "block text-xs font-medium text-[var(--text-secondary)]";
 
+/** One row of GET /setup-api/coding-agent/projects, as the card reads it. */
+interface ProjectRow {
+  folder: string;
+  directory: string;
+  kind: "folder" | "codeProject";
+  name: string;
+  latestRun: { id: string; status: string; task: string } | null;
+}
+
+function isProjectRow(value: unknown): value is ProjectRow {
+  if (!value || typeof value !== "object") return false;
+  const r = value as Record<string, unknown>;
+  return typeof r.folder === "string" && typeof r.directory === "string" && typeof r.name === "string"
+    && (r.kind === "folder" || r.kind === "codeProject");
+}
+
+/** The route answers a bare array or `{ projects }`; both read the same. */
+function projectRowsOf(data: unknown): ProjectRow[] {
+  const list = Array.isArray(data) ? data : (data as { projects?: unknown } | null)?.projects;
+  return Array.isArray(list) ? list.filter(isProjectRow) : [];
+}
+
+type WizardMode = "new" | "existing";
+
 export interface NewAppWizardCardProps {
   /**
    * Close when a click lands outside the card.
@@ -97,6 +128,22 @@ export default function NewAppWizardCard({
   const [what, setWhat] = useState("");
   const [template, setTemplate] = useState<NewAppTemplate>(DEFAULT_NEW_APP_TEMPLATE);
   const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<WizardMode>("new");
+  // The owner's projects, read the first time the existing-project mode is
+  // opened: null until then, [] when the box has none (or could not say).
+  const [projects, setProjects] = useState<ProjectRow[] | null>(null);
+  const [projectDir, setProjectDir] = useState("");
+  const [next, setNext] = useState("");
+  useEffect(() => {
+    if (mode !== "existing" || projects !== null) return;
+    let active = true;
+    fetch("/setup-api/coding-agent/projects", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => { if (active) setProjects(projectRowsOf(data)); })
+      .catch(() => { if (active) setProjects([]); });
+    return () => { active = false; };
+  }, [mode, projects]);
+  const project = projects?.find((p) => p.directory === projectDir) ?? null;
 
   /**
    * Close on a click outside the card, when the host asked for popover
@@ -132,6 +179,24 @@ export default function NewAppWizardCard({
    * hand it to the chat, and get out of the way.
    */
   const create = () => {
+    if (mode === "existing") {
+      const trimmedNext = next.trim();
+      if (!project) return setError(t("codingAgent.newProjectRequired"));
+      if (!trimmedNext) return setError(t("codingAgent.newWhatRequired"));
+      if (trimmedNext.length > maxTaskChars) return setError(t("codingAgent.newWhatTooLong", { max: maxTaskChars }));
+      dispatchChatMessage(buildResumeProjectPrompt({
+        name: project.name,
+        directory: project.directory,
+        kind: project.kind,
+        folder: project.folder,
+        instructions: trimmedNext,
+        latestRun: project.latestRun,
+      }));
+      setError(null);
+      onClose();
+      onHanded?.();
+      return;
+    }
     const trimmedName = name.trim();
     const trimmedWhat = what.trim();
     if (!trimmedName) return setError(t("codingAgent.newNameRequired"));
@@ -152,6 +217,62 @@ export default function NewAppWizardCard({
       className={`rounded-2xl bg-white/[0.03] border border-[var(--coral-bright)]/30 px-4 py-4 space-y-3.5 ${className}`}
     >
       <p className="text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.newTitle")}</p>
+      {/* New app, or an existing project to continue. */}
+      <div className="flex gap-1 rounded-lg bg-black/25 border border-white/[0.10] p-1" role="group" aria-label={t("codingAgent.newTitle")}>
+        {(["new", "existing"] as const).map((m) => (
+          <button
+            key={m}
+            type="button"
+            aria-pressed={mode === m}
+            onClick={() => { setMode(m); setError(null); }}
+            data-testid={`coding-agent-new-mode-${m}`}
+            className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+              mode === m ? "bg-white/[0.08] text-[var(--text-primary)]" : "text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+            }`}
+          >
+            {t(m === "new" ? "codingAgent.newModeNew" : "codingAgent.newModeExisting")}
+          </button>
+        ))}
+      </div>
+      {mode === "existing" ? (<>
+        <label className={LABEL}>
+          {t("codingAgent.newProjectLabel")}
+          <select
+            value={projectDir}
+            onChange={(e) => { setProjectDir(e.target.value); setError(null); }}
+            disabled={projects === null || projects.length === 0}
+            data-testid="coding-agent-new-project"
+            className={`${FIELD} mt-1.5 appearance-none bg-[var(--bg-elevated)] pr-9`}
+          >
+            <option value="">
+              {projects === null ? t("codingAgent.newProjectsLoading") : projects.length === 0 ? t("codingAgent.newNoProjects") : "—"}
+            </option>
+            {(projects ?? []).map((p) => (
+              <option key={p.directory} value={p.directory}>
+                {p.name} · {t(p.kind === "codeProject" ? "codingAgent.newKindCodeProject" : "codingAgent.newKindFolder")}
+              </option>
+            ))}
+          </select>
+        </label>
+        {project?.latestRun && (
+          <p className="text-[11px] text-[var(--text-muted)] break-words" data-testid="coding-agent-new-last-run">
+            {t("codingAgent.newLastRun", { task: project.latestRun.task.trim().split(/\r?\n/)[0].slice(0, 120) })}
+          </p>
+        )}
+        <label className={LABEL}>
+          {t("codingAgent.newNextLabel")}
+          <textarea
+            value={next}
+            onChange={(e) => { setNext(e.target.value); setError(null); }}
+            maxLength={maxTaskChars}
+            rows={3}
+            placeholder={t("codingAgent.newNextPlaceholder")}
+            data-testid="coding-agent-new-next"
+            className={`${FIELD} mt-1.5 resize-y min-h-[5.5rem]`}
+          />
+        </label>
+        <p className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.newExistingHint")}</p>
+      </>) : (<>
       <label className={LABEL}>
         {t("codingAgent.newNameLabel")}
         <input
@@ -192,6 +313,7 @@ export default function NewAppWizardCard({
           ))}
         </select>
       </label>
+      </>)}
       {error && (
         <p className="text-[11px] text-amber-400" role="alert" data-testid="coding-agent-new-error">{error}</p>
       )}
@@ -209,7 +331,7 @@ export default function NewAppWizardCard({
           data-testid="coding-agent-new-create"
           className="text-[11px] px-3 py-1 rounded-lg bg-[var(--coral-bright)] text-black font-medium hover:opacity-90"
         >
-          {t("codingAgent.newCreate")}
+          {t(mode === "existing" ? "codingAgent.newContinue" : "codingAgent.newCreate")}
         </button>
       </div>
     </form>

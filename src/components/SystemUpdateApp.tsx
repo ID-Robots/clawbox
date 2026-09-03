@@ -42,7 +42,7 @@ function isUpdateAvailable(current: string | null | undefined, target: string | 
   return compareSemver(target, current) > 0;
 }
 
-function componentNeedsUpdate(component: { current: string | null; target: string | null; updateAvailable?: boolean }): boolean {
+export function componentNeedsUpdate(component: { current: string | null; target: string | null; updateAvailable?: boolean }): boolean {
   return component.updateAvailable ?? isUpdateAvailable(component.current, component.target);
 }
 

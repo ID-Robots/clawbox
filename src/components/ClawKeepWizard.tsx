@@ -432,6 +432,7 @@ export default function ClawKeepWizard({
                   <button
                     key={freq}
                     type="button"
+                    aria-pressed={frequency === freq}
                     onClick={() => setFrequency(freq)}
                     className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
                       frequency === freq
@@ -457,11 +458,12 @@ export default function ClawKeepWizard({
               {frequency === "weekly" && (
                 <div className="flex items-center gap-3">
                   <span className="text-xs text-[var(--text-muted)] w-16">{t("clawkeep.schedule.day")}</span>
-                  <div className="flex gap-1 flex-wrap">
+                  <div className="flex gap-1 flex-wrap" role="group" aria-label={t("clawkeep.schedule.day")}>
                     {WEEKDAY_LABEL_KEYS.map((labelKey, idx) => (
                       <button
-                        key={idx}
+                        key={labelKey}
                         type="button"
+                        aria-pressed={weekday === idx}
                         onClick={() => setWeekday(idx)}
                         className={`px-2.5 py-1 rounded-md text-xs border cursor-pointer ${
                           weekday === idx

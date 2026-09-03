@@ -16,8 +16,10 @@ export const SPEECH_MAX_CHARS = 1500;
 
 export function speechTextFor(markdown: string, maxChars: number = SPEECH_MAX_CHARS): string {
   let text = markdown
-    // Media directives and code fences carry nothing to say.
-    .replace(/^\s*MEDIA:.*$/gim, " ")
+    // Media and mail-reference directives (MEDIA:, EMAIL:<uid> — see
+    // chat-media.ts and chat-email-refs.ts) and code fences carry nothing
+    // to say.
+    .replace(/^\s*(MEDIA|EMAIL):.*$/gim, " ")
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/`([^`]*)`/g, "$1")
     // Images become nothing; links become their label.

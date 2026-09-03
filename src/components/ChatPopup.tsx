@@ -76,6 +76,9 @@ import {
 const MAX_RETRIES = 8
 const MAX_QUEUED_SENDS = 20
 
+/** How many spoken replies' audio the chat keeps alive at once; older ones lose their player. */
+const SPOKEN_REPLIES_KEPT = 12
+
 /** A turn waiting its go: what to send, and whether it was SPOKEN (then the reply is spoken back). */
 type QueuedSend = { id: string; text: string; attachments: ChatAttachment[]; voice?: boolean }
 // The server gives its upstream two minutes. Leave enough room for the upload
@@ -608,6 +611,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [messages, setMessages] = useState<ChatMessage[]>([])
   // Read when a wait begins, to know what "a new picture" means.
   const messagesRef = useRef<ChatMessage[]>([])
+  // The spoken reply currently playing, and the object URLs handed to bubbles
+  // — declared up here because clearTranscript (below) releases them.
+  const replyPlayerRef = useRef<HTMLAudioElement | null>(null)
+  const spokenUrlsRef = useRef<string[]>([])
+  const releaseSpokenReplies = useCallback(() => {
+    replyPlayerRef.current?.pause()
+    replyPlayerRef.current = null
+    for (const url of spokenUrlsRef.current) { try { URL.revokeObjectURL(url) } catch { /* jsdom */ } }
+    spokenUrlsRef.current = []
+  }, [])
   // Debounce for the pushed-append reconcile, and a stable handle on it — the
   // socket handler is built once and must not close over a stale callback.
   const transcriptReconcileTimerRef = useRef<number | null>(null)
@@ -2059,6 +2072,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // replies arrive via delta+final and don't need the extra
             // round-trip every turn.
             if (isAckOnly) {
+              // The real reply arrives through the history refetch below, as
+              // a stored message rather than a live final — nothing to speak
+              // from here. Release the mark rather than leave it on a run
+              // that is over.
+              if (voiceTurnKeyRef.current === runIdRef.current) voiceTurnKeyRef.current = null
               if (ackOnlyHistoryTimerRef.current !== null) {
                 window.clearTimeout(ackOnlyHistoryTimerRef.current)
               }
@@ -2307,6 +2325,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const clearTranscript = useCallback(() => {
     setMessages([])
     setStreaming('')
+    // The bubbles holding spoken replies are gone for good (a returned-to tab
+    // repaints from the box's history, which cannot carry a browser-local
+    // blob URL), so the blobs go with them. This panel never unmounts while
+    // the desktop is open, so this — not the unmount cleanup — is where a
+    // day of voice use is kept from retaining every reply ever spoken.
+    releaseSpokenReplies()
     // The pills render from their own state, outside the transcript map, and
     // the socket only clears them on `final`/`aborted`/`error`. New chat during
     // a live turn beats all three, which left the previous turn's pills sitting
@@ -2772,15 +2796,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => { voiceAutoReplyRef.current = voiceAutoReply }, [voiceAutoReply])
   // The run started by a spoken question, until its reply has been spoken.
   const voiceTurnKeyRef = useRef<string | null>(null)
-  // The reply currently playing, so a new one does not talk over it; and the
-  // object URLs handed to bubbles, released when the panel goes away.
-  const replyPlayerRef = useRef<HTMLAudioElement | null>(null)
-  const spokenUrlsRef = useRef<string[]>([])
-  useEffect(() => () => {
-    replyPlayerRef.current?.pause()
-    for (const url of spokenUrlsRef.current) { try { URL.revokeObjectURL(url) } catch { /* jsdom */ } }
-    spokenUrlsRef.current = []
-  }, [])
+  // Spoken replies are asked for one after another: the box speaks one at a
+  // time, and two replies landing seconds apart must both be heard.
+  const speakChainRef = useRef<Promise<void>>(Promise.resolve())
+  useEffect(() => () => releaseSpokenReplies(), [releaseSpokenReplies])
   useEffect(() => {
     if (!isOpen) return
     let active = true
@@ -2823,16 +2842,34 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (audio.length > 0) { playReply(audio[0]); return }
     const words = speechTextFor(text)
     if (!words) return
+    // One at a time, in order — chained on the previous ask, whatever became
+    // of it. The box queues replies too; a 429 here means that queue is full,
+    // which a short wait usually clears.
+    const previous = speakChainRef.current
+    let release: () => void = () => {}
+    speakChainRef.current = new Promise<void>((resolve) => { release = resolve })
     try {
-      const res = await fetch('/setup-api/tts/speak', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: words }),
-      })
-      if (!res.ok) return
+      await previous
+      let res: Response | null = null
+      for (let attempt = 0; attempt < 3; attempt++) {
+        res = await fetch('/setup-api/tts/speak', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: words }),
+        })
+        if (res.status !== 429) break
+        await new Promise((resolve) => setTimeout(resolve, 3000 * (attempt + 1)))
+      }
+      if (!res || !res.ok) return
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
       spokenUrlsRef.current.push(url)
+      // A bounded ring: the oldest spoken replies are released once a dozen
+      // are held, even before the transcript is cleared.
+      while (spokenUrlsRef.current.length > SPOKEN_REPLIES_KEPT) {
+        const oldest = spokenUrlsRef.current.shift()
+        if (oldest) { try { URL.revokeObjectURL(oldest) } catch { /* jsdom */ } }
+      }
       // Onto the bubble it answers — the newest assistant bubble with this
       // text and no audio yet — so it can be played again from the transcript.
       setMessages(prev => {
@@ -2848,6 +2885,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       })
       playReply(url)
     } catch { /* the reply is on screen; the voice was a bonus */ }
+    finally { release() }
   }, [playReply])
   const maybeSpeakReplyRef = useRef(maybeSpeakReply)
   useEffect(() => { maybeSpeakReplyRef.current = maybeSpeakReply }, [maybeSpeakReply])
