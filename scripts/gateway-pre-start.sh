@@ -2283,10 +2283,17 @@ else
   # earlier boot) still tells the gateway to import it. Removing it leaves ONE
   # state instead of that — no plugin, no strip, and a line that says so —
   # rather than a module that may throw halfway through parsing. Where the
-  # removal cannot work either (a read-only filesystem) the copy could not have
-  # truncated anything, so the destination is intact and `|| true` is right.
-  rm -rf "$CLAWBOX_HOOK_PLUGIN_DST" 2>/dev/null || true
-  echo "  WARNING: could not install the $CLAWBOX_HOOK_PLUGIN_ID plugin into $CLAWBOX_HOOK_PLUGIN_DST — a partial copy has been removed rather than left for the gateway to import, so EMAIL: directives will reach channels until the next boot repairs it" >&2
+  # removal cannot work either — a read-only filesystem, or a destination
+  # directory whose mode lets `cp` truncate the files already in it but does not
+  # let `rm` unlink them — the removal is REPORTED as not done. Claiming a
+  # cleanup that did not happen is the false success this step exists to avoid,
+  # and it is the difference between "nothing loads" and "the gateway imports a
+  # plugin that is missing a file".
+  if rm -rf "$CLAWBOX_HOOK_PLUGIN_DST" 2>/dev/null; then
+    echo "  WARNING: could not install the $CLAWBOX_HOOK_PLUGIN_ID plugin into $CLAWBOX_HOOK_PLUGIN_DST — anything partial there has been removed rather than left for the gateway to import, so EMAIL: directives will reach channels until the next boot repairs it" >&2
+  else
+    echo "  WARNING: could not install the $CLAWBOX_HOOK_PLUGIN_ID plugin into $CLAWBOX_HOOK_PLUGIN_DST AND could not remove what is there — the gateway may import a partial copy. EMAIL: directives will reach channels; the next boot repairs it only if that path becomes writable" >&2
+  fi
 fi
 
 # Enabled only once the files are on disk, so the config can never name a

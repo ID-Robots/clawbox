@@ -49,7 +49,16 @@ API_BASE="${CLAWBOX_API_BASE:-http://127.0.0.1:80}"
 # running for as long as the box is up. 45 s is the budget the OpenClaw twin
 # gives its own `plugins inspect` (gateway-pre-start.sh) — well past a loaded
 # Jetson's CLI start, well short of forever.
-HERMES_CLI_TIMEOUT=45
+#
+# Overridable like every other tunable here, and for one reason: a test can turn
+# it down and prove the ceiling actually FIRES, which asserting the command line
+# does not. Both call sites also pass `-k 5`, because plain `timeout` only sends
+# SIGTERM: a `hermes` that ignores it keeps running after `timeout` has returned
+# 124, and both calls are inside the `acquire_config_lock` critical section, so
+# a survivor inherits fd 9 and holds ~/.hermes/config.yaml.lock after this
+# script exits — leaving setup-hermes-dashboard-auth.sh to burn its 120 s wait
+# and then write unlocked, which is the config-clobber that lock exists to stop.
+HERMES_CLI_TIMEOUT="${HERMES_CLI_TIMEOUT:-45}"
 # Shared with setup-hermes-dashboard-auth.sh: BOTH scripts read-modify-write
 # ~/.hermes/config.yaml, and at install time they run seconds apart
 # (production-server.js fire-and-forgets this script on the clawbox-setup
@@ -205,10 +214,17 @@ if [ -f "$EMAIL_HOOK_SRC/__init__.py" ] && [ -f "$EMAIL_HOOK_SRC/plugin.yaml" ] 
     # the removal of one already there), so Hermes would import it. Removing it
     # leaves ONE state — no plugin, no strip, and a line that says so — instead
     # of a module that may raise half-way through parsing. Where the removal
-    # cannot work either (a read-only filesystem) the copy could not have
-    # truncated anything, so the destination is intact and `|| true` is right.
-    rm -rf "$EMAIL_HOOK_DST" 2>/dev/null || true
-    log "WARNING: could not install the $EMAIL_HOOK_PLUGIN plugin into $EMAIL_HOOK_DST — a partial copy has been removed rather than left for Hermes to import, so EMAIL: directives will reach channels until the next boot repairs it"
+    # cannot work either — a read-only filesystem, or a destination directory
+    # whose mode lets `cp` truncate the files already in it but does not let
+    # `rm` unlink them — the removal is REPORTED as not done. Claiming a
+    # cleanup that did not happen is the false success this whole step exists
+    # to avoid, and it is the difference between "nothing loads" and "Hermes
+    # imports a package that is missing a file".
+    if rm -rf "$EMAIL_HOOK_DST" 2>/dev/null; then
+      log "WARNING: could not install the $EMAIL_HOOK_PLUGIN plugin into $EMAIL_HOOK_DST — anything partial there has been removed rather than left for Hermes to import, so EMAIL: directives will reach channels until the next boot repairs it"
+    else
+      log "WARNING: could not install the $EMAIL_HOOK_PLUGIN plugin into $EMAIL_HOOK_DST AND could not remove what is there — Hermes may import a partial copy. EMAIL: directives will reach channels; the next boot repairs it only if that path becomes writable"
+    fi
   fi
 else
   log "WARNING: $EMAIL_HOOK_SRC is not a complete plugin — skipping the EMAIL: directive hook"
@@ -561,7 +577,7 @@ PY
 # the helper and its child running for as long as the box is up. A timeout
 # lands in the branch that already exists for a refusal, which is the honest
 # answer for both.
-if timeout "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools disable browser >/dev/null 2>&1; then
+if timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools disable browser >/dev/null 2>&1; then
   log "built-in browser toolset off; browsing goes through the ClawBox browser_* tools"
 else
   log "could not disable the built-in browser toolset — continuing"
@@ -594,20 +610,24 @@ fi
 # refusing `hermes` would stop the boot here, over a DIAGNOSTIC.
 if [ "$EMAIL_HOOK_INSTALLED" = "1" ]; then
   EMAIL_HOOK_DOCTOR_RC=0
-  EMAIL_HOOK_DOCTOR="$(timeout "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" plugins doctor "$EMAIL_HOOK_PLUGIN" 2>&1)" \
+  EMAIL_HOOK_DOCTOR="$(timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" plugins doctor "$EMAIL_HOOK_PLUGIN" 2>&1)" \
     || EMAIL_HOOK_DOCTOR_RC=$?
   # The doctor's own words, trimmed to one line: "no register() function",
   # "No __init__.py in ...", an import traceback's last line. Naming the plugin
-  # without naming the reason is what sends an operator to the wrong file.
-  EMAIL_HOOK_DETAIL="$(printf '%s' "$EMAIL_HOOK_DOCTOR" | tr '\n' ' ' | cut -c1-300)"
-  # 124 is `timeout` killing it, and it is read BEFORE the words. By then the
-  # doctor has usually printed its banner, and on the text alone that banner IS
-  # the "ran and refused" branch below — so a wedged CLI would print a hard
-  # WARNING about a hook that is very probably registered and working, on every
-  # boot. Like the other unknowns this is a NOTE, and it names the budget so an
-  # operator can tell a slow box from a broken plugin.
+  # without naming the reason is what sends an operator to the wrong file. The
+  # `|| :=""` for the same reason as the line above: no diagnostic may end the
+  # boot, and under `pipefail` any stage of this is enough to do it.
+  EMAIL_HOOK_DETAIL="$(printf '%s' "$EMAIL_HOOK_DOCTOR" | tr '\n' ' ' | cut -c1-300)" \
+    || EMAIL_HOOK_DETAIL=""
+  # 124 is read BEFORE the words. By the time `timeout` kills it the doctor has
+  # usually printed its banner, and on the text alone that banner IS the "ran
+  # and refused" branch below — so a wedged CLI would print a hard WARNING about
+  # a hook that is very probably registered and working, on every boot. Like the
+  # other unknowns this is a NOTE. It does NOT claim the CLI was killed: 124 is
+  # also what `timeout` returns when the child chose that exit code itself, and
+  # the two are indistinguishable from here.
   if [ "$EMAIL_HOOK_DOCTOR_RC" = "124" ]; then
-    log "NOTE: 'hermes plugins doctor' did not answer within ${HERMES_CLI_TIMEOUT}s and was stopped — $EMAIL_HOOK_PLUGIN is installed and enabled, but whether its hook registered is unknown here. hermes had printed: $EMAIL_HOOK_DETAIL"
+    log "NOTE: 'hermes plugins doctor' answered 124 — the ${HERMES_CLI_TIMEOUT}s ceiling, or the CLI's own exit code — so $EMAIL_HOOK_PLUGIN is installed and enabled but whether its hook registered is unknown here. hermes had printed: $EMAIL_HOOK_DETAIL"
   else
     case "$EMAIL_HOOK_DOCTOR" in
       *"1 hook(s)"*)

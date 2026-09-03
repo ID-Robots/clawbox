@@ -213,13 +213,35 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     const r = run();
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/WARNING: could not install/);
-    expect(r.stdout).toContain("a partial copy has been removed");
+    expect(r.stdout).toContain("has been removed rather than left for Hermes to import");
     expect(installedFiles()).toEqual([]);
     // And the config still names it — which is exactly why the files must go.
     expect(enabledPlugins()).toEqual([PLUGIN]);
   });
 
-  it("leaves the installed plugin ALONE when it is the SOURCES that cannot be read", () => {
+  it.skipIf(process.getuid?.() === 0)("says so when it could NOT remove the partial copy", () => {
+    // The other half of the same line, and the reason it is a line and not a
+    // claim: `cp` truncates through the modes of files that already exist,
+    // while `rm` needs the directory bit — so a destination the box cannot
+    // write leaves a package missing a file, with `plugins.enabled` still
+    // naming it. Reporting that as a completed cleanup would be a false
+    // success in the step written to remove one.
+    run();
+    const dst = path.join(pluginsDir, PLUGIN);
+    fs.rmSync(path.join(dst, "plugin.yaml")); // so `cp` must CREATE, and fails
+    fs.chmodSync(dst, 0o555);
+    try {
+      const r = run();
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("could not remove what is there");
+      expect(r.stdout).not.toContain("has been removed rather than left");
+      expect(fs.existsSync(dst)).toBe(true);
+    } finally {
+      fs.chmodSync(dst, 0o755);
+    }
+  });
+
+  it.skipIf(process.getuid?.() === 0)("leaves the installed plugin ALONE when it is the SOURCES that cannot be read", () => {
     // The other side of the same branch. `cp` opens its source first and never
     // touches the destination when that open fails, so a source-side problem —
     // a checkout still being written by the updater, a permission slip — leaves
@@ -293,40 +315,45 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(r.stdout).not.toMatch(/WARNING/);
   });
 
-  it("bounds the doctor with a timeout, so a wedged CLI cannot hold the boot", () => {
+  it("BOTH hermes calls are really bounded — a hung CLI cannot hold the boot", () => {
     // `production-server.js` launches this script, so an unbounded CLI call is
-    // a helper (and its child) left running for as long as the box is up. The
-    // OpenClaw twin gives its `plugins inspect` 45 s; this is the same budget,
-    // asserted from the command line the script actually runs.
-    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-fake-bin-"));
-    try {
-      fs.writeFileSync(
-        path.join(binDir, "timeout"),
-        [
-          "#!/usr/bin/env bash",
-          'printf "%s\\n" "timeout $*" >> "$HERMES_CALLS"',
-          "shift",
-          'exec "$@"',
-        ].join("\n"),
-      );
-      fs.chmodSync(path.join(binDir, "timeout"), 0o755);
-      run({ PATH: `${binDir}:${process.env.PATH ?? ""}` });
-      const calls = fs.readFileSync(path.join(home, "calls.log"), "utf-8");
-      expect(calls).toMatch(new RegExp(`timeout 45 .*plugins doctor ${PLUGIN}`));
-      // The sibling call site in the same script, which the same reasoning
-      // covers: leaving one of the two unbounded fixes nothing.
-      expect(calls).toMatch(/timeout 45 .*tools disable browser/);
-    } finally {
-      fs.rmSync(binDir, { recursive: true, force: true });
-    }
+    // a helper (and its child) left running for as long as the box is up, and
+    // both calls sit inside the config-lock critical section. Proven by turning
+    // the ceiling down and hanging the CLI, rather than by matching a command
+    // line: a `timeout` that never fires would leave this test waiting on the
+    // stub's own sleep and then reading a SUCCESS from it.
+    fs.writeFileSync(
+      hermesBin,
+      [
+        "#!/usr/bin/env bash",
+        'printf "%s\\n" "$*" >> "$HERMES_CALLS"',
+        "sleep 30",
+        "exit 0",
+      ].join("\n"),
+    );
+    fs.chmodSync(hermesBin, 0o755);
+    const started = Date.now();
+    const r = run({ HERMES_CLI_TIMEOUT: "1" });
+    expect(r.status).toBe(0);
+    expect(Date.now() - started).toBeLessThan(20_000);
+    // The doctor: killed, so its verdict is the UNKNOWN one and never the
+    // "did not register its hook" defect.
+    expect(r.stdout).toMatch(/NOTE: .*answered 124/);
+    expect(r.stdout).not.toMatch(/did not register its hook/);
+    // The sibling call site: `hermes tools disable browser`, which without a
+    // bound would have slept and then reported SUCCESS.
+    expect(r.stdout).toContain("could not disable the built-in browser toolset");
+    // And the box still got its device tools and its plugin.
+    expect(enabledPlugins()).toEqual([PLUGIN]);
+    expect((readConfig().mcp_servers as Record<string, unknown>).clawbox).toBeTruthy();
   });
 
-  it("calls a doctor the timeout KILLED unknown, not a defect", () => {
-    // 124 is `timeout` stopping it at 45 s — and by then the doctor has already
-    // printed its banner. Read on the text alone that banner IS the "the doctor
-    // ran and refused" branch, so a wedged CLI would print a hard WARNING about
-    // a hook that is very probably registered and working, on every boot. The
-    // exit status is what tells the two apart, so it has to survive.
+  it("reads 124 BEFORE the doctor's words, so a banner is not a defect", () => {
+    // By the time `timeout` kills it, the doctor has usually printed its
+    // banner — and on the text alone that banner IS the "ran and refused"
+    // branch, so the box would log a hard WARNING about a hook that is very
+    // probably registered and working, on every boot. The exit status is what
+    // tells the two apart, so it has to survive and be read first.
     fs.writeFileSync(
       hermesBin,
       [
@@ -343,7 +370,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     const r = run();
     expect(r.status).toBe(0);
     expect(enabledPlugins()).toEqual([PLUGIN]);
-    expect(r.stdout).toMatch(/NOTE: .*did not answer within 45s/);
+    expect(r.stdout).toMatch(/NOTE: .*answered 124/);
     expect(r.stdout).not.toMatch(/WARNING/);
   });
 

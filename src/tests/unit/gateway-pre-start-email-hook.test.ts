@@ -441,7 +441,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     expect(calls()).not.toContain("plugins inspect");
   });
 
-  it("leaves the installed plugin ALONE when it is the sources that cannot be read", () => {
+  it.skipIf(process.getuid?.() === 0)("leaves the installed plugin ALONE when it is the sources that cannot be read", () => {
     // `cp` opens its source first and never touches the destination when that
     // open fails, so a source-side problem — a checkout still being written by
     // the updater, a permission slip — leaves the last good plugin exactly
@@ -481,7 +481,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     const r = run();
     expect(r.status).toBe(0);
     expect(r.stderr).toMatch(/WARNING: could not install/);
-    expect(r.stderr).toContain("a partial copy has been removed");
+    expect(r.stderr).toContain("has been removed rather than left for the gateway to import");
     expect(installed()).toEqual([]);
   });
 

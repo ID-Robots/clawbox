@@ -98,17 +98,20 @@ export const EMAIL_DIRECTIVE_CASES: EmailDirectiveCase[] = [
     // U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE. Python's `re.IGNORECASE`
     // is Unicode-aware and folds it onto `i`, so `EMAİL:7` matched the keyword
     // and the Hermes copy DELETED a line the chat window and the OpenClaw
-    // plugin both keep as text — ECMAScript's `/i` canonicalisation refuses any
-    // non-ASCII character whose fold is ASCII. `re.ASCII` is what makes the
-    // three read the keyword identically. The first line is there because all
-    // three bail out early on a reply with no ASCII `email:` in it at all.
+    // plugin both keep as text: in JavaScript `İ` uppercases to itself and so
+    // never canonicalises to `I` at all. `re.ASCII` is what makes the three
+    // read the keyword identically. The first line is there because all three
+    // bail out early on a reply with no ASCII `email:` in it at all.
     input: "Done.\nEMAIL:4471\nEMAİL:7",
     stripped: "Done.\nEMAİL:7",
   },
   {
     name: "a dotless i is not an ASCII i either",
-    // U+0131 LATIN SMALL LETTER DOTLESS I, the other half of the Turkish pair:
-    // Python folds it onto `I` and stripped `emaıl:7` as well.
+    // U+0131 LATIN SMALL LETTER DOTLESS I, the other half of the Turkish pair
+    // and the other half of the reason: Python folds it onto `I` and stripped
+    // `emaıl:7` too, while `ı` DOES uppercase to ASCII `I` in JavaScript and is
+    // refused by the ECMAScript rule that a non-ASCII character whose fold is
+    // ASCII does not match. Those two code points are the whole offender set.
     input: "Done.\nEMAIL:4471\nemaıl:7",
     stripped: "Done.\nemaıl:7",
   },

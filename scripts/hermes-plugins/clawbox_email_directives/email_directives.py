@@ -64,12 +64,17 @@ _JS_WHITESPACE = (
 #: JavaScript copies call ``.trim()``.
 #:
 #: ``re.ASCII`` FOR THE SAME REASON ``_UID_RE`` SPELLS OUT ``[0-9]``: Python's
-#: ``re.IGNORECASE`` is Unicode-aware and folds ``İ`` (U+0130) and ``ı``
+#: ``re.IGNORECASE`` is Unicode-aware and folds both ``İ`` (U+0130) and ``ı``
 #: (U+0131) onto the ASCII ``i``, so ``EMAİL:7`` matched the keyword here and
 #: this copy DELETED a line the chat window and the OpenClaw plugin both keep as
-#: text — ECMAScript's ``/i`` refuses any non-ASCII character whose fold is
-#: ASCII. It does not touch the payload class: ``\S`` is the complement of
-#: whichever ``\s`` is in force, so ``[\s\S]`` is still every character.
+#: text. Neither matches in JavaScript, for two DIFFERENT reasons: ``İ``
+#: uppercases to itself, so it never canonicalises to ``I`` at all; ``ı`` does
+#: uppercase to ASCII ``I``, and ECMAScript's ``/i`` then refuses it under the
+#: rule that a non-ASCII character whose fold is ASCII does not match. Those two
+#: are the WHOLE offender set — swept over every code point, no other character
+#: folds onto a letter of ``email``. The flag does not touch the payload class:
+#: ``\S`` is the complement of whichever ``\s`` is in force, so ``[\s\S]`` is
+#: still every character.
 _EMAIL_LINE_RE = re.compile(r"^email:([\s\S]*)$", re.IGNORECASE | re.ASCII)
 
 #: Opening or closing marker of a fenced code block.
