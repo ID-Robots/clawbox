@@ -43,11 +43,18 @@ const PROJECT_PATH = "/home/clawbox/clawbox";
 const canRun =
   process.platform !== "win32" && spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0;
 
+/** A 0000 source is readable by root, so that one case would prove nothing there. */
+const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
 let root: string;
 beforeEach(() => {
   root = mkdtempSync(path.join(tmpdir(), "clawbox-bootstrap-manifest-"));
 });
 afterEach(() => {
+  // The "unreadable source" case leaves a 0000 file behind.
+  try {
+    chmodSync(path.join(root, "project", "config", "clawbox-root-manifest.sh"), 0o755);
+  } catch { /* not every case writes one */ }
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -88,13 +95,39 @@ interface Bootstrap {
   calls: string[];
   /** The value the bootstrap would hand to the re-exec. */
   marker: string;
+  /** The live helper's bytes as the run found them. */
+  helperBefore: string;
+  /** The live helper's bytes after the run — the thing a bad copy destroys. */
+  helperAfter: string;
+  /** Whether a staged `<helper>.new` was left behind in libexec. */
+  stagedLeft: boolean;
 }
 
 /**
  * Run the bootstrap's manifest arm with a helper stub whose `--write` fails
  * `failWrites` times before succeeding (Infinity = never succeeds).
  */
-function runBootstrap(opts: { failWrites: number; helperInTree?: boolean }): Bootstrap {
+function runBootstrap(opts: {
+  failWrites: number;
+  helperInTree?: boolean;
+  /**
+   * How the copy from the reset tree fails.
+   *
+   * "unreadable" — the source cannot be opened, so `install` fails before
+   * writing anything (a directory would not do: the shipped `[ -f ]` guard
+   * filters it out before `install` is ever reached, which is the
+   * `helperInTree: false` path). "truncates" — the source is larger than an
+   * RLIMIT_FSIZE the run is given, so `install` is killed by SIGXFSZ PART WAY
+   * THROUGH the copy.
+   * The second is the one that matters: `install` writes into the destination
+   * inode with O_TRUNC, so a copy straight over the live helper leaves a cut-off
+   * file behind — and a truncated helper exits 0 for `--verify`, which turns the
+   * root dispatcher from fail-closed into fail-open for every pinned step.
+   * Neither depends on the runner's privileges; a read-only mode is ignored by
+   * root.
+   */
+  stagingFails?: "unreadable" | "truncates";
+}): Bootstrap {
   const helper = path.join(root, "libexec", "clawbox-root-manifest.sh");
   const project = path.join(root, "project");
   const callLog = path.join(root, "helper-calls.log");
@@ -121,12 +154,13 @@ function runBootstrap(opts: { failWrites: number; helperInTree?: boolean }): Boo
 
   // The helper the reset just checked out. Present unless the test says the
   // fresh tree does not carry one.
+  const treeHelper = path.join(project, "config", "clawbox-root-manifest.sh");
   if (opts.helperInTree !== false) {
-    writeFileSync(
-      path.join(project, "config", "clawbox-root-manifest.sh"),
-      stub.replace("installed %s", "refreshed %s"),
-    );
-    chmodSync(path.join(project, "config", "clawbox-root-manifest.sh"), 0o755);
+    // Padded past the size limit the "truncates" run imposes, so the copy dies
+    // mid-write rather than before it starts.
+    const pad = opts.stagingFails === "truncates" ? `\n${"# pad\n".repeat(30_000)}` : "";
+    writeFileSync(treeHelper, stub.replace("installed %s", "refreshed %s") + pad);
+    chmodSync(treeHelper, opts.stagingFails === "unreadable" ? 0o000 : 0o755);
   }
 
   // The slice runs THROUGH the `exec`, into a stub install.sh that prints the
@@ -154,6 +188,8 @@ function runBootstrap(opts: { failWrites: number; helperInTree?: boolean }): Boo
   const program = [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
+    // 8 blocks, and no core file: the copy below is killed part way through.
+    ...(opts.stagingFails === "truncates" ? ["ulimit -c 0", "ulimit -f 8"] : []),
     `_b=${JSON.stringify(project)}`,
     block,
     // Never reached: the block above ends in `exec`.
@@ -170,6 +206,9 @@ function runBootstrap(opts: { failWrites: number; helperInTree?: boolean }): Boo
     out,
     calls: existsSync(callLog) ? readFileSync(callLog, "utf-8").trim().split("\n").filter(Boolean) : [],
     marker: /MARKER=(\d)/.exec(run.stdout ?? "")?.[1] ?? "",
+    helperBefore: stub,
+    helperAfter: existsSync(helper) ? readFileSync(helper, "utf-8") : "",
+    stagedLeft: existsSync(`${helper}.new`),
   };
 }
 
@@ -279,6 +318,38 @@ describe.runIf(canRun)("the bootstrap's root-exec manifest re-record", () => {
     // reset to new code with nothing installed.
     const run = runBootstrap({ failWrites: Infinity, helperInTree: false });
     expect(run.status).toBe(0);
+    expect(run.out).toContain("REACHED_EXEC=1");
+    expect(run.marker).toBe("1");
+  });
+
+  it("leaves the live helper byte-identical when the copy dies mid-write", () => {
+    // The most dangerous line in this change, and nothing failed if it was
+    // reverted: the call sequence is identical whether the copy goes to
+    // "$_mf.new" and is renamed, or straight over "$_mf". `install` writes into
+    // the existing inode with O_TRUNC, so a copy killed part way through — a
+    // full or read-only root filesystem, which is the same condition that most
+    // often fails the write this repair is answering — leaves a cut-off helper
+    // behind. Measured both ways with an RLIMIT_FSIZE child: temp+rename keeps
+    // the live helper at its original bytes; installing over it leaves an
+    // 8192-byte survivor whose `--verify` still exits 0, which is worse than the
+    // stale manifest it was trying to fix — it turns the root dispatcher from
+    // fail-closed into fail-open for every pinned step.
+    const run = runBootstrap({ failWrites: Infinity, stagingFails: "truncates" });
+    expect(run.status).toBe(0);
+    expect(run.helperAfter, "the live helper was truncated by a failed copy").toBe(run.helperBefore);
+    expect(run.stagedLeft, "a half-written .new was left in libexec").toBe(false);
+    expect(run.out).toContain("REACHED_EXEC=1");
+    expect(run.marker).toBe("1");
+  });
+
+  it.skipIf(isRoot)("cleans up and carries on when the copy fails outright", () => {
+    // The other half: `install` that fails before writing anything must leave
+    // no staged file behind and must not abort the boot path.
+    const run = runBootstrap({ failWrites: Infinity, stagingFails: "unreadable" });
+    expect(run.status).toBe(0);
+    expect(run.out).toContain("could not stage a fresh root-exec manifest helper");
+    expect(run.helperAfter).toBe(run.helperBefore);
+    expect(run.stagedLeft).toBe(false);
     expect(run.out).toContain("REACHED_EXEC=1");
     expect(run.marker).toBe("1");
   });

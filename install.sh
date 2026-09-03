@@ -190,10 +190,15 @@ record_provision_failure() {
 # half a minute later — a false failure over an install that is fine.
 clear_provision_failure() {
   local kept=() f
-  for f in "${PROVISION_FAILURES[@]}"; do
+  # `${a[@]+"${a[@]}"}` rather than `"${a[@]}"`: bash before 4.4 calls an empty
+  # array unbound under `set -u`, and both arrays here are empty on the common
+  # path (nothing recorded, or nothing kept). Aborting the installer inside the
+  # function whose whole job is to CLEAR a failure would report exactly the
+  # false failure it exists to remove.
+  for f in ${PROVISION_FAILURES[@]+"${PROVISION_FAILURES[@]}"}; do
     [ "$f" = "$1" ] || kept+=("$f")
   done
-  PROVISION_FAILURES=("${kept[@]}")
+  PROVISION_FAILURES=(${kept[@]+"${kept[@]}"})
 }
 
 # The step an operator should re-run to repair a recorded failure. Almost every

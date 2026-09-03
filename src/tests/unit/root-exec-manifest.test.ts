@@ -351,16 +351,22 @@ d("install.sh::install_root_libexec", () => {
     return sh([
       "set -uo pipefail",
       `PROJECT_DIR="${project}"`,
-      'record_provision_failure() { echo "provision-failure:$1"; }',
+      'record_provision_failure() { PROVISION_FAILURES+=("$1"); echo "provision-failure:$1"; }',
       // write_root_exec_manifest now CLEARS what it repaired (TASK-584): a
       // manifest the bootstrap could not write and a later step did is not a
       // failure of the run. The real helper is lifted out of install.sh rather
       // than stubbed, so this block exercises the clearing it actually does.
-      "PROVISION_FAILURES=()",
+      //
+      // Seeded, not empty. With an empty array and a record stub that only
+      // echoed, clear_provision_failure had nothing to remove: the lifted
+      // function proved only that the name resolves, while the line below
+      // reports what it actually removed.
+      "PROVISION_FAILURES=(root_exec_manifest)",
       shellFn("clear_provision_failure"),
       block,
       extra,
       "install_root_libexec",
+      'echo "remaining-failures:${PROVISION_FAILURES[*]-}"',
     ].join("\n"));
   }
 
@@ -398,6 +404,22 @@ d("install.sh::install_root_libexec", () => {
   it("records the tree it is about to authorise, so the new dispatcher verifies", () => {
     runBlock();
     expect(sh(`"${helper}" --verify`).status).toBe(0);
+  });
+
+  it("clears a bootstrap failure it has just repaired", () => {
+    // The bootstrap records root_exec_manifest when it cannot re-record the
+    // manifest after the hard reset. This step re-records it half a minute
+    // later, and a run that ends healthy must not still report that failure —
+    // that is a false failure over an install that is fine (TASK-584).
+    const r = runBlock();
+    expect(r.stdout + r.stderr).toMatch(/remaining-failures:\s*$/m);
+  });
+
+  it("clears only the token it repaired", () => {
+    // The control: without this, "clears" would pass over a function that
+    // emptied the whole array and lost every other step's failure.
+    const r = runBlock("PROVISION_FAILURES=(openclaw_tts root_exec_manifest hermes_edition)");
+    expect(r.stdout + r.stderr).toMatch(/remaining-failures:openclaw_tts hermes_edition/);
   });
 
   it("keeps the existing dispatcher when the manifest cannot be written", () => {
