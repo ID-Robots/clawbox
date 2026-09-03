@@ -2828,13 +2828,23 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // settled without guessing.
     if (isChatgptSubscription) {
       const agentsRoot = path.join(OPENCLAW_HOME_DIR, "agents");
-      const agentIds = await fs.readdir(agentsRoot).catch(() => [] as string[]);
+      const agentIds = await fs.readdir(agentsRoot).catch((err: unknown) => {
+        // Not fatal — the sign-in itself succeeded — but a box that could not
+        // be enumerated keeps its stale codex-home mirrors, and that state is
+        // otherwise invisible: `force: true` swallows ENOENT, not EACCES.
+        console.warn("[configure] Could not enumerate agent dirs to clear stale Codex mirrors:", err instanceof Error ? logSafe(err.message) : err);
+        return [] as string[];
+      });
       const staleMirrors = [
         path.join(CLAWBOX_HOME_DIR, ".codex", "auth.json"),
         ...agentIds.map((id) => path.join(agentsRoot, id, "agent", "codex-home", "auth.json")),
       ];
       await Promise.all(
-        staleMirrors.map((file) => fs.rm(file, { force: true }).catch(() => {})),
+        staleMirrors.map((file) =>
+          fs.rm(file, { force: true }).catch((err: unknown) => {
+            console.warn("[configure] Could not clear a stale Codex mirror:", logSafe(file), err instanceof Error ? logSafe(err.message) : err);
+          }),
+        ),
       );
     }
 

@@ -735,7 +735,12 @@ describe("codex-auth-mirror.js", () => {
     expect(parsed.tokens.refresh_token).toBe("refresh-local-live");
   });
 
-  it("realigns a stale ~/.codex/auth.json when codex-home is a symlink to it", () => {
+  it("realigns a stale ~/.codex/auth.json when codex-home is a symlink to it and core cannot be written back", () => {
+    // The precondition is load-bearing and is the 2026.8 state: `doctor --fix`
+    // has emptied the per-agent table, so `writeBackToCore` cannot succeed and
+    // the could-not-record branch runs. On a box whose store IS writable the
+    // stale file is instead adopted as a rotation — that is the older,
+    // untouched hazard recorded against this file, not what this test pins.
     // dedupePaths collapses both destinations onto the plugin's own file, and
     // that one surviving path is then also an app-server home — so a
     // divergence there put the ONLY destination in `skip` and the plugin kept
@@ -819,11 +824,15 @@ describe("codex-auth-mirror.js", () => {
     expect(mainStore.profiles["codex:default"].refresh).toBe("refresh-rotated-by-appserver");
   });
 
-  it("leaves a SECOND diverged app-server home alone after adopting the first rotation", () => {
-    // Two agents run two app-servers, each rotating its own CODEX_HOME. Core
-    // can record only one of those rotations, so writing the adopted token over
-    // the other file discards a live refresh token — exactly the burn the
-    // could-not-record branch already prevents.
+  it("adopts NEITHER rotation when two app-server homes have rotated independently", () => {
+    // Two agents run two app-servers, each rotating its own CODEX_HOME. Core's
+    // store holds one refresh token per profile, so it can record one of them —
+    // and adopting either discards the other, immediately (it is rewritten from
+    // the adopted token) or on the next tick (it becomes the sole divergence
+    // and overwrites the first). Two tokens of one family written into core ten
+    // minutes apart is the `refresh_token_reused` shape #278 was. With no
+    // correct single answer, both files are left exactly as they are and core
+    // is not written at all.
     const second = path.join(openclawHome, "agents", "support", "agent");
     mkdirSync(path.join(second, "codex-home"), { recursive: true });
     const secondAuthPath = path.join(second, "codex-home", "auth.json");
@@ -844,6 +853,11 @@ describe("codex-auth-mirror.js", () => {
 
     expect(JSON.parse(readFileSync(secondAuthPath, "utf-8")).tokens.refresh_token)
       .toBe("refresh-rotated-by-support");
+    expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-rotated-by-main");
+    // ...and core still holds its own token; neither rotation was recorded.
+    const store = JSON.parse(readFileSync(path.join(agentDir, "auth-profiles.json"), "utf-8"));
+    expect(store.profiles["codex:default"].refresh).toBe("refresh-spent");
   });
 
   it("mirrors the owner's ChatGPT sign-in, not the older Codex CLI login beside it", () => {
@@ -883,6 +897,77 @@ describe("codex-auth-mirror.js", () => {
       expect(parsed.tokens.account_id).toBe("acct-owner-signin");
       expect(parsed.tokens.refresh_token).toBe("refresh-owner-signin");
     }
+  });
+
+  it("still mirrors the sign-in when it carries the SHORTEST expiry on the box", () => {
+    // `expires` is issue time PLUS that client's token lifetime, and the
+    // lifetimes differ: the reported box carries +4029 min on `codex:default`
+    // and +13675 min on `openai:chatgpt`, and ClawBox's own sign-in writer
+    // stamps `Date.now() + expiresIn*1000`, falling back to eight hours
+    // (configure/route.ts). So a brand-new ChatGPT sign-in routinely holds the
+    // SMALLEST expiry on a box that has ever run `codex login` — which is why
+    // this ranks by expired-or-not and then by id, never by "expires latest".
+    // Ordering by expiry would run the box as the previous account for its
+    // whole life while Settings showed the new sign-in as connected.
+    seedAgentStore({});
+    seedSharedStore({
+      "codex:default": {
+        type: "oauth",
+        provider: "codex",
+        access: accessToken("acct-old-cli"),
+        refresh: "refresh-old-cli",
+        expires: Date.now() + 3 * 24 * 3_600_000,
+      },
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-owner-signin"),
+        refresh: "refresh-owner-signin",
+        expires: Date.now() + 8 * 3_600_000,
+      },
+    });
+
+    run();
+
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
+    expect(parsed.tokens.account_id).toBe("acct-owner-signin");
+    expect(parsed.tokens.refresh_token).toBe("refresh-owner-signin");
+  });
+
+  it("repairs BOTH mirrors when both are stale — the state the reported box was in", () => {
+    // Measured: both files 3911 bytes, both dated 2026-08-27, both carrying the
+    // Codex CLI login rather than the sign-in. Every other fixture here seeds
+    // one file, which is what let a both-stale box go unnoticed.
+    const stale = JSON.stringify({
+      OPENAI_API_KEY: null,
+      tokens: {
+        access_token: accessToken("acct-stale"),
+        refresh_token: "refresh-eight-days-old",
+        account_id: "acct-stale",
+      },
+    });
+    mkdirSync(path.dirname(homeAuthPath), { recursive: true });
+    mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
+    writeFileSync(homeAuthPath, stale);
+    writeFileSync(codexHomeAuthPath, stale);
+    seedAgentStore({});
+    seedSharedStore({
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-live"),
+        refresh: "refresh-live",
+        expires: Date.now() + 3_600_000,
+      },
+    });
+
+    run();
+
+    // The plugin's own file is repaired. The app-server's own copy holds a
+    // refresh token core does not have and core's store cannot be written on a
+    // 2026.8 box, so it is left alone here and cleared by the sign-in route
+    // instead — see the configure-route test.
+    expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.refresh_token).toBe("refresh-live");
   });
 
   it("tightens an existing world-readable mirror to 0600, not only a freshly created one", () => {
