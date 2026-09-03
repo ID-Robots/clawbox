@@ -215,7 +215,14 @@ export function reconcileBatchCards(
 ): EmailBatchCardState[] {
   let moved = false;
   const next = cards.map((card) => {
-    if (card.status !== "waiting") return card;
+    /**
+     * A card mid-request is left alone — its own approval owns it and will
+     * settle it — but a SETTLED card is not. It may be carrying a provisional
+     * "gone" that a receipt can still correct, and the receipts live 24 h, so
+     * that window is real. It can only ever be improved here, never re-opened:
+     * the status write below is guarded on `waiting`.
+     */
+    if (card.status !== "waiting" && card.status !== "settled") return card;
     const decided = new Set(card.outcomes.map((o) => o.id));
     /**
      * The ones only GUESSED at, which a real receipt may still correct.
@@ -248,7 +255,10 @@ export function reconcileBatchCards(
     const outcomes = [...card.outcomes.filter((o) => !replaced.has(o.id)), ...added];
     // Settled only once EVERY draft on it has an ending. Until then the card
     // is still a live control for the ones that are genuinely still waiting.
-    const everyOne = card.drafts.every((d) => decided.has(d.id));
+    // Only a card that was WAITING may settle here: on one already settled
+    // this pass is correcting a guess, and re-deciding its status would be a
+    // second claim nothing asked for.
+    const everyOne = card.status === "waiting" && card.drafts.every((d) => decided.has(d.id));
     return {
       ...card,
       outcomes,
@@ -286,16 +296,44 @@ export function reconcileBatchCards(
  * `settledByOwner` rides along because this settle IS the customer's own
  * action, which is what licenses moving the caret to the result.
  */
+/**
+ * Re-read an outcome the POLL wrote, against the gesture that is now settling
+ * the card.
+ *
+ * `reconcileBatchCards` has no gesture to weigh an ending against — the card
+ * was offering to send, so it reads a send as the good news — and that verdict
+ * then survived into the summary of a click that asked for the opposite. No
+ * race is needed: the owner approves one draft in Settings, the poll records
+ * it, the card drops it from the ticked set so the button now says "Delete it
+ * without sending", he presses that, and the card settles on a green "1 sent."
+ * about the send he did NOT just make, with his deletion missing from the
+ * sentence. `emailRowOutcome` was taught the gesture and this second producer
+ * was not — the sibling call site this codebase keeps leaving unguarded.
+ *
+ * Only the SENT verdict can cross. Every other ending means the same thing
+ * under both gestures, and the WORDS never change here either way: `kind` is
+ * untouched, so the row still reads "Sent ✓ at 11:34".
+ */
+function asAskedOf(outcome: EmailBatchOutcome, gesture: "approve" | "delete"): EmailBatchOutcome {
+  if (outcome.kind !== "sent") return outcome;
+  const ok = gesture === "approve";
+  return ok === outcome.ok ? outcome : { ...outcome, ok };
+}
+
 export function settleCard(
   cards: EmailBatchCardState[],
   batchId: string,
   answered: readonly EmailBatchOutcome[],
+  gesture: "approve" | "delete",
 ): EmailBatchCardState[] {
   const index = cards.findIndex((card) => card.batchId === batchId);
   if (index === -1) return cards;
   const card = cards[index];
   const responded = new Set(answered.map((o) => o.id));
-  const outcomes = [...card.outcomes.filter((o) => !responded.has(o.id)), ...answered];
+  const outcomes = [
+    ...card.outcomes.filter((o) => !responded.has(o.id)).map((o) => asAskedOf(o, gesture)),
+    ...answered,
+  ];
   const decided = new Set(outcomes.map((o) => o.id));
   const everyOne = card.drafts.every((d) => decided.has(d.id));
   const next = cards.slice();
@@ -409,9 +447,13 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
    * Went out, and going out is what the click asked for.
    *
    * Keyed on the ENDING and on `ok` together, because "it was sent" and "that
-   * is what you wanted" are different facts — see `sentElsewhereCount`. A row
-   * with no ending at all is this card's own send, which has nothing to
-   * disambiguate.
+   * is what you wanted" are different facts — see `sentElsewhereCount`.
+   *
+   * The `kind === undefined` clause is belt and braces: no producer emits an
+   * `ok` row without a kind today (`emailRowOutcome` sets `kind: whenOk` on its
+   * own success, and the poll copies the receipt's), and the type documents the
+   * shape as this card's own send. It is kept so a row shaped that way lands in
+   * one bucket rather than silently in `failedCount`.
    */
   const sentCount = outcomes.filter((o) => o.ok && (o.kind === "sent" || o.kind === undefined)).length;
   /**
@@ -451,6 +493,17 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
   const elsewhereCount = outcomes.filter((o) => o.kind === "gone").length;
   const failedCount =
     outcomes.length - sentCount - sentElsewhereCount - discardedCount - unconfirmedCount - elsewhereCount;
+  /**
+   * Everything that reached somebody, whichever click found out.
+   *
+   * The two failure branches below QUOTE a number of sends inside a sentence
+   * about what did not go, and that number has to be about the MAIL rather than
+   * about the click: narrowing it to `sentCount` made a delete over one draft
+   * sent elsewhere and one refused elsewhere answer "0 sent, 1 not sent." in
+   * red, over a card whose own row two lines up reads "Sent ✓ at 11:34". Only
+   * the branches that decide the TONE keep the two counts apart.
+   */
+  const wentOutCount = sentCount + sentElsewhereCount;
   /**
    * Settled, with nothing to show for it.
    *
@@ -688,10 +741,10 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
           {nothingAttempted
             ? t("chat.emailBatch.resultNone")
             : failedCount > 0
-              ? t("chat.emailBatch.resultPartial", { sent: String(sentCount), failed: String(failedCount) })
+              ? t("chat.emailBatch.resultPartial", { sent: String(wentOutCount), failed: String(failedCount) })
               : unconfirmedCount > 0
                 ? t("chat.emailBatch.resultUnconfirmed", {
-                    sent: String(sentCount),
+                    sent: String(wentOutCount),
                     unconfirmed: String(unconfirmedCount),
                   })
                 : sentElsewhereCount > 0

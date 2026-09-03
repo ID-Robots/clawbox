@@ -696,6 +696,44 @@ describe("reconciling live cards against the store", () => {
     expect(after[0].outcomes.map((o) => o.kind)).toEqual(["gone"]);
   });
 
+  it("corrects a guessed 'gone' on a card that has already settled", async () => {
+    // The half of the provisional-guess rule the first pass did not reach. A
+    // one-draft card whose only draft was caught in the claim-to-send window
+    // settles on the guess immediately, and the receipt — which lives 24 h —
+    // arrives afterwards. Skipping settled cards made that guess permanent,
+    // which is the "vague word here is permanent" hazard, on the client.
+    const { reconcileBatchCards } = await import("@/lib/chat-email-batch");
+    const before = [
+      card({
+        status: "settled",
+        drafts: [draft(1)],
+        outcomes: [{ id: "draft-1", ok: false, kind: "gone" }],
+      }),
+    ];
+    const after = reconcileBatchCards(
+      before,
+      new Set<string>(),
+      new Map([["draft-1", { id: "draft-1", ok: true, kind: "sent" as const, at: 1_700_000_000_500 }]]),
+    );
+    expect(after[0].outcomes[0]).toMatchObject({ kind: "sent", at: 1_700_000_000_500 });
+    // Corrected, never RE-OPENED: a settled card that went live again would put
+    // an Approve button back over mail that is no longer waiting.
+    expect(after[0].status).toBe("settled");
+  });
+
+  it("does not re-open a settled card, or touch one it has nothing better for", async () => {
+    const { reconcileBatchCards } = await import("@/lib/chat-email-batch");
+    const before = [
+      card({
+        status: "settled",
+        drafts: [draft(1)],
+        outcomes: [{ id: "draft-1", ok: false, kind: "gone" }],
+      }),
+    ];
+    // No receipt, nothing learned — the same array back, so no re-render.
+    expect(reconcileBatchCards(before, new Set<string>(), new Map())).toBe(before);
+  });
+
   it("does not touch a card that is mid-send", async () => {
     // Its own approval request owns it and will settle it; a poll landing in
     // that window must not decide the card out from under the response.
@@ -765,6 +803,44 @@ describe("a verdict that does not cry wolf", () => {
     expect(summary.textContent).not.toContain("1 sent.");
     expect(summary).not.toHaveTextContent("Nothing was sent");
     expect(summary.style.color).toBe(WARN_FG);
+  });
+
+  it("does not say '0 sent' over a message the row above says went out", async () => {
+    // The failure branch QUOTES a number of sends inside a sentence about
+    // failures, and that number has to be about the mail rather than about the
+    // click. Narrowing it to "sent, and that is what you asked for" made a
+    // delete gesture answer "0 sent, 1 not sent." in red over a card whose own
+    // row two lines up reads "Sent ✓ at 11:34" — the false failure this chain
+    // exists to prevent, arriving through the arithmetic.
+    await mount(
+      card({
+        status: "settled",
+        drafts: [draft(1), draft(2)],
+        outcomes: [
+          { id: "draft-1", ok: false, kind: "sent", at: 1_700_000_000_500 },
+          { id: "draft-2", ok: false, kind: "failed", error: "The mail server refused the message." },
+        ],
+      }),
+    );
+    const summary = await screen.findByTestId("chat-email-batch-result");
+    expect(summary).toHaveTextContent("1 sent, 1 not sent.");
+    expect(summary.textContent).not.toContain("0 sent");
+  });
+
+  it("counts the same way when the other one could not be confirmed", async () => {
+    await mount(
+      card({
+        status: "settled",
+        drafts: [draft(1), draft(2)],
+        outcomes: [
+          { id: "draft-1", ok: false, kind: "sent", at: 1_700_000_000_500 },
+          { id: "draft-2", ok: false, kind: "unconfirmed" },
+        ],
+      }),
+    );
+    const summary = await screen.findByTestId("chat-email-batch-result");
+    expect(summary).toHaveTextContent("1 sent, 1 not confirmed");
+    expect(summary.textContent).not.toContain("0 sent");
   });
 
   it("says so on its own when the only draft had already gone out", async () => {
@@ -847,7 +923,7 @@ describe("settling a card against its own request", () => {
         outcomes: [{ id: "draft-1", ok: true, kind: "sent", at: 1_700_000_000_500 }],
       }),
     ];
-    const after = settleCard(before, "batch-1", [{ id: "draft-2", ok: true }]);
+    const after = settleCard(before, "batch-1", [{ id: "draft-2", ok: true }], "approve");
 
     expect(after[0].status).toBe("settled");
     // Both, in the order they were learned. Replacing wholesale left draft 1
@@ -862,7 +938,7 @@ describe("settling a card against its own request", () => {
     const before = [
       card({ drafts: [draft(1)], outcomes: [{ id: "draft-1", ok: false, kind: "gone" }] }),
     ];
-    const after = settleCard(before, "batch-1", [{ id: "draft-1", ok: true }]);
+    const after = settleCard(before, "batch-1", [{ id: "draft-1", ok: true }], "approve");
     expect(after[0].outcomes).toEqual([{ id: "draft-1", ok: true }]);
   });
 
@@ -872,16 +948,43 @@ describe("settling a card against its own request", () => {
     // life of the component. This is the deletion-partly-failed case.
     const { settleCard } = await import("@/lib/chat-email-batch");
     const before = [card({ drafts: [draft(1), draft(2)] })];
-    const after = settleCard(before, "batch-1", [{ id: "draft-1", ok: false, kind: "rejected" }]);
+    const after = settleCard(before, "batch-1", [{ id: "draft-1", ok: false, kind: "rejected" }], "delete");
     expect(after[0].status).toBe("waiting");
     expect(after[0].outcomes).toHaveLength(1);
+  });
+
+  it("re-reads a send the poll recorded against the gesture that settles the card", async () => {
+    // The sibling producer. `reconcileBatchCards` has no gesture, so it reads a
+    // send as good news — right while the card is offering to send, and wrong
+    // the moment a DELETE settles on top of it. Without this the card answered
+    // "Delete it without sending" with a green "1 sent." about a message this
+    // click never touched, and the deletion he did get vanished from the line.
+    const { settleCard } = await import("@/lib/chat-email-batch");
+    const before = [
+      card({
+        drafts: [draft(1), draft(2)],
+        outcomes: [{ id: "draft-1", ok: true, kind: "sent", at: 1_700_000_000_500 }],
+      }),
+    ];
+    const after = settleCard(before, "batch-1", [{ id: "draft-2", ok: true, kind: "rejected" }], "delete");
+    // The WORDS are untouched — it really was sent, and the row still says so.
+    expect(after[0].outcomes[0]).toMatchObject({ id: "draft-1", ok: false, kind: "sent", at: 1_700_000_000_500 });
+  });
+
+  it("leaves that same row alone when the gesture was a send", async () => {
+    const { settleCard } = await import("@/lib/chat-email-batch");
+    const kept = { id: "draft-1", ok: true, kind: "sent" as const, at: 1_700_000_000_500 };
+    const before = [card({ drafts: [draft(1), draft(2)], outcomes: [kept] })];
+    const after = settleCard(before, "batch-1", [{ id: "draft-2", ok: true, kind: "sent" }], "approve");
+    // The very same object back: nothing crossed, so nothing is rebuilt.
+    expect(after[0].outcomes[0]).toBe(kept);
   });
 
   it("clears a request error the store has now answered", async () => {
     // "Nothing was sent" in red directly above "1 sent." in green.
     const { settleCard } = await import("@/lib/chat-email-batch");
     const before = [card({ drafts: [draft(1)], requestError: "The approval could not be delivered." })];
-    expect(settleCard(before, "batch-1", [{ id: "draft-1", ok: true }])[0].requestError).toBe("");
+    expect(settleCard(before, "batch-1", [{ id: "draft-1", ok: true }], "approve")[0].requestError).toBe("");
   });
 });
 

@@ -202,6 +202,11 @@ describe("approving a draft somebody already decided", () => {
     // the same draft was approved on Telegram and went out. Reading the ending
     // without the gesture paints that green — the box congratulating him for
     // the one thing he was trying to prevent.
+    //
+    // It is not painted RED either, and that is the same ruling the chat card
+    // makes about this exact event: there is nothing here to fix and everything
+    // to look at, and two screens speaking differently about one message is the
+    // thing all of this is against. Amber, with the route's own words.
     render(<SettingsApp ui={ui} />);
     await waitFor(() => expect(screen.getByTestId("settings-email-approvals")).toBeTruthy());
 
@@ -214,7 +219,11 @@ describe("approving a draft somebody already decided", () => {
       screen.getByText("settings.emailReject").click();
     });
 
-    expect(await screen.findByText("That message was already sent.")).toHaveAttribute("aria-live", "assertive");
+    const message = await screen.findByText("That message was already sent.");
+    expect(message.className).not.toContain("text-red-400");
+    // Never the cyan the product uses for "done", either.
+    expect(message.className).not.toContain("#00e5cc");
+    expect(message.className).toContain("text-amber-300");
   });
 
   it("does not paint an approve green when the draft had been deleted", async () => {

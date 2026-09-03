@@ -1998,8 +1998,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
          * the words are the strip's own.
          */
         const unconfirmed = ending === "unconfirmed";
+        /**
+         * The other event that is neither, and the one the chat card had
+         * already ruled on.
+         *
+         * He pressed *Discard* and the message had gone out from Telegram
+         * seconds earlier. Red is defensible — the deletion genuinely did not
+         * happen — but there is nothing here to fix and everything to look at,
+         * and the card settled on amber for this exact event in the same
+         * change. Two screens speaking differently about one message is what
+         * this whole thing is against, so they say it the same way. The WORDS
+         * are the route's and unchanged: "That message was already sent."
+         */
+        const sentAnyway = action === "reject" && ending === "sent";
         setEmailMsg({
-          type: unconfirmed ? "info" : asAsked ? "success" : "error",
+          type: unconfirmed || sentAnyway ? "info" : asAsked ? "success" : "error",
           message: unconfirmed
             ? t("settings.emailHandledUnconfirmed")
             : data?.error || t("settings.emailApproveFailed"),

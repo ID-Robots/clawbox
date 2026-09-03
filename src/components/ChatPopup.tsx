@@ -3372,7 +3372,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const outcomes = body.results.flatMap(row => emailRowOutcome(row, 'sent'))
       const refused = emailRefusalSentence(body.results)
       setEmailBatches(prev => {
-        const next = settleCard(prev, batchId, outcomes)
+        const next = settleCard(prev, batchId, outcomes, 'approve')
         return refused ? updateBatchCard(next, batchId, { requestError: refused }) : next
       })
     } catch {
@@ -3444,7 +3444,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (outcomes.length === 0) throw new Error('nothing was deleted')
       const refused = emailRefusalSentence(body.results)
       setEmailBatches(prev => {
-        const next = settleCard(prev, batchId, outcomes)
+        // The GESTURE goes with the answer: rows this card learned from an
+        // earlier poll carry that poll's un-gestured reading of a send, and
+        // settling a delete on top of them used to produce a green "1 sent."
+        const next = settleCard(prev, batchId, outcomes, 'delete')
         return refused ? updateBatchCard(next, batchId, { requestError: refused }) : next
       })
     } catch {
