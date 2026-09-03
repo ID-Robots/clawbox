@@ -52,13 +52,38 @@ export function declaredModelIds(value: unknown): string[] {
 }
 
 /**
+ * `_entry_models_discovered` — hermes_cli/model_switch.py:117.
+ *
+ * A catalogue Hermes itself persisted after a successful probe, flagged either
+ * by the current entry-level `models_discovered: true` or by the older
+ * in-mapping `__discovered_model_catalog__` sentinel it still accepts on read.
+ */
+export function entryModelsDiscovered(entry: Record<string, unknown>): boolean {
+  if (entry.models_discovered === true) return true;
+  const models = entry.models;
+  return Boolean(
+    models
+    && typeof models === "object"
+    && !Array.isArray(models)
+    && (models as Record<string, unknown>).__discovered_model_catalog__ === true,
+  );
+}
+
+/**
  * `_models_config_is_allowlist` — hermes_cli/model_switch.py:136.
  *
  * A mapping is per-model METADATA that Hermes itself wrote, never a user pin;
  * a list or a bare string is an intentional narrow. That last clause is what
  * the on-device model's single-scalar declaration rests on.
+ *
+ * `discovered` forces False WHATEVER the shape: a catalogue Hermes persisted
+ * for itself is not the customer pinning anything. So a ClawBox writer that
+ * declared a perfectly good list beside a `models_discovered: true` it did not
+ * clear would still be overwritten by the next empty probe — which is why the
+ * flag belongs in the mirror rather than in a comment.
  */
-export function modelsConfigIsAllowlist(value: unknown): boolean {
+export function modelsConfigIsAllowlist(value: unknown, discovered = false): boolean {
+  if (discovered || value === null || value === undefined) return false;
   if (typeof value === "string") return Boolean(value.trim());
   if (Array.isArray(value)) return declaredModelIds(value).length > 0;
   return false;
@@ -71,6 +96,16 @@ export function modelsConfigIsAllowlist(value: unknown): boolean {
  * answered in a shape Hermes could not read (the ClawBox AI proxy) or had
  * nothing to say (the local model asleep), `null` when it did not answer at
  * all. Merge rule: model_switch.py:3423-3431.
+ *
+ * ONE DISJUNCT OF THAT RULE IS DELIBERATELY NOT MODELLED. Hermes also lets an
+ * EMPTY probe replace a declared allowlist when the probe is an
+ * `_NativePickerModelList`, a Python subtype `string[] | null` cannot carry.
+ * It is unreachable for both providers this mirror judges: that type is
+ * produced only on the Ollama-native branch of `_fetch_picker_live_models`
+ * (model_switch.py:325-334), which returns None early whenever
+ * `preserve_native_models` (= `has_explicit_models`) is true — so a ClawBox
+ * writer that declares an allowlist can never meet it. A writer for an
+ * Ollama-native endpoint would have to model it.
  */
 export function hermesPickerModels(
   entry: Record<string, unknown>,
@@ -81,7 +116,7 @@ export function hermesPickerModels(
   const models = typeof fallbackDefault === "string" && fallbackDefault.trim()
     ? [fallbackDefault.trim(), ...declared.filter((id) => id !== fallbackDefault.trim())]
     : declared;
-  const hasExplicitModels = modelsConfigIsAllowlist(entry.models);
+  const hasExplicitModels = modelsConfigIsAllowlist(entry.models, entryModelsDiscovered(entry));
   if (liveProbe !== null && (liveProbe.length > 0 || !hasExplicitModels)) return liveProbe;
   return models;
 }

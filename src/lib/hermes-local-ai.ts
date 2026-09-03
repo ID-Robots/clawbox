@@ -63,6 +63,12 @@ async function applyLocalAi(options: {
     throw new HermesLocalApplyError("Local model id is missing or malformed.");
   }
   const catalogue = await localCatalogueState();
+  // A catalogue question that FAILED is not a reason to stop asking. Omitting
+  // `models` below is right — an unreadable key is not an absent one — but the
+  // picker's own repair latches once per process and may already have run, so
+  // nothing would ever come back for it and the key would stay missing until
+  // the web server restarted. Hand the repair back to the next request.
+  if (catalogue === "unknown") reconciled = false;
 
   const set: Record<string, string> = {
     // The OpenAI-compatible root, NOT the bare proxy root: Hermes appends

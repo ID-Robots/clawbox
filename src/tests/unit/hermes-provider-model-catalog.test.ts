@@ -25,7 +25,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  *
  * The ClawBox AI proxy answers that probe `200 {"status":"ok","models":[…]}` —
  * not the OpenAI `{"data":[{"id":…}]}` envelope Hermes parses
- * (`probe_api_models`, hermes_cli/models.py:5668) — so the probe yields an
+ * (`probe_api_models`, hermes_cli/models.py:5592) — so the probe yields an
  * EMPTY list, and a provider block that declares nothing renders as
  * "clawai (0)": no ClawBox AI model to pick, on the box's own bot.
  *
@@ -126,6 +126,23 @@ describe("what Hermes' own /model picker knows about ClawBox AI", () => {
     expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), ["deepseek-v5"])).toEqual(["deepseek-v5"]);
   });
 
+  it("would lose the declaration to a discovered-catalogue flag beside it", async () => {
+    // The mirror's own boundary, and a hazard for any future writer of a
+    // `providers.<slug>` block: with `models_discovered: true` beside
+    // `models:`, `_models_config_is_allowlist` (model_switch.py:136) returns
+    // False WHATEVER the shape, the empty probe wins and the row is empty
+    // again. Not reachable for `providers.clawai` today — Hermes writes that
+    // flag only into `custom_providers` entries
+    // (`_save_discovered_models_to_config`, model_switch.py:244) — so a writer
+    // that ever meets it has to CLEAR it, not just declare beside it.
+    const declared = { models: [CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID] };
+    expect(hermesPickerModels(declared, [])).toEqual([
+      CLAWBOX_AI_FLASH_MODEL_ID,
+      CLAWBOX_AI_PRO_MODEL_ID,
+    ]);
+    expect(hermesPickerModels({ ...declared, models_discovered: true }, [])).toEqual([]);
+  });
+
   it("does not offer the vision model as something to chat with", async () => {
     await applyClawaiToHermes("claw_token_abc", "pro");
     // It exists so an attached picture gets looked at (`auxiliary.vision`), and
@@ -170,7 +187,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
         return { code: 0, stdout: "https://clawbox.com/api/ai\n", stderr: "" };
       }
       if (args[1] === "get" && args[2] === `providers.${CLAWAI_PROVIDER}.models`) {
-        return { code: 0, stdout: "['deepseek-v4-flash', 'deepseek-v4-pro']\n", stderr: "" };
+        return { code: 0, stdout: '["deepseek-v4-flash", "deepseek-v4-pro"]\n', stderr: "" };
       }
       return { code: 0, stdout: "", stderr: "" };
     });
@@ -195,6 +212,97 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
         : { code: 0, stdout: "https://clawbox.com/api/ai\n", stderr: "" });
     await reconcileClawaiModelsWithHermes();
     expect(cliMock.mock.calls.some((c) => (c[0] as string[])[1] === "set")).toBe(false);
+  });
+
+  it("tries again after a catalogue read that FAILED rather than answered", async () => {
+    // A non-zero exit whose message is not "config key not set" is not the
+    // answer "no key here" — it is an unreadable config: an EACCES on
+    // config.yaml, Hermes' own filelock held by an interactive CLI, a parse
+    // error. Leaving the file alone is right; latching is not, and it is the
+    // same probe-once trap the branch above already fixed. `localCatalogueState`
+    // maps this identical result to "unknown" and retries; so must this.
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[2] === `providers.${CLAWAI_PROVIDER}.models`
+        ? { code: 1, stdout: "", stderr: "permission denied" }
+        : { code: 0, stdout: "https://clawbox.com/api/ai\n", stderr: "" });
+    await reconcileClawaiModelsWithHermes();
+    expect(cliMock.mock.calls.some((c) => (c[0] as string[])[1] === "set")).toBe(false);
+
+    cliMock.mockReset();
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[2] === `providers.${CLAWAI_PROVIDER}.models`
+        ? { code: 1, stdout: "", stderr: "config key not set" }
+        : { code: 0, stdout: "https://clawbox.com/api/ai\n", stderr: "" });
+    await reconcileClawaiModelsWithHermes();
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
+      CLAWBOX_AI_FLASH_MODEL_ID,
+      CLAWBOX_AI_PRO_MODEL_ID,
+    ]);
+  });
+
+  it("declares the catalogue over a value Hermes does not read as an allowlist", async () => {
+    // `providers.clawai.models` present as a MAPPING — the per-model metadata
+    // shape Hermes' own model wizard writes. `_models_config_is_allowlist`
+    // (model_switch.py:136) returns False for a mapping, so `has_explicit_models`
+    // stays false, the empty probe REPLACES it (model_switch.py:3423-3431) and
+    // the keyboard says "clawai (0)". A key that exists is not a key Hermes
+    // reads: the repair has to look at the value.
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[2] === `providers.${CLAWAI_PROVIDER}.models`
+        ? { code: 0, stdout: '{"deepseek-v4-flash": {"context_length": 65536}}\n', stderr: "" }
+        : { code: 0, stdout: "https://clawbox.com/api/ai\n", stderr: "" });
+    await reconcileClawaiModelsWithHermes();
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
+      CLAWBOX_AI_FLASH_MODEL_ID,
+      CLAWBOX_AI_PRO_MODEL_ID,
+    ]);
+  });
+
+  it("declares the catalogue over an empty list", async () => {
+    // Same rule, the other unusable shape: `_models_config_is_allowlist`
+    // requires at least one id, so `models: []` leaves the probe free to win
+    // with nothing.
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[2] === `providers.${CLAWAI_PROVIDER}.models`
+        ? { code: 0, stdout: "[]\n", stderr: "" }
+        : { code: 0, stdout: "https://clawbox.com/api/ai\n", stderr: "" });
+    await reconcileClawaiModelsWithHermes();
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
+      CLAWBOX_AI_FLASH_MODEL_ID,
+      CLAWBOX_AI_PRO_MODEL_ID,
+    ]);
+  });
+
+  it("leaves a single id the owner pinned by hand alone", async () => {
+    // A bare string IS an allowlist as far as Hermes is concerned, so this box
+    // offers exactly what its owner asked for. Widening it back to both tiers
+    // would be this repair overruling a deliberate configuration.
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[2] === `providers.${CLAWAI_PROVIDER}.models`
+        ? { code: 0, stdout: '"deepseek-v4-flash"\n', stderr: "" }
+        : { code: 0, stdout: "https://clawbox.com/api/ai\n", stderr: "" });
+    await reconcileClawaiModelsWithHermes();
+    expect(cliMock.mock.calls.some((c) => (c[0] as string[])[1] === "set")).toBe(false);
+  });
+
+  it("asks the CLI for the catalogue as JSON", async () => {
+    // Not a style choice. Plain `hermes config get` renders a list or a mapping
+    // through `yaml.safe_dump` (hermes_cli/config.py:1203,
+    // `_format_config_get_value`), so `- deepseek-v4-flash` and
+    // `deepseek-v4-flash:\n  context_length: 65536` arrive as two blocks of text
+    // that only a YAML reader can tell apart — and telling them apart is the
+    // whole of the check above. `--json` is the CLI's own machine-readable mode
+    // (`hermes config get <key> [--json]`, config.py:5769), verified on the
+    // pinned Hermes build every box runs.
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[2] === `providers.${CLAWAI_PROVIDER}.models`
+        ? { code: 1, stdout: "", stderr: "config key not set" }
+        : { code: 0, stdout: "https://clawbox.com/api/ai\n", stderr: "" });
+    await reconcileClawaiModelsWithHermes();
+    const read = cliMock.mock.calls
+      .map((c) => c[0] as string[])
+      .find((args) => args[1] === "get" && args[2] === `providers.${CLAWAI_PROVIDER}.models`);
+    expect(read).toContain("--json");
   });
 
   it("tries again after a read the CLI never answered", async () => {

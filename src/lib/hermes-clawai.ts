@@ -171,7 +171,7 @@ export async function applyClawaiToHermes(
     // Hermes 0.20.5), which reads a custom provider's model set out of THIS
     // block and then probes `<base_url>/models` for a live one.
     //
-    // The probe cannot help us. `probe_api_models` (hermes_cli/models.py:5668)
+    // The probe cannot help us. `probe_api_models` (hermes_cli/models.py:5592)
     // reads the OpenAI envelope, `data[].id`; the ClawBox AI proxy answers
     // `200 {"status":"ok","service":"ClawBox AI Proxy","models":[…]}`. So Hermes
     // parses an EMPTY list, and an empty probe with nothing declared beside it
@@ -379,13 +379,6 @@ let clawaiModelsReconciled = false;
  *
  * Deliberately narrower than a re-link: it writes ONE key and needs no token.
  *
- * THREE ANSWERS, NOT TWO. `hermes config get` exits non-zero both for a key
- * that is unset and for a config it could not read, and only the first is ours
- * to fill in — an unreadable config is not an empty one, so anything but the
- * "not set" wording leaves the file alone. And an existing value of ANY shape
- * is left alone too: it may be Hermes' own discovered catalogue, which is
- * richer than ours.
- *
  * THE LATCH IS FOR ANSWERS ONLY, and that is the whole difference between a
  * repair and a coin toss. `hermes` on the box is a shim over a venv Python, and
  * `step_hermes_install` moves the checkout aside and rebuilds it for about 90 s
@@ -404,16 +397,18 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
     // The catalogue first, because on a settled box it is the answer: one
     // `hermes config get` (~0.6 s of process spawn) and we are done, rather than
     // two on every cold process for a repair that will never be needed again.
-    const declared = await runHermesCli(
-      ["config", "get", `providers.${CLAWAI_PROVIDER}.models`],
-      { timeoutMs: 15_000 },
-    );
-    if (!hermesCliAnswered(declared)) return unlatch();
-    if (declared.code === 0) return;
-    const listing = `${declared.stdout ?? ""}\n${declared.stderr ?? ""}`;
-    // A non-zero exit that is not "not set" is a config we could not read.
-    // Nothing to unlatch for: the CLI answered, and its answer was "no".
-    if (!/config key not set/i.test(listing)) return;
+    const catalogue = await clawaiCatalogueState();
+    if (catalogue === "unknown") return unlatch();
+    if (catalogue === "allowlist") return;
+    if (catalogue === "ignored") {
+      // The key is there and Hermes does not read it, so the box shows
+      // "clawai (0)" with a populated `models:` in its config — the one state
+      // where the file and the symptom disagree. Say so before overwriting it.
+      console.warn(
+        `[hermes/clawai] providers.${CLAWAI_PROVIDER}.models is not an allowlist Hermes reads`
+        + " — declaring the ClawBox AI catalogue over it",
+      );
+    }
 
     // Only now ask whether there is a provider to describe. Not "is a token
     // stored" — the question is whether HERMES has the block, which is what its
@@ -463,6 +458,80 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
 /** Let the next request try the repair again. @see reconcileClawaiModelsWithHermes */
 function unlatch(): void {
   clawaiModelsReconciled = false;
+}
+
+/**
+ * How `providers.clawai.models` is currently spelled in config.yaml — judged by
+ * HERMES' rule, not by the exit code.
+ *
+ *   "absent"    — not there. Ours to write, and the case every field box is in.
+ *   "allowlist" — a non-empty list or string. Hermes reads it as a pin, the
+ *                 empty probe cannot replace it, and it may be the owner's own
+ *                 narrowing: already right, and never ours to widen.
+ *   "ignored"   — there, and NOT allowlist-shaped: a mapping (the per-model
+ *                 metadata `_save_custom_provider` and the `hermes model`
+ *                 wizard write), an empty list, a null. Hermes' own
+ *                 `_models_config_is_allowlist` says False, so the empty probe
+ *                 REPLACES it and the keyboard says "clawai (0)" — a key that
+ *                 exists is not a key Hermes reads.
+ *   "unknown"   — the question failed. Not an answer, and never treated as one.
+ *
+ * SHAPE, NOT EXISTENCE, and that distinction is why this is four states rather
+ * than the exit code. It mirrors `localCatalogueState` in hermes-local-ai.ts,
+ * down to mapping a non-zero exit that is not "config key not set" — an EACCES
+ * on config.yaml, Hermes' own filelock held by an interactive CLI, a parse
+ * error — to "unknown" rather than to a verdict about this box.
+ *
+ * `--json` IS LOAD-BEARING. Plain `hermes config get` renders a list or a
+ * mapping through `yaml.safe_dump` (`_format_config_get_value`,
+ * hermes_cli/config.py:1203), so the two shapes this function exists to tell
+ * apart arrive as two blocks of text that only a YAML reader could separate.
+ * `--json` is the CLI's own machine-readable mode for exactly this
+ * (`hermes config get <key> [--json]`, config.py:5769) and prints
+ * `json.dumps(value)`; verified against the Hermes build `HERMES_PIN_COMMIT`
+ * installs, which is the one every box converges on.
+ */
+type ClawaiCatalogueState = "absent" | "allowlist" | "ignored" | "unknown";
+
+async function clawaiCatalogueState(): Promise<ClawaiCatalogueState> {
+  const declared = await runHermesCli(
+    ["config", "get", `providers.${CLAWAI_PROVIDER}.models`, "--json"],
+    { timeoutMs: 15_000 },
+  );
+  if (!hermesCliAnswered(declared)) return "unknown";
+  if (declared.code !== 0) {
+    const listing = `${declared.stdout ?? ""}\n${declared.stderr ?? ""}`;
+    return /config key not set/i.test(listing) ? "absent" : "unknown";
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(declared.stdout);
+  } catch {
+    // Exit 0 and something we cannot read is not evidence about this box.
+    return "unknown";
+  }
+  return isHermesAllowlist(value) ? "allowlist" : "ignored";
+}
+
+/**
+ * Would Hermes read this value as an allowlist? `_models_config_is_allowlist`
+ * (hermes_cli/model_switch.py:136): a non-empty string, or a list yielding at
+ * least one id through `_declared_model_ids` (:61). Never a mapping — that is
+ * metadata Hermes wrote for itself, not a pin.
+ *
+ * Transcribed here rather than imported from `src/tests/helpers/
+ * hermes-picker-catalogue.ts` ON PURPOSE: that mirror is what judges this
+ * module's writes, and a guard sharing its code could only ever agree with it.
+ */
+function isHermesAllowlist(value: unknown): boolean {
+  if (typeof value === "string") return Boolean(value.trim());
+  if (!Array.isArray(value)) return false;
+  return value.some((entry) => {
+    if (typeof entry === "string") return Boolean(entry.trim());
+    if (!entry || typeof entry !== "object") return false;
+    const row = entry as { id?: unknown; name?: unknown };
+    return [row.id, row.name].some((field) => typeof field === "string" && field.trim());
+  });
 }
 
 /** Test seam. */

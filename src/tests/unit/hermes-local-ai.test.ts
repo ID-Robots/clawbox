@@ -321,6 +321,27 @@ describe("reconciling an already-configured device", () => {
     expect(patchMock).not.toHaveBeenCalled();
   });
 
+  it("hands the catalogue back to the repair when an enable could not read it", async () => {
+    // The repair runs once per process. If it has already run — a settled box,
+    // nothing to do — and the customer THEN enables local AI while the CLI is
+    // mid-`step_hermes_install` rebuild, the enable rightly writes no `models`
+    // and the latched repair never asks again: the key stays missing until the
+    // web server restarts, on the one box that just asked for the feature.
+    registered({ baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama/v1" });
+    await reconcileLocalAiWithHermes();
+
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[2] === `providers.${HERMES_LOCAL_PROVIDER}.models`
+        ? { code: 127, stdout: "", stderr: "" }
+        : { code: 0, stdout: "http://127.0.0.1/setup-api/local-ai/ollama/v1\n", stderr: "" });
+    await applyLocalAiToHermes({ provider: "ollama", model: "qwen3:8b" });
+    expect(sets().some((kv) => kv.startsWith(`providers.${HERMES_LOCAL_PROVIDER}.models=`))).toBe(false);
+
+    registered({ baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama/v1", models: null });
+    await reconcileLocalAiWithHermes();
+    expect(sets()).toContain(`providers.${HERMES_LOCAL_PROVIDER}.models=qwen3:8b`);
+  });
+
   it("leaves a config it could not read alone", async () => {
     // Unreadable is not unset: repairing off a failed read would overwrite
     // whatever is actually in the file.
