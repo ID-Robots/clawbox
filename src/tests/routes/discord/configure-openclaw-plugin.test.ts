@@ -33,6 +33,7 @@ vi.mock("@/lib/openclaw-config", async () => {
 });
 vi.mock("@/lib/openclaw-channels", () => ({
   ensureChannelPlugin: vi.fn(),
+  invalidateChannelStatus: vi.fn(),
   waitForChannelConnected: vi.fn(),
 }));
 vi.mock("@/lib/hermes-discord", async () => {

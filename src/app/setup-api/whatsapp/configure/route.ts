@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { ensureHermesGateway } from "@/lib/hermes-telegram";
-import { ensureChannelPlugin, waitForChannelConnected } from "@/lib/openclaw-channels";
+import {
+  ensureChannelPlugin,
+  invalidateChannelStatus,
+  waitForChannelConnected,
+} from "@/lib/openclaw-channels";
 import { restartGateway } from "@/lib/openclaw-config";
 import {
   WHATSAPP_CHANNEL_ID,
@@ -80,6 +84,10 @@ async function configureOpenclaw(body: ConfigureBody): Promise<NextResponse> {
   if (!body.enabled) {
     await setOpenclawWhatsappEnabled(false);
     const stopped = await applyRestart();
+    // The restart is what actually stops the channel; the config write before it
+    // already dropped the memo, and this drops what a poll during the restart
+    // may have put back.
+    invalidateChannelStatus(WHATSAPP_CHANNEL_ID);
     return NextResponse.json({
       success: true,
       restarted: stopped,
@@ -109,6 +117,12 @@ async function configureOpenclaw(body: ConfigureBody): Promise<NextResponse> {
   const restarted = await applyRestart();
 
   const live = restarted ? await waitForChannelConnected(WHATSAPP_CHANNEL_ID) : null;
+
+  // Same reason as the disable branch above, and as /discord/configure: the
+  // plugin install, the config write and the restart have all landed, so a
+  // remembered row — including one a concurrent poll took while the gateway was
+  // coming back — describes the box as it was before this save.
+  invalidateChannelStatus(WHATSAPP_CHANNEL_ID);
 
   // Root cause first, exactly as on the Discord route. The plugin failures are
   // already returned above, so what remains is the gateway's own verdict.

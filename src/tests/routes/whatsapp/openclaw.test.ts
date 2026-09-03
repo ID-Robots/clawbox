@@ -25,7 +25,8 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/openclaw-channels", () => ({
   ensureChannelPlugin: vi.fn(),
-  readChannelStatus: vi.fn(),
+  invalidateChannelStatus: vi.fn(),
+  readCachedChannelRow: vi.fn(),
   waitForChannelConnected: vi.fn(),
 }));
 vi.mock("@/lib/openclaw-whatsapp", () => ({

@@ -34,7 +34,7 @@
 // env-backed credential here and nothing for envSecretRef() to mint.
 
 import { spawnOpenclawCli } from "@/lib/openclaw-config";
-import { readChannelRow } from "@/lib/openclaw-channels";
+import { invalidateChannelStatus, readCachedChannelRow } from "@/lib/openclaw-channels";
 
 /** OpenClaw's id for this channel — the plugin's, the config key's, the CLI's. */
 export const WHATSAPP_CHANNEL_ID = "whatsapp";
@@ -281,6 +281,10 @@ export class OpenclawWhatsappPairing {
   /** Fold one RPC answer into the snapshot. */
   private apply(result: WebLoginResult): void {
     if (result.connected === true) {
+      // THE pairing event. Until this instant the gateway's row said "not
+      // linked", and a status poll one second later would otherwise repeat it
+      // for the rest of the window while the owner looks at a paired phone.
+      invalidateChannelStatus(WHATSAPP_CHANNEL_ID);
       this.snap = {
         ...this.snap,
         phase: "paired",
@@ -398,9 +402,14 @@ export interface OpenclawWhatsappStatus {
  * business and reading it would be this repo guessing at another project's
  * internals. `configured` in that row means "there is an account the gateway
  * can act as", which is exactly the question.
+ *
+ * Read through the shared memo, because the panel POLLS this: the row costs a
+ * CLI cold start, and every path in this file that changes the channel drops
+ * the memo, so a poll can never repeat an answer the owner has already
+ * overtaken.
  */
 export async function readOpenclawWhatsappStatus(): Promise<OpenclawWhatsappStatus> {
-  const row = await readChannelRow(WHATSAPP_CHANNEL_ID);
+  const row = await readCachedChannelRow(WHATSAPP_CHANNEL_ID);
   if (!row) {
     // Unknown, not "off". Reported as not_configured because that is the only
     // honest thing the panel can offer an action for, and the status card's
@@ -451,6 +460,9 @@ export async function setOpenclawWhatsappEnabled(enabled: boolean): Promise<void
   await spawnOpenclawCli(["config", "set", "channels.whatsapp.enabled", String(enabled), "--json"], {
     timeoutMs: 45_000,
   });
+  // `enabled` is half of what the status reads, so a remembered row is now a
+  // statement about the config as it was before this call.
+  invalidateChannelStatus(WHATSAPP_CHANNEL_ID);
 }
 
 /**
@@ -465,4 +477,6 @@ export async function logoutOpenclawWhatsapp(): Promise<void> {
   await spawnOpenclawCli(["channels", "logout", "--channel", WHATSAPP_CHANNEL_ID], {
     timeoutMs: 60_000,
   });
+  // The session this answered "linked" about is gone.
+  invalidateChannelStatus(WHATSAPP_CHANNEL_ID);
 }

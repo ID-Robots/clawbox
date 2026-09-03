@@ -17,7 +17,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("@/lib/config-store", () => ({ get: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
-vi.mock("@/lib/openclaw-channels", () => ({ readChannelStatus: vi.fn() }));
+vi.mock("@/lib/openclaw-channels", () => ({ readCachedChannelStatus: vi.fn() }));
 vi.mock("@/lib/hermes-discord", async () => {
   const actual = await vi.importActual<typeof import("@/lib/hermes-discord")>("@/lib/hermes-discord");
   return {
@@ -39,11 +39,11 @@ vi.mock("@/lib/hermes-discord", async () => {
 
 import { get } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
-import { readChannelStatus } from "@/lib/openclaw-channels";
+import { readCachedChannelStatus } from "@/lib/openclaw-channels";
 
 const mockGet = vi.mocked(get);
 const mockHarness = vi.mocked(getActiveHarness);
-const mockChannel = vi.mocked(readChannelStatus);
+const mockChannel = vi.mocked(readCachedChannelStatus);
 
 const TOKEN = "clawbox-test-not-a-real-discord-bot-token-000000";
 
@@ -54,7 +54,7 @@ function botResponse() {
   });
 }
 
-function row(over: Partial<NonNullable<Awaited<ReturnType<typeof readChannelStatus>>>> = {}) {
+function row(over: Partial<NonNullable<Awaited<ReturnType<typeof readCachedChannelStatus>>>> = {}) {
   return {
     configured: true,
     running: true,

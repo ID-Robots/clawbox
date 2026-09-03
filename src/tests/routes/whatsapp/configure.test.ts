@@ -7,6 +7,7 @@ vi.mock("@/lib/openclaw-whatsapp", () => ({
 }));
 vi.mock("@/lib/openclaw-channels", () => ({
   ensureChannelPlugin: vi.fn(async () => ({ ok: true, installed: false })),
+  invalidateChannelStatus: vi.fn(),
   waitForChannelConnected: vi.fn(async () => null),
 }));
 vi.mock("@/lib/openclaw-config", () => ({ restartGateway: vi.fn(async () => {}) }));
