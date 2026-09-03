@@ -128,6 +128,35 @@ describe("GET /setup-api/discord/status — Hermes", () => {
     expect(mockGatewayStatus).toHaveBeenCalledTimes(3);
   });
 
+  it("remembers a probe it could not answer for far less time than one it could", async () => {
+    // `null` is "Hermes could not be asked", and the row now offers Retry over
+    // exactly that state. Keeping it for the full fifteen seconds made that
+    // button a dead press: the same unknown came straight back out of the
+    // cache without the CLI being re-entered at all.
+    vi.useFakeTimers();
+    try {
+      mockRegistered.mockResolvedValue(null);
+      await GET();
+      expect(mockRegistered).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(Date.now() + 2_000);
+      await GET();
+      expect(mockRegistered).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(Date.now() + 2_000);
+      mockRegistered.mockResolvedValue(true);
+      expect((await (await GET()).json()).verified).toBe(true);
+      expect(mockRegistered).toHaveBeenCalledTimes(2);
+
+      // A real answer still gets the full window.
+      vi.setSystemTime(Date.now() + 5_000);
+      await GET();
+      expect(mockRegistered).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reads the allowlist per request, so a save is visible at once", async () => {
     // The snapshot and the access env are one file read each. Memoising them
     // for 15 s composed a FRESH `gateway.running` with a stale allowlist: after

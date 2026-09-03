@@ -44,11 +44,17 @@ export function runHermesCli(
      * timeout). Optional — callers that don't pass one behave exactly as before.
      *
      * A route may hand this its `request.signal` for a probe, or for the FIRST
-     * durable write of the request — cancelling either leaves the box exactly
-     * as it was. It must NOT hand it to work that follows a durable write: a
-     * browser that locked its screen would then leave the token in ClawBox's
-     * store and not in Hermes', or a saved channel with a gateway nobody
-     * started. Past the first write, finish the job.
+     * durable write of the request — cancelling either leaves NOTHING ELSE of
+     * that request half-done. It is not a rollback: an abort that lands after
+     * the child has already written keeps that write, because all this does is
+     * refuse to start (see the guard below) or kill the process. What it buys
+     * is that the box is left in one of the two states the request began and
+     * ended in, rather than between them.
+     *
+     * So it must NOT be handed to work that FOLLOWS a durable write: a browser
+     * that locked its screen would then leave the token in ClawBox's store and
+     * not in Hermes', or a saved channel with a gateway nobody started. Past
+     * the first write, finish the job.
      */
     signal?: AbortSignal;
     /**

@@ -125,6 +125,12 @@ interface HermesDiscordProbe {
 }
 
 const HERMES_PROBE_TTL = 15_000;
+// A probe that could NOT be answered is remembered too, but briefly. `null`
+// means Hermes could not be asked, and caching that for the full success window
+// makes the panel's Retry a dead press for fifteen seconds — the very control
+// an unreadable row now offers. Same success/failure split as the shared
+// gateway memo in `hermes-telegram.ts`.
+const HERMES_PROBE_FAILURE_TTL = 3_000;
 // ONLY `send --list discord` is memoised here — the same shape the Telegram
 // status route uses.
 //
@@ -145,7 +151,8 @@ function probeRegistered(token: string): Promise<boolean | null> {
   if (
     cachedRegistered &&
     cachedRegistered.token === token &&
-    Date.now() - cachedRegistered.at < HERMES_PROBE_TTL
+    Date.now() - cachedRegistered.at
+      < (cachedRegistered.registered === null ? HERMES_PROBE_FAILURE_TTL : HERMES_PROBE_TTL)
   ) {
     return Promise.resolve(cachedRegistered.registered);
   }
