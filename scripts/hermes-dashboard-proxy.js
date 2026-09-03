@@ -41,7 +41,12 @@ const CLAWBOX_WEB_PORT = parseInt(process.env.CLAWBOX_WEB_PORT || "80", 10);
 // Host-local, non-loopback: puts the dashboard in gated cookie-auth mode
 // (see file header) while staying off the LAN.
 const UPSTREAM_HOST = process.env.HERMES_DASH_HOST || "127.0.0.2";
-const UPSTREAM_PORT = parseInt(process.env.HERMES_PORT || "9119", 10);
+// `|| 9119` after the coercion, not inside it (same as the DASHBOARD_PORT it
+// mirrors in src/lib/hermes-dashboard-auth.ts): `parseInt("oops")` is NaN, and
+// the proxy would then forward every request to `127.0.0.2:NaN` and to a Host
+// header of the same, failing the dashboard's own Host guard — silently, and
+// nowhere near the typo that caused it.
+const UPSTREAM_PORT = Number.parseInt(process.env.HERMES_PORT || "", 10) || 9119;
 const CLAWBOX_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const UPSTREAM_AUTHORITY = `${UPSTREAM_HOST}:${UPSTREAM_PORT}`;
 // The dashboard's WS Host/Origin guard (_ws_host_origin_is_allowed) rejects any

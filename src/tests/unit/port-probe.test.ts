@@ -1,5 +1,5 @@
 import net from "net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { isPortOpen, waitForPortOpen } from "@/lib/port-probe";
 
 /**
@@ -64,6 +64,60 @@ describe("waitForPortOpen", () => {
     expect(await isPortOpen(port, HOST, 200)).toBe(false);
     setTimeout(() => void listen(port), 40);
     await expect(waitForPortOpen(port, HOST, { ...FAST, timeoutMs: 5_000 })).resolves.toBe(true);
+  });
+
+  it("never lets one probe outlive the whole wait", async () => {
+    // A connect timeout fired just before the deadline would spend the budget a
+    // second time — which matters most for the Hermes bounce, where the budget
+    // handed here is what is LEFT of a shared deadline. Read off the socket
+    // rather than the clock: a refused loopback connect never reaches its own
+    // timeout, so the cap is only observable as the value the probe was given.
+    //
+    // Every probe with budget still on the clock is capped. The LAST one is
+    // not, and deliberately: it is taken with the budget already spent, which
+    // is the "give up at once must not become never ask" carve-out the next
+    // case pins. So the overrun this loop can add is bounded by one probe, not
+    // by one probe per poll.
+    const port = await freePort();
+    const given: number[] = [];
+    const spy = vi
+      .spyOn(net.Socket.prototype, "setTimeout")
+      .mockImplementation(function (this: net.Socket, ms: number) {
+        given.push(ms);
+        return this;
+      } as never);
+    try {
+      await expect(
+        waitForPortOpen(port, HOST, { timeoutMs: 60, intervalMs: 20, probeTimeoutMs: 5_000 }),
+      ).resolves.toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(given.length).toBeGreaterThan(1);
+    for (const ms of given.slice(0, -1)) expect(ms).toBeLessThanOrEqual(60);
+  });
+
+  it("still asks once, at full length, on an exhausted budget", async () => {
+    // "Give up at once" must not become "never ask": a zero or already-spent
+    // budget still gets one probe, and that one is not clamped to nothing.
+    const port = await freePort();
+    const given: number[] = [];
+    const spy = vi
+      .spyOn(net.Socket.prototype, "setTimeout")
+      .mockImplementation(function (this: net.Socket, ms: number) {
+        given.push(ms);
+        return this;
+      } as never);
+    try {
+      await expect(
+        waitForPortOpen(port, HOST, { timeoutMs: 0, probeTimeoutMs: 200 }),
+      ).resolves.toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(given).toEqual([200]);
   });
 
   it("gives up at once on a malformed budget rather than spinning", async () => {

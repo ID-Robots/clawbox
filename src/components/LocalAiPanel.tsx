@@ -191,11 +191,12 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   // Three writers, one channel — a voice pick that settled on the default (the
   // tts route's `fallback`), "Use as fallback" posting
   // /setup-api/providers/default, and the local-only switch posting
-  // /setup-api/local-ai/exclusive; the last two restart the gateway on OpenClaw
-  // and answer `ok` with a `warning` when the restart has not finished. Its own
-  // channel, because the red box below is for changes that did NOT happen: a
-  // failure painted over a landed change sends the owner to repeat it, and the
-  // repeat costs another restart. Amber, and cleared by the next action.
+  // /setup-api/local-ai/exclusive. The last two restart the gateway on OpenClaw
+  // and answer `ok` with a `warning` for either of two causes: the restart has
+  // not finished, or it was refused (a unit masked by an update in flight). Its
+  // own channel, because the red box below is for changes that did NOT happen:
+  // a failure painted over a landed change sends the owner to repeat it, and
+  // the repeat costs another restart. Amber, and cleared by the next action.
   const [notice, setNotice] = useState<string | null>(null);
   // Only the FIRST read has nothing to fall back on; a later failed poll keeps
   // the last good reading. So this is only ever true while there is no snapshot.

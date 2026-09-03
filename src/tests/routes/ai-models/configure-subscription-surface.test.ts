@@ -126,6 +126,7 @@ vi.mock("@/lib/local-ai-token", () => ({
 import { promises as nodeFsPromises } from "fs";
 import { getAll, setMany } from "@/lib/config-store";
 import {
+  GatewayNotReadyError,
   readConfig,
   readConfigStrict,
   restartGateway,
@@ -249,7 +250,9 @@ async function primeConfigureRoute(): Promise<(request: Request) => Promise<Resp
     ((filePath: string) => Promise.resolve(cacheFileFor(String(filePath)))) as never,
   );
 
-  vi.mocked(getAll).mockResolvedValue({});
+  // Past the wizard: the shape these cases mean, and the one where step 9
+  // still waits for the gateway (the first-run skip is pinned in configure.test).
+  vi.mocked(getAll).mockResolvedValue({ setup_complete: true });
   vi.mocked(setMany).mockResolvedValue();
   vi.mocked(readConfig).mockResolvedValue({} as never);
   vi.mocked(readConfigStrict).mockResolvedValue({} as never);
@@ -690,6 +693,42 @@ describe("POST /setup-api/ai-models/configure and the gateway doctor --fix stopp
     expect(res.status).toBe(502);
     expect((await res.json()).error).toMatch(/failed to restart/);
     expect(restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not tell the owner the assistant is offline over a merely slow restart", async () => {
+    vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("doctor exited 1"));
+    mockFs.readdir.mockResolvedValueOnce([MIGRATED_SIBLING] as never);
+    // A faithful stand-in for a cold Jetson: `systemctl restart` succeeded and
+    // the gateway IS coming back, it just has not bound :18789 inside the
+    // readiness budget. The real restartGateway raises GatewayNotReadyError for
+    // that ONLY when it waited, so this mock answers the option the same way.
+    vi.mocked(restartGateway).mockImplementationOnce(async (options) => {
+      if (options?.awaitReady === false) return;
+      throw new GatewayNotReadyError();
+    });
+
+    const res = await configurePost(subscribe());
+
+    expect(res.status).toBe(502);
+    const { error } = await res.json();
+    // The save's own failure still reaches the owner...
+    expect(error).toMatch(/rolled back/);
+    // ...but not an instruction to go restart a gateway that is already coming
+    // back on its own. The restore only needs "did systemd take the restart".
+    expect(error).not.toMatch(/offline until the gateway restarts/);
+    expect(restartGateway).toHaveBeenCalledWith({ awaitReady: false });
+  });
+
+  it("does not wait on the port while restoring after the route's own error handling throws", async () => {
+    const poisoned = new Error("boom") as unknown as { message: unknown };
+    poisoned.message = null;
+    vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(poisoned);
+
+    await expect(configurePost(subscribe())).rejects.toThrow();
+    // This restore's answer is logged and dropped — the original throw becomes
+    // Next's 500 either way — so waiting out the readiness budget for it buys
+    // nothing but latency on a request that has already failed.
+    expect(restartGateway).toHaveBeenCalledWith({ awaitReady: false });
   });
 
   it("leaves the gateway alone when an API-key save fails — nothing stopped it", async () => {

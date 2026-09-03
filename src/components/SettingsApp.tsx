@@ -1344,6 +1344,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // null = loading; default ON when unset on the device.
   const [tgStreaming, setTgStreaming] = useState<boolean | null>(null);
   const [tgStreamingPending, setTgStreamingPending] = useState(false);
+  // The route answers "saved, but not live yet" in two shapes — 200 while the
+  // gateway is still coming back, 502 when the restart was refused — and the
+  // switch keeps its new position for both. Without this the owner saw a
+  // toggle that had moved and nothing saying it was not applied.
+  const [tgStreamingNotice, setTgStreamingNotice] = useState<string | null>(null);
   // Telegram pairing / user-access state.
   const [tgApproved, setTgApproved] = useState<Array<{ id: string; name?: string }>>([]);
   const [tgPending, setTgPending] = useState<Array<{ code?: string; id?: string; name?: string; createdAt?: string }> | null>(null);
@@ -1431,6 +1436,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const toggleTelegramStreaming = useCallback(async (next: boolean) => {
     const prev = tgStreaming;
     setTgStreamingPending(true);
+    setTgStreamingNotice(null);
     setTgStreaming(next); // optimistic
     try {
       const res = await fetch("/setup-api/telegram/streaming", {
@@ -1442,7 +1448,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       // so keep the optimistic value rather than reverting.
       if (!res.ok && res.status !== 502) {
         setTgStreaming(prev); // revert on a real failure
+        return;
       }
+      const body = (await res.json().catch(() => ({}))) as { warning?: unknown };
+      if (typeof body.warning === "string" && body.warning) setTgStreamingNotice(body.warning);
     } catch {
       setTgStreaming(prev);
     } finally {
@@ -3946,6 +3955,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </div>
                   </div>
                   )}
+                  {/* Mounted in every state so the announcement is a text
+                      change rather than a node insertion; polite, because the
+                      save landed and only the switch-over is pending. */}
+                  <div role="status" aria-live="polite" className="mb-4 empty:mb-0">
+                    {tgStreamingNotice && (
+                      <p data-testid="telegram-streaming-notice" className="text-xs text-amber-300/90">
+                        {tgStreamingNotice}
+                      </p>
+                    )}
+                  </div>
                   <button
                     onClick={() => { setTgReconfigure(true); setTgStatus(null); }}
                     className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"

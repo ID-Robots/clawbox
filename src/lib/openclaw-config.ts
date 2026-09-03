@@ -2544,7 +2544,13 @@ export class GatewayNotReadyError extends Error {
  * wait itself).
  */
 export function gatewayReadyWaitMs(): number {
-  return Number(process.env.GATEWAY_READY_WAIT_MS || "30000");
+  // Guarded exactly as respawnWaitMs() guards its Hermes twin: a typo in the
+  // escape hatch above must not become a budget. `waitForPortOpen` reads a
+  // non-finite budget as a single probe, so an unguarded NaN would turn a 30 s
+  // wait into one connect attempt — and the diagnostic would say "nothing is
+  // listening after NaNms", which names neither the cause nor the typo.
+  const override = Number(process.env.GATEWAY_READY_WAIT_MS);
+  return Number.isFinite(override) && override > 0 ? override : 30000;
 }
 
 export const GATEWAY_PORT = Number(process.env.GATEWAY_PORT || "18789");

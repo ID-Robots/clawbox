@@ -70,9 +70,11 @@ export interface UseProviderStatus {
   /** Rejected reason from the last `setDefault`, or null. */
   defaultError: string | null;
   /**
-   * The last `setDefault` SUCCEEDED, but the box qualified it — on OpenClaw the
-   * gateway had not finished restarting when the route answered. The default is
-   * written; this is a notice, and the panel must not paint it as a failure.
+   * The last `setDefault` SUCCEEDED, but the box qualified it. On OpenClaw the
+   * route folds TWO causes into this: the gateway had not finished restarting
+   * when it answered, and the restart was refused (a unit masked by an update
+   * in flight). The forwarded sentence says which. The default is written
+   * either way; this is a notice, and the panel must not paint it as a failure.
    */
   defaultWarning: string | null;
   setDefault: (providerId: string) => Promise<void>;

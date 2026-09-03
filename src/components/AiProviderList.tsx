@@ -96,10 +96,11 @@ export default function AiProviderList() {
           {defaultError ?? toggleError}
         </div>
       )}
-      {/* A default that WAS written, with the box still settling behind it —
-          the gateway restart had not finished when the route answered. Amber
-          and `status`, never the red `alert` above: the change landed, and a
-          failure here sends the owner to click it again for another restart.
+      {/* A default that WAS written, with the box qualifying it — the gateway
+          restart had not finished when the route answered, or it was refused
+          by a unit an update has masked. Amber and `status`, never the red
+          `alert` above: the change landed either way, and a failure here sends
+          the owner to click it again for another restart.
 
           MOUNTED IN EVERY STATE, for the same reason the checking region below
           is: a live region that appears together with its text announces a node

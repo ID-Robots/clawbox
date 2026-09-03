@@ -100,8 +100,12 @@ export const HARNESSES: Record<Harness, HarnessInfo> = {
   hermes: {
     id: "hermes",
     label: "Hermes",
-    // `hermes serve` defaults to 127.0.0.1:9119.
-    baseUrl: `http://127.0.0.1:${process.env.HERMES_PORT || "9119"}`,
+    // `hermes serve` defaults to 127.0.0.1:9119. Coerced then defaulted, like
+    // hermes-dashboard-auth's DASHBOARD_PORT: `|| "9119"` on the raw string
+    // catches "" and unset, but a non-numeric HERMES_PORT would sail through
+    // into `http://127.0.0.1:oops` — a baseUrl that fails every call with a
+    // parse error rather than falling back to the default the line promises.
+    baseUrl: `http://127.0.0.1:${Number(process.env.HERMES_PORT) || 9119}`,
   },
 };
 

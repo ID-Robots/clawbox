@@ -280,6 +280,7 @@ export default function HermesProviderConfig({
     error: statusError,
     settingDefault,
     defaultError,
+    defaultWarning,
     setDefault,
   } = useProviderStatus();
 
@@ -1085,6 +1086,21 @@ export default function HermesProviderConfig({
             className="mt-3 block rounded-lg border border-[var(--red-edge)] bg-[var(--red-wash)] px-3 py-2 text-xs text-[var(--red-ink)]"
           >
             {t("settings.providers.defaultFailed", { message: defaultError })}
+          </output>
+        )}
+        {/* The hook's OTHER answer: the default WAS written and the box
+            qualified it. Unreachable on Hermes today — /setup-api/providers/default
+            takes the setHermesPairing leg, whose POST returns no top-level
+            `warning` on any exit — but this is the third consumer of a shared
+            hook whose two siblings both render it, and a dropped notice is
+            silent by construction. Amber, never the red above: the change
+            landed. */}
+        {defaultWarning && (
+          <output
+            aria-live="polite"
+            className="mt-3 block rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-xs text-amber-200"
+          >
+            {defaultWarning}
           </output>
         )}
 

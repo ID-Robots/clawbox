@@ -256,7 +256,9 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockFs.readdir.mockResolvedValue([]);
     mockFs.rm.mockResolvedValue(undefined);
     mockFs.unlink.mockResolvedValue(undefined);
-    mockGetAll.mockResolvedValue({});
+    // A provisioned box, past the wizard: that is the shape every case here
+    // means, and it is the one where step 9 waits for the gateway to come back.
+    mockGetAll.mockResolvedValue({ setup_complete: true });
     mockReadOpenClawConfig.mockResolvedValue({});
     mockReadOpenClawConfigStrict.mockResolvedValue({});
     mockInferConfiguredLocalModel.mockReturnValue(null);
@@ -1039,6 +1041,41 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
     expect(body.warning).toMatch(/gateway/i);
+  });
+
+  it("waits for the gateway to come back on a box past the wizard", async () => {
+    // Settings renders the "has not finished restarting" notice, so there the
+    // readiness answer has a reader and is worth the budget.
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
+
+    expect(res.status).toBe(200);
+    expect(mockRestartGateway).toHaveBeenCalledWith({ awaitReady: true });
+  });
+
+  it("does not wait for the gateway during the first-run wizard", async () => {
+    // TASK-608 / M2. `setup_complete` is written at the end of the wizard, so
+    // its absence is the first-run path — the one AIModelsStep discards the
+    // warning on, and the one e2e-install measured at 52.9 s (23 s of writes,
+    // then the whole 30 s budget, expired). Waiting there buys latency only.
+    mockGetAll.mockResolvedValue({});
+
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+    expect(mockRestartGateway).toHaveBeenCalledWith({ awaitReady: false });
+  });
+
+  it("still reports a refused restart during the first-run wizard", async () => {
+    // Skipping the poll must not swallow the fact that nothing is coming: the
+    // exec failure is still a 502, wizard or not.
+    mockGetAll.mockResolvedValue({});
+    mockRestartGateway.mockRejectedValue(new Error("Unit clawbox-gateway.service is masked."));
+
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
+
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toContain("gateway failed to restart");
   });
 
   it("returns 502 when gateway restart fails", async () => {
