@@ -100,12 +100,37 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
       # manifest the root dispatcher checks is now stale by construction — and a
       # stale manifest fails every subsequent step of this very update. Paths are
       # literal because the constants block has not been parsed yet.
+      #
+      # A failure here is NOT a warning. The root dispatcher fails closed on a
+      # stale manifest, so every root step of this very update — and the owner's
+      # password change, hostname change, hotspot restart and llama.cpp install
+      # afterwards — is refused with exit 65 until the record is written again
+      # (seen live: `--verify` returned 65 and every root step was refused).
+      # A single line on the stderr of an update nobody watches is how that
+      # became invisible. TASK-584.
       _mf=/usr/local/libexec/clawbox/clawbox-root-manifest.sh
       if [ "$_b" = "/home/clawbox/clawbox" ] && [ -x "$_mf" ]; then
-        "$_mf" --write || echo "[bootstrap] WARN: could not re-record the root-exec manifest" >&2
+        if ! "$_mf" --write; then
+          # Repair before reporting. The most likely reason the INSTALLED helper
+          # failed is that it is the one from before this reset, so replace it
+          # from the tree we just checked out and try once more. Best-effort:
+          # this is the bootstrap of the boot path and it must never abort.
+          echo "[bootstrap] WARN: could not re-record the root-exec manifest — refreshing the helper and retrying" >&2
+          if [ -f "$_b/config/clawbox-root-manifest.sh" ]; then
+            install -o root -g root -m 0755 "$_b/config/clawbox-root-manifest.sh" "$_mf" 2>/dev/null || true
+          fi
+          if ! "$_mf" --write; then
+            # Carried into the re-exec rather than acted on here: the process
+            # that can record it against the run's verdict is the one about to
+            # start. It re-checks before believing this.
+            CLAWBOX_ROOT_MANIFEST_STALE=1
+          fi
+        fi
       fi
       echo "[bootstrap] Re-executing as $(git -C "$_b" -c safe.directory="$_b" rev-parse --short HEAD)..."
-      exec env CLAWBOX_INSTALL_BOOTSTRAPPED=1 bash "$_b/install.sh" "$@"
+      exec env CLAWBOX_INSTALL_BOOTSTRAPPED=1 \
+        CLAWBOX_ROOT_MANIFEST_STALE="${CLAWBOX_ROOT_MANIFEST_STALE:-0}" \
+        bash "$_b/install.sh" "$@"
     fi
     echo "[bootstrap] WARN: couldn't reset to origin/${_br}; continuing with on-disk copy."
   fi
@@ -143,6 +168,40 @@ PROVISION_STATUS_UNPUBLISHED=0
 record_provision_failure() {
   PROVISION_FAILURES+=("$1")
 }
+
+# Drop a recorded failure that a later step actually repaired. Without this the
+# root-exec manifest below would be reported at the end of a run that fixed it
+# half a minute later — a false failure over an install that is fine.
+clear_provision_failure() {
+  local kept=() f
+  for f in "${PROVISION_FAILURES[@]}"; do
+    [ "$f" = "$1" ] || kept+=("$f")
+  done
+  PROVISION_FAILURES=("${kept[@]}")
+}
+
+# The bootstrap could not re-record the root-exec manifest before re-exec'ing
+# into this process (TASK-584). The dispatcher fails closed on a stale manifest,
+# so this update's own root steps — and the owner's password and hostname
+# changes after it — are being refused with exit 65.
+#
+# Verified rather than believed: the marker says the bootstrap's write failed,
+# not that the record is still wrong, and reporting a failure over a manifest
+# that verifies would be the opposite defect. install_root_libexec re-records it
+# later in a full run and clears this again on success.
+if [ "${CLAWBOX_ROOT_MANIFEST_STALE:-0}" = "1" ]; then
+  if /usr/local/libexec/clawbox/clawbox-root-manifest.sh --verify >/dev/null 2>&1; then
+    echo "[bootstrap] the root-exec manifest verifies after all — continuing"
+  else
+    record_provision_failure root_exec_manifest
+    echo "  ############################################################" >&2
+    echo "  # The root-exec manifest could not be re-recorded." >&2
+    echo "  # Root steps are being REFUSED (exit 65): password change," >&2
+    echo "  # hostname, hotspot restart and llama.cpp install included." >&2
+    echo "  # Repair:  sudo /usr/local/libexec/clawbox/clawbox-root-manifest.sh --write" >&2
+    echo "  ############################################################" >&2
+  fi
+fi
 
 # ── The marker must never speak for a run other than this one ────────────────
 # The flash host reads $PROVISION_STATUS_FILE INSTEAD of parsing stdout, so the
@@ -3475,7 +3534,10 @@ ROOT_EXEC_MANIFEST_HELPER="$ROOT_LIBEXEC_DIR/clawbox-root-manifest.sh"
 # the record is NOT current, and the caller must treat that as a failure.
 write_root_exec_manifest() {
   [ -x "$ROOT_EXEC_MANIFEST_HELPER" ] || return 1
-  "$ROOT_EXEC_MANIFEST_HELPER" --write
+  "$ROOT_EXEC_MANIFEST_HELPER" --write || return 1
+  # This is exactly the repair for what the bootstrap could not do, so the run's
+  # verdict must stop reporting it. TASK-584.
+  clear_provision_failure root_exec_manifest
 }
 
 # Best-effort variant for the update paths that legitimately change the tree. A
