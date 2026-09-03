@@ -2011,8 +2011,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
          * are the route's and unchanged: "That message was already sent."
          */
         const sentAnyway = action === "reject" && ending === "sent";
+        /**
+         * The third of them: a 404 the receipts could not explain.
+         *
+         * `whatBecameOf` found nothing, which happens while ANOTHER surface is
+         * between claiming the draft and the end of its SMTP conversation — so
+         * the message may well be going out this second. Red "That draft is no
+         * longer waiting." is a failure claimed over an unknown, and the chat
+         * card renders the identical row muted. Narrowed to the stale answer by
+         * `kind === "gone"`: a 409 with no account, a 400 or a 502 the mail
+         * server spoke carry their own kinds and stay red, because those really
+         * are this click failing.
+         */
+        const endingUnknown = data?.kind === "gone" && ending === "";
         setEmailMsg({
-          type: unconfirmed || sentAnyway ? "info" : asAsked ? "success" : "error",
+          type: unconfirmed || sentAnyway || endingUnknown ? "info" : asAsked ? "success" : "error",
           message: unconfirmed
             ? t("settings.emailHandledUnconfirmed")
             : data?.error || t("settings.emailApproveFailed"),

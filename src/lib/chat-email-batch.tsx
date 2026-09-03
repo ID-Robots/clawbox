@@ -84,6 +84,49 @@ export interface EmailBatchDraft {
   readonly fingerprint: string;
 }
 
+/**
+ * The five endings the store can record, and the list every surface validates
+ * against. `gone` is not one of them: it is a REASON — "this draft left the
+ * queue and nobody here knows which ending it had" — which is why it has no row
+ * in the table below.
+ *
+ * The type is DERIVED from the list, so the two cannot drift. A kind missing
+ * from here does not leave a card silent — the draft is then in neither list
+ * and the reconcile calls it "gone" — so a partial list is how a real ending
+ * quietly becomes "no idea".
+ */
+export const EMAIL_ENDINGS = ["sent", "rejected", "failed", "unconfirmed", "duplicate"] as const;
+export type EmailEnding = (typeof EMAIL_ENDINGS)[number];
+
+/**
+ * The one gesture a card can be answering. Every producer of an outcome names
+ * it, which is what stops one surface reading an ending as good news while the
+ * click that earned it asked for the opposite.
+ */
+export type EmailGesture = "approve" | "delete";
+
+/**
+ * Was this ending the decision the gesture asked for?
+ *
+ * THE TABLE, in one place, because the two directions are not symmetric and
+ * reading the ending alone gets both crossed cases backwards. *Delete without
+ * sending* answered `sent` is the worst outcome available on that click — the
+ * owner asked for a message NOT to go out and it went out — and green there
+ * congratulates him for it. *Approve & send* answered `rejected` means nothing
+ * was sent and nothing will be. `duplicate` is good news either way: an
+ * identical message reached the recipient, so the send happened and this copy
+ * is not waiting.
+ *
+ * `SettingsApp.decidePending` keys on the same two lines, and `ChatPopup` reads
+ * this one — a second copy of a table this small is how the two surfaces came
+ * to disagree about a single message in the first place.
+ */
+export function endingAsAsked(ending: EmailEnding, gesture: EmailGesture): boolean {
+  return gesture === "approve"
+    ? ending === "sent" || ending === "duplicate"
+    : ending === "rejected" || ending === "duplicate";
+}
+
 /** What became of one draft, as the route reported it. */
 export interface EmailBatchOutcome {
   readonly id: string;
@@ -112,7 +155,7 @@ export interface EmailBatchOutcome {
    * deleted from one the mail server refused, and those are not the same news.
    * Absent for the card's own send, which has nothing to disambiguate.
    */
-  readonly kind?: "sent" | "rejected" | "failed" | "unconfirmed" | "duplicate" | "gone";
+  readonly kind?: EmailEnding | "gone";
   /** When it happened, epoch ms — only from a receipt. */
   readonly at?: number;
 }
@@ -148,6 +191,22 @@ export interface EmailBatchCardState {
    * the customer's action forced.
    */
   readonly settledByOwner?: boolean;
+  /**
+   * WHICH gesture settled it — and the card has to remember, because a poll
+   * that lands afterwards has none of its own.
+   *
+   * A settled card can still learn something: a provisional "gone" is corrected
+   * when the receipt behind it arrives (`reconcileBatchCards`). That correction
+   * carries the poll's reading of the ending, which is "a send is the good
+   * news" — right while the card is still offering to send, and exactly wrong
+   * over a click that asked for the opposite. Without this field the card had
+   * no way to tell the two apart, so a *Delete without sending* turned green
+   * "1 sent." the moment the receipt landed.
+   *
+   * Absent while the card is waiting, and absent on one a poll settled by
+   * itself: nobody clicked, so there is no gesture to weigh anything against.
+   */
+  readonly settledBy?: EmailGesture;
 }
 
 /**
@@ -246,7 +305,15 @@ export function reconcileBatchCards(
       // Already answered for, and only a provisional "gone" may be revised —
       // and only by a receipt, never by a second guess.
       if (decided.has(draft.id) && !(guessed.has(draft.id) && receipt)) continue;
-      added.push(receipt ?? { id: draft.id, ok: false, kind: "gone" });
+      // AGAINST THE GESTURE THAT SETTLED THE CARD, when one did. The receipt is
+      // the poll's, and a poll reads a send as the good news because that is
+      // what a waiting card is offering to do — which is the right default here
+      // too, and the wrong answer on a card the owner settled with a delete.
+      added.push(
+        receipt
+          ? asAskedOf(receipt, card.settledBy ?? "approve")
+          : { id: draft.id, ok: false, kind: "gone" },
+      );
       decided.add(draft.id);
     }
     if (added.length === 0) return card;
@@ -310,13 +377,21 @@ export function reconcileBatchCards(
  * sentence. `emailRowOutcome` was taught the gesture and this second producer
  * was not — the sibling call site this codebase keeps leaving unguarded.
  *
- * Only the SENT verdict can cross. Every other ending means the same thing
- * under both gestures, and the WORDS never change here either way: `kind` is
- * untouched, so the row still reads "Sent ✓ at 11:34".
+ * THE WHOLE TABLE, not just the sent row. `ok` is documented as the gesture's
+ * verdict, and crossing only `sent` left a poll-written `rejected` at
+ * `ok: false` across a delete — the very ending that gesture asked for, and the
+ * opposite of what `emailRowOutcome` writes for the identical event. Nothing
+ * reads the difference today, but one row shaped two ways is the latency this
+ * change has spent three passes removing.
+ *
+ * The WORDS never change here either way: `kind` is untouched, so a row that
+ * went out still reads "Sent ✓ at 11:34" whichever button produced it.
  */
-function asAskedOf(outcome: EmailBatchOutcome, gesture: "approve" | "delete"): EmailBatchOutcome {
-  if (outcome.kind !== "sent") return outcome;
-  const ok = gesture === "approve";
+function asAskedOf(outcome: EmailBatchOutcome, gesture: EmailGesture): EmailBatchOutcome {
+  // Nothing to weigh the gesture against: an outcome with no ending is this
+  // card's own send, and `gone` is a reason rather than one of the five.
+  if (!outcome.kind || outcome.kind === "gone") return outcome;
+  const ok = endingAsAsked(outcome.kind, gesture);
   return ok === outcome.ok ? outcome : { ...outcome, ok };
 }
 
@@ -324,7 +399,7 @@ export function settleCard(
   cards: EmailBatchCardState[],
   batchId: string,
   answered: readonly EmailBatchOutcome[],
-  gesture: "approve" | "delete",
+  gesture: EmailGesture,
 ): EmailBatchCardState[] {
   const index = cards.findIndex((card) => card.batchId === batchId);
   if (index === -1) return cards;
@@ -342,7 +417,12 @@ export function settleCard(
     outcomes,
     requestError: "",
     status: everyOne ? "settled" : "waiting",
-    ...(everyOne ? { settledByOwner: true } : {}),
+    // The gesture rides along with `settledByOwner`, and for the same reason
+    // the caret does: this settle IS the customer's own action. A poll that
+    // corrects one of these rows later has no gesture of its own and reads a
+    // send as good news, which over a delete is the one verdict this card must
+    // never produce — see `settledBy` and `reconcileBatchCards`.
+    ...(everyOne ? { settledByOwner: true, settledBy: gesture } : {}),
   };
   return next;
 }
@@ -737,7 +817,15 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
               The sent-elsewhere line NAMES THE DELETIONS TOO. "1 sent." over a
               *Delete without sending* both painted the one thing he was
               preventing as success and dropped the deletion he did get, because
-              a single sentence can only be the head of the chain once. */}
+              a single sentence can only be the head of the chain once.
+
+              "{n} deleted. Nothing was sent." is reserved for a click that was
+              ASKING to delete, and for a card no gesture settled. `discarded`
+              counts a `duplicate` on the ending alone — right for a deletion,
+              and two contradictions at once over an approve, where the message
+              did reach the recipient and this card deleted nothing. Such a card
+              says "decided somewhere else" instead; the ROW still gives the
+              ending its own words. */}
           {nothingAttempted
             ? t("chat.emailBatch.resultNone")
             : failedCount > 0
@@ -756,7 +844,7 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
                     : t("chat.emailBatch.resultSentElsewhere", { count: String(sentElsewhereCount) })
                   : sentCount > 0
                     ? t("chat.emailBatch.resultAllSent", { count: String(sentCount) })
-                    : discardedCount > 0
+                    : discardedCount > 0 && card.settledBy !== "approve"
                       ? t("chat.emailBatch.resultDiscarded", { count: String(discardedCount) })
                       : t("chat.emailBatch.resultElsewhere")}
         </div>

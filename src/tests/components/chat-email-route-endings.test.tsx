@@ -98,6 +98,12 @@ function outcomeRow(draftId: string): HTMLElement | null {
   return row?.querySelector<HTMLElement>('[data-testid="chat-email-batch-outcome"]') ?? null;
 }
 
+/** The settled card's verdict — the words and the colour, which are read together. */
+function verdict(): { text: string; color: string } {
+  const el = screen.getByTestId("chat-email-batch-result");
+  return { text: el.textContent ?? "", color: el.style.color };
+}
+
 /** Which ending the card is showing for one draft, or null when it shows none. */
 function endingFor(draftId: string): string | null {
   return outcomeRow(draftId)?.getAttribute("data-outcome-kind") ?? null;
@@ -316,5 +322,108 @@ describe("deleting a batch whose other draft the POLL already said was sent", ()
     expect(verdict.style.color).not.toBe(OK_FG);
     expect(verdict.style.color).toBe(WARN_FG);
     expect(outcomeRow(gone)?.style.color).not.toBe(OK_FG);
+  });
+});
+
+describe("a delete answered 'gone' whose receipt lands a second later", () => {
+  /**
+   * Hold one send open, so the draft is out of the queue with no receipt yet.
+   *
+   * That window is not a contrivance: every approval path claims the draft
+   * BEFORE `sendMail` and writes the receipt only after it resolves, so for the
+   * length of an SMTP conversation the draft is in neither list. A gesture
+   * landing there is answered "gone" with no ending, and the receipt that
+   * arrives a second later is the one that corrects it.
+   */
+  function holdOneSend(): () => void {
+    let release = (): void => {};
+    mockSend.mockReturnValueOnce(
+      new Promise((resolve) => {
+        release = () => resolve({ messageId: "sent@example.com" });
+      }),
+    );
+    return release;
+  }
+
+  it("does not turn a settled deletion into a green '1 sent.'", async () => {
+    // One draft, one click. Telegram approved it a moment before he pressed
+    // *Delete without sending*, and that send is still mid-conversation.
+    const only = queue("The one he deleted");
+
+    const box = installBoxWithLiveQueue();
+    await mountHermesChat(box);
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-cancel")).toBeTruthy());
+
+    const release = holdOneSend();
+    const elsewhere = POST(
+      new Request("http://localhost/setup-api/email/pending", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", cookie },
+        body: JSON.stringify({ action: "approve", id: only }),
+      }),
+    );
+    // Claimed out of the queue, and no receipt yet: the state the route can
+    // only answer "no longer waiting" for.
+    await waitFor(() => expect(store.listPending()).toHaveLength(0));
+    expect(outcomes.getOutcome(only)).toBeNull();
+
+    fireEvent.click(screen.getByTestId("chat-email-batch-cancel"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-result")).toBeTruthy());
+    expect(endingFor(only)).toBe("gone");
+
+    // The send finishes and writes its receipt. The next poll corrects the
+    // guess — and it has no gesture of its own, which is the whole defect.
+    release();
+    expect((await elsewhere).status).toBe(200);
+    await waitFor(() => expect(outcomes.getOutcome(only)).toMatchObject({ kind: "sent" }));
+    fireEvent.focus(window);
+    await waitFor(() => expect(endingFor(only)).toBe("sent"));
+
+    // The words stay honest — it WAS sent — but neither the verdict nor the row
+    // may be the green that reads as "your deletion worked".
+    //
+    // The verdict is compared as a KEY, which names which sentence the chain
+    // landed on: "resultAllSent" over a deletion is the whole defect. (This
+    // file's chat reaches its table through a dynamic import and answers with
+    // the key until it lands; the words are pinned in chat-email-batch.test.tsx.)
+    expect(verdict()).toEqual({ text: "chat.emailBatch.resultSentElsewhere", color: WARN_FG });
+    expect(outcomeRow(only)?.style.color).not.toBe(OK_FG);
+  });
+
+  it("does not drop the deletion out of the sentence when the receipt lands", async () => {
+    // Two drafts: one he genuinely deleted, one caught mid-send. Once the
+    // receipt corrects the second, `sentCount > 0` outranks `discardedCount`
+    // and the one thing the click achieved stops being mentioned at all.
+    const doomed = queue("The one he deleted");
+    const caught = queue("The one caught mid-send");
+
+    const box = installBoxWithLiveQueue();
+    await mountHermesChat(box);
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-cancel")).toBeTruthy());
+
+    const release = holdOneSend();
+    const elsewhere = POST(
+      new Request("http://localhost/setup-api/email/pending", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", cookie },
+        body: JSON.stringify({ action: "approve", id: caught }),
+      }),
+    );
+    await waitFor(() => expect(store.listPending()).toHaveLength(1));
+
+    fireEvent.click(screen.getByTestId("chat-email-batch-cancel"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-result")).toBeTruthy());
+    expect(endingFor(doomed)).toBe("rejected");
+    expect(endingFor(caught)).toBe("gone");
+
+    release();
+    expect((await elsewhere).status).toBe(200);
+    await waitFor(() => expect(outcomes.getOutcome(caught)).toMatchObject({ kind: "sent" }));
+    fireEvent.focus(window);
+    await waitFor(() => expect(endingFor(caught)).toBe("sent"));
+
+    // Both halves in one sentence: the send he must look at AND the deletion
+    // he actually made. "resultAllSent" here mentions neither.
+    expect(verdict()).toEqual({ text: "chat.emailBatch.resultDiscardedSentElsewhere", color: WARN_FG });
   });
 });

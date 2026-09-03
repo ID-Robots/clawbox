@@ -262,9 +262,14 @@ describe("approving a draft somebody already decided", () => {
     expect(await screen.findByText("That draft was deleted.")).toHaveAttribute("aria-live", "polite");
   });
 
-  it("still reports a draft that vanished with no word about it as an error", async () => {
-    // The guard on the rule above. No receipt means nobody knows what happened,
-    // and that is exactly the case the red banner is for.
+  it("does not claim a failure over a draft whose ending nobody knows yet", async () => {
+    // A 404 the receipts could not explain, which is NOT "it failed": the only
+    // way to be in this state is for another surface to be between claiming the
+    // draft and the end of its SMTP conversation, so the message may be going
+    // out this second. Red here is a definite claim over an unknown — and the
+    // chat card renders the identical row muted, which is the two-screens split
+    // the amber tone was introduced to close. Same rule as `unconfirmed`:
+    // nobody knows is not nothing happened.
     render(<SettingsApp ui={ui} />);
     await waitFor(() => expect(screen.getByTestId("settings-email-approvals")).toBeTruthy());
 
@@ -278,6 +283,26 @@ describe("approving a draft somebody already decided", () => {
     });
 
     const message = await screen.findByText("That draft is no longer waiting.");
+    expect(message).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("still reports a click that really did fail as one", async () => {
+    // The guard on the rule above, and on the narrowing that carries it: only
+    // the STALE answer is softened. A refusal with a kind of its own is this
+    // click failing, and softening that would be the mirror-image lie.
+    render(<SettingsApp ui={ui} />);
+    await waitFor(() => expect(screen.getByTestId("settings-email-approvals")).toBeTruthy());
+
+    decideAnswer = {
+      ok: false,
+      status: 409,
+      body: { error: "This device has no email account connected.", kind: "unconfigured" },
+    };
+    await act(async () => {
+      screen.getByText("settings.emailApprove").click();
+    });
+
+    const message = await screen.findByText("This device has no email account connected.");
     expect(message).toHaveAttribute("aria-live", "assertive");
   });
 });

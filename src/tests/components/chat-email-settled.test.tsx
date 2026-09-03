@@ -60,6 +60,8 @@ let holdReads = false;
 let rejectPosts: Record<string, unknown>[] = [];
 /** What the device answers a reject with. Throwing stands for an unreachable box. */
 let rejectResponse: (() => unknown) | null = null;
+/** The same hook for the approve side, which has its own refusal handling. */
+let approveResponse: (() => unknown) | null = null;
 
 /** How many times the approval queue has been READ. */
 function queueReads(): number {
@@ -86,6 +88,10 @@ function installBoxWithMailQueue(): HermesBox {
             rejectPosts.push(body);
             if (!rejectResponse) return { ok: true, status: 200, json: async () => ({ success: true }) };
             const answer = rejectResponse();
+            return { ok: true, status: 200, json: async () => answer };
+          }
+          if (body.action === "approve_batch" && approveResponse) {
+            const answer = approveResponse();
             return { ok: true, status: 200, json: async () => answer };
           }
           return { ok: true, status: 200, json: async () => ({ success: true, sent: 1, failed: 0, results: [] }) };
@@ -128,6 +134,7 @@ beforeEach(() => {
   holdReads = false;
   rejectPosts = [];
   rejectResponse = null;
+  approveResponse = null;
   resetHarnessCache();
   window.localStorage.clear();
   Element.prototype.scrollIntoView = vi.fn();
@@ -405,6 +412,41 @@ describe("send nothing", () => {
     fireEvent.click(screen.getByTestId("chat-email-batch-cancel"));
 
     await waitFor(() => expect(outcomeFor("draft-1")).toBe("rejected"));
+    // The route's own words, about the draft that is still waiting.
+    const said = await screen.findByTestId("chat-email-batch-error");
+    expect(said).toHaveTextContent("That draft changed after it was shown");
+    // And it is still a live control for the one that did not go.
+    expect(screen.getByTestId("chat-email-batch-approve")).toBeTruthy();
+    expect(outcomeFor("draft-2")).toBeNull();
+  });
+
+  it("says why the one it could not send is still there", async () => {
+    // The MIRROR of the case above, on the approve handler, and it is not the
+    // same test twice: `cancelEmailBatch` throws on an empty `outcomes`, so an
+    // all-refused delete was already loud, while `approveEmailBatch` has no
+    // such throw — before the refusal sentence, an all-refused approve settled
+    // in complete silence. Reverting either handler's two lines leaves the
+    // other one's test green, which is why both exist.
+    queued = [pendingDraft(1), pendingDraft(2)];
+    const box = installBoxWithMailQueue();
+    await mountHermesChat(box);
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-approve")).toBeTruthy());
+
+    approveResponse = () => {
+      queued = [pendingDraft(2)];
+      return {
+        success: false,
+        sent: 1,
+        failed: 1,
+        results: [
+          { id: "draft-1", ok: true },
+          { id: "draft-2", ok: false, reason: "changed", error: "That draft changed after it was shown, so it was not sent." },
+        ],
+      };
+    };
+    fireEvent.click(screen.getByTestId("chat-email-batch-approve"));
+
+    await waitFor(() => expect(outcomeFor("draft-1")).toBe("sent"));
     // The route's own words, about the draft that is still waiting.
     const said = await screen.findByTestId("chat-email-batch-error");
     expect(said).toHaveTextContent("That draft changed after it was shown");

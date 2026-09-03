@@ -5549,7 +5549,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.emailHandledDeleted": "Verwijderd — niet verstuurd",
     "settings.emailHandledDuplicate": "Duplicaat — al verstuurd",
     "settings.emailHandledFailed": "Niet verstuurd — {reason}",
-    "settings.emailHandledUnconfirmed": "Kon niet worden bevestigd — kijk in je map Verzonden",
+    "settings.emailHandledUnconfirmed": "Kon niet worden bevestigd — kijk in uw map Verzonden",
     "settings.emailChatApproval": "Goedkeuren via Telegram",
     "settings.emailChatApprovalHelp": "Stuurt elk wachtend concept naar een aparte Telegram-bot met een goedkeurknop, zodat je het kunt versturen zonder deze pagina te openen. Het moet een tweede bot zijn: de bot waarmee deze ClawBox chat wordt door de assistent aangestuurd, en een goedkeuring mag daar nooit doorheen lopen.",
     "settings.emailChatApprovalOn": "Vraag het me in Telegram",

@@ -18,7 +18,9 @@ import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
 import {
   EmailBatchCard,
+  EMAIL_ENDINGS,
   batchFromPending,
+  endingAsAsked,
   reconcileBatchCards,
   settleCard,
   shownDraftIds,
@@ -27,6 +29,8 @@ import {
   type EmailBatchCardState,
   type EmailBatchDraft,
   type EmailBatchOutcome,
+  type EmailEnding,
+  type EmailGesture,
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
@@ -597,46 +601,25 @@ export function isEmailSendTool(name: string): boolean {
 }
 
 /**
- * The five endings the store can record, validated off the wire.
+ * One ending off the wire, validated against the store's own list.
  *
  * Every surface that reads an ending goes through this: the receipts in the
- * queue's own answer, and the per-draft rows of an approve or a delete. A kind
- * dropped here does not leave the card silent — the draft is then in neither
- * list and the reconcile calls it "gone" — so a partial list of kinds is how a
- * real ending quietly becomes "no idea".
+ * queue's own answer, and the per-draft rows of an approve or a delete.
  */
-const EMAIL_ENDINGS = ['sent', 'rejected', 'failed', 'unconfirmed', 'duplicate'] as const
-type EmailEnding = (typeof EMAIL_ENDINGS)[number]
-
 function emailEnding(value: unknown): EmailEnding | undefined {
   return EMAIL_ENDINGS.includes(value as EmailEnding) ? (value as EmailEnding) : undefined
 }
 
-/**
- * Was this ending the decision the gesture asked for?
- *
- * The same two-line table `SettingsApp.decidePending` keys on, and the SIBLING
- * of it: the two directions are not symmetric, and reading the ending alone
- * gets both crossed cases backwards.
- *
- * *Delete without sending* answered `sent` is the worst outcome available on
- * that click — the owner asked for a message NOT to go out and it went out —
- * and green there congratulates him for it. *Send* answered `rejected` means
- * nothing was sent and nothing will be. `duplicate` is good news either way: an
- * identical message reached the recipient, so the send happened and this copy
- * is not waiting.
- */
-function endingAsAsked(ending: EmailEnding, whenOk: 'sent' | 'rejected'): boolean {
-  return whenOk === 'sent'
-    ? ending === 'sent' || ending === 'duplicate'
-    : ending === 'rejected' || ending === 'duplicate'
-}
+/** What this card's OWN request achieved, when it achieved it. */
+const OWN_ENDING: Record<EmailGesture, 'sent' | 'rejected'> = { approve: 'sent', delete: 'rejected' }
 
 /**
  * One row of an approve or a delete answer, as the card should render it.
  *
- * `whenOk` is what this gesture DID — a send or a deletion — because the route
- * says `ok: true` for its own success and the two are not the same news.
+ * `gesture` is what the owner pressed, because the route says `ok: true` for
+ * its own success and a send and a deletion are not the same news. The same
+ * word `settleCard` and `reconcileBatchCards` take, so all three producers of
+ * an outcome weigh an ending against one vocabulary.
  *
  * A row the route could not act on carries the receipt's `ending` when there is
  * one: the draft was sent, deleted or refused somewhere else while the card sat
@@ -650,20 +633,20 @@ function endingAsAsked(ending: EmailEnding, whenOk: 'sent' | 'rejected'): boolea
  * earlier. Only `changed` returns nothing at all — that draft is still waiting,
  * and giving it an outcome would take its checkbox away for good.
  */
-function emailRowOutcome(row: unknown, whenOk: 'sent' | 'rejected'): EmailBatchOutcome[] {
+function emailRowOutcome(row: unknown, gesture: EmailGesture): EmailBatchOutcome[] {
   if (typeof row !== 'object' || row === null) return []
   const r = row as Record<string, unknown>
   if (typeof r.id !== 'string') return []
   const at = typeof r.at === 'number' ? { at: r.at } : {}
   const error = typeof r.error === 'string' ? { error: r.error } : {}
   // This card's own request landed, so what it asked for is what happened.
-  if (r.ok === true) return [{ id: r.id, ok: true, kind: whenOk, ...at }]
+  if (r.ok === true) return [{ id: r.id, ok: true, kind: OWN_ENDING[gesture], ...at }]
   const ending = emailEnding(r.ending)
-  if (ending) return [{ id: r.id, ok: endingAsAsked(ending, whenOk), kind: ending, ...at, ...error }]
+  if (ending) return [{ id: r.id, ok: endingAsAsked(ending, gesture), kind: ending, ...at, ...error }]
   // A duplicate with no receipt behind it: approveBatch's own word for a twin
   // this very batch covered. Good news under either gesture, for the reason
   // `endingAsAsked` gives.
-  if (r.reason === 'duplicate') return [{ id: r.id, ok: endingAsAsked('duplicate', whenOk), kind: 'duplicate', ...error }]
+  if (r.reason === 'duplicate') return [{ id: r.id, ok: endingAsAsked('duplicate', gesture), kind: 'duplicate', ...error }]
   // Nobody knows which ending it had, so there is nothing to compare the
   // gesture against.
   if (r.reason === 'gone') return [{ id: r.id, ok: false, kind: 'gone', ...error }]
@@ -679,8 +662,13 @@ function emailRowOutcome(row: unknown, whenOk: 'sent' | 'rejected'): EmailBatchO
  * `settleCard` then clears `requestError` and hands the card back live. On a
  * mixed answer, one draft deleted and one refused, the card therefore said
  * nothing at all about the refused one: the silent click this whole path was
- * rewritten to remove, in a smaller place. The all-refused case was already
- * covered, because an empty `outcomes` throws.
+ * rewritten to remove, in a smaller place.
+ *
+ * BOTH handlers need it, and not symmetrically. `cancelEmailBatch` throws on an
+ * empty `outcomes`, so an ALL-refused delete was already loud; `approveEmailBatch`
+ * has no such throw, so an all-refused approve settled in complete silence until
+ * this sentence. Each side has its own regression test, because a revert of
+ * either one leaves the other's green.
  *
  * The ROUTE'S OWN sentence, never a generic one invented here: it says which
  * way the draft moved, and a line written on this side would have to claim
@@ -3369,7 +3357,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // way. Anything with no results at all is a failure of the REQUEST, and
       // is reported as one rather than as an empty success.
       if (!Array.isArray(body.results)) throw new Error(`batch approval refused with ${res.status}`)
-      const outcomes = body.results.flatMap(row => emailRowOutcome(row, 'sent'))
+      const outcomes = body.results.flatMap(row => emailRowOutcome(row, 'approve'))
       const refused = emailRefusalSentence(body.results)
       setEmailBatches(prev => {
         const next = settleCard(prev, batchId, outcomes, 'approve')
@@ -3436,7 +3424,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // A draft the route refused because its text moved is the one exception,
       // and it gets none precisely because it is STILL WAITING; `settleCard`
       // then keeps the card open for it.
-      const outcomes = body.results.flatMap(row => emailRowOutcome(row, 'rejected'))
+      const outcomes = body.results.flatMap(row => emailRowOutcome(row, 'delete'))
       // Nothing at all came back that this card can show. Saying "removed"
       // would be the false success this card exists to avoid, pointing at the
       // owner's own mail, so it says the deletion did not get through and puts
