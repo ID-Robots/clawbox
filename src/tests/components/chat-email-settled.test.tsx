@@ -377,6 +377,42 @@ describe("send nothing", () => {
     expect(outcomeFor("draft-1")).toBeNull();
   });
 
+  it("says why the one it could not delete is still there", async () => {
+    // The mixed answer, and the gap the all-refused case above did not cover.
+    // A refused row gets no outcome on purpose — its draft is still waiting and
+    // an outcome would take its checkbox away for good — and `settleCard` then
+    // clears `requestError` and hands the card straight back. One deleted, one
+    // silently still on screen is the "nothing happens" click again, in a
+    // smaller place.
+    queued = [pendingDraft(1), pendingDraft(2)];
+    const box = installBoxWithMailQueue();
+    await mountHermesChat(box);
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-cancel")).toBeTruthy());
+
+    rejectResponse = () => {
+      queued = [pendingDraft(2)];
+      return {
+        success: false,
+        rejected: 1,
+        resolved: 0,
+        failed: 1,
+        results: [
+          { id: "draft-1", ok: true },
+          { id: "draft-2", ok: false, reason: "changed", error: "That draft changed after it was shown, so it was not deleted." },
+        ],
+      };
+    };
+    fireEvent.click(screen.getByTestId("chat-email-batch-cancel"));
+
+    await waitFor(() => expect(outcomeFor("draft-1")).toBe("rejected"));
+    // The route's own words, about the draft that is still waiting.
+    const said = await screen.findByTestId("chat-email-batch-error");
+    expect(said).toHaveTextContent("That draft changed after it was shown");
+    // And it is still a live control for the one that did not go.
+    expect(screen.getByTestId("chat-email-batch-approve")).toBeTruthy();
+    expect(outcomeFor("draft-2")).toBeNull();
+  });
+
   it("keeps the button when the deletion did not get through", async () => {
     // Nothing was deleted, so saying "removed" here would be the false success
     // this card exists to avoid — in the direction that loses the owner's mail.

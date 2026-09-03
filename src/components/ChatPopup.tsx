@@ -671,6 +671,30 @@ function emailRowOutcome(row: unknown, whenOk: 'sent' | 'rejected'): EmailBatchO
   return [{ id: r.id, ok: false, ...error }]
 }
 
+/**
+ * Why a draft this gesture named is still waiting, when one is.
+ *
+ * `emailRowOutcome` gives a refused row NO outcome on purpose — that draft is
+ * still in the queue, and an outcome would take its checkbox away for good — and
+ * `settleCard` then clears `requestError` and hands the card back live. On a
+ * mixed answer, one draft deleted and one refused, the card therefore said
+ * nothing at all about the refused one: the silent click this whole path was
+ * rewritten to remove, in a smaller place. The all-refused case was already
+ * covered, because an empty `outcomes` throws.
+ *
+ * The ROUTE'S OWN sentence, never a generic one invented here: it says which
+ * way the draft moved, and a line written on this side would have to claim
+ * something about the drafts that did go.
+ */
+function emailRefusalSentence(rows: unknown[]): string {
+  for (const row of rows) {
+    if (typeof row !== 'object' || row === null) continue
+    const r = row as Record<string, unknown>
+    if (r.reason === 'changed' && typeof r.error === 'string' && r.error) return r.error
+  }
+  return ''
+}
+
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t } = useT()
   const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
@@ -3346,7 +3370,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // is reported as one rather than as an empty success.
       if (!Array.isArray(body.results)) throw new Error(`batch approval refused with ${res.status}`)
       const outcomes = body.results.flatMap(row => emailRowOutcome(row, 'sent'))
-      setEmailBatches(prev => settleCard(prev, batchId, outcomes))
+      const refused = emailRefusalSentence(body.results)
+      setEmailBatches(prev => {
+        const next = settleCard(prev, batchId, outcomes)
+        return refused ? updateBatchCard(next, batchId, { requestError: refused }) : next
+      })
     } catch {
       // Back to `waiting`, with the reason next to the button: the drafts were
       // either never claimed or are reported in a response we could not read,
@@ -3414,7 +3442,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // owner's own mail, so it says the deletion did not get through and puts
       // the button back.
       if (outcomes.length === 0) throw new Error('nothing was deleted')
-      setEmailBatches(prev => settleCard(prev, batchId, outcomes))
+      const refused = emailRefusalSentence(body.results)
+      setEmailBatches(prev => {
+        const next = settleCard(prev, batchId, outcomes)
+        return refused ? updateBatchCard(next, batchId, { requestError: refused }) : next
+      })
     } catch {
       // Nothing was deleted, or we cannot say what was. Claiming "removed"
       // here would be the false success this card exists to avoid, pointing at

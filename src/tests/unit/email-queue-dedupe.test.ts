@@ -127,6 +127,39 @@ describe("a repeated queue of the same message", () => {
     expect(store.countPending()).toBe(1);
   });
 
+  it("treats a run of spaces as one — deliberately, and this pins the trade", () => {
+    // "A  B" and "A B" fold, and that is a decision rather than an oversight.
+    //
+    // The fold exists because a RETRY is what queued the second draft, and a
+    // retried composition is not guaranteed byte-identical. It is bounded on
+    // every side that matters: the same recipients, the same subject, five
+    // minutes, and only against a draft still WAITING. Nothing is ever sent
+    // unread — the owner approves the draft that survived — and the agent is
+    // told `already_waiting` rather than "sent", so it can say so.
+    //
+    // The direction of the error is the point: one email instead of two, never
+    // an email to the wrong person and never a message lost. Tightening this to
+    // an exact hash would stop catching the re-rendered retry it was written
+    // for, so the test says what the behaviour IS rather than leaving it to be
+    // discovered.
+    const first = store.queuePending({
+      to: ["owner@example.com"],
+      subject: "The plan",
+      body: "A  B\tC",
+    });
+    const second = store.queuePending({
+      to: ["owner@example.com"],
+      subject: "The plan",
+      body: "A B C",
+    });
+
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(second.draft.id).toBe(first.draft.id);
+    // The FIRST body is the one that is kept and later sent.
+    expect(store.getPending(first.draft.id)?.body).toBe("A  B\tC");
+  });
+
   it("keeps a difference the reader would see", () => {
     // Case in the subject and the body is NOT normalised: "approve the invoice"
     // and "APPROVE THE INVOICE" are not obviously the same message to the
