@@ -724,4 +724,23 @@ export const ja: Record<string, string> = {
   "codingAgent.artBrowser": "ブラウザー",
   "codingAgent.resetConfirm": "すべてリセット — もう一度タップ",
   "codingAgent.resetFailed": "コーディングエージェントをリセットできませんでした。",
+
+  // Settings → System → Agent harness: the pre-exec shell scanning notice
+  // (HERMES-08). The box's only statement that a security control is off.
+  "shellScan.offTitle":
+    "シェルコマンドの事前チェックはオフです",
+  "shellScan.blockedTitle":
+    "シェルコマンドはブロックされています",
+  "shellScan.unknownTitle":
+    "シェルコマンドの事前チェック: 不明",
+  "shellScan.missingDetail":
+    "安全性スキャナーがインストールされていません。エージェントは本体が初めてオンラインになったときにダウンロードします。それまではシェルコマンドをチェックせずに実行します。",
+  "shellScan.blockedDetail":
+    "安全性スキャナーがインストールされておらず、エージェントはそれなしではシェルコマンドを実行しない設定になっています。ダウンロードできるよう本体をインターネットに接続してください。",
+  "shellScan.disabledDetail":
+    "エージェントの設定 (security.tirith_enabled) でオフにされています。コマンドは実行前の安全性チェックなしで動作します。",
+  "shellScan.unknownDetail":
+    "エージェントのセキュリティ設定を読み取れなかったため、この本体はシェルコマンドが実行前にチェックされているか確認できません。",
+  "shellScan.retryAfter":
+    "エージェントは {time} まで再ダウンロードを試みません。",
 };

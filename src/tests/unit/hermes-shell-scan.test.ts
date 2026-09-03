@@ -14,31 +14,67 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  *
  * So this module has to get both halves right:
  *   - it must SAY the scanner is off, and why (no false success);
- *   - it must say nothing at all when the scanner is ready (no false failure),
- *     or the warning is noise within a week.
+ *   - it must say nothing at all when the scanner is installed (no false
+ *     failure), or the warning is noise within a week.
+ *
+ * `yaml-block-edit` is NOT mocked: the config values come out of real YAML text,
+ * so a test cannot pass because a fixture handed the module the answer.
  */
 
-const HERMES_HOME = "/home/clawbox/.hermes";
+const HOME = "/home/clawbox";
+const HERMES_HOME = `${HOME}/.hermes`;
+const CONFIG = `${HERMES_HOME}/config.yaml`;
 const SCANNER = `${HERMES_HOME}/bin/tirith`;
 const MARKER = `${HERMES_HOME}/.tirith-install-failed`;
+/** The FIRST entry of the agent's own PATH (its unit file), not this process's. */
+const AGENT_PATH_SCANNER = `${HOME}/.local/bin/tirith`;
 
-/** Paths that exist as executable regular files, per test. */
+/** Executable regular files. */
 let executables = new Set<string>();
+/** Regular files that exist but are not executable. */
+let plainFiles = new Set<string>();
+/** Paths that stat as directories. */
+let directories = new Set<string>();
 /** mtime for the install-failure marker, or null when there is no marker. */
 let markerMtimeMs: number | null = null;
+/** Contents of the install-failure marker (upstream stores a reason tag). */
+let markerReason = "";
+/** ~/.hermes/config.yaml, or null for "no such file", or an Error to throw. */
+let configText: string | null | Error = "";
+
+const enoent = () => Object.assign(new Error("ENOENT"), { code: "ENOENT" });
 
 const stat = vi.fn(async (p: string) => {
   if (p === MARKER) {
-    if (markerMtimeMs === null) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    if (markerMtimeMs === null) throw enoent();
     return { mtimeMs: markerMtimeMs, isFile: () => true };
   }
-  if (!executables.has(p)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-  return { mtimeMs: 0, isFile: () => true };
+  if (directories.has(p)) return { mtimeMs: 0, isFile: () => false };
+  if (executables.has(p) || plainFiles.has(p)) return { mtimeMs: 0, isFile: () => true };
+  throw enoent();
 });
 const access = vi.fn(async (p: string) => {
   if (!executables.has(p)) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
 });
-vi.mock("fs/promises", () => ({ default: { stat: (p: string) => stat(p), access: (p: string) => access(p) } }));
+const readFile = vi.fn(async (p: string) => {
+  if (p === CONFIG) {
+    if (configText === null) throw enoent();
+    if (configText instanceof Error) throw configText;
+    return configText;
+  }
+  if (p === MARKER) {
+    if (markerMtimeMs === null) throw enoent();
+    return markerReason;
+  }
+  throw enoent();
+});
+vi.mock("fs/promises", () => ({
+  default: {
+    stat: (p: string) => stat(p),
+    access: (p: string) => access(p),
+    readFile: (p: string) => readFile(p),
+  },
+}));
 
 /** ~/.hermes/.env contents (the TIRITH_* overrides live here), or a throw. */
 let envFile: Record<string, string> | Error = {};
@@ -50,33 +86,29 @@ vi.mock("@/lib/hermes-env", () => ({
   readHermesEnv: () => readHermesEnv(),
   hermesHome: () => HERMES_HOME,
 }));
-
-/** What `hermes config get <key>` answers; "" is an unset key. */
-let configValues: Record<string, string> = {};
-/** Keys whose read FAILED (a wedged or missing `hermes`), not answered. */
-let pendingKeys = new Set<string>();
-vi.mock("@/lib/hermes-config-cache", () => ({
-  hermesConfigGetMany: async (keys: string[]) =>
-    Object.fromEntries(keys.map((k) => [k, configValues[k] ?? ""])),
-  hermesConfigReadPending: (key: string) => pendingKeys.has(key),
-}));
+vi.mock("@/lib/hermes-config-yaml", () => ({ hermesConfigPath: () => CONFIG }));
 
 async function readStatus() {
   const { readShellScanStatus } = await import("@/lib/hermes-shell-scan");
   return readShellScanStatus();
 }
 
+/** The shipped config's security block, as it really appears in config.yaml. */
+const securityYaml = (body: string) => `agent:\n  name: hermes\n\nsecurity:\n${body}`;
+
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   executables = new Set<string>();
+  plainFiles = new Set<string>();
+  directories = new Set<string>();
   markerMtimeMs = null;
+  markerReason = "";
+  configText = "";
   envFile = {};
-  configValues = {};
-  pendingKeys = new Set<string>();
-  // Nothing named tirith on this process's PATH, so ~/.hermes/bin decides.
+  vi.stubEnv("HOME", HOME);
+  // Deliberately NOT the agent's PATH. Nothing in this module may read it.
   vi.stubEnv("PATH", "/nowhere/bin");
-  vi.stubEnv("HOME", "/home/clawbox");
 });
 
 afterEach(() => {
@@ -89,7 +121,7 @@ describe("readShellScanStatus — the scanner is missing", () => {
 
     expect(status.state).toBe("off");
     expect(status.reason).toBe("not-installed");
-    // Upstream's default: the command still runs, just unscanned. The dashboard
+    // Upstream's default: the command still runs, just unscanned. The card
     // needs this to word the warning honestly.
     expect(status.failOpen).toBe(true);
     expect(status.scannerPath).toBeNull();
@@ -104,7 +136,6 @@ describe("readShellScanStatus — the scanner is missing", () => {
     const status = await readStatus();
 
     expect(status.state).toBe("off");
-    expect(status.retrySuppressedUntil).not.toBeNull();
     expect(Date.parse(status.retrySuppressedUntil!)).toBeGreaterThan(Date.now());
   });
 
@@ -114,21 +145,44 @@ describe("readShellScanStatus — the scanner is missing", () => {
     expect((await readStatus()).retrySuppressedUntil).toBeNull();
   });
 
+  it("does not claim a 24 h wait for the one reason upstream clears early", async () => {
+    // A `cosign_missing` marker is dropped as soon as cosign is on PATH, and
+    // the download is retried on the next command — telling the owner to wait
+    // a day for that would be a false failure.
+    markerMtimeMs = Date.now() - 60_000;
+    markerReason = "cosign_missing";
+
+    expect((await readStatus()).retrySuppressedUntil).toBeNull();
+  });
+
   it("says the agent blocks commands instead when the box is set to fail closed", async () => {
     // `security.tirith_fail_open: false` is upstream's own deny-until-ready
     // mode. The consequence for the owner is the opposite one — commands stop
     // working — so the two cases must not share a sentence.
-    configValues["security.tirith_fail_open"] = "false";
+    configText = securityYaml("  tirith_fail_open: false\n");
 
     const status = await readStatus();
 
     expect(status.state).toBe("off");
     expect(status.failOpen).toBe(false);
   });
+
+  it("does not mistake a directory named tirith for the scanner", async () => {
+    directories.add(SCANNER);
+
+    expect((await readStatus()).state).toBe("off");
+  });
+
+  it("does not mistake a present-but-not-executable file for the scanner", async () => {
+    // A truncated or wrong-mode download is not a scanner the agent can spawn.
+    plainFiles.add(SCANNER);
+
+    expect((await readStatus()).state).toBe("off");
+  });
 });
 
-describe("readShellScanStatus — the scanner is ready", () => {
-  it("reports scanning ON and says nothing is wrong", async () => {
+describe("readShellScanStatus — the scanner is installed", () => {
+  it("reports it as on and says nothing is wrong", async () => {
     // The false-failure half: a box that is online with the scanner installed
     // must not be warned at.
     executables.add(SCANNER);
@@ -141,8 +195,18 @@ describe("readShellScanStatus — the scanner is ready", () => {
     expect(status.retrySuppressedUntil).toBeNull();
   });
 
-  it("finds a scanner at an explicitly configured path", async () => {
-    configValues["security.tirith_path"] = "/opt/tirith/tirith";
+  it("looks on the AGENT's PATH, not the web server's", async () => {
+    // The agent's unit pins PATH=~/.local/bin:/usr/local/bin:/usr/bin:/bin; the
+    // web server's unit sets none and inherits systemd's default, which has no
+    // ~/.local/bin. Reading process.env.PATH here would paint a warning on a
+    // box whose agent resolves the scanner perfectly well.
+    executables.add(AGENT_PATH_SCANNER);
+
+    expect((await readStatus()).scannerPath).toBe(AGENT_PATH_SCANNER);
+  });
+
+  it("finds a scanner at an explicitly configured absolute path", async () => {
+    configText = securityYaml('  tirith_path: "/opt/tirith/tirith"\n');
     executables.add("/opt/tirith/tirith");
 
     expect((await readStatus()).scannerPath).toBe("/opt/tirith/tirith");
@@ -157,11 +221,25 @@ describe("readShellScanStatus — the scanner is ready", () => {
 
     expect((await readStatus()).scannerPath).toBe("/opt/custom/scan");
   });
+
+  it("does not satisfy an explicitly configured name from the agent's download directory", async () => {
+    // Upstream splits on the VALUE, not the shape: anything but the bare
+    // "tirith" is explicit and authoritative, and the explicit branch never
+    // looks in $HERMES_HOME/bin. A leftover binary of that name there means the
+    // agent is NOT scanning, so reporting "on" would be a false success.
+    configText = securityYaml('  tirith_path: "tirith-v2"\n');
+    executables.add(`${HERMES_HOME}/bin/tirith-v2`);
+
+    const status = await readStatus();
+
+    expect(status.state).toBe("off");
+    expect(status.reason).toBe("not-installed");
+  });
 });
 
 describe("readShellScanStatus — turned off on purpose, and not knowable", () => {
   it("distinguishes 'switched off in the config' from 'never downloaded'", async () => {
-    configValues["security.tirith_enabled"] = "false";
+    configText = securityYaml("  tirith_enabled: false\n");
     executables.add(SCANNER);
 
     const status = await readStatus();
@@ -178,18 +256,40 @@ describe("readShellScanStatus — turned off on purpose, and not knowable", () =
     expect((await readStatus()).reason).toBe("disabled-by-config");
   });
 
-  it("answers 'unknown', never 'on', when the agent's config could not be read", async () => {
-    // A wedged or missing `hermes` leaves the cache holding a failed READ, not
-    // an answer. Falling back to the defaults there would report a scanner that
-    // is enabled and present on a box nobody has actually asked — the exact
-    // false success this whole surface exists to prevent.
+  it("applies upstream's defaults when the box has no config.yaml at all", async () => {
+    // A box before its first boot. Upstream swallows the missing file and uses
+    // its defaults, so this is an answer, not an "unknown".
+    configText = null;
     executables.add(SCANNER);
-    pendingKeys.add("security.tirith_enabled");
+
+    expect((await readStatus()).state).toBe("on");
+  });
+
+  it("answers 'unknown', never 'on', when the agent's config could not be read", async () => {
+    // An unreadable config.yaml (EACCES after a root-owned write, EIO on a
+    // failing eMMC) could be hiding `tirith_enabled: false` or a path this box
+    // does not have. Falling back to the defaults there would assert a setting
+    // nobody read — the exact false success this surface exists to prevent.
+    executables.add(SCANNER);
+    configText = Object.assign(new Error("EACCES"), { code: "EACCES" });
 
     const status = await readStatus();
 
     expect(status.state).toBe("unknown");
     expect(status.reason).toBe("config-unreadable");
+  });
+
+  it("still answers 'off' when the .env settles it and only config.yaml is unreadable", async () => {
+    // TIRITH_ENABLED=0 is decisive on its own. Under-reporting a known-bad
+    // state as "unknown" is the same failure as over-reporting a good one.
+    configText = Object.assign(new Error("EACCES"), { code: "EACCES" });
+    envFile = { TIRITH_ENABLED: "0" };
+    executables.add(SCANNER);
+
+    const status = await readStatus();
+
+    expect(status.state).toBe("off");
+    expect(status.reason).toBe("disabled-by-config");
   });
 
   it("answers 'unknown' when ~/.hermes/.env cannot be read", async () => {

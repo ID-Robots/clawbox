@@ -733,4 +733,23 @@ export const it: Record<string, string> = {
   "codingAgent.artBrowser": "Browser web",
   "codingAgent.resetConfirm": "Reimposta tutto — tocca di nuovo",
   "codingAgent.resetFailed": "Non è stato possibile reimpostare l'agente di codice.",
+
+  // Settings → System → Agent harness: the pre-exec shell scanning notice
+  // (HERMES-08). The box's only statement that a security control is off.
+  "shellScan.offTitle":
+    "Il controllo dei comandi shell è disattivato",
+  "shellScan.blockedTitle":
+    "I comandi shell sono bloccati",
+  "shellScan.unknownTitle":
+    "Controllo dei comandi shell: sconosciuto",
+  "shellScan.missingDetail":
+    "Lo scanner di sicurezza non è installato. L'agente lo scarica la prima volta che la box è online; fino ad allora esegue i comandi shell senza controllarli.",
+  "shellScan.blockedDetail":
+    "Lo scanner di sicurezza non è installato e l'agente è impostato per rifiutare i comandi shell senza di esso. Collega la box a internet perché possa scaricarlo.",
+  "shellScan.disabledDetail":
+    "È stato disattivato nelle impostazioni dell'agente (security.tirith_enabled). I comandi vengono eseguiti senza un controllo di sicurezza preventivo.",
+  "shellScan.unknownDetail":
+    "Non è stato possibile leggere le impostazioni di sicurezza dell'agente, quindi questa box non può confermare che i comandi shell vengano controllati prima di essere eseguiti.",
+  "shellScan.retryAfter":
+    "L'agente non ritenterà il download prima delle {time}.",
 };

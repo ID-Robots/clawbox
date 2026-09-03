@@ -502,6 +502,10 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
   const HERMES_ENTRIES = [
     "hermes-agent",
     "bin",
+    // Upstream's install-failure marker. It suppresses the tirith download for
+    // 24 h, so a reset that kept it would leave a box that IS online unable to
+    // re-fetch the scanner for another day.
+    ".tirith-install-failed",
     "config.yaml",
     "config.yaml.bak-20260813",
     ".env",
@@ -515,11 +519,10 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     "state.db",
     "projects.db",
   ];
-  // What ~/.hermes/bin holds: the upstream tirith binary, plus (here) something
-  // a previous owner could have dropped beside it.
-  const HERMES_BIN_ENTRIES = ["tirith", "planted-payload"];
-  // The reset preserves the agent install and the tirith scanner. Everything
-  // else under ~/.hermes is previous-owner state and must go.
+  // What ~/.hermes/bin holds: the upstream tirith binary.
+  const HERMES_BIN_ENTRIES = ["tirith"];
+  // The reset preserves the agent install and the bin/ the scanner lives in.
+  // Everything else under ~/.hermes is previous-owner state and must go.
   const KEPT_ENTRIES = ["hermes-agent", "bin"];
   const SECRET_ENTRIES = HERMES_ENTRIES.filter((e) => !KEPT_ENTRIES.includes(e));
 
@@ -582,7 +585,7 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     expect(targets).not.toContain(HERMES);
   });
 
-  it("never removes ~/.hermes/bin/tirith, the pre-exec shell scanner", async () => {
+  it("never removes ~/.hermes/bin, which holds the pre-exec shell scanner", async () => {
     // tirith is the ~33 MB upstream binary the agent runs BEFORE every shell
     // command. It is not owner state — it is an upstream release artefact —
     // and the agent only re-downloads it from a GitHub release once the box
@@ -592,18 +595,12 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     await resetPost();
     const targets = rmTargets();
 
-    expect(targets).not.toContain(`${HERMES}/bin/tirith`);
-    // And not by taking the directory out from under it either.
     expect(targets).not.toContain(`${HERMES}/bin`);
-  });
-
-  it("still wipes everything else in ~/.hermes/bin", async () => {
-    // The exception is the scanner, not the directory: anything a previous
-    // owner (or a future upstream) put beside tirith is still removed, so the
-    // carve-out cannot quietly become a second preserved directory.
-    await resetPost();
-
-    expect(rmTargets()).toContain(`${HERMES}/bin/planted-payload`);
+    // And not by reaching into it either — the directory is kept whole, so
+    // nothing inside it is enumerated or removed.
+    for (const entry of HERMES_BIN_ENTRIES) {
+      expect(targets, `expected ~/.hermes/bin/${entry} to survive`).not.toContain(`${HERMES}/bin/${entry}`);
+    }
   });
 
   it("still removes every secret-bearing entry under ~/.hermes", async () => {

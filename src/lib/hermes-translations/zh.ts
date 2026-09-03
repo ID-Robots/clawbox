@@ -733,4 +733,23 @@ export const zh: Record<string, string> = {
   "codingAgent.artBrowser": "浏览器",
   "codingAgent.resetConfirm": "重置全部 — 再次点击",
   "codingAgent.resetFailed": "无法重置编程助手。",
+
+  // Settings → System → Agent harness: the pre-exec shell scanning notice
+  // (HERMES-08). The box's only statement that a security control is off.
+  "shellScan.offTitle":
+    "Shell 命令检查已关闭",
+  "shellScan.blockedTitle":
+    "Shell 命令已被阻止",
+  "shellScan.unknownTitle":
+    "Shell 命令检查：未知",
+  "shellScan.missingDetail":
+    "安全扫描器尚未安装。设备首次联网时代理会自动下载；在此之前，它会在不检查的情况下执行 Shell 命令。",
+  "shellScan.blockedDetail":
+    "安全扫描器尚未安装，且代理被设置为没有它就拒绝执行 Shell 命令。请将设备连接到互联网以便下载扫描器。",
+  "shellScan.disabledDetail":
+    "它在代理设置中被关闭了（security.tirith_enabled）。命令将在没有执行前安全检查的情况下运行。",
+  "shellScan.unknownDetail":
+    "无法读取代理的安全设置，因此本设备无法确认 Shell 命令在执行前是否经过检查。",
+  "shellScan.retryAfter":
+    "代理在 {time} 之前不会重试下载。",
 };

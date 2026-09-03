@@ -1,6 +1,20 @@
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { translations } from "@/lib/translations";
 import HarnessPicker from "@/components/HarnessPicker";
+
+// The real English catalogue, so a key the card asks for that nobody added
+// fails here instead of shipping the raw key to the owner.
+vi.mock("@/lib/i18n", () => ({
+  useT: () => ({
+    t: (key: string, params?: Record<string, string | number>) => {
+      const raw = translations.en[key] ?? key;
+      return params ? raw.replace(/\{(\w+)\}/g, (m, name) => String(params[name] ?? m)) : raw;
+    },
+  }),
+  I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+}));
 
 /**
  * On a single-harness edition the picker collapses to a read-only badge. That
@@ -91,7 +105,20 @@ describe("HarnessPicker shell-scan warning", () => {
 
     const warning = await screen.findByTestId("shell-scan-warning");
     expect(warning.textContent).toContain("Shell command scanning is off");
-    expect(warning.textContent).toContain("without scanning");
+    expect(warning.textContent).toContain("without checking them");
+    // A security control not doing its job is an alert, not a status update.
+    expect(warning.getAttribute("role")).toBe("alert");
+  });
+
+  it("tells the owner the agent will not even retry the download yet", async () => {
+    // Upstream suppresses the re-download for 24 h after a failure, so
+    // "connect it to the internet" is not the whole story.
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+    mockStatus(withScan({ state: "off", reason: "not-installed", failOpen: true, retrySuppressedUntil: until }));
+    render(<HarnessPicker />);
+
+    const warning = await screen.findByTestId("shell-scan-warning");
+    expect(warning.textContent).toContain("will not retry the download before");
   });
 
   it("says commands are BLOCKED, not merely unscanned, when the box fails closed", async () => {
@@ -107,6 +134,17 @@ describe("HarnessPicker shell-scan warning", () => {
     render(<HarnessPicker />);
 
     expect((await screen.findByTestId("shell-scan-warning")).textContent).toContain("tirith_enabled");
+  });
+
+  it("does not call a failed settings read a security failure", async () => {
+    // "We could not read the settings" is this box failing, not the control
+    // being off — a polite live region, and wording that says so.
+    mockStatus(withScan({ state: "unknown", reason: "config-unreadable", failOpen: true, retrySuppressedUntil: null }));
+    render(<HarnessPicker />);
+
+    const warning = await screen.findByTestId("shell-scan-warning");
+    expect(warning.textContent).toContain("unknown");
+    expect(warning.getAttribute("role")).toBe("status");
   });
 
   it("does NOT warn when the scanner is ready", async () => {

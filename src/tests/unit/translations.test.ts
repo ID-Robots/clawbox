@@ -131,6 +131,7 @@ describe("translations", () => {
         "localModels",
         "systemProfile",
         "codingAgent",
+        "shellScan",
       ]);
 
       for (const key of Object.keys(translations.en)) {

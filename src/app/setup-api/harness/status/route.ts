@@ -16,12 +16,16 @@ export async function GET() {
   // On a locked device only the active harness's runtime is installed, so don't
   // probe (or advertise) the other one — just report the single active harness.
   const ids = locked ? [active] : (Object.keys(HARNESSES) as Harness[]);
-  const health = await Promise.all(ids.map(async (id) => [id, await harnessHealthy(id)] as const));
-  const healthById = new Map(health);
   // Pre-exec shell scanning is a Hermes-only control (tirith). Asking about it
   // on the OpenClaw harness would report a missing scanner on a box that never
   // has one — a false failure — so the answer there is "not applicable", null.
-  const shellScan = active === "hermes" ? await readShellScanStatus() : null;
+  // Read ALONGSIDE the health probes, not after them: this route already gates
+  // the whole Agent-harness card, which renders empty until it answers.
+  const [health, shellScan] = await Promise.all([
+    Promise.all(ids.map(async (id) => [id, await harnessHealthy(id)] as const)),
+    active === "hermes" ? readShellScanStatus() : Promise.resolve(null),
+  ]);
+  const healthById = new Map(health);
   return NextResponse.json({
     active,
     edition: getEdition(),
