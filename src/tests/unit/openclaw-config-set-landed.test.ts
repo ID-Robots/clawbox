@@ -76,6 +76,22 @@ function hangingChild(): ChildProcess {
   return child;
 }
 
+/**
+ * A child that ignores SIGKILL, so only the reap bound can settle the call.
+ *
+ * The counterpart of `hangingChild`: that one is reaped at once and never
+ * exercises `KILL_REAP_WAIT_MS`, so without this the bound could be deleted and
+ * a process that refuses to die would hold the request open with nothing here
+ * failing.
+ */
+function unreapableChild(): ChildProcess {
+  const child = new EventEmitter() as ChildProcess;
+  child.stdout = new EventEmitter() as unknown as ChildProcess["stdout"];
+  child.stderr = new EventEmitter() as unknown as ChildProcess["stderr"];
+  child.kill = vi.fn(() => true) as unknown as ChildProcess["kill"];
+  return child;
+}
+
 /** A child that exits with `code` having written nothing. */
 function silentChild(code: number): ChildProcess {
   const child = hangingChild();
@@ -287,6 +303,18 @@ describe("a config set killed at its timeout is verified, not assumed failed", (
     // spawn still produces that type. This drives the real one, on a command
     // that is not a `config` write, so the coupling cannot rot silently.
     mockSpawn.mockImplementation(() => hangingChild());
+
+    const err = await settle(
+      openclawConfig.spawnOpenclawCli(["plugins", "install", "openclaw-discord"], { timeoutMs: 1 }),
+    );
+
+    expect(err).toBeInstanceOf(openclawConfig.OpenclawSpawnTimeoutError);
+  });
+
+  it("answers even when the killed child never exits", async () => {
+    // Pays the real reap budget once, deliberately: fake timers here would mock
+    // away the very bound under test.
+    mockSpawn.mockImplementation(() => unreapableChild());
 
     const err = await settle(
       openclawConfig.spawnOpenclawCli(["plugins", "install", "openclaw-discord"], { timeoutMs: 1 }),
