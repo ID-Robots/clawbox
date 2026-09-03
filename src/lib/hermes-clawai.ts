@@ -1,7 +1,8 @@
 import { setMany } from "@/lib/config-store";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
-import { runHermesCli } from "@/lib/hermes-cli";
+import { runHermesCli, type HermesCliResult } from "@/lib/hermes-cli";
+import { hermesCliAnswered } from "@/lib/hermes-cli-answered";
 import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { refreshHermesImageTools } from "@/lib/hermes-image-refresh";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
@@ -14,6 +15,7 @@ import {
   mergePluginsEnabled,
 } from "@/lib/hermes-image-plugin";
 import {
+  CLAWBOX_AI_CHAT_MODEL_IDS,
   CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_IMAGE_MODEL_ID,
   CLAWBOX_AI_PRO_MODEL_ID,
@@ -161,6 +163,32 @@ export async function applyClawaiToHermes(
     ["config", "set", `providers.${CLAWAI_PROVIDER}.base_url`, CLAWBOX_AI_PROXY_URL],
     ["config", "set", `providers.${CLAWAI_PROVIDER}.api_key`, trimmed],
     ["config", "set", `providers.${CLAWAI_PROVIDER}.api_mode`, "openai"],
+    // ── Telling Hermes what this provider serves ────────────────────────────
+    //
+    // Without this line the box's OWN pickers offer nothing: the Telegram /
+    // Discord `/model` keyboard and the Hermes dashboard's Models page are both
+    // built by `list_authenticated_providers` (hermes_cli/model_switch.py:2571,
+    // Hermes 0.20.5), which reads a custom provider's model set out of THIS
+    // block and then probes `<base_url>/models` for a live one.
+    //
+    // The probe cannot help us. `probe_api_models` (hermes_cli/models.py:5592)
+    // reads the OpenAI envelope, `data[].id`; the ClawBox AI proxy answers
+    // `200 {"status":"ok","service":"ClawBox AI Proxy","models":[…]}`. So Hermes
+    // parses an EMPTY list, and an empty probe with nothing declared beside it
+    // is what rendered as "clawai (0)" on the owner's phone while our own chat
+    // header showed two models — the same box, two answers.
+    //
+    // A LIST, not the singular `model`/`default_model` key: only a list (or a
+    // string) counts as an allowlist (`_models_config_is_allowlist`,
+    // model_switch.py:136), and only an allowlist stops that empty probe from
+    // replacing the declared ids (model_switch.py:3423-3431). It is a floor and
+    // never a ceiling — a probe that DOES answer still wins, so the day the
+    // proxy speaks the OpenAI envelope this stops mattering on its own.
+    //
+    // JSON is how `hermes config set` is told to store a list rather than a
+    // string (hermes_cli/config.py:5515), the same way `plugins.enabled` is
+    // written below.
+    ["config", "set", `providers.${CLAWAI_PROVIDER}.models`, JSON.stringify(CLAWBOX_AI_CHAT_MODEL_IDS)],
     ["config", "set", "model.provider", CLAWAI_PROVIDER],
     ["config", "set", "model.default", model],
     // Clear any global custom-endpoint override a prior provider may have left,
@@ -255,6 +283,19 @@ export async function applyClawaiToHermes(
       );
     }
   }
+  // One of those steps was `providers.clawai.models`, and an exit 0 does not
+  // say it landed as a LIST — the same silent stored-as-text this file's repair
+  // exists for, reached through the path EVERY fresh box takes.
+  //
+  // Not verified here, and never thrown over: a box whose catalogue went in as
+  // text still chats, still sees, still draws, so failing the link over it
+  // would be a false failure on a working device. The repair does that job, and
+  // this hands it back — with no backoff, because nothing failed here — so the
+  // very next models read re-examines the key. That hand-back is load-bearing
+  // on its own: an unlinked box has usually already run the repair and latched
+  // its silent "no providers.clawai", so without it the value the link just
+  // wrote is not looked at again until the web server restarts.
+  handClawaiRepairBack();
 
   // ── Making a picture ───────────────────────────────────────────────────────
   //
@@ -336,6 +377,593 @@ export async function applyClawaiToHermes(
   }
 
   return { provider: CLAWAI_PROVIDER, model, tier };
+}
+
+let clawaiModelsReconciled = false;
+let clawaiRetryAfter = 0;
+let clawaiUnverifiedWrites = 0;
+
+/**
+ * How long a repair whose QUESTION failed waits before another request retries.
+ *
+ * Unlatching on a failure is right — an update must not be able to skip the
+ * repair for the life of the process — but on its own it removes the only
+ * bound on what that failure costs. `GET /setup-api/hermes/models` awaits both
+ * repairs BEFORE it serves anything, each CLI read carries a 15 s timeout, and
+ * that route is what the chat header, the Settings panel and the agent's own
+ * `ai_list_models` all read: a box whose `hermes` is wedged — a filelock held
+ * by an interactive CLI, a half-built venv — would pay it on every request
+ * instead of once per process. Same number and the same reasoning as
+ * `FAILED_READ_TTL_MS` in hermes-config-cache.ts, which exists so that a
+ * hanging `hermes` cannot become one Python start per request.
+ *
+ * IT BOUNDS THE RATE, NOT THE TOTAL — see `REPAIR_MAX_UNVERIFIED_WRITES`.
+ */
+const REPAIR_RETRY_MS = 60_000;
+
+/**
+ * How many writes this process may issue that it cannot read back.
+ *
+ * A RATE IS NOT A BOUND WHEN THE FAULT IS PERMANENT. `hermes config set` exits
+ * 0 for reasons that have nothing to do with the key landing — a config.yaml
+ * the web-server user cannot write, a full partition, a `save_config` that
+ * loses a filelock race, a refusal that still exits 0 — and a key that never
+ * landed reads back exactly like one that was never written: measured on the
+ * box, `hermes config get providers.clawai.models --json` exits 1 with
+ * `Config key not set: providers.clawai.models`. So the deciding read answers
+ * "write" again, and with only `REPAIR_RETRY_MS` in the way that is one
+ * customer config.yaml rewrite plus three Python starts every 60 s for the life
+ * of the web server — on `GET /setup-api/hermes/models`, which AWAITS this
+ * repair before it serves the chat header, the Settings panel or the agent's
+ * own `ai_list_models`.
+ *
+ * Three, because a repair that has issued three writes nobody could read back
+ * has proved as much as one whose literal came back as text.
+ *
+ * IT COUNTS WRITES, NOT FAILED QUESTIONS, which is what keeps it away from the
+ * case the unlatch exists for: a `step_hermes_install` rebuild exits 127 before
+ * reaching argparse, the deciding read answers "retry", NO write is issued and
+ * no attempt is spent — so a 90 s rebuild still costs nothing but the rate
+ * bound, however many requests arrive during it.
+ *
+ * The counter clears on a write that LANDS, and otherwise only on a restart:
+ * the journal says once that this box stopped trying, and the next process
+ * start tries again because the deciding read still finds the key missing.
+ */
+const REPAIR_MAX_UNVERIFIED_WRITES = 3;
+
+/**
+ * Declare the ClawBox AI catalogue on a box that was linked before this code
+ * existed — once per process, and a no-op on every other device.
+ *
+ * Every box already in the field has `providers.clawai` with a URL, a key and a
+ * mode, and no `models:` at all, and nothing re-links it: the owner would keep
+ * seeing "clawai (0)" in their bot for as long as the box stayed paired. Same
+ * shape of repair, and the same reasoning, as `reconcileLocalAiWithHermes`.
+ *
+ * Deliberately narrower than a re-link: it writes ONE key and needs no token.
+ *
+ * THE LATCH IS FOR ANSWERS ONLY, and that is the whole difference between a
+ * repair and a coin toss. `hermes` on the box is a shim over a venv Python, and
+ * `step_hermes_install` moves the checkout aside and rebuilds it for about 90 s
+ * with NO web-server restart afterwards (install.sh) — so during the very
+ * update that ships this fix the shim runs and exits 127 without reaching
+ * argparse. Latching on that would mean the box never declares its catalogue
+ * for the life of the process and the owner's `/model` keeps saying
+ * "clawai (0)" on the release that was meant to fix it.
+ *
+ * So a failed QUESTION unlatches and is asked again on a later request, no
+ * sooner than `REPAIR_RETRY_MS`: no write was issued, and a rebuild that exits
+ * 127 costs one Python start a minute until it finishes.
+ *
+ * A WRITE THIS PROCESS COULD NOT READ BACK unlatches too — and carries a SECOND
+ * bound, because a rate alone bounds nothing that is permanent. `config set`
+ * exits 0 for reasons that have nothing to do with the key landing, and a key
+ * that never landed reads back exactly like an absent one, so the deciding read
+ * answers "write" again on every pass. `REPAIR_MAX_UNVERIFIED_WRITES` is what
+ * makes that end: three writes nobody could read back, and then this process
+ * stops rewriting the customer's config.yaml and says so once.
+ *
+ * The two real answers ("nothing to do", "written") stay latched, and so does
+ * the one failed write this module can PROVE is final: a literal handed back as
+ * text will be handed back as text every 60 s for the life of the process.
+ *
+ * EVERY EXIT SAYS SOMETHING. A silent `return` on the one path the field will
+ * actually reach is how a box ends up wrong with nothing in its journal, so
+ * each verdict that is not "this box is already correct" carries a line.
+ */
+export async function reconcileClawaiModelsWithHermes(): Promise<void> {
+  if (clawaiModelsReconciled || Date.now() < clawaiRetryAfter) return;
+  clawaiModelsReconciled = true;
+  try {
+    const verdict = await clawaiCatalogueVerdict();
+    if (verdict.action === "retry") {
+      console.warn(`[hermes/clawai] catalogue repair deferred — ${verdict.reason}`);
+      return unlatch();
+    }
+    if (verdict.action === "leave") {
+      if (verdict.reason) console.log(`[hermes/clawai] catalogue left alone — ${verdict.reason}`);
+      return;
+    }
+    if (verdict.overwriting) {
+      // Logged where the write happens, not where the shape was read: a line
+      // claiming an overwrite that never ran is the false-success shape this
+      // module keeps being audited for. These are the states in which the file
+      // and the symptom disagree — a populated `models:` and "clawai (0)" or one
+      // bogus entry on the owner's phone — so each is worth naming.
+      console.warn(
+        `[hermes/clawai] providers.${CLAWAI_PROVIDER}.models holds ${verdict.overwriting}`
+        + " — declaring the ClawBox AI catalogue over it",
+      );
+    }
+    const written = await runHermesCli(
+      ["config", "set", `providers.${CLAWAI_PROVIDER}.models`, JSON.stringify(CLAWBOX_AI_CHAT_MODEL_IDS)],
+      { timeoutMs: 15_000 },
+    );
+    // AN EXIT CODE IS NOT AN OUTCOME. `hermes config set k '["a","b"]'` exits 0
+    // even when its structured parse did not yield a list: it prints
+    // "…storing as string." to stderr and saves the literal text
+    // (hermes_cli/config.py:5518-5530). Hermes then reads that string as a
+    // ONE-ID allowlist, so the keyboard would offer a single bogus model and
+    // this repair would have latched "done" over it. Not reachable on the build
+    // `HERMES_PIN_COMMIT` installs — the coercion chain there yields a real
+    // list — which is exactly why it is worth a guard rather than a comment.
+    const storedAsText = /storing as string/i.test(written.stderr ?? "");
+    // AND NEITHER IS A CLEAN STDERR. That warning only exists on a CLI whose
+    // coercion block prints it, so it cannot speak for one old enough to lack
+    // the block — where the same literal is stored as text with an EMPTY stderr
+    // and exit 0. The narrow band where that happens is a box moved off
+    // `HERMES_PIN_COMMIT` by a hand-run `hermes update` onto a CLI that still
+    // takes `--json` on `config get` (or the verdict read would have answered
+    // "retry") and no longer coerces on `config set`. The guard is worth having
+    // for a wider reason than that band, though: an exit code is not an outcome
+    // for ANY reason a write may fail to land, and this repair runs unattended
+    // on every field box.
+    const outcome: ClawaiWriteOutcome = written.code !== 0
+      ? { kind: "unverified", why: `the write exited ${written.code}` }
+      : storedAsText
+        ? { kind: "stored-as-text" }
+        : await verifyClawaiCatalogue();
+    if (outcome.kind !== "landed") {
+      // A repair that could not be made is reported, never claimed: the picker
+      // keeps showing what the box actually has. No credential is in this argv
+      // — the value is a constant model list — so the stream can be logged
+      // whole.
+      console.warn(
+        "[hermes/clawai] could not declare the ClawBox AI catalogue",
+        outcome.kind === "stored-as-text"
+          ? "(this hermes stores a list as text — the same write cannot land, so it is not retried before the next restart)"
+          : `(${outcome.why})`,
+        written.stderr?.trim() || written.stdout?.trim() || "",
+      );
+      // A FAILURE WE HAVE PROVED IS FINAL DOES NOT GET A RETRY. `unlatch()` is
+      // for a repair that might work on a later request — a locked config, a
+      // wedged CLI. A CLI that parsed our constant literal and did not get a
+      // list will parse it the same way every 60 s for the life of this
+      // process, and each attempt re-serialises the customer's config.yaml
+      // through `save_config` for nothing. So that one answer stays latched:
+      // the journal says why, the next process start tries once more (the
+      // residue is still in the file, and the verdict read finds it), and a
+      // hand-run `hermes update` to a CLI that can store a list is picked up on
+      // the restart that follows it.
+      if (outcome.kind !== "unverified") return;
+      // A WRITE THAT NEVER REACHED ARGPARSE IS NOT AN ATTEMPT. 126 and 127 are
+      // the SHELL's codes (see `hermesCliAnswered`): the `hermes` shim ran
+      // while `step_hermes_install` was rebuilding the venv under it, so
+      // nothing was parsed, nothing was written and no config.yaml was
+      // re-serialised. That is a failed QUESTION wearing a write's clothes, and
+      // spending one of three attempts on it would burn the budget on exactly
+      // the transient the unlatch exists for.
+      if (!hermesCliAnswered(written)) return unlatch();
+      // AND A FAILURE WE CANNOT PROVE EITHER WAY GETS A FEW, NOT AN ENDLESS
+      // SUPPLY. `unverified` is the honest verdict for a question that did not
+      // answer — but it is also what a `config set` that exits 0 without
+      // landing produces on EVERY pass, and that fault is a property of the
+      // box, not a moment. Counting those writes is what turns "retry, rate
+      // limited" into a repair that ends: three attempts, then this process
+      // stops rewriting config.yaml and says so once.
+      clawaiUnverifiedWrites += 1;
+      if (clawaiUnverifiedWrites < REPAIR_MAX_UNVERIFIED_WRITES) return unlatch();
+      console.warn(
+        `[hermes/clawai] giving up on the ClawBox AI catalogue after ${clawaiUnverifiedWrites}`
+        + " writes that could not be read back — not retried before the next restart",
+      );
+      return;
+    }
+    // The write landed, so nothing is owed to the bound above any more: a later
+    // hand-back (a re-link) starts from a clean count.
+    clawaiUnverifiedWrites = 0;
+    // The catalogue this device serves just changed — don't serve the old one.
+    //
+    // NO MCP RELOAD HERE, deliberately, and the same reason `reconcileLocalAiWithHermes`
+    // uses its INNER write: this hangs off `GET /setup-api/hermes/models`, which
+    // is the route the agent's own `ai_list_models` reads, so a `reload.mcp`
+    // would shut down the MCP child that is mid-tool-call. Nor does it move the
+    // provider SET the enum is built from — the provider already existed; only
+    // the models it lists changed — so there is nothing for
+    // `refreshProviderToolsIfSetChanged` to notice. See provider-write-paths.test.ts.
+    invalidateModelOptions();
+  } catch (err) {
+    console.error("[hermes/clawai] catalogue reconcile failed:", err);
+    unlatch();
+  }
+}
+
+/**
+ * What a write to `providers.clawai.models` turned out to be.
+ *
+ *   landed         — the key reads back as exactly the ids we sent.
+ *   stored-as-text — the CLI handed our own literal back as a STRING. Proof
+ *                    that this build cannot store a list, and therefore that
+ *                    re-issuing the identical write is futile.
+ *   unverified     — the question failed, or answered something else. Says
+ *                    nothing about the write either way, so the caller retries
+ *                    — on the ordinary cadence, and only until
+ *                    `REPAIR_MAX_UNVERIFIED_WRITES` of them have gone by.
+ *
+ * `why` IS THE HALF THE JOURNAL USED TO LOSE. "It did not read back as the list
+ * we wrote" is a DEFINITE claim, and this outcome is the one that knows least:
+ * a 15 s timeout, a SIGKILL, a decorated stdout and a genuine "key absent" all
+ * arrive here. So each carries the read's own exit code and first stderr line —
+ * and NEVER the value, which is why the leaf is read rather than the block.
+ */
+type ClawaiWriteOutcome =
+  | { kind: "landed" }
+  | { kind: "stored-as-text" }
+  | { kind: "unverified"; why: string };
+
+/**
+ * Did the catalogue we just wrote actually land as a LIST?
+ *
+ * `hermes config set` has no typed mode — `set_config_value(key, value: str,
+ * force=False)` (hermes_cli/config.py:5383) is the only entry point, and a JSON
+ * literal through its `_looks_structured_value` coercion is the harness's own
+ * way of storing a list. What the harness offers for the other half is
+ * `hermes config get <key> --json` (config.py:5769), which prints
+ * `json.dumps(value)`; that is the whole verification, so nothing here reaches
+ * into Hermes' store. (The OpenClaw half of this repo gets a typed
+ * `config set … --json` instead — see the PR body; the asymmetry is Hermes',
+ * not ours.)
+ *
+ * `force` IS NOT PASSED, DELIBERATELY. What that parameter gates has not been
+ * read on the build `HERMES_PIN_COMMIT` installs, and nothing here depends on
+ * knowing: if it does gate replacing an existing node, a refusal that still
+ * exits 0 is precisely the false success this read-back catches — reported with
+ * its cause and bounded by `REPAIR_MAX_UNVERIFIED_WRITES` rather than retried
+ * forever. Sending a flag whose effect we have not read on the build we ship
+ * would be the guess this function exists to remove.
+ *
+ * THE LEAF, NOT THE BLOCK, and not only for the smaller parse: the entry this
+ * repair read to decide carries `api_key`, and this key cannot. A verification
+ * that need never hold a credential should not be given one — which is also
+ * what makes the read's stderr safe to put in the journal.
+ *
+ * IT NEVER THROWS. `runHermesCli` rejects on a spawn failure or a timeout, and
+ * an unanswerable verification is not the repair failing — letting it reach the
+ * caller's `catch` would log "catalogue reconcile failed" over a write that
+ * landed.
+ */
+async function verifyClawaiCatalogue(): Promise<ClawaiWriteOutcome> {
+  const declared = JSON.stringify(CLAWBOX_AI_CHAT_MODEL_IDS);
+  let read: HermesCliResult;
+  try {
+    read = await runHermesCli(
+      ["config", "get", `providers.${CLAWAI_PROVIDER}.models`, "--json"],
+      { timeoutMs: 15_000 },
+    );
+  } catch (err) {
+    // Every rejection `runHermesCli` produces is one of its own fixed sentences
+    // — "hermes timed out", a `spawnFailureMessage` — so none of them can carry
+    // a value out of the store.
+    return unverified(err instanceof Error ? err.message : "the read-back could not be run");
+  }
+  // 126, 127 and a signal's `null` are all covered by this one test, so
+  // `hermesCliAnswered` would add nothing here: what separates them is the
+  // number in the journal line, not a second branch.
+  if (read.code !== 0) return unverified(`read exit ${read.code}${stderrCause(read.stderr)}`);
+  let value: unknown;
+  try {
+    value = JSON.parse(read.stdout);
+  } catch {
+    // Our own words, never the `SyntaxError` — it quotes a prefix of its input.
+    return unverified("the read-back was not JSON");
+  }
+  if (
+    Array.isArray(value)
+    && value.length === CLAWBOX_AI_CHAT_MODEL_IDS.length
+    && value.every((id, i) => id === CLAWBOX_AI_CHAT_MODEL_IDS[i])
+  ) {
+    return { kind: "landed" };
+  }
+  return value === declared ? { kind: "stored-as-text" } : unverified("the key holds something else");
+}
+
+/** An outcome that says nothing about the write, and why it could not say more. */
+function unverified(why: string): ClawaiWriteOutcome {
+  return { kind: "unverified", why: `could not be verified — ${why}` };
+}
+
+/** The CLI's first stderr line, for the journal: capped, and never a value —
+ *  the key this read names holds model ids, and the block that holds `api_key`
+ *  is deliberately not the one read here. */
+function stderrCause(stderr: string): string {
+  const line = stderr.trim().split(/\r?\n/, 1)[0]?.slice(0, 200);
+  return line ? `: ${line}` : "";
+}
+
+/** Let a later request try the repair again, no sooner than `REPAIR_RETRY_MS`
+ *  and no more often in total than `REPAIR_MAX_UNVERIFIED_WRITES`.
+ *  @see reconcileClawaiModelsWithHermes */
+function unlatch(): void {
+  clawaiModelsReconciled = false;
+  clawaiRetryAfter = Date.now() + REPAIR_RETRY_MS;
+}
+
+/** Something OTHER than the repair may have moved `providers.clawai.models`:
+ *  let the very next read look at it, with no backoff. Nothing failed, so there
+ *  is nothing to back off from — and this runs on an explicit customer action
+ *  (a link) rather than on every request, so it cannot become a spawn per
+ *  request the way an unbounded retry could. Same lever, and the same
+ *  reasoning, as `handRepairBack` in hermes-local-ai.ts. */
+function handClawaiRepairBack(): void {
+  clawaiModelsReconciled = false;
+  clawaiRetryAfter = 0;
+}
+
+/**
+ * What to do about `providers.clawai.models`, decided from the WHOLE entry.
+ *
+ *   "write"  — declare our catalogue. `overwriting` names what was already
+ *              there, when something was, because a repair that replaces a
+ *              populated key is worth a line in the journal saying which fault
+ *              it found.
+ *   "leave"  — this box is not ours to change. A `reason` is logged; the two
+ *              ordinary cases (already declared, never linked) carry none,
+ *              because every box on the fleet would print them once a boot.
+ *   "retry"  — the question failed. Never an answer, always logged, and the
+ *              caller unlatches so a later request asks again.
+ *
+ * THE WHOLE ENTRY, NOT THE `models` LEAF, and that is the difference between a
+ * repair and vandalism. Hermes decides what `models:` MEANS from two of its
+ * siblings:
+ *
+ *   - `discover_models: false` is its documented way to pin a catalogue of any
+ *     shape — "discover_models: false is the documented way to pin, and it is
+ *     honored above" (model_switch.py:3777), read on the installed build. With
+ *     discovery off no probe runs, so even a mapping is exactly what the
+ *     keyboard shows: that owner has NO symptom, and overwriting their pin with
+ *     our flat two-id list would destroy per-model metadata to fix nothing.
+ *   - `models_discovered: true` marks a catalogue Hermes persisted for itself,
+ *     which `_models_config_is_allowlist` refuses WHATEVER the shape (:136). Our
+ *     list would be refused with it, so writing there would latch "repaired"
+ *     over a keyboard still saying "clawai (0)" — a false success. That refusal
+ *     only bites where a probe can replace what it refused, so the flag is read
+ *     TOGETHER with `discover_models`: with discovery off nothing replaces
+ *     anything and the box is repairable after all.
+ *
+ * One read answers all of that, and carries the `base_url` the orphan guard
+ * needs, so it also replaces the second CLI spawn this repair used to make.
+ *
+ * `--json` IS LOAD-BEARING. Plain `hermes config get` renders a block through
+ * `yaml.safe_dump` (`_format_config_get_value`, hermes_cli/config.py:1203) and a
+ * bare string through `str()`, so the shapes this function exists to tell apart
+ * arrive as text only a YAML reader could separate. `--json` is the CLI's own
+ * machine-readable mode for exactly this (`hermes config get <key> [--json]`,
+ * config.py:5769) and prints `json.dumps(value)`; verified against the build
+ * `HERMES_PIN_COMMIT` installs, which `step_hermes_install` brings every box to.
+ * A box moved off that pin by a hand-run `hermes update` could meet a CLI that
+ * rejects the flag: that answers "retry", which is logged and rate-limited by
+ * `REPAIR_RETRY_MS` rather than repeated per request.
+ *
+ * THE STDOUT OF THIS READ IS A CREDENTIAL. The entry carries `api_key`, so no
+ * branch below logs `stdout` — only exit codes and our own words.
+ */
+type ClawaiVerdict =
+  | { action: "write"; overwriting?: string }
+  | { action: "leave"; reason: string }
+  | { action: "retry"; reason: string };
+
+async function clawaiCatalogueVerdict(): Promise<ClawaiVerdict> {
+  const read = await runHermesCli(
+    ["config", "get", `providers.${CLAWAI_PROVIDER}`, "--json"],
+    { timeoutMs: 15_000 },
+  );
+  if (!hermesCliAnswered(read)) {
+    return { action: "retry", reason: `the CLI never answered (exit ${read.code})` };
+  }
+  if (read.code !== 0) {
+    // No `providers.clawai` at all: a box that has never been linked. A real
+    // answer, and there is nothing to describe — writing `models` beside no
+    // endpoint would give Hermes a picker row offering two models with nowhere
+    // to send them, the same orphan the local provider's removal exists to
+    // avoid. Anything else is a config we could not read.
+    if (/config key not set/i.test(`${read.stdout ?? ""}\n${read.stderr ?? ""}`)) {
+      return { action: "leave", reason: "" };
+    }
+    return { action: "retry", reason: `the provider block could not be read (exit ${read.code})` };
+  }
+
+  let entry: unknown;
+  try {
+    // THIS CATCH IS LOAD-BEARING FOR A SECOND REASON. `JSON.parse` throws a
+    // `SyntaxError` whose message QUOTES A PREFIX OF ITS INPUT, and this input
+    // is the whole `providers.clawai` block — `api_key` and all. Letting it
+    // reach the caller's `catch (err)` would print that prefix through
+    // `console.error("[hermes/clawai] catalogue reconcile failed:", err)`. The
+    // reason below is our own words; nothing derived from the error is logged.
+    entry = JSON.parse(read.stdout);
+  } catch {
+    return { action: "retry", reason: "the CLI printed a value this build could not parse" };
+  }
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    return { action: "retry", reason: "providers.clawai is not a block" };
+  }
+  const row = entry as Record<string, unknown>;
+
+  if (!(typeof row.base_url === "string" && row.base_url.trim())) {
+    // `models:` beside no endpoint is a picker row offering models with nowhere
+    // to send them — the orphan the local provider's removal exists to avoid —
+    // so this is still "leave". But a block that exists with no `base_url` is
+    // an INVALID state, not an ordinary one, and the two verdicts that stay
+    // silent are silent because every box on the fleet is in them. The line
+    // names the provider and nothing else: the block it came from carries
+    // `api_key`.
+    return { action: "leave", reason: `providers.${CLAWAI_PROVIDER} carries no endpoint` };
+  }
+  // FIRST, because it beats every other reading of `models:` — WHEREVER A PROBE
+  // CAN ACT ON IT. `models_discovered: true` makes `_models_config_is_allowlist`
+  // return False whatever the shape (:136), so with discovery on the empty probe
+  // replaces our list and a write here would latch "repaired" over a keyboard
+  // still saying "clawai (0)".
+  //
+  // With `discover_models: false` beside it that reading means nothing:
+  // `_discovery_allowed` gates the probe (:3788) and `grp["models"] =
+  // live_models` never runs (:3823), so nothing replaces anything and the row is
+  // exactly what `_declared_model_ids` finds. An entry carrying both flags and
+  // no readable `models:` is EMPTY — the same "clawai (0)" — and the ids we
+  // declare there are permanent, because no probe can come back to undo them.
+  // Declining it would strand a box one write fixes for good.
+  //
+  // THE FLAG IS DECLARED BESIDE, NOT CLEARED, and that is a known limit rather
+  // than an oversight: an owner who later turns discovery back on puts that box
+  // into the state above, where the empty probe wins and this branch declines
+  // it. Clearing the flag would mean a second write to verify on a state only a
+  // contradictory pair of hand-edits produces — Hermes writes neither key into
+  // `providers:` (it persists its own catalogues under `custom_providers`).
+  if (hermesOwnsCatalogue(row) && hermesDiscoversModels(row)) {
+    return { action: "leave", reason: "Hermes persisted this catalogue itself (models_discovered)" };
+  }
+  // A LIST STORED AS TEXT IS NOT A CATALOGUE — and it is the one broken shape
+  // Hermes reads as a perfectly good one. Ran on the installed 0.20.5 over the
+  // string `["deepseek-v4-flash","deepseek-v4-pro"]`: `_declared_model_ids`
+  // (:61) yields ONE id, the whole literal, and `_models_config_is_allowlist`
+  // (:136) says True. So the keyboard offers a single unusable entry and BOTH
+  // "already declared" branches below walk away from it.
+  //
+  // This is the residue of the failed write the guard in
+  // `reconcileClawaiModelsWithHermes` catches: `hermes config set` saves the
+  // literal text and exits 0, so the value is in the file before that guard
+  // ever sees the warning, and on a CLI old enough to lack the coercion block
+  // there is no warning to see. Unlatching without this check re-reads the
+  // string we just wrote and calls it declared — the guard would defeat itself.
+  if (typeof row.models === "string" && looksLikeStructuredText(row.models)) {
+    return { action: "write", overwriting: "a list Hermes stored as text" };
+  }
+  // A PIN THAT PINS NOTHING IS NOT A PIN. `discover_models: false` only protects
+  // something if there is something to protect: with discovery off Hermes runs
+  // no probe (`_discovery_allowed`, model_switch.py:3788) and shows exactly the
+  // ids `_declared_model_ids` finds, so the flag beside an absent or empty
+  // `models:` leaves the row EMPTY — the "clawai (0)" this repair exists to
+  // fix, reached down the one path that used to walk away calling it a pin.
+  // `_declared_model_ids` is the right question here rather than the allowlist
+  // one, because with discovery off even a mapping's keys are shown.
+  if (!hermesDiscoversModels(row) && hermesDeclaresAnyId(row.models)) {
+    return { action: "leave", reason: "the catalogue is pinned with discover_models: false" };
+  }
+  if (row.models === undefined) return { action: "write" };
+  return isHermesAllowlist(row.models)
+    ? { action: "leave", reason: "" }
+    : { action: "write", overwriting: "a value Hermes does not read as an allowlist" };
+}
+
+/**
+ * Does this text plausibly encode a YAML/JSON list or mapping?
+ * `_looks_structured_value`, hermes_cli/config.py:5322 — the CLI's OWN test for
+ * "this argument is a structure, not a scalar", and the one that decides
+ * whether `config set` attempts a `yaml.safe_load` at all. Borrowing it here
+ * rather than inventing a rule keeps the two ends of the same write agreeing:
+ * every value the CLI meant to store as a list, and failed to, answers true.
+ *
+ * ONLY THE FLOW-STYLE TRIGGER IS MODELLED, deliberately. The Python also fires
+ * on multi-line block style (`- item` / `key: value` lines), which cannot be
+ * residue here: this module writes `JSON.stringify(ids)` and nothing else, and a
+ * hand-edited block in config.yaml is loaded by PyYAML as a real list long
+ * before any of this runs. The conservatism is the point either way — a model
+ * id is a scalar, so `deepseek-v4-flash` and even `-5` stay pins.
+ */
+function looksLikeStructuredText(value: string): boolean {
+  const stripped = value.replace(/^\s+/, "");
+  return stripped.startsWith("[") || stripped.startsWith("{");
+}
+
+/**
+ * Will Hermes probe `<base_url>/models` for this entry? `discover_models`,
+ * model_switch.py:3371 — absent means yes, and the string spellings "false",
+ * "no" and "0" mean no, exactly as the Python coerces them.
+ */
+function hermesDiscoversModels(row: Record<string, unknown>): boolean {
+  const flag = row.discover_models;
+  if (flag === undefined) return true;
+  // `discover.lower() not in {"false","no","0"}` — NO trim, deliberately. A
+  // quoted " false " is discovery ON to Hermes, so the empty probe wipes the
+  // block and the repair IS needed; trimming here would have ClawBox decline to
+  // touch a box Hermes is about to empty.
+  if (typeof flag === "string") return !["false", "no", "0"].includes(flag.toLowerCase());
+  return Boolean(flag);
+}
+
+/**
+ * Does this `models:` yield any id at all? `_declared_model_ids`,
+ * model_switch.py:61 — a non-empty string, any list entry that resolves to an
+ * id, or a mapping's keys, skipping the two sentinel keys Hermes writes for
+ * itself.
+ *
+ * Deliberately WIDER than `isHermesAllowlist`: a mapping is not an allowlist,
+ * but its keys are still what a pinned (discovery-off) row displays, and the
+ * only question here is whether anything would be shown.
+ */
+function hermesDeclaresAnyId(value: unknown): boolean {
+  if (isHermesAllowlist(value)) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.keys(value).some(
+    (key) => key !== "__explicit_model_allowlist__" && key !== "__discovered_model_catalog__",
+  );
+}
+
+/**
+ * `_entry_models_discovered` — model_switch.py:116. The current entry-level
+ * `models_discovered: true`, or the in-mapping sentinel older builds wrote and
+ * this one still accepts on read.
+ */
+function hermesOwnsCatalogue(row: Record<string, unknown>): boolean {
+  if (row.models_discovered === true) return true;
+  const models = row.models;
+  return Boolean(
+    models
+    && typeof models === "object"
+    && !Array.isArray(models)
+    && (models as Record<string, unknown>).__discovered_model_catalog__ === true,
+  );
+}
+
+/**
+ * Would Hermes read this value as an allowlist? `_models_config_is_allowlist`
+ * (model_switch.py:136): a non-empty string, or a list yielding at least one id
+ * through `_declared_model_ids` (:61). Never a mapping — that is metadata
+ * Hermes wrote for itself, not a pin. The `discovered` argument the Python
+ * takes is the caller's `hermesOwnsCatalogue` gate above, which is a different
+ * verdict here (leave alone) rather than a different shape.
+ *
+ * Transcribed rather than imported from `src/tests/helpers/
+ * hermes-picker-catalogue.ts` ON PURPOSE: that mirror is what judges this
+ * module's writes, and a guard sharing its code could only ever agree with it.
+ */
+function isHermesAllowlist(value: unknown): boolean {
+  if (typeof value === "string") return Boolean(value.trim());
+  if (!Array.isArray(value)) return false;
+  return value.some((entry) => {
+    if (typeof entry === "string") return Boolean(entry.trim());
+    if (!entry || typeof entry !== "object") return false;
+    const nested = entry as { id?: unknown; name?: unknown };
+    return [nested.id, nested.name].some((field) => typeof field === "string" && field.trim());
+  });
+}
+
+/** Test seam. The counter is NOT part of the hand-back — a re-link is worth one
+ *  more attempt, not a fresh three — so it is cleared here explicitly. */
+export function _resetClawaiModelsReconcileForTests(): void {
+  clawaiUnverifiedWrites = 0;
+  handClawaiRepairBack();
 }
 
 /**

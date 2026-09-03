@@ -17,8 +17,19 @@ vi.mock("@/lib/hermes-model-options", async (importOriginal) => {
   return { ...actual, getModelOptions: getModelOptionsMock };
 });
 
+const reconcileLocalMock = vi.fn(async () => {});
+const reconcileClawaiMock = vi.fn(async () => {});
 vi.mock("@/lib/hermes-local-ai", () => ({
-  reconcileLocalAiWithHermes: vi.fn(async () => {}),
+  reconcileLocalAiWithHermes: reconcileLocalMock,
+}));
+vi.mock("@/lib/hermes-clawai", () => ({
+  reconcileClawaiModelsWithHermes: reconcileClawaiMock,
+}));
+
+const activeHarnessMock = vi.fn(async () => "hermes");
+vi.mock("@/lib/harness", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/harness")>()),
+  getActiveHarness: activeHarnessMock,
 }));
 
 vi.mock("@/lib/hermes-cli", () => ({
@@ -56,6 +67,10 @@ beforeEach(async () => {
   session = installSessionFixture();
   getModelOptionsMock.mockReset();
   getModelOptionsMock.mockResolvedValue(PAYLOAD);
+  reconcileLocalMock.mockClear();
+  reconcileClawaiMock.mockClear();
+  activeHarnessMock.mockReset();
+  activeHarnessMock.mockResolvedValue("hermes");
   vi.resetModules();
   ({ GET } = await import("@/app/setup-api/hermes/models/route"));
 });
@@ -93,6 +108,25 @@ describe("GET /setup-api/hermes/models", () => {
   it("does not honour ?refresh=1 on the scoped provider read either", async () => {
     await GET(request("?provider=anthropic&refresh=1", false));
     expect(getModelOptionsMock).toHaveBeenCalledWith({ refresh: false });
+  });
+
+  it("repairs the Hermes `providers:` block on a Hermes box", async () => {
+    await GET(request("", false));
+    expect(reconcileLocalMock).toHaveBeenCalled();
+    expect(reconcileClawaiMock).toHaveBeenCalled();
+  });
+
+  it("spawns no `hermes` repair on an OpenClaw box", async () => {
+    // Both repairs open with a `hermes` spawn, and an OpenClaw device has no
+    // binary to spawn and no `providers:` block to repair — the call would
+    // reject, be caught, logged and retried on the next request, forever. One
+    // gate at the call site, ahead of both, rather than two modules each
+    // assuming their own edition.
+    activeHarnessMock.mockResolvedValue("openclaw");
+    const res = await GET(request("", false));
+    expect(res.status).toBe(200);
+    expect(reconcileLocalMock).not.toHaveBeenCalled();
+    expect(reconcileClawaiMock).not.toHaveBeenCalled();
   });
 
   it("reports credential presence and verification as separate fields", async () => {
