@@ -68,7 +68,14 @@ export async function waitForPortOpen(
   const budgetMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 0;
   const deadline = Date.now() + budgetMs;
   for (;;) {
-    if (await isPortOpen(port, host, probeTimeoutMs)) return true;
+    // ONE probe may not outlive the WHOLE wait: a connect timeout fired just
+    // before the deadline would spend the caller's budget a second time, which
+    // matters most where the budget is what is left of a shared deadline. The
+    // first probe always runs at its full length, so a zero or exhausted budget
+    // still asks once — "give up at once" must not become "never ask".
+    const leftBeforeProbe = deadline - Date.now();
+    const probeMs = leftBeforeProbe > 0 ? Math.min(probeTimeoutMs, leftBeforeProbe) : probeTimeoutMs;
+    if (await isPortOpen(port, host, probeMs)) return true;
     const remaining = deadline - Date.now();
     if (remaining <= 0) return false;
     await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remaining)));

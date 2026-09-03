@@ -117,6 +117,40 @@ describe("LocalAiPanel", () => {
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "select", choice: "local" } }));
   });
 
+  /**
+   * TASK-608. "Use as fallback" on the on-device row posts
+   * /setup-api/providers/default, which on OpenClaw restarts the gateway. When
+   * the gateway has not bound again inside the route's readiness budget the
+   * change IS written and the route answers `ok` with a `warning`.
+   *
+   * This panel's only feedback channel was the red error box, so that answer
+   * used to paint a failure over a change that went through — and the owner's
+   * next move is to repeat it, paying another restart.
+   */
+  it("shows a gateway that is still coming back as a notice, not as a failed change", async () => {
+    stubFetch({
+      llmDefault: true,
+      post: (url) => (url === "/setup-api/providers/default"
+        ? new Response(JSON.stringify({
+            ok: true,
+            provider: "clawai",
+            model: "deepseek/deepseek-v4-flash",
+            warning: "Saved, but the gateway did not come back — the new model applies once it is serving again.",
+          }), { status: 200, headers: { "content-type": "application/json" } })
+        : undefined),
+    });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => expect(screen.getByTestId("local-model-role-llamacpp")).toHaveTextContent(/primary/i));
+    fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+    fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-fallback"));
+
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/providers/default", body: { provider: "clawai" } }));
+    const notice = await screen.findByTestId("local-ai-notice");
+    expect(notice).toHaveTextContent("the gateway did not come back");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("turns Local AI off through its own route, and sends the memory index to Memory Shard", async () => {
     stubFetch({ llmDefault: true });
     renderPanel();

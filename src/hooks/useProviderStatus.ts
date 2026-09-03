@@ -69,6 +69,12 @@ export interface UseProviderStatus {
   settingDefault: string | null;
   /** Rejected reason from the last `setDefault`, or null. */
   defaultError: string | null;
+  /**
+   * The last `setDefault` SUCCEEDED, but the box qualified it — on OpenClaw the
+   * gateway had not finished restarting when the route answered. The default is
+   * written; this is a notice, and the panel must not paint it as a failure.
+   */
+  defaultWarning: string | null;
   setDefault: (providerId: string) => Promise<void>;
   refresh: () => void;
 }
@@ -79,6 +85,7 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
   const [error, setError] = useState(false);
   const [settingDefault, setSettingDefault] = useState<string | null>(null);
   const [defaultError, setDefaultError] = useState<string | null>(null);
+  const [defaultWarning, setDefaultWarning] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
   // Guards a setState after unmount, and lets a slow answer for a previous
   // nonce be discarded rather than overwriting a newer one.
@@ -152,16 +159,22 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
   const setDefault = useCallback(async (providerId: string) => {
     setSettingDefault(providerId);
     setDefaultError(null);
+    setDefaultWarning(null);
     try {
       const res = await fetch("/setup-api/providers/default", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider: providerId }),
       });
-      const data = (await res.json().catch(() => ({}))) as { error?: unknown };
+      const data = (await res.json().catch(() => ({}))) as { error?: unknown; warning?: unknown };
       if (!res.ok) {
         throw new Error(typeof data.error === "string" && data.error ? data.error : `HTTP ${res.status}`);
       }
+      // A qualified success is still a success. The route answers `ok` with a
+      // `warning` when the default IS written and only the gateway restart is
+      // still in flight, so everything below must still run — skipping it would
+      // leave the star on the old provider over a change that landed.
+      if (typeof data.warning === "string" && data.warning) setDefaultWarning(data.warning);
       // An explicit default outranks whatever the chat remembered from an
       // ad-hoc pick, or the chat would keep opening on the provider that was
       // just replaced. Harmless on OpenClaw, where the key is never written.
@@ -182,6 +195,7 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
     error,
     settingDefault,
     defaultError,
+    defaultWarning,
     setDefault,
     refresh,
   };

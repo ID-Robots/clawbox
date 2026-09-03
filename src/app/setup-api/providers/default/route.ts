@@ -112,6 +112,29 @@ export async function POST(request: Request) {
     }),
   );
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!res.ok) return NextResponse.json(data, { status: res.status });
-  return NextResponse.json({ ok: true, provider, model: option.model });
+  // A 502 CARRYING A WARNING is not a failed default. `/setup-api/chat/model`
+  // answers that when the model is already on disk and only the gateway has not
+  // finished coming back — the body is the new state plus `warning`, with no
+  // `error` key at all. Forwarded verbatim it reads to every client of THIS
+  // route as a failed save over a change that landed: the star stays on the old
+  // provider, nothing tells the chat header or the capability probe, and the
+  // owner's retry pays a second gateway restart.
+  //
+  // The warning is REQUIRED, not merely the status, so a 502 from a proxy or
+  // from cloudflared stays the error it is — the same guard `ChatPopup` applies
+  // to the same route's answer, on the same reasoning.
+  //
+  // It becomes a 200 rather than a forwarded 502 because this endpoint's whole
+  // point is one contract for both harnesses: Hermes has no gateway to wait for,
+  // and no caller here should have to learn a status code that only one edition
+  // can produce. `warning` is how "saved, still settling" is said.
+  const gatewayPending =
+    res.status === 502 && typeof data.warning === "string" && data.warning !== "";
+  if (!res.ok && !gatewayPending) return NextResponse.json(data, { status: res.status });
+  return NextResponse.json({
+    ok: true,
+    provider,
+    model: option.model,
+    ...(gatewayPending ? { warning: data.warning } : {}),
+  });
 }

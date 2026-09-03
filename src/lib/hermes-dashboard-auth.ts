@@ -30,7 +30,10 @@ export const HERMES_DASHBOARD_UNIT = "clawbox-hermes-dashboard.service";
  * "127.0.0.2:9119" is a rename waiting to half-land.
  */
 export const DASHBOARD_HOST = process.env.HERMES_DASH_HOST || "127.0.0.2";
-export const DASHBOARD_PORT = Number(process.env.HERMES_PORT || "9119");
+// `|| 9119` after the coercion, not inside it: a non-numeric HERMES_PORT would
+// otherwise make this NaN, and every consumer below would build
+// `http://127.0.0.2:NaN` — an origin that resolves nowhere, silently.
+export const DASHBOARD_PORT = Number(process.env.HERMES_PORT) || 9119;
 const DASH_ORIGIN = `http://${DASHBOARD_HOST}:${DASHBOARD_PORT}`;
 const CLAWBOX_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const USERNAME = process.env.HERMES_DASH_USERNAME || "clawbox";

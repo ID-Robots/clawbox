@@ -26,7 +26,7 @@ import type { ProviderStatusRow } from "@/lib/provider-status";
 
 export default function AiProviderList() {
   const { t } = useT();
-  const { summary, loading, error, settingDefault, defaultError, setDefault, refresh } = useProviderStatus();
+  const { summary, loading, error, settingDefault, defaultError, defaultWarning, setDefault, refresh } = useProviderStatus();
   const [toggling, setToggling] = useState<string | null>(null);
   const [toggleError, setToggleError] = useState<string | null>(null);
 
@@ -94,6 +94,19 @@ export default function AiProviderList() {
       {(defaultError || toggleError) && (
         <div role="alert" className="mb-3 rounded-xl border border-red-500/20 bg-red-500/[0.06] px-3 py-2 text-[11px] text-red-300">
           {defaultError ?? toggleError}
+        </div>
+      )}
+      {/* A default that WAS written, with the box still settling behind it —
+          the gateway restart had not finished when the route answered. Amber
+          and `status`, never the red `alert` above: the change landed, and a
+          failure here sends the owner to click it again for another restart. */}
+      {defaultWarning && (
+        <div
+          role="status"
+          data-testid="ai-provider-default-warning"
+          className="mb-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-200"
+        >
+          {defaultWarning}
         </div>
       )}
 

@@ -59,7 +59,14 @@ const RESPAWN_POLL_MS = 500;
  * shape as the gateway's `gatewayReadyWaitMs()`.
  */
 function respawnWaitMs(): number {
-  return Number(process.env.HERMES_DASHBOARD_WAIT_MS || DASHBOARD_RESPAWN_WAIT_MS);
+  // Guarded exactly as `waitForPortOpen` guards its own budget, and for the
+  // same reason: the value comes from the environment, and a malformed one is
+  // NaN. `Date.now() + NaN` is NaN, so every `remaining <= 0` below is false,
+  // `Math.min(RESPAWN_POLL_MS, NaN)` is NaN, and `setTimeout(_, NaN)` clamps to
+  // 1 ms — the replacement wait would never return and would fork a `systemctl
+  // show` per iteration for the life of the process.
+  const override = Number(process.env.HERMES_DASHBOARD_WAIT_MS);
+  return Number.isFinite(override) && override > 0 ? override : DASHBOARD_RESPAWN_WAIT_MS;
 }
 
 /**
@@ -252,11 +259,17 @@ export async function bounceHermesDashboard(): Promise<boolean> {
   );
   if (result?.code !== 0) return false;
 
-  if (!(await waitForReplacement(outgoing, Date.now() + respawnWaitMs()))) {
+  // ONE deadline across both halves — the doc block above budgets them together
+  // because they are the same restart, and spending it twice would put the
+  // ceiling at 90 s inside a request cloudflared cuts at 100 s.
+  // `waitForPortOpen` reads a non-positive budget as "one probe, then give up",
+  // so the leftover needs no clamp here.
+  const deadline = Date.now() + respawnWaitMs();
+  if (!(await waitForReplacement(outgoing, deadline))) {
     console.error(`[hermes] ${HERMES_DASHBOARD_UNIT} did not come back after its stop`);
     return false;
   }
-  if (await waitForPortOpen(DASHBOARD_PORT, DASHBOARD_HOST, { timeoutMs: respawnWaitMs() })) return true;
+  if (await waitForPortOpen(DASHBOARD_PORT, DASHBOARD_HOST, { timeoutMs: deadline - Date.now() })) return true;
   console.error(
     `[hermes] ${HERMES_DASHBOARD_UNIT} restarted but is not listening on ${DASHBOARD_HOST}:${DASHBOARD_PORT} again`,
   );

@@ -149,10 +149,16 @@ describe("bounceHermesDashboard", () => {
     systemd({ pids: ["4242", "4242"] });
     process.env.HERMES_DASHBOARD_WAIT_MS = "40";
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    await expect(bounceHermesDashboard()).resolves.toBe(false);
-    expect(waitForPortOpenMock).not.toHaveBeenCalled();
-    errorSpy.mockRestore();
-    delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    // finally, not a trailing statement: a failing assertion would otherwise
+    // skip the cleanup and leak a 40 ms dashboard budget into every later test
+    // in this worker, turning one red into a cascade nowhere near its cause.
+    try {
+      await expect(bounceHermesDashboard()).resolves.toBe(false);
+      expect(waitForPortOpenMock).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+      delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    }
   });
 
   it("reads the outgoing PID before it stops anything", async () => {
@@ -163,6 +169,72 @@ describe("bounceHermesDashboard", () => {
     // One before the stop to name the outgoing process, at least one after.
     expect(mainPidQueries.length).toBeGreaterThanOrEqual(2);
     expect(mainPidQueries[0][1]).toContain("clawbox-hermes-dashboard.service");
+  });
+
+  /**
+   * ONE budget for both halves, which is what the module's own doc block
+   * promises and what makes 45 s a safe number: the bounce runs synchronously
+   * inside three Hermes request routes that can reach the owner through
+   * cloudflared, whose edge cuts a response at 100 s. Two independent 45 s
+   * waits is a 90 s ceiling — inside the edge only by 10 s, and a 90 s spinner
+   * where the file says 45.
+   */
+  it("spends ONE budget across both halves, not one each", async () => {
+    const budgetMs = 300;
+    const readDelayMs = 120;
+    process.env.HERMES_DASHBOARD_WAIT_MS = String(budgetMs);
+    try {
+      // Each systemd read costs real time, and the replacement PID only shows
+      // up on the third one — so the first half eats the whole budget and the
+      // second half must be left with none of it.
+      const pids = ["4242", "4242", "5353"];
+      execFileMock.mockImplementation((_bin: string, args: string[], _opts: unknown, cb: unknown) => {
+        const done = cb as (e: Error | null, out: { stdout: string; stderr: string }) => void;
+        const property = (args as string[]).find((a) => a.startsWith("--property=")) ?? "";
+        if (property !== "--property=MainPID") {
+          done(null, { stdout: "Restart=always\n", stderr: "" });
+          return;
+        }
+        const pid = (pids.length > 1 ? pids.shift() : pids[0]) ?? "0";
+        setTimeout(() => done(null, { stdout: `MainPID=${pid}\n`, stderr: "" }), readDelayMs);
+      });
+
+      let probeStartedAt = 0;
+      waitForPortOpenMock.mockImplementation(async () => {
+        probeStartedAt = Date.now();
+        return true;
+      });
+
+      const startedAt = Date.now();
+      await expect(bounceHermesDashboard()).resolves.toBe(true);
+
+      const [, , options] = waitForPortOpenMock.mock.calls[0] as [number, string, { timeoutMs: number }];
+      // The budget the socket half was handed, plus what the PID half already
+      // spent, may not exceed the one budget the whole bounce has.
+      expect((probeStartedAt - startedAt) + options.timeoutMs).toBeLessThanOrEqual(budgetMs + 150);
+    } finally {
+      delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    }
+  });
+
+  /**
+   * The same guard `waitForPortOpen` carries, for the same reason: this budget
+   * comes from `Number(process.env…)` too. `Number("soon")` is NaN, and
+   * `Date.now() + NaN` is NaN — every `remaining <= 0` comparison is then
+   * false, `Math.min(500, NaN)` is NaN, and `setTimeout(_, NaN)` clamps to
+   * 1 ms. The replacement wait would never return and would fork a
+   * `systemctl show` per iteration for the life of the process.
+   */
+  it("falls back to the built-in budget when the wait override is malformed", async () => {
+    process.env.HERMES_DASHBOARD_WAIT_MS = "soon";
+    try {
+      systemd({ pids: ["4242", "5353"] });
+      await expect(bounceHermesDashboard()).resolves.toBe(true);
+      const [, , options] = waitForPortOpenMock.mock.calls[0] as [number, string, { timeoutMs: number }];
+      expect(Number.isFinite(options.timeoutMs)).toBe(true);
+    } finally {
+      delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    }
   });
 
   it("counts a respawn even when the unit had no running process to begin with", async () => {

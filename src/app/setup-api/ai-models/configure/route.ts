@@ -26,6 +26,7 @@ import {
   openclawIsAbsent,
   OpenclawUnavailableError,
   type OpenClawConfig,
+  GatewayNotReadyError,
 } from "@/lib/openclaw-config";
 import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { getActiveHarness } from "@/lib/harness";
@@ -2854,14 +2855,29 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
 
     // 9. Restart OpenClaw gateway so it picks up the new auth profile and model
     gateway.state = "restart-issued";
+    let gatewayWarning: string | undefined;
     try {
       await restartGateway();
     } catch (err) {
       console.error("[configure] Gateway restart failed after configuring", ocProvider, ":", err instanceof Error ? logSafe(err.message) : err);
-      return NextResponse.json(
-        { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
-        { status: 502 },
-      );
+      // A gateway that has not finished coming back is NOT a failed configure.
+      // The provider, the credential and the model are all written by the time
+      // this runs; only the wait gave up. This 502 predates the readiness wait,
+      // when it could fire only if `systemctl restart` itself failed — the wait
+      // widened it to "the port did not open inside 30 s", which is a state the
+      // box recovers from on its own, and reporting it as a failure stops the
+      // first-boot wizard dead at the AI step and tells the owner to reboot a
+      // box that needed ten more seconds.
+      //
+      // A restart that was REFUSED is a different fact: nothing is coming, and
+      // the owner does have to act. That one keeps the 502.
+      if (!(err instanceof GatewayNotReadyError)) {
+        return NextResponse.json(
+          { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
+          { status: 502 },
+        );
+      }
+      gatewayWarning = "Saved, but the gateway has not finished restarting — the new model applies once it is serving again.";
     }
 
     // Configuration fully applied — now consume the OAuth handoff file (if any).
@@ -2871,7 +2887,8 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       await fs.unlink(pendingHandoffTokensPath).catch(() => {});
     }
 
-    return NextResponse.json({ success: true, ...(chatgptOrderWarning ? { warning: chatgptOrderWarning } : {}) });
+    const warning = [chatgptOrderWarning, gatewayWarning].filter(Boolean).join(" ");
+    return NextResponse.json({ success: true, ...(warning ? { warning } : {}) });
   } catch (err) {
     // Never surface the raw error: it can carry CLI internals and filesystem
     // paths. Log it server-side for diagnosis and return a generic, actionable

@@ -31,6 +31,16 @@ vi.mock("@/lib/config-store", () => ({
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
+  // A REAL class, not `vi.fn()` and not an omitted export: the configure route
+  // narrows on `instanceof GatewayNotReadyError` to tell "the gateway has not
+  // finished coming back" from "the restart was refused", and `instanceof
+  // undefined` throws a TypeError the first time a test makes it reject.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR: 24000,
   compactionReserveFloorForContext: (n: number) =>
     Number.isFinite(n) && n > 0 ? Math.min(24000, Math.max(4096, Math.round(n / 4))) : 24000,

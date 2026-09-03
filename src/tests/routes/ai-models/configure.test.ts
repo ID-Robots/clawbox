@@ -86,6 +86,15 @@ vi.mock("@/lib/openclaw-config", () => ({
       ? Math.min(24000, Math.max(4096, Math.round(contextWindow / 4)))
       : 24000,
   restartGateway: vi.fn(),
+  // A REAL class, not `vi.fn()` and not an omitted export: the route narrows on
+  // `instanceof GatewayNotReadyError`, and `instanceof undefined` throws a
+  // TypeError the first time a test makes the restart reject.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
   readConfig: vi.fn(),
   readConfigStrict: vi.fn(),
@@ -153,6 +162,7 @@ import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway
   runOpenclawDoctorFix,
   spawnOpenclawCli,
   setProviderPlugins,
+  GatewayNotReadyError,
 } from "@/lib/openclaw-config";
 import { configSetCalls, configSetCommands, failConfigSetsMatching, findConfigSet } from "./config-set-calls";
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
@@ -1002,6 +1012,33 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
+  });
+
+  /**
+   * TASK-608. A gateway that has not finished coming back is NOT a failed
+   * configure: the provider, the credential and the model are all on disk, and
+   * `restartGateway` only stopped waiting.
+   *
+   * This route's 502 predates the readiness wait, when it could fire only if
+   * `systemctl restart` itself failed. The wait widened it to "the port did not
+   * open inside 30 s" — and `e2e-install`'s fresh-install wizard proved what
+   * that costs: OpenAI configured, the gateway a few seconds late, a 502, and
+   * the wizard stopped dead at the AI step with "Try rebooting the device" over
+   * a box that needed ten more seconds. A restart that was REFUSED is a
+   * different fact and keeps the 502 below.
+   */
+  it("keeps a configure that landed when only the gateway has not come back yet", async () => {
+    mockRestartGateway.mockRejectedValue(new GatewayNotReadyError("gateway did not come back"));
+
+    const res = await configurePost(jsonRequest({
+      provider: "anthropic",
+      apiKey: "sk-test",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.warning).toMatch(/gateway/i);
   });
 
   it("returns 502 when gateway restart fails", async () => {
