@@ -197,6 +197,13 @@ pair: `backup_list` and `backup_now` are not registered there, and
 `backup_status` answers "not available on this edition" rather than a status
 object the agent reads as "not paired yet".
 
+Where ClawKeep does run, `backup_status` returns the shared `protection`
+verdict plus a `notes` array — the caveats that apply to *this* box (an
+unpaired box, a `lastHeartbeatStatus` that is not an outcome, a protected
+verdict with no schedule behind it). They are on the result rather than in the
+tool description because they are conditional, and because description text is
+paid for in the `tools/list` payload on every turn.
+
 `screen_capture` resolves the display from `CLAWBOX_VNC_DISPLAY`, then
 `~/.cache/clawbox/vnc-display.env`, then `:0` — the harness spawns this server
 with no `DISPLAY`, and the desktop is the VNC Xvfb, not `:0`.
