@@ -6,7 +6,7 @@ import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
 import { fetchHarness } from "@/lib/client-harness";
-import { I18nProvider } from "@/lib/i18n";
+import { I18nProvider, useT } from "@/lib/i18n";
 import { handoffSettingsSection, STANDALONE_SETTINGS_SECTION_PARAM } from "@/lib/ui-events";
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
@@ -35,23 +35,40 @@ const MemoryShardApp = dynamic(() => import("@/components/MemoryShardApp"), { ss
 const OPENCLAW_ONLY_APP_IDS = ["store", "openclaw", "memory-shard"];
 const HERMES_ONLY_APP_IDS = ["hermes", "hermes-skills"];
 
+// The title bar's name for each app, as the same `app.*` TRANSLATION KEYS the
+// desktop registry (`src/app/page.tsx`) uses — this window is the same app the
+// desktop shows, so it must not carry a second, English-only name table. A
+// product name (Hermes, ClawKeep) has no key and falls through as itself, which
+// is what `t(key) || key` does. Kept in step by
+// src/tests/unit/desktop-app-names-i18n.test.ts.
 const APP_TITLES: Record<string, string> = {
-  settings: "Settings",
-  terminal: "Terminal",
-  coding: "Coding Agent",
-  files: "Files",
-  browser: "Browser",
-  vnc: "Remote Desktop",
-  store: "App Store",
-  openclaw: "OpenClaw",
-  "hermes-skills": "Hermes Skills",
-  "memory-shard": "Memory Shard",
-  clawbox: "Chat",
+  settings: "app.settings",
+  terminal: "app.terminal",
+  coding: "app.codingAgent",
+  files: "app.files",
+  browser: "app.browser",
+  vnc: "app.remoteDesktop",
+  store: "app.store",
+  openclaw: "app.openclaw",
+  "hermes-skills": "app.skills",
+  "memory-shard": "app.memoryShard",
+  clawbox: "app.chat",
   clawkeep: "ClawKeep",
-  system_update: "System Update",
+  system_update: "app.systemUpdate",
+  // Not a desktop app: the setup wizard has no registry entry and no key.
   setup: "Setup",
   hermes: "Hermes",
 };
+
+/**
+ * The title bar renders INSIDE `I18nProvider`, because the provider is this
+ * page's own child: `useT()` in `StandaloneAppPage` would see no provider above
+ * it and echo the key back.
+ */
+function StandaloneTitle({ name }: { name: string }) {
+  const { t } = useT();
+  return <span className="text-xs font-medium text-white/70">{t(name) || name}</span>;
+}
 
 export default function StandaloneAppPage() {
   const { id } = useParams<{ id: string }>();
@@ -267,7 +284,7 @@ export default function StandaloneAppPage() {
         {/* Minimal title bar */}
         <div className="flex items-center gap-2 px-3 py-1.5 bg-[#111827] border-b border-white/10 shrink-0">
           <Image src="/clawbox-logo.png" alt="" width={20} height={20} className="w-5 h-5 rounded" />
-          <span className="text-xs font-medium text-white/70">{title}</span>
+          <StandaloneTitle name={title} />
           <Link href="/" className="ml-auto text-xs text-white/30 hover:text-white/60 no-underline">
             Back to Desktop
           </Link>
