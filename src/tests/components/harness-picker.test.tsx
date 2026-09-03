@@ -6,9 +6,17 @@ import HarnessPicker from "@/components/HarnessPicker";
 
 // The real English catalogue, so a key the card asks for that nobody added
 // fails here instead of shipping the raw key to the owner.
+/** The locale the card must format its timestamp for; "en" would prove nothing. */
+const UI_LOCALE = "de";
+/** When true, `t` answers the raw key — the state I18nProvider serves while its
+    catalogue import is in flight, and forever if that import fails. */
+let catalogueMissing = false;
+
 vi.mock("@/lib/i18n", () => ({
   useT: () => ({
+    locale: UI_LOCALE,
     t: (key: string, params?: Record<string, string | number>) => {
+      if (catalogueMissing) return key;
       const raw = translations.en[key] ?? key;
       return params ? raw.replace(/\{(\w+)\}/g, (m, name) => String(params[name] ?? m)) : raw;
     },
@@ -37,7 +45,10 @@ const locked = (healthy: boolean) => ({
   harnesses: [{ id: "hermes", label: "Hermes", healthy }],
 });
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  catalogueMissing = false;
+  vi.unstubAllGlobals();
+});
 
 describe("HarnessPicker locked badge", () => {
   it("shows the harness as up when the status route says it is healthy", async () => {
@@ -119,6 +130,24 @@ describe("HarnessPicker shell-scan warning", () => {
 
     const warning = await screen.findByTestId("shell-scan-warning");
     expect(warning.textContent).toContain("will not retry the download before");
+    // Formatted for the UI locale, not the runtime default — the rest of the
+    // sentence is already in the owner's language.
+    expect(warning.textContent).toContain(new Date(until).toLocaleString(UI_LOCALE));
+  });
+
+  it("falls back to English rather than showing a raw key if the catalogue never loaded", async () => {
+    // I18nProvider answers t(key) === key until its dynamic import of the
+    // catalogue resolves, and forever if it fails ("the device is offline
+    // mid-update"). Everything else on this card is hardcoded English, so the
+    // one sentence that says a security control is off would be the only thing
+    // on screen rendering as `shellScan.offTitle`.
+    catalogueMissing = true;
+    mockStatus(withScan({ state: "off", reason: "not-installed", failOpen: true, retrySuppressedUntil: null }));
+    render(<HarnessPicker />);
+
+    const warning = await screen.findByTestId("shell-scan-warning");
+    expect(warning.textContent).toContain("Shell command scanning is off");
+    expect(warning.textContent).not.toContain("shellScan.");
   });
 
   it("says commands are BLOCKED, not merely unscanned, when the box fails closed", async () => {

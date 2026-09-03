@@ -65,7 +65,7 @@ import path from "path";
 
 import { hermesConfigPath } from "@/lib/hermes-config-yaml";
 import { hermesHome, readHermesEnv } from "@/lib/hermes-env";
-import { getYamlPath } from "@/lib/yaml-block-edit";
+import { getYamlPath, hasYamlPath } from "@/lib/yaml-block-edit";
 
 /** Hermes' own config keys, and the env var that overrides each of them. */
 const KEYS = {
@@ -81,11 +81,31 @@ const DEFAULT_ENABLED = true;
 const DEFAULT_PATH = "tirith";
 const DEFAULT_FAIL_OPEN = true;
 
+/**
+ * A config.yaml this large is not a config file. Same guard, and the same
+ * reason, as `MAX_ENV_BYTES` next door in hermes-env: this read happens behind a
+ * Settings panel and must not be able to pull an arbitrary amount of a planted
+ * file into memory.
+ */
+const MAX_CONFIG_BYTES = 1024 * 1024;
+
 /** Upstream writes this beside config.yaml and skips retries while it is fresh. */
 const INSTALL_FAILED_MARKER = ".tirith-install-failed";
 const MARKER_TTL_MS = 24 * 60 * 60 * 1000;
-/** The one marker reason upstream clears early, so the 24 h claim is wrong for it. */
+/**
+ * The one marker reason upstream drops early — and only when `cosign` is on the
+ * agent's PATH (`tirith_security.py:200-205`); without it the 24 h suppression
+ * stands like any other. Nothing upstream writes this reason today (a missing
+ * cosign downgrades to SHA-256 only, `:451`), so this is a guard against a
+ * future bump, not a live case.
+ */
 const RETRYABLE_MARKER_REASON = "cosign_missing";
+
+/** One key out of config.yaml: whether it is there at all, and its raw scalar. */
+interface ConfigValue {
+  present: boolean;
+  raw: string | null;
+}
 
 export type ShellScanState = "on" | "off" | "unknown";
 
@@ -123,13 +143,34 @@ function envBool(raw: string): boolean {
   return ["1", "true", "yes"].includes(raw.trim().toLowerCase());
 }
 
-/** A YAML scalar as a boolean, or null when the key is unset or unrecognised. */
-function yamlBool(raw: string | null): boolean | null {
-  if (raw === null) return null;
-  const v = raw.trim().toLowerCase();
-  if (["1", "true", "yes", "on"].includes(v)) return true;
-  if (["0", "false", "no", "off"].includes(v)) return false;
-  return null;
+/**
+ * Values PyYAML resolves to something Python calls false. `no`/`off`/`n` are in
+ * the list because the config is YAML 1.1, where they are booleans; `[]`/`{}`
+ * because an empty collection is falsy; `0`/`0.0` because zero is.
+ */
+const FALSY_YAML = new Set(["false", "no", "off", "n", "null", "~", "0", "0.0", "[]", "{}", ""]);
+
+/**
+ * A configured Hermes flag, as UPSTREAM reads it.
+ *
+ * Upstream does not parse these as booleans at all — `_load_security_config`
+ * hands the YAML value through untouched and the call sites apply plain Python
+ * truthiness (`if not cfg["tirith_enabled"]`, `if fail_open`). So anything
+ * present that is not falsy is TRUE, including a word like `maybe`; and a key
+ * written with no value at all is `None`, which is FALSE, not "unset".
+ *
+ * Returns null only for a key that is genuinely absent — the one case where the
+ * caller's default applies.
+ *
+ * KNOWN LIMIT: `getYamlPath` unquotes, so `tirith_enabled: "false"` (a truthy
+ * Python string) is indistinguishable here from `tirith_enabled: false`. It is
+ * read as false, i.e. as "scanning off" — the direction that warns rather than
+ * the one that stays quiet.
+ */
+function configuredFlag(value: ConfigValue): boolean | null {
+  if (!value.present) return null;
+  if (value.raw === null) return false; // `key:` with nothing after it → None
+  return !FALSY_YAML.has(value.raw.trim().toLowerCase());
 }
 
 /** True when `p` is a regular file this process may execute. */
@@ -202,9 +243,10 @@ async function onlyIfExecutable(p: string): Promise<string | null> {
 /**
  * When upstream will next allow a download retry, or null if it will retry now.
  *
- * `cosign_missing` is excluded on purpose: upstream clears that marker as soon
- * as `cosign` is on PATH (`:189-199`), so claiming a 24 h wait for it would be a
- * false failure.
+ * A `cosign_missing` marker is excluded ONLY when cosign is actually installed:
+ * that is the condition on which upstream clears it and retries (`:189-205`).
+ * Excluding it unconditionally would tell the owner to connect the box to the
+ * internet on a box that will not retry for another day.
  */
 async function readRetrySuppressedUntil(): Promise<string | null> {
   const marker = path.join(hermesHome(), INSTALL_FAILED_MARKER);
@@ -225,7 +267,7 @@ async function readRetrySuppressedUntil(): Promise<string | null> {
     const stat = await handle.stat();
     if (!stat.isFile()) return null;
     const reason = await handle.readFile("utf-8");
-    if (reason.trim() === RETRYABLE_MARKER_REASON) return null;
+    if (reason.trim() === RETRYABLE_MARKER_REASON && (await which("cosign"))) return null;
     const until = stat.mtimeMs + MARKER_TTL_MS;
     return until > Date.now() ? new Date(until).toISOString() : null;
   } catch {
@@ -235,23 +277,53 @@ async function readRetrySuppressedUntil(): Promise<string | null> {
   }
 }
 
-/** The `security:` block as raw scalars, or null when the file is unreadable. */
-async function readSecurityConfig(): Promise<Record<keyof typeof KEYS, string | null> | null> {
-  let text: string;
+/**
+ * config.yaml's text, "" when the box has none yet, or null when it could not be
+ * read.
+ *
+ * Hardened the same way, and for the same two reasons, as `readEnvText` in
+ * hermes-env and the marker read above. The agent runs as the same user and can
+ * write `~/.hermes`: a plain `fs.readFile` on a FIFO planted there parks in
+ * `open(2)` with no writer, and this read sits inside the status route's
+ * `Promise.all`, so that request would never settle and each one would hold a
+ * libuv threadpool thread. `O_NONBLOCK` returns immediately (it has no effect on
+ * a regular file, the only case that goes on to read), the regular-file check
+ * happens on the descriptor that was opened, and the size is capped.
+ */
+async function readConfigText(): Promise<string | null> {
+  let handle: FileHandle;
   try {
-    text = await fs.readFile(hermesConfigPath(), "utf-8");
+    handle = await fs.open(hermesConfigPath(), fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     // No config.yaml is an ordinary state — a box before its first boot. Upstream
     // swallows that and applies its defaults (`:79-80`), so it is not "unknown".
-    if (code === "ENOENT" || code === "ENOTDIR") text = "";
-    else return null;
+    return code === "ENOENT" || code === "ENOTDIR" ? "" : null;
   }
   try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > MAX_CONFIG_BYTES) return null;
+    return await handle.readFile("utf-8");
+  } catch {
+    return null;
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
+/** The `security:` block, or null when the file could not be read or parsed. */
+async function readSecurityConfig(): Promise<Record<keyof typeof KEYS, ConfigValue> | null> {
+  const text = await readConfigText();
+  if (text === null) return null;
+  try {
+    const read = (yaml: readonly string[]): ConfigValue => ({
+      present: hasYamlPath(text, [...yaml]),
+      raw: getYamlPath(text, [...yaml]),
+    });
     return {
-      enabled: getYamlPath(text, [...KEYS.enabled.yaml]),
-      path: getYamlPath(text, [...KEYS.path.yaml]),
-      failOpen: getYamlPath(text, [...KEYS.failOpen.yaml]),
+      enabled: read(KEYS.enabled.yaml),
+      path: read(KEYS.path.yaml),
+      failOpen: read(KEYS.failOpen.yaml),
     };
   } catch {
     // A shape the line reader does not understand. Reporting the defaults here
@@ -280,12 +352,12 @@ export async function readShellScanStatus(): Promise<ShellScanStatus> {
   const enabledOverride = KEYS.enabled.env in env ? envBool(env[KEYS.enabled.env]) : null;
   const failOpen =
     (KEYS.failOpen.env in env ? envBool(env[KEYS.failOpen.env]) : null) ??
-    yamlBool(config?.failOpen ?? null) ??
+    (config ? configuredFlag(config.failOpen) : null) ??
     DEFAULT_FAIL_OPEN;
 
   // An override in .env settles the question on its own, so an unreadable
   // config.yaml must not turn a definitively-off box into "unknown".
-  const enabled = enabledOverride ?? (config ? yamlBool(config.enabled) ?? DEFAULT_ENABLED : null);
+  const enabled = enabledOverride ?? (config ? configuredFlag(config.enabled) ?? DEFAULT_ENABLED : null);
   if (enabled === null) return unknown();
   if (!enabled) {
     return { state: "off", reason: "disabled-by-config", failOpen, scannerPath: null, retrySuppressedUntil: null };
@@ -295,7 +367,7 @@ export async function readShellScanStatus(): Promise<ShellScanStatus> {
   // an unreadable one is unknown even when we know scanning is enabled.
   const pathOverride = (env[KEYS.path.env] ?? "").trim();
   if (!pathOverride && !config) return unknown();
-  const configuredPath = pathOverride || (config?.path ?? "").trim() || DEFAULT_PATH;
+  const configuredPath = pathOverride || (config?.path.raw ?? "").trim() || DEFAULT_PATH;
 
   const scannerPath = await resolveScanner(configuredPath);
   if (scannerPath) {
@@ -306,7 +378,10 @@ export async function readShellScanStatus(): Promise<ShellScanStatus> {
     reason: "not-installed",
     failOpen,
     scannerPath: null,
-    retrySuppressedUntil: await readRetrySuppressedUntil(),
+    // Only the bare default is ever auto-downloaded. On an explicitly configured
+    // path upstream stops at "not found" and never fetches anything (`:536-541`),
+    // so promising a retry after the marker expires would be a false failure.
+    retrySuppressedUntil: configuredPath === DEFAULT_PATH ? await readRetrySuppressedUntil() : null,
   };
 }
 

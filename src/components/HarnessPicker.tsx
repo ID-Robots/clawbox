@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { useT } from "@/lib/i18n";
+import { shellScanEn } from "@/lib/hermes-translations/en-shell-scan";
 
 interface HarnessEntry {
   id: string;
@@ -31,6 +32,24 @@ interface ShellScanRow {
 type Translate = (key: string, params?: Record<string, string | number>) => string;
 
 /**
+ * `t`, but this card never renders a raw key.
+ *
+ * `I18nProvider` serves `t(key) === key` until its dynamic import of the
+ * catalogue resolves — and forever if that import fails, which it explicitly
+ * contemplates ("the device is offline mid-update"). Everything else on this
+ * card is hardcoded English and would look normal beside it, so the one
+ * sentence in the product that says a security control is off would be the only
+ * thing on screen reading `shellScan.offTitle`. The English table is imported
+ * statically, so it cannot be the thing that failed to load.
+ */
+function scanCopy(t: Translate, key: string, params?: Record<string, string | number>): string {
+  const translated = t(key, params);
+  if (translated !== key) return translated;
+  const english = shellScanEn[key] ?? key;
+  return params ? english.replace(/\{(\w+)\}/g, (m, name) => String(params[name] ?? m)) : english;
+}
+
+/**
  * What to say about pre-exec shell scanning, or null when there is nothing to
  * say. Returning null for a healthy box is the point: a box whose scanner is
  * installed must not be warned at, or the warning stops meaning anything.
@@ -46,23 +65,23 @@ function shellScanWarning(
 ): { title: string; detail: string; severe: boolean } | null {
   if (!scan || scan.state === "on") return null;
   if (scan.state === "unknown") {
-    return { title: t("shellScan.unknownTitle"), detail: t("shellScan.unknownDetail"), severe: false };
+    return { title: scanCopy(t, "shellScan.unknownTitle"), detail: scanCopy(t, "shellScan.unknownDetail"), severe: false };
   }
   if (scan.reason === "disabled-by-config") {
-    return { title: t("shellScan.offTitle"), detail: t("shellScan.disabledDetail"), severe: true };
+    return { title: scanCopy(t, "shellScan.offTitle"), detail: scanCopy(t, "shellScan.disabledDetail"), severe: true };
   }
   // Upstream suppresses the re-download for 24 h after a failure, so "connect
   // it to the internet" is not the whole story and the owner has to be told.
   const until = scan.retrySuppressedUntil
     // The UI locale, not the runtime default: the rest of this sentence is
     // already in the owner's language, so the timestamp inside it has to be.
-    ? ` ${t("shellScan.retryAfter", { time: new Date(scan.retrySuppressedUntil).toLocaleString(locale) })}`
+    ? ` ${scanCopy(t, "shellScan.retryAfter", { time: new Date(scan.retrySuppressedUntil).toLocaleString(locale) })}`
     : "";
   // The two outcomes are opposites, not degrees: fail-open runs the command
   // unchecked, fail-closed refuses to run it at all.
   return scan.failOpen
-    ? { title: t("shellScan.offTitle"), detail: `${t("shellScan.missingDetail")}${until}`, severe: true }
-    : { title: t("shellScan.blockedTitle"), detail: `${t("shellScan.blockedDetail")}${until}`, severe: true };
+    ? { title: scanCopy(t, "shellScan.offTitle"), detail: `${scanCopy(t, "shellScan.missingDetail")}${until}`, severe: true }
+    : { title: scanCopy(t, "shellScan.blockedTitle"), detail: `${scanCopy(t, "shellScan.blockedDetail")}${until}`, severe: true };
 }
 
 // Lets the user pick which agent harness (OpenClaw / Hermes) backs the device.

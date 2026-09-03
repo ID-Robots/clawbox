@@ -41,6 +41,10 @@ let markerMtimeMs: number | null = null;
 let markerReason = "";
 /** ~/.hermes/config.yaml, or null for "no such file", or an Error to throw. */
 let configText: string | null | Error = "";
+/** False models a fifo/directory where config.yaml should be. */
+let configIsRegularFile = true;
+/** Overrides the reported size, for the too-large guard. */
+let configSize: number | null = null;
 
 const enoent = () => Object.assign(new Error("ENOENT"), { code: "ENOENT" });
 
@@ -56,10 +60,20 @@ const stat = vi.fn(async (p: string) => {
  * exists, so a regression back to stat-then-read fails here.
  */
 const open = vi.fn(async (p: string) => {
+  if (p === CONFIG) {
+    if (configText === null) throw enoent();
+    if (configText instanceof Error) throw configText;
+    const text = configText;
+    return {
+      stat: async () => ({ mtimeMs: 0, size: configSize ?? text.length, isFile: () => configIsRegularFile }),
+      readFile: async () => text,
+      close: async () => {},
+    };
+  }
   if (p !== MARKER || markerMtimeMs === null) throw enoent();
   const mtimeMs = markerMtimeMs;
   return {
-    stat: async () => ({ mtimeMs, isFile: () => true }),
+    stat: async () => ({ mtimeMs, size: markerReason.length, isFile: () => true }),
     readFile: async () => markerReason,
     close: async () => {},
   };
@@ -67,19 +81,17 @@ const open = vi.fn(async (p: string) => {
 const access = vi.fn(async (p: string) => {
   if (!executables.has(p)) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
 });
-const readFile = vi.fn(async (p: string) => {
-  if (p === CONFIG) {
-    if (configText === null) throw enoent();
-    if (configText instanceof Error) throw configText;
-    return configText;
-  }
-  throw enoent();
-});
+/**
+ * `fs.readFile` is deliberately ABSENT from this mock. config.yaml and the
+ * marker are both read through one descriptor opened O_NONBLOCK — a fifo
+ * planted in either path by the agent (which runs as the same user) would
+ * otherwise park the status route forever — so a regression to a plain
+ * path-based read fails here with "not a function" instead of passing quietly.
+ */
 vi.mock("fs/promises", () => ({
   default: {
     stat: (p: string) => stat(p),
     access: (p: string) => access(p),
-    readFile: (p: string) => readFile(p),
     open: (p: string) => open(p),
   },
 }));
@@ -113,6 +125,8 @@ beforeEach(() => {
   markerMtimeMs = null;
   markerReason = "";
   configText = "";
+  configIsRegularFile = true;
+  configSize = null;
   envFile = {};
   vi.stubEnv("HOME", HOME);
   // Deliberately NOT the agent's PATH. Nothing in this module may read it.
@@ -159,8 +173,31 @@ describe("readShellScanStatus — the scanner is missing", () => {
     // a day for that would be a false failure.
     markerMtimeMs = Date.now() - 60_000;
     markerReason = "cosign_missing";
+    executables.add("/usr/bin/cosign");
 
     expect((await readStatus()).retrySuppressedUntil).toBeNull();
+  });
+
+  it("keeps the 24 h claim for a cosign_missing marker when cosign is not installed", async () => {
+    // Upstream drops that marker only once cosign is actually on PATH; without
+    // it the suppression stands like any other, and telling the owner to plug
+    // the box in would be a false failure.
+    markerMtimeMs = Date.now() - 60_000;
+    markerReason = "cosign_missing";
+
+    expect((await readStatus()).retrySuppressedUntil).not.toBeNull();
+  });
+
+  it("does not promise a download retry for an explicitly configured path", async () => {
+    // Upstream never auto-downloads on the explicit branch, so a stale marker
+    // from an earlier default-path era must not produce "will retry after…".
+    configText = securityYaml('  tirith_path: "/opt/tirith/tirith"\n');
+    markerMtimeMs = Date.now() - 60_000;
+
+    const status = await readStatus();
+
+    expect(status.reason).toBe("not-installed");
+    expect(status.retrySuppressedUntil).toBeNull();
   });
 
   it("says the agent blocks commands instead when the box is set to fail closed", async () => {
@@ -242,6 +279,87 @@ describe("readShellScanStatus — the scanner is installed", () => {
 
     expect(status.state).toBe("off");
     expect(status.reason).toBe("not-installed");
+  });
+});
+
+/**
+ * Upstream never parses these keys as booleans. `_load_security_config` hands
+ * the YAML value through untouched and the call sites apply plain Python
+ * truthiness — `if not cfg["tirith_enabled"]` skips scanning outright, and
+ * `if fail_open` decides between allowing and BLOCKING. So every value Python
+ * calls false has to read as false here, including the shapes a truncated write
+ * or a hand edit actually produces. Reading them as "unset" and substituting a
+ * default is how a security control ends up reported as on while the agent is
+ * not scanning at all.
+ */
+describe("readShellScanStatus — a present-but-falsy setting is not an unset one", () => {
+  const FALSY = ["null", "~", '""', "0", "[]", "{}"];
+
+  for (const value of FALSY) {
+    it(`reads tirith_enabled: ${value} as OFF, not as the default ON`, async () => {
+      configText = securityYaml(`  tirith_enabled: ${value}\n`);
+      executables.add(SCANNER);
+
+      const status = await readStatus();
+
+      expect(status.state).toBe("off");
+      expect(status.reason).toBe("disabled-by-config");
+    });
+
+    it(`reads tirith_fail_open: ${value} as fail-CLOSED, not as the default fail-open`, async () => {
+      // The two outcomes are opposites: fail-open runs the command unchecked,
+      // fail-closed refuses to run it. Getting this backwards tells the owner
+      // his commands are running while the agent is blocking every one.
+      configText = securityYaml(`  tirith_fail_open: ${value}\n`);
+
+      expect((await readStatus()).failOpen).toBe(false);
+    });
+  }
+
+  it("reads a key written with no value at all as OFF", async () => {
+    // `tirith_enabled:` — a truncated write or a templated blank. YAML reads it
+    // as null, which Python calls false; `getYamlPath` alone cannot tell it
+    // apart from an absent key.
+    configText = securityYaml("  tirith_enabled:\n");
+    executables.add(SCANNER);
+
+    expect((await readStatus()).reason).toBe("disabled-by-config");
+  });
+
+  it("keeps upstream's default when the key really is absent", async () => {
+    // The other side of the same coin: no key at all still means enabled.
+    configText = securityYaml("  redact_secrets: true\n");
+    executables.add(SCANNER);
+
+    expect((await readStatus()).state).toBe("on");
+  });
+
+  it("treats an unrecognised word as TRUE, the way Python does", async () => {
+    // `if not "maybe"` is false in Python — a non-empty string is truthy.
+    configText = securityYaml("  tirith_enabled: maybe\n");
+    executables.add(SCANNER);
+
+    expect((await readStatus()).state).toBe("on");
+  });
+});
+
+describe("readShellScanStatus — config.yaml is read the hardened way", () => {
+  it("refuses a config.yaml that is not a regular file instead of hanging on it", async () => {
+    // The agent runs as the same user and can write ~/.hermes. A fifo planted
+    // where config.yaml belongs would park a plain read in open(2) with no
+    // writer, and this read sits inside the status route's Promise.all — the
+    // request would never settle and the card would hang empty forever.
+    configIsRegularFile = false;
+    executables.add(SCANNER);
+
+    expect((await readStatus()).state).toBe("unknown");
+  });
+
+  it("refuses a config.yaml far too large to be one", async () => {
+    configSize = 8 * 1024 * 1024;
+    executables.add(SCANNER);
+
+    expect((await readStatus()).state).toBe("unknown");
   });
 });
 
