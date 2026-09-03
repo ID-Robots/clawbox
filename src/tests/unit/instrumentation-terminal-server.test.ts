@@ -206,6 +206,34 @@ describe("startTerminalServer", () => {
     expect(spawnMock, "a child that would not die stranded the Terminal").toHaveBeenCalledTimes(2);
   });
 
+  /**
+   * And a THIRD reload landing inside that wait. If the replacement disowns the
+   * dying child, this call sees none and falls back to the probe — which the
+   * same dying child answers — while the previous generation's wait is now
+   * stale. Ownership has to outlive the SIGTERM, not the call.
+   */
+  it("keeps a reload during the grace period from being answered by the dying child", async () => {
+    startTerminalServer();
+    await settle();
+    const first = childFromCall(0);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({
+      ok: true,
+      text: () => Promise.resolve(BANNER),
+    })));
+    startTerminalServer();
+    await settle();
+    // A third reload, while the first child is still on its way out.
+    startTerminalServer();
+    await settle();
+
+    die(first, 0);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(spawnMock, "the newest reload started nothing").toHaveBeenCalledTimes(2);
+  });
+
   it("retries a child that could not be spawned at all", async () => {
     startTerminalServer();
     await settle();

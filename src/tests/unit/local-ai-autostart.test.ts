@@ -298,4 +298,38 @@ describe("llama.cpp child supervision", () => {
     await expect(mod.startLlamaCppServer("gemma4-e2b-it-q4_0")).rejects.toThrow(/stopped while it was starting/);
     expect(spawnMock, "a start the owner cancelled spawned anyway").not.toHaveBeenCalled();
   });
+
+  /**
+   * A stopped child must not rearm its own chain. Its exit handler awaits the
+   * pid cleanup, and that await is long enough for a stop AND a fresh start to
+   * land — the start clears `llamaCppStopping`, so a flag-only check let the
+   * dead child schedule a retry of its old alias against the new runtime.
+   */
+  it("does not let a child that was stopped rearm its restart chain", async () => {
+    vi.useFakeTimers();
+    const childA = emittingChild(4242);
+    spawnMock.mockReturnValue(childA);
+
+    const mod = await loadModule();
+    expect(await mod.startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
+
+    // Freeze childA's exit handler mid-cleanup.
+    let releaseCleanup!: () => void;
+    const pendingCleanup = new Promise<void>((resolve) => { releaseCleanup = () => resolve(); });
+    llamaCppMocks.clearLlamaCppPid.mockImplementationOnce(() => pendingCleanup);
+    childA.emit("exit", 143);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The owner stops it, then starts it again — which clears llamaCppStopping.
+    await mod.stopLlamaCppServer();
+    spawnMock.mockReturnValue(emittingChild(4243));
+    expect(await mod.startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+
+    // Only now does childA's handler get to finish.
+    releaseCleanup();
+    await vi.advanceTimersByTimeAsync(CHILD_RESTART_CEILING_MS);
+
+    expect(spawnMock, "the stopped child armed a chain of its own").toHaveBeenCalledTimes(2);
+  });
 });

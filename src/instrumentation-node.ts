@@ -133,11 +133,13 @@ export function startTerminalServer() {
   let restartDelayMs = TERMINAL_RESTART_MIN_MS
   terminalStopping = false
 
-  // Kill any leftover child from previous hot-reload
+  // Kill any leftover child from previous hot-reload. `terminalChild` is
+  // deliberately NOT cleared here: it stays the marker of "we still own a child"
+  // until that child is actually gone, so a further reload during the wait below
+  // takes this same branch instead of the probe.
   const replaced = terminalChild
   if (replaced) {
     try { replaced.kill('SIGTERM') } catch {}
-    terminalChild = null
   }
 
   if (replaced) {
@@ -151,6 +153,7 @@ export function startTerminalServer() {
     const launch = () => {
       if (launched) return
       launched = true
+      if (terminalChild === replaced) terminalChild = null
       startServer()
     }
     replaced.once('close', launch)
@@ -402,7 +405,13 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
           llamaCppChild = null
         }
         await llamaCpp.clearLlamaCppPid(spec.pidPath)
-        if (llamaCppStopping) return
+        // The generation, not just the flag: that `await` above is long enough
+        // for a stop to arrive AND a fresh start to clear `llamaCppStopping`
+        // again, and this handler would then arm a retry for the child that was
+        // deliberately stopped — a second chain, for an old alias, racing the
+        // start that just replaced it. The generation is the one thing a later
+        // start cannot un-say.
+        if (llamaCppStopping || stopGeneration !== llamaCppStopGeneration) return
 
         // Same backoff as the terminal server, and for the same reason: this
         // retry was flat 5 s with no cap, so a start script that can never
