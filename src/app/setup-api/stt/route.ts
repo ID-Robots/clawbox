@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { isDeepStrictEqual } from "util";
+import { getActiveHarness } from "@/lib/harness";
 import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "@/lib/harness/credentials";
 import {
   openclawIsAbsent,
@@ -61,7 +62,14 @@ async function status() {
     // unlinked cloud or an uninstalled whisper is shown under `engines`, not
     // listed here as a step that will silently do nothing.
     chain: sttEngineOrder(primary).filter((engine) => (engine === "cloud" ? cloudConfigured : local.installed)),
-    channels: openclawIsAbsent() ? EDITION_UNSUPPORTED : { supportedOnEdition: true as const },
+    // The ACTIVE harness, not the edition — the same rule /setup-api/tts uses
+    // and for the same reason: on a licensed dual box switched to Hermes,
+    // `openclawIsAbsent()` is false while the gateway that serves channels is
+    // not the one this box is talking through, so it reported channel voice
+    // notes as working on a harness that serves none.
+    channels: (await getActiveHarness()) === "openclaw" && !openclawIsAbsent()
+      ? { supportedOnEdition: true as const }
+      : EDITION_UNSUPPORTED,
   };
 }
 

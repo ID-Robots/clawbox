@@ -288,7 +288,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       return text(
         `Started coding run "${run.id}" in ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}. `
         + "It works in the background on the ClawBox and may take several minutes. "
-        + `Tell the user it is running, then call coding_agent_status with run_id "${run.id}" (wait_seconds up to ${MAX_WAIT_SECONDS} lets you block instead of polling) and relay its summary when it finishes.`,
+        + `Tell the user it is running and stop — the device shows its progress and tells them when it finishes. Check on it with coding_agent_status (run_id "${run.id}") only when the user asks.`,
       );
     },
   );

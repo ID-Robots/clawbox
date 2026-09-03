@@ -75,13 +75,22 @@ export function isVoiceStatus(value: unknown): value is VoiceStatusAnswer {
 }
 
 /**
- * The box says the whole feature is absent on this SKU. Read as its own field
- * rather than inferred from a missing engine list: "no voice is installed" and
- * "this edition has no voice at all" are different answers.
+ * The box says spoken replies ON CHANNELS are not part of this edition.
+ *
+ * This used to read a top-level `supportedOnEdition: false` and hide the WHOLE
+ * panel behind a card. That was the wrong scope: speaking is not an OpenClaw
+ * feature — Hermes has its own voice, and the box's engines, voices and sample
+ * are answered on every edition. What genuinely needs the gateway is a spoken
+ * reply on WhatsApp, Telegram or Discord, so that is the only thing the note
+ * now claims, and it sits BESIDE the working controls instead of replacing
+ * them. Read as its own field for the same reason as before: "no voice is
+ * installed" and "this edition cannot speak on channels" are different answers.
  */
-function isEditionUnsupported(value: unknown): boolean {
+function channelsUnavailable(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
-  return (value as { supportedOnEdition?: unknown }).supportedOnEdition === false;
+  const channels = (value as { channels?: unknown }).channels;
+  if (!channels || typeof channels !== "object") return false;
+  return (channels as { supportedOnEdition?: unknown }).supportedOnEdition === false;
 }
 
 /**
@@ -117,7 +126,7 @@ const MUTED = "text-xs text-[var(--text-muted)]";
 export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const { t } = useT();
   const [status, setStatus] = useState<VoiceStatusAnswer | null>(null);
-  const [unsupported, setUnsupported] = useState(false);
+  const [noChannelSpeech, setNoChannelSpeech] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The box settled on the default instead of the pick, and said so (the
   // tts route's `fallback`). Amber, not red: nothing is broken, the owner's
@@ -139,11 +148,12 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     try {
       const res = await fetch("/setup-api/tts", { cache: "no-store" });
       const data = await res.json();
-      if (isEditionUnsupported(data)) {
-        setUnsupported(true);
-        return;
-      }
+      // Both pieces of state follow the same "keep the last good reading" rule.
+      // Set before the guard, an error body — `res.ok` is never checked — would
+      // read as `channelsUnavailable: false` and quietly clear a note the box
+      // had already given us, while `status` correctly kept its last value.
       if (!isVoiceStatus(data)) return;
+      setNoChannelSpeech(channelsUnavailable(data));
       setStatus(data);
     } catch {
       /* keep the last good reading rather than blanking the panel */
@@ -302,24 +312,6 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       setBusy(null);
     }
   }, [refusalText, t]);
-
-  if (unsupported) {
-    return (
-      <div className="max-w-2xl" data-testid="voice-output-unsupported">
-        <div className={`${CARD} space-y-2`}>
-          <div className="flex items-center gap-2">
-            <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }} aria-hidden="true">
-              voice_over_off
-            </span>
-            <h2 className="font-semibold text-[var(--text-primary)]">{t("settings.voice.unsupported.title")}</h2>
-          </div>
-          <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
-            {t("settings.voice.unsupported.body")}
-          </p>
-        </div>
-      </div>
-    );
-  }
 
   if (!status) {
     return (
@@ -504,7 +496,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       {/* Spoken replies: a voice message — a Telegram voice note, the chat's
           microphone — is answered with a voice. On by default. The gateway
           answers the channels (`tts.auto: "inbound"`); the desktop chat
-          asks the box to speak the reply itself. */}
+          asks the box to speak the reply itself, on every harness. */}
       <div className={`${CARD} ${ROW}`}>
         <div className="min-w-0">
           <label htmlFor="voice-auto-reply" className={LABEL}>{t("settings.voice.autoReply")}</label>
@@ -525,6 +517,23 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
           <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${status.autoReply !== false ? "translate-x-6" : "translate-x-1"}`} />
         </button>
       </div>
+
+      {/* The one half of speech that really is the gateway's. Said once, at the
+          bottom, so the controls above are not framed as unavailable: this box
+          speaks in its own chat perfectly well. */}
+      {noChannelSpeech && (
+        <div className={`${CARD} space-y-2`} data-testid="voice-channels-unavailable">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }} aria-hidden="true">
+              voice_over_off
+            </span>
+            <h2 className="font-semibold text-[var(--text-primary)]">{t("settings.voice.channelsUnavailable.title")}</h2>
+          </div>
+          <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
+            {t("settings.voice.channelsUnavailable.body")}
+          </p>
+        </div>
+      )}
     </div>
   );
 }

@@ -72,7 +72,19 @@ function installBoxWithMailQueue(): HermesBox {
         if ((init?.method ?? "GET").toUpperCase() === "POST") {
           const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
           approvalPosts.push(body);
-          const answer = approvalReply((body.drafts ?? []) as { id: string }[]);
+          const drafts = (body.drafts ?? []) as { id: string }[];
+          if (body.action === "reject_batch") {
+            // The device drops them and says so, the way the route does.
+            queued = queued.filter((d) => !drafts.some((e) => e.id === d.id));
+            const payload = {
+              success: true,
+              rejected: drafts.length,
+              failed: 0,
+              results: drafts.map((d) => ({ id: d.id, ok: true })),
+            };
+            return { ok: true, status: 200, json: async () => payload };
+          }
+          const answer = approvalReply(drafts);
           return { ok: answer.ok, status: answer.status, json: async () => answer.payload };
         }
         return { ok: true, status: 200, json: async () => ({ pending: queued }) };
@@ -234,14 +246,92 @@ describe("a turn that queued mail", () => {
     expect((approvalPosts[0].drafts as { id: string }[]).map((d) => d.id)).toEqual(["draft-1", "draft-3"]);
   });
 
-  it("posts nothing at all when the owner cancels, and takes the card away", async () => {
+  it("deletes the drafts when the owner cancels, and never sends one", async () => {
+    // This used to assert that cancelling posted NOTHING and removed the card.
+    // Both halves were the bug the owner reported: the drafts stayed queued and
+    // the surface's next scheduled read offered them again fifteen seconds
+    // later ("when I click dismiss nothing happens; it returns after 20 secs").
+    // Cancelling is now a deletion, so it does reach the device — and the one
+    // thing that must still never happen is a send.
     await turnThatSentMail();
     await waitFor(() => expect(screen.getByTestId("chat-email-batch")).toBeTruthy());
 
     fireEvent.click(screen.getByTestId("chat-email-batch-cancel"));
 
-    await waitFor(() => expect(screen.queryByTestId("chat-email-batch")).toBeNull());
-    expect(approvalPosts).toHaveLength(0);
+    await waitFor(() => expect(approvalPosts).toHaveLength(1));
+    expect(approvalPosts[0].action).toBe("reject_batch");
+    expect(approvalPosts.some((p) => p.action === "approve_batch")).toBe(false);
+    // The card stays as the record of what was thrown away rather than
+    // vanishing and leaving the owner wondering whether the click landed.
+    expect(screen.getByTestId("chat-email-batch")).toBeTruthy();
+    expect(screen.queryByTestId("chat-email-batch-approve")).toBeNull();
+  });
+
+  it("does not report a draft decided elsewhere as a failed send", async () => {
+    // The owner approved one of the three from Telegram while the card sat on
+    // screen, so the route answers "gone" for it. Nothing failed: it is not
+    // waiting because it was already dealt with, and most likely sent. Reading
+    // that as a failure put "Not sent" in red over a message that had gone —
+    // the false FAILURE this whole change exists to stop, from the last angle
+    // that was still making it.
+    approvalReply = (drafts) => ({
+      ok: true,
+      status: 207,
+      payload: {
+        success: false,
+        sent: drafts.length - 1,
+        failed: 0,
+        results: drafts.map((d, index) =>
+          index === 1
+            ? { id: d.id, ok: false, reason: "gone", error: "That draft is no longer waiting." }
+            : { id: d.id, ok: true, recipients: 1 },
+        ),
+      },
+    });
+
+    await turnThatSentMail();
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("chat-email-batch-approve"));
+
+    await waitFor(() => expect(screen.getAllByTestId("chat-email-batch-outcome")).toHaveLength(3));
+    const kinds = screen
+      .getAllByTestId("chat-email-batch-outcome")
+      .map((o) => o.getAttribute("data-outcome-kind"));
+    expect(kinds).toEqual(["sent", "gone", "sent"]);
+    // Two went, and the verdict says two — not "2 sent, 1 not sent."
+    expect(screen.getByTestId("chat-email-batch-result").textContent).toBe("chat.emailBatch.resultAllSent");
+  });
+
+  it("shows the ending a draft had elsewhere, rather than a permanent shrug", async () => {
+    // The route reads the receipt for a draft that had already left the queue.
+    // The card settles on this answer and no later poll can revisit it, so a
+    // "handled elsewhere" over a mail server's refusal would be the last word
+    // this surface ever says about a message that never arrived.
+    approvalReply = (drafts) => ({
+      ok: true,
+      status: 207,
+      payload: {
+        success: false,
+        sent: drafts.length - 1,
+        failed: 0,
+        results: drafts.map((d, index) =>
+          index === 1
+            ? { id: d.id, ok: false, reason: "gone", ending: "failed", error: "mailbox unavailable" }
+            : { id: d.id, ok: true, recipients: 1 },
+        ),
+      },
+    });
+
+    await turnThatSentMail();
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("chat-email-batch-approve"));
+
+    await waitFor(() => expect(screen.getAllByTestId("chat-email-batch-outcome")).toHaveLength(3));
+    expect(
+      screen.getAllByTestId("chat-email-batch-outcome").map((o) => o.getAttribute("data-outcome-kind")),
+    ).toEqual(["sent", "failed", "sent"]);
+    // A real failure is still counted as one — this is not an excuse to go quiet.
+    expect(screen.getByTestId("chat-email-batch-result").textContent).toBe("chat.emailBatch.resultPartial");
   });
 
   it("reports a partial failure per draft rather than as a send", async () => {

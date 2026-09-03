@@ -356,7 +356,7 @@ describe("catalog — the ChatGPT surface has no enumeration on this core", () =
       count: 2,
       models: [
         { key: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", contextWindow: 400_000, available: true, tags: ["default"] },
-        // The id DEFAULT_MODEL_BY_PROVIDER carries for openai. It is in the
+        // The id PROVIDER_CATALOGS carries for openai. It is in the
         // catalogue, so the old lookup found it and stopped.
         { key: "openai/gpt-5.4", name: "GPT-5.4", contextWindow: 1_000_000, available: true, tags: [] },
       ],

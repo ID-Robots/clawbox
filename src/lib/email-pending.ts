@@ -86,6 +86,35 @@ const DRAFT_BODY_RE = /^[\t\n\r\u0020-\u007e\u00a0-\u2027\u202f-\u2065\u206a-\uf
 /** How much of the body the approvals strip shows before the owner opens it. */
 export const PREVIEW_CHARS = 160;
 
+/**
+ * How long an identical message counts as the SAME message.
+ *
+ * The case this exists for is a retry, not a coincidence. `email_send` reaches
+ * the device over HTTP with a 60 s budget, and a route that had already written
+ * the draft but answered late used to be asked to write it again — the owner's
+ * box produced two identical drafts, ids one apart, from one request. Five
+ * minutes covers a timeout and the retry behind it with room to spare, and is
+ * far short of the interval at which a person plausibly asks for the same
+ * message, word for word, to the same address, twice.
+ *
+ * It is only half the guard. The other half is that a fold only ever happens
+ * into a draft that is STILL WAITING — see queuePending.
+ *
+ * WHAT THE FOLD THEREFORE DOES NOT COVER: a retry that lands after the owner
+ * has already approved the first draft. There is nothing waiting to fold into,
+ * so a fresh draft is queued and he is asked about a message that has gone. The
+ * queue is deliberately not given a memory of decided drafts — folding into one
+ * would swallow a second message he really did ask for — and the tool that used
+ * to produce that retry no longer asks for one (mcp/tools/email.ts).
+ *
+ * Nor can the receipts store close the rest of this window as it stands: it
+ * deliberately keeps NO body (email-outcomes.ts), so it cannot produce a
+ * `draftContentKey` and can recognise a retry only by recipients and subject.
+ * Closing it would mean giving a receipt a content-key column — a hash, never
+ * the text — which is a change to that file, not a lookup this one is missing.
+ */
+export const DEDUPE_WINDOW_MS = 5 * 60 * 1000;
+
 export interface PendingEmail {
   id: string;
   to: string[];
@@ -108,7 +137,17 @@ export interface PendingEmailView {
 }
 
 export type QueueResult =
-  | { ok: true; draft: PendingEmail }
+  | {
+      ok: true;
+      draft: PendingEmail;
+      /**
+       * The draft returned was ALREADY in the queue and nothing new was
+       * written. The caller has to say so rather than report a second queued
+       * message — an agent told "queued" twice tells the owner two emails are
+       * waiting when one is.
+       */
+      deduped: boolean;
+    }
   | { ok: false; error: string; reason: "full" | "invalid" };
 
 /**
@@ -148,6 +187,54 @@ export function draftFingerprint(
   draft: Pick<PendingEmail, "id" | "to" | "subject" | "body" | "createdAt">,
 ): string {
   const canonical = JSON.stringify([draft.id, draft.to, draft.subject, draft.body, draft.createdAt]);
+  return createHash("sha256").update(canonical, "utf8").digest("hex").slice(0, 32);
+}
+
+/**
+ * A short, stable name for what a draft SAYS — the content-only sibling of
+ * `draftFingerprint`.
+ *
+ * The two are deliberately different things and neither can stand in for the
+ * other. `draftFingerprint` includes the id and the timestamp, because its job
+ * is "is this still the exact row the owner was shown"; two identical messages
+ * fingerprint differently, which is right for a freeze and useless for
+ * recognising a retry. This one covers recipients, subject and body and nothing
+ * else, so a message queued twice has one key both times.
+ *
+ * NORMALISED, because the two calls are not guaranteed to be byte-identical: a
+ * retried tool call can differ in recipient case or padding, in the whitespace
+ * a model re-flowed around a subject, or in line endings. What is normalised is
+ * only what cannot change the message a person reads:
+ *
+ *   - recipients trimmed, lower-cased and SORTED — the same two people in the
+ *     other order is the same message;
+ *   - CRLF folded to LF, since a body differing only in line endings renders
+ *     identically and sends identically;
+ *   - runs of spaces and tabs collapsed, and the ends trimmed.
+ *
+ * Case is deliberately KEPT, and so are LINE BREAKS. "Approve the invoice" and
+ * "APPROVE THE INVOICE" are not obviously the same message to the person whose
+ * name is on them, and neither is one paragraph the same message as three — a
+ * re-flowed second draft is a rewrite, and this key decides whether one of them
+ * is silently dropped. Only the blank-line runs a mail client would render
+ * identically are levelled.
+ */
+export function draftContentKey(message: { to: string[]; subject: string; body: string }): string {
+  const recipients = message.to
+    .map((r) => r.trim().toLowerCase())
+    .filter(Boolean)
+    .sort();
+  // `[^\S\n]` is "whitespace that is not a newline": spaces and tabs go, the
+  // shape of the message stays.
+  //
+  // ORDER MATTERS, and it used to be wrong: the blank-line collapse ran BEFORE
+  // the spaces around each newline were trimmed, so "a \n \n \n b" still had
+  // spaces between its newlines when `\n{3,}` looked and kept all three, while
+  // the identical "a\n\n\nb" folded to two. Two renderings of one message got
+  // two keys and the second was queued as a new draft. Trim first, then level.
+  const flatten = (text: string): string =>
+    text.replace(/\r\n/g, "\n").replace(/[^\S\n]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const canonical = JSON.stringify([recipients, flatten(message.subject), flatten(message.body)]);
   return createHash("sha256").update(canonical, "utf8").digest("hex").slice(0, 32);
 }
 
@@ -254,6 +341,30 @@ export function queuePending(input: { to: string[]; subject: string; body: strin
   }
 
   const drafts = readAll();
+
+  // THE RETRY GUARD, and it sits BEFORE the cap on purpose: a retry that would
+  // have folded into a draft already waiting must not be refused for filling a
+  // queue it was never going to add to.
+  //
+  // Matched against drafts that are still WAITING, and only those. There is no
+  // memory of decided drafts here, and that is the point: folding into one the
+  // owner has already approved would swallow a second message he really did
+  // ask for, and a queue is the wrong place to make that guess. The window then
+  // bounds how long two identical waiting drafts count as one.
+  //
+  // Nothing is written on this path. The caller gets the id that is already on
+  // disk, and the surfaces go on showing the one card they already had.
+  const now = Date.now();
+  const key = draftContentKey({ to, subject, body });
+  // Distance, not "newer than": a Jetson that wrote a draft before NTP settled
+  // (or after a step backwards) leaves `createdAt` in the future, and a
+  // one-sided comparison is then permanently true — every later identical
+  // message would fold into that one stale draft for ever.
+  const already = drafts.find(
+    (d) => Math.abs(now - d.createdAt) < DEDUPE_WINDOW_MS && draftContentKey(d) === key,
+  );
+  if (already) return { ok: true, draft: already, deduped: true };
+
   if (drafts.length >= MAX_PENDING) {
     return {
       ok: false,
@@ -267,10 +378,62 @@ export function queuePending(input: { to: string[]; subject: string; body: strin
     to,
     subject,
     body,
-    createdAt: Date.now(),
+    createdAt: now,
   };
   writeAll([...drafts, draft]);
-  return { ok: true, draft };
+  return { ok: true, draft, deduped: false };
+}
+
+/**
+ * Take the RETRY ARTEFACTS of a draft that has just been sent out of the queue,
+ * and return them.
+ *
+ * FOR ONE MOMENT ONLY: straight after a draft has been successfully sent. It
+ * must NOT be called after a send that failed, and it is not called on reject —
+ * nothing was delivered in either case, so nothing is covered.
+ *
+ * THE WINDOW IS THE WHOLE SAFETY ARGUMENT, and it is the same one
+ * `queuePending` uses. What this sweeps is the second row a timed-out retry
+ * left behind: queued within seconds of the first, never meant to exist.
+ * Beyond that window an identical message is a SECOND REQUEST — DEDUPE_WINDOW_MS
+ * says so in as many words — and deleting one would throw away mail the owner
+ * asked for and may already have read and approved. So the comparison is
+ * against the sent draft's own `createdAt`, not against "whenever": two
+ * reminders queued forty minutes apart are two reminders.
+ *
+ * IT SWEEPS A TWIN THE SAME GESTURE NAMED, TOO. It used to spare those, on the
+ * reading that a batch the owner ticked twice is two consents. It is not: the
+ * two rows say the same words to the same people and he cannot tell them apart,
+ * the queue itself now refuses to write the second one, and sending both is the
+ * duplicate email that started all of this. Approving resolves a twin wherever
+ * it was approved from — the owner's rule for every surface, and the batch card
+ * is the surface he uses.
+ *
+ * NEVER THROWS. Every caller reaches this after `sendMail` has already
+ * resolved, and a queue file that cannot be rewritten must not turn a delivered
+ * email into a reported failure; the worst a swallowed error costs is a twin
+ * left waiting, which is where it already was.
+ *
+ * The draft itself is left alone; its caller owns its lifecycle.
+ */
+export function dropDuplicatesOf(draft: PendingEmail): PendingEmail[] {
+  try {
+    const key = draftContentKey(draft);
+    const drafts = readAll();
+    const twins = drafts.filter(
+      (d) =>
+        d.id !== draft.id
+        && Math.abs(d.createdAt - draft.createdAt) < DEDUPE_WINDOW_MS
+        && draftContentKey(d) === key,
+    );
+    if (twins.length === 0) return [];
+    const twinIds = new Set(twins.map((d) => d.id));
+    writeAll(drafts.filter((d) => !twinIds.has(d.id)));
+    return twins;
+  } catch (err) {
+    console.error("[email/pending] could not sweep duplicates:", err instanceof Error ? err.message : err);
+    return [];
+  }
 }
 
 /** Newest first — the owner wants to see what just arrived. */

@@ -23,6 +23,10 @@ vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/harness/clawai-images", () => ({ clawaiImageRouteReachable: vi.fn() }));
 vi.mock("@/lib/hermes-dashboard-turn", () => ({ hermesCanStreamTurns: vi.fn() }));
+vi.mock("@/lib/hermes-tts", () => ({
+  hermesSpeaksReplies: vi.fn(),
+  hermesVoiceProbePending: vi.fn(),
+}));
 vi.mock("@/lib/harness/hermes-features", () => ({
   hermesSupportsImages: vi.fn(),
   hermesHasVisionRoute: vi.fn(),
@@ -45,6 +49,7 @@ let getActiveHarness: Mock;
 let flagProbePending: Mock;
 let visionPending: Mock;
 let imageBackendPending: Mock;
+let voicePending: Mock;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -69,6 +74,12 @@ beforeEach(async () => {
     hermesVisionRoutePending: Mock;
     hermesImageBackendPending: Mock;
   };
+  const voice = (await import("@/lib/hermes-tts")) as unknown as {
+    hermesSpeaksReplies: Mock;
+    hermesVoiceProbePending: Mock;
+  };
+  voice.hermesSpeaksReplies.mockResolvedValue(false);
+  voicePending = voice.hermesVoiceProbePending;
 
   getActiveHarness.mockResolvedValue("hermes");
   credentials.hasClawaiToken.mockResolvedValue(false);
@@ -83,6 +94,7 @@ beforeEach(async () => {
   flagProbePending.mockReturnValue(false);
   visionPending.mockReturnValue(false);
   imageBackendPending.mockReturnValue(false);
+  voicePending.mockReturnValue(false);
 
   ({ GET } = await import("@/app/setup-api/chat/capabilities/route"));
 });
@@ -105,6 +117,15 @@ describe("GET /setup-api/chat/capabilities", () => {
 
   it("reports pending when the vision-route read is in backoff", async () => {
     visionPending.mockReturnValue(true);
+    expect((await body()).factsPending).toBe(true);
+  });
+
+  it("reports pending when the voice read is in backoff", async () => {
+    // `hermesSpeaksReplies` fails closed, so "this box has no voice" and "the
+    // box could not be asked" leave by the same door. Without this the page —
+    // which fetches these facts once on mount and on no timer — hid a working
+    // voice until reload over one timed-out `hermes config get`.
+    voicePending.mockReturnValue(true);
     expect((await body()).factsPending).toBe(true);
   });
 

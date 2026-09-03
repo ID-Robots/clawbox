@@ -280,8 +280,10 @@ describe("carrying the picked model onto a conversation already in progress", ()
     //
     // The real case is switching TO a user-defined provider: the switch
     // validates the model against the target provider's listing, and a
-    // `providers.<slug>` entry in config.yaml carries none. On this device that
-    // is `clawai` — the box default — so customers do reach it.
+    // `providers.<slug>` entry in config.yaml carried none until
+    // `applyClawaiToHermes` started declaring one. On this device that is
+    // `clawai` — the box default — so customers did reach it, and a box whose
+    // config predates that write still can.
     const { turn } = await connect(
       { sessionId: "20260823_185842_1eabd5", model: "deepseek-v4-flash", provider: "clawai" },
       { model: "gpt-5.6-sol", provider: "openai-codex" },

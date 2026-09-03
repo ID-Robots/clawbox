@@ -164,39 +164,40 @@ export async function speakInCloud(config: VoiceConfigView, requestedVoice: unkn
  *    not going to catch up.
  */
 const speechQueue = createSerialLock();
-let inFlight = false;
-let waiting = 0;
+/**
+ * Every synthesis ADMITTED and not yet finished — the one speaking and the
+ * ones behind it. Counted at admission, before the serial lock schedules
+ * anything, so a burst of simultaneous asks is judged by what was admitted
+ * and not by an in-flight flag that none of them has set yet.
+ */
+let admitted = 0;
+/** One speaking, plus this many waiting. */
 const MAX_WAITING = 3;
 
 async function asTheOneSynthesis(work: () => Promise<Response>): Promise<Response> {
-  return speechQueue(async () => {
-    inFlight = true;
-    try {
-      return await work();
-    } finally {
-      inFlight = false;
-    }
-  });
+  admitted += 1;
+  try {
+    return await speechQueue(work);
+  } finally {
+    admitted -= 1;
+  }
 }
 
-/** Run `work` as the one synthesis; answers 429 `busy` when another is speaking. */
+/** Run `work` as the one synthesis; answers 429 `busy` when anything is speaking or waiting to. */
 export async function withSpeechLock(work: () => Promise<Response>): Promise<Response> {
-  if (inFlight || waiting > 0) return refuse("Still speaking the last sample — try again in a moment.", "busy", 429);
+  if (admitted > 0) return refuse("Still speaking the last sample — try again in a moment.", "busy", 429);
   return asTheOneSynthesis(work);
 }
 
 /** Run `work` as the one synthesis once the ones before it are done; 429 `busy` only when the queue is full. */
 export async function withSpeechQueue(work: () => Promise<Response>): Promise<Response> {
-  // `waiting` counts every reply that has entered the queue, the one being
-  // spoken included; the ones actually waiting are the rest.
-  const queued = waiting - (inFlight ? 1 : 0);
-  if (queued >= MAX_WAITING) return refuse("The box is still speaking earlier replies — try again in a moment.", "busy", 429);
-  waiting += 1;
-  try {
-    return await asTheOneSynthesis(work);
-  } finally {
-    waiting -= 1;
-  }
+  if (admitted > MAX_WAITING) return refuse("The box is still speaking earlier replies — try again in a moment.", "busy", 429);
+  return asTheOneSynthesis(work);
+}
+
+/** For tests: how many syntheses are admitted right now. */
+export function admittedSyntheses(): number {
+  return admitted;
 }
 
 /**

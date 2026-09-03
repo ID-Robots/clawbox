@@ -3,7 +3,9 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
+import { getActiveHarness } from "@/lib/harness";
 import { requireSession } from "@/lib/route-auth";
+import { reconcileClawaiModelsWithHermes } from "@/lib/hermes-clawai";
 import { reconcileLocalAiWithHermes } from "@/lib/hermes-local-ai";
 import {
   getModelOptions,
@@ -78,8 +80,23 @@ export async function GET(request: Request) {
   }
 
   // A device whose local model was enabled before Hermes knew how to host it
-  // repairs itself here — once per process, and a no-op on every other device.
-  await reconcileLocalAiWithHermes();
+  // repairs itself here — once per process, and a no-op on every other device —
+  // and the same for the ClawBox AI catalogue, which a box linked before Hermes
+  // was told what the proxy serves does not have. Both write the `providers:`
+  // block Hermes' OWN pickers read, so a box fixes its Telegram `/model`
+  // keyboard by being asked this question once.
+  //
+  // GATED ON THE HARNESS, once, in front of both. Their first act is a `hermes`
+  // spawn, and on an OpenClaw box there is no binary to spawn and no
+  // `providers:` block to repair: `runHermesCli` would reject, the catch would
+  // log a failure, and the repair would unlatch and do it again on the next
+  // request. Today this route is unreachable there (`ChatPopup` passes no
+  // Hermes provider), which is exactly why the guard belongs at the call site
+  // rather than in two modules that each assume their own edition.
+  if ((await getActiveHarness()) === "hermes") {
+    await reconcileLocalAiWithHermes();
+    await reconcileClawaiModelsWithHermes();
+  }
 
   try {
     if (provider) {

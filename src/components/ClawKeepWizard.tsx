@@ -63,6 +63,11 @@ export default function ClawKeepWizard({
   const [challenge, setChallenge] = useState<PairStartResponse | null>(null);
   const [pairPhase, setPairPhase] = useState<"" | "pending" | "configuring">("");
   const pollRef = useRef<number | null>(null);
+  // Invalidates the poll that is running RIGHT NOW — its in-flight request
+  // included, which stopPolling (an interval clear) cannot reach. Set by the
+  // polling effect; called before a new code is asked for and on Cancel, so
+  // an old challenge's late "complete" cannot end the new one.
+  const invalidatePollRef = useRef<() => void>(() => {});
 
   const stopPolling = useCallback(() => {
     if (pollRef.current !== null) {
@@ -80,6 +85,7 @@ export default function ClawKeepWizard({
     let disposed = false;
     let inFlight = false;
     const controller = new AbortController();
+    invalidatePollRef.current = () => { disposed = true; controller.abort(); };
     const tick = async () => {
       if (inFlight) return;
       inFlight = true;
@@ -123,6 +129,9 @@ export default function ClawKeepWizard({
   }, [challenge, pairPhase, onStatusChanged, stopPolling, t]);
 
   const startPairing = async () => {
+    // Whatever poll is running belongs to the code being replaced.
+    invalidatePollRef.current();
+    stopPolling();
     setBusy("pair");
     setError(null);
     try {
@@ -307,7 +316,7 @@ export default function ClawKeepWizard({
               <PairChallengeCard
                 challenge={challenge}
                 phase={pairPhase}
-                onCancel={() => { stopPolling(); setChallenge(null); setPairPhase(""); }}
+                onCancel={() => { invalidatePollRef.current(); stopPolling(); setChallenge(null); setPairPhase(""); }}
                 onGetNewCode={() => void startPairing()}
                 busy={busy === "pair"}
               />

@@ -441,6 +441,23 @@ describe("ensureHermesGateway", () => {
     expect(runHermesCliMock.mock.calls[1][1]?.sudo).toBeUndefined();
   });
 
+  // THE FALSE FAILURE THAT BECOMES A PRIVILEGED WRITE. A probe that could not
+  // run — a `hermes gateway status` that timed out on a loaded Jetson, a wedged
+  // CLI — degrades to {installed:false, running:false}, which is exactly the
+  // shape of a box that has no gateway at all. Acting on it ran
+  // `sudo hermes gateway install --system` over the unit of a box that already
+  // had one.
+  it("does not read a failed probe as 'no gateway here' and install over one", async () => {
+    runHermesCliMock.mockRejectedValueOnce(new Error("hermes call timed out"));
+
+    const { ensureHermesGateway } = await import("@/lib/hermes-telegram");
+    await expect(ensureHermesGateway()).resolves.toMatchObject({ applied: false });
+
+    // One call: the probe. No install, no restart.
+    expect(runHermesCliMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
   // `gateway restart` with no service unit falls back to starting the gateway
   // in the foreground, which from a route handler blocks until the timeout.
   it("leaves a manually-run gateway alone rather than restarting it", async () => {

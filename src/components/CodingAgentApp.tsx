@@ -1539,7 +1539,10 @@ export default function CodingAgentApp() {
                       </button>
                     </div>
                     <div className="flex-1 min-h-0">
-                      <TerminalApp initialCommand={command} />
+                      {/* Keyed by the run: a terminal types its command once,
+                          on its first output, so a reused one would keep
+                          tailing the previous run. */}
+                      <TerminalApp key={run.id} initialCommand={command} />
                     </div>
                   </div>
                 );

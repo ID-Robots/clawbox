@@ -29,7 +29,7 @@
 
 import { resolveImapHost, type EmailSettings } from "@/lib/email-config";
 import { clearHermesEnvValues, getHermesEnvValue, setHermesEnvValues } from "@/lib/hermes-env";
-import { ensureHermesGateway, hermesGatewayStatus } from "@/lib/hermes-telegram";
+import { ensureHermesGateway, readHermesGatewayStatus } from "@/lib/hermes-telegram";
 
 export const HERMES_EMAIL_KEYS = [
   "EMAIL_ADDRESS",
@@ -108,9 +108,16 @@ export async function hermesEmailState(): Promise<{
   };
 }
 
-/** Restart Hermes' messaging gateway so the adapter picks up the new .env. */
-export async function restartHermesForEmail(signal?: AbortSignal): Promise<boolean> {
-  const status = await ensureHermesGateway(signal);
+/**
+ * Restart Hermes' messaging gateway so the adapter picks up the new .env.
+ *
+ * No abort signal, deliberately: the only caller reaches this after the EMAIL_*
+ * block has been written, and `runHermesCli` refuses a call whose signal is
+ * already aborted — so a browser that walked away would leave the credentials
+ * saved and the gateway still polling the old mailbox.
+ */
+export async function restartHermesForEmail(): Promise<boolean> {
+  const status = await ensureHermesGateway();
   // Both halves: a restart that was refused leaves the gateway running on the
   // PREVIOUS .env, which is exactly the state this function exists to rule out.
   return status.running && status.applied;
@@ -152,11 +159,22 @@ export type EmailPollingStop =
  * that did not happen: the allowlist can still reach the agent until someone
  * restarts that process, and the owner is told so.
  */
-export async function stopHermesEmailPolling(signal?: AbortSignal): Promise<EmailPollingStop> {
-  const before = await hermesGatewayStatus(signal);
+export async function stopHermesEmailPolling(): Promise<EmailPollingStop> {
+  // The UNCACHED reader, like `ensureHermesGateway`: this branches on `before`,
+  // and the shared fifteen-second memo picks the wrong branch. Opening
+  // Settings → Channels populates that memo from three status routes at once,
+  // so a gateway that died and was brought back by systemd inside the window
+  // reads as `running:false` here — "none-running", answered as "receiving
+  // stopped" over a live gateway still polling the mailbox the owner just
+  // disconnected.
+  const { value: before, answered } = await readHermesGatewayStatus();
+  // Nor is a probe that could not be run an answer of "nothing was polling".
+  // Same user-visible consequence as a refused restart: something may still be
+  // receiving and this call did not change it, so say so.
+  if (!answered) return "restart-failed";
   if (!before.running) return "none-running";
   if (!before.installed) return "unmanaged";
-  const after = await ensureHermesGateway(signal);
+  const after = await ensureHermesGateway();
   // runHermesCli resolves on non-zero and the status probe is unprivileged, so
   // an unchecked await here reported "stopped" for a restart that was refused.
   return after.applied ? "stopped" : "restart-failed";

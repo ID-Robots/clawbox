@@ -20,12 +20,20 @@
 import path from "path";
 import { promises as fs } from "fs";
 import { runChild } from "@/lib/child-run";
-import { CONFIG_ROOT } from "@/lib/config-store";
 import { runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { LOCAL_TTS_PROVIDER_ID } from "@/lib/voice-output";
 
-/** The entrypoint OpenClaw execs for on-device speech, in the checkout. */
-export const LOCAL_TTS_SCRIPT = path.join(CONFIG_ROOT, "scripts", "openclaw", "clawbox-tts.sh");
+/**
+ * The entrypoint OpenClaw execs for on-device speech, in the checkout.
+ *
+ * The checkout root is config-store's rule, restated rather than imported:
+ * read at call time, and without a module-scope import of config-store, so
+ * the tts route can be loaded under a test that mocks that store narrowly.
+ */
+export function localTtsScriptPath(): string {
+  const root = process.env.CLAWBOX_ROOT || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
+  return path.join(root, "scripts", "openclaw", "clawbox-tts.sh");
+}
 
 /** Where the speech block lives in openclaw.json — see the tts route's ttsConfigHome(). */
 export type TtsConfigHome = "tts" | "messages.tts";
@@ -47,7 +55,7 @@ export function buildLocalTtsProvider(command: string, timeoutMs: number): Local
  * not hardcoded: a second copy of the number here is how install.sh once
  * killed the process at the instant Kokoro gave up, with no diagnostic.
  */
-export async function readLocalTtsTimeoutMs(script: string = LOCAL_TTS_SCRIPT): Promise<number | null> {
+export async function readLocalTtsTimeoutMs(script: string = localTtsScriptPath()): Promise<number | null> {
   const run = await runChild("bash", [script, "--provider-timeout-ms"], {
     timeoutMs: 10_000,
     env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: process.env.HOME ?? "/home/clawbox" },
@@ -72,7 +80,7 @@ export type WireLocalVoiceResult =
  * the silent failure the whole entry exists to avoid — and never selects the
  * provider: selection stays the tts route's decision.
  */
-export async function wireLocalVoice(home: TtsConfigHome, script: string = LOCAL_TTS_SCRIPT): Promise<WireLocalVoiceResult> {
+export async function wireLocalVoice(home: TtsConfigHome, script: string = localTtsScriptPath()): Promise<WireLocalVoiceResult> {
   try {
     await fs.access(script, fs.constants.X_OK);
   } catch {

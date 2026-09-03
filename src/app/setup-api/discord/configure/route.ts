@@ -182,10 +182,19 @@ function channelWarning(status: ChannelStatus | null): ChannelWarning | undefine
 }
 
 /** Restart the harness' gateway; report rather than throw when it will not. */
-async function applyRestart(harness: string, signal: AbortSignal, secret: string): Promise<boolean> {
+/**
+ * Bring the gateway up so a just-saved Discord channel is actually served.
+ *
+ * Deliberately takes NO abort signal: every caller reaches this only after the
+ * token and the allowlist have been written, so a browser that disconnected
+ * must not be able to cancel the half that makes those writes live. It would
+ * leave a saved channel with nobody serving it and the owner told "restart
+ * pending" over a restart nothing is going to perform.
+ */
+async function applyRestart(harness: string, secret: string): Promise<boolean> {
   try {
     if (harness === "hermes") {
-      const status = await ensureHermesGateway(signal);
+      const status = await ensureHermesGateway();
       // A refused restart leaves the previous process up, and the unprivileged
       // status probe cannot tell the two apart — so require both.
       return status.running && status.applied;
@@ -274,7 +283,7 @@ export async function POST(request: Request) {
         });
       }
 
-      const restarted = await applyRestart(harness, request.signal, "");
+      const restarted = await applyRestart(harness, "");
       return NextResponse.json({
         success: true,
         restarted,
@@ -371,7 +380,18 @@ export async function POST(request: Request) {
     }
 
     if (harness === "hermes") {
-      await setHermesDiscordToken(rawToken, request.signal);
+      // No `request.signal` here. `set("discord_bot_token", …)` above has
+      // already committed the token to ClawBox's own store — on BOTH harnesses
+      // — so this is not the first durable write of the request, and a browser
+      // that goes away during the three Discord round trips before it (the
+      // member listing takes seconds on a large server) must not be able to
+      // cancel the other half. `runHermesCli` refuses a call whose signal is
+      // already aborted, so passing it would leave the token stored here,
+      // absent from ~/.hermes/.env, no allowlist written and the gateway not
+      // restarted — reliably, not rarely. Past the first durable write, finish
+      // the job; the allowlist write and `applyRestart` below take no signal
+      // for the same reason.
+      await setHermesDiscordToken(rawToken);
     } else {
       // OpenClaw: channel config + the EnvironmentFile the gateway resolves
       // `channels.discord.token` from.
@@ -401,7 +421,7 @@ export async function POST(request: Request) {
       console.info("[discord/configure] updated env keys:", allowlist.changedKeys.join(","));
     }
 
-    const restarted = await applyRestart(harness, request.signal, rawToken);
+    const restarted = await applyRestart(harness, rawToken);
 
     // ── Did the channel actually come up? ──────────────────────────────────
     //

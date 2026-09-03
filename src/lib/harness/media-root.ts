@@ -43,6 +43,25 @@ export async function chatGeneratedImageDir(): Promise<string> {
   return path.join(await chatMediaRoot(), "chat-generated");
 }
 
+/** Where a reply this box spoke aloud is written. */
+export async function chatSpokenReplyDir(): Promise<string> {
+  return path.join(await chatMediaRoot(), "chat-spoken");
+}
+
+/**
+ * How long a spoken reply is kept.
+ *
+ * The same 30 days as a picture, for the same reason — the clip and the bubble
+ * naming it must age out together — but a much smaller cap: a clip is a few
+ * seconds of WAV, every reply can have one, and they are re-playable rather
+ * than precious. 100 MB is thousands of them and still bounded on a device
+ * whose disk is shared with the models.
+ */
+export const SPOKEN_REPLY_RETENTION: MediaRetention = {
+  maxAgeMs: 30 * 24 * 60 * 60 * 1000,
+  maxBytes: 100 * 1024 * 1024,
+};
+
 /**
  * How long a generated picture is kept, for whichever path drew it.
  *

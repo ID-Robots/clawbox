@@ -21,6 +21,10 @@ import VoiceOutputPanel from "./VoiceOutputPanel";
 import SystemProfilePanel from "./SystemProfilePanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { copyToClipboard } from "@/lib/clipboard";
+// The ending vocabulary and the gesture table, from the module that owns the
+// outcome shape — never a second copy of either. Both are plain functions on a
+// const list; the card component beside them is not pulled in by naming these.
+import { emailEnding, endingAsAsked, type EmailEnding } from "@/lib/chat-email-batch";
 import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
 import { installPendingRefresh } from "@/lib/email-pending-refresh";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
@@ -91,6 +95,35 @@ interface PendingEmail {
 }
 
 /**
+ * A draft that is no longer waiting, and what became of it.
+ *
+ * The strip above used to just stop listing such a draft, which is honest about
+ * the queue and silent about the mail: an owner who approved on Telegram opened
+ * this panel to nothing at all and could not tell "it went out" from "it was
+ * deleted" from "this box never had it". The queue is where he comes to find
+ * out, so it is where the answer belongs.
+ */
+interface HandledEmail {
+  id: string;
+  /**
+   * DERIVED from `EMAIL_ENDINGS`, never spelled out again.
+   *
+   * That list exists so a sixth ending cannot be added in one place and go
+   * unread in another — its own comment calls a partial copy "how a real ending
+   * quietly becomes 'no idea'". A hand-written union here made this strip the
+   * one reader the compiler could not warn; the renderer below carries the
+   * other half of that promise, an exhaustive chain ending in `never`, because
+   * the type alone would have let a sixth ending render as "Failed: " with no
+   * reason.
+   */
+  kind: EmailEnding;
+  at: number;
+  to: string[];
+  subject: string;
+  error?: string;
+}
+
+/**
  * A draft that was approved, claimed out of the queue and then failed to send.
  * /setup-api/email/pending hands the whole message back for exactly this, so
  * the owner's approved mail is not lost to a transient SMTP error.
@@ -99,6 +132,17 @@ interface LostDraft {
   to: string[];
   subject: string;
   body: string;
+  /**
+   * The send was never confirmed one way or the other, so the heading over this
+   * draft must not say it was not sent.
+   *
+   * The route computes which failure it was and sends the receipt's word back
+   * (`ending`). A dropped connection after DATA leaves nobody able to say
+   * whether the message arrived, and a confident "This message was not sent" is
+   * precisely how an owner is talked into sending it a second time — while the
+   * handled strip on the same screen was about to say "could not be confirmed".
+   */
+  unconfirmed: boolean;
 }
 
 /**
@@ -1167,6 +1211,112 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // actions on that panel, not on its own.
 
 
+  /**
+   * WHO NEEDS A CHANNEL'S STATUS.
+   *
+   * Not just that channel's own pane. The Channels hub draws a live dot and a
+   * status line per channel from the very same state, and the four status
+   * fetches used to be gated on `section === "<that channel>"` alone — so a
+   * cold open of the hub asked nothing and drew every configured channel with
+   * no dot and its static hint, exactly as if it were not set up. The owner
+   * read that as "not configured" and it only corrected itself once he had
+   * opened each pane.
+   *
+   * The reader stays the harness's own edition-aware status route
+   * (/setup-api/<channel>/status); the hub and the pane just share it.
+   *
+   * ENTERING A PANE STILL RE-ASKS. An earlier revision gated each effect on a
+   * boolean that was already `true` on the hub and stayed `true` in the pane,
+   * so the channel was probed exactly once per Settings mount — and a status
+   * that failed on the cold read could never be retried: the pane it opened
+   * sat on its loading skeleton with no request outstanding. That is the
+   * probe-once class this file is supposed to be rid of. Each effect keeps
+   * `section` in its dependencies, as it did before the hub existed, so every
+   * arrival at a channel is a fresh read; the routes' own memos absorb the
+   * repeat.
+   *
+   * Cost: a cold hub open asks all four at once. The fan-out itself is not new
+   * — `openclaw-channels.ts` already notes that on mobile, where the panels'
+   * `!isMobile` escapes never return early, one section change re-reads every
+   * channel — and what bounds it is server-side and per route, not uniform:
+   * the shared `channels status` memo (15 s) on the OpenClaw edition, each
+   * route's own `HERMES_PROBE_TTL` (15 s) on Hermes, plus 60 s bot-info caches
+   * on Telegram and Discord. `/setup-api/email/status` has no memo and needs
+   * none — it is a config read with no shell-out. Seeding every channel from
+   * ONE `channels status` spawn is TASK-694.
+   */
+  /**
+   * The newest status request per channel.
+   *
+   * The hub, the pane and every save can have reads in flight at once now that
+   * arriving at a pane re-asks. Responses are not ordered, so an older one
+   * landing last would write its stale answer over a newer one — turning a
+   * just-saved channel back into "not configured". Each refresher claims a
+   * generation before it fetches and writes nothing, not even the settled
+   * mark, once it has been superseded.
+   */
+  const channelReqRef = useRef<Record<ChannelSection, number>>({
+    telegram: 0,
+    email: 0,
+    whatsapp: 0,
+    discord: 0,
+  });
+  const claimChannelRead = useCallback(
+    (id: ChannelSection) => {
+      const gen = channelReqRef.current[id] + 1;
+      channelReqRef.current[id] = gen;
+      return () => channelReqRef.current[id] === gen;
+    },
+    [],
+  );
+
+  /**
+   * Channels whose status route has ANSWERED ONE WAY OR THE OTHER.
+   *
+   * All four refreshers deliberately keep the last known value when the route
+   * 5xxs or the network drops, which is right for a pane that already has one.
+   * On a cold hub open there is no last value, so without this a failed read is
+   * indistinguishable from a read still in flight: the row would pulse "still
+   * asking" for the life of the session over a question nobody is still asking.
+   */
+  const [settledChannels, setSettledChannels] = useState<ReadonlySet<ChannelSection>>(
+    () => new Set(),
+  );
+  const markChannelSettled = useCallback((id: ChannelSection) => {
+    setSettledChannels((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+  }, []);
+  /**
+   * Put a channel back to "being asked".
+   *
+   * Retrying an unreadable row otherwise changed nothing on screen for the two
+   * seconds the CLI takes, and changed nothing again if it failed — a dead
+   * press, twice. Dropping the settled mark first makes the row honestly
+   * `unknown` ("Checking…", pulsing) for the duration and land on whichever
+   * state is true afterwards.
+   */
+  const unsettleChannel = useCallback((id: ChannelSection) => {
+    setSettledChannels((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
+
+  /**
+   * The hub row's navigating button, per channel.
+   *
+   * A Retry is rendered only while its row is unreachable, so pressing it
+   * unmounts it — and a focused element that disappears drops focus to
+   * `<body>`, leaving a keyboard or screen-reader owner nowhere, twice: once
+   * while the read runs and again when it lands. Focus moves here instead,
+   * which is the control whose accessible name carries the channel's state, so
+   * focus follows the answer rather than falling out of the page.
+   */
+  const channelRowRefs = useRef<Partial<Record<ChannelSection, HTMLButtonElement | null>>>({});
+  /** The WhatsApp pane's own root, for the same reason. */
+  const whatsappPaneRef = useRef<HTMLDivElement | null>(null);
+
   /* ── Telegram ── */
   const [tgToken, setTgToken] = useState("");
   const [tgShowToken, setTgShowToken] = useState(false);
@@ -1197,8 +1347,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [tgPairingStatus, setTgPairingStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   const refreshTelegramStatus = useCallback(async () => {
+    const isCurrent = claimChannelRead("telegram");
     try {
       const r = await fetch("/setup-api/telegram/status", { cache: "no-store" });
+      if (!isCurrent()) return;
       if (!r.ok) {
         // Don't clobber existing state on a transient error (gateway
         // restarting, 5xx, etc.) — keep the last known bot info visible.
@@ -1206,6 +1358,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         return;
       }
       const d = await r.json();
+      if (!isCurrent()) return;
       setTgConfigured(d.configured ?? false);
       if (d.configured && d.username) {
         setTgBotInfo({ username: d.username, firstName: d.firstName, link: d.link });
@@ -1216,8 +1369,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       // Network error — likewise keep the last known state instead of
       // flashing "not configured" at the user mid-restart.
       console.warn("[telegram] refresh failed:", err);
+    } finally {
+      if (isCurrent()) markChannelSettled("telegram");
     }
-  }, []);
+  }, [markChannelSettled, claimChannelRead]);
 
   const refreshPairing = useCallback(async () => {
     try {
@@ -1230,15 +1385,30 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   }, []);
 
+  // The status the hub's dot and the pane's card both read.
+  //
+  // `unsettleChannel` first, and never without the read that follows it: a
+  // channel whose hub read failed keeps its settled mark, so entering its pane
+  // drew "Could not check" for the whole duration of the pane's OWN fresh read
+  // and only then flipped. That is the round-3 pulse pointing the other way —
+  // claiming the question is unanswerable while it is being asked. The other
+  // three status effects below do the same, for the same reason.
+  useEffect(() => {
+    if (!isMobile && section !== "telegram" && section !== "channels") return;
+    unsettleChannel("telegram");
+    refreshTelegramStatus();
+  }, [section, isMobile, refreshTelegramStatus, unsettleChannel]);
+
+  // Pane-only detail — the approved list and the streaming toggle have no
+  // reader on the hub, so the hub must not pay for them.
   useEffect(() => {
     if (section !== "telegram" && !isMobile) return;
-    refreshTelegramStatus();
     refreshPairing();
     fetch("/setup-api/telegram/streaming", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => setTgStreaming(d ? d.enabled !== false : true))
       .catch(() => setTgStreaming(true));
-  }, [section, isMobile, refreshTelegramStatus, refreshPairing]);
+  }, [section, isMobile, refreshPairing]);
 
   // Refresh the approved/pending lists when an approval happens anywhere (e.g.
   // the desktop popup) so the Settings list updates without a manual reload.
@@ -1430,22 +1600,28 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [emailAllowedSenders, setEmailAllowedSenders] = useState("");
   const [emailAskBeforeSend, setEmailAskBeforeSend] = useState(true);
   const [emailPending, setEmailPending] = useState<PendingEmail[]>([]);
+  const [emailHandled, setEmailHandled] = useState<HandledEmail[]>([]);
   const [emailPendingBusy, setEmailPendingBusy] = useState<string | null>(null);
   const [emailLostDraft, setEmailLostDraft] = useState<LostDraft | null>(null);
   const [emailSaving, setEmailSaving] = useState(false);
   const [emailTesting, setEmailTesting] = useState(false);
   const [emailReconfigure, setEmailReconfigure] = useState(false);
-  const [emailMsg, setEmailMsg] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  // `info` is the third tone, and it exists because two are not enough here: a
+  // send the box handed over and never heard back is neither a success nor a
+  // failure, and both of the other two are a claim nothing can support.
+  const [emailMsg, setEmailMsg] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
   const emailSaveControllerRef = useRef<AbortController | null>(null);
   const [chatApproval, setChatApproval] = useState<ChatApprovalState | null>(null);
   const [chatApprovalToken, setChatApprovalToken] = useState("");
   const [chatApprovalBusy, setChatApprovalBusy] = useState(false);
 
   const refreshEmailStatus = useCallback(async () => {
+    const isCurrent = claimChannelRead("email");
     try {
       const r = await fetch("/setup-api/email/status", { cache: "no-store" });
-      if (!r.ok) return;
+      if (!isCurrent() || !r.ok) return;
       const d = await r.json();
+      if (!isCurrent()) return;
       // Every field is guarded: the component test's fetch stub answers unknown
       // URLs with {}, and a transient 5xx must not blank the panel either.
       setEmailStatus({
@@ -1468,8 +1644,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       });
     } catch {
       // keep the last known state rather than flashing "not configured"
+    } finally {
+      if (isCurrent()) markChannelSettled("email");
     }
-  }, []);
+  }, [markChannelSettled, claimChannelRead]);
 
   /**
    * The approval queue. Session-gated server-side (the MCP bearer is refused
@@ -1493,6 +1671,32 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               }))
           : [],
       );
+      // Read out of the SAME response as the queue, never a second request:
+      // two requests can catch a draft in neither answer, and the panel would
+      // then show the one state that is never true — no draft, and no word
+      // about where it went.
+      setEmailHandled(
+        Array.isArray(d?.outcomes)
+          ? d.outcomes
+              .filter((o: unknown): o is Record<string, unknown> => typeof o === "object" && o !== null)
+              // `emailEnding` is the vocabulary, so the wire is read through it
+              // rather than against a fourth hand-written copy of the same five
+              // words — and it NARROWS, which is what removes the cast the row
+              // below used to need.
+              .flatMap((o: Record<string, unknown>): HandledEmail[] => {
+                const kind = emailEnding(o.kind);
+                if (typeof o.id !== "string" || typeof o.at !== "number" || !kind) return [];
+                return [{
+                  id: o.id,
+                  kind,
+                  at: o.at,
+                  to: Array.isArray(o.to) ? o.to.filter((x): x is string => typeof x === "string") : [],
+                  subject: typeof o.subject === "string" ? o.subject : "",
+                  ...(typeof o.error === "string" ? { error: o.error } : {}),
+                }];
+              })
+          : [],
+      );
     } catch {
       // keep the last known queue rather than blanking the strip
     }
@@ -1508,12 +1712,20 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   }, []);
 
+  // The status the hub's dot and the pane's card both read. Unsettle-then-read,
+  // as on the Telegram effect above.
+  useEffect(() => {
+    if (!isMobile && section !== "email" && section !== "channels") return;
+    unsettleChannel("email");
+    refreshEmailStatus();
+  }, [section, isMobile, refreshEmailStatus, unsettleChannel]);
+
+  // Pane-only detail — the approvals strip and the chat-approval bot.
   useEffect(() => {
     if (section !== "email" && !isMobile) return;
-    refreshEmailStatus();
     refreshEmailPending();
     refreshChatApproval();
-  }, [section, isMobile, refreshEmailStatus, refreshEmailPending, refreshChatApproval]);
+  }, [section, isMobile, refreshEmailPending, refreshChatApproval]);
 
   /**
    * KEEP THE QUEUE HONEST WHILE THE PANEL IS OPEN.
@@ -1619,7 +1831,96 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
-        setEmailMsg({ type: "error", message: data?.error || t("settings.emailApproveFailed") });
+        /**
+         * A decision somebody already made is NOT this click failing — but only
+         * when it is the decision this click was asking for.
+         *
+         * The owner tapped *Approve & send* in Telegram, the message went out,
+         * and this row was still on screen because the queue is re-read on a
+         * schedule. The route answers 404 "no longer waiting" — correctly, this
+         * request did nothing — and painting that red put a failure over a send
+         * that succeeded, directly above the green "Sent ✓" the handled strip
+         * was about to show for the same message.
+         *
+         * KEYED ON THE GESTURE, because the two directions are not symmetric and
+         * reading the ending alone gets both of the crossed cases backwards.
+         * *Discard* answered `sent` is the worst outcome available on that click
+         * — the owner asked for a message NOT to go out and it went out — and a
+         * green banner there congratulates him for it. *Approve & send* answered
+         * `rejected` means nothing was sent and nothing will be; the words are
+         * honest, and the colour is what is read first.
+         *
+         * `duplicate` is good news either way: an identical message reached the
+         * recipient, so the send happened and this copy is not waiting. An
+         * ending of `failed` or `unconfirmed`, and a 404 with no ending at all,
+         * stay red — all three are something to look at.
+         */
+        const ending = emailEnding(data?.ending);
+        // THE SHARED TABLE, not a second copy of it. The chat card weighs an
+        // ending against a gesture with the same two lines, and the one time
+        // these two surfaces each kept their own reading of a single message is
+        // the defect this whole change exists to remove. `reject` is this
+        // panel's word for the gesture the card calls `delete`; the endings and
+        // the verdict are identical.
+        const asAsked = ending !== undefined && endingAsAsked(ending, action === "approve" ? "approve" : "delete");
+        /**
+         * Neither a success nor a failure, and it needs its own tone.
+         *
+         * The 502 from an approve carries the receipt's ending too, and
+         * `unconfirmed` means the box handed the message over and never heard
+         * back. Red "Could not send the message." there is a positive claim
+         * nothing in this process can support — and one `refreshEmailPending()`
+         * later the handled strip below says "Could not be confirmed — check
+         * your Sent folder" about the very same draft. Two verdicts on one
+         * screen, and the definite one is the one the owner acts on, by mailing
+         * the recipient twice. `info` is the amber StatusMessage already has;
+         * the words are the strip's own.
+         */
+        const unconfirmed = ending === "unconfirmed";
+        /**
+         * The other event that is neither, and the one the chat card had
+         * already ruled on.
+         *
+         * He pressed *Discard* and the message had gone out from Telegram
+         * seconds earlier. Red is defensible — the deletion genuinely did not
+         * happen — but there is nothing here to fix and everything to look at,
+         * and the card settled on amber for this exact event in the same
+         * change. Two screens speaking differently about one message is what
+         * this whole thing is against, so they say it the same way. The WORDS
+         * are the route's and unchanged: "That message was already sent."
+         */
+        const sentAnyway = action === "reject" && ending === "sent";
+        /**
+         * The third of them: a 404 the receipts could not explain.
+         *
+         * `whatBecameOf` found nothing, and THREE different things put it
+         * there, which is why the amber says "no idea" rather than naming one:
+         *
+         *   - another surface is between claiming the draft and the end of its
+         *     SMTP conversation, so the message may be going out this second;
+         *   - the receipt EXPIRED — they live 24 h (`route.ts`), and a draft
+         *     decided before that is indistinguishable here from one that was
+         *     never queued;
+         *   - `email-pending.json` could not be read at all, so the claim
+         *     failed and produced this identical 404.
+         *
+         * Only the first is a race. The other two are recorded as filed-not-
+         * fixed in the PR that introduced this branch: the way out of both is a
+         * `kind` of its own from the route, which would let the strip say which
+         * one it is instead of guessing. Red "That draft is no longer waiting."
+         * over any of the three is a failure claimed over an unknown, and the
+         * chat card renders the identical row muted. Narrowed to the stale
+         * answer by `kind === "gone"`: a 409 with no account, a 400 or a 502 the
+         * mail server spoke carry their own kinds and stay red, because those
+         * really are this click failing.
+         */
+        const endingUnknown = data?.kind === "gone" && ending === undefined;
+        setEmailMsg({
+          type: unconfirmed || sentAnyway || endingUnknown ? "info" : asAsked ? "success" : "error",
+          message: unconfirmed
+            ? t("settings.emailHandledUnconfirmed")
+            : data?.error || t("settings.emailApproveFailed"),
+        });
         // The route claims a draft before it sends, so a failed send has
         // already taken it out of the queue and refreshEmailPending() is about
         // to remove the row. Hold what it handed back, or the message the
@@ -1628,7 +1929,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         if (lost && typeof lost === "object") {
           const d = lost as Partial<LostDraft>;
           if (Array.isArray(d.to) && typeof d.subject === "string" && typeof d.body === "string") {
-            setEmailLostDraft({ to: d.to.map(String), subject: d.subject, body: d.body });
+            setEmailLostDraft({ to: d.to.map(String), subject: d.subject, body: d.body, unconfirmed });
           }
         }
       } else {
@@ -1735,6 +2036,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       setEmailReconfigure(false);
       setEmailMode("send");
       setEmailPending([]);
+      // The receipts go with the queue — the route clears them server-side for
+      // the same reason, and leaving them on screen would keep the disconnected
+      // account's recipients and subjects up until the next poll.
+      setEmailHandled([]);
+      // And the same for the one draft this panel keeps in full. It is rendered
+      // on its own condition, not on `configured`, so a failed send from the
+      // account just disconnected would sit there — recipients, subject and
+      // body — until another approval happened to fail.
+      setEmailLostDraft(null);
       setEmailMsg({ type: "success", message: t("settings.emailDisconnected") });
       refreshEmailStatus();
     } catch (err) {
@@ -1756,10 +2066,23 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [waMsg, setWaMsg] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   const refreshWhatsapp = useCallback(async () => {
+    const isCurrent = claimChannelRead("whatsapp");
     try {
       const r = await fetch("/setup-api/whatsapp/status", { cache: "no-store" });
-      if (!r.ok) return; // keep the last known state rather than flashing "off"
+      // keep the last known state rather than flashing "off"
+      if (!isCurrent() || !r.ok) return;
       const d = await r.json();
+      if (!isCurrent()) return;
+      // `verified: false` is the gateway failing to be asked, dressed up as a
+      // 200 — the route still has to answer `state: "not_configured"` because
+      // the panel needs something to offer an action for. That is the 5xx above
+      // wearing a different hat, so it is handled the same way and, crucially,
+      // in the same PLACE: three readers each deciding what an unverified
+      // answer means is how the hub came to say "Could not check" while the
+      // pane one click later said "Not configured", with a Link-a-number button
+      // under a phone that was paired. Absent means an older build that cannot
+      // tell us either way — verified, so an upgrade never blanks every row.
+      if (d?.verified === false) return;
       // Every field is defaulted: an older build (or a stubbed fetch) answering
       // `{}` must render as "no WhatsApp here", never as a half-populated panel.
       setWaStatus({
@@ -1776,13 +2099,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       });
     } catch {
       // transient — keep the previous state
+    } finally {
+      if (isCurrent()) markChannelSettled("whatsapp");
     }
-  }, []);
+  }, [markChannelSettled, claimChannelRead]);
 
+  // Unsettle-then-read, as on the Telegram effect above.
   useEffect(() => {
-    if (section !== "whatsapp" && !isMobile) return;
+    if (!isMobile && section !== "whatsapp" && section !== "channels") return;
+    unsettleChannel("whatsapp");
     refreshWhatsapp();
-  }, [section, isMobile, refreshWhatsapp]);
+  }, [section, isMobile, refreshWhatsapp, unsettleChannel]);
 
   const saveWhatsapp = useCallback(
     async (payload: { allowedUsers?: string[]; mode?: "bot" | "self-chat"; enabled?: boolean }) => {
@@ -2062,8 +2389,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const dcSaveControllerRef = useRef<AbortController | null>(null);
 
   const refreshDiscordStatus = useCallback(async () => {
+    const isCurrent = claimChannelRead("discord");
     try {
       const r = await fetch("/setup-api/discord/status", { cache: "no-store" });
+      if (!isCurrent()) return;
       if (!r.ok) {
         // Transient error — keep the last known state rather than flashing
         // "not configured" at someone whose bot is fine.
@@ -2071,6 +2400,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         return;
       }
       const d = await r.json();
+      if (!isCurrent()) return;
       setDcConfigured(d.configured ?? false);
       setDcBotName(typeof d.username === "string" ? d.username : null);
       setDcTokenRejected(d.tokenRejected === true);
@@ -2083,8 +2413,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       }
     } catch (err) {
       console.warn("[discord] refresh failed:", err);
+    } finally {
+      if (isCurrent()) markChannelSettled("discord");
     }
-  }, []);
+  }, [markChannelSettled, claimChannelRead]);
 
   // The member list costs Discord API calls, so it is fetched only while the
   // Discord section is actually open — never from the status poll that backs
@@ -2109,10 +2441,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   }, []);
 
+  // Unsettle-then-read, as on the Telegram effect above.
   useEffect(() => {
-    if (section !== "discord" && !isMobile) return;
+    if (!isMobile && section !== "discord" && section !== "channels") return;
+    unsettleChannel("discord");
     refreshDiscordStatus();
-  }, [section, isMobile, refreshDiscordStatus]);
+  }, [section, isMobile, refreshDiscordStatus, unsettleChannel]);
 
   useEffect(() => {
     if (section !== "discord") return;
@@ -3389,34 +3723,104 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <p className="text-[11px] text-[var(--text-muted)] mb-4 leading-relaxed">{t("settings.channelsHelper")}</p>
               <div className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]" data-testid="settings-channels-list">
                 {CHANNEL_ITEMS.map((item) => {
-                  const connected = channelConnected(item.id);
+                  const state = channelState(item.id);
+                  const connected = state === "connected";
                   const { subtitle } = sectionStatus(item.id);
+                  const refreshChannel = {
+                    telegram: refreshTelegramStatus,
+                    email: refreshEmailStatus,
+                    whatsapp: refreshWhatsapp,
+                    discord: refreshDiscordStatus,
+                  }[item.id];
                   return (
-                    <button
+                    <div
                       key={item.id}
-                      type="button"
-                      onClick={() => setSectionGated(item.id)}
-                      data-testid={`settings-channel-${item.id}`}
-                      className="w-full flex items-center gap-3 px-3 py-3 text-left bg-transparent border-none cursor-pointer hover:bg-white/[0.04] transition-colors"
+                      className="w-full flex items-center hover:bg-white/[0.04] transition-colors"
                     >
-                      <span className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06]">
-                        <span className="material-symbols-rounded" style={{ fontSize: 20, color: connected ? "var(--coral-bright)" : "var(--text-muted)" }}>
-                          {item.icon}
+                      {/* The row navigates; Retry is its SIBLING, not a control
+                          nested inside it. A <button> may not contain another
+                          interactive element: the retry's label would be
+                          absorbed into the accessible name of the control that
+                          navigates away, and browse mode commonly flattens the
+                          inner one out of reach entirely. */}
+                      <button
+                        type="button"
+                        ref={(el) => { channelRowRefs.current[item.id] = el; }}
+                        onClick={() => setSectionGated(item.id)}
+                        data-testid={`settings-channel-${item.id}`}
+                        data-state={state}
+                        className="flex-1 min-w-0 flex items-center gap-3 px-3 py-3 text-left bg-transparent border-none cursor-pointer"
+                      >
+                        {/* The ligature IS the glyph's text, so without this the
+                            row's accessible name began "chat", "send", "mail",
+                            "forum" — read out before the channel's own name. */}
+                        <span className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06]" aria-hidden="true">
+                          <span className="material-symbols-rounded" style={{ fontSize: 20, color: connected ? "var(--coral-bright)" : "var(--text-muted)" }}>
+                            {item.icon}
+                          </span>
                         </span>
-                      </span>
-                      <span className="flex-1 min-w-0">
-                        <span className="block text-sm text-[var(--text-primary)] font-medium truncate">{t(item.labelKey)}</span>
-                        <span className="block text-[11px] text-[var(--text-muted)] truncate">
-                          {subtitle ?? t(item.hintKey)}
+                        <span className="flex-1 min-w-0">
+                          <span className="block text-sm text-[var(--text-primary)] font-medium truncate">{t(item.labelKey)}</span>
+                          {/* State first, subtitle second. A subtitle is only
+                              ever a description of an ANSWER, so when there is
+                              no answer it must not be allowed to speak: reading
+                              `subtitle ?? …` here let a route that says "not
+                              configured" without being able to verify it print
+                              those very words over a live channel.
+                              The words are part of the row's accessible name,
+                              which is what actually carries the state to a
+                              screen reader — a live region that appears already
+                              populated does not reliably announce. */}
+                          <span className="block text-[11px] text-[var(--text-muted)] truncate">
+                            {state === "unknown"
+                              ? t("settings.checking")
+                              : state === "unreachable"
+                                ? t("settings.statusUnavailable")
+                                : (subtitle ?? t(item.hintKey))}
+                          </span>
                         </span>
-                      </span>
-                      {connected && (
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" aria-hidden="true" />
+                        {/* A mark per state: set up, still asking, and asked but
+                            unanswered. "Still asking" used to look exactly like
+                            "nothing there", which is the bug this row had. The
+                            dot means the channel is CONFIGURED, not that traffic
+                            is flowing — `channelConnected` does not read the
+                            routes' `receiving` field (TASK-693). */}
+                        {connected ? (
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" aria-hidden="true" />
+                        ) : state === "unknown" ? (
+                          <span
+                            className="w-1.5 h-1.5 rounded-full bg-white/25 shrink-0 animate-pulse motion-reduce:animate-none"
+                            aria-hidden="true"
+                          />
+                        ) : state === "unreachable" ? (
+                          <span className="w-1.5 h-1.5 rounded-full bg-white/25 shrink-0" aria-hidden="true" />
+                        ) : null}
+                        <span className="material-symbols-rounded text-[var(--text-muted)] shrink-0" style={{ fontSize: 18 }} aria-hidden="true">
+                          chevron_right
+                        </span>
+                      </button>
+                      {/* A dead end needs a way out. Named per channel, because
+                          up to four rows can be unreachable at once and four
+                          controls all called "Retry" name nothing. */}
+                      {state === "unreachable" && (
+                        <button
+                          type="button"
+                          data-testid={`settings-channel-retry-${item.id}`}
+                          aria-label={`${t("settings.retry")} — ${t(item.labelKey)}`}
+                          onClick={() => {
+                            // Before anything re-renders: this button is about
+                            // to unmount under its own click, and focus must
+                            // land on the row rather than on <body>.
+                            channelRowRefs.current[item.id]?.focus();
+                            unsettleChannel(item.id);
+                            void refreshChannel();
+                          }}
+                          className="text-[11px] text-[var(--coral-bright)] shrink-0 mr-3 px-1 py-1 bg-transparent border-none cursor-pointer hover:underline"
+                        >
+                          {t("settings.retry")}
+                        </button>
                       )}
-                      <span className="material-symbols-rounded text-[var(--text-muted)] shrink-0" style={{ fontSize: 18 }} aria-hidden="true">
-                        chevron_right
-                      </span>
-                    </button>
+                    </div>
                   );
                 })}
               </div>
@@ -3866,7 +4270,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="rounded-2xl border border-amber-400/30 bg-amber-500/[0.06] p-5" data-testid="settings-email-lost-draft">
                 <div className="flex items-center gap-2 mb-3">
                   <span className="material-symbols-rounded text-amber-300" style={{ fontSize: 18 }} aria-hidden="true">warning</span>
-                  <span className="text-sm text-[var(--text-primary)]">{t("settings.emailApproveFailedDraft")}</span>
+                  {/* The heading is a verdict of its own, and there are two of
+                      them. "This message was not sent" is right over a refusal
+                      the mail server spoke and wrong over a dropped connection,
+                      where nobody knows — and the wrong one is the one that
+                      gets the recipient mailed twice. */}
+                  <span className="text-sm text-[var(--text-primary)]">
+                    {t(emailLostDraft.unconfirmed ? "settings.emailApproveUnconfirmedDraft" : "settings.emailApproveFailedDraft")}
+                  </span>
                 </div>
                 <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
                   <div className="text-xs text-[var(--text-muted)] break-words">
@@ -3914,6 +4325,76 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         >
                           {t("settings.emailReject")}
                         </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* What became of the drafts that are no longer waiting.
+                Shown only when there is something to say — an empty
+                strip is not news — and it fades on its own, because
+                the receipts behind it expire after a day. Every
+                string here is agent-composed text and is rendered as
+                text, exactly like the queue above it. */}
+            {emailHandled.length > 0 && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-handled">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">history</span>
+                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailHandled")}</label>
+                </div>
+                <div className="space-y-3">
+                  {emailHandled.map((entry) => (
+                    <div
+                      key={entry.id}
+                      data-outcome-id={entry.id}
+                      data-outcome-kind={entry.kind}
+                      className="rounded-xl bg-white/[0.02] border border-white/[0.06] px-4 py-3"
+                    >
+                      <div className="text-xs text-[var(--text-muted)] truncate">
+                        {t("settings.emailPendingTo")}: {entry.to.join(", ")}
+                      </div>
+                      <div className="text-sm text-[var(--text-primary)] font-medium mt-1 break-words">{entry.subject}</div>
+                      <div
+                        className={`text-xs mt-1 break-words ${entry.kind === "sent" ? "text-emerald-300" : entry.kind === "failed" ? "text-red-300" : entry.kind === "unconfirmed" ? "text-amber-300" : "text-[var(--text-muted)]"}`}
+                      >
+                        {/* Each ending in its own words. "Not sent" over a
+                            deletion, a duplicate and a mail-server refusal
+                            alike would send the owner looking for a fault in
+                            two cases where there is none. */}
+                        {entry.kind === "sent"
+                          ? t("settings.emailHandledSent", {
+                              time: new Date(entry.at).toLocaleTimeString(undefined, {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              }),
+                            })
+                          : entry.kind === "rejected"
+                            ? t("settings.emailHandledDeleted")
+                            : entry.kind === "duplicate"
+                              ? t("settings.emailHandledDuplicate")
+                              : entry.kind === "unconfirmed"
+                                // Never "Not sent": the box handed the message
+                                // over and never heard back, and a confident
+                                // "not sent" is how a person sends it twice.
+                                ? t("settings.emailHandledUnconfirmed")
+                                : entry.kind === "failed"
+                                  ? t("settings.emailHandledFailed", { reason: entry.error || "" })
+                                  // `entry.kind` is `never` here, so a sixth
+                                  // member of `EMAIL_ENDINGS` is a COMPILE
+                                  // ERROR rather than a row announced as
+                                  // "Failed: " with an empty reason. Reading
+                                  // the wire through `emailEnding` is what lets
+                                  // an unknown ending reach this renderer at
+                                  // all — the hand-written filter dropped it —
+                                  // so the guard has to travel with it. If it
+                                  // were ever reached it answers with the one
+                                  // sentence that claims nothing.
+                                  : ((unreachable: never) => {
+                                      void unreachable;
+                                      return t("settings.emailHandledUnconfirmed");
+                                    })(entry.kind)}
                       </div>
                     </div>
                   ))}
@@ -4220,7 +4701,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         {/* ─── WhatsApp ─── */}
         {activeSection === "whatsapp" && (
-          <div className="max-w-xl space-y-5" data-testid="settings-section-whatsapp">
+          /* `tabIndex={-1}` is not a tab stop; it is somewhere for focus to
+             land when the status card's Retry replaces itself. */
+          <div className="max-w-xl space-y-5" data-testid="settings-section-whatsapp" ref={whatsappPaneRef} tabIndex={-1}>
 
             {/* Upstream's ban-risk warning, shown before anything else rather
                 than hidden behind a docs link — it is the single most important
@@ -4246,13 +4729,45 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                   <h3 className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-4">{t("settings.status")}</h3>
                   {waStatus === null ? (
-                    <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
-                      <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
-                      <div className="flex-1 space-y-2">
-                        <div className="h-3 w-32 rounded bg-white/[0.08]" />
-                        <div className="h-2 w-20 rounded bg-white/[0.06]" />
+                    /* Nothing known — but there are two ways to know nothing,
+                       and the pane owes the owner the same distinction the hub
+                       row draws. Pulsing "loading" over a read that has already
+                       come back empty is the row's own bug one screen along:
+                       nothing re-asks while the pane is open, so the pulse would
+                       run for the life of the mount. */
+                    channelState("whatsapp") === "unreachable" ? (
+                      <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5" data-testid="whatsapp-status-unavailable">
+                        <div className="w-10 h-10 rounded-full bg-white/[0.06] flex items-center justify-center shrink-0">
+                          <span className="material-symbols-rounded" style={{ fontSize: 22 }} aria-hidden="true">cloud_off</span>
+                        </div>
+                        <div className="min-w-0 flex-1 text-sm text-[var(--text-primary)] font-medium">
+                          {t("settings.statusUnavailable")}
+                        </div>
+                        <button
+                          type="button"
+                          data-testid="whatsapp-status-retry"
+                          onClick={() => {
+                            // Same reason as the hub's Retry: this card is about
+                            // to be replaced by the skeleton, so move focus to
+                            // the pane before it goes.
+                            whatsappPaneRef.current?.focus();
+                            unsettleChannel("whatsapp");
+                            void refreshWhatsapp();
+                          }}
+                          className="text-xs text-[var(--coral-bright)] shrink-0 px-2 py-1 bg-transparent border-none cursor-pointer hover:underline"
+                        >
+                          {t("settings.retry")}
+                        </button>
                       </div>
-                    </div>
+                    ) : (
+                      <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
+                        <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
+                        <div className="flex-1 space-y-2">
+                          <div className="h-3 w-32 rounded bg-white/[0.08]" />
+                          <div className="h-2 w-20 rounded bg-white/[0.06]" />
+                        </div>
+                      </div>
+                    )
                   ) : (
                     <div className={`flex items-center gap-4 rounded-xl px-4 py-3.5 border ${
                       waStatus.receiving
@@ -4501,6 +5016,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   </div>
                 )}
 
+                {/* Everything below edits the channel, so it may only be
+                    offered over a channel that was actually read — the same
+                    gate the pairing card above already carries. A live "Add
+                    number", mode picker and Enable switch under a "Could not
+                    check" card is the hub-versus-pane contradiction again,
+                    one card down. */}
+                {waStatus && (<>
                 {/* Allowlist — the security-critical field */}
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                   <h3 className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">{t("settings.whatsappAllowedTitle")}</h3>
@@ -4600,6 +5122,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${waStatus?.enabled ? "translate-x-6" : "translate-x-1"}`} />
                   </button>
                 </div>
+                </>)}
 
                 {waMsg && (
                   <div
@@ -5359,15 +5882,64 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   };
 
+  /**
+   * Whether the server has actually answered for this channel yet. Without
+   * this there are only two states in the UI and "we have not asked" renders
+   * as "not set up" — the false failure this hub shipped with.
+   */
+  const channelStatusKnown = (id: ChannelSection): boolean => {
+    switch (id) {
+      case "telegram": return tgConfigured !== null;
+      case "email": return emailStatus !== null;
+      case "whatsapp": return waStatus !== null;
+      case "discord": return dcConfigured !== null;
+    }
+  };
+
+  /**
+   * The states a channel row may honestly be in.
+   *
+   * `unknown` and `unreachable` are both "we cannot say", but only one of them
+   * is still being worked on: pulsing at the owner after the read has already
+   * failed would be its own small lie.
+   */
+  const channelState = (
+    id: ChannelSection,
+  ): "connected" | "not-configured" | "unknown" | "unreachable" => {
+    if (channelStatusKnown(id)) return channelConnected(id) ? "connected" : "not-configured";
+    // Nothing known, and a read is outstanding (or has never run) — including
+    // one a Retry just started. Only once it has settled with nothing to show
+    // may the row say the channel could not be read.
+    return settledChannels.has(id) ? "unreachable" : "unknown";
+  };
+
   const sectionStatus = (id: Section): SectionStatus => {
     switch (id) {
       case "channels": {
+        // A count is only true once every channel has answered. This said "Not
+        // configured" over a box with three live channels because the hub's
+        // fetches had not run yet; reporting "1 connected" off the one channel
+        // a deep link happened to load is the same lie with a different
+        // number. So: silence while anything is still in flight, as `ai` and
+        // `localAi` below already do.
         const connected = CHANNEL_ITEMS.filter((a) => channelConnected(a.id)).length;
-        return {
-          subtitle: connected > 0
-            ? t("settings.channelsConnectedCount", { n: connected })
-            : (t("settings.notConfigured") || "Not configured"),
-        };
+        if (CHANNEL_ITEMS.every((a) => channelStatusKnown(a.id))) {
+          return {
+            subtitle: connected > 0
+              ? t("settings.channelsConnectedCount", { n: connected })
+              : (t("settings.notConfigured") || "Not configured"),
+          };
+        }
+        // Not everything is known, but nothing is still being asked either —
+        // one of the routes could not be reached. Report what was actually
+        // confirmed rather than going silent for the rest of the session; the
+        // count can only understate, and never says "Not configured" over a
+        // channel nobody managed to read.
+        const allSettled = CHANNEL_ITEMS.every((a) => channelState(a.id) !== "unknown");
+        if (allSettled && connected > 0) {
+          return { subtitle: t("settings.channelsConnectedCount", { n: connected }) };
+        }
+        return { subtitle: null };
       }
       case "appearance": {
         const sub = ui.wallpaperId.startsWith("custom-")

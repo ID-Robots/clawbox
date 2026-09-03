@@ -45,9 +45,15 @@ describe("queue", () => {
     expect(store.countPending()).toBe(1);
   });
 
-  it("gives every draft its own id", () => {
+  // What this used to assert was that queueing DRAFT twice produced two ids —
+  // which is exactly the duplicate an owner met on a real box, because a
+  // timed-out `email_send` was retried and the queue had no way to tell the
+  // retry from a second message. Two different messages still get two ids;
+  // the same message twice is one draft, and email-queue-dedupe.test.ts owns
+  // that rule.
+  it("gives every distinct draft its own id", () => {
     const a = store.queuePending(DRAFT);
-    const b = store.queuePending(DRAFT);
+    const b = store.queuePending({ ...DRAFT, subject: "A different message" });
     expect(a.ok && b.ok && a.draft.id !== b.draft.id).toBe(true);
   });
 

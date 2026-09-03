@@ -62,6 +62,18 @@ export default function AiProviderList() {
     (row.state === "connected" || row.state === "needs-reauth") && row.section !== "localAi",
   );
 
+  // A row nobody has probed yet cannot be filtered INTO this list — it is not
+  // known to hold a sign-in — and the filter above therefore turns a box whose
+  // harness is still booting into "No providers connected", which is a
+  // confident lie about a working box. Stay on the skeleton until there is
+  // something real to show; `useProviderStatus` re-asks on its own until the
+  // answers arrive, and the server stops saying `checking` either way
+  // (TASK-663). Only while the list would be EMPTY, though: ClawBox AI's link
+  // is read from our own store and needs no dashboard, so a row we already
+  // know about is shown rather than hidden behind everyone else's spinner.
+  const awaitingProbe = rows.length === 0
+    && (summary?.providers ?? []).some((row) => row.state === "checking");
+
   return (
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="ai-provider-list">
       <div className="flex items-center gap-2 mb-1">
@@ -85,7 +97,28 @@ export default function AiProviderList() {
         </div>
       )}
 
-      {loading ? (
+      {/* Three grey bars are indistinguishable from a hung page, and the wait
+          they stand for is the unit's own start window — up to
+          `TimeoutStartSec` on a box whose ExecStartPre is grinding. Say which
+          of the two it is, in the owner's language, with the word the rows
+          below already use.
+
+          MOUNTED IN EVERY STATE, empty when there is nothing to say: a live
+          region that appears along with its text announces a node insertion,
+          which assistive tech may drop entirely. A region that is already there
+          announces a text CHANGE, which it will not — and the same applies on
+          the way out, where the emptying is what says the wait is over. Outside
+          the branch below for the same reason: that branch unmounts. */}
+      <p
+        role="status"
+        aria-live="polite"
+        data-testid="ai-provider-list-checking"
+        className={`text-[11px] text-[var(--text-muted)] ${awaitingProbe ? "mb-2" : ""}`}
+      >
+        {awaitingProbe ? t("settings.checking") : ""}
+      </p>
+
+      {loading || awaitingProbe ? (
         <div className="space-y-2" data-testid="ai-provider-list-loading">
           {[0, 1, 2].map((i) => (
             <div key={i} className="h-12 rounded-xl bg-white/[0.04] motion-safe:animate-pulse" />

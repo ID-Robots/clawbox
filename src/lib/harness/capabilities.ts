@@ -78,6 +78,17 @@ export interface HarnessFacts {
    * the agent's own dispatcher reads at tool time.
    */
   hermesAgentDrawsImages: boolean;
+  /**
+   * This box is configured to speak (`tts.provider` in `~/.hermes/config.yaml`
+   * names one of the two providers ClawBox offers).
+   *
+   * PROBED, like its neighbours, and about the box rather than the version:
+   * the Voice tab writes that key, so two boxes running the same `hermes` can
+   * disagree. Hermes' factory value is `edge`, which ClawBox never offers and
+   * never counts — see hermes-tts.ts for why a ClawBox must not speak through
+   * it by default.
+   */
+  hermesSpeaksReplies: boolean;
 }
 
 /**
@@ -174,12 +185,24 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
         : facts.hasClawaiToken && facts.hasClawaiImageRoute
           ? "composer"
           : null,
-      // Speaking replies is a gateway capability with no Hermes equivalent.
-      // Genuinely absent, and note this is voice OUTPUT: voice INPUT is
-      // `canTranscribe` above and is a different feature with a different
-      // answer. Reading one as the other is how a working microphone gets
-      // hidden behind a card that says "voice is an OpenClaw feature".
-      canSpeakReplies: false,
+      // Voice OUTPUT, and note it is a different feature from voice INPUT
+      // (`canTranscribe` above) with a different answer — reading one as the
+      // other is how a working microphone got hidden behind a card saying
+      // "voice is an OpenClaw feature".
+      //
+      // This said `false` with the comment "a gateway capability with no
+      // Hermes equivalent". That was never true of the harness: Hermes ships
+      // its own `tts:` block, a `text_to_speech` toolset (which this repo's
+      // own local-model-profile.ts already lists) and `POST /api/audio/speak`.
+      // What was true is that ClawBox had not wired any of it up. So the flag
+      // follows the box's ACTUAL speech config now, the same way
+      // `hermesAgentDrawsImages` follows its image backend.
+      canSpeakReplies: facts.hermesSpeaksReplies,
+      // WHO speaks it. Hermes has no gateway to append an audio part on its
+      // own, so the ClawBox chat route asks Hermes to speak the finished reply
+      // and attaches the clip in the same shape the gateway produces — which
+      // is why the renderer needed no edition of its own.
+      spokenReplyTrigger: facts.hermesSpeaksReplies ? "box" : null,
       canAbortTurn: true,
       // There is no socket, so there is nothing that can be "down" and a
       // connection banner would be describing a wire that does not exist.
@@ -219,6 +242,9 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
     // flag that keeps `generateImage` honest about rejecting here.
     imageGenerationTrigger: facts.hasClawaiToken ? "agent" : null,
     canSpeakReplies: true,
+    // The gateway speaks the reply itself and pushes it as a second message
+    // carrying the audio; nothing here has to ask for it.
+    spokenReplyTrigger: "harness",
     canAbortTurn: true,
     hasLiveConnection: true,
   };
@@ -238,6 +264,8 @@ export const UNKNOWN_FACTS: HarnessFacts = {
   // worse than one that appears a beat late.
   hasClawaiImageRoute: false,
   hermesAgentDrawsImages: false,
+  // And no player promised until the box has said it has a voice configured.
+  hermesSpeaksReplies: false,
 };
 
 /**

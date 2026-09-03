@@ -17,7 +17,13 @@
  * construction — the output is the input with a known set of line splices.
  *
  * DELIBERATELY NOT A YAML LIBRARY. It understands block mappings of plain
- * scalars, which is what the keys ClawBox owns (`providers.*`, `model.*`) are.
+ * scalars, which is what the keys ClawBox SPLICES (`providers.<slug>.base_url`,
+ * `.api_key`, `.api_mode`, the single-id `providers.clawlocal.models`,
+ * `model.*`) are. Not every key ClawBox owns is one: `providers.clawai.models`
+ * is a LIST, written through `hermes config set` because a sequence is a shape
+ * this module raises on — so a caller adding a `providers.*` patch must check
+ * that the leaf it wants is a scalar first (see `localCatalogueState` in
+ * hermes-local-ai.ts for the read that does it).
  * Anything else on the path it is asked to touch — flow style, block scalars,
  * sequences, quoted or duplicate keys, tab indentation, multi-document files —
  * raises {@link YamlEditUnsupported} rather than guessing. Callers are expected

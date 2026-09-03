@@ -2225,7 +2225,9 @@ unset CLAWBOX_MCP_TOKEN_VAL
 # falls back to guessing paths — which has misled it before (e.g.
 # checking .npm-global/.../openclaw/skills for user skills and finding
 # "nothing", even though the skill is installed at
-# <workspace>/skills/).
+# <workspace>/skills/) — and, on the box this top-up was written for, into
+# queueing an operator-approval proposal for a gateway restart nothing here
+# can render (TASK-612).
 #
 # OpenClaw 2 unbundled the DeepSeek provider into its own plugin
 # (@openclaw/deepseek-provider) and refuses gateway readiness while a
@@ -2312,16 +2314,111 @@ fi
 
 CLAWBOX_GUIDE_SRC="$CLAWBOX_ROOT/config/clawbox-workspace-guide.md"
 CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
-if [ -d "$CLAWBOX_WORKSPACE" ] && [ -f "$CLAWBOX_GUIDE_SRC" ]; then
+# The heading of the section an already-seeded CLAWBOX.md is topped up with,
+# and the marker that says it is already there. Matched with `grep -qF` and
+# `index(...) == 1`, so it must be the literal start of the heading line.
+CLAWBOX_GUIDE_TOPUP="## System actions and restarts"
+# EVERY write below is guarded, and that is a boot requirement rather than a
+# matter of taste: config/clawbox-gateway.service runs this script as
+# `ExecStartPre=` with no leading `-`, so under `set -euo pipefail` a failing
+# write here is the unit's failure. With Restart=always and RestartSec=5 the
+# gateway would burn StartLimitBurst=20 in about a hundred seconds and then sit
+# failed for the rest of the StartLimitIntervalSec=3600 window — the box loses
+# its assistant over an advisory text file. So each write warns and boots on.
+if [ -d "$CLAWBOX_WORKSPACE" ]; then
   # Seed-if-missing rather than overwrite-on-diff. The agent and the
   # user may personalize CLAWBOX.md (add device-specific notes, remove
   # sections that don't apply). Overwriting on every gateway start
   # would clobber those edits. If the shipped template changes and an
   # operator wants to pull it in, they can delete the file; the next
   # gateway start will re-seed.
-  if [ ! -f "$CLAWBOX_GUIDE_DST" ]; then
-    install -m 644 "$CLAWBOX_GUIDE_SRC" "$CLAWBOX_GUIDE_DST"
-    echo "  Seeded CLAWBOX.md in OpenClaw workspace"
+  #
+  # The template is tested with `-r`, HERE rather than in the condition above.
+  # It is only ever read, so `-r` covers both the missing file the old enclosing
+  # `-f` tested for and the existing-but-unreadable one `-f` waved through into a
+  # write that then fails. Testing it inside this chain is what keeps the promise
+  # the next block relies on: the AGENTS.md rule needs no template at all, and it
+  # is the copy the harness actually injects, so it must still land when the
+  # template is missing or unreadable — which the enclosing `-f` silently
+  # prevented, with no warning at all.
+  if [ ! -r "$CLAWBOX_GUIDE_SRC" ]; then
+    echo "  WARNING: could not read $CLAWBOX_GUIDE_SRC; leaving CLAWBOX.md as it is" >&2
+  elif [ ! -f "$CLAWBOX_GUIDE_DST" ]; then
+    if install -m 644 "$CLAWBOX_GUIDE_SRC" "$CLAWBOX_GUIDE_DST"; then
+      echo "  Seeded CLAWBOX.md in OpenClaw workspace"
+    else
+      # The first-boot and post-factory-reset path, and the one write in this
+      # block that used to be bare: a full rootfs, a filesystem remounted
+      # read-only after errors, or the documented "delete CLAWBOX.md to
+      # re-seed" step on such a box all land here.
+      echo "  WARNING: could not seed CLAWBOX.md in the OpenClaw workspace" >&2
+    fi
+  elif ! grep -qF "$CLAWBOX_GUIDE_TOPUP" "$CLAWBOX_GUIDE_DST"; then
+    # Seed-if-missing alone means a section ADDED to the template after a box
+    # was set up never reaches that box — every box in the field already has
+    # CLAWBOX.md, including the one whose agent queued an operator-approval
+    # proposal for a gateway restart (TASK-612). Shipping the rule to new
+    # boxes only would be a fix that reports success without arriving.
+    #
+    # So: append the one section, never overwrite the file. Personalizations
+    # survive, and the `grep -qF` above is the idempotence marker — a second
+    # gateway start finds the heading and appends nothing. The awk below is the
+    # section's only source, and it is bounded by the NEXT `## ` heading rather
+    # than by the `---` rule that happens to sit before it: a rule inside the
+    # section would have truncated it, and a CRLF template (`---\r`) would have
+    # matched no terminator at all and dragged every following section along.
+    # Trailing blank lines and that closing rule are then dropped, because the
+    # append supplies its own separator and carrying the template's too ends the
+    # topped-up guide on a dangling rule.
+    #
+    # The heading is matched as a WHOLE line (modulo a CR), not as a prefix: a
+    # later `## System actions and restarts (advanced)` would otherwise open the
+    # extraction and then fail to close it, swallowing every section after it.
+    #
+    # The heading reaches awk through the environment rather than `-v`, which
+    # runs its value through escape processing: a heading that ever grew a
+    # backslash would quietly stop matching and the section would go missing
+    # with no warning. Extraction and append are both guarded, under the
+    # invariant at the top of this block — neither may abort pre-start — and a
+    # renamed heading is reported apart from an unreadable template, because the
+    # two send an operator to different files.
+    CLAWBOX_GUIDE_SECTION=""
+    if CLAWBOX_GUIDE_SECTION="$(heading="$CLAWBOX_GUIDE_TOPUP" awk '
+      { line = $0; sub(/\r$/, "", line) }
+      line == ENVIRON["heading"] { inside = 1; lines[++n] = $0; next }
+      inside && /^## / { exit }
+      inside { lines[++n] = $0 }
+      END {
+        while (n > 0) {
+          tail = lines[n]
+          sub(/\r$/, "", tail)
+          if (tail != "" && tail != "---") break
+          n--
+        }
+        for (i = 1; i <= n; i++) print lines[i]
+      }
+    ' "$CLAWBOX_GUIDE_SRC")"; then
+      if [ -z "$CLAWBOX_GUIDE_SECTION" ]; then
+        # The heading was renamed in the template without this marker following
+        # it. Appending a separator alone would report a success that added
+        # nothing, and would do it again on every gateway start.
+        echo "  WARNING: the shipped guide no longer carries '$CLAWBOX_GUIDE_TOPUP'" >&2
+      # A file that does not end in a newline would otherwise have its last
+      # line joined to the separator, making it a setext heading.
+      elif { [ -s "$CLAWBOX_GUIDE_DST" ] && [ "$(tail -c1 "$CLAWBOX_GUIDE_DST")" != "" ] && printf '\n'; \
+             printf '\n---\n\n%s\n' "$CLAWBOX_GUIDE_SECTION"; } >> "$CLAWBOX_GUIDE_DST"; then
+        echo "  Appended the system-actions section to CLAWBOX.md"
+      else
+        # Its cause is on this shell's stderr already; do not hide it behind a
+        # 2>/dev/null that the failing redirection never reaches anyway.
+        echo "  WARNING: could not append the system-actions section to CLAWBOX.md" >&2
+      fi
+    else
+      # Separated from the empty-extraction case on purpose: an unreadable
+      # template is an I/O fault, not a renamed heading, and telling an
+      # operator the wrong one sends them to the wrong file.
+      echo "  WARNING: could not read $CLAWBOX_GUIDE_SRC to top up CLAWBOX.md" >&2
+    fi
   fi
 
   # Append a one-liner reference to AGENTS.md if it exists and doesn't
@@ -2329,8 +2426,50 @@ if [ -d "$CLAWBOX_WORKSPACE" ] && [ -f "$CLAWBOX_GUIDE_SRC" ]; then
   # its session-start context without us having to overwrite AGENTS.md
   # (which the agent may have personalized).
   CLAWBOX_AGENTS_MD="$CLAWBOX_WORKSPACE/AGENTS.md"
-  if [ -f "$CLAWBOX_AGENTS_MD" ] && ! grep -qF "CLAWBOX.md" "$CLAWBOX_AGENTS_MD"; then
-    printf '\n\n## ClawBox integration\n\nSee `CLAWBOX.md` for device-specific conventions: where user-installed skills live, how to control the desktop Chromium via `browser_*` tools, and how to install/uninstall skills through the App Store.\n' >> "$CLAWBOX_AGENTS_MD"
-    echo "  Appended CLAWBOX.md reference to AGENTS.md"
+  # Guarded on the pointer's OWN heading, not on the bare "CLAWBOX.md" literal.
+  # The rule block below ends "`CLAWBOX.md` has the long form", so a literal
+  # guard is satisfied by the rule's own text: the two blocks both landed only
+  # because this one happens to be written first. That ordering was
+  # load-bearing and stated nowhere — a reorder, or moving the rule into a
+  # helper that ran earlier, would have cost every fresh box its pointer with
+  # both markers "satisfied" and no warning. Nothing else writes this heading,
+  # and every box in the field already carries it verbatim (it has not changed
+  # since it was introduced), so no box receives a second copy.
+  CLAWBOX_AGENTS_POINTER="## ClawBox integration"
+  if [ -f "$CLAWBOX_AGENTS_MD" ] && ! grep -qF "$CLAWBOX_AGENTS_POINTER" "$CLAWBOX_AGENTS_MD"; then
+    # Guarded like the two appends below, and for the same reason: this one has
+    # always been bare, so a read-only AGENTS.md aborted pre-start under
+    # `set -euo pipefail` and the gateway never started — over a pointer
+    # sentence. Reachable whenever the file exists without the marker.
+    if printf '\n\n%s\n\nSee `CLAWBOX.md` for device-specific conventions: where user-installed skills live, how to control the desktop Chromium via `browser_*` tools, how to install/uninstall skills through the App Store, and which system actions are the owner'"'"'s.\n' "$CLAWBOX_AGENTS_POINTER" >> "$CLAWBOX_AGENTS_MD"; then
+      echo "  Appended CLAWBOX.md reference to AGENTS.md"
+    else
+      echo "  WARNING: could not append the CLAWBOX.md reference to AGENTS.md" >&2
+    fi
+  fi
+
+  # THE RULE ITSELF GOES IN AGENTS.md, not only in CLAWBOX.md.
+  #
+  # OpenClaw's workspace file map (docs/concepts/agent-workspace.md, verified in
+  # the pinned 2026.8.1 package) injects AGENTS.md, SOUL.md, USER.md,
+  # IDENTITY.md, BOOT.md, BOOTSTRAP.md and memory/ at the start of every
+  # session — and describes AGENTS.md as "operating instructions ... good place
+  # for rules". CLAWBOX.md is NOT in that set: it is read only if the agent
+  # chooses to open it, prompted by the pointer above. A behavioural
+  # prohibition that the model may never load is not a prohibition, which is
+  # how TASK-612 could otherwise have shipped green and reproduced unchanged.
+  #
+  # Its own marker, deliberately not the "CLAWBOX.md" one: that pointer is
+  # already present on every box in the field, so anything guarded by it can
+  # never be delivered again.
+  CLAWBOX_AGENTS_RULE="## System actions on this ClawBox"
+  if [ -f "$CLAWBOX_AGENTS_MD" ] && ! grep -qF "$CLAWBOX_AGENTS_RULE" "$CLAWBOX_AGENTS_MD"; then
+    if printf '\n\n%s\n\nRestarting the OpenClaw gateway is not yours to do from a chat turn: the gateway hosts this session, so the restart kills the reply before it lands. It is rarely needed either — saving a setting under Settings -> Providers, Voice or Channels restarts it. Say that, and name the setting.\n\nA device restart or shutdown IS yours when the owner asks in their own words: `system_power`, `confirm: true`, with their reason. Their own control is the power menu in the desktop tray, not Settings -> System.\n\nNever queue an `operator_approval` proposal for any of this. ClawBox renders no approval card, so a queued proposal is shown to nobody; a parked one is answered with `openclaw approvals pending` / `openclaw approvals resolve` from the Terminal app. `CLAWBOX.md` has the long form.\n' "$CLAWBOX_AGENTS_RULE" >> "$CLAWBOX_AGENTS_MD"; then
+      echo "  Appended the system-actions rule to AGENTS.md"
+    else
+      # Advisory text must never hold up the gateway; the next start retries.
+      echo "  WARNING: could not append the system-actions rule to AGENTS.md" >&2
+    fi
   fi
 fi
+# --- end guide seeding ---

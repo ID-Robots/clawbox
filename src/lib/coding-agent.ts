@@ -986,6 +986,9 @@ async function readProjectFolders(): Promise<{ base: string; names: string[] } |
  * `isDirectory()` on the Dirent, deliberately: a symlink is never followed,
  * so a link out of the folder is not offered as a project in it.
  */
+/** The most folders a listing names — the readdir's and the run store's alike. */
+const MAX_PROJECT_FOLDERS = 100;
+
 async function readFolderNames(base: string): Promise<string[]> {
   try {
     const entries = await fs.promises.readdir(base, { withFileTypes: true });
@@ -993,7 +996,7 @@ async function readFolderNames(base: string): Promise<string[]> {
       .filter((e) => e.isDirectory() && !e.name.startsWith("."))
       .map((e) => e.name)
       .sort()
-      .slice(0, 100);
+      .slice(0, MAX_PROJECT_FOLDERS);
   } catch {
     return [];
   }
@@ -1086,8 +1089,12 @@ export async function listProjects(): Promise<{ directory: string | null; projec
     // worked in symlink-resolved, so both spellings of the base are matched.
     // Never a dot-folder: that is state, not a project.
     const realBase = await fs.promises.realpath(folders.base).catch(() => folders.base);
+    // Bounded like the readdir (readFolderNames keeps 100): the run store is
+    // not a hard bound — held runs are never trimmed — and every folder here
+    // costs a stat and a git log on every poll.
     const workedIn = new Set<string>();
     for (const run of loadRuns()) {
+      if (workedIn.size >= MAX_PROJECT_FOLDERS) break;
       if (typeof run.directory !== "string") continue;
       for (const base of new Set([folders.base, realBase])) {
         if (!run.directory.startsWith(base + path.sep)) continue;
@@ -2059,7 +2066,11 @@ export const ULTRACODE_BRIEF = [
 
 const FILE_TOOLS = ["Read", "Edit", "Write"] as const;
 /** Always denied under data/, whether or not they exist yet. */
-const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "coding-agent-runs.json"];
+// email-outcomes.json sits beside email-pending.json for the same reason: it
+// names who the owner mailed and what about. A run has no business reading
+// either, and a file that only exists once mail has been approved is exactly
+// the kind that gets added to the store and forgotten here.
+const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "coding-agent-runs.json"];
 
 /**
  * Claude Code's Read/Edit/Write rules for the paths a run must not open.

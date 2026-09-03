@@ -14,7 +14,7 @@
  */
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { promises as fs } from "fs";
+import { constants as fsConstants, promises as fs } from "fs";
 import os from "os";
 import path from "path";
 
@@ -137,6 +137,47 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
+async function executable(bin: string): Promise<boolean> {
+  try {
+    await fs.access(bin, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Can this box actually RUN the command a local TTS provider names?
+ *
+ * One fact, asked by both surfaces that depend on it — Settings → Voice's
+ * `commandPresent` and the chat's spoken-reply capability — because two
+ * spellings of it is how they came to describe one box differently.
+ *
+ * Two provider shapes reach here and the answer must be the same for both.
+ * OpenClaw's `tts-local-cli` holds a bare `command` beside a separate `args`
+ * array; Hermes' `clawbox-local` holds a whole command LINE, because Hermes
+ * substitutes its own placeholders into it
+ * (`<script> --text-file={input_path} -- {output_path}`). So the string is
+ * tried whole first — a bare command may legitimately contain spaces — and
+ * then as its first word, which is the executable in the command-line shape.
+ *
+ * X_OK, not the default F_OK: the harness EXECUTES this. A script that is
+ * present but not executable — a tree copied without modes, an archive
+ * restored with the bits stripped — leaves every other condition saying yes,
+ * so "the file is there" reported a voice the box could not produce.
+ * `install.sh` refuses to register a command that is not `-x`; this asks the
+ * same question again at read time, because the file can lose the bit long
+ * after the config was written.
+ *
+ * Fails CLOSED, like every other fact behind a capability.
+ */
+export async function localTtsCommandRunnable(command: string): Promise<boolean> {
+  const line = command.trim();
+  if (!line) return false;
+  const first = line.split(/\s+/, 1)[0];
+  return (await executable(line)) || (first !== line && (await executable(first)));
+}
+
 async function run(cmd: string, args: string[], timeout = 5000): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(cmd, args, { timeout });
@@ -181,12 +222,20 @@ export interface UnitState {
 }
 
 export async function readUnitState(unit: string, scope: "user" | "system"): Promise<UnitState> {
-  const isActive = scope === "user"
-    ? await runUserSystemctl(["is-active", unit])
-    : await run("/usr/bin/systemctl", ["is-active", unit]);
-  const isEnabled = scope === "user"
-    ? await runUserSystemctl(["is-enabled", unit])
-    : await run("/usr/bin/systemctl", ["is-enabled", unit]);
+  // Concurrent, not sequential. The two answers are independent, and each call
+  // carries its own 5 s timeout — awaited one after the other a wedged systemd
+  // bus cost 10 s, which the Voice tab has always paid but the chat turn now
+  // pays too (the spoken-reply capability reads this inventory per reply,
+  // ahead of the reply's own speech budget rather than inside it). Asked
+  // together the worst case is one timeout, not two.
+  const [isActive, isEnabled] = await Promise.all([
+    scope === "user"
+      ? runUserSystemctl(["is-active", unit])
+      : run("/usr/bin/systemctl", ["is-active", unit]),
+    scope === "user"
+      ? runUserSystemctl(["is-enabled", unit])
+      : run("/usr/bin/systemctl", ["is-enabled", unit]),
+  ]);
   const enabledWord = (isEnabled ?? "").trim();
   // `is-enabled` answers with an error string, not a state, when the unit file
   // is missing — that is how "absent" is told apart from "installed but off".

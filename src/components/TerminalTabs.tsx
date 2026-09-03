@@ -19,7 +19,7 @@
  * clicking the tab that is already in front refocuses nothing).
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import TerminalApp, { type TerminalTabAction } from "./TerminalApp";
 
@@ -107,8 +107,15 @@ export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
   // keys walk the rest (roving tabindex), Home/End go to the ends. Moving
   // selects, so the shell behind the tab comes to the front as the focus
   // moves — the same as a click.
+  // Where focus should land after the next state change: on the selected
+  // tab, when a tab was closed from the keyboard (the button it was on is
+  // gone) — never after a mouse close, which keeps the keyboard in the shell.
+  const focusSelectedRef = useRef(false);
   const onTabKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+    // Only from a tab itself: an arrow on a close button must not move the
+    // selection under a focus that stays on the button.
+    if ((e.target as HTMLElement).getAttribute("role") !== "tab") return;
     e.preventDefault();
     setState((prev) => {
       const index = prev.tabs.findIndex((tab) => tab.id === prev.activeId);
@@ -147,7 +154,13 @@ export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
                 data-testid={`terminal-tab-${tab.id}`}
                 data-active={selected ? "true" : "false"}
                 tabIndex={selected ? 0 : -1}
-                ref={(el) => { if (selected && el && document.activeElement?.getAttribute("role") === "tab") el.focus(); }}
+                ref={(el) => {
+                  if (!selected || !el) return;
+                  if (focusSelectedRef.current || document.activeElement?.getAttribute("role") === "tab") {
+                    focusSelectedRef.current = false;
+                    el.focus();
+                  }
+                }}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => onSelect(tab.id)}
                 onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(tab.id); } }}
@@ -164,7 +177,8 @@ export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
                 title={t("terminal.closeTab")}
                 data-testid={`terminal-tab-close-${tab.id}`}
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => onClose(tab.id)}
+                // `detail === 0`: a click the keyboard made (Enter, Space).
+                onClick={(e) => { if (e.detail === 0) focusSelectedRef.current = true; onClose(tab.id); }}
                 className="my-1 mr-1.5 w-5 rounded flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 bg-transparent border-none cursor-pointer shrink-0"
               >
                 <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">close</span>

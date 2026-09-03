@@ -41,6 +41,7 @@ import { appendTranscript } from "@/lib/harness/transcript-store";
 import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "@/lib/harness/transcript-key";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
+import { splitEmailRefs } from "@/lib/chat-email-refs";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
 import {
   readHermesBillingProvider,
@@ -53,6 +54,8 @@ import {
   servableMediaRoot,
 } from "@/lib/harness/hermes-generated-media";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
+import { speakHermesReply } from "@/lib/harness/hermes-spoken-reply";
+import { hermesSpeaksReplies } from "@/lib/hermes-tts";
 import {
   DASHBOARD_PROVIDER_KIND,
   isQuietStreamError,
@@ -385,7 +388,44 @@ async function settleTurn(
   // Appended AFTER the answer rather than replacing it: the model's own
   // sentence is the caption, and dropping it would leave a picture with no
   // words in a conversation the customer is having.
-  const answer = [caption, ...drawn.map((file) => `MEDIA:${file}`)]
+  // The reply, SPOKEN — the Hermes half of what the OpenClaw gateway does
+  // unbidden. Said as a `MEDIA:` line for exactly the reason the picture above
+  // is: `splitAssistantMedia` lifts it back out a few lines down into the same
+  // `audio` array the gateway's attachment part produces, so the transcript,
+  // the adapter and the bubble's player all keep working with no edition of
+  // their own.
+  //
+  // The CAPTION is what gets spoken, not `answer`: the MEDIA: lines are
+  // machinery, and a box reading a file path aloud would be absurd.
+  //
+  // `EMAIL:` is machinery for the same reason and loses the same way, so it
+  // comes off the SPOKEN copy only. This is the one edition where the rule can
+  // be applied HERE: on Hermes the clip is built right here, so a caption that
+  // kept its directives had the box say "EMAIL four four seven one" after the
+  // summary. On OpenClaw the GATEWAY picks the engine, and ClawBox's reach
+  // depends on which one it picks — a cloud provider gets text ClawBox never
+  // touches, while the on-device Kokoro voice is spoken by running ClawBox's
+  // own scripts/openclaw/clawbox-tts.sh, which install.sh (step_openclaw_tts)
+  // wires as the `tts-local-cli` provider command with `{{Text}}` in argv. So
+  // on that one engine ClawBox IS handed the reply with the directive still in
+  // it — but as an engine's input, not as the reply: it covers one of the two
+  // voices and would put chat semantics in a speech script. Both engines still
+  // read the id aloud, and fixing that is TASK-697's outbound hook, which
+  // covers both at once. `caption` itself is left alone: `answer` below is the
+  // transcript, and the bubble's card is made from exactly those lines.
+  //
+  // Fail-soft and bounded (see speakHermesReply): a reply that could not be
+  // spoken still renders, silently. Losing the answer to a busy voice would be
+  // a far worse trade than losing the audio.
+  // The capability read is inside the try/catch of neither — `hermesSpeaksReplies`
+  // fails closed and `speakHermesReply` never throws — so a box that cannot
+  // answer the question simply does not speak, and the turn is unaffected.
+  const spokenClip = (await hermesSpeaksReplies()) ? await speakHermesReply(splitEmailRefs(caption).text) : null;
+  const answer = [
+    caption,
+    ...drawn.map((file) => `MEDIA:${file}`),
+    ...(spokenClip ? [`MEDIA:${spokenClip}`] : []),
+  ]
     .filter(Boolean)
     .join("\n");
   // The database first, the console parse next, and what the stream itself

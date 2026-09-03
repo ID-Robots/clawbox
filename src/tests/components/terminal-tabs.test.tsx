@@ -169,6 +169,34 @@ describe("TerminalTabs", () => {
   });
 });
 
+describe("the tab strip's keyboard", () => {
+  it("moves the selection with the arrows only from a tab, and lands focus on the neighbour after a keyboard close", async () => {
+    render(<TerminalTabs />);
+    await waitFor(() => expect(sockets.length).toBe(1));
+    fireEvent.click(screen.getByTestId("terminal-tab-new"));
+    await waitFor(() => expect(sockets.length).toBe(2));
+    const tab2 = screen.getByTestId("terminal-tab-2");
+    // An arrow on the CLOSE button must not move the selection.
+    fireEvent.keyDown(screen.getByTestId("terminal-tab-close-2"), { key: "ArrowLeft" });
+    expect(tab2).toHaveAttribute("aria-selected", "true");
+    // From the tab itself it does, and the focus goes with it.
+    tab2.focus();
+    fireEvent.keyDown(tab2, { key: "ArrowLeft" });
+    const tab1 = screen.getByTestId("terminal-tab-1");
+    expect(tab1).toHaveAttribute("aria-selected", "true");
+    expect(document.activeElement).toBe(tab1);
+    fireEvent.keyDown(tab1, { key: "End" });
+    expect(tab2).toHaveAttribute("aria-selected", "true");
+    // A keyboard close (a click with no pointer detail) leaves focus on the
+    // tab that is selected next, not on a button that no longer exists.
+    const close2 = screen.getByTestId("terminal-tab-close-2");
+    close2.focus();
+    fireEvent.click(close2, { detail: 0 });
+    await waitFor(() => expect(screen.queryByTestId("terminal-tab-2")).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(screen.getByTestId("terminal-tab-1"));
+  });
+});
+
 describe("the terminal's right-click menu", () => {
   it("copies the selection, and reaches the terminal for Select all and Clear", async () => {
     const writeText = vi.fn(async () => {});

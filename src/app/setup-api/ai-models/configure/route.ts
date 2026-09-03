@@ -80,6 +80,7 @@ import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import {
   isValidModelId,
   GOOGLE_MODELS,
+  ANTHROPIC_DEFAULT_MODEL_ID,
   ANTHROPIC_MODELS,
   extractProviderModelId,
   routesSubscriptionNatively,
@@ -165,7 +166,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     profileKey: CLAWBOX_AI_PROFILE_KEY,
   },
   anthropic: {
-    defaultModel: "anthropic/claude-sonnet-5",
+    defaultModel: `anthropic/${ANTHROPIC_DEFAULT_MODEL_ID}`,
     profileKey: "anthropic:default",
   },
   openai: {

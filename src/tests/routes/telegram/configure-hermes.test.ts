@@ -46,11 +46,12 @@ const NEW_TOKEN = "987654321:ZYXwvuTSRqponMLKjihGFEdcba";
 describe("POST /setup-api/telegram/configure — harness routing", () => {
   let POST: (req: Request) => Promise<Response>;
 
-  function req(body: unknown): Request {
+  function req(body: unknown, signal?: AbortSignal): Request {
     return new Request("http://localhost/setup-api/telegram/configure", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
     });
   }
 
@@ -82,7 +83,9 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
       expect(res.status).toBe(200);
       expect(body).toMatchObject({ success: true, restarted: true });
       expect(mockSet).toHaveBeenCalledWith("telegram_bot_token", TOKEN);
-      expect(mockSetHermesToken).toHaveBeenCalledWith(TOKEN, expect.anything());
+      // One argument, deliberately: no abort signal — see the split-brain test
+      // at the bottom of this describe.
+      expect(mockSetHermesToken).toHaveBeenCalledWith(TOKEN);
       expect(mockEnsureGateway).toHaveBeenCalled();
     });
 
@@ -111,6 +114,35 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
 
       expect(body.reset).toBe(false);
       expect(mockClearHermesPairing).not.toHaveBeenCalled();
+    });
+
+    it("does not let a browser that walked away cancel the half it has already committed to", async () => {
+      // A phone locking during the ~1-3 s the CLI takes on a Jetson aborts the
+      // fetch. By then ClawBox's own store holds the new token and, on a token
+      // change, the previous bot's approvals are gone. `runHermesCli` refuses a
+      // call whose signal is already aborted, so handing `request.signal` any
+      // further made that a RELIABLE split: token here, absent from
+      // ~/.hermes/.env, approvals lost, and a 500 on the way out.
+      const controller = new AbortController();
+      controller.abort();
+      // Model the real library: it goes through `runHermesCli`, which refuses.
+      mockSetHermesToken.mockImplementation(async (_token: string, signal?: AbortSignal) => {
+        if (signal?.aborted) throw new Error("hermes call cancelled");
+      });
+      mockEnsureGateway.mockImplementation(async (signal?: AbortSignal) => {
+        if (signal?.aborted) throw new Error("hermes call cancelled");
+        return { installed: true, running: true, scope: "system" as const, applied: true };
+      });
+
+      const res = await POST(req({ botToken: TOKEN }, controller.signal));
+      const body = await res.json();
+
+      // The owner is not told the save failed over a box he cannot see.
+      expect(res.status).toBe(200);
+      expect(body).toMatchObject({ success: true, restarted: true });
+      // And both halves of the box agree: ClawBox's store and Hermes' .env.
+      expect(mockSet).toHaveBeenCalledWith("telegram_bot_token", TOKEN);
+      expect(mockSetHermesToken).toHaveBeenCalledWith(TOKEN);
     });
 
     it("fails the save with the old token in place when the pairing reset throws", async () => {

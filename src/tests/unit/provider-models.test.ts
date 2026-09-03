@@ -22,6 +22,24 @@ describe("provider-models", () => {
       expect(getProviderCatalog("codex")?.defaultModelId).toBe("gpt-5.5");
     });
 
+    // The cold-start default only decides what a box lands on before it has
+    // enumerated anything — `openclaw models list` tags one row `default` per
+    // provider and that tag wins (catalog/route.ts) — but it is what
+    // "Make default -> Anthropic" writes on a box whose Anthropic row has no
+    // model of its own, and it was still the placeholder Sonnet id.
+    it("lands the Anthropic cold-start default on Claude Opus 5", () => {
+      const catalog = getProviderCatalog("anthropic");
+      expect(catalog?.defaultModelId).toBe("claude-opus-5");
+      // A default the curated list does not carry is a default the picker
+      // cannot render, so the two are asserted together.
+      expect(catalog?.models.map((m) => m.id)).toContain("claude-opus-5");
+      // Exactly one row may claim the "Default." hint, and it is that one: two
+      // rows hinted Default is what a hand-edited list drifts into.
+      expect(
+        (catalog?.models ?? []).filter((m) => m.hint?.startsWith("Default")).map((m) => m.id),
+      ).toEqual(["claude-opus-5"]);
+    });
+
     it("does not return inherited Object prototype members", () => {
       expect(getProviderCatalog("toString")).toBeNull();
       expect(getProviderCatalog("constructor")).toBeNull();

@@ -1,8 +1,10 @@
 export const dynamic = "force-dynamic";
 
 import { promises as fs } from "fs";
+import { getActiveHarness } from "@/lib/harness";
+import { speakWithHermes } from "@/lib/hermes-tts";
 import { buildTtsInventory, KOKORO_STAMP } from "@/lib/local-models";
-import { openclawIsAbsent, readConfig } from "@/lib/openclaw-config";
+import { readConfig } from "@/lib/openclaw-config";
 import { speechTextFor, SPEECH_MAX_CHARS } from "@/lib/speech-text";
 import { getVoiceAutoReply } from "@/lib/voice-reply";
 import { isSameOriginRequest } from "@/lib/same-origin";
@@ -37,7 +39,6 @@ async function exists(p: string): Promise<boolean> {
 }
 
 export async function POST(req: Request) {
-  if (openclawIsAbsent()) return refuse("Voice output is not part of this edition.", "edition", 409);
   if (!(await getVoiceAutoReply())) return refuse("Spoken replies are switched off in Settings → Voice.", "switched_off", 409);
   // From OUR page only: the owner's cookie rides on a POST any other site
   // fires at the box, and a spoken reply through the cloud voice is billed
@@ -57,6 +58,14 @@ export async function POST(req: Request) {
   // Waits for an earlier reply rather than refusing: see withSpeechQueue.
   return withSpeechQueue(async () => {
     try {
+      // On a box running Hermes the reply is spoken by Hermes' own speech
+      // route, with the provider the Voice tab wrote — the same voice its
+      // channel replies would have.
+      if ((await getActiveHarness()) === "hermes") {
+        const spoken = await speakWithHermes(text);
+        if (!spoken.ok) return refuse("Could not speak that on this box.", spoken.code, spoken.status, spoken.reason ? { reason: spoken.reason } : {});
+        return new Response(spoken.audio, { headers: { "Content-Type": spoken.mime, "Cache-Control": "no-store" } });
+      }
       const [config, models, state] = await Promise.all([readConfig(), buildTtsInventory(), readVoiceState()]);
       const installed = models.filter((m) => m.kind === "tts" && m.installed);
       const command = localCommandPath(config);

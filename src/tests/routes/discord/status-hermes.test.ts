@@ -116,10 +116,56 @@ describe("GET /setup-api/discord/status — Hermes", () => {
     expect(body).toMatchObject({ configured: true, verified: false });
   });
 
-  it("asks Hermes only once for concurrent callers", async () => {
+  it("memoises its own CLI read and leaves the gateway to the shared reader", async () => {
     await Promise.all([GET(), GET(), GET()]);
+    // `send --list discord` is this route's own shell-out and stays memoised here.
     expect(mockRegistered).toHaveBeenCalledTimes(1);
-    expect(mockGatewayStatus).toHaveBeenCalledTimes(1);
+    // `hermes gateway status` is NOT: three status routes ask for that same
+    // command, so its dedup, its short failure TTL and the invalidation the
+    // gateway restart paths call all live in `hermesGatewayStatus()`. A second
+    // 15 s copy here shadowed all three — see
+    // `src/tests/unit/hermes-gateway-status-memo.test.ts`.
+    expect(mockGatewayStatus).toHaveBeenCalledTimes(3);
+  });
+
+  it("remembers a probe it could not answer for far less time than one it could", async () => {
+    // `null` is "Hermes could not be asked", and the row now offers Retry over
+    // exactly that state. Keeping it for the full fifteen seconds made that
+    // button a dead press: the same unknown came straight back out of the
+    // cache without the CLI being re-entered at all.
+    vi.useFakeTimers();
+    try {
+      mockRegistered.mockResolvedValue(null);
+      await GET();
+      expect(mockRegistered).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(Date.now() + 2_000);
+      await GET();
+      expect(mockRegistered).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(Date.now() + 2_000);
+      mockRegistered.mockResolvedValue(true);
+      expect((await (await GET()).json()).verified).toBe(true);
+      expect(mockRegistered).toHaveBeenCalledTimes(2);
+
+      // A real answer still gets the full window.
+      vi.setSystemTime(Date.now() + 5_000);
+      await GET();
+      expect(mockRegistered).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads the allowlist per request, so a save is visible at once", async () => {
+    // The snapshot and the access env are one file read each. Memoising them
+    // for 15 s composed a FRESH `gateway.running` with a stale allowlist: after
+    // the owner saved the allowlist and the gateway restarted, this route kept
+    // answering `denied-no-allowlist` — "every message is being dropped" — over
+    // the thing he had just fixed.
+    await Promise.all([GET(), GET(), GET()]);
+    expect(mockAccess).toHaveBeenCalledTimes(3);
+    expect(mockSnapshot).toHaveBeenCalledTimes(3);
   });
 
   it("never returns the token itself", async () => {

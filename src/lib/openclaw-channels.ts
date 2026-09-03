@@ -362,7 +362,7 @@ export async function readChannelRow(
  * never set up — the common case — re-spawn the CLI five times as often as one
  * where it is configured, which is the opposite of the point.
  */
-interface ChannelRowResult {
+export interface ChannelRowResult {
   /** False only when the gateway could not be asked, or its output not read. */
   answered: boolean;
   row: Record<string, unknown> | null;
@@ -490,7 +490,7 @@ interface CachedRow {
 interface InFlightRow {
   /** The channel's invalidation count when this read started. */
   epoch: number;
-  promise: Promise<Record<string, unknown> | null>;
+  promise: Promise<ChannelRowResult>;
 }
 
 const cachedRows = new Map<string, CachedRow>();
@@ -511,7 +511,7 @@ const epochs = new Map<string, number>();
  * or a poll can keep serving a "not paired" that the owner's scan has already
  * disproved.
  */
-export function readCachedChannelRow(channelId: string): Promise<Record<string, unknown> | null> {
+export function readCachedChannelRowResult(channelId: string): Promise<ChannelRowResult> {
   const epoch = epochs.get(channelId) ?? 0;
   const cached = cachedRows.get(channelId);
   if (cached) {
@@ -519,7 +519,9 @@ export function readCachedChannelRow(channelId: string): Promise<Record<string, 
     const ttl = cached.answered ? CHANNEL_STATUS_TTL_MS : CHANNEL_STATUS_FAILURE_TTL_MS;
     // `age >= 0` because the clock is wall-clock: a Jetson whose RTC is corrected
     // BACKWARDS by NTP would otherwise pin the entry until the clock caught up.
-    if (age >= 0 && age < ttl) return Promise.resolve(cached.row);
+    if (age >= 0 && age < ttl) {
+      return Promise.resolve({ answered: cached.answered, row: cached.row });
+    }
   }
   // Join a read in flight — but only one started since the last invalidation.
   // An older one is answering a question the owner has already changed the
@@ -535,7 +537,7 @@ export function readCachedChannelRow(channelId: string): Promise<Record<string, 
       if ((epochs.get(channelId) ?? 0) === epoch) {
         cachedRows.set(channelId, { row, answered, at: Date.now() });
       }
-      return row;
+      return { answered, row };
     })
     .finally(() => {
       // Only ever clear our OWN entry: an abandoned read must not evict the
@@ -545,6 +547,18 @@ export function readCachedChannelRow(channelId: string): Promise<Record<string, 
     });
   inFlightRows.set(channelId, { epoch, promise });
   return promise;
+}
+
+/**
+ * {@link readCachedChannelRowResult} for callers that only need the row.
+ *
+ * A `null` row here means BOTH "the gateway said there is no such channel" and
+ * "the gateway could not be asked" — two different facts. Anything that has to
+ * tell them apart (the Settings list, which must not draw "Not configured" over
+ * a channel nobody managed to read) needs the result form above.
+ */
+export function readCachedChannelRow(channelId: string): Promise<Record<string, unknown> | null> {
+  return readCachedChannelRowResult(channelId).then(({ row }) => row);
 }
 
 /** {@link readChannelStatus} over {@link readCachedChannelRow}. */

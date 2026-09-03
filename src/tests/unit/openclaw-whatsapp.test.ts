@@ -18,14 +18,26 @@ vi.mock("@/lib/openclaw-config", async () => {
 });
 vi.mock("@/lib/openclaw-channels", () => ({
   invalidateChannelStatus: vi.fn(),
-  readCachedChannelRow: vi.fn(),
+  readCachedChannelRowResult: vi.fn(),
 }));
 
 import { spawnOpenclawCli } from "@/lib/openclaw-config";
-import { readCachedChannelRow } from "@/lib/openclaw-channels";
+import { readCachedChannelRowResult } from "@/lib/openclaw-channels";
 
 const mockSpawn = vi.mocked(spawnOpenclawCli);
-const mockChannel = vi.mocked(readCachedChannelRow);
+const mockChannelResult = vi.mocked(readCachedChannelRowResult);
+
+/**
+ * The gateway ANSWERED. A `null` row from an answering gateway means "there is
+ * no such channel here" — a real fact about an unconfigured box — which is a
+ * different thing from the gateway not being reachable at all.
+ */
+const mockChannel = {
+  mockResolvedValue: (row: Record<string, unknown> | null) =>
+    mockChannelResult.mockResolvedValue({ answered: true, row }),
+  mockResolvedValueOnce: (row: Record<string, unknown> | null) =>
+    mockChannelResult.mockResolvedValueOnce({ answered: true, row }),
+};
 
 const QR_A = "data:image/png;base64,AAAA";
 const QR_B = "data:image/png;base64,BBBB";
@@ -310,6 +322,7 @@ describe("readOpenclawWhatsappStatus", () => {
       enabled: true,
       paired: true,
       connected: true,
+      verified: true,
     });
   });
 
@@ -409,12 +422,31 @@ describe("readOpenclawWhatsappStatus", () => {
   });
 
   it("never invents a link when the gateway could not be asked", async () => {
-    mockChannel.mockResolvedValue(null);
+    // The gateway could not be asked at all. Same null row as the case below,
+    // and the opposite fact: the panel must be told this "not_configured" is
+    // nobody answering, or it draws "Not configured" over a paired phone
+    // whenever the gateway is restarting.
+    mockChannelResult.mockResolvedValue({ answered: false, row: null });
     expect(await lib.readOpenclawWhatsappStatus()).toEqual({
       state: "not_configured",
       enabled: false,
       paired: false,
       connected: false,
+      verified: false,
+    });
+  });
+
+  it("reports a gateway that answered 'no such channel' as a real answer", async () => {
+    // The DEFAULT state of an OpenClaw box: gateway healthy, WhatsApp never set
+    // up. Reading this as "could not check" would give the whole SKU a
+    // permanent unreachable row with a retry that can never clear it.
+    mockChannelResult.mockResolvedValue({ answered: true, row: null });
+    expect(await lib.readOpenclawWhatsappStatus()).toEqual({
+      state: "not_configured",
+      enabled: false,
+      paired: false,
+      connected: false,
+      verified: true,
     });
   });
 });

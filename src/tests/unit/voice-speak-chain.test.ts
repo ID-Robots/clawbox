@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { speakThroughChain } from "@/lib/voice-speak";
+import { speakThroughChain, withSpeechLock, withSpeechQueue } from "@/lib/voice-speak";
 import type { VoiceConfigView, VoiceEngine } from "@/lib/voice-output";
 
 /**
@@ -55,5 +55,47 @@ describe("speakThroughChain", () => {
     });
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe("no_voice");
+  });
+});
+
+/**
+ * The box speaks one thing at a time. A reply waits its turn — one speaking,
+ * up to three behind it, the fifth simultaneous ask refused — while an
+ * audition is refused the moment anything is admitted.
+ */
+describe("the speech queue", () => {
+  const gate = () => {
+    let open: () => void = () => {};
+    const opened = new Promise<void>((resolve) => { open = resolve; });
+    return { open, work: async () => { await opened; return new Response("ok"); } };
+  };
+
+  it("admits one speaking and three waiting, refuses the fifth, and lets the next in once one finished", async () => {
+    const gates = [gate(), gate(), gate(), gate()];
+    const running = gates.map((g) => withSpeechQueue(g.work));
+    // All four are admitted before any of them has started speaking.
+    const fifth = await withSpeechQueue(async () => new Response("late"));
+    expect(fifth.status).toBe(429);
+    expect((await fifth.json()).code).toBe("busy");
+    gates[0].open();
+    expect((await running[0]).status).toBe(200);
+    // A slot came free: the next ask is admitted.
+    const sixthGate = gate();
+    const sixth = withSpeechQueue(sixthGate.work);
+    for (const g of gates.slice(1)) g.open();
+    sixthGate.open();
+    for (const r of running.slice(1)) expect((await r).status).toBe(200);
+    expect((await sixth).status).toBe(200);
+  });
+
+  it("refuses an audition while anything is admitted", async () => {
+    const g = gate();
+    const reply = withSpeechQueue(g.work);
+    const audition = await withSpeechLock(async () => new Response("sample"));
+    expect(audition.status).toBe(429);
+    g.open();
+    await reply;
+    const later = await withSpeechLock(async () => new Response("sample"));
+    expect(later.status).toBe(200);
   });
 });

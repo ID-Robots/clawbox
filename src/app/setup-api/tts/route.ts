@@ -3,16 +3,26 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import { get as readPreference } from "@/lib/config-store";
+import { speechEntitledTier } from "@/lib/hermes-tts";
+import { getActiveHarness } from "@/lib/harness";
+import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "@/lib/harness/credentials";
+import {
+  hermesVoiceConfigView,
+  readHermesVoice,
+  selectHermesEngine,
+  writeHermesCloudVoice,
+  HermesTtsWriteError,
+} from "@/lib/hermes-tts";
 import {
   buildTtsInventory,
   KOKORO_STAMP,
+  localTtsCommandRunnable,
   type LocalModelEntry,
 } from "@/lib/local-models";
 import {
   openclawIsAbsent,
   readConfig,
   runOpenclawConfigSet,
-  type OpenClawConfig,
 } from "@/lib/openclaw-config";
 import {
   buildVoiceOutputStatus,
@@ -23,16 +33,17 @@ import {
   selectionError,
   type LocalVoiceProbe,
   type VoiceChoice,
+  type VoiceConfigView,
   type VoiceOutputState,
   type VoiceOutputStatus,
 } from "@/lib/voice-output";
 import { readLocalVoice, readVoiceState, writeLocalVoice, writeVoiceState } from "@/lib/voice-output-store";
+import { isCloudVoice, isCloudVoiceFor, isLocalVoice, isVoiceLanguage } from "@/lib/voice-catalog";
+import { createSerialLock } from "@/lib/serial-lock";
 import { wireLocalVoice } from "@/lib/voice-local-wiring";
 import { getVoiceAutoReply, setVoiceAutoReply, ttsAutoModeFor } from "@/lib/voice-reply";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
-import { isCloudVoice, isCloudVoiceFor, isLocalVoice, isVoiceLanguage } from "@/lib/voice-catalog";
-import { createSerialLock } from "@/lib/serial-lock";
 
 /**
  * GET  /setup-api/tts            → who speaks for this box
@@ -55,7 +66,10 @@ function refuse(error: string, code: string, status: number) {
   return NextResponse.json({ error, code }, { status, headers: NO_STORE });
 }
 
-function localProbeFrom(config: OpenClawConfig, models: LocalModelEntry[], commandPresent: boolean): LocalVoiceProbe {
+// `VoiceConfigView`, not `OpenClawConfig`: the only thing read here is the
+// local provider's command, and both harnesses' configs are projected into
+// that view. `OpenClawConfig` is structurally assignable to it.
+function localProbeFrom(config: VoiceConfigView, models: LocalModelEntry[], commandPresent: boolean): LocalVoiceProbe {
   const installedTts = models.filter(m => m.kind === "tts" && m.installed);
   return {
     providerConfigured: Boolean(localCommandPath(config)),
@@ -74,14 +88,46 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
-async function probeBox() {
-  const [config, models] = await Promise.all([readConfig(), buildTtsInventory()]);
+/**
+ * The box's speech config, in the ONE shape the status builder reads —
+ * whichever harness holds it.
+ *
+ * OpenClaw keeps it in openclaw.json; Hermes keeps it in its own `tts:` block
+ * and `hermes-tts.ts` projects that into the same view. Everything downstream
+ * (which engine is configured, what Auto resolves to, the privacy notice) is
+ * then decided once, by rules neither edition can disagree about.
+ *
+ * The LOCAL engine is read the same way on both: `buildTtsInventory()` stats
+ * Kokoro's own artefacts on this disk, and the provider entry's command has to
+ * still be there. Hermes runs the same `clawbox-tts.sh` (install.sh registers
+ * it as a `type: command` provider), so this half needed no edition of its own.
+ */
+async function readVoiceConfig(harness: Awaited<ReturnType<typeof getActiveHarness>>): Promise<VoiceConfigView> {
+  if (harness !== "hermes") return await readConfig();
+  const [probe, token, entitled] = await Promise.all([
+    readHermesVoice(),
+    resolveClawaiToken(),
+    speechEntitledTier(),
+  ]);
+  // The endpoint only for a box whose plan includes the cloud voice; see the
+  // parameter's own note for why that is said as a null URL.
+  return hermesVoiceConfigView(probe, token, entitled ? CLAWBOX_AI_PROXY_URL : null);
+}
+
+async function probeBox(harness: Awaited<ReturnType<typeof getActiveHarness>>) {
+  const [config, models] = await Promise.all([readVoiceConfig(harness), buildTtsInventory()]);
   const command = localCommandPath(config);
-  // The provider entry names a script; if that script is gone the box cannot
-  // speak locally however healthy the voices look. Fall back to the installer's
-  // own artefacts when no command is configured at all.
+  // The provider entry names a script; if that script is gone — or is there but
+  // cannot be run — the box cannot speak locally however healthy the voices
+  // look. Through the shared helper, because the chat's spoken-reply capability
+  // asks the same question and because the two editions spell `command`
+  // differently: stat'ing Hermes' command LINE whole read every correctly
+  // provisioned box on that edition as "not wired to use its voice".
+  //
+  // Fall back to the installer's own artefacts when no command is configured at
+  // all — the stamp is a marker file, so its question is existence, not X_OK.
   const commandPresent = command
-    ? await exists(command)
+    ? await localTtsCommandRunnable(command)
     : await exists(KOKORO_STAMP);
   return { config, probe: localProbeFrom(config, models, commandPresent) };
 }
@@ -98,17 +144,57 @@ async function withUiLanguage(state: VoiceOutputState): Promise<VoiceOutputState
   return isVoiceLanguage(ui) ? { ...state, language: ui } : state;
 }
 
-/** The status plus the owner's switch for spoken replies (src/lib/voice-reply.ts). */
-type VoiceStatusAnswer = VoiceOutputStatus & { autoReply: boolean };
+/**
+ * The half of speech that really is OpenClaw's.
+ *
+ * A spoken reply in WhatsApp, Telegram or Discord is the GATEWAY speaking on
+ * a channel, and a Hermes box has no gateway and no channels. That is a fact
+ * about one half of the feature, not a reason to refuse the whole route — the
+ * Voice tab itself (which engine speaks, in which voice, and the sample) is
+ * answered on every edition. Exactly the shape /setup-api/stt already uses for
+ * the other direction of speech, whose comment has claimed "Same shape
+ * /setup-api/tts answers with" since before it was true.
+ */
+const CHANNELS_UNSUPPORTED = {
+  supportedOnEdition: false,
+  error: "Spoken replies on channels are an OpenClaw feature and are not part of this edition.",
+} as const;
 
-async function status(): Promise<VoiceStatusAnswer> {
+/**
+ * Whether the box's CHANNEL replies can be spoken.
+ *
+ * Keyed on the ACTIVE harness, like every write on this route, and not on the
+ * edition. `openclawIsAbsent()` is only ever true for the `hermes` SKU, so on
+ * a licensed DUAL box switched to Hermes it said channels work — while every
+ * setting on this page was being written into Hermes' config, which serves no
+ * channel at all. The panel would have confirmed a voice change that the
+ * WhatsApp and Telegram replies never took.
+ */
+async function channelsSpeak(harness: Awaited<ReturnType<typeof getActiveHarness>>) {
+  return harness === "openclaw" && !openclawIsAbsent()
+    ? { supportedOnEdition: true as const }
+    : CHANNELS_UNSUPPORTED;
+}
+
+type VoiceStatusBody = VoiceOutputStatus & {
+  channels: typeof CHANNELS_UNSUPPORTED | { supportedOnEdition: true };
+  /** The owner's switch for spoken replies (src/lib/voice-reply.ts). */
+  autoReply: boolean;
+};
+
+async function status(): Promise<VoiceStatusBody> {
+  const harness = await getActiveHarness();
   const [{ config, probe }, state, localVoice, autoReply] = await Promise.all([
-    probeBox(),
+    probeBox(harness),
     readVoiceState().then(withUiLanguage),
     readLocalVoice(),
     getVoiceAutoReply(),
   ]);
-  return { ...buildVoiceOutputStatus(config, probe, state, localVoice), autoReply };
+  return {
+    ...buildVoiceOutputStatus(config, probe, state, localVoice),
+    channels: await channelsSpeak(harness),
+    autoReply,
+  };
 }
 
 /**
@@ -116,27 +202,33 @@ async function status(): Promise<VoiceStatusAnswer> {
  * a failed CLI write must leave the stored switch describing what the box
  * still does. The boot repair (ensureVoiceAutoReplyMode) never overwrites
  * a mode that is present, so the two are brought into step here and
- * nowhere else.
+ * nowhere else. Only the gateway has channels to answer with a voice, so
+ * only a box running OpenClaw gets the mode written; the desktop chat's
+ * half of the switch works on every harness.
  */
 async function handleAutoReply(enabled: unknown) {
   if (typeof enabled !== "boolean") {
     return refuse("Say whether spoken replies are on or off.", "bad_request", 400);
   }
-  if (!openclawIsAbsent()) {
+  if ((await getActiveHarness()) === "openclaw" && !openclawIsAbsent()) {
     await runOpenclawConfigSet([`${await ttsConfigHome()}.auto`, ttsAutoModeFor(enabled)]);
   }
   await setVoiceAutoReply(enabled);
   return NextResponse.json(await status(), { headers: NO_STORE });
 }
 
-/**
- * Every write below runs through the openclaw CLI (`config set
- * tts.provider` for the selection, `…providers.<cloud>.voice` for the cloud
- * voice — OpenClaw 2 moved the whole block from messages.tts to a top-level
- * tts object; the readers in voice-output.ts accept both homes). The Hermes SKU ships no openclaw binary at all, so the panel
- * offered a Select the route then refused with a 409. Say the true thing once,
- * here, instead of letting the customer discover it a button at a time. Same
- * shape ClawKeep reports for the same reason (lib/clawkeep.ts).
+/*
+ * Every write below goes to the harness that will actually SPEAK — the
+ * openclaw CLI (`config set tts.provider`, `…providers.<cloud>.voice`;
+ * OpenClaw 2 moved the block from messages.tts to a top-level tts object and
+ * the readers in voice-output.ts accept both homes), or `hermes config set
+ * tts.*` on a box running Hermes (see lib/hermes-tts.ts).
+ *
+ * Keyed on the ACTIVE harness rather than on "is the openclaw binary here",
+ * which is what makes the dual SKU come out right: a dual box switched to
+ * Hermes has an openclaw binary AND speaks through Hermes, so a write chosen
+ * by the binary's presence would land in the config of the harness that is
+ * not talking.
  */
 /**
  * Which home this box's speech config lives in: top-level `tts` (OpenClaw 2)
@@ -155,16 +247,7 @@ async function ttsConfigHome(): Promise<"tts" | "messages.tts"> {
   return "tts";
 }
 
-const EDITION_UNSUPPORTED = {
-  supportedOnEdition: false,
-  error: "Voice output is an OpenClaw feature and is not part of this edition.",
-  code: "edition",
-} as const;
-
 export async function GET() {
-  if (openclawIsAbsent()) {
-    return NextResponse.json(EDITION_UNSUPPORTED, { headers: NO_STORE });
-  }
   try {
     return NextResponse.json(await status(), { headers: NO_STORE });
   } catch (err) {
@@ -185,23 +268,30 @@ export async function GET() {
 const withVoiceState = createSerialLock();
 
 /**
- * Which voice an engine speaks with. The on-device voice is the file the local
- * script reads, so the gateway's next utterance uses it with no restart; the
- * cloud voice is OpenClaw's own `providers.<cloud>.voice`, written the way the
- * provider itself is. Both are validated against the catalogue the engine
+ * Which voice an engine speaks with.
+ *
+ * The on-device voice is the file the local script reads, so the next
+ * utterance uses it with no restart — and it needs no harness branch, because
+ * both harnesses run that same script. The cloud voice is the harness's own
+ * per-provider key: OpenClaw's `providers.<cloud>.voice`, or Hermes'
+ * `tts.openai.voice`. Both are validated against the catalogue the engine
  * accepts, so an unknown id is refused here instead of failing at speech time.
  */
 async function handleVoice(engine: unknown, voice: unknown) {
+  const harness = await getActiveHarness();
   if (engine === "local") {
     if (!isLocalVoice(voice)) {
       return refuse("That voice is not on this box.", "unknown_voice", 400);
     }
+    // Edition-agnostic on purpose: `clawbox-tts.sh` reads this file on every
+    // utterance and both harnesses run that same script, so the on-device
+    // voice needs no harness branch at all.
     await writeLocalVoice(voice);
   } else if (engine === "cloud") {
     if (!isCloudVoice(voice)) {
       return refuse("The cloud voice does not have that voice.", "unknown_voice", 400);
     }
-    const target = cloudSpeechTarget(await readConfig());
+    const target = cloudSpeechTarget(await readVoiceConfig(harness));
     if (!target) {
       return refuse("That voice is not available on this box.", "not_available", 409);
     }
@@ -211,12 +301,19 @@ async function handleVoice(engine: unknown, voice: unknown) {
     if (!isCloudVoiceFor(target.model, voice)) {
       return refuse(`The cloud voice's model (${target.model}) does not have that voice.`, "unknown_voice", 400);
     }
-    // The DETECTED home, not a hardcoded one: writing top-level tts.* while
-    // the providers still live under the legacy messages.tts would split the
-    // voice from its provider definition (and the readers prefer the
-    // top-level home). ttsConfigHome() keys off the same signal the readers
-    // use — where the providers actually are.
-    await runOpenclawConfigSet([`${await ttsConfigHome()}.providers.${target.providerId}.voice`, voice]);
+    if (harness === "hermes") {
+      // Hermes' own per-provider key. Same catalogue on both editions: the
+      // OpenAI-compatible slot takes the same voice names OpenClaw writes, so
+      // the ids map one to one and no translation table is needed.
+      await writeHermesCloudVoice(voice);
+    } else {
+      // The DETECTED home, not a hardcoded one: writing top-level tts.* while
+      // the providers still live under the legacy messages.tts would split the
+      // voice from its provider definition (and the readers prefer the
+      // top-level home). ttsConfigHome() keys off the same signal the readers
+      // use — where the providers actually are.
+      await runOpenclawConfigSet([`${await ttsConfigHome()}.providers.${target.providerId}.voice`, voice]);
+    }
   } else {
     return refuse("Pick the voice on this box or the cloud voice.", "unknown_engine", 400);
   }
@@ -231,6 +328,27 @@ async function handleLanguage(language: unknown) {
     await writeVoiceState({ ...(await readVoiceState()), language });
   });
   return NextResponse.json(await status(), { headers: NO_STORE });
+}
+
+/** Write the harness's selection: Hermes through its own writer, OpenClaw through the CLI. */
+async function selectProvider(
+  harness: Awaited<ReturnType<typeof getActiveHarness>>,
+  before: VoiceOutputStatus,
+  providerId: string,
+): Promise<Response | null> {
+  if (harness === "hermes") {
+    // Endpoint and credential first, selection last — see selectHermesEngine.
+    // A refusal here must not be swallowed: a box left pointing at a
+    // provider whose credential never landed answers every utterance with a
+    // 401, which reads as "the voice is broken" rather than "it was never
+    // configured".
+    const engine = before.engines.find((e) => e.providerId === providerId)?.id;
+    if (!engine) return refuse("That voice is not available on this box.", "not_available", 409);
+    await selectHermesEngine(engine, await resolveClawaiToken());
+    return null;
+  }
+  await runOpenclawConfigSet([`${await ttsConfigHome()}.provider`, providerId]);
+  return null;
 }
 
 /**
@@ -249,10 +367,16 @@ type LocalFallbackReason = "not_installed" | "not_wired";
  * that never speaks), and the answer carries `fallback` so the panel can say
  * in one amber line what happened and why.
  */
-async function settleOnAuto(before: VoiceOutputStatus, requested: VoiceChoice, reason: LocalFallbackReason) {
+async function settleOnAuto(
+  harness: Awaited<ReturnType<typeof getActiveHarness>>,
+  before: VoiceOutputStatus,
+  requested: VoiceChoice,
+  reason: LocalFallbackReason,
+) {
   const providerId = providerIdForChoice("auto", before.engines);
-  if (providerId && providerId !== before.activeProviderId && !openclawIsAbsent()) {
-    await runOpenclawConfigSet([`${await ttsConfigHome()}.provider`, providerId]);
+  if (providerId && providerId !== before.activeProviderId) {
+    const refused = await selectProvider(harness, before, providerId);
+    if (refused) return refused;
   }
   await withVoiceState(async () => {
     await writeVoiceState({ ...(await readVoiceState()), choice: "auto" });
@@ -261,20 +385,22 @@ async function settleOnAuto(before: VoiceOutputStatus, requested: VoiceChoice, r
 }
 
 async function handleSelect(choice: VoiceChoice) {
-  let { config, probe } = await probeBox();
+  const harness = await getActiveHarness();
+  let { config, probe } = await probeBox(harness);
 
   // The box's own voice, installed but not wired: Kokoro is there (stamp,
-  // unit) and only the `tts-local-cli` provider entry is missing — the state
-  // install.sh leaves behind when another provider was already selected. The
-  // owner's pick is the moment to write it, not a refusal to read.
+  // unit) and only OpenClaw's `tts-local-cli` provider entry is missing — the
+  // state install.sh leaves behind when another provider was already
+  // selected. The owner's pick is the moment to write it, not a refusal to
+  // read. OpenClaw only: Hermes' provider is registered by install.sh itself.
   let wiringFailed = false;
-  if (choice === "local" && probe.engineInstalled && !(probe.providerConfigured && probe.commandPresent)) {
+  if (choice === "local" && harness !== "hermes" && probe.engineInstalled && !(probe.providerConfigured && probe.commandPresent)) {
     if (openclawIsAbsent()) {
       return refuse("This box cannot change the voice.", "cannot_change", 409);
     }
     const wired = await wireLocalVoice(await ttsConfigHome());
     if (wired.ok) {
-      ({ config, probe } = await probeBox());
+      ({ config, probe } = await probeBox(harness));
     } else {
       wiringFailed = true;
     }
@@ -286,7 +412,7 @@ async function handleSelect(choice: VoiceChoice) {
   const refusal = selectionError(choice, before.engines);
   if (refusal && choice === "local") {
     // Not a red error: the default voice stays, and the answer says why.
-    return settleOnAuto(before, choice, probe.engineInstalled || wiringFailed ? "not_wired" : "not_installed");
+    return settleOnAuto(harness, before, choice, probe.engineInstalled || wiringFailed ? "not_wired" : "not_installed");
   }
   // A cloud voice the box cannot use is still refused out loud: the cloud
   // engine has nothing on this box to install or wire, so "fall back" would
@@ -300,10 +426,8 @@ async function handleSelect(choice: VoiceChoice) {
   }
 
   if (providerId !== before.activeProviderId) {
-    if (openclawIsAbsent()) {
-      return refuse("This box cannot change the voice.", "cannot_change", 409);
-    }
-    await runOpenclawConfigSet([`${await ttsConfigHome()}.provider`, providerId]);
+    const refused = await selectProvider(harness, before, providerId);
+    if (refused) return refused;
   }
 
   // Re-read under the lock: the copy above decided the refusal, but the CLI
@@ -316,11 +440,6 @@ async function handleSelect(choice: VoiceChoice) {
 }
 
 export async function POST(req: Request) {
-  // Refuse before the body is even read: on this edition there is no binary to
-  // spawn, so nothing below could land.
-  if (openclawIsAbsent()) {
-    return NextResponse.json(EDITION_UNSUPPORTED, { status: 409 });
-  }
   let body: unknown;
   try {
     body = await req.json();
@@ -332,10 +451,11 @@ export async function POST(req: Request) {
   if (action !== "select" && action !== "voice" && action !== "language" && action !== "autoReply") {
     return refuse("Unknown action.", "bad_request", 400);
   }
-  // OWNER ONLY for the switch: whether the box answers a voice message with
-  // audio — through the cloud voice, which sends the words off the box — is
-  // the person's decision, and the agent holds the MCP bearer the middleware
-  // also admits here. Same rule as the transcription engine (stt route).
+  // OWNER ONLY for the switch, and from OUR page: whether the box answers a
+  // voice message with audio — through the cloud voice, which sends the
+  // words off the box — is the person's decision, and the agent holds the
+  // MCP bearer the middleware also admits here (same rule as the stt route);
+  // the cookie rides on a POST any other site fires at the box (same-origin.ts).
   if (action === "autoReply" && !(await hasOwnerSession(req))) {
     return NextResponse.json(
       { error: "Changing spoken replies needs a signed-in browser session.", kind: "owner_only", code: "owner_only" },
@@ -363,6 +483,11 @@ export async function POST(req: Request) {
     return await handleSelect(choice as VoiceChoice);
   } catch (err) {
     console.warn(`[setup-api/tts] ${action} failed:`, err);
+    // A harness that refused the write is a 409 the panel can explain, not a
+    // 500: the box is reachable and said no. Anything else really is a fault.
+    if (err instanceof HermesTtsWriteError) {
+      return refuse("This box could not change the voice.", "cannot_change", 409);
+    }
     return refuse("Could not change the voice on this box.", "cannot_change", 500);
   }
 }

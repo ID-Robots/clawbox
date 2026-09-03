@@ -3,10 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vite
 /**
  * `/setup-api/chat/capabilities` — that the Hermes facts are asked TOGETHER.
  *
- * Five of the facts this route reports are independent probes, and on a cold
+ * Six of the facts this route reports are independent probes, and on a cold
  * cache each is a real cost: `hermes chat --help` is a Python interpreter
- * start (0.9-1.3 s on a Jetson), the two `hermes config get` reads are two
- * more, the streaming probe mints a WebSocket ticket, and the image-route
+ * start (0.9-1.3 s on a Jetson), the `hermes config get` reads (the vision
+ * route, the image backend, and the voice `tts.provider`) are more of the
+ * same, the streaming probe mints a WebSocket ticket, and the image-route
  * probe leaves the device. `use-harness-adapter` asks for all of them on every
  * chat mount, and every `hermes config set` bumps config.yaml's mtime and
  * evicts the config memos behind two of them.
@@ -24,6 +25,11 @@ vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/harness/clawai-images", () => ({ clawaiImageRouteReachable: vi.fn() }));
 vi.mock("@/lib/hermes-dashboard-turn", () => ({ hermesCanStreamTurns: vi.fn() }));
+vi.mock("@/lib/hermes-tts", () => ({
+  hermesSpeaksReplies: vi.fn(),
+  // Read by `factsPending`; the memo accessor never spawns, so a plain false.
+  hermesVoiceProbePending: vi.fn(() => false),
+}));
 vi.mock("@/lib/harness/hermes-features", () => ({
   hermesSupportsImages: vi.fn(),
   hermesHasVisionRoute: vi.fn(),
@@ -68,6 +74,9 @@ beforeEach(async () => {
   const dashboard = (await import("@/lib/hermes-dashboard-turn")) as unknown as {
     hermesCanStreamTurns: Mock;
   };
+  const voice = (await import("@/lib/hermes-tts")) as unknown as {
+    hermesSpeaksReplies: Mock;
+  };
   const features = (await import("@/lib/harness/hermes-features")) as unknown as {
     hermesSupportsImages: Mock;
     hermesHasVisionRoute: Mock;
@@ -82,6 +91,7 @@ beforeEach(async () => {
     hermesStreamsTurns: dashboard.hermesCanStreamTurns,
     hasClawaiImageRoute: images.clawaiImageRouteReachable,
     hermesAgentDrawsImages: features.hermesAgentDrawsImages,
+    hermesSpeaksReplies: voice.hermesSpeaksReplies,
   };
 
   getActiveHarness.mockResolvedValue("hermes");
@@ -126,6 +136,7 @@ describe("GET /setup-api/chat/capabilities asks the Hermes probes together", () 
       hermesStreamsTurns: true,
       hasClawaiImageRoute: true,
       hermesAgentDrawsImages: true,
+      hermesSpeaksReplies: true,
     });
   });
 

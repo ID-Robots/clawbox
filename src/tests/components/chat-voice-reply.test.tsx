@@ -21,6 +21,8 @@ const sentFrames: Frame[] = [];
 const speakBodies: string[] = [];
 let autoReplyAnswer = true;
 let replyText = "**Fine**, thanks.";
+/** When set, a turn is acked with "Sent." and the reply arrives from history instead. */
+let ackOnly = false;
 
 class FakeGatewayWs {
   static readonly CONNECTING = 0;
@@ -53,7 +55,11 @@ class FakeGatewayWs {
       return;
     }
     if (frame.method === "chat.history") {
-      this.respond(id, { messages: [] });
+      // After an ack-only turn, the stored reply is what history answers.
+      const stored = ackOnly && sentFrames.some((f) => f.method === "chat.send")
+        ? [{ role: "assistant", content: [{ type: "text", text: replyText }], timestamp: 1787260001000 }]
+        : [];
+      this.respond(id, { messages: stored });
       return;
     }
     if (frame.method !== "chat.send") {
@@ -72,7 +78,7 @@ class FakeGatewayWs {
         sessionKey: "agent:main:main",
         state: "final",
         stopReason: "stop",
-        message: { role: "assistant", content: [{ type: "text", text: replyText }], timestamp: 1787260000000 },
+        message: { role: "assistant", content: [{ type: "text", text: ackOnly ? "Sent." : replyText }], timestamp: 1787260000000 },
       },
     }), 1);
   }
@@ -178,6 +184,7 @@ describe("spoken replies in the desktop chat", () => {
     FakeMediaRecorder.instances.length = 0;
     autoReplyAnswer = true;
     replyText = "**Fine**, thanks.";
+    ackOnly = false;
     resetHarnessCache();
     window.localStorage.clear();
     Element.prototype.scrollIntoView = vi.fn();
@@ -241,4 +248,15 @@ describe("spoken replies in the desktop chat", () => {
     await speakIntoTheChat();
     await waitFor(() => expect(speakBodies.length).toBe(1));
   });
+
+  it("still speaks a reply that only arrived through the history refetch after an ack-only final", async () => {
+    ackOnly = true;
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    // The gateway acked with "Sent."; the reply is fetched 3 s later and is
+    // owed aloud all the same.
+    await waitFor(() => expect(speakBodies).toEqual([JSON.stringify({ text: "Fine, thanks." })]), { timeout: 8000 });
+  }, 12_000);
+
 });
