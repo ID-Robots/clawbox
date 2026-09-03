@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "events";
 
 /**
  * The defect these cover: on the Hermes SKU the on-demand start gate was
@@ -27,6 +28,7 @@ const getAllMock = vi.fn();
 vi.mock("@/lib/config-store", () => ({
   getAll: (...args: unknown[]) => getAllMock(...args),
   DATA_DIR: "/tmp/clawbox-test-data",
+  CONFIG_ROOT: "/tmp/clawbox-test-root",
 }));
 
 const llamaCppMocks = {
@@ -67,6 +69,19 @@ const LAUNCH_SPEC = {
 /** A child that looks alive enough for bootLlamaCppServer to accept it. */
 function fakeChild(pid = 4242) {
   return { pid, on: vi.fn(), kill: vi.fn() };
+}
+
+type EmittingChild = EventEmitter & { pid: number | undefined; kill: () => void };
+
+/**
+ * A child that emits for real, so a missing listener fails the way Node fails:
+ * an 'error' event nobody is listening for is an uncaught exception.
+ */
+function emittingChild(pid: number | undefined): EmittingChild {
+  const child = new EventEmitter() as EmittingChild;
+  child.pid = pid;
+  child.kill = vi.fn();
+  return child;
 }
 
 async function loadModule() {
@@ -170,5 +185,66 @@ describe("llama.cpp auto-start gate", () => {
     const { startLlamaCppServer } = await loadModule();
     expect(await startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
     expect(spawnMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * What happens to the web server when the llama.cpp child goes wrong.
+ *
+ * Both of these are about the same thing: the supervisor has to hear about the
+ * child through an event that is actually delivered. A `spawn` that fails
+ * before a process exists emits 'error' — and an 'error' event with no listener
+ * is an uncaught exception, so a child that merely could not be created used to
+ * take the whole ClawBox web server down with it.
+ */
+describe("llama.cpp child supervision", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    llamaCppMocks.getLlamaCppLaunchSpec.mockReturnValue(LAUNCH_SPEC);
+    llamaCppMocks.queryLlamaCppModels.mockResolvedValue([]);
+    llamaCppMocks.readLlamaCppPid.mockResolvedValue(null);
+    llamaCppMocks.isLlamaCppPidRunning.mockReturnValue(false);
+    llamaCppMocks.clearLlamaCppPid.mockResolvedValue(undefined);
+    llamaCppMocks.ensureLlamaCppRuntimeDir.mockResolvedValue(undefined);
+    llamaCppMocks.writeLlamaCppPid.mockResolvedValue(undefined);
+    llamaCppMocks.getConfiguredLlamaCppModelAlias.mockReturnValue("gemma4-e2b-it-q4_0");
+    readConfigMock.mockResolvedValue({});
+    getAllMock.mockResolvedValue({ local_ai_configured: true, local_ai_provider: "llamacpp" });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("survives a child that could not be spawned at all", async () => {
+    const child = emittingChild(undefined);
+    spawnMock.mockReturnValue(child);
+
+    const { startLlamaCppServer } = await loadModule();
+    await expect(startLlamaCppServer("gemma4-e2b-it-q4_0")).rejects.toThrow(/Failed to start llama.cpp/);
+
+    // Node delivers this after the synchronous failure the caller already saw.
+    expect(() => child.emit("error", new Error("spawn EAGAIN"))).not.toThrow();
+  });
+
+  it("schedules exactly one retry however the child went away", async () => {
+    vi.useFakeTimers();
+    const child = emittingChild(4242);
+    spawnMock.mockReturnValue(child);
+
+    const { startLlamaCppServer } = await loadModule();
+    expect(await startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+
+    // A real child emits both, in this order. A supervisor listening to each of
+    // them would restart twice for one death.
+    spawnMock.mockReturnValue(emittingChild(4243));
+    child.emit("exit", 1);
+    child.emit("close", 1);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(spawnMock).toHaveBeenCalledTimes(2);
   });
 });

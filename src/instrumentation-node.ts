@@ -286,6 +286,15 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
     },
   )
 
+  // Attached BEFORE the pid check below, because a spawn that failed emits
+  // 'error' asynchronously and an 'error' event with no listener is an uncaught
+  // exception: a child that merely could not be created (fork(2) answering
+  // EAGAIN while the box boots) took the whole web server down with it. The
+  // failure itself is still reported to the caller, by the pid check.
+  child.on('error', (err) => {
+    console.error('[instrumentation] llama.cpp failed to start:', err instanceof Error ? err.message : err)
+  })
+
   if (!child.pid) {
     throw new Error('Failed to start llama.cpp')
   }
@@ -295,7 +304,10 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
   await llamaCpp.writeLlamaCppPid(child.pid, spec.pidPath)
   console.log(`[instrumentation] llama.cpp auto-starting ${alias} (pid=${child.pid})`)
 
-  child.on('exit', (code) => {
+  // 'close' rather than 'exit', for the same reason the terminal server uses
+  // it: it is the one ending every child reaches, so the pid file is cleared
+  // and the retry scheduled exactly once however the child went away.
+  child.on('close', (code) => {
     void (async () => {
       try {
         if (llamaCppChild === child) {
