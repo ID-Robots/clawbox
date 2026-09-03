@@ -77,14 +77,22 @@ export async function POST(request: Request) {
     await set("telegram_bot_token", botToken);
 
     if (harness === "hermes") {
-      await setHermesTelegramToken(botToken, request.signal);
+      // No `request.signal` past this point. The line above has already written
+      // the token to ClawBox's own store and, on a token change, cleared the
+      // approvals — so a browser that goes away now (a phone locking during the
+      // ~1-3 s the CLI takes) must not be able to cancel the other half. It
+      // would leave the token saved here, absent from ~/.hermes/.env, and the
+      // previous bot's approvals gone; `runHermesCli` refuses a call whose
+      // signal is already aborted, so this would be a reliable split rather
+      // than a rare one. Past the first durable write, finish the job.
+      await setHermesTelegramToken(botToken);
 
       // Hermes' messaging gateway is the process that RECEIVES messages, so it
       // has to be installed and up. As with the OpenClaw restart below, the
       // token is already persisted here — a service failure is a warning, not a
       // failed save.
       try {
-        const status = await ensureHermesGateway(request.signal);
+        const status = await ensureHermesGateway();
         // `applied` and not just `running`: the status probe runs unprivileged
         // and a refused restart leaves the OLD process up, so `running` alone
         // reported the new token as live when it was not.

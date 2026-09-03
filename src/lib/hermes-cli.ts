@@ -42,6 +42,19 @@ export function runHermesCli(
      * Kill the child when the caller gives up (a browser that navigated away
      * aborts its fetch, but that alone would leave the process running to its
      * timeout). Optional — callers that don't pass one behave exactly as before.
+     *
+     * A route may hand this its `request.signal` for a probe, or for the FIRST
+     * durable write of the request — cancelling either leaves NOTHING ELSE of
+     * that request half-done. It is not a rollback: an abort that lands after
+     * the child has already written keeps that write, because all this does is
+     * refuse to start (see the guard below) or kill the process. What it buys
+     * is that the box is left in one of the two states the request began and
+     * ended in, rather than between them.
+     *
+     * So it must NOT be handed to work that FOLLOWS a durable write: a browser
+     * that locked its screen would then leave the token in ClawBox's store and
+     * not in Hermes', or a saved channel with a gateway nobody started. Past
+     * the first write, finish the job.
      */
     signal?: AbortSignal;
     /**
@@ -57,6 +70,17 @@ export function runHermesCli(
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const bin = opts.sudo ? SUDO_BIN : HERMES_BIN;
   const argv = opts.sudo ? ["-n", HERMES_BIN, ...args] : args;
+  // Already aborted BEFORE the call: nothing may be started. `abort` fires
+  // once, so a listener registered below would never hear it and the child
+  // would run to completion for a caller that is already gone — the route
+  // handlers pass `request.signal`, which aborts the moment the browser
+  // disconnects, and the worst case is `ensureHermesGateway` reading the
+  // failure as "no gateway here" and going on to `sudo hermes gateway install
+  // --system`. Node's own `spawn({ signal })` does not cover this either: on a
+  // pre-aborted signal it still spawns and then kills, which for a privileged
+  // install is precisely the thing to avoid. Same rejection as `onAbort`, so
+  // callers have one message to recognise.
+  if (opts.signal?.aborted) return Promise.reject(new Error("hermes call cancelled"));
   return new Promise<HermesCliResult>((resolve, reject) => {
     const child = spawn(bin, argv, {
       stdio: [opts.input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],

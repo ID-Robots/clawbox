@@ -53,11 +53,12 @@ const TOKEN = "clawbox-test-not-a-real-discord-bot-token-000000";
 describe("POST /setup-api/discord/configure — Hermes", () => {
   let POST: (req: Request) => Promise<Response>;
 
-  function req(): Request {
+  function req(signal?: AbortSignal): Request {
     return new Request("http://localhost/setup-api/discord/configure", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ botToken: TOKEN }),
+      ...(signal ? { signal } : {}),
     });
   }
 
@@ -93,7 +94,9 @@ describe("POST /setup-api/discord/configure — Hermes", () => {
     const res = await POST(req());
 
     expect(res.status).toBe(200);
-    expect(mockSetHermesToken).toHaveBeenCalledWith(TOKEN, expect.anything());
+    // One argument, deliberately: no abort signal — see the split-brain test
+    // further down this describe.
+    expect(mockSetHermesToken).toHaveBeenCalledWith(TOKEN);
     expect(mockEnsureGateway).toHaveBeenCalled();
     expect(await res.json()).toMatchObject({ success: true, restarted: true, username: "clawbot" });
   });
@@ -126,6 +129,38 @@ describe("POST /setup-api/discord/configure — Hermes", () => {
     // The token was already persisted before the gateway was touched.
     expect(mockSet).toHaveBeenCalledWith("discord_bot_token", TOKEN);
     errorSpy.mockRestore();
+  });
+
+  it("does not let a browser that walked away cancel the half it has already committed to", async () => {
+    // Three Discord round trips happen before anything is written, the last of
+    // them a guild-member listing that takes seconds on a large server. A phone
+    // that locks in that window aborts the fetch AFTER
+    // `set("discord_bot_token")` has committed to ClawBox's own store. Handing
+    // `request.signal` any further down makes that a RELIABLE split-brain:
+    // `runHermesCli` refuses a call whose signal is already aborted, so the
+    // token sits in ClawBox's store, never reaches ~/.hermes/.env, no allowlist
+    // is written and the gateway is never restarted — and the 500 that explains
+    // it goes to a browser nobody is looking at.
+    const controller = new AbortController();
+    mockSet.mockImplementation(async (key: string) => {
+      if (key === "discord_bot_token") controller.abort();
+    });
+    // Model the real library: it goes through `runHermesCli`, which refuses.
+    mockSetHermesToken.mockImplementation(async (_token: string, signal?: AbortSignal) => {
+      if (signal?.aborted) throw new Error("hermes call cancelled");
+    });
+
+    const res = await POST(req(controller.signal));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({ success: true, restarted: true });
+    expect(mockSet).toHaveBeenCalledWith("discord_bot_token", TOKEN);
+    // One argument, deliberately: past the first durable write, finish the job.
+    expect(mockSetHermesToken).toHaveBeenCalledWith(TOKEN);
+    // And the two steps that follow it are not skipped.
+    expect(mockSetAllowlist).toHaveBeenCalled();
+    expect(mockEnsureGateway).toHaveBeenCalled();
   });
 
   it("does not reach Hermes at all when Discord rejects the token", async () => {

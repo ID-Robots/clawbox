@@ -151,7 +151,7 @@ export async function POST(request: Request) {
           // come up is a warning, not a failed save (same contract as
           // /telegram/configure).
           try {
-            const running = await restartHermesForEmail(request.signal);
+            const running = await restartHermesForEmail();
             if (!running) {
               return NextResponse.json({
                 success: true,
@@ -176,7 +176,7 @@ export async function POST(request: Request) {
           // write to the assistant' and re-save" path. Only restart one that is
           // already up; never start one here.
           try {
-            const stop = await stopHermesEmailPolling(request.signal);
+            const stop = await stopHermesEmailPolling();
             return NextResponse.json({
               success: true,
               inbound: false,
@@ -235,7 +235,9 @@ export async function POST(request: Request) {
   }
 }
 
-export async function DELETE(request: Request) {
+// No `Request` parameter: disconnecting is not a reason to abandon the teardown
+// half-done, so nothing here takes the client's abort signal.
+export async function DELETE() {
   try {
     // Asked before the account is dropped, for the same reason POST asks: this
     // is the other direction of the same flip. An agent whose box no longer has
@@ -259,7 +261,7 @@ export async function DELETE(request: Request) {
         // Same reasoning as the inbound-off branch of POST: restart a gateway
         // that is running so it drops the adapter, but do not install one on a
         // device whose owner has just disconnected email.
-        await stopHermesEmailPolling(request.signal).catch(() => "none-running" as const);
+        await stopHermesEmailPolling().catch(() => "none-running" as const);
       } catch (err) {
         console.error("[email/configure] Hermes email teardown failed:", err);
       }

@@ -34,7 +34,7 @@
 // env-backed credential here and nothing for envSecretRef() to mint.
 
 import { spawnOpenclawCli } from "@/lib/openclaw-config";
-import { invalidateChannelStatus, readCachedChannelRow } from "@/lib/openclaw-channels";
+import { invalidateChannelStatus, readCachedChannelRowResult } from "@/lib/openclaw-channels";
 
 /** OpenClaw's id for this channel — the plugin's, the config key's, the CLI's. */
 export const WHATSAPP_CHANNEL_ID = "whatsapp";
@@ -392,6 +392,15 @@ export interface OpenclawWhatsappStatus {
   paired: boolean;
   /** The gateway says the transport is up. */
   connected: boolean;
+  /**
+   * Whether the gateway actually ANSWERED.
+   *
+   * `state: "not_configured"` is returned both when the gateway says there is
+   * no such channel and when the gateway could not be asked at all. Those are
+   * not the same claim, and a caller that cannot tell them apart draws "Not
+   * configured" over a paired phone whenever the gateway is restarting.
+   */
+  verified: boolean;
 }
 
 /**
@@ -409,12 +418,23 @@ export interface OpenclawWhatsappStatus {
  * overtaken.
  */
 export async function readOpenclawWhatsappStatus(): Promise<OpenclawWhatsappStatus> {
-  const row = await readCachedChannelRow(WHATSAPP_CHANNEL_ID);
+  // The RESULT form, not the row: a null row means both "the gateway answered
+  // and there is no such channel" and "the gateway could not be asked", and
+  // reporting the second as the first is the false failure this reader feeds.
+  const { answered, row } = await readCachedChannelRowResult(WHATSAPP_CHANNEL_ID);
   if (!row) {
-    // Unknown, not "off". Reported as not_configured because that is the only
-    // honest thing the panel can offer an action for, and the status card's
-    // `receiving: false` says the rest.
-    return { state: "not_configured", enabled: false, paired: false, connected: false };
+    // Reported as not_configured because that is the only thing the panel can
+    // offer an action for. `verified` carries the distinction the row alone
+    // cannot: the gateway ANSWERING "there is no such channel" is a real fact
+    // about an unconfigured box, and only a gateway that could not be asked is
+    // unverified.
+    return {
+      state: "not_configured",
+      enabled: false,
+      paired: false,
+      connected: false,
+      verified: answered,
+    };
   }
 
   // `linked` is the ONLY honest answer to "is a phone paired". `configured`
@@ -452,6 +472,7 @@ export async function readOpenclawWhatsappStatus(): Promise<OpenclawWhatsappStat
     enabled,
     paired,
     connected,
+    verified: true,
   };
 }
 

@@ -408,17 +408,117 @@ export function parseHermesGatewayStatus(stdout: string): HermesGatewayStatus {
   return { installed: false, running: MANUAL_RUNNING_RE.test(stdout), scope: null };
 }
 
-/** `hermes gateway status`, parsed. Reports "down" rather than throwing. */
-export async function hermesGatewayStatus(signal?: AbortSignal): Promise<HermesGatewayStatus> {
+/**
+ * `hermes gateway status`, parsed, and NEVER memoised. Reports "down" rather
+ * than throwing — with ONE exception: a probe the caller CANCELLED is rethrown,
+ * because "down" is an answer and a cancellation is not (see the catch below).
+ *
+ * `answered` is the difference between "the gateway says it is down" and "the
+ * gateway could not be asked". Every caller that BRANCHES on the result — this
+ * module's `ensureHermesGateway`, email's `stopHermesEmailPolling` — has to use
+ * this reader and check that flag, because both of the answers the failure path
+ * fabricates (`installed:false`, `running:false`) pick a wrong branch: one runs
+ * a privileged install on a box that already has a gateway, the other reports
+ * receiving as stopped on a box that is still polling. Callers that only
+ * DISPLAY the status take the memoised `hermesGatewayStatus()` below.
+ */
+export async function readHermesGatewayStatus(
+  signal?: AbortSignal,
+): Promise<{ value: HermesGatewayStatus; answered: boolean }> {
   try {
     const res = await runHermesCli(["gateway", "status"], {
       timeoutMs: GATEWAY_TIMEOUT_MS,
       signal,
     });
-    return parseHermesGatewayStatus(res.stdout);
-  } catch {
-    return { installed: false, running: false, scope: null };
+    return { value: parseHermesGatewayStatus(res.stdout), answered: true };
+  } catch (err) {
+    // A CANCELLED probe is not an answer of "no gateway here". Swallowing it
+    // hands `ensureHermesGateway` an `installed: false` for a box whose gateway
+    // is fine, which sends it down the privileged INSTALL path. The caller
+    // asked to stop; stop. (`runHermesCli` refuses a call whose signal is
+    // already aborted before it spawns, so this covers both an abort that lands
+    // mid-probe and one that landed before it started.)
+    if (signal?.aborted) throw err;
+    return { value: { installed: false, running: false, scope: null }, answered: false };
   }
+}
+
+/**
+ * ONE memo for `hermes gateway status`, shared by every caller.
+ *
+ * This is a Hermes CLI cold start (~2 s on a Jetson) and three separate status
+ * routes ask for it — Telegram, WhatsApp and Discord — each of which used to
+ * memoise the answer privately. Opening Settings → Channels asks all three at
+ * once, so the box paid for the SAME command three times concurrently while
+ * each route's own cache sat empty. The dedup belongs here, at the one place
+ * that runs the command, not in three copies downstream.
+ *
+ * A failed probe is remembered too, but briefly: caching only successes means
+ * the slower a wedged CLI gets, the more often the box re-enters it. Same
+ * success/failure split as the channel-row memo in `openclaw-channels.ts`.
+ */
+const GATEWAY_STATUS_TTL_MS = 15_000;
+const GATEWAY_STATUS_FAILURE_TTL_MS = 3_000;
+let cachedGatewayStatus: { value: HermesGatewayStatus; at: number; answered: boolean } | null = null;
+let inFlightGatewayStatus: { epoch: number; promise: Promise<HermesGatewayStatus> } | null = null;
+/**
+ * Invalidation count. A read that started before the last invalidation is
+ * describing the process that the invalidation was called BECAUSE it changed,
+ * so it may neither be joined nor stored — clearing the cache alone would let
+ * an in-flight probe repopulate it with the pre-restart answer a moment later.
+ * Same guard as the per-channel one in `openclaw-channels.ts`.
+ */
+let gatewayStatusEpoch = 0;
+
+/**
+ * Drop the remembered gateway status, including a read still in flight.
+ *
+ * Anything that restarts, installs or reconfigures the gateway must call this:
+ * a memo that outlives the thing it describes is how a probe-once bug is born,
+ * and this one would report the pre-restart process as the live one.
+ */
+export function invalidateHermesGatewayStatus(): void {
+  cachedGatewayStatus = null;
+  gatewayStatusEpoch += 1;
+}
+
+export async function hermesGatewayStatus(signal?: AbortSignal): Promise<HermesGatewayStatus> {
+  // A caller that brought its own deadline gets its own probe: it cannot be
+  // served a shared promise it has no way to abort, and the ensure/restart
+  // paths need the truth as of now, not as of fifteen seconds ago.
+  if (signal) return (await readHermesGatewayStatus(signal)).value;
+
+  const epoch = gatewayStatusEpoch;
+  const age = cachedGatewayStatus ? Date.now() - cachedGatewayStatus.at : Infinity;
+  if (
+    cachedGatewayStatus
+    // `age >= 0` because the clock is wall-clock: an RTC corrected BACKWARDS by
+    // NTP would otherwise pin the entry until the clock caught up.
+    && age >= 0
+    && age < (cachedGatewayStatus.answered ? GATEWAY_STATUS_TTL_MS : GATEWAY_STATUS_FAILURE_TTL_MS)
+  ) {
+    return cachedGatewayStatus.value;
+  }
+  // Join a read in flight, but only one started since the last invalidation.
+  if (inFlightGatewayStatus && inFlightGatewayStatus.epoch === epoch) {
+    return inFlightGatewayStatus.promise;
+  }
+
+  const promise = (async () => {
+    const { value, answered } = await readHermesGatewayStatus();
+    // An invalidation that landed while this was in flight means the answer
+    // predates the change that caused it.
+    if (gatewayStatusEpoch === epoch) {
+      cachedGatewayStatus = { value, at: Date.now(), answered };
+    }
+    return value;
+  })().finally(() => {
+    // Only ever clear our OWN entry, or an abandoned read evicts the
+    // replacement an invalidation started.
+    if (inFlightGatewayStatus?.epoch === epoch) inFlightGatewayStatus = null;
+  });
+  inFlightGatewayStatus = { epoch, promise };
+  return promise;
 }
 
 /** Unix user the gateway system service should run as. */
@@ -522,7 +622,22 @@ async function restartHermesGatewayUserService(signal?: AbortSignal): Promise<bo
  * the unit is correct even though the install runs through sudo.
  */
 export async function ensureHermesGateway(signal?: AbortSignal): Promise<HermesGatewayEnsureResult> {
-  const before = await hermesGatewayStatus(signal);
+  // Uncached, always. Whether this installs or restarts turns on `before`, and
+  // a fifteen-second-old answer picks the wrong branch — every caller reaches
+  // this after its own durable write and so passes no signal, which is exactly
+  // the branch of `hermesGatewayStatus` that serves the memo: a stale
+  // `installed:false` would send it down the install path on a box where the
+  // gateway is already installed.
+  const { value: before, answered } = await readHermesGatewayStatus(signal);
+
+  // A probe that FAILED is not an answer of "no gateway here" either. A
+  // `hermes gateway status` that times out on a loaded Jetson, or a wedged CLI,
+  // degrades to `{installed:false, running:false}` — the exact shape that sends
+  // this function on to `sudo hermes gateway install --system` on a box that
+  // already has a unit. Report "nothing applied" instead and let the caller
+  // warn: the owner retries and the next probe usually answers, whereas a
+  // spurious install rewrites a working unit.
+  if (!answered) return { ...before, applied: false };
 
   if (before.installed) {
     // A system unit can only be controlled by root; a user unit must NOT be,
@@ -530,6 +645,7 @@ export async function ensureHermesGateway(signal?: AbortSignal): Promise<HermesG
     const applied = before.scope === "system"
       ? await restartHermesGatewayUnit(signal)
       : await restartHermesGatewayUserService(signal);
+    invalidateHermesGatewayStatus();
     return { ...(await hermesGatewayStatus(signal)), applied };
   }
 
@@ -565,6 +681,7 @@ export async function ensureHermesGateway(signal?: AbortSignal): Promise<HermesG
   } catch (err) {
     console.error("[hermes] gateway install failed:", err);
   }
+  invalidateHermesGatewayStatus();
   return { ...(await hermesGatewayStatus(signal)), applied };
 }
 

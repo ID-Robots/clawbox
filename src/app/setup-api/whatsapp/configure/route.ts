@@ -252,8 +252,16 @@ export async function POST(request: Request) {
     // takes effect when it restarts. The .env write already happened, so a
     // restart failure is a warning at 200, never a failed save — same contract
     // as /telegram/configure.
+    //
+    // And no `request.signal`, for the same reason: `setHermesWhatsappConfig`
+    // above has already written ~/.hermes/.env, which `changedKeys.length > 0`
+    // proves, so the restart is the only thing that can still make that write
+    // true. `runHermesCli` refuses a call whose signal is already aborted, so
+    // passing it would leave the new allowlist saved and the running gateway
+    // still enforcing the old one — while the "restart_pending" warning goes to
+    // a browser that is gone. Past the first durable write, finish the job.
     try {
-      const status = await ensureHermesGateway(request.signal);
+      const status = await ensureHermesGateway();
       // See /telegram/configure: `running` alone is satisfied by the pre-restart
       // process, so the new config would be reported live while unread.
       if (!status.running || !status.applied) {
