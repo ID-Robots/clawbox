@@ -226,8 +226,14 @@ export function draftContentKey(message: { to: string[]; subject: string; body: 
     .sort();
   // `[^\S\n]` is "whitespace that is not a newline": spaces and tabs go, the
   // shape of the message stays.
+  //
+  // ORDER MATTERS, and it used to be wrong: the blank-line collapse ran BEFORE
+  // the spaces around each newline were trimmed, so "a \n \n \n b" still had
+  // spaces between its newlines when `\n{3,}` looked and kept all three, while
+  // the identical "a\n\n\nb" folded to two. Two renderings of one message got
+  // two keys and the second was queued as a new draft. Trim first, then level.
   const flatten = (text: string): string =>
-    text.replace(/\r\n/g, "\n").replace(/[^\S\n]+/g, " ").replace(/\n{3,}/g, "\n\n").replace(/ ?\n ?/g, "\n").trim();
+    text.replace(/\r\n/g, "\n").replace(/[^\S\n]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   const canonical = JSON.stringify([recipients, flatten(message.subject), flatten(message.body)]);
   return createHash("sha256").update(canonical, "utf8").digest("hex").slice(0, 32);
 }

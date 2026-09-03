@@ -171,6 +171,8 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.emailBatch.resultAllSent": "{count} sent.",
     "chat.emailBatch.resultPartial": "{sent} sent, {failed} not sent.",
     "chat.emailBatch.resultDiscarded": "{count} deleted. Nothing was sent.",
+    "chat.emailBatch.resultSentElsewhere": "{count} already sent — too late to delete. Check your Sent folder.",
+    "chat.emailBatch.resultDiscardedSentElsewhere": "{discarded} deleted, {sent} already sent — check your Sent folder.",
     "chat.emailBatch.resultUnconfirmed": "{sent} sent, {unconfirmed} not confirmed — check your Sent folder.",
     "chat.emailBatch.resultElsewhere": "These were decided somewhere else.",
     "chat.emailBatch.draftSent": "Sent",

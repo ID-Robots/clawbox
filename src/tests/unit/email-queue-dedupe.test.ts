@@ -103,6 +103,30 @@ describe("a repeated queue of the same message", () => {
     expect(store.countPending()).toBe(2);
   });
 
+  it("folds a retry that only re-indented its blank lines", () => {
+    // The two bodies render identically in every mail client: a run of blank
+    // lines is a run of blank lines whether or not the agent left a space on
+    // each of them. The key levels those runs — but it used to level them
+    // BEFORE trimming the spaces around each newline, so the padded rendering
+    // still had spaces between its newlines when the collapse looked, kept all
+    // three, and earned a second draft for a message already waiting.
+    const first = store.queuePending({
+      to: ["owner@example.com"],
+      subject: "The plan",
+      body: "First point.\n\n\nSecond point.",
+    });
+    const second = store.queuePending({
+      to: ["owner@example.com"],
+      subject: "The plan",
+      body: "First point. \n \n \n Second point.",
+    });
+
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(second.draft.id).toBe(first.draft.id);
+    expect(store.countPending()).toBe(1);
+  });
+
   it("keeps a difference the reader would see", () => {
     // Case in the subject and the body is NOT normalised: "approve the invoice"
     // and "APPROVE THE INVOICE" are not obviously the same message to the

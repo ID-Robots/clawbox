@@ -11,6 +11,10 @@ import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test
 import { I18nProvider } from "@/lib/i18n";
 import { EmailBatchCard, type EmailBatchCardState, type EmailBatchDraft } from "@/lib/chat-email-batch";
 
+/** The card's own colours, as jsdom serialises them. */
+const OK_FG = "rgb(134, 239, 172)";
+const WARN_FG = "rgb(252, 211, 77)";
+
 /** Longer than the clamp, so the "show the whole message" path is exercised. */
 const LONG_TAIL = "Then, quietly, a paragraph nobody asked for. ";
 const LONG_BODY = `${"Perfectly ordinary opening. ".repeat(30)}${LONG_TAIL}`;
@@ -629,6 +633,69 @@ describe("reconciling live cards against the store", () => {
     expect(after[0].outcomes).toHaveLength(1);
   });
 
+  it("lets a receipt correct a 'gone' the poll had only guessed at", async () => {
+    // Every approval path claims the draft BEFORE it sends and writes the
+    // receipt after, so for the length of an SMTP conversation the draft is in
+    // neither list. A poll landing in that window recorded "gone" — and, with
+    // `known` seeded from every outcome, never looked at that draft again. A
+    // permanent shrug over a message that went out.
+    const { reconcileBatchCards } = await import("@/lib/chat-email-batch");
+    const caught = [
+      card({
+        drafts: [draft(1), draft(2)],
+        outcomes: [{ id: "draft-1", ok: false, kind: "gone" }],
+      }),
+    ];
+    const after = reconcileBatchCards(
+      caught,
+      new Set(["draft-2"]),
+      new Map([["draft-1", { id: "draft-1", ok: true, kind: "sent" as const, at: 1_700_000_000_500 }]]),
+    );
+    expect(after[0].outcomes).toHaveLength(1);
+    expect(after[0].outcomes[0]).toMatchObject({ kind: "sent", at: 1_700_000_000_500 });
+  });
+
+  it("does not replace an ending the store actually recorded", async () => {
+    // Only the guess is provisional. A real receipt is the store's word and a
+    // later poll must not overwrite it — nor churn the card into a re-render.
+    const { reconcileBatchCards } = await import("@/lib/chat-email-batch");
+    const before = [
+      card({
+        drafts: [draft(1), draft(2)],
+        outcomes: [{ id: "draft-1", ok: false, kind: "rejected" }],
+      }),
+    ];
+    expect(
+      reconcileBatchCards(
+        before,
+        new Set(["draft-2"]),
+        new Map([["draft-1", { id: "draft-1", ok: true, kind: "sent" as const }]]),
+      ),
+    ).toBe(before);
+  });
+
+  it("leaves a guessed 'gone' alone when the poll learned nothing new", async () => {
+    // No receipt, no better information — and no re-render either.
+    const { reconcileBatchCards } = await import("@/lib/chat-email-batch");
+    const before = [
+      card({
+        drafts: [draft(1), draft(2)],
+        outcomes: [{ id: "draft-1", ok: false, kind: "gone" }],
+      }),
+    ];
+    expect(reconcileBatchCards(before, new Set(["draft-2"]), new Map())).toBe(before);
+  });
+
+  it("still settles a card whose last draft only ever got a 'gone'", async () => {
+    // "Provisional" must not mean "never decided": a card that could not settle
+    // would keep a live Approve button over mail that is no longer waiting,
+    // which is the defect this whole card was rebuilt to remove.
+    const { reconcileBatchCards } = await import("@/lib/chat-email-batch");
+    const after = reconcileBatchCards([card({ drafts: [draft(1)] })], new Set<string>(), new Map());
+    expect(after[0].status).toBe("settled");
+    expect(after[0].outcomes.map((o) => o.kind)).toEqual(["gone"]);
+  });
+
   it("does not touch a card that is mid-send", async () => {
     // Its own approval request owns it and will settle it; a poll landing in
     // that window must not decide the card out from under the response.
@@ -672,6 +739,78 @@ describe("a verdict that does not cry wolf", () => {
     );
     // The deleted one is not counted as a failure; the refused one is.
     expect(await screen.findByTestId("chat-email-batch-result")).toHaveTextContent("1 sent, 1 not sent.");
+  });
+
+  it("does not congratulate the owner for a send he was deleting", async () => {
+    // He pressed *Delete all 2 without sending*; one of them had been approved
+    // on Telegram while he was reading and went out. Reading the ending without
+    // the gesture painted that row green "Sent ✓" and settled the card on a
+    // green "1 sent." — the box congratulating him for the one thing he was
+    // trying to prevent, with the deletion he DID get dropped from the verdict
+    // because a single sentence can only be the head of the chain once.
+    await mount(
+      card({
+        status: "settled",
+        drafts: [draft(1), draft(2)],
+        outcomes: [
+          { id: "draft-1", ok: true, kind: "rejected" },
+          { id: "draft-2", ok: false, kind: "sent", at: 1_700_000_000_500 },
+        ],
+      }),
+    );
+    const summary = await screen.findByTestId("chat-email-batch-result");
+    expect(summary).toHaveTextContent("1 deleted, 1 already sent");
+    expect(summary).toHaveTextContent("check your Sent folder");
+    // Never the green all-sent line, and never a claim that nothing went out.
+    expect(summary.textContent).not.toContain("1 sent.");
+    expect(summary).not.toHaveTextContent("Nothing was sent");
+    expect(summary.style.color).toBe(WARN_FG);
+  });
+
+  it("says so on its own when the only draft had already gone out", async () => {
+    await mount(
+      card({
+        status: "settled",
+        drafts: [draft(1)],
+        outcomes: [{ id: "draft-1", ok: false, kind: "sent", at: 1_700_000_000_500 }],
+      }),
+    );
+    const summary = await screen.findByTestId("chat-email-batch-result");
+    expect(summary).toHaveTextContent("1 already sent");
+    // Never "0 deleted": this card deleted nothing.
+    expect(summary).not.toHaveTextContent("0 deleted");
+    expect(summary.style.color).toBe(WARN_FG);
+  });
+
+  it("keeps the row honest about the send while taking the green off it", async () => {
+    // The words are the receipt's — it really was sent, and softening that
+    // would hide the one thing he has to know. The colour is the gesture's.
+    await mount(
+      card({
+        status: "settled",
+        drafts: [draft(1)],
+        outcomes: [{ id: "draft-1", ok: false, kind: "sent", at: 1_700_000_000_500 }],
+      }),
+    );
+    const row = await screen.findByTestId("chat-email-batch-outcome");
+    expect(row.textContent).toMatch(/^Sent /);
+    expect(row.textContent).not.toContain("Not sent");
+    expect(row.style.color).not.toBe(OK_FG);
+    expect(row.style.color).toBe(WARN_FG);
+  });
+
+  it("still paints a send the owner asked for green", async () => {
+    // The guard on the rule above.
+    await mount(
+      card({
+        status: "settled",
+        drafts: [draft(1)],
+        outcomes: [{ id: "draft-1", ok: true, kind: "sent", at: 1_700_000_000_500 }],
+      }),
+    );
+    const row = await screen.findByTestId("chat-email-batch-outcome");
+    expect(row.style.color).toBe(OK_FG);
+    expect(screen.getByTestId("chat-email-batch-result").style.color).toBe(OK_FG);
   });
 
   it("does not let a covered duplicate turn a clean batch into a partial one", async () => {

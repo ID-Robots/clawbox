@@ -89,11 +89,18 @@ function installBoxWithLiveQueue(): HermesBox {
 /** The card's own colours, as jsdom serialises them. Amber is "look at this". */
 const WARN_FG = "rgb(252, 211, 77)";
 const ERROR_FG = "rgb(248, 113, 113)";
+/** Green, which on this card means "what you asked for happened". */
+const OK_FG = "rgb(134, 239, 172)";
+
+/** The row the card is showing for one draft. */
+function outcomeRow(draftId: string): HTMLElement | null {
+  const row = document.querySelector(`[data-draft-id="${draftId}"]`);
+  return row?.querySelector<HTMLElement>('[data-testid="chat-email-batch-outcome"]') ?? null;
+}
 
 /** Which ending the card is showing for one draft, or null when it shows none. */
 function endingFor(draftId: string): string | null {
-  const row = document.querySelector(`[data-draft-id="${draftId}"]`);
-  return row?.querySelector('[data-testid="chat-email-batch-outcome"]')?.getAttribute("data-outcome-kind") ?? null;
+  return outcomeRow(draftId)?.getAttribute("data-outcome-kind") ?? null;
 }
 
 function queue(subject: string): string {
@@ -193,5 +200,72 @@ describe("a batch send whose answer never came back", () => {
     await waitFor(() => expect(screen.getByTestId("chat-email-batch-result")).toBeTruthy());
     expect(outcomes.getOutcome(only)).toMatchObject({ kind: "failed" });
     expect(endingFor(only)).toBe("failed");
+  });
+});
+
+describe("deleting a batch one of whose drafts went out elsewhere", () => {
+  it("does not congratulate the owner for the one thing he was stopping", async () => {
+    // Two drafts on the card. He reads them, decides against both and presses
+    // *Delete all 2 without sending*. In the forty seconds he spent reading,
+    // the second one was approved on Telegram and went out.
+    //
+    // The route answers that row `{ reason: "gone", ending: "sent" }` — true,
+    // and the worst news available on that click. Reading the ending without
+    // the gesture painted it green "Sent ✓" and settled the card on a green
+    // "1 sent.", which is the box congratulating him for the send he was
+    // trying to prevent — and the deletion he DID get vanished from the
+    // verdict entirely.
+    const doomed = queue("The one he deleted");
+    const gone = queue("The one that went out");
+
+    const box = installBoxWithLiveQueue();
+    await mountHermesChat(box);
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-cancel")).toBeTruthy());
+
+    // Approved somewhere else while the card sat on screen — the REAL route,
+    // so the receipt is the one a Telegram tap would have written.
+    const elsewhere = await POST(
+      new Request("http://localhost/setup-api/email/pending", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", cookie },
+        body: JSON.stringify({ action: "approve", id: gone }),
+      }),
+    );
+    expect(elsewhere.status).toBe(200);
+    expect(outcomes.getOutcome(gone)).toMatchObject({ kind: "sent" });
+
+    fireEvent.click(screen.getByTestId("chat-email-batch-cancel"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-result")).toBeTruthy());
+
+    // The words stay honest: it WAS sent, and the card says so.
+    expect(endingFor(gone)).toBe("sent");
+    expect(endingFor(doomed)).toBe("rejected");
+    // The colour is what is read first, and green here means "your delete
+    // worked" over a message that is already in somebody's inbox.
+    expect(outcomeRow(gone)?.style.color).not.toBe(OK_FG);
+    const verdict = screen.getByTestId("chat-email-batch-result");
+    expect(verdict.style.color).not.toBe(OK_FG);
+    expect(verdict.style.color).toBe(WARN_FG);
+  });
+
+  it("still says nothing was sent when every draft was deleted", async () => {
+    // The guard on the rule above: an ordinary deletion is not news, and must
+    // not be dragged into the amber that means "look at this".
+    const first = queue("First to delete");
+    const second = queue("Second to delete");
+
+    const box = installBoxWithLiveQueue();
+    await mountHermesChat(box);
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-cancel")).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId("chat-email-batch-cancel"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-result")).toBeTruthy());
+
+    expect(endingFor(first)).toBe("rejected");
+    expect(endingFor(second)).toBe("rejected");
+    expect(mockSend).not.toHaveBeenCalled();
+    const verdict = screen.getByTestId("chat-email-batch-result");
+    expect(verdict.style.color).not.toBe(WARN_FG);
+    expect(verdict.style.color).not.toBe(ERROR_FG);
   });
 });

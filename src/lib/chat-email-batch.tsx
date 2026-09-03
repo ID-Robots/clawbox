@@ -87,6 +87,22 @@ export interface EmailBatchDraft {
 /** What became of one draft, as the route reported it. */
 export interface EmailBatchOutcome {
   readonly id: string;
+  /**
+   * Whether this is what the GESTURE asked for — not whether the message went
+   * out. It decides the COLOUR of the row and which side of the verdict it
+   * counts on; `kind` alone decides the words.
+   *
+   * The two are not the same, and reading the ending alone gets both crossed
+   * cases backwards. A draft the owner pressed *Delete without sending* on,
+   * answered "sent" because Telegram approved it forty seconds earlier, is the
+   * worst outcome available on that click — and `ok` from the ending painted it
+   * green, the box congratulating him for the one thing he was preventing. The
+   * mirror is just as wrong: an approve answered "deleted" is not good news.
+   *
+   * A poll has no gesture to compare against, so a receipt read by
+   * `reconcileBatchCards` is `ok` when the message went out — which is what the
+   * card was offering to do.
+   */
   readonly ok: boolean;
   /** Why not, when it did not go. Already customer-readable. */
   readonly error?: string;
@@ -200,19 +216,39 @@ export function reconcileBatchCards(
   let moved = false;
   const next = cards.map((card) => {
     if (card.status !== "waiting") return card;
-    const known = new Set(card.outcomes.map((o) => o.id));
+    const decided = new Set(card.outcomes.map((o) => o.id));
+    /**
+     * The ones only GUESSED at, which a real receipt may still correct.
+     *
+     * Every approval path claims the draft out of the queue BEFORE `sendMail`
+     * and writes the receipt only after it resolves, so for the length of an
+     * SMTP conversation the draft is in neither list. A poll landing in that
+     * window — `installPendingRefresh` fires on focus and visibilitychange, not
+     * only on the timer — recorded "gone" and then never looked again, leaving
+     * a permanent shrug over a message that went out. So "gone" is provisional:
+     * it still DECIDES the draft, or a card could never settle and would keep a
+     * live Approve button over mail that is no longer waiting, but a later
+     * receipt replaces it. The reconcile moves towards better information
+     * rather than towards its first guess.
+     */
+    const guessed = new Set(card.outcomes.filter((o) => o.kind === "gone").map((o) => o.id));
     const added: EmailBatchOutcome[] = [];
     for (const draft of card.drafts) {
-      if (known.has(draft.id) || pendingIds.has(draft.id)) continue;
-      added.push(resolved.get(draft.id) ?? { id: draft.id, ok: false, kind: "gone" });
-      known.add(draft.id);
+      if (pendingIds.has(draft.id)) continue;
+      const receipt = resolved.get(draft.id);
+      // Already answered for, and only a provisional "gone" may be revised —
+      // and only by a receipt, never by a second guess.
+      if (decided.has(draft.id) && !(guessed.has(draft.id) && receipt)) continue;
+      added.push(receipt ?? { id: draft.id, ok: false, kind: "gone" });
+      decided.add(draft.id);
     }
     if (added.length === 0) return card;
     moved = true;
-    const outcomes = [...card.outcomes, ...added];
+    const replaced = new Set(added.map((o) => o.id));
+    const outcomes = [...card.outcomes.filter((o) => !replaced.has(o.id)), ...added];
     // Settled only once EVERY draft on it has an ending. Until then the card
     // is still a live control for the ones that are genuinely still waiting.
-    const everyOne = card.drafts.every((d) => known.has(d.id));
+    const everyOne = card.drafts.every((d) => decided.has(d.id));
     return {
       ...card,
       outcomes,
@@ -369,7 +405,24 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
     outcomeRef.current?.focus();
   }, [settled, settledByOwner]);
 
-  const sentCount = outcomes.filter((o) => o.ok).length;
+  /**
+   * Went out, and going out is what the click asked for.
+   *
+   * Keyed on the ENDING and on `ok` together, because "it was sent" and "that
+   * is what you wanted" are different facts — see `sentElsewhereCount`. A row
+   * with no ending at all is this card's own send, which has nothing to
+   * disambiguate.
+   */
+  const sentCount = outcomes.filter((o) => o.ok && (o.kind === "sent" || o.kind === undefined)).length;
+  /**
+   * Went out although the click asked for it NOT to.
+   *
+   * The owner pressed *Delete without sending* and one of the drafts had been
+   * approved on Telegram while he was reading. It really was sent, so the row
+   * says so — but it is the worst news on the card, not a success, and it must
+   * never be added to the green count that answers "did what I clicked work?".
+   */
+  const sentElsewhereCount = outcomes.filter((o) => !o.ok && o.kind === "sent").length;
   /**
    * Endings that are not failures.
    *
@@ -378,10 +431,12 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
    * wrong. Counting them as failures made "Delete without sending" answer with
    * "0 sent, 2 not sent." in the colour that means something needs doing, which
    * is a false alarm about the owner's own deliberate act.
+   *
+   * On the ENDING alone: a deletion is a deletion whether or not it is what
+   * this particular click asked for, and `ok` is now true for both of these
+   * under a delete gesture.
    */
-  const discardedCount = outcomes.filter(
-    (o) => !o.ok && (o.kind === "rejected" || o.kind === "duplicate"),
-  ).length;
+  const discardedCount = outcomes.filter((o) => o.kind === "rejected" || o.kind === "duplicate").length;
   // An unconfirmed send is not a failure to report as one: nobody knows what
   // happened, and the row says exactly that.
   const unconfirmedCount = outcomes.filter((o) => o.kind === "unconfirmed").length;
@@ -394,7 +449,8 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
    * talked out of, and it is the one the owner acts on by sending again.
    */
   const elsewhereCount = outcomes.filter((o) => o.kind === "gone").length;
-  const failedCount = outcomes.length - sentCount - discardedCount - unconfirmedCount - elsewhereCount;
+  const failedCount =
+    outcomes.length - sentCount - sentElsewhereCount - discardedCount - unconfirmedCount - elsewhereCount;
   /**
    * Settled, with nothing to show for it.
    *
@@ -609,7 +665,7 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
             color:
               failedCount > 0 || nothingAttempted
                 ? ERROR_FG
-                : unconfirmedCount > 0
+                : unconfirmedCount > 0 || sentElsewhereCount > 0
                   ? WARN_FG
                   : sentCount > 0
                     ? OK_FG
@@ -620,9 +676,15 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
         >
           {/* In order of what the owner needs to know: a real failure first,
               then a send nobody could confirm — which outranks the good news
-              beside it, because it is the one line he has to act on — then
-              what went, then what he threw away, and last the case where this
-              card did none of it. */}
+              beside it, because it is the one line he has to act on — then a
+              message that went out when he was asking for it NOT to, then what
+              went, then what he threw away, and last the case where this card
+              did none of it.
+
+              The sent-elsewhere line NAMES THE DELETIONS TOO. "1 sent." over a
+              *Delete without sending* both painted the one thing he was
+              preventing as success and dropped the deletion he did get, because
+              a single sentence can only be the head of the chain once. */}
           {nothingAttempted
             ? t("chat.emailBatch.resultNone")
             : failedCount > 0
@@ -632,11 +694,18 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
                     sent: String(sentCount),
                     unconfirmed: String(unconfirmedCount),
                   })
-                : sentCount > 0
-                  ? t("chat.emailBatch.resultAllSent", { count: String(sentCount) })
-                  : discardedCount > 0
-                    ? t("chat.emailBatch.resultDiscarded", { count: String(discardedCount) })
-                    : t("chat.emailBatch.resultElsewhere")}
+                : sentElsewhereCount > 0
+                  ? discardedCount > 0
+                    ? t("chat.emailBatch.resultDiscardedSentElsewhere", {
+                        discarded: String(discardedCount),
+                        sent: String(sentElsewhereCount),
+                      })
+                    : t("chat.emailBatch.resultSentElsewhere", { count: String(sentElsewhereCount) })
+                  : sentCount > 0
+                    ? t("chat.emailBatch.resultAllSent", { count: String(sentCount) })
+                    : discardedCount > 0
+                      ? t("chat.emailBatch.resultDiscarded", { count: String(discardedCount) })
+                      : t("chat.emailBatch.resultElsewhere")}
         </div>
       )}
 
@@ -679,8 +748,13 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
  */
 function outcomeColor(outcome: EmailBatchOutcome): string {
   if (outcome.kind === "unconfirmed") return WARN_FG;
-  if (outcome.ok || outcome.kind === "sent") return OK_FG;
+  // A send is green only when sending is what the click asked for. Answered to
+  // a *Delete without sending*, the same ending is the worst news on the card —
+  // amber, because there is nothing to fix and everything to look at, and
+  // certainly not the green that reads as "your deletion worked".
+  if (outcome.kind === "sent") return outcome.ok ? OK_FG : WARN_FG;
   if (outcome.kind === "rejected" || outcome.kind === "duplicate" || outcome.kind === "gone") return MUTED_FG;
+  if (outcome.ok) return OK_FG;
   return ERROR_FG;
 }
 
@@ -688,6 +762,12 @@ function outcomeLine(
   outcome: EmailBatchOutcome,
   t: (key: string, vars?: Record<string, string>) => string,
 ): string {
+  const wentOut = (): string =>
+    outcome.at === undefined
+      ? t("chat.emailBatch.draftSent")
+      : t("chat.emailBatch.draftSentAt", {
+          time: new Date(outcome.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }),
+        });
   switch (outcome.kind) {
     case "rejected":
       return t("chat.emailBatch.draftRemoved");
@@ -699,14 +779,18 @@ function outcomeLine(
       // Not "not sent": the box handed the message over and never heard back,
       // and telling the owner it failed is how they come to send it twice.
       return t("chat.emailBatch.draftUnconfirmed");
+    case "sent":
+      // The receipt's own word, whatever the gesture was. `ok` decides the
+      // COLOUR of this line, never the words: a card that softened "it went
+      // out" because the owner had asked for a deletion would be hiding the one
+      // thing he has to know — and the `!outcome.ok` fall-through below would
+      // have called it "Not sent", about a message already in an inbox.
+      return wentOut();
     default:
       break;
   }
   if (!outcome.ok) return t("chat.emailBatch.draftFailed", { reason: outcome.error || "" });
-  if (outcome.at === undefined) return t("chat.emailBatch.draftSent");
-  return t("chat.emailBatch.draftSentAt", {
-    time: new Date(outcome.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }),
-  });
+  return wentOut();
 }
 
 interface EmailBatchRowProps {

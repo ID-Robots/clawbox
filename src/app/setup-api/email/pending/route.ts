@@ -611,6 +611,13 @@ async function approveBatch(request: Request, raw: unknown): Promise<NextRespons
    *   both messages went, which is the one reading this route's header says
    *   must never be possible.
    *
+   * `sent` IS THE WHOLE LIST, and deliberately: `whatBecameOf` answers
+   * `reason: "duplicate"` for a duplicate receipt, so a row can never be both
+   * "gone" and `ending: "duplicate"`, and `duplicates` above counts those. A
+   * second clause for them here would be dead today and a double count the day
+   * that mapping moved — `failed` is a subtraction, so one row in two buckets
+   * takes it negative.
+   *
    * And RECEIPT-BACKED throughout: a draft that left the queue with nothing
    * recorded about it is an unknown, not a resolution, and it stays in `failed`.
    *
@@ -619,9 +626,7 @@ async function approveBatch(request: Request, raw: unknown): Promise<NextRespons
    * and under EVERY ending it is not waiting. Harmonising them would be wrong
    * in one direction or the other.
    */
-  const resolved = results.filter(
-    (r) => !r.ok && r.reason === "gone" && (r.ending === "sent" || r.ending === "duplicate"),
-  ).length;
+  const resolved = results.filter((r) => !r.ok && r.reason === "gone" && r.ending === "sent").length;
   const failed = results.length - sent - duplicates - resolved;
   // Entries the loop never reached, because the request was abandoned partway.
   // Counted rather than ignored: with an empty `results` — an abort before the

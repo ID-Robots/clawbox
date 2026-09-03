@@ -613,6 +613,26 @@ function emailEnding(value: unknown): EmailEnding | undefined {
 }
 
 /**
+ * Was this ending the decision the gesture asked for?
+ *
+ * The same two-line table `SettingsApp.decidePending` keys on, and the SIBLING
+ * of it: the two directions are not symmetric, and reading the ending alone
+ * gets both crossed cases backwards.
+ *
+ * *Delete without sending* answered `sent` is the worst outcome available on
+ * that click — the owner asked for a message NOT to go out and it went out —
+ * and green there congratulates him for it. *Send* answered `rejected` means
+ * nothing was sent and nothing will be. `duplicate` is good news either way: an
+ * identical message reached the recipient, so the send happened and this copy
+ * is not waiting.
+ */
+function endingAsAsked(ending: EmailEnding, whenOk: 'sent' | 'rejected'): boolean {
+  return whenOk === 'sent'
+    ? ending === 'sent' || ending === 'duplicate'
+    : ending === 'rejected' || ending === 'duplicate'
+}
+
+/**
  * One row of an approve or a delete answer, as the card should render it.
  *
  * `whenOk` is what this gesture DID — a send or a deletion — because the route
@@ -623,10 +643,12 @@ function emailEnding(value: unknown): EmailEnding | undefined {
  * on screen, and the card settles on this answer, so "no longer waiting" over
  * all of them would be a permanent shrug where the box knows the truth.
  *
- * `ok` follows the ENDING and not the route's field: a message that went out
- * from another surface still went out, and a copy resolved as a duplicate did
- * not. Only `changed` returns nothing at all — that draft is still waiting, and
- * giving it an outcome would take its checkbox away for good.
+ * `kind` is the receipt's word and `ok` is the GESTURE'S verdict on it, which
+ * is why both travel. The card writes the words from one and the colour from
+ * the other; keying the colour off the ending alone painted a draft the owner
+ * was deleting a triumphant green because Telegram had sent it a minute
+ * earlier. Only `changed` returns nothing at all — that draft is still waiting,
+ * and giving it an outcome would take its checkbox away for good.
  */
 function emailRowOutcome(row: unknown, whenOk: 'sent' | 'rejected'): EmailBatchOutcome[] {
   if (typeof row !== 'object' || row === null) return []
@@ -634,10 +656,16 @@ function emailRowOutcome(row: unknown, whenOk: 'sent' | 'rejected'): EmailBatchO
   if (typeof r.id !== 'string') return []
   const at = typeof r.at === 'number' ? { at: r.at } : {}
   const error = typeof r.error === 'string' ? { error: r.error } : {}
-  if (r.ok === true) return [{ id: r.id, ok: whenOk === 'sent', kind: whenOk, ...at }]
+  // This card's own request landed, so what it asked for is what happened.
+  if (r.ok === true) return [{ id: r.id, ok: true, kind: whenOk, ...at }]
   const ending = emailEnding(r.ending)
-  if (ending) return [{ id: r.id, ok: ending === 'sent', kind: ending, ...at, ...error }]
-  if (r.reason === 'duplicate') return [{ id: r.id, ok: false, kind: 'duplicate', ...error }]
+  if (ending) return [{ id: r.id, ok: endingAsAsked(ending, whenOk), kind: ending, ...at, ...error }]
+  // A duplicate with no receipt behind it: approveBatch's own word for a twin
+  // this very batch covered. Good news under either gesture, for the reason
+  // `endingAsAsked` gives.
+  if (r.reason === 'duplicate') return [{ id: r.id, ok: endingAsAsked('duplicate', whenOk), kind: 'duplicate', ...error }]
+  // Nobody knows which ending it had, so there is nothing to compare the
+  // gesture against.
   if (r.reason === 'gone') return [{ id: r.id, ok: false, kind: 'gone', ...error }]
   if (r.reason === 'changed') return []
   return [{ id: r.id, ok: false, ...error }]
@@ -3183,6 +3211,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (!kind) continue
           resolved.set(o.id, {
             id: o.id,
+            // A poll has no gesture to weigh this against, and what the card
+            // was offering to do is send: a message that went out is the good
+            // news, everything else is not.
             ok: kind === 'sent',
             kind,
             ...(typeof o.at === 'number' ? { at: o.at } : {}),

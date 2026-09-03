@@ -118,6 +118,17 @@ interface LostDraft {
   to: string[];
   subject: string;
   body: string;
+  /**
+   * The send was never confirmed one way or the other, so the heading over this
+   * draft must not say it was not sent.
+   *
+   * The route computes which failure it was and sends the receipt's word back
+   * (`ending`). A dropped connection after DATA leaves nobody able to say
+   * whether the message arrived, and a confident "This message was not sent" is
+   * precisely how an owner is talked into sending it a second time — while the
+   * handled strip on the same screen was about to say "could not be confirmed".
+   */
+  unconfirmed: boolean;
 }
 
 /**
@@ -1720,7 +1731,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [emailSaving, setEmailSaving] = useState(false);
   const [emailTesting, setEmailTesting] = useState(false);
   const [emailReconfigure, setEmailReconfigure] = useState(false);
-  const [emailMsg, setEmailMsg] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  // `info` is the third tone, and it exists because two are not enough here: a
+  // send the box handed over and never heard back is neither a success nor a
+  // failure, and both of the other two are a claim nothing can support.
+  const [emailMsg, setEmailMsg] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
   const emailSaveControllerRef = useRef<AbortController | null>(null);
   const [chatApproval, setChatApproval] = useState<ChatApprovalState | null>(null);
   const [chatApprovalToken, setChatApprovalToken] = useState("");
@@ -1970,9 +1984,25 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           action === "approve"
             ? ending === "sent" || ending === "duplicate"
             : ending === "rejected" || ending === "duplicate";
+        /**
+         * Neither a success nor a failure, and it needs its own tone.
+         *
+         * The 502 from an approve carries the receipt's ending too, and
+         * `unconfirmed` means the box handed the message over and never heard
+         * back. Red "Could not send the message." there is a positive claim
+         * nothing in this process can support — and one `refreshEmailPending()`
+         * later the handled strip below says "Could not be confirmed — check
+         * your Sent folder" about the very same draft. Two verdicts on one
+         * screen, and the definite one is the one the owner acts on, by mailing
+         * the recipient twice. `info` is the amber StatusMessage already has;
+         * the words are the strip's own.
+         */
+        const unconfirmed = ending === "unconfirmed";
         setEmailMsg({
-          type: asAsked ? "success" : "error",
-          message: data?.error || t("settings.emailApproveFailed"),
+          type: unconfirmed ? "info" : asAsked ? "success" : "error",
+          message: unconfirmed
+            ? t("settings.emailHandledUnconfirmed")
+            : data?.error || t("settings.emailApproveFailed"),
         });
         // The route claims a draft before it sends, so a failed send has
         // already taken it out of the queue and refreshEmailPending() is about
@@ -1982,7 +2012,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         if (lost && typeof lost === "object") {
           const d = lost as Partial<LostDraft>;
           if (Array.isArray(d.to) && typeof d.subject === "string" && typeof d.body === "string") {
-            setEmailLostDraft({ to: d.to.map(String), subject: d.subject, body: d.body });
+            setEmailLostDraft({ to: d.to.map(String), subject: d.subject, body: d.body, unconfirmed });
           }
         }
       } else {
@@ -4323,7 +4353,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="rounded-2xl border border-amber-400/30 bg-amber-500/[0.06] p-5" data-testid="settings-email-lost-draft">
                 <div className="flex items-center gap-2 mb-3">
                   <span className="material-symbols-rounded text-amber-300" style={{ fontSize: 18 }} aria-hidden="true">warning</span>
-                  <span className="text-sm text-[var(--text-primary)]">{t("settings.emailApproveFailedDraft")}</span>
+                  {/* The heading is a verdict of its own, and there are two of
+                      them. "This message was not sent" is right over a refusal
+                      the mail server spoke and wrong over a dropped connection,
+                      where nobody knows — and the wrong one is the one that
+                      gets the recipient mailed twice. */}
+                  <span className="text-sm text-[var(--text-primary)]">
+                    {t(emailLostDraft.unconfirmed ? "settings.emailApproveUnconfirmedDraft" : "settings.emailApproveFailedDraft")}
+                  </span>
                 </div>
                 <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
                   <div className="text-xs text-[var(--text-muted)] break-words">
