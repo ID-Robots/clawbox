@@ -19,6 +19,7 @@ import { json, text, type Registrar, type ToolResult } from "../lib/register";
 import { zBool, zConfirm, zEnumOf, zInt, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
 import { PREFERENCE_LANGUAGES, WALLPAPER_FITS } from "../../src/lib/preference-schema";
+import { deriveProtection, type ProtectionInput } from "../../src/lib/clawkeep-protection";
 
 // Raw bytes whose base64 still fits under the 1 MiB image cap in
 // lib/register.ts (base64 is 4/3 of the input). Anything larger is dropped
@@ -174,7 +175,7 @@ const BACKUP_RULES: ErrorRule[] = [
   },
 ];
 
-interface BackupStatusBody {
+interface BackupStatusBody extends Partial<ProtectionInput> {
   supportedOnEdition?: boolean;
   paired?: boolean;
 }
@@ -544,7 +545,18 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
       // handed a status object it read as "configured:false, so tell them to
       // pair it" — advice the Settings app cannot honour on this edition.
       if (body.supportedOnEdition === false) return text(NOT_ON_THIS_EDITION);
-      return json(body);
+      // The raw status is not an answer to "did it succeed". The two failures
+      // that stop backups longest write no heartbeat, so a box whose backups
+      // died days ago still reports `lastHeartbeatStatus: "ok"` — read
+      // literally, the agent tells the owner the last run succeeded. Attach
+      // the same verdict the two shields draw so it cannot.
+      return json({
+        ...body,
+        protection: deriveProtection(
+          { ...body, lastBackupAtMs: body.lastBackupAtMs ?? 0 },
+          Date.now(),
+        ),
+      });
     },
   );
 

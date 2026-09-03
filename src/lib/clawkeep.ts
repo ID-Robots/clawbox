@@ -153,6 +153,10 @@ export interface ClawKeepStatus {
   schedule: ClawKeepSchedule;
   /** Wall-clock ms of the next scheduled run, or 0 when disabled. */
   nextRunAtMs: number;
+  /** When the schedule was last saved (`schedule.json` mtime), or 0. Read by
+   * the protection shield so arming a schedule does not lapse a box for a run
+   * that has not come round yet. */
+  scheduleChangedAtMs: number;
   /** True when the device-local passphrase file is present (and non-empty).
    * `paired && !encryptionConfigured` is the gate the UI watches to surface
    * the "Set encryption passphrase" CTA before the first backup. */
@@ -244,6 +248,23 @@ export async function readSchedule(): Promise<ClawKeepSchedule> {
     return sanitiseSchedule(JSON.parse(raw));
   } catch {
     return { ...DEFAULT_SCHEDULE };
+  }
+}
+
+/**
+ * When the schedule was last changed, as unix ms — `schedule.json`'s mtime.
+ * `writeSchedule` lands the file by atomic rename, so its mtime is exactly the
+ * moment the owner last saved a schedule. 0 when it has never been written.
+ *
+ * The protection shield needs it: arming auto-backup shrinks the tolerated
+ * backup age from a week to 36 h, and applying that retroactively would lapse
+ * a box on the same click for a run that is not due yet.
+ */
+export async function readScheduleChangedAtMs(): Promise<number> {
+  try {
+    return Math.round((await fs.stat(SCHEDULE_PATH)).mtimeMs);
+  } catch {
+    return 0;
   }
 }
 
@@ -699,7 +720,7 @@ export async function clearPassphrase(): Promise<{ removed: boolean }> {
 
 export async function getStatus(): Promise<ClawKeepStatus> {
   await ensureDataDir();
-  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, schedule, encryptionConfigured] = await Promise.all([
+  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, schedule, scheduleChangedAtMs, encryptionConfigured] = await Promise.all([
     readToken(),
     readConfigToml(),
     readStateFile(),
@@ -707,6 +728,7 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     getDaemonBin(),
     isRestoring(),
     readSchedule(),
+    readScheduleChangedAtMs(),
     isEncryptionConfigured(),
   ]);
 
@@ -754,6 +776,7 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     restoring,
     schedule,
     nextRunAtMs: computeNextRunMs(schedule, new Date()),
+    scheduleChangedAtMs,
     encryptionConfigured,
   };
 }

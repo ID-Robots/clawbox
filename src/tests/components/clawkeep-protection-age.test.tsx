@@ -50,6 +50,7 @@ const BASE_STATUS = {
     retentionKeepLast: 10,
   },
   nextRunAtMs: 0,
+  scheduleChangedAtMs: 0,
 };
 
 let status: Record<string, unknown> = { ...BASE_STATUS };
@@ -145,6 +146,34 @@ describe("the ClawKeep shield's age term", () => {
   it("reads 'Not Protected' on a fresh install that has never run one, never 'lapsed'", async () => {
     status = { ...BASE_STATUS, lastBackupAtMs: 0, lastHeartbeatStatus: "" };
     expect(await shieldHeadline()).toBe("Not Protected");
+  });
+
+  it("does not lapse a box for a schedule it was given a minute ago", async () => {
+    // Every box ships with auto-backup off (a week-long window). Arming Daily
+    // shrinks it to 36 h — retroactively, that flips a green box amber on the
+    // same click and blames a scheduled run that has never run.
+    status = {
+      ...BASE_STATUS,
+      lastBackupAtMs: Date.now() - 3 * 24 * HOUR,
+      lastHeartbeatAtMs: Date.now() - 3 * 24 * HOUR,
+      lastHeartbeatStatus: "ok",
+      scheduleChangedAtMs: Date.now() - 60_000,
+    };
+    expect(await shieldHeadline()).toBe("You're Protected");
+  });
+
+  it("says a refused run is refused, instead of waiting out the window", async () => {
+    // EXIT_NEED_PASSPHRASE (9) returns without touching lastBackupAtMs, so the
+    // age term alone would report green for 36 h over a box on which no run
+    // can succeed.
+    status = {
+      ...BASE_STATUS,
+      lastBackupAtMs: Date.now() - 1 * HOUR,
+      lastHeartbeatAtMs: Date.now() - 30 * 60 * 1000,
+      lastHeartbeatStatus: "needs-passphrase",
+    };
+    expect(await shieldHeadline()).toBe("Protection Lapsed");
+    expect(screen.getByText(/refusing to run until this box has an encryption passphrase/i)).toBeTruthy();
   });
 
   it("still reports an error heartbeat as lapsed", async () => {

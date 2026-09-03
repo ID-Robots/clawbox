@@ -21,7 +21,7 @@ interface ChromeShelfProps {
   onLauncherClick: () => void;
   onTrayClick: () => void;
   onClawKeepShieldClick?: () => void;
-  clawkeepStatus?: { stale: boolean; unconfigured?: boolean; busy: boolean; restoring: boolean };
+  clawkeepStatus?: { stale: boolean; lapsed?: boolean; unconfigured?: boolean; busy: boolean; restoring: boolean };
   onPinApp?: (id: string) => void;
   onUnpinApp?: (id: string) => void;
   onCloseApp?: (id: string) => void;
@@ -40,7 +40,7 @@ export default function ChromeShelf({
   onLauncherClick,
   onTrayClick,
   onClawKeepShieldClick,
-  clawkeepStatus = { stale: false, unconfigured: false, busy: false, restoring: false },
+  clawkeepStatus = { stale: false, lapsed: false, unconfigured: false, busy: false, restoring: false },
   onPinApp,
   onUnpinApp,
   onCloseApp,
@@ -112,7 +112,8 @@ export default function ChromeShelf({
   const unpinnedApps = isMobile
     ? apps.filter(a => a.isOpen && a.id !== "settings")
     : apps.filter(a => a.isPinned === false);
-  // Priority: restoring (orange) > backup running (green) > stale/red > ok.
+  // Priority: restoring (orange) > backup running (green) > lapsed (amber)
+  // > never-protected (red) > ok.
   // Restore is the rarer, longer, more user-blocking operation, so it wins
   // even if a backup heartbeat happens to be in flight at the same time.
   const stale = clawAiAuthenticated && clawkeepStatus.stale;
@@ -127,10 +128,16 @@ export default function ChromeShelf({
     : needsSetup
     ? t("shelf.clawkeepNotSetUp")
     : t("shelf.openClawKeep");
-  const mode: "restoring" | "busy" | "alert" | "setup" | "ok" =
+  // A box that WAS protected and has drifted is not the same as one that
+  // never was — the card says so in amber, and the shelf has to agree or the
+  // distinction only exists on the screen the owner has not opened.
+  const lapsed = clawAiAuthenticated && !!clawkeepStatus.lapsed;
+  const mode: "restoring" | "busy" | "lapsed" | "alert" | "setup" | "ok" =
     clawkeepStatus.restoring ? "restoring"
     : clawkeepStatus.busy ? "busy"
-    : !clawAiAuthenticated || clawkeepStatus.stale ? "alert"
+    : !clawAiAuthenticated ? "alert"
+    : lapsed ? "lapsed"
+    : clawkeepStatus.stale ? "alert"
     : needsSetup ? "setup"
     : "ok";
   // Tailwind JIT can only see *literal* class strings, so each variant
@@ -147,6 +154,15 @@ export default function ChromeShelf({
       pulse: "bg-emerald-400/20",
       pulseDelayed: "bg-emerald-400/15",
       tooltip: t("shelf.clawkeepBusy"),
+    },
+    // Was protected, has drifted: the backup is overdue whichever cause put it
+    // there (a failed run, a run that never happened, a refused one), so the
+    // "overdue" title still reads true and only the colour changes.
+    lapsed: {
+      icon: "text-amber-400 clawkeep-shelf-glow-orange",
+      pulse: "bg-amber-400/25",
+      pulseDelayed: "bg-amber-400/20",
+      tooltip: baseTitle,
     },
     alert: {
       icon: "text-red-500 clawkeep-shelf-glow-red",

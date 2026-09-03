@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { backupSourceFor } from "@/lib/harness/backup-source";
-import { deriveProtection, type ProtectionState } from "@/lib/clawkeep-protection";
+import { deriveProtection, isBackupRunning, type ProtectionState } from "@/lib/clawkeep-protection";
 import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, FIELD } from "./coding-agent-ui";
 import {
   CARD,
@@ -67,6 +67,9 @@ interface ClawKeepStatus {
   backupContainsCredentials?: boolean;
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
+  /** When the schedule was last saved. Optional so a status from an older
+   *  server still renders; see deriveProtection() for what it guards. */
+  scheduleChangedAtMs?: number;
   /** True when the device has a stored backup-encryption passphrase. The
    * "Run a backup now" button is gated on this; without it the runner
    * refuses to run since unencrypted backups would leak to the operator. */
@@ -85,27 +88,10 @@ const STEP_LABEL_KEYS: Record<string, string> = {
   "checking-stats": "clawkeep.step.checkingStats",
 };
 
-// If a "running" status hasn't been refreshed in this many ms, assume the
-// daemon crashed (systemd timer kill, OOM, …) and stop showing the
-// progress panel — otherwise reopens would spin forever after a fault.
-//
-// Real backups on Jetson finish in 2-5 minutes (archive build + upload to
-// R2 over a typical home connection). 30 minutes is a comfortable upper
-// bound — a backup that genuinely takes longer almost always means the
-// upload is stuck, in which case the user wants the "Reset stuck backup"
-// affordance below, not a 4-hour spinner that pretends progress is fine.
-const STALE_RUNNING_MS = 30 * 60 * 1000;
 // Show a "Looks stuck?" reset button after this much wall-clock time on
 // the same heartbeat. Tighter than STALE_RUNNING_MS so the user has a
 // recovery path *before* the panel auto-hides.
 const RESET_HINT_AFTER_MS = 6 * 60 * 1000;
-
-function isBackupRunning(status: ClawKeepStatus | null): boolean {
-  if (!status) return false;
-  if (status.lastHeartbeatStatus !== "running") return false;
-  if (!status.lastHeartbeatAtMs) return false;
-  return Date.now() - status.lastHeartbeatAtMs < STALE_RUNNING_MS;
-}
 
 interface CloudSnapshot {
   name: string;
@@ -239,7 +225,7 @@ export default function ClawKeepApp() {
   // `status` changes, so the period re-evaluates the moment a backup starts or
   // ends.
   useEffect(() => {
-    const intervalMs = isBackupRunning(status) ? 3000 : 10000;
+    const intervalMs = isBackupRunning(status, Date.now()) ? 3000 : 10000;
     // Skip a tick if the previous refresh is still in flight, so a slow/hung
     // fetch can't stack concurrent requests on the Jetson.
     let inFlight = false;
@@ -602,7 +588,7 @@ export default function ClawKeepApp() {
                 busyKind={
                   busy === "restore"
                     ? "restore"
-                    : busy === "backup" || isBackupRunning(status)
+                    : busy === "backup" || isBackupRunning(status, Date.now())
                     ? "backup"
                     : null
                 }
@@ -611,7 +597,17 @@ export default function ClawKeepApp() {
                 schedule={status.schedule}
                 nextRunAtMs={status.nextRunAtMs}
                 onSaved={(next) => {
-                  setStatus((prev) => prev ? { ...prev, schedule: next.schedule, nextRunAtMs: next.nextRunAtMs } : prev);
+                  setStatus((prev) => prev
+                    ? {
+                      ...prev,
+                      schedule: next.schedule,
+                      nextRunAtMs: next.nextRunAtMs,
+                      // Without this the shield would judge the new, tighter
+                      // window against the OLD change stamp and lapse the box
+                      // on the same click.
+                      scheduleChangedAtMs: next.scheduleChangedAtMs ?? Date.now(),
+                    }
+                    : prev);
                 }}
                 onError={setError}
               />
@@ -701,7 +697,7 @@ function ScheduleCard({
 }: {
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
-  onSaved: (next: { schedule: ClawKeepSchedule; nextRunAtMs: number }) => void;
+  onSaved: (next: { schedule: ClawKeepSchedule; nextRunAtMs: number; scheduleChangedAtMs?: number }) => void;
   onError: (msg: string) => void;
 }) {
   const { t } = useT();
@@ -1270,6 +1266,8 @@ function DashboardCard({
   // and nothing has run since.
   const subheadKey = protection.reason === "stale"
     ? "clawkeep.status.staleSub"
+    : protection.reason === "blocked"
+    ? "clawkeep.status.blockedSub"
     : copy.subheadKey;
 
   return (
@@ -1298,12 +1296,12 @@ function DashboardCard({
 
       <h2 className="relative text-lg font-semibold text-[var(--text-primary)] mt-4">{t(copy.headlineKey)}</h2>
       <p className="relative mt-1 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
-        {t(subheadKey, { agent, when: timeAgo(status.lastBackupAtMs, t) })}
+        {t(subheadKey, { agent, when: timeAgo(status.lastBackupAtMs, t, protectionNowMs) })}
       </p>
 
       {/* Stats strip — compact, equal-width, no card chrome to keep the eye on the shield */}
       <div className="relative mt-5 grid grid-cols-3 gap-6 w-full max-w-md text-center">
-        <Stat label={t("clawkeep.stat.lastBackup")} value={timeAgo(status.lastBackupAtMs, t)} />
+        <Stat label={t("clawkeep.stat.lastBackup")} value={timeAgo(status.lastBackupAtMs, t, protectionNowMs)} />
         <Stat label={t("clawkeep.stat.cloudUsage")} value={formatBytes(status.cloudBytes)} />
         <Stat label={t("clawkeep.stat.snapshots")} value={status.snapshotCount.toString()} />
       </div>

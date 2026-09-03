@@ -6,7 +6,7 @@ import * as kv from "@/lib/client-kv";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
-import { deriveProtection } from "@/lib/clawkeep-protection";
+import { deriveProtection, isBackupRunning } from "@/lib/clawkeep-protection";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT,
   NEW_APP_EVENT, notifyCodingRunStarted } from "@/lib/ui-events";
@@ -544,6 +544,7 @@ function ChromeDesktopInner() {
   }, []);
 
   const [clawkeepStale, setClawkeepStale] = useState(false);
+  const [clawkeepLapsed, setClawkeepLapsed] = useState(false);
   const [clawkeepUnconfigured, setClawkeepUnconfigured] = useState(false);
   const [clawkeepBusy, setClawkeepBusy] = useState(false);
   const [clawkeepRestoring, setClawkeepRestoring] = useState(false);
@@ -561,8 +562,11 @@ function ChromeDesktopInner() {
         const data = await res.json() as {
           paired?: boolean;
           lastBackupAtMs?: number;
+          lastHeartbeatAtMs?: number;
           lastHeartbeatStatus?: string;
           schedule?: { enabled: boolean; frequency: "daily" | "weekly" };
+          scheduleChangedAtMs?: number;
+          encryptionConfigured?: boolean;
           restoring?: boolean;
         };
         if (aborted) return;
@@ -573,16 +577,27 @@ function ChromeDesktopInner() {
         const unconfigured = data.paired === false;
         // One judgement for both shields. ClawKeep's own shield and this one
         // must never disagree about whether the box is protected, so the age
-        // term, the schedule window and the error heartbeat all come from the
+        // term, the schedule window and every explicit failure come from the
         // shared deriveProtection() rather than a second rule written here.
-        const stale = !unconfigured && deriveProtection({
+        const now = Date.now();
+        const protection = deriveProtection({
           lastBackupAtMs: data.lastBackupAtMs ?? 0,
+          lastHeartbeatAtMs: data.lastHeartbeatAtMs,
           lastHeartbeatStatus: data.lastHeartbeatStatus,
           schedule: data.schedule,
-        }, Date.now()).state !== "protected";
+          scheduleChangedAtMs: data.scheduleChangedAtMs,
+          encryptionConfigured: data.encryptionConfigured,
+        }, now);
         setClawkeepUnconfigured(unconfigured);
-        setClawkeepStale(stale);
-        setClawkeepBusy(data.lastHeartbeatStatus === "running");
+        setClawkeepStale(!unconfigured && protection.state !== "protected");
+        // Amber on the shelf too, so a box that has drifted and one that was
+        // never protected are as distinguishable there as on the card.
+        setClawkeepLapsed(!unconfigured && protection.state === "lapsed");
+        // A "running" heartbeat nothing has refreshed for half an hour is a
+        // run that died mid-backup, not progress — the same rule the card
+        // uses. Without it the shelf pulses green for ever and the protection
+        // verdict can never reach it.
+        setClawkeepBusy(isBackupRunning(data, now));
         setClawkeepRestoring(!!data.restoring);
       } catch {
         // Leave last-known state alone on transient failures so the shield
@@ -2596,7 +2611,7 @@ function ChromeDesktopInner() {
           openSettingsSection("system");
         }}
         onClawKeepShieldClick={openClawKeepOrAiProvider}
-        clawkeepStatus={{ stale: clawkeepStale, unconfigured: clawkeepUnconfigured, busy: clawkeepBusy, restoring: clawkeepRestoring }}
+        clawkeepStatus={{ stale: clawkeepStale, lapsed: clawkeepLapsed, unconfigured: clawkeepUnconfigured, busy: clawkeepBusy, restoring: clawkeepRestoring }}
         onPowerClick={() => {
           setLauncherOpen(false);
           setTrayOpen((prev) => !prev);
