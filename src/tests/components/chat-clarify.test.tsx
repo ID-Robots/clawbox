@@ -234,6 +234,19 @@ describe("a clarify that was replayed or has run out", () => {
     expect(screen.getByTestId("chat-clarify-answered")).toBeTruthy();
   });
 
+  it("says the customer's own message answered it, with nothing left to click", async () => {
+    // TASK-610. A message typed into the composer while the agent is parked is
+    // delivered as the ANSWER, so the card that comes back names it as the
+    // answer rather than sitting there as a form the customer has already
+    // replied to — and offers no control that would answer it a second time.
+    await askQuestion({ ...SINGLE, answered: { "": "the second one" } });
+    // The answered LINE, not the form: the text itself rides through the
+    // translator, which this environment stubs to the key.
+    expect(screen.getByTestId("chat-clarify-answered")).toBeTruthy();
+    expect(screen.queryAllByTestId("chat-clarify-choice")).toHaveLength(0);
+    expect(screen.queryAllByTestId("chat-clarify-text")).toHaveLength(0);
+  });
+
   it("goes dead in place when the agent stops waiting", async () => {
     // The card stays on screen — a question that silently vanished would read
     // as an answer that was sent — but nothing on it can be posted any more.

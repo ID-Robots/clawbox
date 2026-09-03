@@ -289,6 +289,42 @@ else:
     print("[register-mcp] WARNING: skills is not a mapping; "
           "leaving the bundled email skills enabled.", file=sys.stderr)
 
+# ── The clarify window this appliance ships with. ──────────────────────────
+# When the agent stops to ask the customer a question it parks its own worker
+# thread on `Event.wait(agent.clarify_timeout)`. Hermes' default is 3600
+# seconds, and a value of <= 0 is passed through as None — Python's word for
+# FOREVER. On an appliance that is an hour in which the session cannot be used
+# for anything else because one question went unanswered, and a customer who
+# has walked away from the chat has no idea it is holding.
+#
+# Five minutes is the window a person actually answers a chat question inside.
+# It is a backstop rather than the fix: a message arriving on a parked session
+# is now delivered as the ANSWER (hermes-dashboard-turn.ts), so the timeout
+# only decides how long a session that hears nothing at all stays parked.
+#
+# SEEDED, NOT PINNED: written only when the key is absent, so an owner who has
+# chosen their own window keeps it. Written here, with the rest of this
+# device's rendered Hermes config, because `hermes config set` stores a scalar
+# as a STRING ("storing as string" on stderr) while this is a number upstream
+# reads as one — the same reason the MCP entry above is written in PyYAML.
+CLARIFY_TIMEOUT_SECONDS = 300
+agent_cfg = cfg.get("agent")
+if agent_cfg is None:
+    agent_cfg = {}
+    cfg["agent"] = agent_cfg
+if isinstance(agent_cfg, dict):
+    if "clarify_timeout" not in agent_cfg:
+        agent_cfg["clarify_timeout"] = CLARIFY_TIMEOUT_SECONDS
+        changed = True
+        print(f"[register-mcp] agent.clarify_timeout set to {CLARIFY_TIMEOUT_SECONDS}s "
+              "— an unanswered question parks the session for that long, not an hour")
+else:
+    # A shape this script does not understand, left alone for the same reason a
+    # non-mapping `skills` key is: repairing it is not this script's call, and
+    # the MCP registration above must still land.
+    print("[register-mcp] WARNING: agent is not a mapping; "
+          "leaving the clarify timeout at hermes' own default.", file=sys.stderr)
+
 if not changed:
     print("[register-mcp] Hermes MCP registration already current, skipping write")
     sys.exit(0)

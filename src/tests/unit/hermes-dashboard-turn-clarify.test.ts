@@ -498,10 +498,16 @@ describe("a question that was already waiting when we reconnected", () => {
       (activity) => seen.push(activity),
     );
     await settle();
+    // It reaches the surface as the answer to this turn's message lands on it
+    // (TASK-610) — but the payload itself still comes from the session RESULT,
+    // and everything the customer must see is carried across from there.
+    socket.deliver({ jsonrpc: "2.0", id: socket.method("clarify.respond")?.id, result: { status: "ok" } });
+    await settle();
     expect(seen[0]).toEqual({
       kind: "clarify",
       requestId: "re001122",
       questions: [{ qid: "", question: "Which file did you mean?", choices: ["a.ts", "b.ts"], multiSelect: false }],
+      answered: { "": "Hey" },
     });
     socket.event("message.complete", { text: "ok", status: "complete" });
     await running;
@@ -529,9 +535,17 @@ describe("a question that was already waiting when we reconnected", () => {
       (activity) => seen.push(activity),
     );
     await settle();
+    // q2 is the one still outstanding, so this turn's message goes there and
+    // the two locked answers ride along beside it.
+    socket.deliver({
+      jsonrpc: "2.0",
+      id: socket.method("clarify.respond")?.id,
+      result: { status: "ok", remaining: 0 },
+    });
+    await settle();
     const [clarify] = clarifiesOnly(seen);
     expect(clarify.questions).toHaveLength(3);
-    expect(clarify.answered).toEqual({ q1: "beta", q3: "" });
+    expect(clarify.answered).toEqual({ q1: "beta", q3: "", q2: "Hey" });
     socket.event("message.complete", { text: "ok", status: "complete" });
     await running;
   });
@@ -549,6 +563,8 @@ describe("a question that was already waiting when we reconnected", () => {
       () => {},
       (activity) => seen.push(activity),
     );
+    await settle();
+    socket.deliver({ jsonrpc: "2.0", id: socket.method("clarify.respond")?.id, result: { status: "ok" } });
     await settle();
     expect(clarifiesOnly(seen)).toHaveLength(1);
     socket.event("clarify.request", { question: "Which file?", choices: ["a.ts"], request_id: "dupe0011" });
