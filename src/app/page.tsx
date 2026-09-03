@@ -6,6 +6,7 @@ import * as kv from "@/lib/client-kv";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
+import { deriveProtection } from "@/lib/clawkeep-protection";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT,
   NEW_APP_EVENT, notifyCodingRunStarted } from "@/lib/ui-events";
@@ -549,7 +550,6 @@ function ChromeDesktopInner() {
   useEffect(() => {
     let aborted = false;
     let inFlight = false;
-    const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
     const check = async () => {
       // Skip ticks while a previous fetch is still outstanding so a slow
       // device doesn't pile up overlapping requests.
@@ -562,6 +562,7 @@ function ChromeDesktopInner() {
           paired?: boolean;
           lastBackupAtMs?: number;
           lastHeartbeatStatus?: string;
+          schedule?: { enabled: boolean; frequency: "daily" | "weekly" };
           restoring?: boolean;
         };
         if (aborted) return;
@@ -570,10 +571,15 @@ function ChromeDesktopInner() {
         // explicit `paired: false` counts — a response missing the field keeps
         // the old alert fallback rather than silencing a real overdue backup.
         const unconfigured = data.paired === false;
-        const stale =
-          !unconfigured
-          && (!data.lastBackupAtMs
-            || Date.now() - data.lastBackupAtMs > STALE_AFTER_MS);
+        // One judgement for both shields. ClawKeep's own shield and this one
+        // must never disagree about whether the box is protected, so the age
+        // term, the schedule window and the error heartbeat all come from the
+        // shared deriveProtection() rather than a second rule written here.
+        const stale = !unconfigured && deriveProtection({
+          lastBackupAtMs: data.lastBackupAtMs ?? 0,
+          lastHeartbeatStatus: data.lastHeartbeatStatus,
+          schedule: data.schedule,
+        }, Date.now()).state !== "protected";
         setClawkeepUnconfigured(unconfigured);
         setClawkeepStale(stale);
         setClawkeepBusy(data.lastHeartbeatStatus === "running");

@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { backupSourceFor } from "@/lib/harness/backup-source";
+import { deriveProtection, type ProtectionState } from "@/lib/clawkeep-protection";
 import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, FIELD } from "./coding-agent-ui";
 import {
   CARD,
@@ -1167,14 +1168,6 @@ function BackupProgressPanel({
   );
 }
 
-type ProtectionState = "protected" | "lapsed" | "unprotected";
-
-function deriveProtection(status: ClawKeepStatus): ProtectionState {
-  if (status.lastHeartbeatStatus === "error") return "lapsed";
-  if (status.lastBackupAtMs > 0) return "protected";
-  return "unprotected";
-}
-
 interface ProtectionCopy {
   headlineKey: string;
   subheadKey: string;
@@ -1184,15 +1177,6 @@ interface ProtectionCopy {
   discClass: string;
   iconClass: string;
 }
-
-// Lapsed and unprotected share an "at-risk" red palette; only headline/
-// subhead/icon/badge differ. Spread a single base into both.
-const RED_PALETTE = {
-  badgeClass: "bg-red-500/15 text-red-300 border-red-500/30",
-  discClass:
-    "bg-gradient-to-br from-red-400 via-red-500 to-rose-600 shadow-[0_0_28px_rgba(239,68,68,0.35)]",
-  iconClass: "text-white drop-shadow-[0_0_10px_rgba(239,68,68,0.55)]",
-} as const;
 
 const COPY_BY_STATE: Record<ProtectionState, ProtectionCopy> = {
   protected: {
@@ -1205,19 +1189,28 @@ const COPY_BY_STATE: Record<ProtectionState, ProtectionCopy> = {
       "bg-gradient-to-br from-emerald-400 via-emerald-500 to-teal-600 shadow-[0_0_28px_rgba(16,185,129,0.35)]",
     iconClass: "text-white drop-shadow-[0_0_10px_rgba(16,185,129,0.55)]",
   },
+  // Amber, not red: a box that was protected and has drifted is a different
+  // thing from one that never was, and the two used to be indistinguishable
+  // at a glance because they shared a palette.
   lapsed: {
-    ...RED_PALETTE,
     headlineKey: "clawkeep.status.lapsed",
     subheadKey: "clawkeep.status.lapsedSub",
     badgeKey: "clawkeep.badge.atRisk",
     iconName: "gpp_maybe",
+    badgeClass: "bg-amber-500/15 text-amber-300 border-amber-500/30",
+    discClass:
+      "bg-gradient-to-br from-amber-400 via-amber-500 to-orange-600 shadow-[0_0_28px_rgba(245,158,11,0.35)]",
+    iconClass: "text-white drop-shadow-[0_0_10px_rgba(245,158,11,0.55)]",
   },
   unprotected: {
-    ...RED_PALETTE,
     headlineKey: "clawkeep.status.unprotected",
     subheadKey: "clawkeep.status.unprotectedSub",
     badgeKey: "clawkeep.badge.unprotected",
     iconName: "gpp_bad",
+    badgeClass: "bg-red-500/15 text-red-300 border-red-500/30",
+    discClass:
+      "bg-gradient-to-br from-red-400 via-red-500 to-rose-600 shadow-[0_0_28px_rgba(239,68,68,0.35)]",
+    iconClass: "text-white drop-shadow-[0_0_10px_rgba(239,68,68,0.55)]",
   },
 };
 
@@ -1239,6 +1232,17 @@ function DashboardCard({
   // Optional "Name this backup" field for the manual run — passed to the
   // daemon as the snapshot label. Cleared after we hand it off.
   const [backupName, setBackupName] = useState("");
+  // The age term has to keep ageing even when nothing else changes. A box
+  // whose daemon is gone answers /setup-api/clawkeep with the same bytes
+  // forever, and a refresh that throws leaves `status` untouched — deriving
+  // the shield only from a new status would hold "protected" for as long as
+  // the window lasts. Sample the clock on a tick of its own instead, seeded
+  // with the current time so a lapsed box never flashes green on first paint.
+  const [protectionNowMs, setProtectionNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setProtectionNowMs(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
   if (busyKind) {
     const stepKey = busyKind === "backup" ? STEP_LABEL_KEYS[status.currentStep] : undefined;
     return (
@@ -1259,8 +1263,14 @@ function DashboardCard({
   // guaranteed to be empty.
   const canRestore = !disabled && status.snapshotCount > 0;
 
-  const state = deriveProtection(status);
-  const copy = COPY_BY_STATE[state];
+  const protection = deriveProtection(status, protectionNowMs);
+  const copy = COPY_BY_STATE[protection.state];
+  // A backup that simply aged out needs its own sentence: the generic "your
+  // last backup didn't complete" is wrong when the last one completed fine
+  // and nothing has run since.
+  const subheadKey = protection.reason === "stale"
+    ? "clawkeep.status.staleSub"
+    : copy.subheadKey;
 
   return (
     <div className={`${CARD} relative flex flex-col items-center text-center pt-8 pb-6`}>
@@ -1288,7 +1298,7 @@ function DashboardCard({
 
       <h2 className="relative text-lg font-semibold text-[var(--text-primary)] mt-4">{t(copy.headlineKey)}</h2>
       <p className="relative mt-1 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
-        {t(copy.subheadKey, { agent })}
+        {t(subheadKey, { agent, when: timeAgo(status.lastBackupAtMs, t) })}
       </p>
 
       {/* Stats strip — compact, equal-width, no card chrome to keep the eye on the shield */}
@@ -1327,7 +1337,7 @@ function DashboardCard({
           disabled={disabled}
           className={BTN_PRIMARY}
         >
-          {state === "protected" ? t("clawkeep.backupNow") : t("clawkeep.protectMyOpenclaw", { agent })}
+          {protection.state === "protected" ? t("clawkeep.backupNow") : t("clawkeep.protectMyOpenclaw", { agent })}
         </button>
         {canRestore && (
           <button
