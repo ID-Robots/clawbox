@@ -730,7 +730,10 @@ function normaliseClarify(raw: unknown): ClarifyActivity | null {
  */
 function answerableQuestion(clarify: ClarifyActivity): ClarifyQuestion | null {
   const answered = clarify.answered ?? {};
-  return clarify.questions.find((question) => !(question.qid in answered)) ?? null;
+  // `Object.hasOwn`, never `in`: a qid is a string the model chose, and
+  // `"toString" in {}` is true. A batch that happened to name a question
+  // `constructor` would otherwise look answered before anybody answered it.
+  return clarify.questions.find((question) => !Object.hasOwn(answered, question.qid)) ?? null;
 }
 
 /**
@@ -766,7 +769,8 @@ function clarifyStillOpen(
 ): boolean {
   if (typeof raw === "number" && Number.isFinite(raw)) return raw > 0;
   if (Array.isArray(raw)) return raw.some((value) => typeof value === "string");
-  return clarify.questions.some((question) => !(question.qid in answered));
+  // Own properties only — see `answerableQuestion`.
+  return clarify.questions.some((question) => !Object.hasOwn(answered, question.qid));
 }
 
 /**

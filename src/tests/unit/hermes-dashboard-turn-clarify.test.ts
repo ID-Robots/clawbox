@@ -791,6 +791,40 @@ describe("a new message while the agent is parked on a question", () => {
     await running;
   });
 
+  it("does not treat a question named after an Object property as already answered", async () => {
+    // A qid is a string the model chose, and `"toString" in {}` is true. Read
+    // with `in`, a batch that named a question `constructor` would look
+    // answered before anybody answered it — the message would go to the wrong
+    // question, or nowhere at all.
+    const { turn, socket } = await connect({
+      pending_clarify: {
+        questions: [
+          { qid: "constructor", question: "Which builder?", choices: ["a"] },
+          { qid: "q2", question: "Which file?", choices: ["b"] },
+        ],
+        request_id: "fw990011",
+      },
+    });
+    const running = turn!.run(
+      () => {},
+      () => {},
+    );
+    await settle();
+    expect(socket.method("clarify.respond")?.params).toEqual({
+      request_id: "fw990011",
+      answer: "Hey",
+      question_id: "constructor",
+    });
+    socket.deliver({
+      jsonrpc: "2.0",
+      id: socket.method("clarify.respond")?.id,
+      result: { status: "ok", remaining: ["q2"] },
+    });
+    await settle();
+    socket.event("message.complete", { text: "ok", status: "complete" });
+    await running;
+  });
+
   it("forwards nothing when every question is already answered, and asks as it always did", async () => {
     // There is no question left to deliver the message to, and "no question_id"
     // is not a spare slot to put it in: against a batch that is upstream's

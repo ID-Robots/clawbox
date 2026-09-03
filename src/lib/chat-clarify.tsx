@@ -222,7 +222,10 @@ export function ClarifyPrompt({ card, onAnswer }: ClarifyPromptProps) {
   );
 
   const isBatch = questions.length > 1;
-  const outstanding = questions.filter((question) => !(question.qid in answered));
+  // `Object.hasOwn` rather than `in` here and at `locked` below: a qid is a
+  // string the model chose, and every object answers to `toString` and
+  // `constructor`. A question named either would render as already answered.
+  const outstanding = questions.filter((question) => !Object.hasOwn(answered, question.qid));
 
   /**
    * Send every question that is still open, in one gesture.
@@ -280,7 +283,7 @@ export function ClarifyPrompt({ card, onAnswer }: ClarifyPromptProps) {
       {questions.map((question, index) => {
         const labelId = `${idPrefix}-q${index}`;
         const inputId = `${idPrefix}-a${index}`;
-        const locked = question.qid in answered;
+        const locked = Object.hasOwn(answered, question.qid);
         // Markdown source must never become an accessible name — it is read out
         // character for character. See plainTextForLabel.
         const spoken = plainTextForLabel(question.question);
