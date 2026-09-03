@@ -460,14 +460,15 @@ export default function CodingAgentApp() {
    * the folder is not a thing this can open any more.
    */
   const openInTerminal = (run: Run) => {
-    let command: string;
-    if (run.status === "running" && run.transcriptPath) {
-      command = `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(run.transcriptPath)}`;
-    } else if (run.sessionId) {
-      command = `cd ${quoted(run.directory)} && claude-ds --resume ${run.sessionId}`;
-    } else {
-      return;
-    }
+    // The one builder of that command (src/lib/coding-run-preview.ts), so the
+    // quoting is the same here and on the run page's embedded terminal.
+    const command = livePreviewCommand({
+      transcriptPath: run.transcriptPath ?? null,
+      sessionId: run.sessionId ?? null,
+      directory: run.directory,
+      live: run.status === "running",
+    });
+    if (!command) return;
     window.dispatchEvent(new CustomEvent("clawbox:open-terminal", { detail: { command } }));
   };
 

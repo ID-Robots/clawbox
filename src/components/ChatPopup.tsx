@@ -80,6 +80,8 @@ const MAX_QUEUED_SENDS = 20
 const SPOKEN_REPLIES_KEPT = 12
 /** The most one ask for a spoken reply may take, queue and cold start included. */
 const SPEAK_REPLY_TIMEOUT_MS = 150_000
+/** The longest one spoken reply holds the queue while playing (a capped reply is ~100 s of speech). */
+const PLAYBACK_MAX_MS = 150_000
 
 /** A turn waiting its go: what to send, and whether it was SPOKEN (then the reply is spoken back). */
 type QueuedSend = { id: string; text: string; attachments: ChatAttachment[]; voice?: boolean }
@@ -617,7 +619,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // — declared up here because clearTranscript (below) releases them.
   const replyPlayerRef = useRef<HTMLAudioElement | null>(null)
   const spokenUrlsRef = useRef<string[]>([])
+  // Bumped whenever the spoken replies are released (the transcript cleared,
+  // the panel gone): a synthesis still in flight then belongs to a
+  // conversation that no longer exists, and must create nothing.
+  const speechGenerationRef = useRef(0)
   const releaseSpokenReplies = useCallback(() => {
+    speechGenerationRef.current += 1
     replyPlayerRef.current?.pause()
     replyPlayerRef.current = null
     for (const url of spokenUrlsRef.current) { try { URL.revokeObjectURL(url) } catch { /* jsdom */ } }
@@ -2814,17 +2821,30 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     window.addEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged)
     return () => { active = false; window.removeEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged) }
   }, [isOpen])
-  const playReply = useCallback((src: string) => {
+  /**
+   * Play a reply, and settle once it has been heard — `ended`, an `error`,
+   * a refusal to start, or a release — so the next spoken reply waits for
+   * this one instead of talking over it. Bounded, so a player that never
+   * reports either cannot hold the queue forever.
+   */
+  const playReply = useCallback((src: string): Promise<void> => new Promise<void>((resolve) => {
+    let settled = false
+    const done = () => { if (!settled) { settled = true; resolve() } }
     try {
       replyPlayerRef.current?.pause()
       const player = new Audio(src)
       replyPlayerRef.current = player
+      player.addEventListener('ended', done, { once: true })
+      player.addEventListener('error', done, { once: true })
+      // Paused from outside (a release, a newer reply): heard enough.
+      player.addEventListener('pause', done, { once: true })
       const started = player.play()
       // A browser that wants the gesture and the sound in the same tick
       // refuses; the bubble's own player is there for exactly that case.
-      if (started && typeof started.catch === 'function') started.catch(() => {})
-    } catch { /* no Audio here (jsdom) — the bubble's player remains */ }
-  }, [])
+      if (started && typeof started.catch === 'function') started.catch(done)
+      window.setTimeout(done, PLAYBACK_MAX_MS)
+    } catch { done() /* no Audio here (jsdom) — the bubble's player remains */ }
+  }), [])
   /**
    * The reply that closes the run a spoken question started: speak it.
    * `audio` is what the harness attached itself (a channel-style spoken
@@ -2834,17 +2854,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (!runKey || voiceTurnKeyRef.current !== runKey) return
     voiceTurnKeyRef.current = null
     if (!voiceAutoReplyRef.current) return
-    if (audio.length > 0) { playReply(audio[0]); return }
-    const words = speechTextFor(text)
-    if (!words) return
-    // One at a time, in order — chained on the previous ask, whatever became
-    // of it. The box queues replies too; a 429 here means that queue is full,
-    // which a short wait usually clears.
+    const words = audio.length > 0 ? '' : speechTextFor(text)
+    if (audio.length === 0 && !words) return
+    // One at a time, in order, PLAYBACK INCLUDED — chained on the previous
+    // reply, whatever became of it, so a second answer never talks over the
+    // first. The box queues syntheses too; a 429 here means that queue is
+    // full, which a short wait usually clears.
+    const generation = speechGenerationRef.current
     const previous = speakChainRef.current
     let release: () => void = () => {}
     speakChainRef.current = new Promise<void>((resolve) => { release = resolve })
     try {
       await previous
+      if (speechGenerationRef.current !== generation) return
+      if (audio.length > 0) { await playReply(audio[0]); return }
       let res: Response | null = null
       for (let attempt = 0; attempt < 3; attempt++) {
         res = await fetch('/setup-api/tts/speak', {
@@ -2861,6 +2884,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }
       if (!res || !res.ok) return
       const blob = await res.blob()
+      // The transcript this reply belonged to may have gone while the box
+      // was speaking: then nothing is created, stored or played.
+      if (speechGenerationRef.current !== generation) return
       const url = URL.createObjectURL(blob)
       spokenUrlsRef.current.push(url)
       // A bounded ring: the oldest spoken replies are released once a dozen
@@ -2882,7 +2908,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         }
         return prev
       })
-      playReply(url)
+      await playReply(url)
     } catch { /* the reply is on screen; the voice was a bonus */ }
     finally { release() }
   }, [playReply])

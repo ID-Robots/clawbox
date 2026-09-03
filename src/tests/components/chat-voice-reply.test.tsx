@@ -184,7 +184,9 @@ describe("spoken replies in the desktop chat", () => {
     vi.stubGlobal("WebSocket", FakeGatewayWs as unknown as typeof WebSocket);
     installMedia();
     installFetch();
-    play = vi.fn(async () => {});
+    // Playback ends a tick after it starts: the chain of spoken replies
+    // waits for that before the next one plays.
+    play = vi.fn(async function (this: HTMLMediaElement) { setTimeout(() => this.dispatchEvent(new Event("ended")), 0); });
     Object.defineProperty(MEDIA, "play", { configurable: true, value: play });
     Object.defineProperty(MEDIA, "pause", { configurable: true, value: vi.fn() });
     URL.createObjectURL = () => "blob:spoken-reply";

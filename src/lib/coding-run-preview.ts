@@ -17,6 +17,9 @@ function quoted(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+/** A Claude Code session id: what the harness records, and nothing a shell would read otherwise. */
+const SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
+
 export function livePreviewCommand(run: {
   transcriptPath: string | null;
   sessionId: string | null;
@@ -26,8 +29,9 @@ export function livePreviewCommand(run: {
   if (run.live && run.transcriptPath) {
     return `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(run.transcriptPath)}`;
   }
-  if (run.sessionId && run.directory) {
-    return `cd ${quoted(run.directory)} && claude-ds --resume ${run.sessionId}`;
+  if (run.sessionId && run.directory && SESSION_ID.test(run.sessionId)) {
+    // Quoted like the paths: the id is run metadata typed into a shell.
+    return `cd ${quoted(run.directory)} && claude-ds --resume ${quoted(run.sessionId)}`;
   }
   if (run.transcriptPath) {
     return `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(run.transcriptPath)}`;

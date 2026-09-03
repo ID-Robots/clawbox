@@ -650,7 +650,8 @@ describe("CodingAgentApp", () => {
         // The session-less row offered a button that only ran `cd`.
         expect(screen.queryByTestId("coding-agent-terminal-run-paused01")).not.toBeInTheDocument();
         fireEvent.click(terminal);
-        expect(opened).toEqual([`cd '${RUN.directory}' && claude-ds --resume ${session}`]);
+        // The id is quoted like the paths: run metadata typed into a shell.
+        expect(opened).toEqual([`cd '${RUN.directory}' && claude-ds --resume '${session}'`]);
       } finally {
         window.removeEventListener("clawbox:open-terminal", onTerminal);
       }
