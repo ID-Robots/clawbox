@@ -135,7 +135,11 @@ describe("what Hermes' own /model picker knows about ClawBox AI", () => {
     // again. Not reachable for `providers.clawai` today — Hermes writes that
     // flag only into `custom_providers` entries
     // (`_save_discovered_models_to_config`, model_switch.py:244) — so a writer
-    // that ever meets it has to CLEAR it, not just declare beside it.
+    // that meets it while discovery is ON has to CLEAR it, not just declare
+    // beside it. With discovery OFF no probe runs and the declaration stands
+    // whatever the flag says, which is the one case the clawai repair writes
+    // into; see the branch in `clawaiCatalogueVerdict` for the limit that
+    // leaves.
     const declared = { models: [CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID] };
     expect(hermesPickerModels(declared, [])).toEqual([
       CLAWBOX_AI_FLASH_MODEL_ID,
@@ -249,14 +253,22 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     // means anything to Hermes. Reading the entry answers both AND carries the
     // `base_url` the orphan guard needs, so it also costs one Python start
     // instead of two.
+    //
+    // The WHOLE sequence, not just the deciding read: this is also what bounds
+    // the repair's total spawns, and `--json` on the verification read is
+    // load-bearing in the same way it is on the deciding one — without it the
+    // CLI renders the list through `yaml.safe_dump` and the guard would report
+    // "could not declare" over a write that landed.
     providerBlock(LINKED);
     await reconcileClawaiModelsWithHermes();
-    // Everything BEFORE the write, which is what "decide in one Python start"
-    // means. The write is verified by a read of its own key afterwards — see
-    // the silent-stored-as-text test — and that one is a different question.
-    const args = cliMock.mock.calls.map((c) => c[0] as string[]);
-    const deciding = args.slice(0, args.findIndex((a) => a[1] === "set"));
-    expect(deciding).toEqual([["config", "get", `providers.${CLAWAI_PROVIDER}`, "--json"]]);
+    expect(cliMock.mock.calls.map((c) => c[0] as string[])).toEqual([
+      ["config", "get", `providers.${CLAWAI_PROVIDER}`, "--json"],
+      ["config", "set", `providers.${CLAWAI_PROVIDER}.models`, JSON.stringify([
+        CLAWBOX_AI_FLASH_MODEL_ID,
+        CLAWBOX_AI_PRO_MODEL_ID,
+      ])],
+      ["config", "get", `providers.${CLAWAI_PROVIDER}.models`, "--json"],
+    ]);
   });
 
   it("asks the CLI for the catalogue as JSON", async () => {
@@ -432,11 +444,17 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     // Not claimed: the catalogue cache is only dropped for a write that landed.
     expect(invalidateMock).not.toHaveBeenCalled();
 
+    // Nor retried. This CLI parsed a CONSTANT literal and did not get a list,
+    // so it will parse it the same way every 60 s for the life of the process —
+    // and each attempt re-serialises the customer's config.yaml through
+    // `save_config` for nothing. A failure we have PROVED is final stays
+    // latched; the next process start tries once more, because the residue is
+    // still in the file for the deciding read to find.
     const firstAttempt = cliMock.mock.calls.filter((c) => (c[0] as string[])[1] === "set").length;
     vi.advanceTimersByTime(60_001);
     await reconcileClawaiModelsWithHermes();
     expect(cliMock.mock.calls.filter((c) => (c[0] as string[])[1] === "set").length)
-      .toBeGreaterThan(firstAttempt);
+      .toBe(firstAttempt);
   });
 
   it("does not claim a repair the CLI stored as text without saying so", async () => {
@@ -454,6 +472,37 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
       // Not claimed: the catalogue cache is only dropped for a write that landed.
       expect(invalidateMock).not.toHaveBeenCalled();
       expect(warn.mock.calls.flat().map(String).join(" ")).toContain("could not declare");
+
+      // And not retried, for the same reason the warning branch is not: the
+      // read-back handed our own literal back, which is proof the write cannot
+      // land on this CLI rather than a transient failure.
+      const firstAttempt = setCount();
+      vi.advanceTimersByTime(60_001);
+      await reconcileClawaiModelsWithHermes();
+      expect(setCount()).toBe(firstAttempt);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("tries again when the write could not be VERIFIED rather than proved wrong", async () => {
+    // The other half of the same guard. A verification that did not answer —
+    // a wedged `hermes`, a `--json` this build rejects, a decorated stdout —
+    // says nothing about the write, so it is not proof of anything and the
+    // ordinary 60 s cadence applies. Only a value handed back as our own
+    // literal is final.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const setCount = () => cliMock.mock.calls.filter((c) => (c[0] as string[])[1] === "set").length;
+    try {
+      cliMock.mockImplementation(async (args: string[]) => {
+        if (args[2] === `providers.${CLAWAI_PROVIDER}.models` && args[1] === "get") {
+          return { code: 2, stdout: "", stderr: "unrecognized arguments: --json" };
+        }
+        if (args[1] === "set") return { code: 0, stdout: "", stderr: "" };
+        return { code: 0, stdout: `${JSON.stringify(LINKED)}\n`, stderr: "" };
+      });
+      await reconcileClawaiModelsWithHermes();
+      expect(invalidateMock).not.toHaveBeenCalled();
 
       const firstAttempt = setCount();
       vi.advanceTimersByTime(60_001);

@@ -463,31 +463,47 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
     // `HERMES_PIN_COMMIT` installs — the coercion chain there yields a real
     // list — which is exactly why it is worth a guard rather than a comment.
     const storedAsText = /storing as string/i.test(written.stderr ?? "");
-    // AND NEITHER IS A CLEAN STDERR. The guard above can only fire on a CLI
-    // whose coercion block exists to print that warning; on one old enough to
-    // lack it — which is the build this repair is REACHED on — the same literal
-    // is stored as text with an empty stderr and exit 0. So the write is judged
-    // by reading it back through the CLI's own machine-readable mode, the same
-    // lever the verdict read uses, and a value that does not come back as our
-    // list is a write that did not land. Without this the repair rewrites the
-    // customer's config.yaml once per boot, claims success every time and never
-    // converges.
-    const landed = written.code === 0 && !storedAsText && (await clawaiCatalogueLanded());
-    if (!landed) {
+    // AND NEITHER IS A CLEAN STDERR. That warning only exists on a CLI whose
+    // coercion block prints it, so it cannot speak for one old enough to lack
+    // the block — where the same literal is stored as text with an EMPTY stderr
+    // and exit 0. The narrow band where that happens is a box moved off
+    // `HERMES_PIN_COMMIT` by a hand-run `hermes update` onto a CLI that still
+    // takes `--json` on `config get` (or the verdict read would have answered
+    // "retry") and no longer coerces on `config set`. The guard is worth having
+    // for a wider reason than that band, though: an exit code is not an outcome
+    // for ANY reason a write may fail to land, and this repair runs unattended
+    // on every field box.
+    const outcome = written.code !== 0
+      ? "unverified"
+      : storedAsText
+        ? "stored-as-text"
+        : await verifyClawaiCatalogue();
+    if (outcome !== "landed") {
       // A repair that could not be made is reported, never claimed: the picker
-      // keeps showing what the box actually has, and a later request tries
-      // again. No credential is in this argv — the value is a constant model
-      // list — so the stream can be logged whole.
+      // keeps showing what the box actually has. No credential is in this argv
+      // — the value is a constant model list — so the stream can be logged
+      // whole.
       console.warn(
         "[hermes/clawai] could not declare the ClawBox AI catalogue",
         written.code !== 0
           ? `exit ${written.code}`
-          : storedAsText
-            ? "(the CLI stored it as text, not a list)"
+          : outcome === "stored-as-text"
+            ? "(this hermes stores a list as text — the same write cannot land, so it is not retried before the next restart)"
             : "(it did not read back as the list we wrote)",
         written.stderr?.trim() || written.stdout?.trim() || "",
       );
-      return unlatch();
+      // A FAILURE WE HAVE PROVED IS FINAL DOES NOT GET A RETRY. `unlatch()` is
+      // for a repair that might work on a later request — a locked config, a
+      // wedged CLI. A CLI that parsed our constant literal and did not get a
+      // list will parse it the same way every 60 s for the life of this
+      // process, and each attempt re-serialises the customer's config.yaml
+      // through `save_config` for nothing. So that one answer stays latched:
+      // the journal says why, the next process start tries once more (the
+      // residue is still in the file, and the verdict read finds it), and a
+      // hand-run `hermes update` to a CLI that can store a list is picked up on
+      // the restart that follows it.
+      if (outcome === "unverified") unlatch();
+      return;
     }
     // The catalogue this device serves just changed — don't serve the old one.
     //
@@ -508,36 +524,56 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
 /**
  * Did the catalogue we just wrote actually land as a LIST?
  *
- * `hermes config set` has no typed mode — `set_config_value(key, value: str)`
- * (hermes_cli/config.py:5383) is the only entry point, and a JSON literal
- * through its `_looks_structured_value` coercion is the harness's own way of
- * storing a list. What the harness DOES offer for the other half is
- * `hermes config get <key> --json` (config.py:5769), which prints
- * `json.dumps(value)` — so the write is verified with the CLI's own reader
- * rather than with anything that reaches into its store.
+ *   "landed"         — the key reads back as exactly the ids we sent.
+ *   "stored-as-text" — the CLI handed our own literal back as a STRING. Proof
+ *                      that this build cannot store a list, and therefore that
+ *                      re-issuing the identical write is futile.
+ *   "unverified"     — the question failed, or answered something else. Says
+ *                      nothing about the write either way, so the caller
+ *                      retries on the ordinary cadence.
  *
- * FALSE COVERS BOTH "it came back wrong" AND "it could not be read", because
- * the caller does the same thing with either: report, and let a later request
- * try again after `REPAIR_RETRY_MS`. A write we cannot verify is not a write we
- * may claim — the whole point of the guard.
+ * `hermes config set` has no typed mode — `set_config_value(key, value: str,
+ * force=False)` (hermes_cli/config.py:5383) is the only entry point, and a JSON
+ * literal through its `_looks_structured_value` coercion is the harness's own
+ * way of storing a list. What the harness offers for the other half is
+ * `hermes config get <key> --json` (config.py:5769), which prints
+ * `json.dumps(value)`; that is the whole verification, so nothing here reaches
+ * into Hermes' store. (The OpenClaw half of this repo gets a typed
+ * `config set … --json` instead — see the PR body; the asymmetry is Hermes',
+ * not ours.)
+ *
+ * THE LEAF, NOT THE BLOCK, and not only for the smaller parse: the entry this
+ * repair read to decide carries `api_key`, and this key cannot. A verification
+ * that need never hold a credential should not be given one.
+ *
+ * IT NEVER THROWS. `runHermesCli` rejects on a spawn failure or a timeout, and
+ * an unanswerable verification is not the repair failing — letting it reach the
+ * caller's `catch` would log "catalogue reconcile failed" over a write that
+ * landed.
  */
-async function clawaiCatalogueLanded(): Promise<boolean> {
-  const read = await runHermesCli(
-    ["config", "get", `providers.${CLAWAI_PROVIDER}.models`, "--json"],
-    { timeoutMs: 15_000 },
-  );
-  if (!hermesCliAnswered(read) || read.code !== 0) return false;
+type ClawaiWriteOutcome = "landed" | "stored-as-text" | "unverified";
+
+async function verifyClawaiCatalogue(): Promise<ClawaiWriteOutcome> {
+  const declared = JSON.stringify(CLAWBOX_AI_CHAT_MODEL_IDS);
   let value: unknown;
   try {
+    const read = await runHermesCli(
+      ["config", "get", `providers.${CLAWAI_PROVIDER}.models`, "--json"],
+      { timeoutMs: 15_000 },
+    );
+    if (!hermesCliAnswered(read) || read.code !== 0) return "unverified";
     value = JSON.parse(read.stdout);
   } catch {
-    return false;
+    return "unverified";
   }
-  return (
+  if (
     Array.isArray(value)
     && value.length === CLAWBOX_AI_CHAT_MODEL_IDS.length
     && value.every((id, i) => id === CLAWBOX_AI_CHAT_MODEL_IDS[i])
-  );
+  ) {
+    return "landed";
+  }
+  return value === declared ? "stored-as-text" : "unverified";
 }
 
 /** Let a later request try the repair again, no sooner than `REPAIR_RETRY_MS`.
@@ -665,6 +701,13 @@ async function clawaiCatalogueVerdict(): Promise<ClawaiVerdict> {
   // no readable `models:` is EMPTY — the same "clawai (0)" — and the ids we
   // declare there are permanent, because no probe can come back to undo them.
   // Declining it would strand a box one write fixes for good.
+  //
+  // THE FLAG IS DECLARED BESIDE, NOT CLEARED, and that is a known limit rather
+  // than an oversight: an owner who later turns discovery back on puts that box
+  // into the state above, where the empty probe wins and this branch declines
+  // it. Clearing the flag would mean a second write to verify on a state only a
+  // contradictory pair of hand-edits produces — Hermes writes neither key into
+  // `providers:` (it persists its own catalogues under `custom_providers`).
   if (hermesOwnsCatalogue(row) && hermesDiscoversModels(row)) {
     return { action: "leave", reason: "Hermes persisted this catalogue itself (models_discovered)" };
   }

@@ -97,6 +97,12 @@ export function modelsConfigIsAllowlist(value: unknown, discovered = false): boo
  * nothing to say (the local model asleep), `null` when it did not answer at
  * all. Merge rule: model_switch.py:3423-3431.
  *
+ * `null` IS ALSO HOW A DISCOVERY-OFF ENTRY IS ASKED. `_discovery_allowed`
+ * (model_switch.py:3788) gates the probe on `discover_models`, and this mirror
+ * does not model that gate — so an entry carrying `discover_models: false` must
+ * be handed `null`, never a list, or it would be told a probe won that Hermes
+ * would never have run.
+ *
  * ONE DISJUNCT OF THAT RULE IS DELIBERATELY NOT MODELLED. Hermes also lets an
  * EMPTY probe replace a declared allowlist when the probe is an
  * `_NativePickerModelList`, a Python subtype `string[] | null` cannot carry.
