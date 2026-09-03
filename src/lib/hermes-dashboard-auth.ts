@@ -110,9 +110,23 @@ export async function dashboardWsTicket(signal?: AbortSignal): Promise<string | 
 /** Where the dashboard's WebSocket endpoints live, for a caller that opens one. */
 export const DASHBOARD_WS_ORIGIN = `ws://${DASH_HOST}:${DASH_PORT}`;
 
-// Fetch a dashboard API path with a valid session, re-logging in once on 401.
-export async function dashboardFetch(apiPath: string, init?: RequestInit): Promise<Response> {
+/**
+ * Fetch a dashboard API path with a valid session, re-logging in once on 401.
+ *
+ * `timeoutMs` overrides the module default for the one kind of call that is
+ * legitimately slow: synthesising speech. Every other endpoint here answers
+ * from memory or a database and has no business taking seconds, so the tight
+ * default stays the default — a caller has to ask for the longer rope and say
+ * why. (`/api/audio/speak` reaches a cloud voice, or a local engine paying a
+ * cold start, and 8 s would abort a request that was going to succeed and
+ * report it as a dead dashboard.)
+ */
+export async function dashboardFetch(
+  apiPath: string,
+  init?: RequestInit & { timeoutMs?: number },
+): Promise<Response> {
   if (!cachedCookie) cachedCookie = await loginWithBackoff();
+  const deadline = init?.timeoutMs ?? REQUEST_TIMEOUT_MS;
   const attempt = () =>
     fetch(`${DASH_ORIGIN}${apiPath}`, {
       ...init,
@@ -123,8 +137,8 @@ export async function dashboardFetch(apiPath: string, init?: RequestInit): Promi
       // (`dashboardWsTicket`) was the one call with no deadline at all. Both
       // now apply: whichever fires first ends the request.
       signal: init?.signal
-        ? AbortSignal.any([init.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)])
-        : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        ? AbortSignal.any([init.signal, AbortSignal.timeout(deadline)])
+        : AbortSignal.timeout(deadline),
       headers: { ...(init?.headers || {}), cookie: cachedCookie || "" },
     });
   let res = await attempt();

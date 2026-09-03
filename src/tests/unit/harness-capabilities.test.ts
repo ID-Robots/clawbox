@@ -23,7 +23,7 @@ const linked: HarnessFacts = {
   hermesHasVisionRoute: false,
   hermesStreamsTurns: false,
   hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false,
+  hermesAgentDrawsImages: false, hermesSpeaksReplies: false
 };
 const bare: HarnessFacts = {
   hasClawaiToken: false,
@@ -31,7 +31,7 @@ const bare: HarnessFacts = {
   hermesHasVisionRoute: false,
   hermesStreamsTurns: false,
   hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false,
+  hermesAgentDrawsImages: false, hermesSpeaksReplies: false
 };
 /** The box the attach button is honest on: the flag AND somewhere to look. */
 const seeing: HarnessFacts = {
@@ -40,7 +40,7 @@ const seeing: HarnessFacts = {
   hermesHasVisionRoute: true,
   hermesStreamsTurns: false,
   hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false,
+  hermesAgentDrawsImages: false, hermesSpeaksReplies: false
 };
 /** A linked box whose agent has an image backend selected — it can draw. */
 const drawing: HarnessFacts = {
@@ -49,7 +49,7 @@ const drawing: HarnessFacts = {
   hermesHasVisionRoute: false,
   hermesStreamsTurns: false,
   hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: true,
+  hermesAgentDrawsImages: true, hermesSpeaksReplies: false
 };
 
 describe("capabilitiesFor", () => {
@@ -165,8 +165,6 @@ describe("capabilitiesFor", () => {
   it("keeps genuinely absent things absent whatever the facts say", () => {
     for (const facts of [linked, bare, seeing]) {
       const caps = capabilitiesFor("hermes", facts);
-      // TTS is a gateway capability with no Hermes equivalent.
-      expect(caps.canSpeakReplies).toBe(false);
       // There is no socket, so there is nothing a connection banner could
       // honestly describe.
       expect(caps.hasLiveConnection).toBe(false);
@@ -174,6 +172,36 @@ describe("capabilitiesFor", () => {
       // extensions by design; a document has no way in.
       expect(caps.canAttachDocuments).toBe(false);
     }
+  });
+
+  /**
+   * `canSpeakReplies` was hardcoded `false` here with the comment "TTS is a
+   * gateway capability with no Hermes equivalent". Hermes has one — a `tts:`
+   * provider block and `POST /api/audio/speak` — and this repo's own
+   * local-model-profile.ts already listed `tts` among its built-in toolsets.
+   * So it follows the box's speech config now, exactly as
+   * `canGenerateImages` follows its image backend.
+   */
+  it("speaks only where the box is actually configured to", () => {
+    // All three fact sets carry `hermesSpeaksReplies: false` — a box with no
+    // voice selected promises no player.
+    for (const facts of [linked, bare, seeing]) {
+      const caps = capabilitiesFor("hermes", facts);
+      expect(caps.canSpeakReplies).toBe(false);
+      // And the two are computed together: nothing may claim to speak while
+      // naming nobody to do it.
+      expect(caps.spokenReplyTrigger).toBeNull();
+    }
+    const speaking = capabilitiesFor("hermes", { ...linked, hermesSpeaksReplies: true });
+    expect(speaking.canSpeakReplies).toBe(true);
+    // The BOX asks, because Hermes never speaks a reply unbidden.
+    expect(speaking.spokenReplyTrigger).toBe("box");
+  });
+
+  it("leaves the gateway to speak for itself on OpenClaw", () => {
+    const caps = capabilitiesFor("openclaw", linked);
+    expect(caps.canSpeakReplies).toBe(true);
+    expect(caps.spokenReplyTrigger).toBe("harness");
   });
 
   it("claims streaming only where the box was found able to do it", () => {
@@ -222,7 +250,7 @@ describe("capabilitiesFor", () => {
         hermesHasVisionRoute: false,
         hermesStreamsTurns: false,
         hasClawaiImageRoute: false,
-        hermesAgentDrawsImages: false,
+        hermesAgentDrawsImages: false, hermesSpeaksReplies: false
       }).canAttachImages,
     ).toBe(false);
     // And the mirror: a vision route on an agent whose turn cannot carry the
@@ -234,7 +262,7 @@ describe("capabilitiesFor", () => {
         hermesHasVisionRoute: true,
         hermesStreamsTurns: false,
         hasClawaiImageRoute: false,
-        hermesAgentDrawsImages: false,
+        hermesAgentDrawsImages: false, hermesSpeaksReplies: false
       }).canAttachImages,
     ).toBe(false);
   });
@@ -253,7 +281,7 @@ describe("capabilitiesFor", () => {
         hermesHasVisionRoute: false,
         hermesStreamsTurns: false,
         hasClawaiImageRoute: false,
-        hermesAgentDrawsImages: false,
+        hermesAgentDrawsImages: false, hermesSpeaksReplies: false
       }).canAttachImages,
     ).toBe(false);
     expect(
@@ -263,7 +291,7 @@ describe("capabilitiesFor", () => {
         hermesHasVisionRoute: true,
         hermesStreamsTurns: false,
         hasClawaiImageRoute: false,
-        hermesAgentDrawsImages: false,
+        hermesAgentDrawsImages: false, hermesSpeaksReplies: false
       }).canAttachImages,
     ).toBe(true);
   });

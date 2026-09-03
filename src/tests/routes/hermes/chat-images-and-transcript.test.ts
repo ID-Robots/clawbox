@@ -81,7 +81,14 @@ const transcript = () =>
     .map((line) => JSON.parse(line));
 
 const staged = (name: string) => path.join(mediaRoot, "chat-attachments", name);
-const lastArgs = () => spawned[spawned.length - 1].args;
+// The last CHAT invocation, not merely the last spawn. The turn is no longer
+// the only thing this route runs a `hermes` for — settling it also asks the
+// config whether the box has a voice to speak the reply with — and a helper
+// that just took the newest spawn started returning `config get` argv.
+const lastArgs = () => {
+  const chat = spawned.filter((s) => s.args.includes("-q"));
+  return chat[chat.length - 1].args;
+};
 
 describe("POST /setup-api/hermes/chat", () => {
   beforeEach(() => {

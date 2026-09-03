@@ -53,6 +53,8 @@ import {
   servableMediaRoot,
 } from "@/lib/harness/hermes-generated-media";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
+import { speakHermesReply } from "@/lib/harness/hermes-spoken-reply";
+import { hermesSpeaksReplies } from "@/lib/hermes-tts";
 import {
   DASHBOARD_PROVIDER_KIND,
   isQuietStreamError,
@@ -385,7 +387,28 @@ async function settleTurn(
   // Appended AFTER the answer rather than replacing it: the model's own
   // sentence is the caption, and dropping it would leave a picture with no
   // words in a conversation the customer is having.
-  const answer = [caption, ...drawn.map((file) => `MEDIA:${file}`)]
+  // The reply, SPOKEN — the Hermes half of what the OpenClaw gateway does
+  // unbidden. Said as a `MEDIA:` line for exactly the reason the picture above
+  // is: `splitAssistantMedia` lifts it back out a few lines down into the same
+  // `audio` array the gateway's attachment part produces, so the transcript,
+  // the adapter and the bubble's player all keep working with no edition of
+  // their own.
+  //
+  // The CAPTION is what gets spoken, not `answer`: the MEDIA: lines are
+  // machinery, and a box reading a file path aloud would be absurd.
+  //
+  // Fail-soft and bounded (see speakHermesReply): a reply that could not be
+  // spoken still renders, silently. Losing the answer to a busy voice would be
+  // a far worse trade than losing the audio.
+  // The capability read is inside the try/catch of neither — `hermesSpeaksReplies`
+  // fails closed and `speakHermesReply` never throws — so a box that cannot
+  // answer the question simply does not speak, and the turn is unaffected.
+  const spokenClip = (await hermesSpeaksReplies()) ? await speakHermesReply(caption) : null;
+  const answer = [
+    caption,
+    ...drawn.map((file) => `MEDIA:${file}`),
+    ...(spokenClip ? [`MEDIA:${spokenClip}`] : []),
+  ]
     .filter(Boolean)
     .join("\n");
   // The database first, the console parse next, and what the stream itself

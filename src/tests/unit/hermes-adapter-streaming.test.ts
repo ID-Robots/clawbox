@@ -27,6 +27,7 @@ const FACTS = {
   hermesStreamsTurns: true,
   hasClawaiImageRoute: false,
   hermesAgentDrawsImages: false,
+  hermesSpeaksReplies: false,
 };
 const STREAMING_CAPS = capabilitiesFor("hermes", FACTS);
 const BLOCKING_CAPS = capabilitiesFor("hermes", { ...FACTS, hermesStreamsTurns: false });
