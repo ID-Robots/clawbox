@@ -2243,7 +2243,16 @@ step_openclaw_install() {
     # falls back to the hardcoded version — that is the defined answer, and an
     # aborted update is not. TASK-657, same shape as gateway-pre-start.sh:45.
     PINNED=$(head -1 "$PIN_FILE" | awk '{print $1}' || true)
-    echo "  Pinned OpenClaw target from $PIN_FILE: $PINNED"
+    if [ -n "$PINNED" ]; then
+      echo "  Pinned OpenClaw target from $PIN_FILE: $PINNED"
+    else
+      # The `|| true` above turns an unreadable or empty pin file into an empty
+      # PINNED, and the fallback below is then correct -- but the unconditional
+      # line printed "Pinned OpenClaw target from ...: " and asserted a pin had
+      # been read when none had. The `else` branch's WARN is not reached from
+      # here, so say it here.
+      echo "  WARN: $PIN_FILE could not be read — falling back to hardcoded $OPENCLAW_VERSION" >&2
+    fi
   else
     echo "  WARN: $PIN_FILE not found — falling back to hardcoded $OPENCLAW_VERSION" >&2
   fi

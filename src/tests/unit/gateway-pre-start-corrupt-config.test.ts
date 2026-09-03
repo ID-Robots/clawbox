@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +17,12 @@ const SCRIPT = path.resolve(process.cwd(), "scripts/gateway-pre-start.sh");
 
 const hasPython3 =
   spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
+
+/**
+ * 0000 is a no-op for root, which reads anything — the unreadable case would
+ * take the happy path and prove nothing. CI is non-root.
+ */
+const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
 function extractLoader(): string {
   const src = readFileSync(SCRIPT, "utf-8");
@@ -43,6 +49,20 @@ function load(cfgPath: string): { result: unknown; stderr: string } {
   );
   if (proc.status !== 0) throw new Error(`loader exited ${proc.status}: ${proc.stderr}`);
   return { result: JSON.parse(proc.stdout.trim()), stderr: proc.stderr };
+}
+
+/** The same run, but reporting a non-zero exit instead of throwing on it. */
+function loadRaw(cfgPath: string): { status: number | null; stdout: string; stderr: string } {
+  const proc = spawnSync(
+    "python3",
+    [
+      "-c",
+      `import json, os, sys, shutil, time\ncfg_path = sys.argv[1]${LOADER}\nprint(json.dumps(cfg))`,
+      cfgPath,
+    ],
+    { encoding: "utf-8" },
+  );
+  return { status: proc.status, stdout: proc.stdout ?? "", stderr: proc.stderr ?? "" };
 }
 
 describe.skipIf(!hasPython3)("gateway-pre-start.sh config load block", () => {
@@ -84,6 +104,34 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh config load block", () => {
     expect(readFileSync(cfgPath, "utf-8")).toBe(torn);
     expect(stderr).toMatch(/WARN: openclaw\.json is not valid JSON/);
     expect(stderr).toContain(backups[0]);
+  });
+
+  it.skipIf(isRoot)("does not take the boot down on a file it cannot read, and does not answer {}", () => {
+    // `PermissionError` is not a subclass of `FileNotFoundError`, so it escaped
+    // the one arm that was caught. This heredoc is a bare top-level command in
+    // a script under `set -euo pipefail`, so the raise killed the whole
+    // ExecStartPre: no gateway, on every boot, until someone with shell access
+    // fixed the mode. openclaw.json is clawbox-owned and therefore writable
+    // from a chat turn, which makes that an agent-reachable boot DoS — the same
+    // class this change already closed for data/hostname.env and .mcp-token,
+    // moved to the more central file, the one this script exists to edit.
+    //
+    // And answering `{}` is not the fix either: that object is written back a
+    // few hundred lines below, so a config that merely could not be OPENED
+    // would lose every provider, auth profile and channel.
+    writeFileSync(cfgPath, JSON.stringify({ gateway: { port: 18789 }, models: { providers: { openai: {} } } }));
+    chmodSync(cfgPath, 0o000);
+    try {
+      const r = loadRaw(cfgPath);
+      expect(r.status, `the loader aborted the pre-start:\n${r.stderr}`).toBe(0);
+      expect(r.stdout.trim(), "it answered {} for a file it could not read").toBe("");
+      expect(r.stderr).toMatch(/could not be read/i);
+      expect(r.stderr).toMatch(/leaving it exactly as it is/i);
+      // Nothing beside it: this is not the corrupt-file path.
+      expect(readdirSync(dir)).toEqual(["openclaw.json"]);
+    } finally {
+      chmodSync(cfgPath, 0o644);
+    }
   });
 
   // The block runs with the script's own imports; a change there must move here.

@@ -73,17 +73,26 @@ function block(fromLine: string, toLine: string): string {
   return PRE_START.slice(start, end + toLine.length);
 }
 
-function run(program: string): { status: number | null; out: string } {
+function run(program: string): { status: number | null; out: string; stderr: string } {
   const file = path.join(root, "block.sh");
   writeFileSync(file, `#!/usr/bin/env bash\nset -euo pipefail\n${program}\n`);
   chmodSync(file, 0o755);
   const r = spawnSync("bash", [file], { encoding: "utf-8", timeout: 30_000 });
-  return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, stderr: r.stderr ?? "" };
 }
+
+/**
+ * The 0000 cases are a no-op for root, which reads anything: they would pass by
+ * taking the happy path and prove nothing. CI is non-root; a `sudo npm test` on
+ * a box is not.
+ */
+const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
 interface Probe {
   status: number | null;
   out: string;
+  /** Only what went to fd 2 — the stream the WARNs promise. */
+  stderr: string;
   /** The version the block settled on, or null when it never got that far. */
   effective: string | null;
   /** The generation it exported, or null when it never got that far. */
@@ -133,6 +142,7 @@ function probe(opts: {
   return {
     status: r.status,
     out: r.out,
+    stderr: r.stderr,
     effective: /EFFECTIVE=(.*)/.exec(r.out)?.[1] ?? null,
     v2: /V2=(.*)/.exec(r.out)?.[1] ?? null,
   };
@@ -196,8 +206,95 @@ describe.runIf(canRun)("gateway-pre-start's OpenClaw generation probe", () => {
     const r = probe({ cli: "exit 1", pkg: null, pin: "2026.8.1\n" });
     expect(r.status, `the pre-start aborted:\n${r.out}`).toBe(0);
     expect(r.out, "it decided a generation it could not know").not.toContain("REACHED_END=1");
-    expect(r.out).toMatch(/cannot tell which OpenClaw generation/);
-    expect(r.out).toMatch(/leaving openclaw.json exactly as it is/);
+    expect(r.stderr).toMatch(/cannot tell which OpenClaw generation/);
+    expect(r.stderr).toMatch(/leaving openclaw.json exactly as it is/);
+    // The skipped pre-start is not only the generation-sensitive rewrites, so
+    // the WARN must name what this boot does NOT re-apply.
+    expect(r.stderr).toMatch(/auth token/i);
+    expect(r.stderr).toMatch(/allowedOrigins/);
+  });
+
+  for (const version of ["0.0.0-dev", "1.2.3", "next", "2026.8"] as const) {
+    it(`refuses to call a core v1 on a version it cannot read as a date (${version})`, () => {
+      // The manifest read accepted ANY non-empty string, while the CLI
+      // fallback right beneath it applied `grep -oE '20[0-9]{4}...'`. So the
+      // two sources validated differently and the stricter one was the one
+      // almost never reached: a dev/nightly build, a fork, an
+      // `npm i -g <git url>` install or a vendor rebuild sailed past the
+      // "write nothing" guard as a non-empty value and selected v1 semantics
+      // on a core that may well be v2 — which then refuses the legacy
+      // messages.tts / imageGenerationModel / allowInsecureAuth names this
+      // script would write, and never reports ready. Exactly the outcome this
+      // change exists to make impossible, through a different door.
+      const r = probe({ cli: "exit 1", pkg: version, pin: "2026.8.1\n" });
+      expect(r.status, `the pre-start aborted:\n${r.out}`).toBe(0);
+      expect(r.out, "it decided a generation it could not know").not.toContain("REACHED_END=1");
+      expect(r.stderr).toMatch(/cannot tell which OpenClaw generation/);
+    });
+  }
+
+  it("still reads a real date version, suffix and all", () => {
+    // The control for the four above: the shape check must not reject the
+    // versions the fleet actually runs.
+    const r = probe({ cli: "exit 1", pkg: "2026.8.1-rc.2" });
+    expect(r.status).toBe(0);
+    expect(r.effective).toBe("2026.8.1");
+    expect(r.v2).toBe("1");
+  });
+
+  for (const [name, pkg] of [
+    ["is not valid JSON", "@@corrupt@@"],
+    ["is empty", ""],
+    ["carries no version at all", "{}"],
+    ["carries a non-string version", '{"version":{"major":2026}}'],
+  ] as const) {
+    it(`falls through to the CLI when the manifest ${name}`, () => {
+      const pkgDir = path.join(root, "lib", "node_modules", "openclaw");
+      mkdirSync(pkgDir, { recursive: true });
+      writeFileSync(path.join(pkgDir, "package.json"), pkg);
+      const r = probe({ cli: 'echo "openclaw 2026.8.1"', pkg: null });
+      expect(r.status, `the pre-start aborted:\n${r.out}`).toBe(0);
+      expect(r.effective).toBe("2026.8.1");
+    });
+  }
+
+  it.skipIf(isRoot)("falls through to the CLI when the manifest cannot be read", () => {
+    const pkgDir = path.join(root, "lib", "node_modules", "openclaw");
+    mkdirSync(pkgDir, { recursive: true });
+    const manifest = path.join(pkgDir, "package.json");
+    writeFileSync(manifest, JSON.stringify({ version: "2026.8.1" }));
+    chmodSync(manifest, 0o000);
+    try {
+      const r = probe({ cli: 'echo "openclaw 2026.7.4"', pkg: null });
+      expect(r.status, `the pre-start aborted:\n${r.out}`).toBe(0);
+      expect(r.effective).toBe("2026.7.4");
+    } finally {
+      chmodSync(manifest, 0o644);
+    }
+  });
+
+  it("lets an explicit generation win over a core it cannot identify", () => {
+    // The comment above this check says an explicit CLAWBOX_OPENCLAW_V2 "wins".
+    // With the write-nothing exit 0 placed above it, a pinned generation became
+    // a silent no-op instead — and every sibling suite pins BOTH generations
+    // of this script that way.
+    const bin = path.join(root, "bin", "openclaw");
+    mkdirSync(path.dirname(bin), { recursive: true });
+    writeFileSync(bin, "#!/usr/bin/env bash\nexit 1\n");
+    chmodSync(bin, 0o755);
+    const r = run(
+      [
+        "CLAWBOX_OPENCLAW_V2=1",
+        `OPENCLAW_BIN=${JSON.stringify(bin)}`,
+        `OPENCLAW_PIN_FILE=${JSON.stringify(path.join(root, "absent.txt"))}`,
+        block('OPENCLAW_TARGET=""', "export CLAWBOX_OPENCLAW_V2"),
+        'echo "V2=${CLAWBOX_OPENCLAW_V2}"',
+        'echo "REACHED_END=1"',
+      ].join("\n"),
+    );
+    expect(r.status, `the pre-start aborted:\n${r.out}`).toBe(0);
+    expect(r.out).toContain("REACHED_END=1");
+    expect(r.out).toContain("V2=1");
   });
 
   it("carries on when the pin file exists but cannot be read", () => {
@@ -233,6 +330,7 @@ describe.runIf(canRun)("gateway-pre-start's mDNS hostname read", () => {
   it("falls back to clawbox when the file cannot be read, instead of aborting", () => {
     // `sed` exits 2 on a file it cannot open, pipefail carries it, and the
     // gateway never starts — the same defect as the version probe.
+    if (isRoot) return; // 0000 is a no-op for root; the case would prove nothing
     const r = hostname({ unreadable: true });
     expect(r.status, `the pre-start aborted:\n${r.out}`).toBe(0);
     expect(r.name).toBe("clawbox");

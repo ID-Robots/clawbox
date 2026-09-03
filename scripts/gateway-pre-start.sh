@@ -89,12 +89,24 @@ except Exception:
 print(v if isinstance(v, str) else "")
 PY
 )"
+# Both sources validate the SAME way. The manifest read accepted any non-empty
+# string while the fallback below applied this regex, so the stricter of the two
+# was the one almost never reached: a core whose version is not 20YY.M.P -- a
+# dev or nightly build, a fork, an `npm i -g <git url>` install, a vendor
+# rebuild -- yielded a non-empty value that sailed past the "write nothing"
+# guard and picked v1 semantics for a core that may well be v2, whose loader
+# then refuses the legacy names this script would write. A version that is not a
+# date says nothing about the generation, so it must read as "unknown".
+CLAWBOX_OPENCLAW_EFFECTIVE="$(printf '%s' "$CLAWBOX_OPENCLAW_EFFECTIVE" | grep -oE '^20[0-9]{2}\.[0-9]+\.[0-9]+' || true)"
 # Second source, and time-boxed. `|| true` only rescues a CLI that RETURNS: a
 # wedged `--version` (an import that never resolves, an fs stall, a SQLite lock)
 # would hold ExecStartPre until TimeoutStartSec killed the unit, and
 # Restart=always would then spend StartLimitBurst on a box that never comes up.
+# 45 s, matching the CLI call PR #614 added to this same script: the measured
+# cost is 7.9-8.0 s on an Orin, a cold first boot is the slow case, and running
+# out of time here now means skipping the whole pre-start (below), not aborting.
 if [ -z "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
-  CLAWBOX_OPENCLAW_EFFECTIVE="$(timeout 20 "$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)"
+  CLAWBOX_OPENCLAW_EFFECTIVE="$(timeout 45 "$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)"
 fi
 # And if the installed core cannot be identified at all, WRITE NOTHING. The pin
 # is deliberately not a fallback here: a partially failed update (repo synced,
@@ -106,17 +118,24 @@ fi
 # re-adds. The config on disk booted this box before; leaving it alone is the
 # only option here that cannot make a working box stop working. A box with no
 # core at all already exited 0 a few lines above.
-if [ -z "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
-  echo "  WARN: cannot tell which OpenClaw generation is installed ($CLAWBOX_OPENCLAW_PKG unreadable and $OPENCLAW_BIN did not answer)." >&2
-  echo "  WARN: leaving openclaw.json exactly as it is and starting the gateway on it." >&2
-  exit 0
-fi
 # An explicit CLAWBOX_OPENCLAW_V2 in the environment wins — the unit tests
 # pin BOTH generations of this script against fixture configs, and they must
-# not follow whatever the box's own pin file happens to say.
+# not follow whatever the box's own pin file happens to say. It has to be
+# checked BEFORE the give-up below, not after: with the `exit 0` above it, a
+# pinned generation became a silent no-op on any box whose core could not be
+# identified, while the comment here still said it wins.
 if [ -z "${CLAWBOX_OPENCLAW_V2:-}" ]; then
+  if [ -z "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
+    # Not a small skip. Everything below this line is skipped, and most of it is
+    # not generation-sensitive at all, so the WARN has to name what this boot
+    # does NOT re-apply rather than sound like "one rewrite was left out".
+    echo "  WARN: cannot tell which OpenClaw generation is installed ($CLAWBOX_OPENCLAW_PKG carries no usable version and $OPENCLAW_BIN did not answer)." >&2
+    echo "  WARN: leaving openclaw.json exactly as it is and starting the gateway on it." >&2
+    echo "  WARN: this boot therefore does NOT re-apply the gateway auth token, the messaging-channel security pass, the gateway.controlUi.allowedOrigins rebuild (a changed LAN IP is not picked up), the MCP token seeding or the MCP registration reconcile." >&2
+    exit 0
+  fi
   CLAWBOX_OPENCLAW_V2=0
-  if [ -n "$CLAWBOX_OPENCLAW_EFFECTIVE" ] && [ "$(printf '%s\n' 2026.8 "$CLAWBOX_OPENCLAW_EFFECTIVE" | sort -V | head -1)" = "2026.8" ]; then
+  if [ "$(printf '%s\n' 2026.8 "$CLAWBOX_OPENCLAW_EFFECTIVE" | sort -V | head -1)" = "2026.8" ]; then
     CLAWBOX_OPENCLAW_V2=1
   fi
 fi
@@ -298,6 +317,23 @@ try:
         cfg = json.load(f)
 except FileNotFoundError:
     cfg = {}
+except OSError as err:
+    # The file EXISTS and could not be opened (a mode, an ACL, an I/O error).
+    # Neither of the two obvious answers is safe here. Letting it escape aborts
+    # this ExecStartPre under `set -e`, so the box gets no gateway at all, on
+    # every boot, until someone with shell access fixes the mode -- and
+    # openclaw.json is clawbox-owned, so an agent can reach that from a chat
+    # turn. Answering {} is worse: that object is written back below, and a
+    # config that merely could not be READ would lose every provider, auth
+    # profile and channel. PermissionError is not a FileNotFoundError, so the
+    # arm above never covered this. Leave the file alone and boot on it, the
+    # same policy the generation probe settles on further up.
+    print(
+        f"  WARN: {os.path.basename(cfg_path)} could not be read ({err}); "
+        f"leaving it exactly as it is and starting the gateway on it",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
 except json.JSONDecodeError as err:
     # Corrupt file — start from an empty object and let the gateway re-seed on
     # first write; the alternative is refusing to boot. But that {} is written
@@ -1768,7 +1804,11 @@ if [ ! -f "$DEEPSEEK_PLUGIN_JSON" ]; then
   DEEPSEEK_PLUGIN_JSON="$(dirname "$OPENCLAW_CONFIG")/extensions/deepseek/openclaw.plugin.json"
 fi
 if [ -f "$DEEPSEEK_PLUGIN_JSON" ]; then
-  python3 - "$DEEPSEEK_PLUGIN_JSON" <<'PY'
+  # Guarded, like the guide seeding further down and for the same reason: this
+  # is a bare top-level command in a script under `set -e`, its write `raise`s
+  # on failure, and a read-only rootfs or a full disk would turn a cosmetic
+  # "declare xhigh reasoning effort" patch into a box with no gateway.
+  if ! python3 - "$DEEPSEEK_PLUGIN_JSON" <<'PY'
 import json, os, sys, tempfile
 
 path = sys.argv[1]
@@ -1776,7 +1816,7 @@ target = ["off", "high", "xhigh"]
 try:
     with open(path) as f:
         cfg = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
+except (OSError, json.JSONDecodeError):
     sys.exit(0)
 
 models = cfg.get("modelCatalog", {}).get("providers", {}).get("deepseek", {}).get("models", [])
@@ -1807,6 +1847,9 @@ if changed:
 else:
     print("  Deepseek plugin JSON already declares xhigh, skipping write")
 PY
+  then
+    echo "  WARN: could not patch the deepseek plugin JSON with xhigh reasoning effort; the gateway starts without it" >&2
+  fi
 fi
 
 # One-time config migration for devices updating from OpenClaw <=2026.5.x:
@@ -1829,7 +1872,7 @@ LEGACY_CODEX_PRIMARY="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, sys
 try:
     cfg = json.load(open(sys.argv[1]))
-except (FileNotFoundError, json.JSONDecodeError):
+except (OSError, json.JSONDecodeError):
     print(""); sys.exit(0)
 primary = (((cfg.get("agents") or {}).get("defaults") or {}).get("model") or {}).get("primary") or ""
 print(primary if isinstance(primary, str) and primary.lower().startswith("openai-codex/") else "")
@@ -1944,7 +1987,7 @@ import json, sys
 try:
     with open(sys.argv[1]) as f:
         cfg = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
+except (OSError, json.JSONDecodeError):
     print("0"); sys.exit(0)
 agents = cfg.get("agents")
 defaults = agents.get("defaults", {}) if isinstance(agents, dict) else {}
@@ -1988,7 +2031,7 @@ import json, sys
 try:
     with open(sys.argv[1]) as f:
         cfg = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
+except (OSError, json.JSONDecodeError):
     print("1"); sys.exit(0)
 plugins = cfg.get("plugins")
 entries = plugins.get("entries", {}) if isinstance(plugins, dict) else {}
@@ -2241,7 +2284,10 @@ export CLAWBOX_MCP_TOKEN_VAL
 export CLAWBOX_BUN_BIN="${CLAWBOX_BUN_BIN:-$CLAWBOX_HOME_DIR/.bun/bin/bun}"
 export CLAWBOX_MCP_ENTRY="${CLAWBOX_MCP_ENTRY:-$CLAWBOX_ROOT/mcp/clawbox-mcp.ts}"
 export CLAWBOX_API_BASE="${CLAWBOX_API_BASE:-http://127.0.0.1:$CLAWBOX_PORT}"
-python3 - "$OPENCLAW_CONFIG" <<'PY'
+# Guarded for the same reason as the deepseek patch above: a bare heredoc whose
+# write `raise`s, in a script under `set -e`. A full disk must cost this boot
+# its MCP registration, never its gateway.
+if ! python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile
 
 cfg_path = sys.argv[1]
@@ -2251,7 +2297,7 @@ if not token:
 try:
     with open(cfg_path) as f:
         cfg = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
+except (OSError, json.JSONDecodeError):
     sys.exit(0)
 
 desired = {
@@ -2280,6 +2326,9 @@ except Exception:
     raise
 print("  Updated MCP server registration with bearer token")
 PY
+then
+  echo "  WARN: could not write the MCP server registration; the ClawBox MCP tools are unavailable this boot" >&2
+fi
 unset CLAWBOX_MCP_TOKEN_VAL
 
 # Seed CLAWBOX.md in the OpenClaw workspace so the agent's session-start
@@ -2310,7 +2359,7 @@ if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ ! -f "$OPENCLAW_HOME_DIR/extensions/dee
 import json, sys
 try:
     cfg = json.load(open(sys.argv[1]))
-except (FileNotFoundError, json.JSONDecodeError):
+except (OSError, json.JSONDecodeError):
     print("0"); sys.exit(0)
 providers = ((cfg.get("models") or {}).get("providers") or {})
 deepseek = providers.get("deepseek")
@@ -2357,7 +2406,7 @@ try:
     with open(sys.argv[1]) as f:
         cfg = json.load(f)
     ws = cfg.get("agents", {}).get("defaults", {}).get("workspace")
-except (FileNotFoundError, json.JSONDecodeError, KeyError):
+except (OSError, json.JSONDecodeError, KeyError):
     ws = None
 if isinstance(ws, str) and ws.strip():
     ws = os.path.expanduser(ws.strip())
