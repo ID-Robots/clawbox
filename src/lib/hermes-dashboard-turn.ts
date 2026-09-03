@@ -714,7 +714,7 @@ function answerableQid(clarify: ClarifyActivity): string | null {
 }
 
 /**
- * How many of a batch's questions are still open after an answer landed.
+ * Whether a batch still has a question in it after an answer landed.
  *
  * The gateway's own `remaining` is preferred over anything computed here,
  * because only it knows: answers accumulate in ITS registry across every
