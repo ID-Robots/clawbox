@@ -68,8 +68,9 @@ export type AudioModelEntry = Record<string, unknown>;
  * The local entry is a CLI row running the same stt-client.py the chat
  * microphone uses (see stt-local.ts); `{{MediaPath}}` is OpenClaw's
  * placeholder for the voice note on disk. It is left out when the engine is
- * not installed, because OpenClaw would otherwise spend its timeout on a
- * script that is not there before reaching the cloud row behind it.
+ * not installed: OpenClaw would otherwise try the row and record a failed
+ * attempt for every voice note before reaching the cloud row behind it — and
+ * on a box with no usable cloud leg, that is the transcript lost.
  */
 export function buildAudioModels(order: readonly SttEngine[], localInstalled: boolean): AudioModelEntry[] {
   const entries: AudioModelEntry[] = [];

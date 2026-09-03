@@ -170,11 +170,59 @@ describe("localSttInstalled", () => {
     expect(probe.detail).toContain("faster-whisper");
   });
 
-  it("remembers the answer for a minute instead of spawning python each time", async () => {
+  it("remembers the python import instead of spawning an interpreter each time", async () => {
     installEngine();
     runChild.mockResolvedValue(ran());
     await lib.localSttInstalled();
     await lib.localSttInstalled();
+    expect(runChild).toHaveBeenCalledTimes(1);
+  });
+
+  // The engine can leave the box while the web server keeps running — a
+  // manual removal from the Terminal or the agent's shell; nothing in the app
+  // uninstalls it. A positive answer held for hours after that is what put a
+  // `type: "cli"` row for a script that is gone into tools.media.models, and
+  // OpenClaw takes such a row on trust: `openclaw config set` accepts it and
+  // no doctor check inspects a configured CLI entry, so the row is retried and
+  // discarded on every voice note. The two stat() calls must be asked every time.
+  it("stops reading as installed once the script is removed, inside the positive TTL", async () => {
+    installEngine();
+    runChild.mockResolvedValue(ran());
+    expect((await lib.localSttInstalled()).installed).toBe(true);
+
+    fs.rmSync(path.join(home, ".openclaw", "workspace", "scripts", "stt-client.py"));
+
+    const after = await lib.localSttInstalled();
+    expect(after.installed).toBe(false);
+    expect(after.detail).toContain("The on-box transcriber is not installed.");
+  });
+
+  it("stops reading as installed once the whisper-server unit is removed, inside the positive TTL", async () => {
+    installEngine();
+    runChild.mockResolvedValue(ran());
+    expect((await lib.localSttInstalled()).installed).toBe(true);
+
+    fs.rmSync(path.join(home, ".config", "systemd", "user", "whisper-server.service"));
+
+    const after = await lib.localSttInstalled();
+    expect(after.installed).toBe(false);
+    expect(after.detail).toContain("whisper-server");
+  });
+
+  // The other half of the split: a file check that answers false must not
+  // throw away what python already told us, or every chat-mic press on a box
+  // without the engine would start an interpreter again.
+  it("keeps the python answer across a file check that failed in between", async () => {
+    installEngine();
+    runChild.mockResolvedValue(ran());
+    expect((await lib.localSttInstalled()).installed).toBe(true);
+
+    const script = path.join(home, ".openclaw", "workspace", "scripts", "stt-client.py");
+    fs.rmSync(script);
+    expect((await lib.localSttInstalled()).installed).toBe(false);
+    fs.writeFileSync(script, "#!/usr/bin/env python3\n");
+    expect((await lib.localSttInstalled()).installed).toBe(true);
+
     expect(runChild).toHaveBeenCalledTimes(1);
   });
 });
