@@ -23,7 +23,6 @@ import { renderText } from "@/lib/chat-markdown";
 import { artifactUrl } from "@/lib/use-coding-agent-activity";
 import {
   OPEN_CODING_RUN_EVENT,
-  dispatchCodingLivePreview,
   dispatchOpenApp,
   notifyCodingRunStarted,
   onCodingAgentChanged,
@@ -31,6 +30,8 @@ import {
   takePendingCodingRun,
 } from "@/lib/ui-events";
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
+import TerminalApp from "./TerminalApp";
+import { livePreviewCommand } from "@/lib/coding-run-preview";
 import { copyToClipboard } from "@/lib/clipboard";
 import type { AgentStatus, Effort, GitHubState } from "./CodingAgentSettingsPanel";
 
@@ -781,17 +782,6 @@ export default function CodingAgentApp() {
             className={secondary}
           >
             {terminalLabel}
-          </button>
-        )}
-        {where === "page" && run.status === "running" && run.transcriptPath && (
-          <button
-            type="button"
-            onClick={() => dispatchCodingLivePreview({ runId: run.id, transcriptPath: run.transcriptPath ?? null, sessionId: run.sessionId ?? null, directory: run.directory })}
-            data-testid={`coding-agent-live-${run.id}`}
-            className={`${BTN_BASE} border border-emerald-400/40 bg-emerald-400/[0.07] text-emerald-400 hover:bg-emerald-400/[0.14]`}
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">terminal</span>
-            {t("codingAgent.liveView")}
           </button>
         )}
         {github?.connected && run.commit && (
@@ -1579,8 +1569,37 @@ export default function CodingAgentApp() {
                 </div>
               )}
 
-              {/* The newest steps, as the runner recorded them. */}
-              {activity.length > 0 && (
+              {/* While the run works: its terminal, embedded — the transcript
+                  tailed live where the activity log used to be. Once it has
+                  settled, the log (below) is the record. */}
+              {isLive(run.status) && run.transcriptPath && (() => {
+                const command = livePreviewCommand({ transcriptPath: run.transcriptPath ?? null, sessionId: run.sessionId ?? null, directory: run.directory, live: true });
+                if (!command) return null;
+                return (
+                  <div className="mt-3 rounded-xl border border-emerald-400/20 overflow-hidden flex flex-col" style={{ height: 460, background: "#0d0d1a" }} data-testid="coding-agent-run-terminal">
+                    <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.06] bg-white/[0.03] shrink-0">
+                      <span className="material-symbols-rounded text-emerald-400" style={{ fontSize: 16 }} aria-hidden="true">terminal</span>
+                      <p className={`${SECTION_LABEL} !mb-0`}>{t("codingAgent.livePreviewTitle")}</p>
+                      <span className="ml-auto" />
+                      <button
+                        type="button"
+                        onClick={() => openInTerminal(run)}
+                        data-testid="coding-agent-run-terminal-open"
+                        className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 text-[var(--text-muted)] hover:bg-white/5 cursor-pointer"
+                      >
+                        {t("codingAgent.livePreviewOpenApp")}
+                      </button>
+                    </div>
+                    <div className="flex-1 min-h-0">
+                      <TerminalApp initialCommand={command} />
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* The newest steps, as the runner recorded them — the record
+                  once the run has settled. */}
+              {activity.length > 0 && !(isLive(run.status) && run.transcriptPath) && (
                 <details className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3" data-testid="coding-agent-run-activity" open={isLive(run.status)}>
                   <summary className={`${SECTION_LABEL} cursor-pointer list-none`}>
                     {t("codingAgent.activityTitle")}

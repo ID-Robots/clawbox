@@ -22,6 +22,11 @@ const t = (key: string, params?: Record<string, string | number>) => {
   if (params) for (const [k, v] of Object.entries(params)) str = str.replaceAll(`{${k}}`, String(v));
   return str;
 };
+// xterm never renders in jsdom; the run page only needs to know it embedded one.
+vi.mock("@/components/TerminalApp", () => ({
+  default: ({ initialCommand }: { initialCommand?: string }) => <div data-testid="terminal-mock" data-command={initialCommand ?? ""} />,
+}));
+
 vi.mock("@/lib/i18n", () => ({
   useT: () => ({ locale: "en", t }),
 }));
@@ -697,6 +702,29 @@ describe("CodingAgentApp", () => {
       } finally {
         window.removeEventListener(CODING_RUN_STARTED_EVENT, onStarted);
       }
+    });
+
+    it("embeds the live terminal on a running run's page in place of the activity log, and keeps the log once it settled", async () => {
+      const live = { ...RUN, status: "running", completedAt: null, summary: null, transcriptPath: "/home/clawbox/.claude-ds/projects/x/s.jsonl", progress: ["$ npm test"] };
+      stubFetch({ enabled: true, readiness: READY }, [live], { projects: [SITE_PROJECT] });
+      const { unmount } = render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+      await screen.findByTestId("coding-agent-run-page");
+      const terminal = await screen.findByTestId("coding-agent-run-terminal");
+      expect(within(terminal).getByTestId("terminal-mock")).toHaveAttribute("data-command", expect.stringContaining("coding-run-preview"));
+      expect(screen.queryByTestId("coding-agent-run-activity")).toBeNull();
+      // The floating "Live view" is gone from the page's controls.
+      expect(screen.queryByTestId("coding-agent-live-run-k3x9q2ab")).toBeNull();
+      unmount();
+
+      stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, progress: ["$ npm test"] }], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+      await screen.findByTestId("coding-agent-run-page");
+      expect(screen.queryByTestId("coding-agent-run-terminal")).toBeNull();
+      expect(await screen.findByTestId("coding-agent-run-activity")).toBeInTheDocument();
     });
 
     it("opens a run's own page from its row: figures, summary, files and evidence, and Back returns", async () => {

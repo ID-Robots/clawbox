@@ -70,7 +70,7 @@ const LABELS = {
     plan: en["codingAgent.chatPlan"],
   },
 };
-const OPEN = en["codingAgent.chatOpenApp"];
+const OPEN = en["codingAgent.liveView"];
 
 /** A run's plan as TodoWrite last wrote it: one done, one on, one to go. */
 const TODOS = [
@@ -404,33 +404,34 @@ describe("the badge", () => {
 });
 
 /**
- * The owner's two asks, in their words: "We can click on the Coding Agent
- * pill to expand and see live work, also replace the
- * mcp__clawbox__browser_screenshot with good looking ui element that we can
- * also click and open the screenshot."
+ * View: the run's own page in the app, full-screen. The pill used to carry an
+ * underlined "open" link and a separate "Live view" that popped a floating
+ * terminal; the owner asked for one button, and the live terminal lives on
+ * the run's page now.
  */
-describe("the card's Live view", () => {
-  const base = {
-    id: "run-live001", projectId: "timer", task: "x",
-    startedAt: NOW - 30_000, completedAt: null as number | null,
-    source: "agent" as const,
-    subagentsTotal: 0, subagentsActive: 0, subagentsByType: {},
-    tokensUsed: 0, thinkingTokens: 0, filesTouched: 0, numTurns: 0,
-    progress: [], screenshots: [], todos: [],
-    transcriptPath: "/home/clawbox/.claude-ds/projects/x/s.jsonl", sessionId: null, directory: "/home/clawbox/Projects/timer",
-  };
-
-  it("offers the live terminal only while the run works, and asks the desktop for it", () => {
-    const onLiveView = vi.fn();
+describe("the card's View button", () => {
+  it("is the one way into the app, whatever the run's state", () => {
+    const onOpen = vi.fn();
+    const base = {
+      id: "run-live001", projectId: "timer", task: "x",
+      startedAt: NOW - 30_000, completedAt: null as number | null,
+      source: "agent" as const,
+      subagentsTotal: 0, subagentsActive: 0, subagentsByType: {},
+      tokensUsed: 0, thinkingTokens: 0, filesTouched: 0, numTurns: 0,
+      progress: [], screenshots: [], todos: [],
+      transcriptPath: "/home/clawbox/.claude-ds/projects/x/s.jsonl", sessionId: null, directory: "/home/clawbox/Projects/timer",
+    };
     const { rerender } = render(
-      <CodingAgentActivityPill run={{ ...base, status: "running" }} labels={LABELS} openLabel={OPEN} liveViewLabel="Live view" onLiveView={onLiveView} />,
+      <CodingAgentActivityPill run={{ ...base, status: "running" }} labels={LABELS} openLabel={OPEN} onOpen={onOpen} />,
     );
-    fireEvent.click(screen.getByTestId("coding-agent-activity-live-view"));
-    expect(onLiveView).toHaveBeenCalledTimes(1);
-    rerender(
-      <CodingAgentActivityPill run={{ ...base, status: "completed", completedAt: NOW }} labels={LABELS} openLabel={OPEN} liveViewLabel="Live view" onLiveView={onLiveView} />,
-    );
+    fireEvent.click(screen.getByTestId("coding-agent-activity-view"));
+    expect(onOpen).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId("coding-agent-activity-live-view")).toBeNull();
+    rerender(
+      <CodingAgentActivityPill run={{ ...base, status: "completed", completedAt: NOW }} labels={LABELS} openLabel={OPEN} onOpen={onOpen} />,
+    );
+    fireEvent.click(screen.getByTestId("coding-agent-activity-view"));
+    expect(onOpen).toHaveBeenCalledTimes(2);
   });
 });
 

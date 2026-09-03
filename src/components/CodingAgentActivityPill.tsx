@@ -198,7 +198,7 @@ function StepChip({ step, label, detail, onClick, title }: {
 }
 
 export default function CodingAgentActivityPill(
-  { run, labels, openLabel, onOpen, onPreview, liveViewLabel, onLiveView }: {
+  { run, labels, openLabel, onOpen, onPreview }: {
     run: CodingAgentActivity;
     /**
      * One per status, plus the owner-started variant of "running", plus the
@@ -213,13 +213,6 @@ export default function CodingAgentActivityPill(
      * second lightbox. `alt` is the picture's accessible name.
      */
     onPreview?: (src: string, alt: string) => void;
-    /**
-     * Pop the floating live terminal on this run (CodingRunLivePreview). The
-     * button is drawn only while the run is in flight — a finished run's
-     * transcript is history, and the Coding Agent app has it.
-     */
-    liveViewLabel?: string;
-    onLiveView?: () => void;
   },
 ) {
   const live = run.status === "running";
@@ -389,13 +382,17 @@ export default function CodingAgentActivityPill(
             {expanded ? "expand_less" : "expand_more"}
           </span>
         </div>
-        {onLiveView && run.status === "running" ? (
+        {onOpen ? (
+          // View: the run's own page in the Coding Agent app, full-screen.
+          // (The pill used to carry an underlined "open" link and a "Live
+          // view" that popped a floating terminal; both are this one button
+          // now, and the live terminal lives on the run's page.)
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); onLiveView(); }}
-            title={liveViewLabel ?? "live"}
-            aria-label={liveViewLabel ?? "live"}
-            data-testid="coding-agent-activity-live-view"
+            onClick={(e) => { e.stopPropagation(); onOpen(); }}
+            title={openLabel}
+            aria-label={openLabel}
+            data-testid="coding-agent-activity-view"
             style={{
               background: "rgba(52,211,153,0.12)",
               border: "1px solid rgba(52,211,153,0.35)",
@@ -406,28 +403,6 @@ export default function CodingAgentActivityPill(
               fontSize: 11,
               fontWeight: 600,
               padding: "1px 7px",
-              flexShrink: 0,
-              marginRight: 6,
-            }}
-          >
-            {liveViewLabel ?? "live"}
-          </button>
-        ) : null}
-        {onOpen ? (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); onOpen(); }}
-            title={openLabel}
-            aria-label={openLabel}
-            style={{
-              background: "transparent",
-              border: 0,
-              color: "rgba(255,255,255,0.55)",
-              cursor: "pointer",
-              font: "inherit",
-              fontSize: 11.5,
-              padding: 0,
-              textDecoration: "underline",
               flexShrink: 0,
             }}
           >

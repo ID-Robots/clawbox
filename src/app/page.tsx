@@ -7,7 +7,7 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
-import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, notifyCodingRunStarted, CODING_LIVE_PREVIEW_EVENT, handoffCodingRun, type CodingLivePreviewRequest } from "@/lib/ui-events";
+import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, notifyCodingRunStarted, handoffCodingRun, type OpenAppDetail } from "@/lib/ui-events";
 import { useAutoHide } from "@/lib/use-auto-hide";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
@@ -32,7 +32,6 @@ import ChatPopup, { CHAT_PANEL_GAP } from "@/components/ChatPopup";
 
 /** How long a coding run's finish card stays on the desktop before it hides itself. */
 import ToastHost from "@/components/ToastHost";
-import CodingRunLivePreview, { livePreviewCommand } from "@/components/CodingRunLivePreview";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
@@ -275,6 +274,8 @@ interface OpenWindow {
   width?: number;
   height?: number;
   meta?: Record<string, string>;
+  /** Bumped when something asks for this window maximized (a chat's View); ChromeWindow acts on the change. */
+  maximizeNonce?: number;
 }
 
 function ChromeDesktopInner() {
@@ -1184,6 +1185,12 @@ function ChromeDesktopInner() {
   }, [openWindows]);
 
   const openApp = useCallback((appId: string, forceNew = false, meta?: Record<string, string>) => {
+    // `maximize` is a request, not a property of the window: the record
+    // keeps a nonce ChromeWindow maximizes on, and the rest of `meta` rides
+    // with the window (a Terminal's command).
+    const { maximize, ...windowMeta } = meta ?? {};
+    const wantMaximized = maximize === "true";
+    const maxNonce = wantMaximized ? { maximizeNonce: Date.now() } : {};
     const allApps = getAllApps();
     const app = allApps.find((a) => a.id === appId);
     if (!app) return;
@@ -1228,7 +1235,7 @@ function ChromeDesktopInner() {
           setOpenWindows((prev) =>
             prev.map((w) =>
               w.id === existingWindow.id
-                ? { ...w, minimized: false, zIndex: nextZIndex }
+                ? { ...w, minimized: false, zIndex: nextZIndex, ...maxNonce }
                 : w
             )
           );
@@ -1237,7 +1244,7 @@ function ChromeDesktopInner() {
           // Bring to front
           setOpenWindows((prev) =>
             prev.map((w) =>
-              w.id === existingWindow.id ? { ...w, zIndex: nextZIndex } : w
+              w.id === existingWindow.id ? { ...w, zIndex: nextZIndex, ...maxNonce } : w
             )
           );
           setNextZIndex((z) => z + 1);
@@ -1250,7 +1257,7 @@ function ChromeDesktopInner() {
     const windowId = `${appId}-${Date.now()}`;
     setOpenWindows((prev) => [
       ...prev,
-      { id: windowId, appId, zIndex: nextZIndex, minimized: false, ...(meta ? { meta } : {}) },
+      { id: windowId, appId, zIndex: nextZIndex, minimized: false, ...(Object.keys(windowMeta).length ? { meta: windowMeta } : {}), ...maxNonce },
     ]);
     setNextZIndex((z) => z + 1);
   }, [openWindows, nextZIndex, getAllApps]);
@@ -1315,8 +1322,8 @@ function ChromeDesktopInner() {
 
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ appId?: string }>).detail;
-      if (detail?.appId) openAppRef.current(detail.appId);
+      const detail = (e as CustomEvent<OpenAppDetail>).detail;
+      if (detail?.appId) openAppRef.current(detail.appId, false, detail.maximize ? { maximize: "true" } : undefined);
     };
     window.addEventListener(OPEN_APP_EVENT, handler);
     return () => window.removeEventListener(OPEN_APP_EVENT, handler);
@@ -1356,23 +1363,6 @@ function ChromeDesktopInner() {
   const codingNoticeKeys = useMemo(() => codingNotices.map(n => n.runId), [codingNotices]);
   useAutoHide(codingNoticeKeys, dismissCodingNotice);
 
-  // The floating live terminal of a coding run — see CodingRunLivePreview.
-  // One for the desktop: a request for another run replaces it.
-  const [livePreview, setLivePreview] = useState<CodingLivePreviewRequest | null>(null);
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<CodingLivePreviewRequest>).detail;
-      if (!detail || typeof detail.runId !== "string") return;
-      setLivePreview({
-        runId: detail.runId,
-        transcriptPath: typeof detail.transcriptPath === "string" ? detail.transcriptPath : null,
-        sessionId: typeof detail.sessionId === "string" ? detail.sessionId : null,
-        directory: typeof detail.directory === "string" ? detail.directory : null,
-      });
-    };
-    window.addEventListener(CODING_LIVE_PREVIEW_EVENT, handler);
-    return () => window.removeEventListener(CODING_LIVE_PREVIEW_EVENT, handler);
-  }, []);
 
   // The owner-notice ring: `ui:pending-actions` holds an array of
   // { id, ts, ...action }, newest last, written through pushPendingAction()
@@ -2022,19 +2012,6 @@ function ChromeDesktopInner() {
           the pairing flow dispatch. Without it ui_notify, `clawbox notify`
           and every server-side owner notice were fired and never shown. */}
       <ToastHost />
-      {livePreview && (
-        <CodingRunLivePreview
-          key={livePreview.runId}
-          runId={livePreview.runId}
-          command={livePreviewCommand({
-            transcriptPath: livePreview.transcriptPath,
-            sessionId: livePreview.sessionId,
-            directory: livePreview.directory,
-            live: true,
-          })}
-          onClose={() => setLivePreview(null)}
-        />
-      )}
       {((updateAvailable && !updateNoticeHidden) || showClawAiOfferNotification || pairingRequests.length > 0 || codingNotices.length > 0) && (
         <div className="pointer-events-none fixed top-4 right-4 z-[99998] flex w-[320px] flex-col gap-3">
           {/* New version available notification */}
@@ -2557,6 +2534,7 @@ function ChromeDesktopInner() {
               onGeometryChange={(geo) => updateWindowGeometry(window.id, geo)}
               minimized={window.minimized}
               rightInset={chatPanelInset}
+              maximizeSignal={window.maximizeNonce}
             >
               {renderWindowContent(window.appId, window.meta)}
             </ChromeWindow>

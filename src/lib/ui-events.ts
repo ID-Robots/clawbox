@@ -50,10 +50,15 @@ export function handoffCodingRun(runId: string): void {
   window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId } }));
 }
 
-export function dispatchOpenCodingRun(runId: string): void {
+/**
+ * Open the Coding Agent app on a run. `maximize` opens (or brings) the window
+ * full-screen: the chat's View button lands the owner on the run's page with
+ * the whole desktop for it.
+ */
+export function dispatchOpenCodingRun(runId: string, opts: { maximize?: boolean } = {}): void {
   if (typeof window === "undefined") return;
   handoffCodingRun(runId);
-  dispatchOpenApp("coding");
+  dispatchOpenApp("coding", opts);
 }
 
 /** The run handed off before the app mounted, taken exactly once. */
@@ -65,26 +70,6 @@ export function takePendingCodingRun(): string | null {
   return id;
 }
 
-/**
- * "Pop the live terminal preview of this run" — the chat's run card asks the
- * desktop, which owns the one floating preview (CodingRunLivePreview), so a
- * second click on the same run raises it rather than opening a second one.
- */
-export const CODING_LIVE_PREVIEW_EVENT = "clawbox:coding-live-preview";
-
-export interface CodingLivePreviewRequest {
-  runId: string;
-  /** Where Claude Code keeps the run's transcript — the live tail. */
-  transcriptPath: string | null;
-  /** The session to `--resume` once the run has finished. */
-  sessionId: string | null;
-  directory: string | null;
-}
-
-export function dispatchCodingLivePreview(detail: CodingLivePreviewRequest): void {
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent(CODING_LIVE_PREVIEW_EVENT, { detail }));
-}
 
 /**
  * "The chat's model or provider selection changed."
@@ -97,9 +82,16 @@ export function dispatchCodingLivePreview(detail: CodingLivePreviewRequest): voi
  */
 export const CHAT_MODEL_STATE_EVENT = "clawbox:chat-model-state-changed";
 
-export function dispatchOpenApp(appId: string): void {
+/** What the desktop is asked for: which app, and whether its window should be maximized. */
+export interface OpenAppDetail {
+  appId: string;
+  maximize?: boolean;
+}
+
+export function dispatchOpenApp(appId: string, opts: { maximize?: boolean } = {}): void {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent(OPEN_APP_EVENT, { detail: { appId } }));
+  const detail: OpenAppDetail = { appId, ...(opts.maximize ? { maximize: true } : {}) };
+  window.dispatchEvent(new CustomEvent<OpenAppDetail>(OPEN_APP_EVENT, { detail }));
 }
 
 /**

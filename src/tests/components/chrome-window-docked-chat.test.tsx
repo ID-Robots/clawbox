@@ -9,9 +9,10 @@ vi.mock("@/lib/i18n", () => ({
 /**
  * A docked chat narrows the desktop, nothing more: every window keeps its own
  * size and place, can still be dragged, resized and maximized — and the one
- * that IS maximized stops DOCK_GAP short of the chat instead of touching it.
- * (For a while every window was forced to fill the pane beside the chat; the
- * owner asked for the windows back.)
+ * that IS maximized sits DOCK_GAP inside the desktop on every side, the way
+ * the chat floats, with the chat's own gap as its right-hand margin. (For a
+ * while every window was forced to fill the pane beside the chat; the owner
+ * asked for the windows back.)
  */
 describe("a window beside a docked chat", () => {
   const win = (rightInset: number) => render(
@@ -38,19 +39,40 @@ describe("a window beside a docked chat", () => {
     expect(screen.getByRole("button", { name: "window.maximize" })).toBeInTheDocument();
   });
 
-  it("leaves a small gap to the chat when maximized", () => {
+  it("sits a margin inside the desktop when maximized, the chat's gap on the right", () => {
     win(412);
     fireEvent.click(screen.getByRole("button", { name: "window.maximize" }));
     const el = screen.getByTestId("chrome-window-terminal");
-    expect(el.style.left).toBe("0px");
-    expect(el.style.top).toBe("0px");
-    expect(el.style.width).toBe(`calc(100% - ${412 + DOCK_GAP}px)`);
-    expect(el.style.borderRadius).toBe("0px");
+    expect(el.style.left).toBe(`${DOCK_GAP}px`);
+    expect(el.style.top).toBe(`${DOCK_GAP}px`);
+    expect(el.style.width).toBe(`calc(100% - ${DOCK_GAP + 412}px)`);
+    expect(el.style.height).toContain(`${DOCK_GAP * 2}px`);
+    // Corners kept, like the chat's.
+    expect(el.style.borderRadius).toBe("8px");
   });
 
-  it("fills the whole width when maximized with no chat docked", () => {
+  it("keeps the same margin on both sides when no chat is docked", () => {
     win(0);
     fireEvent.click(screen.getByRole("button", { name: "window.maximize" }));
-    expect(screen.getByTestId("chrome-window-terminal").style.width).toBe("calc(100% - 0px)");
+    expect(screen.getByTestId("chrome-window-terminal").style.width).toBe(`calc(100% - ${DOCK_GAP * 2}px)`);
+  });
+
+  it("maximizes when the desktop asks, once per request", () => {
+    const { rerender } = render(
+      <ChromeWindow title="Coding Agent" appId="coding" isActive zIndex={100} onClose={() => {}} onFocus={() => {}} onMinimize={() => {}} maximizeSignal={undefined}>
+        <div>body</div>
+      </ChromeWindow>,
+    );
+    const el = screen.getByTestId("chrome-window-coding");
+    expect(el.style.width).toBe("800px");
+    rerender(
+      <ChromeWindow title="Coding Agent" appId="coding" isActive zIndex={100} onClose={() => {}} onFocus={() => {}} onMinimize={() => {}} maximizeSignal={1}>
+        <div>body</div>
+      </ChromeWindow>,
+    );
+    expect(el.style.left).toBe(`${DOCK_GAP}px`);
+    // The owner restores it by hand; the same signal value does not re-maximize.
+    fireEvent.click(screen.getByRole("button", { name: "window.restore" }));
+    expect(el.style.width).toBe("800px");
   });
 });

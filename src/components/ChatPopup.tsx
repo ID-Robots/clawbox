@@ -28,7 +28,7 @@ import {
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
-import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun, dispatchCodingLivePreview } from '@/lib/ui-events'
+import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
@@ -764,17 +764,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           plan: t("codingAgent.chatPlan"),
         },
       }}
-      openLabel={t("codingAgent.chatOpenApp")}
-      onOpen={() => dispatchOpenCodingRun(run.id)}
-      // The floating live terminal, owned by the desktop: one for the whole
-      // screen, folded and unfolded with a click on its bar.
-      liveViewLabel={t("codingAgent.liveView")}
-      onLiveView={() => dispatchCodingLivePreview({
-        runId: run.id,
-        transcriptPath: run.transcriptPath,
-        sessionId: run.sessionId,
-        directory: run.directory,
-      })}
+      // View: the run's own page in the Coding Agent app, with the whole
+      // desktop for it — the live terminal is embedded there while it runs.
+      openLabel={t("codingAgent.liveView")}
+      onOpen={() => dispatchOpenCodingRun(run.id, { maximize: true })}
       // A run's screenshot opens in the SAME full-size preview the generated
       // and attached images use (the portal at the end of this component),
       // not a second lightbox of the card's own.

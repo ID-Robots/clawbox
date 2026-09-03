@@ -17,7 +17,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.chatFinished": "Coding agent finished",
   "codingAgent.chatFailed": "Coding agent did not finish",
   "codingAgent.chatStopped": "Coding agent stopped",
-  "codingAgent.chatOpenApp": "open",
   // A template the chat's run card fills in — "{n} agents" — shown when a
   // delegated run fans out to sub-agents.
   "codingAgent.chatAgents": "{n} agents",
@@ -169,13 +168,9 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.showDetails": "Show details",
   "codingAgent.hideDetails": "Hide details",
   "codingAgent.noticeOpenRun": "Open the run",
-  "codingAgent.liveView": "Live view",
+  "codingAgent.liveView": "View",
   "codingAgent.livePreviewTitle": "Live terminal",
-  "codingAgent.livePreviewShow": "Show the live terminal",
-  "codingAgent.livePreviewHide": "Hide the live terminal",
-  "codingAgent.livePreviewClose": "Close the live terminal",
   "codingAgent.livePreviewOpenApp": "Open in Terminal",
-  "codingAgent.livePreviewNotYet": "Nothing to show yet — the run has not written its transcript.",
   "codingAgent.homeRuns": "Runs outside your projects",
   "codingAgent.fullTask": "Show the whole task",
   "codingAgent.startedAgo": "started {when}",
