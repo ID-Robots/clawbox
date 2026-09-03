@@ -65,10 +65,14 @@ export default function AiProviderList() {
   // A row nobody has probed yet cannot be filtered INTO this list — it is not
   // known to hold a sign-in — and the filter above therefore turns a box whose
   // harness is still booting into "No providers connected", which is a
-  // confident lie about a working box. Stay on the skeleton until the answers
-  // arrive; `useProviderStatus` re-asks on its own until they do, and the
-  // server stops saying `checking` either way (TASK-663).
-  const awaitingProbe = (summary?.providers ?? []).some((row) => row.state === "checking");
+  // confident lie about a working box. Stay on the skeleton until there is
+  // something real to show; `useProviderStatus` re-asks on its own until the
+  // answers arrive, and the server stops saying `checking` either way
+  // (TASK-663). Only while the list would be EMPTY, though: ClawBox AI's link
+  // is read from our own store and needs no dashboard, so a row we already
+  // know about is shown rather than hidden behind everyone else's spinner.
+  const awaitingProbe = rows.length === 0
+    && (summary?.providers ?? []).some((row) => row.state === "checking");
 
   return (
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="ai-provider-list">

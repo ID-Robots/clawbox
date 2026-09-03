@@ -23,7 +23,7 @@ import {
   HERMES_PANEL_PROVIDERS,
   hermesProviderLabel,
 } from "@/lib/hermes-providers";
-import { getModelOptions } from "@/lib/hermes-model-options";
+import { getModelOptions, probeStillOwed } from "@/lib/hermes-model-options";
 
 /**
  * What the strip paints, and the only five things it may say.
@@ -45,7 +45,10 @@ import { getModelOptions } from "@/lib/hermes-model-options";
  * toward {@link ProviderStatusSummary.degraded}: there is no bad answer yet,
  * only no answer. It is time-bounded at the source (`PROBE_GRACE_MS` in
  * `hermes-model-options.ts`) so a harness that never comes back falls back to
- * `unknown` and a degraded summary rather than spinning for ever.
+ * `unknown` and a degraded summary rather than spinning for ever — see
+ * `probeStillOwed` in `hermes-model-options.ts`, which asks systemd whether the
+ * dashboard's unit is actually still starting rather than guessing from a
+ * clock.
  */
 export type ProviderConnectionState =
   | "connected"
@@ -178,7 +181,7 @@ interface UnstampedSummary extends Omit<ProviderStatusSummary, "providers"> {
 }
 
 /**
- * The one place the four states are decided, so the two harness paths cannot
+ * The one place the five states are decided, so the two harness paths cannot
  * drift into disagreeing about what "connected" means.
  *
  * `credentialed === null` means the source could not tell us (Hermes' on-disk
@@ -229,17 +232,16 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
 
   // ...and if it did not, has it simply not had a chance yet? The dashboard is
   // not up when this server is (~11-12 s after every boot and after every
-  // restart we ourselves trigger), and `hermes-model-options` is the one place
-  // that knows how long its silence has lasted. Within that window a row with
-  // no auth state is `checking`, not `unknown`, and the summary is not
-  // degraded — there is no bad answer yet, only no answer. Past it the payload
-  // drops the flag on its own and every row goes back to today's behaviour.
+  // restart we ourselves trigger). `probeStillOwed` is the one place that
+  // knows, and it asks systemd rather than a clock. Within that window a row
+  // with no auth state is `checking`, not `unknown`, and the summary is not
+  // degraded — there is no bad answer yet, only no answer. Once the unit says
+  // it is up (or failed), every row goes back to today's behaviour.
   //
-  // Guarded on `stale` as well as the flag: the downgrade path can carry this
-  // marker onto a payload that DID come from the live dashboard, and a live
-  // row the dashboard declined to judge is a real result that keeps its own
-  // word.
-  const awaitingProbe = payload.stale === true && payload.awaitingProbe === true;
+  // Guarded on `stale` as well: `probeStillOwed` describes the DASHBOARD, and
+  // on a payload that did come from the live dashboard a row it declined to
+  // judge is a real result that keeps its own word.
+  const awaitingProbe = payload.stale === true && await probeStillOwed();
 
   const providers = ids.map((id) => {
     const isDefault = id === defaultProvider;
@@ -347,11 +349,20 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
       id,
       label,
       // No `awaitingProbe` here, deliberately: this reader PROBES NOTHING. It
-      // answers from `openclaw.json` on disk, so `credentialed.has` is always
-      // a definite yes or no and there is no window in which an answer is
-      // owed. OpenClaw's gateway has no equivalent to ask either — its only
-      // non-WebSocket endpoints are the `/healthz`, `/readyz` and `/startupz`
-      // liveness probes, none of which carries provider auth.
+      // answers from whatever `openclaw.json` it just read, so `credentialed`
+      // is a definite yes or no for every row and there is no window in which
+      // a probe answer is owed. OpenClaw's gateway has no equivalent to ask
+      // either — its only non-WebSocket endpoints are the `/healthz`,
+      // `/readyz` and `/startupz` liveness probes, none of which carries
+      // provider auth.
+      //
+      // A separate question, deliberately NOT answered here: `readConfig`
+      // collapses every read failure (EACCES, a file caught half-written by a
+      // concurrent `config set`) into `{}`, so an unreadable config reads as
+      // "nothing configured" rather than as `degraded` — which is what the
+      // summary's own doc promises. Same shape of false failure as the one
+      // this fix addresses, different reader, and it needs `readConfigStrict`
+      // rather than a probe state.
       state: stateFor(credentialed.has(id), isDefault),
       isDefault,
       section: sectionFor(id),

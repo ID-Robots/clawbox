@@ -27,6 +27,7 @@ import fs from "fs/promises";
 import path from "path";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
 import { hermesConfigGet, invalidateHermesConfigCache } from "@/lib/hermes-config-cache";
+import { hermesDashboardUnitState } from "@/lib/hermes-dashboard-control";
 import { get } from "@/lib/config-store";
 import { CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-models";
 import {
@@ -156,19 +157,6 @@ export interface ModelOptionsPayload {
    * were a moment ago.
    */
   degraded?: "dashboard-unreachable";
-  /**
-   * True on a fallback payload built while the dashboard is still only
-   * STARTING — see {@link PROBE_GRACE_MS}. It is the difference between "we
-   * have not been able to ask yet" and "we asked and it is broken", and
-   * `/setup-api/providers/status` is what turns it into the row state
-   * `checking` instead of `unknown` plus a degraded banner (TASK-663).
-   *
-   * Never set on a live payload. Computed when the payload is BUILT, so a
-   * cached fallback can carry it for up to `DEGRADED_REFRESH_GAP_MS` past the
-   * moment the window closes; the background re-ask that every degraded read
-   * schedules replaces it within the second.
-   */
-  awaitingProbe?: boolean;
 }
 
 export interface ProviderScope {
@@ -225,25 +213,62 @@ const DEGRADED_REFRESH_GAP_MS = 1_000;
 // calls, so an explicit refresh is throttled per process.
 const EXPLICIT_REFRESH_MIN_GAP_MS = 10_000;
 /**
- * How long the dashboard may be unreachable before its silence stops meaning
- * "still coming up" and starts meaning "not answering".
+ * The BACKSTOP for "is the dashboard still coming up?", used only when systemd
+ * cannot say (see {@link probeStillOwed}).
  *
  * It is NOT up when this server is: `clawbox-setup` answers in 0 ms and
  * `clawbox-hermes-dashboard` needs another ~11-12 s — after every boot, and
- * again after every restart this app itself triggers. About twice that window,
- * the same headroom `degradedRetryDelayMs`' 23 s budget is built on.
+ * again after every restart this app itself triggers. About twice that window.
  *
  * BOUNDED on purpose. A plain "has the dashboard ever answered in this
  * process?" would leave a permanently dead one reading as "Checking…" forever
  * — the same lie as the degraded banner it replaces, pointing the other way.
+ * Exported so the client-side retry budget that has to outlast it
+ * (`useProviderStatus`) can be checked against it rather than eyeballed.
  */
-const PROBE_GRACE_MS = 25_000;
+export const PROBE_GRACE_MS = 25_000;
 
 /** When the live dashboard first failed to answer, or 0 while it is answering.
  *  Started by the first failure, cleared by the next success — never restarted
  *  by a later failure in the same outage, or the grace above would renew
  *  itself once a second and never expire. */
 let firstUnansweredAt = 0;
+
+/**
+ * Is an answer from the dashboard still OWED, rather than overdue?
+ *
+ * The difference between "we have not been able to ask yet" and "we asked and
+ * it is broken" — `/setup-api/providers/status` turns a true here into the row
+ * state `checking` instead of `unknown` plus a degraded banner (TASK-663).
+ *
+ * Answered by SYSTEMD wherever systemd can answer, because the unit that starts
+ * the dashboard is the thing that knows whether it is starting. The clock is
+ * only the fallback: for a box that cannot be asked (a dev checkout, a failed
+ * query) and for a unit that is nominally running but has not bound its socket
+ * yet.
+ *
+ * Read at CALL time, never frozen into a payload. `getModelOptions` serves a
+ * degraded payload from cache and refreshes behind the request, so a flag
+ * stamped when the payload was BUILT reports the window as it stood a poll ago
+ * — and the client's last retry would then be answered "still checking" by a
+ * window that had already closed, leaving the panel spinning for good.
+ */
+export async function probeStillOwed(): Promise<boolean> {
+  // Nothing has failed, so nothing is outstanding — including on a process that
+  // has not asked yet, where there is nothing to wait for either.
+  if (!firstUnansweredAt) return false;
+  const unit = await hermesDashboardUnitState();
+  // On its way, however long that takes. A loaded Jetson finishing a start-up
+  // migration is exactly the case a fixed clock calls broken.
+  if (unit === "starting") return true;
+  // Failed, masked, or stopped and disabled (which is what an OpenClaw box does
+  // to this unit): nothing is coming, so stop promising it and let the rows
+  // degrade now rather than after a grace that means nothing here.
+  if (unit === "down") return false;
+  // `running` — up, but a just-started process still has to bind its socket —
+  // or `unknown`. Fall back to the clock.
+  return Date.now() - firstUnansweredAt < PROBE_GRACE_MS;
+}
 
 let cached: ModelOptionsPayload | null = null;
 let inflight: Promise<ModelOptionsPayload> | null = null;
@@ -575,11 +600,9 @@ async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
   ]);
 
   // One live answer clears the debt; the first failure after an answer opens
-  // it. Everything below that is served without auth state is "not asked yet"
-  // rather than "asked and broken" for as long as the grace lasts.
+  // it. See `probeStillOwed`, which is what reads this.
   if (dash) firstUnansweredAt = 0;
   else if (!firstUnansweredAt) firstUnansweredAt = Date.now();
-  const awaitingProbe = !dash && Date.now() - firstUnansweredAt < PROBE_GRACE_MS;
 
   if (dash) {
     return {
@@ -603,7 +626,6 @@ async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
       fetchedAt: Date.now(),
       source: "catalog-file",
       stale: true,
-      awaitingProbe,
     };
   }
 
@@ -623,7 +645,6 @@ async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
     fetchedAt: Date.now(),
     source: "cold-start",
     stale: true,
-    awaitingProbe,
   };
 }
 
@@ -662,17 +683,7 @@ function load(refresh: boolean): Promise<ModelOptionsPayload> {
       // Serve the better payload we already have and SAY that the refresh
       // failed. TASK-446.
       if (previous && isDowngrade(payload, previous)) {
-        const kept: ModelOptionsPayload = {
-          ...previous,
-          degraded: "dashboard-unreachable",
-          // The CATALOGUE we keep is the old one; the probe debt is a fact
-          // about now, so it comes from the read we just made. Without this, a
-          // dashboard that stays dead — every fresh answer a downgrade against
-          // this same kept payload — would carry the first minute's
-          // `awaitingProbe: true` for the life of the process, and the
-          // Providers panel would say "Checking…" forever.
-          awaitingProbe: payload.awaitingProbe,
-        };
+        const kept: ModelOptionsPayload = { ...previous, degraded: "dashboard-unreachable" };
         if (gen === generation) cached = kept;
         return kept;
       }

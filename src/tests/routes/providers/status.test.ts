@@ -4,7 +4,10 @@ vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({ readConfig: vi.fn() }));
 vi.mock("@/lib/config-store", () => ({ get: vi.fn() }));
-vi.mock("@/lib/hermes-model-options", () => ({ getModelOptions: vi.fn() }));
+vi.mock("@/lib/hermes-model-options", () => ({
+  getModelOptions: vi.fn(),
+  probeStillOwed: vi.fn(),
+}));
 
 let GET: () => Promise<Response>;
 let getActiveHarness: Mock;
@@ -12,6 +15,7 @@ let hasClawaiToken: Mock;
 let readConfig: Mock;
 let getConfigValue: Mock;
 let getModelOptions: Mock;
+let probeStillOwed: Mock;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -20,9 +24,14 @@ beforeEach(async () => {
   ({ hasClawaiToken } = (await import("@/lib/harness/credentials")) as unknown as { hasClawaiToken: Mock });
   ({ readConfig } = (await import("@/lib/openclaw-config")) as unknown as { readConfig: Mock });
   ({ get: getConfigValue } = (await import("@/lib/config-store")) as unknown as { get: Mock });
-  ({ getModelOptions } = (await import("@/lib/hermes-model-options")) as unknown as { getModelOptions: Mock });
+  ({ getModelOptions, probeStillOwed } = (await import("@/lib/hermes-model-options")) as unknown as {
+    getModelOptions: Mock;
+    probeStillOwed: Mock;
+  });
   getConfigValue.mockResolvedValue(null);
   hasClawaiToken.mockResolvedValue(false);
+  // The settled box: the dashboard has answered, so nothing is outstanding.
+  probeStillOwed.mockResolvedValue(false);
   ({ GET } = await import("@/app/setup-api/providers/status/route"));
 });
 
@@ -182,21 +191,22 @@ describe("GET /setup-api/providers/status — Hermes", () => {
   // able to ask for yet: a false failure, and the one the Providers panel
   // opened on.
   //
-  // `awaitingProbe` is the payload's own word for "the live dashboard has not
-  // answered yet and has not been unreachable long enough to call it broken".
-  function unprobedPayload(awaitingProbe: boolean) {
+  // `probeStillOwed` is `hermes-model-options`' answer to "is the dashboard
+  // still coming up?" — asked of systemd, read at CALL time so a cached payload
+  // cannot report the window as it stood a poll ago.
+  function unprobedPayload() {
     return hermesPayload({
       providers: [
         { id: "anthropic", name: "anthropic", authenticated: null, verified: null, isUserDefined: null, source: "catalog-file", total: 0, models: [] },
       ],
       source: "catalog-file",
       stale: true,
-      awaitingProbe,
     });
   }
 
   it("says CHECKING, not degraded, while the first probe is still owed", async () => {
-    getModelOptions.mockResolvedValue(unprobedPayload(true));
+    getModelOptions.mockResolvedValue(unprobedPayload());
+    probeStillOwed.mockResolvedValue(true);
     const body = await (await GET()).json();
 
     expect(body.degraded).toBe(false);
@@ -213,8 +223,9 @@ describe("GET /setup-api/providers/status — Hermes", () => {
   // stop reading as "Checking…" and go back to reading as degraded. A probe
   // that failed shown as checking forever is the same lie in the other
   // direction.
-  it("stops checking and degrades once the probe has been owed too long", async () => {
-    getModelOptions.mockResolvedValue(unprobedPayload(false));
+  it("stops checking and degrades once the probe is no longer owed", async () => {
+    getModelOptions.mockResolvedValue(unprobedPayload());
+    probeStillOwed.mockResolvedValue(false);
     const body = await (await GET()).json();
 
     expect(body.degraded).toBe(true);
@@ -225,7 +236,12 @@ describe("GET /setup-api/providers/status — Hermes", () => {
   // result and keeps its own word. `checking` is only ever about the absence of
   // a probe, never about what one returned.
   it("still says unknown for a row the live dashboard could not judge", async () => {
-    getModelOptions.mockResolvedValue(hermesPayload({ awaitingProbe: false }));
+    // The shape the `stale` half of the guard exists for: the dashboard ANSWERED
+    // (so `gemini`'s null is a result), while a concurrent outage has the probe
+    // predicate saying an answer is owed. Without that half this row would be
+    // repainted "checking" on the strength of a fact about a different read.
+    getModelOptions.mockResolvedValue(hermesPayload({ stale: false }));
+    probeStillOwed.mockResolvedValue(true);
     const body = await (await GET()).json();
 
     expect(body.degraded).toBe(false);
@@ -420,8 +436,26 @@ describe("the response carries statuses, never credentials", () => {
       expect(Object.keys(row).sort()).toEqual(["enabled", "id", "isDefault", "label", "section", "state"]);
       expect(typeof row.isDefault).toBe("boolean");
       expect(typeof row.enabled).toBe("boolean");
-      // The owner's switch is a fifth, orthogonal field — never a fifth state.
-      expect(["connected", "disconnected", "needs-reauth", "unknown"]).toContain(row.state);
+      // The owner's switch is an orthogonal FIELD — never a state.
+      expect(["connected", "disconnected", "needs-reauth", "checking", "unknown"]).toContain(row.state);
+    }
+  });
+
+  // ...and the same contract on the answer a booting box gives, which is the
+  // one shape the fixture above cannot produce.
+  it("emits only those fields while the box is still being checked", async () => {
+    getActiveHarness.mockResolvedValue("hermes");
+    getModelOptions.mockResolvedValue(hermesPayload({ stale: true }));
+    probeStillOwed.mockResolvedValue(true);
+    const body = await (await GET()).json();
+
+    expect(Object.keys(body).sort()).toEqual(
+      ["defaultProvider", "degraded", "harness", "providers"],
+    );
+    expect(body.providers.some((row: Row) => row.state === "checking")).toBe(true);
+    for (const row of body.providers) {
+      expect(Object.keys(row).sort()).toEqual(["enabled", "id", "isDefault", "label", "section", "state"]);
+      expect(["connected", "disconnected", "needs-reauth", "checking", "unknown"]).toContain(row.state);
     }
   });
 });

@@ -28,13 +28,25 @@ import type { ProviderStatusSummary } from "@/lib/provider-status";
 
 /**
  * How many times a `checking` answer is re-asked, on the schedule the model
- * catalogue's own degraded retries use (1+2+4+8+8+8 s ≈ 31 s).
+ * catalogue's own degraded retries use.
  *
- * It must OUTLAST the server's own checking window (`PROBE_GRACE_MS`, 25 s):
- * the last poll has to land after the server has made up its mind, or the
- * panel settles for good on a spinner the server has already stopped serving.
+ * The budget must OUTLAST the server's own checking window (`PROBE_GRACE_MS`),
+ * or the last poll is answered "still checking" by a window that is about to
+ * close and the panel settles for good on a spinner. The two constants live in
+ * different modules — one of them server-only — so the relationship is pinned
+ * by a test rather than by these two comments agreeing; see
+ * `checking-retry-budget.test.ts` and {@link checkingRetryBudgetMs}.
  */
-const CHECKING_RETRY_ATTEMPTS = 6;
+export const CHECKING_RETRY_ATTEMPTS = 7;
+
+/** Wall-clock span of the whole retry schedule, for that test. */
+export function checkingRetryBudgetMs(): number {
+  let total = 0;
+  for (let attempt = 0; attempt < CHECKING_RETRY_ATTEMPTS; attempt++) {
+    total += degradedRetryDelayMs(attempt);
+  }
+  return total;
+}
 
 export interface UseProviderStatus {
   /** Null until the first load lands. */
@@ -64,6 +76,11 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
   // first answer with nothing left to check, so a later boot (a gateway
   // restart from Settings) gets a fresh budget rather than the exhausted one.
   const checkingAttemptRef = useRef(0);
+  // Whether the last answer we actually got had a row still being checked. Read
+  // by the FAILURE path, which has no body to look at: a read that failed is no
+  // evidence the probe finished, and booking no retry there would end the loop
+  // on the first transient 500 with the spinner frozen on screen.
+  const checkingRef = useRef(false);
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
 
@@ -73,6 +90,16 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
     const controller = new AbortController();
     controllerRef.current = controller;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    // Booked from BOTH the success and the failure path — see `checkingRef`.
+    const scheduleRetry = () => {
+      if (!checkingRef.current) {
+        checkingAttemptRef.current = 0;
+        return;
+      }
+      if (checkingAttemptRef.current >= CHECKING_RETRY_ATTEMPTS) return;
+      retryTimer = setTimeout(refresh, degradedRetryDelayMs(checkingAttemptRef.current));
+      checkingAttemptRef.current += 1;
+    };
 
     fetch("/setup-api/providers/status", { cache: "no-store", signal: controller.signal })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
@@ -85,17 +112,11 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
         if (!data || !Array.isArray(data.providers)) throw new Error("Malformed status");
         setSummary(data);
         setError(false);
-        // A `checking` row is a promise that this answer is going to change.
-        // Keep it only as long as the server can still be waiting; past the
-        // budget the server has already replaced it with a real state, so a
-        // further poll would be asking about nothing.
-        if (!data.providers.some((row) => row.state === "checking")) {
-          checkingAttemptRef.current = 0;
-          return;
-        }
-        if (checkingAttemptRef.current >= CHECKING_RETRY_ATTEMPTS) return;
-        retryTimer = setTimeout(refresh, degradedRetryDelayMs(checkingAttemptRef.current));
-        checkingAttemptRef.current += 1;
+        // A `checking` row is a promise that this answer is going to change,
+        // and nothing else on the page emits a signal when a harness finishes
+        // booting. Bounded, so a box that never answers still stops polling.
+        checkingRef.current = data.providers.some((row) => row.state === "checking");
+        scheduleRetry();
       })
       .catch((err) => {
         if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) return;
@@ -103,6 +124,7 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
         // transient failure reads as "everything disconnected", which is the one
         // thing it must never say by accident.
         setError(true);
+        scheduleRetry();
       });
 
     return () => {

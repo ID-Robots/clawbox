@@ -19,7 +19,11 @@ const execFileMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("child_process", () => ({ execFile: execFileMock }));
 
-import { bounceHermesDashboard } from "@/lib/hermes-dashboard-control";
+import {
+  bounceHermesDashboard,
+  classifyUnitState,
+  hermesDashboardUnitState,
+} from "@/lib/hermes-dashboard-control";
 
 /** `systemctl show … --property=Restart --value` prints `value`. */
 function systemdRestartPolicy(value: string): void {
@@ -91,5 +95,68 @@ describe("bounceHermesDashboard", () => {
   it("does not throw when the CLI is missing entirely", async () => {
     cliMock.mockRejectedValue(new Error("ENOENT"));
     await expect(bounceHermesDashboard()).resolves.toBe(false);
+  });
+});
+
+/**
+ * TASK-663 — the second, read-only question this module answers: is the
+ * dashboard still COMING UP?
+ *
+ * The Providers panel used to report a booting box as degraded with every
+ * provider "Unknown". Whether the unit is starting is systemd's fact, not
+ * something to approximate with a wall clock beside it, and `systemctl show`
+ * is a read — the same unprivileged call the restart guard above already makes.
+ */
+describe("hermesDashboardUnitState", () => {
+  /** `systemctl show … --property=ActiveState --property=SubState --value`
+   *  prints one value per line, in the order asked. */
+  function systemdUnit(activeState: string, subState: string): void {
+    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: unknown) => {
+      (cb as (e: Error | null, out: { stdout: string; stderr: string }) => void)(null, {
+        stdout: `${activeState}\n${subState}\n`,
+        stderr: "",
+      });
+    });
+  }
+
+  it("asks systemd for the unit, with a read that needs no privilege", async () => {
+    systemdUnit("active", "running");
+    await hermesDashboardUnitState();
+
+    const [bin, args] = systemctlCall();
+    expect(bin).toBe("/usr/bin/systemctl");
+    expect(args[0]).toBe("show");
+    expect(args).toContain("--property=ActiveState");
+    expect(args).toContain("--property=SubState");
+    expect(args).not.toContain("restart");
+  });
+
+  it("answers unknown — never a guess — when systemd cannot be asked", async () => {
+    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: unknown) => {
+      (cb as (e: Error) => void)(new Error("no such unit"));
+    });
+    expect(await hermesDashboardUnitState()).toBe("unknown");
+  });
+
+  // The vocabulary itself, pinned so a rename upstream cannot silently turn a
+  // failed unit into "still starting".
+  it.each([
+    // On its way: the first start, and the state a Restart=always unit sits in
+    // between crashes.
+    ["activating", "start", "starting"],
+    ["activating", "auto-restart", "starting"],
+    ["reloading", "reload", "starting"],
+    // Active, but its ExecStartPre has not finished.
+    ["active", "start-pre", "starting"],
+    ["active", "running", "running"],
+    // Nothing is going to answer. Note an OpenClaw box stops and disables this
+    // unit deliberately, so "down" is not by itself a fault.
+    ["failed", "failed", "down"],
+    ["inactive", "dead", "down"],
+    ["deactivating", "stop-sigterm", "down"],
+    // No systemd, no unit, or a query that produced nothing.
+    ["", "", "unknown"],
+  ])("reads %s/%s as %s", (activeState, subState, expected) => {
+    expect(classifyUnitState(activeState, subState)).toBe(expected);
   });
 });

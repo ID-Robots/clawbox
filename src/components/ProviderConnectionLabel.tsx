@@ -13,7 +13,7 @@ import type { ProviderConnectionState } from "@/lib/provider-status";
  * DESIGN NOTES, each load-bearing rather than taste (carried over from the
  * connection strip this section absorbed):
  *
- *  - Every state carries a WORD, not just a dot. Two of the four states differ
+ *  - Every state carries a WORD, not just a dot. Two of the five states differ
  *    only in hue otherwise, and roughly one man in twelve cannot separate the
  *    two hues that would carry them.
  *  - The state colours are cyan (verified) and amber (needs attention), never

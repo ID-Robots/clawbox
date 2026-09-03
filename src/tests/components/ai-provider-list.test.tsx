@@ -208,4 +208,41 @@ describe("AiProviderList", () => {
     await new Promise((resolve) => setTimeout(resolve, 1_600));
     expect(statusCalls()).toBe(settled);
   });
+
+  // A read that FAILED is no evidence the probe finished. Booking the next
+  // retry only from the success path ended the loop on the first transient 500
+  // — the setup server restarting itself is one — and froze the spinner on
+  // screen for the life of the mount, with the box coming up seconds later and
+  // nothing on the page noticing.
+  it("keeps polling after a failed read while rows are still being checked", async () => {
+    let answer: "checking" | "error" | "good" = "checking";
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      const json = (body: unknown, status = 200) =>
+        new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+      if (url.startsWith("/setup-api/preferences")) return json({});
+      if (url.startsWith("/setup-api/providers/status")) {
+        if (answer === "error") return json({ error: "boom" }, 500);
+        const rows = answer === "checking"
+          ? ROWS.map((r) => ({ ...r, state: "checking", isDefault: false }))
+          : ROWS;
+        return json({ harness: "hermes", providers: rows, defaultProvider: "clawai", degraded: false });
+      }
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderList();
+    await screen.findByTestId("ai-provider-list-loading");
+
+    // The poll that lands mid-outage fails; the one after it must still happen.
+    answer = "error";
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument(), { timeout: 4_000 });
+
+    answer = "good";
+    await waitFor(
+      () => expect(screen.getByTestId("ai-provider-openai")).toBeInTheDocument(),
+      { timeout: 6_000 },
+    );
+  });
 });

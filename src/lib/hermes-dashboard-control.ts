@@ -56,6 +56,63 @@ async function restartsItself(): Promise<boolean> {
 }
 
 /**
+ * Is the dashboard coming up, up, or not coming at all — asked of systemd,
+ * which is the thing that actually knows.
+ *
+ * The unit is what starts the process, so its own state is the native answer to
+ * "is this still booting?" — better than any clock we could run beside it. It
+ * separates the two cases a wall-clock grace gets wrong in opposite directions:
+ * a dashboard that legitimately takes longer than the usual ~11-12 s (a loaded
+ * Jetson after a big update) is still `activating` and must not be called
+ * broken, and a `failed` or masked unit is never coming back and must not be
+ * called "still starting" for one more second.
+ *
+ * `systemctl show` is a READ and needs no privilege — the same call, on the
+ * same unit, that {@link restartsItself} above already makes.
+ *
+ * NEVER THROWS, and "unknown" is a real answer: a dev checkout with no systemd,
+ * no such unit, or a query that failed. The caller decides what to do without
+ * it rather than being handed a guess dressed as a fact.
+ */
+export type HermesDashboardUnitState = "starting" | "running" | "down" | "unknown";
+
+/**
+ * Deliberately NOT memoised. The spawn is a local read of a few milliseconds
+ * and its only caller asks solely while the dashboard is FAILING to answer —
+ * never on a healthy box — so a cache would buy nothing and would hold a fact
+ * whose whole value is being current.
+ */
+export async function hermesDashboardUnitState(): Promise<HermesDashboardUnitState> {
+  const { stdout } = await execFileAsync(
+    "/usr/bin/systemctl",
+    ["show", HERMES_DASHBOARD_UNIT, "--property=ActiveState", "--property=SubState", "--value"],
+    { timeout: SYSTEMCTL_TIMEOUT_MS },
+  ).catch(() => ({ stdout: "" }));
+  // `--value` prints one line per requested property, in the order asked.
+  const [activeState = "", subState = ""] = stdout.trim().split(/\r?\n/).map((line) => line.trim());
+  return classifyUnitState(activeState, subState);
+}
+
+/** Exported for the test that pins the systemd vocabulary; not a caller's API. */
+export function classifyUnitState(
+  activeState: string,
+  subState: string,
+): HermesDashboardUnitState {
+  // `activating` covers both the first start and `auto-restart`, the state a
+  // `Restart=always` unit sits in between crashes — in both the process is on
+  // its way, so an answer is genuinely still owed.
+  if (activeState === "activating" || activeState === "reloading") return "starting";
+  // A unit can be `active` while its ExecStartPre is still running.
+  if (activeState === "active") return subState === "start-pre" ? "starting" : "running";
+  // `failed`, `inactive` (stopped, disabled or masked), `deactivating`: nothing
+  // is going to answer. Note this is NOT "the box is broken" — an OpenClaw box
+  // stops and disables this unit on purpose.
+  if (activeState) return "down";
+  // No systemd, no such unit, or the query failed.
+  return "unknown";
+}
+
+/**
  * Stop the dashboard so systemd starts it again, or answer false without
  * touching it.
  *
