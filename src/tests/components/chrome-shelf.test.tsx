@@ -100,6 +100,46 @@ describe("ChromeShelf", () => {
     expect(icon?.className).toContain("clawkeep-shelf-glow-red");
   });
 
+  it("goes amber, not red, once a box that WAS protected has drifted", () => {
+    // ClawKeep's own card paints a lapsed box amber and a never-protected one
+    // red. The shelf has to agree, or the distinction only exists on the
+    // screen the owner has not opened.
+    render(
+      <ChromeShelf
+        {...baseProps}
+        onClawKeepShieldClick={vi.fn()}
+        clawAiAuthenticated
+        clawkeepStatus={{ stale: true, lapsed: true, unconfigured: false, busy: false, restoring: false }}
+      />,
+    );
+
+    const shield = screen.getByTestId("shelf-clawkeep-shield-button");
+    expect(shield).toHaveAttribute("title", "ClawKeep backup overdue");
+    const icon = shield.querySelector(".material-symbols-rounded");
+    expect(icon?.className).toContain("text-amber-400");
+    expect(icon?.className).not.toContain("clawkeep-shelf-glow-red");
+  });
+
+  it("keeps the red alert on a PAIRED box that has never backed up", () => {
+    // Distinct from the never-paired case above: pairing is the opt-in, so a
+    // paired box with nothing in the cloud is genuinely unprotected and keeps
+    // the red alert it has always had. Only `paired: false` earns the calm
+    // setup shield (TASK-510).
+    render(
+      <ChromeShelf
+        {...baseProps}
+        onClawKeepShieldClick={vi.fn()}
+        clawAiAuthenticated
+        clawkeepStatus={{ stale: true, lapsed: false, unconfigured: false, busy: false, restoring: false }}
+      />,
+    );
+
+    const icon = screen.getByTestId("shelf-clawkeep-shield-button")
+      .querySelector(".material-symbols-rounded");
+    expect(icon?.className).toContain("clawkeep-shelf-glow-red");
+    expect(icon?.className).not.toContain("text-amber-400");
+  });
+
   it("lets a stale flag win over unconfigured if both ever arrive together", () => {
     render(
       <ChromeShelf
