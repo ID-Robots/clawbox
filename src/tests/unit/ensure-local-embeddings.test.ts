@@ -492,50 +492,146 @@ describe("gateway-pre-start.sh local embeddings hand-off", () => {
 });
 
 // install.sh runs the script synchronously and then reads openclaw.json to
-// report the outcome (the script exits 0 on every soft failure by design). That
-// check must accept the key the installed core actually uses, or a v2 install
-// prints "WARN: local embeddings are not configured yet" over a configured box.
-describe.skipIf(!hasPython3)("install.sh local embeddings post-run check", () => {
+// report the outcome (the script exits 0 on every soft failure by design).
+//
+// That report has to name the embedder the INSTALLED core will use. OpenClaw 2
+// (2026.8+) reads `memory.search.*` and ignores `agents.defaults.memorySearch`
+// entirely; a v1 core does the reverse. The check used to read both and prefer
+// whichever named a provider, so a v2 box with an empty `memory.search` and a
+// stale legacy `ollama` block — the state an un-migrated upgrade leaves — was
+// told "Local embeddings ready … needs no API key" while every note was being
+// embedded by the default cloud provider (TASK-659). The mirror case, a v1
+// core with only `memory.search` filled in, reported the same thing.
+//
+// These run the shipped block out of install.sh — the generation gate, the
+// config read and the message it picks — under `set -euo pipefail` against a
+// fake device root, once per generation.
+describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
   const INSTALL_SH = readFileSync(path.resolve(process.cwd(), "install.sh"), "utf-8");
-  const HEAD = "python3 - /home/clawbox/.openclaw/openclaw.json <<'PY'";
-  const start = INSTALL_SH.indexOf(HEAD);
-  const end = start < 0 ? -1 : INSTALL_SH.indexOf("\nPY\n", start);
-  const program = start < 0 || end < 0 ? "" : INSTALL_SH.slice(INSTALL_SH.indexOf("\n", start) + 1, end);
 
-  function configured(cfg: unknown): boolean {
-    if (!program) throw new Error("install.sh post-run check not found — the heredoc test above names it");
-    const file = path.join(dir, "post-run.json");
-    writeFileSync(file, JSON.stringify(cfg));
-    return spawnSync("python3", ["-c", program, file], { encoding: "utf-8" }).status === 0;
+  /**
+   * The embedding half of `step_ollama_install`: from the helper path it runs
+   * to the end of the function. Sliced rather than taking the whole function,
+   * which would try to install Ollama itself.
+   */
+  const BLOCK = (() => {
+    const start = INSTALL_SH.indexOf('  local ENSURE_EMBEDDINGS="$PROJECT_DIR/scripts/ensure-local-embeddings.sh"');
+    if (start < 0) return "";
+    const end = INSTALL_SH.indexOf("\n}", start);
+    if (end < 0) return "";
+    const body = INSTALL_SH.slice(start, end);
+    // The "must not say ready" assertions would pass over a truncated slice,
+    // so the slice has to reach the block's last statement to count.
+    return body.includes("could not pull qwen3-embedding:0.6b") ? body : "";
+  })();
+
+  const READY = "Local embeddings ready";
+
+  /**
+   * Run the shipped block against a fake device root.
+   *
+   * `as_clawbox` is the real seam — on a device it runs the command as the
+   * clawbox user, so the config it opens is that user's home. The stub keeps
+   * the argv the installer builds and only redirects `/home/clawbox/...` into
+   * the temp root.
+   */
+  function report(opts: { v2: boolean; config: unknown }): string {
+    if (!BLOCK) throw new Error("install.sh post-run check not found, or extracted truncated");
+    const home = path.join(dir, "device", "home", "clawbox");
+    const project = path.join(dir, "device", "project");
+    mkdirSync(path.join(home, ".openclaw"), { recursive: true });
+    mkdirSync(path.join(project, "scripts"), { recursive: true });
+    // `undefined` means "the file is not readable JSON" — a config the
+    // installer has to survive rather than a shape it has to understand.
+    writeFileSync(
+      path.join(home, ".openclaw", "openclaw.json"),
+      opts.config === undefined ? "{ this is not json" : JSON.stringify(opts.config),
+    );
+    // Best-effort and its exit code says nothing; the check under test is what
+    // reads the config afterwards.
+    writeFileSync(path.join(project, "scripts", "ensure-local-embeddings.sh"), "#!/usr/bin/env bash\nexit 0\n");
+    chmodSync(path.join(project, "scripts", "ensure-local-embeddings.sh"), 0o755);
+
+    const program = [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      `FAKE_ROOT=${JSON.stringify(home)}`,
+      // The device home the installer names. Never touched: as_clawbox maps it.
+      'CLAWBOX_HOME="/home/clawbox"',
+      `PROJECT_DIR=${JSON.stringify(project)}`,
+      "as_clawbox() {",
+      "  local a; local -a mapped=()",
+      '  for a in "$@"; do',
+      '    case "$a" in /home/clawbox*) mapped+=("$FAKE_ROOT${a#/home/clawbox}") ;; *) mapped+=("$a") ;; esac',
+      "  done",
+      '  "${mapped[@]}"',
+      "}",
+      'as_clawbox_login() { "$@"; }',
+      `openclaw_is_v2() { return ${opts.v2 ? 0 : 1}; }`,
+      "check_embeddings() {",
+      BLOCK,
+      "}",
+      "check_embeddings",
+      "",
+    ].join("\n");
+
+    const file = path.join(dir, "post-run-check.sh");
+    writeFileSync(file, program);
+    chmodSync(file, 0o755);
+    const run = spawnSync("bash", [file], { encoding: "utf-8", timeout: 30_000 });
+    // Best-effort by contract: the block must never abort the install, whatever
+    // it finds — including a config it cannot parse.
+    expect(run.status).toBe(0);
+    return `${run.stdout ?? ""}${run.stderr ?? ""}`;
   }
 
-  it("ships the check as a heredoc this test can run verbatim", () => {
-    expect(program).toContain("import json");
+  const LOCAL = { provider: "ollama", model: MODEL };
+  const REMOTE = { provider: "openai", model: "text-embedding-3-large" };
+  const cfg = (search: unknown, legacy?: unknown) => ({
+    memory: { search },
+    ...(legacy === undefined ? {} : { agents: { defaults: { memorySearch: legacy } } }),
+  });
+
+  it("ships the check as a block this test can run verbatim", () => {
+    expect(BLOCK).toContain("import json");
   });
 
   it("accepts OpenClaw 2's memory.search home", () => {
-    expect(configured({ memory: { search: { provider: "ollama", model: MODEL } } })).toBe(true);
+    expect(report({ v2: true, config: cfg(LOCAL) })).toContain(READY);
   });
 
-  it("still accepts the legacy agents.defaults.memorySearch home", () => {
-    expect(configured({ agents: { defaults: { memorySearch: { provider: "ollama", model: MODEL } } } })).toBe(true);
+  it("still accepts the legacy agents.defaults.memorySearch home on a v1 core", () => {
+    expect(report({ v2: false, config: cfg({}, LOCAL) })).toContain(READY);
   });
 
   it("does not report a box that is on a remote provider, or not configured, as ready", () => {
-    expect(configured({ memory: { search: { provider: "openai", model: "text-embedding-3-large" } } })).toBe(false);
-    expect(configured({ agents: { defaults: {} } })).toBe(false);
-    expect(configured({ memory: { search: { model: MODEL } } })).toBe(false);
+    const remote = report({ v2: true, config: cfg(REMOTE) });
+    expect(remote).not.toContain(READY);
+    expect(remote).toMatch(/cloud/i);
+    // The provider is named so the operator knows which key to fix.
+    expect(remote).toContain("openai");
+
+    const unset = report({ v2: true, config: cfg({}) });
+    expect(unset).not.toContain(READY);
+    expect(unset).toMatch(/cloud/i);
+    expect(unset).toContain("memory.search");
+
+    expect(report({ v2: true, config: cfg({ model: MODEL }) })).not.toContain(READY);
   });
 
-  it("reads only the active home — a stale legacy block cannot vouch for a box OpenClaw 2 has on the cloud", () => {
-    // The upgrade case: agents.defaults.memorySearch still says ollama from
-    // the box's OpenClaw 1 days, and the owner has since picked OpenAI under
-    // memory.search, the only home the running core reads. Every note is
-    // being sent to OpenAI; "needs no API key" would be a false claim.
-    const stale = { provider: "ollama", model: MODEL };
-    const remote = { provider: "openai", model: "text-embedding-3-large" };
-    expect(configured({ memory: { search: remote }, agents: { defaults: { memorySearch: stale } } })).toBe(false);
-    // The mirror image is ready: the active home is local, whatever the stale one says.
-    expect(configured({ memory: { search: stale }, agents: { defaults: { memorySearch: remote } } })).toBe(true);
+  it("reads only the home the installed core parses — a stale block cannot vouch for the box", () => {
+    // The un-migrated upgrade: the OpenClaw 1 choice still says ollama and the
+    // v2 core does not read it. "Needs no API key" would be a false claim.
+    expect(report({ v2: true, config: cfg({}, LOCAL) })).not.toContain(READY);
+    // Mirror image, and the reason the gate is not "prefer memory.search":
+    // that same config on a v1 core IS on local embeddings.
+    expect(report({ v2: false, config: cfg({}, LOCAL) })).toContain(READY);
+    // And a v1 core ignores memory.search however it is filled in.
+    expect(report({ v2: false, config: cfg(LOCAL, {}) })).not.toContain(READY);
+    expect(report({ v2: true, config: cfg(LOCAL, REMOTE) })).toContain(READY);
+  });
+
+  it("survives a config it cannot read at all", () => {
+    expect(report({ v2: true, config: undefined })).not.toContain(READY);
   });
 });

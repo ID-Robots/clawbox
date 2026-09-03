@@ -4515,24 +4515,48 @@ step_ollama_install() {
     # The helper exits 0 on every soft failure by design (a missing Ollama must
     # not abort an install), so its exit code says nothing about the outcome.
     # Read the config it was supposed to write instead — from the ACTIVE home.
-    # Only an OpenClaw 2 core writes memory.search, and once that names a
-    # provider the core ignores agents.defaults.memorySearch entirely — so a
-    # stale legacy block still saying "ollama" from the box's OpenClaw 1 days,
-    # beside a memory.search the owner has since pointed at OpenAI, is a box on
-    # the cloud embedder. "Ready, needs no API key" would be false there.
-    if as_clawbox python3 - /home/clawbox/.openclaw/openclaw.json <<'PY' 2>/dev/null
+    #
+    # Read the ONE key the installed core will parse. OpenClaw 2 reads
+    # memory.search and ignores agents.defaults.memorySearch entirely; a v1
+    # core does the reverse. Reading whichever block happened to name a
+    # provider printed "ready, needs no API key" over a v2 box whose
+    # memory.search was still empty and whose stale OpenClaw 1 block said
+    # "ollama" — a box on the default cloud embedder (TASK-659). The gate is
+    # the same 2026.8 boundary scripts/ensure-local-embeddings.sh writes
+    # through and src/lib/memory-shard.ts (embeddingConfigHome) reads through.
+    local EMBED_KEY="agents.defaults.memorySearch"
+    if openclaw_is_v2; then EMBED_KEY="memory.search"; fi
+    local EMBED_STATE
+    EMBED_STATE="$(as_clawbox python3 - "$CLAWBOX_HOME/.openclaw/openclaw.json" "$EMBED_KEY" <<'PY' 2>/dev/null || true
 import json, sys
-cfg = json.load(open(sys.argv[1]))
-v2 = (cfg.get("memory") or {}).get("search") or {}
-legacy = ((cfg.get("agents") or {}).get("defaults") or {}).get("memorySearch") or {}
-home = v2 if v2.get("provider") else legacy
-sys.exit(0 if home.get("provider") == "ollama" and home.get("model") == "qwen3-embedding:0.6b" else 1)
+try:
+    node = json.load(open(sys.argv[1]))
+except Exception:
+    node = {}
+for part in sys.argv[2].split("."):
+    node = node.get(part) if isinstance(node, dict) else None
+home = node if isinstance(node, dict) else {}
+provider = home.get("provider") or ""
+model = home.get("model") or ""
+if provider == "ollama" and model == "qwen3-embedding:0.6b":
+    print("local")
+elif provider in ("", "auto"):
+    print("unset")
+else:
+    print("cloud:%s" % provider)
 PY
-    then
-      echo "  Local embeddings ready (qwen3-embedding:0.6b, semantic memory needs no API key)"
-    else
-      echo "  WARN: local embeddings are not configured yet; semantic memory falls back to lexical FTS until the next boot retries it (non-fatal)"
-    fi
+)"
+    case "$EMBED_STATE" in
+      local)
+        echo "  Local embeddings ready (qwen3-embedding:0.6b, semantic memory needs no API key)"
+        ;;
+      cloud:*)
+        echo "  WARN: semantic memory is on a CLOUD embedder ($EMBED_KEY.provider=${EMBED_STATE#cloud:}) — every indexed note is embedded off the box and it needs that provider's API key; re-run scripts/ensure-local-embeddings.sh to move it on-device (non-fatal)"
+        ;;
+      *)
+        echo "  WARN: local embeddings are not configured ($EMBED_KEY is unset), so semantic memory falls back to the core's default cloud embedder — which needs an API key, and without one memory search stays on lexical FTS; the next boot retries the switch (non-fatal)"
+        ;;
+    esac
   elif ollama pull qwen3-embedding:0.6b >/dev/null 2>&1; then
     echo "  Pulled local embedding model qwen3-embedding:0.6b (semantic memory, no API key)"
   else
