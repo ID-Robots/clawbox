@@ -408,7 +408,7 @@ export function EmailFullView({
   // an await and it is satisfied — as it should be, because a panel that set
   // state on mount would render twice to show one thing.
   //
-  // ChatPopup keys this component by uid, so a different message is a fresh
+  // Both chat surfaces key this component by uid, so a different message is a fresh
   // mount and the `useState` initialisers above are its reset.
   useEffect(() => {
     const controller = new AbortController()
