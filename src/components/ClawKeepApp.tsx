@@ -1289,6 +1289,17 @@ function DashboardCard({
     ? "clawkeep.status.staleSub"
     : protection.reason === "blocked"
     ? "clawkeep.status.blockedSub"
+    // A green shield over a box with auto-backup off is the truth about the
+    // snapshot in the cloud and silence about what happens next. Nothing will
+    // make a newer one, and the window that called this box protected is the
+    // no-schedule week rather than the cadence it used to keep — so one click
+    // on the switch turns a five-day-stale nightly box green. The verdict is
+    // deliberately left alone (judging a box its owner took off auto-backup
+    // against the cadence they abandoned would cry wolf at every manual box);
+    // what changes is that the card stops saying "safe, the works" and says
+    // how old the backup is and that nothing is scheduled.
+    : protection.state === "protected" && !status.schedule?.enabled
+    ? "clawkeep.status.protectedOffSub"
     : copy.subheadKey;
 
   return (

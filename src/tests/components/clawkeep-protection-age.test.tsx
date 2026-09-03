@@ -118,6 +118,7 @@ describe("the ClawKeep shield's age term", () => {
       lastHeartbeatStatus: "ok",
     };
     expect(await shieldHeadline()).toBe("You're Protected");
+    expect(screen.getByText(/safe in the ClawBox cloud/i)).toBeTruthy();
   });
 
   it("keeps a weekly schedule green at three days old", async () => {
@@ -160,6 +161,27 @@ describe("the ClawKeep shield's age term", () => {
       scheduleArmedAtMs: Date.now() - 60_000,
     };
     expect(await shieldHeadline()).toBe("You're Protected");
+  });
+
+  it("says auto-backup is off rather than 'safe, the works', when the switch is what turned it green", async () => {
+    // Five days stale on a nightly cadence is amber; switching auto-backup off
+    // widens the tolerated age to the no-schedule week and the shield goes
+    // green on that one click. The verdict is beta's — a box its owner took off
+    // auto-backup is judged as a manual one, and judging it against the cadence
+    // it abandoned would cry wolf at every manual box — but the card must not
+    // answer it with "safe in the ClawBox cloud" when nothing is going to make
+    // a newer backup.
+    status = {
+      ...BASE_STATUS,
+      schedule: { ...BASE_STATUS.schedule, enabled: false },
+      lastBackupAtMs: Date.now() - 5 * 24 * HOUR,
+      lastHeartbeatAtMs: Date.now() - 5 * 24 * HOUR,
+      lastHeartbeatStatus: "ok",
+    };
+    expect(await shieldHeadline()).toBe("You're Protected");
+    expect(screen.getByText(/last completed backup was 5d ago/i)).toBeTruthy();
+    expect(screen.getByText(/auto-backup is off/i)).toBeTruthy();
+    expect(screen.queryByText(/safe in the ClawBox cloud/i)).toBeNull();
   });
 
   it("says a refused run is refused, instead of waiting out the window", async () => {
