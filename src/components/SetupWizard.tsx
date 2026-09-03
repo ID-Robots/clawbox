@@ -17,6 +17,23 @@ import { cachedEdition, resolveEdition } from "@/lib/client-harness";
 
 const SETUP_COMPLETION_MAX_HEALTH_CHECKS = 6;
 
+/**
+ * The zone this browser thinks it is in, or undefined. TASK-514.
+ *
+ * Wrapped because `Intl.DateTimeFormat().resolvedOptions()` is not free of
+ * surprises across the phones and laptops people run the wizard from — a
+ * browser that throws here, or reports nothing, must still be able to complete
+ * setup, so this never rejects and the caller treats the zone as optional.
+ */
+function resolveBrowserTimezone(): string | undefined {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return typeof zone === "string" && zone.length > 0 ? zone : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function extractErrorMessage(res: Response, fallback: string) {
   const data = await res.json().catch(() => ({}));
   return typeof data.error === "string" ? data.error : fallback;
@@ -549,6 +566,15 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
         try {
           const res = await fetch("/setup-api/setup/complete", {
             method: "POST",
+            headers: { "Content-Type": "application/json" },
+            // TASK-514: hand the box the zone this browser already knows. The
+            // box ships on Etc/UTC and nothing else in setup ever asks, so the
+            // assistant would answer in UTC while the taskbar clock — drawn
+            // from THIS device — looked right. The route treats it as optional
+            // and ignores anything it doesn't like, and the Intl call is
+            // wrapped because a browser that throws on it must still be able
+            // to finish setup.
+            body: JSON.stringify({ timezone: resolveBrowserTimezone() }),
             signal: AbortSignal.timeout(15_000),
           });
           if (res.ok) return res;

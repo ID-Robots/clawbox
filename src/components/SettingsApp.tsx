@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import Image from "next/image";
 import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
@@ -345,6 +345,38 @@ function Toggle({ on, onToggle, label }: { on: boolean; onToggle: (v: boolean) =
   );
 }
 
+/**
+ * What GET /setup-api/system/timezone answers. TASK-514.
+ *
+ * `localTime` is the BOX's own wall clock, which is the whole point of the
+ * card: the taskbar clock is rendered by the browser from the phone's or
+ * laptop's clock, so it looks right on a box that is hours out.
+ */
+interface TimezoneInfo {
+  supported: boolean;
+  timezone: string;
+  localTime: string;
+  utcOffset: string;
+  ntpSynchronized: boolean;
+  /** Still on the systemd default — i.e. nobody was ever asked. */
+  isDefault: boolean;
+}
+
+/**
+ * DEFAULT_TIMEZONE from src/lib/timezone.ts, restated rather than imported:
+ * that module pulls in `child_process` and cannot be reached from a client
+ * component. Only used to re-derive `isDefault` from a POST reply, which
+ * carries the live status but not the flag.
+ */
+const DEFAULT_TIMEZONE = "Etc/UTC";
+
+/**
+ * How many zone rows reach the DOM. tzdata is ~600 names and rendering them
+ * all made the System tab janky on the device's own browser; the search box is
+ * how you get to the rest.
+ */
+const TIMEZONE_ROW_LIMIT = 50;
+
 type SectionStatus = { subtitle: string | null };
 
 export default function SettingsApp({ ui }: SettingsAppProps) {
@@ -524,6 +556,105 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     const iv = setInterval(poll, 3000);
     return () => clearInterval(iv);
   }, [section]);
+
+  /* ── Time zone ── TASK-514.
+   * A ONE-SHOT when the System section opens, deliberately not folded into the
+   * 3 s stats poll above: the zone only changes when this card changes it, and
+   * `?zones=1` carries ~600 names that would be re-sent every three seconds.
+   */
+  const [tzInfo, setTzInfo] = useState<TimezoneInfo | null>(null);
+  const [tzZones, setTzZones] = useState<string[]>([]);
+  const [tzSearch, setTzSearch] = useState("");
+  const [tzSelected, setTzSelected] = useState("");
+  const [tzSaving, setTzSaving] = useState(false);
+  // An empty `message` means "the server gave no reason" — the render falls
+  // back to settings.timezoneSaveFailed. Keeping the fallback out here is what
+  // lets the fetch below stay off `t`, which changes when translations load.
+  const [tzStatus, setTzStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
+  useEffect(() => {
+    if (section !== "system") return;
+    let cancelled = false;
+    fetch("/setup-api/system/timezone?zones=1", { cache: "no-store" })
+      .then(async res => {
+        const data = await res.json().catch(() => ({})) as Partial<TimezoneInfo> & { zones?: unknown; error?: unknown };
+        if (cancelled) return;
+        if (!res.ok) {
+          // Covers the 503 the route answers when the root-owned helper is not
+          // installed — its message names the install step, so it is shown as
+          // sent rather than flattened into "could not change the time zone".
+          setTzStatus({ type: "error", message: typeof data.error === "string" ? data.error : "" });
+          return;
+        }
+        setTzInfo({
+          supported: data.supported === true,
+          timezone: typeof data.timezone === "string" ? data.timezone : DEFAULT_TIMEZONE,
+          localTime: typeof data.localTime === "string" ? data.localTime : "",
+          utcOffset: typeof data.utcOffset === "string" ? data.utcOffset : "",
+          ntpSynchronized: data.ntpSynchronized === true,
+          isDefault: data.isDefault === true,
+        });
+        setTzZones(Array.isArray(data.zones) ? data.zones.filter((z): z is string => typeof z === "string") : []);
+        setTzSelected(typeof data.timezone === "string" ? data.timezone : "");
+      })
+      .catch(() => { if (!cancelled) setTzStatus({ type: "error", message: "" }); });
+    return () => { cancelled = true; };
+  }, [section]);
+
+  const tzMatches = useMemo(() => {
+    const q = tzSearch.trim().toLowerCase();
+    return q ? tzZones.filter(z => z.toLowerCase().includes(q)) : tzZones;
+  }, [tzZones, tzSearch]);
+
+  const tzRows = useMemo(() => {
+    const rows = tzMatches.slice(0, TIMEZONE_ROW_LIMIT);
+    // The pick always keeps a row even when the search text no longer matches
+    // it — otherwise Apply would be armed with a zone that is nowhere on screen.
+    if (tzSelected && !rows.includes(tzSelected)) rows.unshift(tzSelected);
+    return rows;
+  }, [tzMatches, tzSelected]);
+  const tzHidden = Math.max(0, tzMatches.length - TIMEZONE_ROW_LIMIT);
+
+  const applyTimezone = useCallback(async () => {
+    const zone = tzSelected;
+    if (!zone) return;
+    setTzSaving(true);
+    setTzStatus(null);
+    try {
+      const res = await fetch("/setup-api/system/timezone", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timezone: zone }),
+      });
+      const data = await res.json().catch(() => ({})) as Partial<TimezoneInfo> & { error?: unknown };
+      if (!res.ok) {
+        setTzStatus({ type: "error", message: typeof data.error === "string" ? data.error : "" });
+        return;
+      }
+      // Confirm with the clock the BOX read back after the change, never with
+      // the zone that was asked for: an echo would look identical whether or
+      // not the OS actually moved.
+      const applied = typeof data.timezone === "string" ? data.timezone : zone;
+      const localTime = typeof data.localTime === "string" ? data.localTime : "";
+      setTzInfo(prev => ({
+        supported: data.supported === true,
+        timezone: applied,
+        localTime,
+        utcOffset: typeof data.utcOffset === "string" ? data.utcOffset : (prev?.utcOffset ?? ""),
+        ntpSynchronized: data.ntpSynchronized === true,
+        // POST answers the live status but not the flag; re-derive it so the
+        // UTC warning clears (or stays, for an owner who really picked UTC).
+        isDefault: applied === DEFAULT_TIMEZONE,
+      }));
+      setTzSelected(applied);
+      setTzSearch("");
+      setTzStatus({ type: "success", message: t("settings.timezoneSaved", { zone: applied, time: localTime }) });
+    } catch {
+      setTzStatus({ type: "error", message: "" });
+    } finally {
+      setTzSaving(false);
+    }
+  }, [tzSelected, t]);
 
   /* ── System update ── */
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
@@ -5381,6 +5512,78 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 that change what the box does, and the cards below are what
                 they change. TASK-455. */}
             <SystemProfilePanel />
+
+            {/* Time zone. Same rationale as the comment above: this changes
+                what the box does — the assistant's idea of "now", every
+                reminder and every schedule — so it belongs above the cards
+                that merely report. The taskbar clock is drawn by the browser
+                and is no witness at all; the only honest reading is the
+                box's own `localTime`, which is what this card shows and what
+                it confirms a change with. TASK-514. */}
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-timezone">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>schedule</span>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.timezone")}</label>
+              </div>
+              <p className="text-[11px] text-[var(--text-muted)] opacity-60 mb-3 leading-relaxed">{t("settings.timezoneDesc")}</p>
+
+              {tzInfo?.isDefault && (
+                <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2.5" data-testid="settings-timezone-utc-warning">
+                  <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 18 }} aria-hidden="true">warning</span>
+                  <div className="text-[11px] text-amber-100/90 leading-relaxed">{t("settings.timezoneUtcWarning")}</div>
+                </div>
+              )}
+
+              {tzInfo && (
+                <div className="flex items-center justify-between gap-3 rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3 mb-2">
+                  <span className="text-sm font-mono text-[var(--text-primary)] truncate">{tzInfo.timezone}</span>
+                  <span className="text-[11px] text-[var(--text-muted)] shrink-0" data-testid="settings-timezone-now">{t("settings.timezoneCurrent", { time: tzInfo.localTime })}</span>
+                </div>
+              )}
+
+              <div className="flex items-stretch gap-2">
+                <div className="flex-1 flex items-center bg-white/[0.04] border border-white/[0.08] rounded-xl overflow-hidden focus-within:border-orange-400/60 focus-within:bg-white/[0.06] transition-all">
+                  <input
+                    type="text"
+                    value={tzSearch}
+                    onChange={e => { setTzSearch(e.target.value); setTzStatus(null); }}
+                    placeholder={t("settings.timezoneSearch")}
+                    aria-label={t("settings.timezoneSearch")}
+                    className="flex-1 min-w-0 px-3.5 py-2.5 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/15"
+                  />
+                </div>
+                <button
+                  onClick={applyTimezone}
+                  disabled={tzSaving || !tzSelected || tzSelected === tzInfo?.timezone}
+                  className="px-4 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all"
+                >
+                  {tzSaving ? t("settings.saving") : t("settings.timezoneApply")}
+                </button>
+              </div>
+
+              <div role="listbox" aria-label={t("settings.timezone")} className="mt-2 max-h-56 overflow-y-auto rounded-xl border border-white/[0.06] bg-white/[0.02]">
+                {tzRows.map(zone => (
+                  <button
+                    key={zone}
+                    type="button"
+                    role="option"
+                    aria-selected={zone === tzSelected}
+                    onClick={() => { setTzSelected(zone); setTzStatus(null); }}
+                    className={`w-full text-left px-3.5 py-2 text-xs font-mono cursor-pointer border-none transition-colors ${zone === tzSelected ? "bg-[#fe6e00]/15 text-[var(--coral-bright)]" : "bg-transparent text-[var(--text-secondary)] hover:bg-white/[0.06]"}`}
+                  >
+                    {zone}
+                  </button>
+                ))}
+                {tzRows.length === 0 && (
+                  <div className="px-3.5 py-3 text-xs text-[var(--text-muted)] opacity-60">{t("noResults")}</div>
+                )}
+                {tzHidden > 0 && (
+                  <div className="px-3.5 py-2 text-[10px] text-[var(--text-muted)] opacity-50 font-mono">+{tzHidden}</div>
+                )}
+              </div>
+
+              {tzStatus && <div className="mt-3"><StatusMessage type={tzStatus.type} message={tzStatus.message || t("settings.timezoneSaveFailed")} /></div>}
+            </div>
 
             {stats ? (
               <>

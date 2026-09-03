@@ -320,6 +320,58 @@ function ChromeDesktopInner() {
   // One-shot cleanup of stale chat localStorage from older builds.
   useEffect(() => { purgeLegacyChatCaches() }, []);
 
+  // ─── TASK-514: adopt this browser's time zone on a box that was never asked ───
+  //
+  // The wizard now sends the zone with setup/complete, but boxes set up before
+  // that shipped are still on Etc/UTC — so the assistant answers in UTC while
+  // the taskbar clock, drawn from THIS device, looks right. The first desktop
+  // load after the upgrade is the only moment a device that knows the zone is
+  // talking to a box that doesn't, so take it, then say so.
+  //
+  // There is no client-side "already done" marker on purpose: the server owns
+  // the one-shot. A successful POST writes TIMEZONE_SYNCED_KEY, and GET reports
+  // autoSyncPending only while the box is on Etc/UTC AND that key is unset — so
+  // this can never fire twice, not even for an owner who really wants UTC. The
+  // ref below is only about this page load (StrictMode double-mount, re-renders).
+  const timezoneSyncAttempted = useRef(false);
+  useEffect(() => {
+    if (!setupChecked || setupRequired) return; // Never behind the wizard.
+    if (timezoneSyncAttempted.current) return;
+    timezoneSyncAttempted.current = true;
+
+    (async () => {
+      try {
+        const res = await fetch("/setup-api/system/timezone");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data?.autoSyncPending !== true) return;
+
+        const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        // A browser that reports UTC tells us nothing the box doesn't already
+        // believe, so leave the marker unset and let a later load (or a real
+        // trip abroad) answer it instead.
+        if (typeof browserZone !== "string" || !browserZone) return;
+        if (browserZone === "Etc/UTC" || browserZone === "UTC") return;
+        if (browserZone === data.timezone) return;
+
+        const applyRes = await fetch("/setup-api/system/timezone", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ timezone: browserZone }),
+        });
+        if (!applyRes.ok) return;
+        const applied = await applyRes.json();
+        // The zone the SERVER read back after the change, not the one we sent:
+        // if the OS normalised it, the notice must name what the box actually is.
+        window.dispatchEvent(new CustomEvent("clawbox:toast", {
+          detail: { message: t("desktop.timezoneAutoSet", { zone: applied.timezone }) },
+        }));
+      } catch {
+        // The clock is not worth a broken desktop.
+      }
+    })();
+  }, [setupChecked, setupRequired, t]);
+
   // Check if setup is complete. The desktop boots either way; incomplete
   // setups get the wizard opened as a window after the UI loads.
   useEffect(() => {
