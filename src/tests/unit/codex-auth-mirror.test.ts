@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, symlinkSync, chmodSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -123,6 +123,42 @@ function run(): string {
     encoding: "utf-8",
     env: { ...process.env, OPENCLAW_STATE_DIR: "", CODEX_AUTH_MIRROR_QUIET: "" },
   });
+}
+
+/**
+ * The same script, run as the TIMER runs it (`CODEX_AUTH_MIRROR_QUIET=1`), with
+ * `fs.chmodSync` failing on every credential file and on nothing else, and both
+ * streams captured.
+ *
+ * The syscall is faulted from a `--require` preload rather than stubbed in this
+ * process: the script is a real child, and an unprivileged test cannot provoke
+ * an EPERM on a file it owns — while a CI job running as root could not provoke
+ * one at all. The directory chmod is deliberately left working; only the
+ * `auth.json` files fail.
+ */
+function runWithFailingCredentialChmod(): { stdout: string; stderr: string; status: number | null } {
+  const preload = path.join(home, "chmod-fault.cjs");
+  writeFileSync(
+    preload,
+    [
+      'const fs = require("node:fs");',
+      "const real = fs.chmodSync;",
+      "fs.chmodSync = (target, mode) => {",
+      '  if (String(target).endsWith("auth.json")) {',
+      '    const error = new Error("EPERM: operation not permitted, chmod");',
+      '    error.code = "EPERM";',
+      "    throw error;",
+      "  }",
+      "  return real(target, mode);",
+      "};",
+      "",
+    ].join("\n"),
+  );
+  const result = spawnSync("node", ["--require", preload, SCRIPT, openclawHome, homeAuthPath], {
+    encoding: "utf-8",
+    env: { ...process.env, OPENCLAW_STATE_DIR: "", CODEX_AUTH_MIRROR_QUIET: "1" },
+  });
+  return { stdout: result.stdout, stderr: result.stderr, status: result.status };
 }
 
 beforeEach(() => {
@@ -981,6 +1017,27 @@ describe("codex-auth-mirror.js", () => {
     run();
 
     expect(statSync(homeAuthPath).mode & 0o777).toBe(0o600);
+  });
+
+  it("reports a failed chmod where the TIMER can see it, not through the quiet log", () => {
+    // The timer unit runs with CODEX_AUTH_MIRROR_QUIET=1, so a failure reported
+    // through log() is silent on the path that runs 144 times a day — a mirror
+    // that stays world-readable while holding an OAuth refresh token would say
+    // nothing at all. Both credential files are faulted, because both are
+    // written by the same helper.
+    seedProfile(accessToken("acct-1"));
+
+    const { stdout, stderr, status } = runWithFailingCredentialChmod();
+
+    expect(stdout).toBe(""); // quiet mode: nothing on the channel the timer drops
+    expect(stderr).toContain("could not tighten permissions");
+    expect(stderr).toContain(homeAuthPath);
+    expect(stderr).toContain(codexHomeAuthPath);
+    // Non-fatal: the credential is still mirrored, and the gateway pre-start
+    // pass must never be blocked by a permissions failure.
+    expect(status).toBe(0);
+    expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-secret");
   });
 });
 

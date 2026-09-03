@@ -245,8 +245,10 @@ const PROFILE_KEYS = ["openai:chatgpt", "codex:default", "openai-codex:default"]
  *
  * The most usable entry, by core's own ranking (see profileKeyIn). A canonical
  * entry left half-written by an interrupted sign-in must not hide a legacy one
- * that still works; an entry that merely EXISTS is a last resort, so a rotation
- * still lands somewhere when nothing is credentialed yet.
+ * that still works, so an entry with no access token sorts LAST rather than
+ * being dropped. It is never a fallback: when such an entry ranks first there
+ * is no credential on the box at all, `credentialFromProfiles` returns null and
+ * `main()` stops before any mirror or write-back.
  *
  * One rule for both directions, deliberately. Reading by one rule and writing
  * back by another is how a box ends up reading `codex:default` and writing the
@@ -302,9 +304,28 @@ function profileKeyIn(profiles) {
   // candidate here, it never drops one, because core keeps an expired OAuth
   // profile eligible and refreshes it (the `expired` reason code is scoped to
   // `type: "token"` — docs/auth-credential-semantics.md); a dead credential
-  // still beats none. A missing or unusable `expires` is "unknown", never
-  // "expired", which is core's answer too (`resolveTokenExpiryState` returns
-  // `missing`/`invalid_expires`, and only `expired` scores).
+  // still beats none.
+  //
+  // Three tiers, not two: live, then UNKNOWN, then expired. A missing or
+  // unusable `expires` is never "expired" — that is core's answer too
+  // (`resolveTokenExpiryState` returns `missing`/`invalid_expires`, and only
+  // `expired` scores) — but it is not evidence of life either, so it must not
+  // tie with a credential this box can see is still valid. Defensive only:
+  // neither this repo's sign-in writer nor the Codex CLI omits `expires`, so no
+  // shipped writer produces the shape. Ranking such an entry level with a live
+  // one let a PROFILE_KEYS-preferred profile carrying no `expires` outrank an
+  // agent's own demonstrably live login.
+  //
+  // LIMIT, stated rather than papered over: the only expiry signal here is the
+  // box's wall clock. On a Jetson carrier board with no battery-backed RTC the
+  // clock can be hours behind at boot — which is exactly when
+  // gateway-pre-start.sh runs this — and a genuinely expired credential then
+  // reads as live, every candidate ties, and the rank falls back to
+  // PROFILE_KEYS, i.e. to beta's ordering. No local check closes that: a grace
+  // period only forgives a clock running AHEAD, and the access token's own JWT
+  // `exp` claim is evaluated against the same wrong clock. It self-heals on the
+  // next ten-minute timer tick once NTP lands, and the degraded state is what
+  // beta always did, so it is left as a known bound.
   //
   // NOT ranked by `expires` descending, however tempting: `expires` is issue
   // time PLUS that client's token lifetime, and the lifetimes differ. ClawBox's
@@ -324,17 +345,20 @@ function profileKeyIn(profiles) {
       const preference = PROFILE_KEYS.indexOf(key);
       return {
         key,
-        // A profile with no access token cannot be mirrored at all; it is only
-        // a candidate so a rotation still has somewhere to land.
+        // A profile with no access token cannot be mirrored at all. It stays a
+        // candidate only so a half-written canonical entry cannot HIDE a legacy
+        // one that still works; ranked last, it is never selected over a
+        // credentialed entry, and when it wins the pass has no credential.
         uncredentialed: entry && entry.access ? 0 : 1,
-        expired: expires !== null && expires <= now ? 1 : 0,
+        // 0 live, 1 unknown, 2 expired.
+        expiry: expires === null ? 1 : expires <= now ? 2 : 0,
         preference: preference === -1 ? PROFILE_KEYS.length : preference,
       };
     })
     .sort(
       (a, b) =>
         a.uncredentialed - b.uncredentialed ||
-        a.expired - b.expired ||
+        a.expiry - b.expiry ||
         a.preference - b.preference ||
         a.key.localeCompare(b.key),
     );
@@ -424,12 +448,20 @@ function writeMirror(dest, credential) {
   // `mode` applies on CREATION only, so a file another tool left 0644 stayed
   // 0644 through every rewrite while holding a refresh token. Non-fatal: the
   // credential is written either way, and an EPERM here (a file owned by
-  // another user) must not abort the rest of the pass — main()'s only handler
-  // is a log line the timer unit suppresses.
+  // another user) must not abort the rest of the pass.
+  //
+  // console.error, not log(): the timer unit runs with
+  // CODEX_AUTH_MIRROR_QUIET=1, so a log() line here is silent on the path that
+  // runs 144 times a day — a mirror left world-readable while holding an OAuth
+  // refresh token would say nothing at all. The rule this file keeps is that a
+  // state which is not "normal and idempotent" goes to stderr, and failing to
+  // tighten permissions on a credential file is that state.
   try {
     fs.chmodSync(dest, 0o600);
-  } catch {
-    log(`Codex auth.json: could not tighten permissions on ${dest}`);
+  } catch (error) {
+    console.error(
+      `  Codex auth.json: could not tighten permissions on ${dest} — it may be readable by other users (${error.code || error.message}).`,
+    );
   }
   return reason;
 }
@@ -483,7 +515,11 @@ function dedupePaths(files) {
  * within one agent's store, not a fleet-wide identity: a second agent may hold
  * the same id for a different account, and writing this rotation into it would
  * replace a refresh token that belongs to someone else and break its next
- * refresh.
+ * refresh. Note the consequence when the rotation came from agent B's
+ * codex-home while the credential resolved from agent A: it is recorded in A's
+ * store, the one core will resolve next. That is deliberate — A is the store
+ * that hands out the token, and on the two shapes that ship it is either
+ * unwritable (`state-db`) or A is `main`, whose store IS the shared store.
  */
 function writeBackToCore(agentDirs, tokens, profileId) {
   if (!tokens || !tokens.refresh_token || !profileId) return false;
@@ -517,7 +553,24 @@ function writeBackToCore(agentDirs, tokens, profileId) {
       // swallowed below, becomes `wrote = false`, and is reported to the
       // operator as an unsettleable divergence — a false failure over a lock.
       db.exec("PRAGMA busy_timeout = 5000");
+      let open = false;
       try {
+        // BEGIN IMMEDIATE, because busy_timeout serialises each statement's
+        // lock acquisition and nothing more: the SELECT and the UPDATE below
+        // are a read-modify-write of ONE json blob holding every profile, so a
+        // writer landing between them is silently overwritten — and not only
+        // for this profile id, for all of them. That writer exists: on a
+        // `legacy-main` box this table IS the store core reads and writes when
+        // it refreshes an OAuth credential itself, and two mirror passes can
+        // overlap too (the boot pass from gateway-pre-start.sh and a timer
+        // tick). Losing core's freshly rotated refresh token to the one this
+        // pass read is precisely the `refresh_token_reused` shape the rest of
+        // this file exists to prevent. IMMEDIATE takes the write lock before
+        // the read, so a concurrent writer waits out the busy_timeout instead;
+        // if it cannot, this pass fails into the catch below and the next tick
+        // retries, which is the existing non-fatal contract.
+        db.exec("BEGIN IMMEDIATE");
+        open = true;
         const row = db
           .prepare("SELECT store_json FROM auth_profile_store WHERE store_key = ?")
           .get("primary");
@@ -532,8 +585,19 @@ function writeBackToCore(agentDirs, tokens, profileId) {
         store.profiles = profiles;
         db.prepare("UPDATE auth_profile_store SET store_json = ?, updated_at = ? WHERE store_key = ?")
           .run(JSON.stringify(store), Date.now(), "primary");
+        db.exec("COMMIT");
+        open = false;
+        // Only after the COMMIT: a rotation reported as recorded but rolled
+        // back would leave main() adopting a token core does not hold.
         wrote = true;
       } finally {
+        if (open) {
+          try {
+            db.exec("ROLLBACK");
+          } catch {
+            // Closing the handle rolls it back anyway; never mask the original.
+          }
+        }
         db.close();
       }
     } catch {
@@ -700,9 +764,14 @@ function main() {
     }
   }
   // Skipped destinations are already reported above; this line is about the
-  // ones this pass owns, so a single left-behind file must not silence it.
+  // ones this pass owns, so a single left-behind file must not silence it —
+  // and must not let it read as "every mirror is current" either, which is the
+  // opposite of the warning printed a few lines up.
   if (synced === 0 && skip.size < destinations.length) {
-    log("Codex auth.json: credential already current");
+    log(
+      "Codex auth.json: credential already current" +
+        (skip.size > 0 ? " on the files this pass owns" : ""),
+    );
   }
 }
 
