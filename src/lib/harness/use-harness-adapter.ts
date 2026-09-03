@@ -104,6 +104,7 @@ async function fetchFacts(signal?: AbortSignal): Promise<ProbedFacts | null> {
         hermesStreamsTurns: data.facts?.hermesStreamsTurns === true,
         hasClawaiImageRoute: data.facts?.hasClawaiImageRoute === true,
         hermesAgentDrawsImages: data.facts?.hermesAgentDrawsImages === true,
+        hermesSpeaksReplies: data.facts?.hermesSpeaksReplies === true,
       },
       // A box too old to send the field is not pending, it is simply not
       // saying — which is the pre-existing behaviour, unchanged.

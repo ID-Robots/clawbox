@@ -442,6 +442,7 @@ need_value() {
 usage() {
   cat >&2 <<USAGE
 Usage: clawbox-tts.sh [--voice <voice>] <text> <output-path>
+       clawbox-tts.sh [--voice <voice>] --text-file <path> -- <output-path>
        clawbox-tts.sh --set-voice <voice>
        clawbox-tts.sh --get-voice
        clawbox-tts.sh --list-voices
@@ -452,6 +453,7 @@ USAGE
 }
 
 REQUESTED_VOICE=""
+TEXT_FILE=""
 ENGINE_USED=""
 ARGS=()
 
@@ -466,6 +468,13 @@ while [ $# -gt 0 ]; do
       REQUESTED_VOICE="$2"; shift 2 ;;
     --voice=*)
       REQUESTED_VOICE="${1#--voice=}"; shift ;;
+    --text-file)
+      # Same guard as --voice, for the same reason: a `shift 2` with one
+      # argument left does not shift, and swallowing that spins this loop.
+      need_value "--text-file" "$#"
+      TEXT_FILE="$2"; shift 2 ;;
+    --text-file=*)
+      TEXT_FILE="${1#--text-file=}"; shift ;;
     --set-voice)
       need_value "--set-voice" "$#"
       save_voice "$2"; exit $? ;;
@@ -486,16 +495,63 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ "${#ARGS[@]}" -lt 2 ]; then
-  usage
-  exit 2
+# ── Where the text comes from ───────────────────────────────────────────────
+# Two forms, and never both at once:
+#
+#   [--voice <v>] <text> <output-path>                the OpenClaw provider's
+#                                                     form, unchanged.
+#   [--voice <v>] --text-file <path> -- <output-path> the Hermes form.
+#
+# Hermes' native TTS block (`tts.providers.<name>` with `type: command`)
+# substitutes {input_path} with a FILE HOLDING THE TEXT — not with the text —
+# and the command string it builds is then interpreted by a shell. Reading that
+# file HERE is what keeps both of those from becoming a problem: routing it back
+# through `"$(cat …)"` inside the provider command string would re-expand a
+# model-controlled string inside a shell, and would hand a long reply to
+# execve() until it hit ARG_MAX. The file is read once, by this script, and its
+# contents are never re-parsed by anything.
+#
+# Purely additive: with no --text-file, everything below this block behaves
+# exactly as it did, because the OpenClaw edition's provider depends on it.
+if [ -n "$TEXT_FILE" ]; then
+  # Refused rather than silently resolved: a caller that passed both a file and
+  # positional text does not agree with itself about what the box should say,
+  # and guessing is how the wrong sentence gets spoken.
+  if [ "${#ARGS[@]}" -ne 1 ]; then
+    echo "clawbox-tts: --text-file takes the output path as its only positional argument (got ${#ARGS[@]}) — pass the text in the file or as an argument, never both" >&2
+    usage
+    exit 2
+  fi
+  # A missing or unreadable file must never fall through to an empty string: a
+  # run that exits 0 with no audio is indistinguishable from a working TTS to
+  # everything upstream, and that silent success is the failure this whole
+  # script exists to prevent.
+  if [ ! -r "$TEXT_FILE" ]; then
+    echo "clawbox-tts: --text-file $TEXT_FILE is missing or unreadable — refusing to speak an empty string" >&2
+    exit 2
+  fi
+  if ! TEXT="$(cat -- "$TEXT_FILE")"; then
+    echo "clawbox-tts: --text-file $TEXT_FILE could not be read — refusing to speak an empty string" >&2
+    exit 2
+  fi
+  OUTPUT="${ARGS[0]}"
+else
+  if [ "${#ARGS[@]}" -lt 2 ]; then
+    usage
+    exit 2
+  fi
+  TEXT="${ARGS[0]}"
+  OUTPUT="${ARGS[1]}"
 fi
 
-TEXT="${ARGS[0]}"
-OUTPUT="${ARGS[1]}"
-
 if [ -z "$TEXT" ]; then
-  echo "clawbox-tts: empty text" >&2
+  # Named by its source: "empty text" over a --text-file that exists and is
+  # empty sends the operator looking at the wrong end of the call.
+  if [ -n "$TEXT_FILE" ]; then
+    echo "clawbox-tts: --text-file $TEXT_FILE is empty — refusing to speak nothing" >&2
+  else
+    echo "clawbox-tts: empty text" >&2
+  fi
   exit 2
 fi
 

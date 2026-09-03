@@ -6,7 +6,9 @@ import os from "os";
 import path from "path";
 import crypto from "crypto";
 import { runChild } from "@/lib/child-run";
-import { openclawIsAbsent, readConfig } from "@/lib/openclaw-config";
+import { getActiveHarness } from "@/lib/harness";
+import { speakWithHermes } from "@/lib/hermes-tts";
+import { readConfig } from "@/lib/openclaw-config";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { cloudSpeechTarget, localCommandPath, cloudVoiceFrom, type VoiceConfigView } from "@/lib/voice-output";
 import { readLocalVoice } from "@/lib/voice-output-store";
@@ -153,6 +155,27 @@ async function speakInCloud(config: VoiceConfigView, requestedVoice: unknown, te
 }
 
 /**
+ * The audition on a box running Hermes.
+ *
+ * One engine is auditioned, as on the OpenClaw side — but the CHOOSING is
+ * Hermes': `/api/audio/speak` speaks with whatever `tts.provider` names, and
+ * that key is what the Voice tab's "Speak from" writes. So the sample and the
+ * box's real replies can never disagree about which voice this is.
+ */
+async function speakWithHermesEngine(text: string): Promise<Response> {
+  const spoken = await speakWithHermes(text);
+  if (!spoken.ok) {
+    return refuse(
+      "The voice on this box could not speak that.",
+      spoken.code,
+      spoken.status,
+      spoken.reason ? { reason: spoken.reason } : {},
+    );
+  }
+  return new Response(spoken.audio, { headers: { "Content-Type": spoken.mime, ...NO_STORE } });
+}
+
+/**
  * One sample at a time. Two local syntheses at once would fight over the GPU
  * on an 8 GB board, and the second press is almost always the first one heard
  * as "nothing happened".
@@ -160,7 +183,6 @@ async function speakInCloud(config: VoiceConfigView, requestedVoice: unknown, te
 let inFlight = false;
 
 export async function POST(req: Request) {
-  if (openclawIsAbsent()) return refuse("Voice output is not part of this edition.", "edition", 409);
   let body: unknown;
   try {
     body = await req.json();
@@ -174,6 +196,11 @@ export async function POST(req: Request) {
   if (inFlight) return refuse("Still speaking the last sample — try again in a moment.", "busy", 429);
   inFlight = true;
   try {
+    // On a box running Hermes the audition goes through Hermes' own
+    // `/api/audio/speak`, which resolves the very `tts.provider` the Voice tab
+    // just wrote. Auditioning through a chain we built ourselves would be
+    // auditioning a different box than the one that answers the customer.
+    if ((await getActiveHarness()) === "hermes") return await speakWithHermesEngine(text);
     const config = await readConfig();
     return engine === "local"
       ? await speakLocally(config, voice, text)

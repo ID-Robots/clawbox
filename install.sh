@@ -1685,10 +1685,18 @@ step_openclaw_setup() {
   # guaranteed 127 whenever the in-app updater invokes that step, and under
   # `set -e` an AND-list like `guard && { log …; return 0; }` takes the whole
   # shell down with it.
-  is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw install"; return 0; }
-  step_openclaw_install
-  step_openclaw_patch
-  step_openclaw_config
+  # The hermes SKU skips the OpenClaw TRIO — there is no gateway on it — but no
+  # longer the whole step. step_openclaw_tts below is the on-device voice, and
+  # a blanket `return 0` here is what left a freshly flashed Hermes box with no
+  # speech engine at all: the step's own edition guard was removed, and this
+  # one silently kept it alive on the fresh-install path.
+  if is_hermes_edition; then
+    echo "  [hermes edition] skipping OpenClaw install"
+  else
+    step_openclaw_install
+    step_openclaw_patch
+    step_openclaw_config
+  fi
   # Only 12 ("Kokoro was requested and did not install"), 13 ("this box has NO
   # working on-device TTS engine") and 14 ("the voice scripts did not deploy;
   # Kokoro's own verdict stands") are tolerated here, and only because the step
@@ -2753,8 +2761,16 @@ tts_ensure_provider_registered() {
   as_clawbox "$OPENCLAW_BIN" plugins info tts-local-cli >/dev/null 2>&1
 }
 
+# The on-device voice, for EVERY edition.
+#
+# This step used to open with
+#   is_hermes_edition && { echo "  [hermes edition] skipping on-device TTS"; return 0; }
+# so a Hermes box never ran scripts/install-voice.sh at all: no Kokoro, no
+# kokoro-server unit, and nothing for step_validate_services to verify. The
+# owner's decision is that Hermes runs the SAME on-device engine as OpenClaw,
+# so the skip is gone and the two harnesses are registered separately below —
+# each through its own native mechanism, neither one standing in for the other.
 step_openclaw_tts() {
-  is_hermes_edition && { echo "  [hermes edition] skipping on-device TTS"; return 0; }
   local TTS_SCRIPT="$PROJECT_DIR/scripts/openclaw/clawbox-tts.sh"
 
   # --tts-only installs the CUDA Kokoro stack and deploys the voice scripts,
@@ -2945,6 +2961,128 @@ step_openclaw_tts() {
     # The engine is there and the run still did not finish clean, so what is
     # missing is the deploy behind it — say that rather than deny the engine.
     echo "  Kokoro GPU TTS installed, but the voice install did not complete ($KOKORO_REASON)"
+  fi
+
+  # ── The Hermes harness gets the same engine, through Hermes' own mechanism ──
+  #
+  # Hermes has a native TTS block — `tts:` in ~/.hermes/config.yaml — whose
+  # `tts.providers.<name>` entries can be `type: command`. Its tool substitutes
+  # {voice}, {input_path} and {output_path} into the command string and then
+  # runs it through a shell. {input_path} is a FILE HOLDING THE TEXT, which is
+  # why clawbox-tts.sh grew --text-file: see the block at the top of that
+  # script for why the file is read there rather than `cat`-ed into an argument
+  # here. `hermes config set` is the harness's own writer for this, so nothing
+  # in ClawBox edits config.yaml behind its back.
+  #
+  # has_hermes_harness, NEVER is_hermes_edition: the premium `dual` SKU runs
+  # both harnesses, and a box keyed off the hermes SKU alone would get a voice
+  # on OpenClaw and silence on Hermes.
+  #
+  # WHY AN ALREADY-SHIPPED BOX GETS THIS WITHOUT A FACTORY RESET: the in-app
+  # updater dispatches `post_update`, and step_post_update calls
+  # step_openclaw_tts directly and unconditionally — there is no edition guard
+  # anywhere between the updater's dispatch and this function — so one update
+  # brings an existing Hermes box up. (On a FRESH install the caller is
+  # step_openclaw_setup, which is why step_hermes_install now runs before it:
+  # this block needs the Hermes CLI to exist.)
+  if has_hermes_harness; then
+    local HERMES_TTS_BIN="${HERMES_BIN:-$CLAWBOX_HOME/.local/bin/hermes}"
+    local HERMES_TTS_PROVIDER="clawbox-local"
+    # The command Hermes will run. The placeholders are Hermes' own; the
+    # example in its tool ships them unquoted, so they are unquoted here too.
+    local HERMES_TTS_COMMAND="$TTS_SCRIPT --voice {voice} --text-file {input_path} -- {output_path}"
+    local HERMES_TTS_FAIL=""
+    # Rule (a), the same one the OpenClaw arm applies below: never point a
+    # harness at a command that is not executable. It looks like a working
+    # install right up until someone asks the box to speak.
+    if [ ! -x "$TTS_SCRIPT" ]; then
+      HERMES_TTS_FAIL="$TTS_SCRIPT is missing or not executable"
+    elif [ ! -x "$HERMES_TTS_BIN" ]; then
+      HERMES_TTS_FAIL="the Hermes CLI is not runnable at $HERMES_TTS_BIN"
+    fi
+    if [ -z "$HERMES_TTS_FAIL" ]; then
+      # Read the CURRENT selection before writing anything, so the seed
+      # decision below is made against what the owner actually has. An unset
+      # key exits 1 with `Config key not set: <key>` on stderr and prints
+      # nothing, so a failed read and an unset key both arrive here as "".
+      local CURRENT_HERMES_TTS
+      CURRENT_HERMES_TTS=$(as_clawbox "$HERMES_TTS_BIN" config get tts.provider 2>/dev/null || echo "")
+      CURRENT_HERMES_TTS=$(printf '%s' "$CURRENT_HERMES_TTS" | tr -d '\r' | tail -1)
+
+      # Rule (b): the DEFINITION lands before the provider is selected, and a
+      # definition that did not land is never selected — pointing the harness
+      # at a provider that does not exist is strictly worse than leaving
+      # tts.provider alone, because then every spoken reply fails while the box
+      # looks configured.
+      #
+      # `command` first, `type` last: `type: command` is what makes Hermes
+      # treat the entry as a command provider at all, so writing it second
+      # means a half-written provider is never a runnable-looking one.
+      #
+      # No `format` key is written. The placeholder list includes {format}, but
+      # nothing in this repo establishes that a command provider READS a
+      # `format` key, and a key invented here would be config the harness does
+      # not own. clawbox-tts.sh derives the container from the output path.
+      if as_clawbox "$HERMES_TTS_BIN" config set "tts.providers.$HERMES_TTS_PROVIDER.command" "$HERMES_TTS_COMMAND" \
+        && as_clawbox "$HERMES_TTS_BIN" config set "tts.providers.$HERMES_TTS_PROVIDER.type" command; then
+        echo "  Hermes on-device TTS provider defined ($HERMES_TTS_PROVIDER)"
+        # ── Seed-if-unset, with ONE extra value counted as unset: `edge` ──────
+        #
+        # This is the non-obvious rule in this step. Hermes ships
+        # `tts.provider: edge` as its FACTORY default — Microsoft's cloud
+        # voice. A ClawBox must not default to sending its owner's speech to a
+        # cloud service: the product's whole claim is that the box speaks for
+        # itself, on-device. So `edge` is treated as the factory setting it is
+        # and replaced. Anything ELSE — elevenlabs, openai, a provider the
+        # owner added by hand — is the owner's own choice and is preserved
+        # untouched, exactly as the OpenClaw arm below preserves theirs, and
+        # this step re-runs on every update.
+        case "$CURRENT_HERMES_TTS" in
+          ""|null|edge|"$HERMES_TTS_PROVIDER")
+            if as_clawbox "$HERMES_TTS_BIN" config set tts.provider "$HERMES_TTS_PROVIDER"; then
+              if [ "$CURRENT_HERMES_TTS" = "edge" ]; then
+                echo "  Hermes TTS provider set to $HERMES_TTS_PROVIDER (replacing Hermes' factory 'edge' cloud default)"
+              else
+                echo "  Hermes TTS provider set to $HERMES_TTS_PROVIDER"
+              fi
+            else
+              HERMES_TTS_FAIL="could not select the $HERMES_TTS_PROVIDER provider"
+            fi
+            ;;
+          *)
+            echo "  Hermes TTS provider already set ($CURRENT_HERMES_TTS) — preserving; the $HERMES_TTS_PROVIDER definition is up to date either way"
+            ;;
+        esac
+      else
+        HERMES_TTS_FAIL="could not write the $HERMES_TTS_PROVIDER provider definition"
+      fi
+    fi
+    if [ -n "$HERMES_TTS_FAIL" ]; then
+      # Loud, recorded, and carried in the exit status — but NOT a `return 1`.
+      # On the dual SKU the OpenClaw arm below is a separate harness's voice
+      # and must still be configured; and on the hermes SKU a box that cannot
+      # speak must still finish provisioning and come up reachable, which is
+      # how it gets fixed. 14 is this step's "the TTS install did not
+      # complete", which step_openclaw_setup and step_post_update both report
+      # and neither treats as fatal.
+      echo "  ERROR: the on-device voice was NOT registered with Hermes — $HERMES_TTS_FAIL" >&2
+      echo "         Hermes will not speak on this box until it is. Re-run:" >&2
+      echo "         sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
+      record_provision_failure openclaw_tts
+      [ "$TTS_RC" -eq 0 ] && TTS_RC=14
+    fi
+  fi
+
+  # ── The OpenClaw gateway's own provider registration ────────────────────────
+  # The hermes SKU removes that gateway entirely (step_openclaw_install
+  # early-returns, clawbox-gateway.service is stopped, disabled and masked), so
+  # there is no `openclaw` CLI to write to: every oc_config_set below would
+  # retry three times, fail, and turn a perfectly good voice install into a
+  # failed step. Spelled with is_hermes_edition because that is exactly
+  # has_openclaw_harness's own definition — `dual` keeps the gateway and takes
+  # the path below like any openclaw box.
+  if is_hermes_edition; then
+    return "$TTS_RC"
   fi
 
   # Seed-if-unset, same contract as the primary model above: an owner who has
@@ -5346,80 +5484,83 @@ step_validate_services() {
     # returning success after failing, an email batch reporting success having
     # sent nothing) that "no answer" is not allowed to score as a pass.
     #
-    # Hermes has no on-device TTS step at all, so it has nothing to verify.
-    if ! is_hermes_edition; then
-      # Read fresh from the file on every pass, never from an earlier answer.
-      local tts_state=""
-      if [ -r "$TTS_STATUS_FILE" ]; then
-        # `tr -d '\r'`: the file is written by a shell on the device, but it is
-        # also restored from tarballs and edited by hand, and a CRLF line ends
-        # the verdict as `ready\r` — a value that is neither `ready` nor any
-        # other word in the vocabulary. Parse the line rather than merely
-        # refusing it; what a garbled value must NOT do is score a pass, and
-        # that is what the `*)` arm below is for.
-        tts_state=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
-      fi
-      # `ready` is the only verdict that means "this engine can speak".
-      # `skipped:*` is a board that declines it — with one engine, a box with
-      # no voice — `failed:*` is one that was asked and could not, and an
-      # EMPTY string is a step that reported nothing at all; all three fail.
-      # ONE line about this box's speech, so the check probe_count counts as
-      # one contributes at most one.
-      #
-      # The vocabulary is closed: `ready`, `skipped:<reason>`, `failed:<reason>`,
-      # or nothing at all. Anything else — a truncated write (tts_status_publish
-      # truncates the file with `>` rather than writing-then-renaming, so a box
-      # that lost power mid-publish can leave one), a typo, a stray line — used
-      # to match no arm and fall out of the chain as a silent PASS, while the
-      # strictly LESS informative absent verdict correctly failed. Unparseable
-      # is at least as suspicious as absent, so it lands in the `*)` arm and
-      # fails — without asserting an engine state it could not read.
-      #
-      # `?*`, not `*`: a bare `skipped:` or `failed:` carries no reason, and a
-      # truncated write is exactly how one appears. "This board declines the
-      # engine" is a claim, and a claim with its reason cut off is not evidence
-      # for it either.
-      #
-      # Unreadable is decided FIRST, before any arm names an engine state:
-      # "this box has NO working on-device TTS engine" is a claim about an
-      # engine that may be running perfectly, and a verdict this probe could
-      # not parse is no evidence for it.
-      local tts_fix="Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts"
-      local tts_verdict_unreadable=false
-      case "$tts_state" in ""|ready|skipped:?*|failed:?*) ;; *) tts_verdict_unreadable=true ;; esac
-      if [ "$tts_verdict_unreadable" = true ]; then
-        failed_probe+=("TTS: unrecognised on-device TTS verdict at $TTS_STATUS_FILE (Kokoro: $tts_state) — a verdict outside the ready/skipped:<reason>/failed:<reason> vocabulary is not evidence of an engine. $tts_fix")
-      else
-        case "$tts_state" in
-          "")
-            failed_probe+=("TTS: no on-device TTS verdict at $TTS_STATUS_FILE — the TTS step left no record, so whether this box has an engine cannot be asserted either way. $tts_fix")
-            ;;
-          ready)
-            ;;
-          skipped:?*)
-            # The mute box: the same recorded, named, non-fatal fact as
-            # step_openclaw_tts's 13, checked again here from the file.
-            #
-            # Except in the e2e-install container, which says it has no GPU by
-            # construction with CLAWBOX_TEST_NO_GPU=1 (e2e-install/README.md
-            # lists every CUDA step it skips for the same reason): a Kokoro
-            # that declines there is the documented state of that host, not a
-            # defect in it — and failing every harness run would teach
-            # everyone to ignore this check on the hardware where it matters.
-            # Not keyed on test mode itself: the unit tests run this probe in
-            # test mode and pin the real-hardware rule. Real devices never set
-            # either; on them a skipped Kokoro fails exactly as before.
-            if harness_has_no_gpu; then
-              echo "  CLAWBOX_TEST_NO_GPU=1, on-device TTS declined ($tts_state) — expected without a GPU, not a failed probe"
-            else
-              failed_probe+=("TTS: this box has NO working on-device TTS engine — Kokoro, the only on-device engine, does not apply to this board ($tts_state). The cloud voice speaks for it once the box is linked to ClawBox AI. $tts_fix")
-            fi
-            ;;
-          failed:?*)
-            failed_probe+=("TTS: Kokoro GPU TTS was requested and did NOT install ($tts_state) — this box has no on-device voice; spoken replies fall back to the gateway's cloud voice until it is fixed. $tts_fix")
-            ;;
-        esac
-      fi
+    # Every edition, Hermes included. This probe used to sit behind
+    # `if ! is_hermes_edition`, with the comment "Hermes has no on-device TTS
+    # step at all, so it has nothing to verify." It runs the same
+    # step_openclaw_tts as every other SKU now, so it has exactly the same
+    # verdict to verify — and a health check that skips the one engine a box
+    # depends on is how "All N checks healthy" gets printed over a mute box.
+    # Read fresh from the file on every pass, never from an earlier answer.
+    local tts_state=""
+    if [ -r "$TTS_STATUS_FILE" ]; then
+      # `tr -d '\r'`: the file is written by a shell on the device, but it is
+      # also restored from tarballs and edited by hand, and a CRLF line ends
+      # the verdict as `ready\r` — a value that is neither `ready` nor any
+      # other word in the vocabulary. Parse the line rather than merely
+      # refusing it; what a garbled value must NOT do is score a pass, and
+      # that is what the `*)` arm below is for.
+      tts_state=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
+    fi
+    # `ready` is the only verdict that means "this engine can speak".
+    # `skipped:*` is a board that declines it — with one engine, a box with
+    # no voice — `failed:*` is one that was asked and could not, and an
+    # EMPTY string is a step that reported nothing at all; all three fail.
+    # ONE line about this box's speech, so the check probe_count counts as
+    # one contributes at most one.
+    #
+    # The vocabulary is closed: `ready`, `skipped:<reason>`, `failed:<reason>`,
+    # or nothing at all. Anything else — a truncated write (tts_status_publish
+    # truncates the file with `>` rather than writing-then-renaming, so a box
+    # that lost power mid-publish can leave one), a typo, a stray line — used
+    # to match no arm and fall out of the chain as a silent PASS, while the
+    # strictly LESS informative absent verdict correctly failed. Unparseable
+    # is at least as suspicious as absent, so it lands in the `*)` arm and
+    # fails — without asserting an engine state it could not read.
+    #
+    # `?*`, not `*`: a bare `skipped:` or `failed:` carries no reason, and a
+    # truncated write is exactly how one appears. "This board declines the
+    # engine" is a claim, and a claim with its reason cut off is not evidence
+    # for it either.
+    #
+    # Unreadable is decided FIRST, before any arm names an engine state:
+    # "this box has NO working on-device TTS engine" is a claim about an
+    # engine that may be running perfectly, and a verdict this probe could
+    # not parse is no evidence for it.
+    local tts_fix="Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts"
+    local tts_verdict_unreadable=false
+    case "$tts_state" in ""|ready|skipped:?*|failed:?*) ;; *) tts_verdict_unreadable=true ;; esac
+    if [ "$tts_verdict_unreadable" = true ]; then
+      failed_probe+=("TTS: unrecognised on-device TTS verdict at $TTS_STATUS_FILE (Kokoro: $tts_state) — a verdict outside the ready/skipped:<reason>/failed:<reason> vocabulary is not evidence of an engine. $tts_fix")
+    else
+      case "$tts_state" in
+        "")
+          failed_probe+=("TTS: no on-device TTS verdict at $TTS_STATUS_FILE — the TTS step left no record, so whether this box has an engine cannot be asserted either way. $tts_fix")
+          ;;
+        ready)
+          ;;
+        skipped:?*)
+          # The mute box: the same recorded, named, non-fatal fact as
+          # step_openclaw_tts's 13, checked again here from the file.
+          #
+          # Except in the e2e-install container, which says it has no GPU by
+          # construction with CLAWBOX_TEST_NO_GPU=1 (e2e-install/README.md
+          # lists every CUDA step it skips for the same reason): a Kokoro
+          # that declines there is the documented state of that host, not a
+          # defect in it — and failing every harness run would teach
+          # everyone to ignore this check on the hardware where it matters.
+          # Not keyed on test mode itself: the unit tests run this probe in
+          # test mode and pin the real-hardware rule. Real devices never set
+          # either; on them a skipped Kokoro fails exactly as before.
+          if harness_has_no_gpu; then
+            echo "  CLAWBOX_TEST_NO_GPU=1, on-device TTS declined ($tts_state) — expected without a GPU, not a failed probe"
+          else
+            failed_probe+=("TTS: this box has NO working on-device TTS engine — Kokoro, the only on-device engine, does not apply to this board ($tts_state). The cloud voice speaks for it once the box is linked to ClawBox AI. $tts_fix")
+          fi
+          ;;
+        failed:?*)
+          failed_probe+=("TTS: Kokoro GPU TTS was requested and did NOT install ($tts_state) — this box has no on-device voice; spoken replies fall back to the gateway's cloud voice until it is fixed. $tts_fix")
+          ;;
+      esac
     fi
 
     # Probe 3 (hermes only): the OpenClaw gateway must be GONE. This is the only
@@ -5519,14 +5660,21 @@ step_validate_services() {
 
   local probe_count=2
   if is_test_mode; then probe_count=1; fi
+  # +1 on EVERY edition: the on-device TTS verdict. Counted even when it passes,
+  # so the total the healthy line prints is the number of checks that actually
+  # ran.
+  #
+  # This used to be the `else` arm of the hermes branch below — Hermes got the
+  # three gateway probes INSTEAD of the TTS verdict, because Hermes had no
+  # on-device TTS step to verify. It runs the same step_openclaw_tts as every
+  # other SKU now and the probe above is no longer gated, so an either/or would
+  # make the installer's own summary lie: it would print one fewer check than it
+  # ran on hermes, and the count is the only thing standing between "All N
+  # checks healthy" and a check that silently stopped running.
+  probe_count=$(( probe_count + 1 ))
   if is_hermes_edition; then
     # +3: gateway-inactive, gateway-port-silent, dashboard-proxy-answers.
     probe_count=$(( probe_count + 3 ))
-  else
-    # +1: the on-device TTS verdict. Counted even when it passes, so the total
-    # the healthy line prints is the number of checks that actually ran. Hermes
-    # has no on-device TTS step, hence the either/or.
-    probe_count=$(( probe_count + 1 ))
   fi
   # +1 (hermes AND dual): the dashboard auth provider actually verifies.
   if has_hermes_harness; then probe_count=$(( probe_count + 1 )); fi
@@ -5692,11 +5840,19 @@ step_install_bun
 log "Building ClawBox..."
 step_build
 
-log "Installing and configuring OpenClaw..."
-step_openclaw_setup
-
+# BEFORE step_openclaw_setup, deliberately. That step ends in step_openclaw_tts,
+# which registers the on-device voice with EVERY harness the box runs — and the
+# Hermes half of that needs ~/.local/bin/hermes to exist to be written through.
+# With the old order a fresh hermes/dual box reached the registration before the
+# agent it was registering with, and every first install would have recorded a
+# provisioning failure for a box that was fine. step_hermes_install self-gates on
+# has_hermes_harness (a no-op on openclaw), needs nothing OpenClaw provides, and
+# is idempotent, so moving it up costs nothing on any other SKU.
 log "Installing Hermes (on the hermes and dual editions)..."
 step_hermes_install
+
+log "Installing and configuring OpenClaw..."
+step_openclaw_setup
 
 log "Installing ClawKeep CLI..."
 step_clawkeep_install

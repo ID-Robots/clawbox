@@ -97,6 +97,22 @@ export interface HarnessCapabilities {
   readonly imageGenerationTrigger: "agent" | "composer" | null;
   /** Replies can be spoken back (TTS). */
   readonly canSpeakReplies: boolean;
+  /**
+   * WHO turns the reply into audio — the sibling of `imageGenerationTrigger`,
+   * and a separate flag for the same reason:
+   *
+   *   `'harness'`  the gateway speaks the reply itself and pushes a second
+   *                message carrying the audio part. OpenClaw. Nothing for the
+   *                chat to ask for.
+   *   `'box'`      the BOX asks, because the harness will not do it unbidden:
+   *                Hermes exposes `POST /api/audio/speak` but never speaks a
+   *                reply on its own, so the ClawBox chat route calls it and
+   *                attaches the clip in the same shape the gateway produces.
+   *   `null`       nothing here can speak. Always the value when
+   *                `canSpeakReplies` is false, and never a value when it is
+   *                true — the two are computed together.
+   */
+  readonly spokenReplyTrigger: "harness" | "box" | null;
   /** The Stop button. */
   readonly canAbortTurn: boolean;
   /** There is a socket that can be down — i.e. a connection banner is honest. */

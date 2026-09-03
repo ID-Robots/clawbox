@@ -13,6 +13,7 @@ import {
 } from "@/lib/harness/hermes-features";
 import { clawaiImageRouteReachable } from "@/lib/harness/clawai-images";
 import { hermesCanStreamTurns } from "@/lib/hermes-dashboard-turn";
+import { hermesSpeaksReplies } from "@/lib/hermes-tts";
 
 export const dynamic = "force-dynamic";
 
@@ -51,7 +52,7 @@ export async function GET() {
   // plugin, and reads the credential instead. Spending a spawn (and a failure)
   // there would compute facts nobody consumes.
   const onHermes = harness === "hermes";
-  const [supportsImages, hasVisionRoute, streamsTurns, hasImageRoute, drawsImages] =
+  const [supportsImages, hasVisionRoute, streamsTurns, hasImageRoute, drawsImages, speaksReplies] =
     await Promise.all([
       // Whether the installed `hermes` understands `chat --image` — PROBED,
       // once per process. An attach button shown on a guess would stage files
@@ -85,6 +86,11 @@ export async function GET() {
       // mtime-keyed memo as the vision route, so it flips on the model-state
       // event the moment ClawBox AI is linked rather than at the next restart.
       onHermes ? hermesAgentDrawsImages() : false,
+      // Whether the box has a VOICE selected — the same shape as the image
+      // backend above, read from `tts.provider` through the same mtime-keyed
+      // memo, so a selection made in Settings -> Voice reaches the chat on the
+      // next re-probe rather than at the next restart.
+      onHermes ? hermesSpeaksReplies() : false,
     ]);
   const facts: HarnessFacts = {
     // A boolean precisely so the device credential never travels to a browser.
@@ -92,6 +98,7 @@ export async function GET() {
     hermesSupportsImages: supportsImages,
     hermesHasVisionRoute: hasVisionRoute,
     hermesStreamsTurns: streamsTurns,
+    hermesSpeaksReplies: speaksReplies,
     hasClawaiImageRoute: hasImageRoute,
     hermesAgentDrawsImages: drawsImages,
   };
