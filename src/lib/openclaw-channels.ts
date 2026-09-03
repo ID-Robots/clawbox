@@ -32,6 +32,7 @@
 
 import {
   type SpawnOpenclawOptions,
+  OpenclawSpawnTimeoutError,
   openclawIsAbsent,
   readConfig,
   spawnOpenclawCli,
@@ -147,9 +148,15 @@ async function pluginEnabledInConfig(pluginId: string): Promise<boolean> {
   }
 }
 
-/** A timeout from spawnOpenclawCli names itself; nothing else does. */
+// Answering FALSE to everything it cannot read is load-bearing in BOTH uses of
+// the function above, and neither tolerates the opposite: as the precondition
+// it means an unreadable config runs the idempotent enable instead of skipping
+// it, and as the read-back after a killed enable it means only an entry this
+// process can SEE forgives the kill.
+
+/** A spawn killed at its deadline, by type — the message is not the contract. */
 function isTimeout(err: unknown): boolean {
-  return err instanceof Error && /timed out after \d+ms/.test(err.message);
+  return err instanceof OpenclawSpawnTimeoutError;
 }
 
 /**
@@ -245,8 +252,26 @@ export async function ensureChannelPlugin(
         timeoutMs: PLUGIN_QUERY_TIMEOUT_MS,
       });
     } catch (err) {
-      console.error(`[openclaw-channels] enabling the ${channelId} plugin failed:`, err);
-      return { ok: false, reason: "install_failed" };
+      // A SIGKILL at the deadline is the one failure that says nothing about
+      // whether the write happened. `plugins enable` writes
+      // `plugins.entries.<id>.enabled` and THEN spends seconds loading the
+      // gateway SDK, so on a Jetson the entry lands inside the 45 s window we
+      // kill in — and this used to answer `install_failed`, which reaches the
+      // owner as "the plugin could not be installed" over a channel that is
+      // enabled on disk. The same read-back the precondition just used settles
+      // it, and it fails closed, so an unreadable config keeps the failure.
+      //
+      // Only the ENABLE. A killed `plugins install` is not settled by this
+      // entry: the npm package landing on disk is the other half of that verb,
+      // and the config entry alone would bless an install that never finished.
+      if (isTimeout(err) && (await pluginEnabledInConfig(pluginId))) {
+        console.warn(
+          `[openclaw-channels] enabling ${spec} was killed at its deadline, but the entry is in openclaw.json — the enable landed`,
+        );
+      } else {
+        console.error(`[openclaw-channels] enabling the ${channelId} plugin failed:`, err);
+        return { ok: false, reason: "install_failed" };
+      }
     }
   }
 
