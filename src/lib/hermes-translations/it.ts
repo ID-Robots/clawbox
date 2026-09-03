@@ -665,7 +665,7 @@ export const it: Record<string, string> = {
   "codingAgent.statDuration": "Durata",
   "codingAgent.statTokens": "Token",
   "codingAgent.statHelpers": "Aiutanti",
-  "codingAgent.statCommit": "Commit",
+  "codingAgent.statCommit": "Ultimo commit",
   "codingAgent.statModels": "Modelli",
   "codingAgent.helpersTitle": "Aiutanti al lavoro",
   "codingAgent.planTitle": "Piano",

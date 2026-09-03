@@ -674,7 +674,14 @@ describe("install.sh wires TTS to the on-device chain", () => {
     return source.slice(start, end);
   }
 
-  const step = extractShellFunction(INSTALL_SH, "step_openclaw_tts");
+  // The provider DEFINITION — script check, timeout, JSON, config set — lives
+  // in a helper the step calls from both of its paths (fresh, and preserving
+  // another selection), so the two are read together. The helper comes
+  // second: the ordering assertions below walk the step first.
+  const step = [
+    extractShellFunction(INSTALL_SH, "step_openclaw_tts"),
+    extractShellFunction(INSTALL_SH, "tts_write_local_provider_definition"),
+  ].join("\n");
 
   it("seeds the provider only when the owner has not chosen one", () => {
     // Same contract as agents.defaults.model.primary: an owner who switched to
@@ -704,10 +711,13 @@ describe("install.sh wires TTS to the on-device chain", () => {
     // oc_config_set retries 3x then returns 1. Naming tts-local-cli as THE
     // provider after its definition failed to land points the box at a
     // provider that does not exist and breaks every spoken reply.
-    expect(step).toContain('if ! oc_config_set "$TTS_HOME.providers.tts-local-cli"');
-    const defineIndex = step.indexOf('oc_config_set "$TTS_HOME.providers.tts-local-cli"');
+    expect(step).toContain('if ! tts_write_local_provider_definition "$TTS_HOME" "$TTS_SCRIPT"; then');
+    const defineIndex = step.indexOf('if ! tts_write_local_provider_definition "$TTS_HOME" "$TTS_SCRIPT"; then');
     const selectIndex = step.indexOf('oc_config_set "$TTS_HOME.provider" ');
+    expect(selectIndex).toBeGreaterThan(defineIndex);
     expect(step.slice(defineIndex, selectIndex)).toContain("return 1");
+    // And the helper itself writes through the retrying oc_config_set.
+    expect(step).toContain('oc_config_set "$TTS_HOME.providers.tts-local-cli"');
   });
 
   it("refuses to wire the provider to a command that is not there", () => {
