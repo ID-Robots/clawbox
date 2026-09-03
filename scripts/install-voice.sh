@@ -1,7 +1,16 @@
 #!/bin/bash
 # Install local voice pipeline: faster-whisper (STT) + Kokoro (TTS)
 # With CUDA GPU acceleration and persistent model servers for fast inference.
-# Runs as clawbox user. Requires espeak-ng to be installed (system package).
+# Runs as clawbox user. It needs NO system speech package: `kokoro` pulls in
+# `misaki[en]`, and misaki/espeak.py calls
+# `EspeakWrapper.set_library(espeakng_loader.get_library_path())` at import, so
+# both the espeak-ng shared library and its data come out of the bundled
+# `espeakng-loader` wheel. Measured 2026-09-04 on a shipped openclaw box and a
+# shipped hermes box: no espeak-ng package, no espeak-ng binary, and
+# `KPipeline(lang_code='a').g2p.fallback` is still an EspeakFallback that
+# phonemises out-of-vocabulary words. The header used to claim the apt package
+# was required and install.sh has never installed it (TASK-686); what the claim
+# was standing in for is now CHECKED, in kokoro_predownload_model below.
 #
 # Usage:
 #   install-voice.sh              full STT+TTS install (CTranslate2 source
@@ -323,6 +332,14 @@ kokoro_predownload_model() {
 from kokoro import KPipeline
 pipeline = KPipeline(lang_code='a')
 print('Kokoro model ready on', next(pipeline.model.parameters()).device)
+# kokoro builds the espeak phonemiser fallback inside a try/except and degrades
+# to logger.warning('EspeakFallback not Enabled: OOD words will be skipped')
+# plus fallback=None. Nothing downstream reads that warning, so a box in that
+# arm published KOKORO=ready and then silently dropped every out-of-vocabulary
+# word -- a name, a brand, 'ClawBox' itself -- from every spoken reply. Fail the
+# warm-up instead, so the verdict says the engine is not usable.
+if getattr(pipeline.g2p, 'fallback', None) is None:
+    raise SystemExit('espeak phonemiser fallback unavailable: out-of-vocabulary words would be dropped from speech (the espeakng-loader wheel that kokoro pulls in is missing or broken)')
 " 2>&1) || rc=$?
   printf '%s\n' "$out" | tail -5
   return "$rc"
