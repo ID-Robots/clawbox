@@ -91,6 +91,42 @@ describe("POST /setup-api/tts/sample on a Hermes box", () => {
     expect(speakMock).not.toHaveBeenCalled();
   });
 
+  /**
+   * Every cloud case here used to audition `alloy` — the one value a broken
+   * comparison cannot break. These two use a non-default voice on purpose.
+   */
+  it("auditions the cloud voice the box is really set to", async () => {
+    hermesConfig = {
+      "tts.provider": "openai",
+      "tts.openai.voice": "nova",
+      "tts.openai.model": "tts-1",
+      "tts.openai.base_url": "https://clawbox.test/api/ai",
+      "tts.openai.api_key": "claw_a_linked_hermes_box",
+    };
+    const { POST } = await route();
+    const res = await POST(post({ text: "parity check", engine: "cloud", voice: "nova" }));
+
+    // 409 here was a false failure: the panel shows `nova`, the owner presses
+    // Play beside it, and the route refuses naming the voice on screen.
+    expect(res.status).toBe(200);
+    expect(speakMock).toHaveBeenCalled();
+  });
+
+  it("still substitutes the default when the model does not have the stored voice", async () => {
+    // tts-1 has no `verse`, so the panel renders `alloy` — and Play beside it
+    // must match the panel, not the raw stored value.
+    hermesConfig = {
+      "tts.provider": "openai",
+      "tts.openai.voice": "verse",
+      "tts.openai.model": "tts-1",
+      "tts.openai.base_url": "https://clawbox.test/api/ai",
+      "tts.openai.api_key": "claw_a_linked_hermes_box",
+    };
+    const { POST } = await route();
+    expect((await POST(post({ text: "parity check", engine: "cloud", voice: "alloy" }))).status).toBe(200);
+    expect((await POST(post({ text: "parity check", engine: "cloud", voice: "verse" }))).status).toBe(409);
+  });
+
   it("refuses a VOICE the box is not set to", async () => {
     // The engine matches; the voice does not. `/api/audio/speak` would have
     // spoken af_heart and returned 200 under a control reading af_bella.

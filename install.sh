@@ -4045,7 +4045,7 @@ step_post_update() {
   # runs, and the Hermes half of that is written through ~/.local/bin/hermes.
   # The repair below is exactly the population that needs it: a box whose
   # factory reset (pre-fix build) deleted ~/.hermes/hermes-agent still HAS the
-  # executable shim, so the `-x` guard passes, both `hermes config set` calls
+  # executable shim, so the `-x` guard passes, the `hermes config set` calls
   # fail against the missing venv, and the update ends with a recorded
   # provisioning failure and a scary "Hermes will not speak on this box" — over
   # a box that step_hermes_install repairs perfectly forty lines later, and

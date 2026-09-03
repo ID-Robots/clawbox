@@ -181,12 +181,20 @@ export interface UnitState {
 }
 
 export async function readUnitState(unit: string, scope: "user" | "system"): Promise<UnitState> {
-  const isActive = scope === "user"
-    ? await runUserSystemctl(["is-active", unit])
-    : await run("/usr/bin/systemctl", ["is-active", unit]);
-  const isEnabled = scope === "user"
-    ? await runUserSystemctl(["is-enabled", unit])
-    : await run("/usr/bin/systemctl", ["is-enabled", unit]);
+  // Concurrent, not sequential. The two answers are independent, and each call
+  // carries its own 5 s timeout — awaited one after the other a wedged systemd
+  // bus cost 10 s, which the Voice tab has always paid but the chat turn now
+  // pays too (the spoken-reply capability reads this inventory per reply,
+  // ahead of the reply's own speech budget rather than inside it). Asked
+  // together the worst case is one timeout, not two.
+  const [isActive, isEnabled] = await Promise.all([
+    scope === "user"
+      ? runUserSystemctl(["is-active", unit])
+      : run("/usr/bin/systemctl", ["is-active", unit]),
+    scope === "user"
+      ? runUserSystemctl(["is-enabled", unit])
+      : run("/usr/bin/systemctl", ["is-enabled", unit]),
+  ]);
   const enabledWord = (isEnabled ?? "").trim();
   // `is-enabled` answers with an error string, not a state, when the unit file
   // is missing — that is how "absent" is told apart from "installed but off".

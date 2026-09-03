@@ -99,6 +99,7 @@ vi.mock("@/lib/hermes-dashboard-auth", () => ({
 
 let restoreEnv: () => void = () => {};
 let root: string;
+let ttsScript: string;
 
 /** A clip big enough to be audio rather than a bare container header. */
 const WAV = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4096, 1)]);
@@ -145,11 +146,15 @@ beforeEach(() => {
   process.env.CLAWBOX_ROOT = root;
   process.env.HOME = root;
   fs.mkdirSync(path.join(root, "data", "chat-media"), { recursive: true });
-  // A box whose on-device voice is registered and selected.
+  // A box whose on-device voice is registered and selected. The command names
+  // a REAL file: the capability checks the script is on disk, not merely that
+  // the config names one — the same third condition the Voice tab applies.
+  ttsScript = path.join(root, "clawbox-tts.sh");
+  fs.writeFileSync(ttsScript, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   hermesConfig = {
     "tts.provider": "clawbox-local",
     "tts.providers.clawbox-local.type": "command",
-    "tts.providers.clawbox-local.command": "/opt/clawbox-tts.sh --voice {voice}",
+    "tts.providers.clawbox-local.command": `${ttsScript} --text-file={input_path} -- {output_path}`,
   };
 });
 
@@ -239,6 +244,22 @@ describe("a speak endpoint that answers with far too much", () => {
     // The reply still lands; only the oversized clip is dropped.
     expect(assistant.text).toBe("The lantern is green.");
     expect(assistant.audio).toBeUndefined();
+  });
+});
+
+describe("a Hermes box whose voice script is gone", () => {
+  it("promises no player when the command the config names is not on disk", () => {
+    // The panel's third condition: `providerConfigured && commandPresent &&
+    // engineInstalled`. A box whose clawbox-tts.sh went missing while the
+    // Kokoro stamp and unit remain would otherwise have the chat promising a
+    // player while the Voice tab said the box is not wired to use its voice.
+    fs.rmSync(ttsScript, { force: true });
+    return post({ message: "what colour" }).then(async (res) => {
+      expect(res.status).toBe(200);
+      expect(speakCalls).toHaveLength(0);
+      const assistant = transcript().filter((m) => m.role === "assistant").pop();
+      expect(assistant.audio).toBeUndefined();
+    });
   });
 });
 

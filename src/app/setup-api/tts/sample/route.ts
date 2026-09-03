@@ -7,7 +7,7 @@ import path from "path";
 import crypto from "crypto";
 import { runChild } from "@/lib/child-run";
 import { getActiveHarness } from "@/lib/harness";
-import { hermesProviderFor, hermesVoiceConfigView, readHermesVoice, speakWithHermes } from "@/lib/hermes-tts";
+import { hermesProviderFor, readHermesVoice, speakWithHermes } from "@/lib/hermes-tts";
 import { readConfig } from "@/lib/openclaw-config";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { cloudSpeechTarget, localCommandPath, cloudVoiceFrom, type VoiceConfigView } from "@/lib/voice-output";
@@ -201,13 +201,20 @@ async function speakWithHermesEngine(
   // lives in Hermes' own key; the on-device one is the file `clawbox-tts.sh`
   // reads, which is what `readLocalVoice` answers.
   if (typeof requestedVoice === "string" && requestedVoice) {
-    // The voice the PANEL SHOWS, not the raw persisted one. `cloudVoiceFrom`
-    // substitutes the default whenever the stored voice is not one the
-    // configured model actually has (tts-1 has no `verse`), so comparing
-    // against the raw value would 409 naming a voice the dropdown is
+    // The voice the PANEL SHOWS, which is `cloudVoiceFrom`'s rule applied to
+    // the probe: the stored voice when the configured model actually has it,
+    // and the default when it does not (tts-1 has no `verse`). Comparing
+    // against the raw stored value would 409 naming a voice the dropdown is
     // displaying — refusing the owner for agreeing with us.
+    //
+    // The rule is applied DIRECTLY rather than by building a config view and
+    // asking `cloudVoiceFrom`. That was tried and was much worse: the view's
+    // cloud provider entry only exists `if (token)`, so passing a null token
+    // dropped voice, model and baseUrl and the comparison collapsed to
+    // `alloy` for every box — turning a narrow refusal into Play refusing
+    // every cloud voice but the default, including the one on screen.
     const active = engine === "cloud"
-      ? cloudVoiceFrom(hermesVoiceConfigView(probe, null, null)) ?? DEFAULT_CLOUD_VOICE
+      ? (isCloudVoiceFor(probe.cloudModel, probe.cloudVoice) ? probe.cloudVoice : DEFAULT_CLOUD_VOICE)
       : (await readLocalVoice()) ?? DEFAULT_LOCAL_VOICE;
     if (requestedVoice !== active) {
       return refuse(

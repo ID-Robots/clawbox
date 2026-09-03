@@ -458,7 +458,14 @@ export async function hermesSpeaksReplies(): Promise<boolean> {
         hermesConfigGet(KEYS.localCommand),
         localTtsEngineInstalled(),
       ]);
-      return trimmed(type) === "command" && trimmed(command) !== null && installed;
+      const script = trimmed(command);
+      if (trimmed(type) !== "command" || script === null || !installed) return false;
+      // The command FILE, not just the string that names it — the third of the
+      // panel's three conditions (`providerConfigured && commandPresent &&
+      // engineInstalled`). A box whose clawbox-tts.sh is gone while the Kokoro
+      // stamp and unit remain would otherwise have the chat promising a player
+      // while the Voice tab says the box is not wired to use its voice.
+      return await commandFileExists(script);
     }
     // The endpoint AND the credential: `writeHermesCloudTarget` writes them
     // separately and the first failure throws, so a box can hold one without
@@ -546,6 +553,24 @@ async function localTtsEngineInstalled(): Promise<boolean> {
   try {
     const { buildTtsInventory } = await import("@/lib/local-models");
     return (await buildTtsInventory()).some((m) => m.kind === "tts" && m.installed);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Is the command the provider names actually on disk?
+ *
+ * `localCommandPath`-shaped: the provider's command is a full command line, so
+ * the executable is its first word. Fails CLOSED like its neighbours.
+ */
+async function commandFileExists(command: string): Promise<boolean> {
+  try {
+    const bin = command.trim().split(/\s+/)[0];
+    if (!bin) return false;
+    const { promises: fs } = await import("fs");
+    await fs.access(bin);
+    return true;
   } catch {
     return false;
   }
