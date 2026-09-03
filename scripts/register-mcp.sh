@@ -135,6 +135,51 @@ chmod 600 "$MCP_TOKEN_FILE" 2>/dev/null || true
 # ~/.hermes/config.yaml — which several /setup-api/hermes/* routes rewrite —
 # never holds a second copy of it.
 
+# ── 2b. Install the outbound EMAIL:-directive hook plugin. ──────────────────
+# `EMAIL:4471` is how the agent tells a ClawBox CHAT that its reply points at a
+# message the owner can open; the chat lifts the line out and shows a card. A
+# channel has no cards, so there the line is an internal id printed at the owner
+# (TASK-679). PR #605 stopped the tools ASKING for it on a channel — a sentence
+# a model can misread — and this is the guarantee behind the sentence: Hermes'
+# own `transform_llm_output` hook, which fires once per turn before delivery and
+# before speech, takes the line out whatever the model wrote.
+#
+# HERE, not in the ClawBox-AI link path where the image backend is installed
+# (src/lib/hermes-image-plugin.ts). That one is a paid capability and only a
+# linked box needs it; this one has to be on EVERY Hermes box, and a factory
+# reset wipes ~/.hermes bar `hermes-agent` and `bin` (setup/reset/route.ts).
+# This script runs from production-server.js at every web-server boot, so a
+# reset box re-provisions itself without anyone asking.
+#
+# Copied rather than symlinked, and overwritten unconditionally: the files are
+# OURS, versioned with the app, and an update that ships a fixed plugin must
+# actually deliver it. The stale `__pycache__` goes with them, because Python
+# will happily import a `.pyc` whose source no longer exists.
+EMAIL_HOOK_PLUGIN="clawbox_email_directives"
+EMAIL_HOOK_SRC="$PROJECT_DIR/scripts/hermes-plugins/$EMAIL_HOOK_PLUGIN"
+# Derived from the config this script is already writing, so a test can move the
+# whole Hermes home with one variable and the two stay in step.
+HERMES_PLUGINS_DIR="${HERMES_PLUGINS_DIR:-$(dirname "$HERMES_CONFIG")/plugins}"
+EMAIL_HOOK_DST="$HERMES_PLUGINS_DIR/$EMAIL_HOOK_PLUGIN"
+EMAIL_HOOK_INSTALLED=0
+
+if [ -f "$EMAIL_HOOK_SRC/__init__.py" ] && [ -f "$EMAIL_HOOK_SRC/plugin.yaml" ] \
+  && [ -f "$EMAIL_HOOK_SRC/email_directives.py" ]; then
+  if mkdir -p "$EMAIL_HOOK_DST" 2>/dev/null \
+    && cp -f "$EMAIL_HOOK_SRC/__init__.py" "$EMAIL_HOOK_SRC/plugin.yaml" \
+             "$EMAIL_HOOK_SRC/email_directives.py" "$EMAIL_HOOK_DST/" 2>/dev/null; then
+    rm -rf "$EMAIL_HOOK_DST/__pycache__" 2>/dev/null || true
+    EMAIL_HOOK_INSTALLED=1
+  else
+    # Never fatal. A box with its device tools registered but this plugin not
+    # copied still works; it only shows the directive on a channel, which is
+    # exactly where it stood before this existed.
+    log "WARNING: could not install the $EMAIL_HOOK_PLUGIN plugin into $EMAIL_HOOK_DST"
+  fi
+else
+  log "WARNING: $EMAIL_HOOK_SRC is not a complete plugin — skipping the EMAIL: directive hook"
+fi
+
 # ── 3. Reconcile mcp_servers.clawbox in ~/.hermes/config.yaml. ──────────────
 # Done in Python/PyYAML for the same reason gateway-pre-start.sh does its
 # openclaw.json pass in Python: read-modify-write with an atomic rename, and a
@@ -152,6 +197,11 @@ export CLAWBOX_MCP_HERMES_CONFIG="$HERMES_CONFIG"
 export CLAWBOX_MCP_BUN_BIN="$BUN_BIN"
 export CLAWBOX_MCP_ENTRY="$MCP_ENTRY"
 export CLAWBOX_MCP_API_BASE="$API_BASE"
+# Empty unless the plugin's files are on disk, so the enable below can never
+# name a plugin that is not there — "enabled in config, nothing loaded" is the
+# false success this whole step exists to avoid.
+export CLAWBOX_EMAIL_HOOK_PLUGIN=""
+[ "$EMAIL_HOOK_INSTALLED" = "1" ] && export CLAWBOX_EMAIL_HOOK_PLUGIN="$EMAIL_HOOK_PLUGIN"
 
 python3 - <<'PY'
 import ast, os, sys, tempfile
@@ -341,6 +391,54 @@ else:
     print("[register-mcp] WARNING: agent is not a mapping; "
           "leaving the clarify timeout at hermes' own default.", file=sys.stderr)
 
+# ── Enable the outbound EMAIL:-directive hook plugin. ───────────────────────
+# `plugins.enabled` is opt-in for every user plugin on the box
+# (hermes_cli/plugins.py:4000 skips anything not listed), and it is the SAME
+# list that gates the ClawAI image backend — so this is MERGED, never replaced.
+# Writing our name over the list would silently unload the customer's image
+# generation, and any other plugin they installed, as a side effect of a
+# directive strip.
+#
+# A shape this script does not understand is left alone rather than repaired:
+# `hermes config set` stores lists as a JSON string ('["a","b"]'), which
+# `parse_config_string_list` reads, and the same two forms the skills block
+# below handles turn up here.
+hook_plugin = os.environ.get("CLAWBOX_EMAIL_HOOK_PLUGIN") or ""
+if hook_plugin:
+    plugins_cfg = cfg.get("plugins")
+    if plugins_cfg is None:
+        plugins_cfg = {}
+        cfg["plugins"] = plugins_cfg
+    if isinstance(plugins_cfg, dict):
+        raw_enabled = plugins_cfg.get("enabled")
+        if isinstance(raw_enabled, str):
+            text = raw_enabled.strip()
+            parsed = None
+            if text.startswith("["):
+                try:
+                    parsed = ast.literal_eval(text)
+                except (ValueError, SyntaxError):
+                    parsed = None
+            names = [str(item) for item in parsed] if isinstance(parsed, list) else (
+                [raw_enabled] if raw_enabled else []
+            )
+        elif isinstance(raw_enabled, (list, tuple)):
+            names = [str(item) for item in raw_enabled]
+        elif raw_enabled is None:
+            names = []
+        else:
+            names = None
+            print("[register-mcp] WARNING: plugins.enabled is not a list or a string; "
+                  "leaving the EMAIL: directive hook disabled.", file=sys.stderr)
+        if names is not None and hook_plugin not in names:
+            plugins_cfg["enabled"] = names + [hook_plugin]
+            changed = True
+            print("[register-mcp] enabled the " + hook_plugin
+                  + " plugin — EMAIL: card directives are stripped on the way to a channel")
+    else:
+        print("[register-mcp] WARNING: plugins is not a mapping; "
+              "leaving the EMAIL: directive hook disabled.", file=sys.stderr)
+
 if not changed:
     print("[register-mcp] Hermes MCP registration already current, skipping write")
     sys.exit(0)
@@ -410,4 +508,40 @@ if "$HERMES_BIN" tools disable browser >/dev/null 2>&1; then
   log "built-in browser toolset off; browsing goes through the ClawBox browser_* tools"
 else
   log "could not disable the built-in browser toolset — continuing"
+fi
+
+# ── 5. Prove the EMAIL: hook plugin actually LOADS, every boot. ─────────────
+# `hermes plugins list` would say "enabled" for a plugin that raises on import,
+# has no `register()`, or registers a mistyped hook name: its status is read
+# straight back out of the config sets it was just written into
+# (hermes_cli/plugins_cmd.py:1931). Believing it is the false success this
+# check exists to catch.
+#
+# `plugins doctor` is the honest one — it really imports the plugin in a
+# sandboxed temporary HERMES_HOME and prints what registered
+# (hermes_cli/plugin_dev.py:84-107). For this plugin the line must read
+# "1 hook(s)"; "0 hook(s)" means the file loaded but the hook did not register,
+# which is precisely the state nothing else on the box would report.
+#
+# EVERY BOOT, not once behind a marker — the same reasoning as the browser
+# toolset above. The state lives in Hermes' own tree, so a marker in ClawBox's
+# data/ can drift from it, and anything that resets ~/.hermes without wiping
+# data/ would leave the marker set and the plugin gone, permanently.
+#
+# Advisory: it must never hold up the web server. What it buys is a line in the
+# log that says which of the two states the box is actually in.
+if [ "$EMAIL_HOOK_INSTALLED" = "1" ]; then
+  EMAIL_HOOK_DOCTOR="$("$HERMES_BIN" plugins doctor "$EMAIL_HOOK_PLUGIN" 2>&1 || true)"
+  case "$EMAIL_HOOK_DOCTOR" in
+    *"1 hook(s)"*)
+      log "$EMAIL_HOOK_PLUGIN loaded and registered its outbound hook"
+      ;;
+    *)
+      # The doctor's own words, trimmed to one line: "no register() function",
+      # "No __init__.py in ...", an import traceback's last line. Naming the
+      # plugin without naming the reason is what sends an operator to the wrong
+      # file.
+      log "WARNING: $EMAIL_HOOK_PLUGIN did not register its hook — EMAIL: directives will still reach channels. hermes plugins doctor said: $(printf '%s' "$EMAIL_HOOK_DOCTOR" | tr '\n' ' ' | cut -c1-300)"
+      ;;
+  esac
 fi
