@@ -1,13 +1,13 @@
 /**
  * Terminal — connect to the real /terminal-ws WebSocket, which
- * production-server.js proxies to the node-pty backed terminal-server.ts.
+ * production-server.js proxies to the node-pty backed terminal-server.mjs.
  * Types a command into the PTY and asserts its output shows up on the wire.
  *
  * This exercises:
  *   - node-pty native rebuild (install.sh's ensure_node_pty)
  *   - production-server.js WebSocket upgrade routing, including the session
  *     check it applies to the single-service sockets
- *   - the standalone terminal-server.ts on port 3006 inside the container
+ *   - the standalone terminal-server.mjs on port 3006 inside the container
  *
  * The upgrade carries a `clawbox_session` cookie because that is what the
  * desktop's Terminal app sends. A WebSocket upgrade never passes through the

@@ -9,7 +9,7 @@ queries:
 # (e.g. js/insecure-temporary-file across src/tests/**) are noise.
 #
 # NOTE: scripts/** is intentionally NOT excluded — it holds security-critical
-# runtime code (scripts/terminal-server.ts WebSocket server, browser launcher)
+# runtime code (scripts/terminal-server.mjs WebSocket server, browser launcher)
 # that must stay under CodeQL coverage. CI-only script alerts are dismissed
 # individually instead.
 paths-ignore:

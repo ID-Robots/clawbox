@@ -20,7 +20,7 @@ const IS_DEV = process.env.NODE_ENV === "development";
 // Path prefixes that the production server routes to a non-gateway upstream.
 // Keep entries in sync with any new WebSocket-only services added behind :80.
 //
-//   /terminal-ws  → xterm/PTY WebSocket (scripts/terminal-server.ts)
+//   /terminal-ws  → xterm/PTY WebSocket (scripts/terminal-server.mjs)
 //   /novnc-ws     → noVNC / websockify for the remote desktop app
 // `requireAuth` gates the raw single-service sockets (terminal PTY, noVNC) on a
 // valid ClawBox session cookie. WebSocket upgrades never pass through Next.js

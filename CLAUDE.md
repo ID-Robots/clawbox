@@ -202,7 +202,7 @@ A webapp always runs in a sandboxed iframe with an opaque origin (`src/lib/webap
 ### System Integration (`scripts/`, `config/`)
 
 - **`scripts/start-ap.sh`** / **`scripts/stop-ap.sh`** — create/tear down WiFi AP "ClawBox-Setup" on `wlP1p1s0` at `10.42.0.1/24`
-- **`scripts/terminal-server.ts`** — WebSocket PTY server on port 3006
+- **`scripts/terminal-server.mjs`** — WebSocket PTY server on port 3006 (plain ESM JS, started with the web server's own Node — no npx, no transpiler)
 - **`scripts/setup-optimizations.sh`** — Jetson GPU/memory tuning
 - **`scripts/gateway-pre-start.sh`** — gateway pre-startup hooks
 - **`scripts/kokoro-*.sh`** / **`scripts/kokoro-server.py`** — voice/TTS integration
