@@ -11,6 +11,13 @@ export function parseTranscript(file) {
   try { text = fs.readFileSync(file, "utf8"); } catch { return null; }
   const byModel = {};
   let lines = 0;
+  // One API message arrives as SEVERAL transcript lines — one per content
+  // block (thinking, then text or tool_use), each carrying the message's whole
+  // usage. Measured 2026-09-03 on the box's CLI (2.1.259): the l-01 baseline
+  // transcript had 97 usage lines for 31 messages, and the per-line sum was
+  // 3x the real bill. Count each message.id once; the per-message sum matches
+  // the CLI's own modelUsage exactly.
+  const billed = new Set();
   for (const line of text.split("\n")) {
     if (!line.trim().startsWith("{")) continue;
     lines++;
@@ -19,6 +26,10 @@ export function parseTranscript(file) {
     const message = event?.message;
     const usage = message?.usage;
     if (!usage || typeof usage !== "object") continue;
+    if (typeof message.id === "string" && message.id) {
+      if (billed.has(message.id)) continue;
+      billed.add(message.id);
+    }
     const model = typeof message.model === "string" ? message.model : "(unknown)";
     const slot = (byModel[model] ??= { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, messages: 0 });
     slot.input += usage.input_tokens ?? 0;

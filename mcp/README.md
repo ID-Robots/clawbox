@@ -378,7 +378,25 @@ shell tool, not less and not more:
   no web tools. Bash is full access (`Bash(*)`): the owner's switch IS the
   consent for a delegated shell, and the brief holds it to one command per
   call. Three sub-agents ship (explorer / tester / reviewer), all on the
-  flash model; the writing stays with the main loop on the tier model;
+  flash model, plus a `workflow-subagent` of the same name as Claude Code's
+  built-in default workflow agent, which shadows it: an `agent()` call that
+  names no agentType then runs on flash with read-and-run tools instead of
+  as a full writer on the tier model (measured: the first ultracode bench
+  run typed none of its four agents). The writing stays with the main loop
+  on the tier model. Under
+  ultracode (the default effort) the run also gets Claude Code's `Workflow`
+  tool, listed AND pre-approved (`--allowedTools Workflow` — listed alone a
+  headless run is refused with "Review dynamic workflow before running"),
+  plus a brief paragraph on what to fan out; a fixed effort level is no
+  opt-in to orchestration and never gets it. The brief keeps a workflow to
+  read-only helpers by agentType (explorer / tester / reviewer): the writing
+  stays with the main loop, whose edits are what the record, the review
+  pass and the commit see. A workflow counts as one helper of type
+  `workflow` on the run record, billed live from its task_progress totals
+  so the owner's token ceiling holds during a fan-out; the Agent tool's
+  helpers are background tasks too on the installed CLI (2.1.259), kept
+  "active" until their task_notification rather than their launch receipt,
+  and a refused launch is taken back out of the counts;
 - the credential folders `file-guard` protects, and every entry of this
   checkout's `data/` except the public subtrees (so `config.json` — the token
   the run is using — but never the run's own `data/code-projects/<id>`), are

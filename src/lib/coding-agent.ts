@@ -300,9 +300,9 @@ export const CAPABILITY_DROP_ARGS: readonly string[] = [
 ];
 
 /** Claude Code tools the run may use at all (`--tools`). No WebFetch/WebSearch:
- *  the appliance is offline-first and the task is local code. Task (sub-agents)
- *  is added only when the owner has switched them on — see
- *  CODING_AGENT_SUBAGENTS_CONFIG_KEY. */
+ *  the appliance is offline-first and the task is local code. The sub-agent
+ *  tool is always on (SUBAGENT_DEFINITIONS gives it something to delegate to);
+ *  the Workflow tool joins it under ultracode only — see WORKFLOW_TOOL. */
 export const CLAUDE_TOOLS = "Read,Write,Edit,Glob,Grep,Bash,NotebookEdit";
 /**
  * Claude Code's sub-agent tool, as it appears in `--tools` and in the stream.
@@ -372,12 +372,55 @@ export const SUBAGENT_DEFINITIONS = {
     tools: ["Read", "Grep", "Glob"],
     model: "deepseek-v4-flash",
   },
+  /**
+   * The agent a workflow's `agent()` runs when the script names no agentType.
+   * Claude Code's built-in of this name is a full writer on the session's
+   * model, and the brief's "every agent() must pass agentType" was ignored on
+   * the first ultracode bench run (run-roo5mgvd, 2026-09-03: a four-agent
+   * review workflow, all four on the tier model, none typed). A definition of
+   * the same name in `--agents` shadows the built-in — measured on this box:
+   * the default agent then runs on flash with these tools — so the omission
+   * costs flash tokens and can edit nothing, instead of four pro readers.
+   */
+  "workflow-subagent": {
+    description:
+      "The agent a workflow runs when its agent() call names no agentType: "
+      + "reads, runs checks, reports. Use proactively as a workflow's reader; "
+      + "it never edits.",
+    prompt:
+      "You are one agent of a workflow. Read the files and run the checks you "
+      + "were asked to, then report findings with file paths and line numbers, "
+      + "or say plainly that you found nothing. Never edit a file.",
+    tools: ["Read", "Grep", "Glob", "Bash"],
+    model: "deepseek-v4-flash",
+  },
 } as const;
 
 export type SubagentName = keyof typeof SUBAGENT_DEFINITIONS;
 
-export function toolsFor(subagents: boolean): string {
-  return subagents ? `${CLAUDE_TOOLS},${SUBAGENT_TOOL}` : CLAUDE_TOOLS;
+/**
+ * Claude Code's dynamic-workflow tool — the orchestration half of ultracode.
+ *
+ * Ultracode is xhigh effort plus a standing opt-in to orchestrate the work
+ * with this tool, and the CLI's own ultracode reminder tells the model to use
+ * it on every substantive task. Until 2026-09-03 a run never had it: `--tools`
+ * left it out — and even listed, a headless run cannot use it: the tool asks
+ * "Review dynamic workflow before running", and in -p mode that question is
+ * answered with a denial. The model gets it as an is_error tool_result,
+ * retries the identical call (twice in the probe, two steps gone), and the
+ * owner sees only a permission denial on the card. Pre-approved through
+ * `--allowedTools Workflow` it works (measured on this box with the installed CLI: a workflow
+ * launches in the background, reports task_started / task_progress /
+ * task_notification on the stream, and each agent runs on the model its
+ * agentType names). So the default effort was quietly half of itself: the
+ * thinking, none of the fan-out. The fixed levels never get the tool — there
+ * the owner did not opt into orchestration.
+ */
+export const WORKFLOW_TOOL = "Workflow";
+
+export function toolsFor(subagents: boolean, effort?: CodingEffort): string {
+  const tools = subagents ? `${CLAUDE_TOOLS},${SUBAGENT_TOOL}` : CLAUDE_TOOLS;
+  return effort === ULTRACODE_EFFORT ? `${tools},${WORKFLOW_TOOL}` : tools;
 }
 
 /**
@@ -1461,6 +1504,8 @@ interface LiveRun {
   endRequested: "stop" | "pause" | null;
   timedOut: boolean;
   sawResult: boolean;
+  /** The first init has been seen; any later one is the CLI continuing. */
+  sawInit: boolean;
   /** Whether "Thinking…" has already been said once. */
   sawThinking: boolean;
   stderr: string;
@@ -1489,6 +1534,27 @@ interface LiveRun {
    * duplicate must not decrement twice.
    */
   openSubagents: Map<string, ActiveSubagent>;
+  /**
+   * The API message billed last. The CLI streams one assistant event per
+   * content block of a message, every one carrying the message's full usage
+   * (measured on 2.1.259: thinking block, then the text or tool_use block,
+   * identical usage on both) — billed per event, a turn cost double and the
+   * owner's ceiling tripped at half its number. Per-message billing sums to
+   * exactly the CLI's own modelUsage. A bounded set rather than the last id
+   * alone: two helpers working at once interleave their events.
+   */
+  billedMessageIds: Set<string>;
+  /**
+   * Output tokens the assistant events of the current CLI segment reported.
+   * Through the ClawBox AI proxy every assistant event says output_tokens 0
+   * and the real number arrives only on the segment's result event (574 and
+   * 9 in the probe), so the result bills the difference — and never twice on
+   * a backend whose assistant events do carry it.
+   */
+  outputBilledInSegment: number;
+  /** tool_use id → tokens already billed for that workflow, from its
+   *  task_progress reports (cumulative totals; only the delta is billed). */
+  helperBilled: Map<string, number>;
   /** Resolved once at start, so a retry does not need an async lookup. */
   setprivPath: string;
   /** What this run was spawned with — a retry must match, not re-read. */
@@ -1891,14 +1957,49 @@ export const HEADLESS_BRIEF = [
   "Verify efficiently: use browser_fill to set a form field by selector and browser_click on controls; never navigate a page one Tab or arrow key at a time — a whole step budget was once spent that way.",
   "The ClawBox checkout (/home/clawbox/clawbox), its data/ folder, your own run record and any session files are not yours to inspect: reads there are refused, and every attempt costs a step. Work inside your project folder and your evidence folder only.",
   "Unless you have been given full access, run ONE command per Bash call. Chaining with ; or && , pipes, redirection, subshells and heredocs are all refused, however harmless the parts look — split them into separate calls instead of retrying the combined form.",
-  "When sub-agents are available to you, use them: hand searching and mapping to the explorer, running builds and tests to the tester, and a last read-through to the reviewer before you report done. Do the writing yourself.",
+  // Measured on bench runs run-y3i3y1lk and run-35aq5yh2 (2026-09-03): with
+  // the softer "when sub-agents are available, use them" the tier model read,
+  // tested and reviewed everything in its own thread and reported
+  // subagentsTotal 0 every time — the helpers existed and were never named
+  // as a step. So the protocol is spelled out as steps, with the reason.
+  "Delegate instead of doing everything in one thread — the sub-agents are how a run stays fast and keeps its own context small: before you edit code that already exists here and you have not read, send the explorer to map it (an empty or freshly scaffolded folder has nothing to map — skip that); after each batch of changes, send the tester to run whatever check exists — the build, the tests, or a script you wrote; and before your final report, send the reviewer over your changes (name the files) and fix what it finds. Do the writing yourself: the explorer, tester and reviewer read, run and review, they never edit.",
+  // The -p mechanics, measured on this box (2026-09-03): a helper is launched
+  // in the background, the model's turn ends, and the CLI restarts the same
+  // session with each result. Left unsaid, the model spent its steps asking
+  // itself how to wait.
+  "Sub-agents and workflows run in the background: launch independent ones together and keep working while they run; when nothing is left but waiting, end your turn with one line saying what is still out — you are restarted with each result as it arrives. Never poll for them, and never read their transcripts or session files.",
   "Verify your work where you can (run the build or the tests you have).",
   "The clawbox browser tools drive this device's own Chromium. You cannot see images — browser_view_local, browser_open and browser_screenshot save a screenshot into the run's evidence folder and answer with a written description of it; the interaction tools (click, type, keypress, scroll) answer briefly without one. When you build something with a visible result, open it with browser_view_local (it takes a file path in your folder) and read the description of what actually renders before you report done.",
   "Verify deliberately, not exhaustively: take a described screenshot at each state that matters and move on — never one per keystroke, and never watch a timer or animation run its course when a short interval proves the logic. A handful of screenshots is a verified app; fifty is a stalled one.",
   "You have a limited number of steps and every tool call spends one. Driving a page key by key through the browser is the fastest way to run out mid-task (measured: one run spent 103 steps on single keypresses and was cut off) — prove logic with a small script run by node instead, and spend the browser on ONE visual pass of the states that matter.",
-  "The folder named in CLAWBOX_RUN_ARTIFACTS_DIR is this run's evidence folder, shown to the owner with the run's details. Screenshots land there automatically; save test output there too, and move any verification script you wrote there instead of deleting it.",
+  // Bench run run-droy3ws4 (2026-09-03) COPIED its checker into the evidence
+  // folder and left the original in the project: the grep patterns inside it
+  // ("TODO", "lorem ipsum") and the synopses it checked for then counted as
+  // the project's own, and a 96-point site scored 54.
+  "The folder named in CLAWBOX_RUN_ARTIFACTS_DIR is this run's evidence folder, shown to the owner with the run's details. Screenshots land there automatically; save test output there too, and MOVE any verification script you wrote there (mv, never a copy): a checker left behind in the project folder ships as part of the project.",
   "A short task is not a small task: deliver the complete, polished result the task implies — real styling, sensible edge handling, a finished feel — never a minimal stub.",
   "Your final message is delivered to the person who delegated the task. State what you changed (file names), how they can check it, and anything you could not finish.",
+].join(" ");
+
+/**
+ * Added to the brief under ultracode only: what the Workflow tool is for on
+ * this box. The CLI's own reminder says "use it on every substantive task;
+ * token cost is not a constraint", and the inline reference it ships offers
+ * writer fan-outs, worktree isolation and scriptPath re-runs — each of which
+ * is wrong here: a run is single-writer by design (the record's changed
+ * files and the review pass that hangs off them come from the main loop's
+ * own edits; a workflow agent's writes would reach the commit — it stages
+ * the whole folder — and nothing else), the
+ * folder is not a git repository of its own, the session files are denied
+ * paths where every Read costs a step, and the owner's ceilings do apply. So
+ * this says what a workflow IS for on this box — many read-only helpers in
+ * one step — and names the three traps by name.
+ */
+export const ULTRACODE_BRIEF = [
+  "Ultracode is on and the Workflow tool is approved for this run: it is the one-step way to run many READ-ONLY helpers at once — map many files, verify many pages, review many changes — with agent(), parallel() and pipeline().",
+  "Every agent() must pass agentType \"explorer\", \"tester\" or \"reviewer\" (never general-purpose, never a workflow inside a workflow, never isolation: \"worktree\" — this folder is not a git repository of its own), and the writing stays with you: shared code first, then the parts, then a workflow to check them all.",
+  "The owner's step and token ceilings apply to this run and every token a workflow's agents spend is billed to it, whatever the reminder says about cost — size a workflow to the task.",
+  "A script's meta must be a plain object literal. If a workflow fails or returns nothing useful, send a narrower script inline — never scriptPath or resumeFromRunId, and never Read the script file, transcript or journal its result names: that folder is closed to you and each attempt costs a step.",
 ].join(" ");
 
 const FILE_TOOLS = ["Read", "Edit", "Write"] as const;
@@ -2021,7 +2122,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     "--permission-mode", "acceptEdits",
     "--setting-sources", "user",
     "--max-turns", String(opts.maxTurns ?? DEFAULT_MAX_TURNS),
-    "--append-system-prompt", HEADLESS_BRIEF,
+    "--append-system-prompt", opts.effort === ULTRACODE_EFFORT ? `${HEADLESS_BRIEF} ${ULTRACODE_BRIEF}` : HEADLESS_BRIEF,
   ];
   // Ultracode travels as a flag, the fixed levels through the wrapper's env
   // pin (see EFFORT_LEVELS). The wrapper would add the flag itself from the
@@ -2042,7 +2143,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
   }
   // The three tool flags are variadic and swallow any positional that follows,
   // which is why the task travels on stdin and these come last.
-  args.push("--tools", toolsFor(true));
+  args.push("--tools", toolsFor(true, opts.effort));
   // The Agent tool with nothing to delegate to is a tool that never fires.
   args.push("--agents", JSON.stringify(SUBAGENT_DEFINITIONS));
   {
@@ -2053,7 +2154,9 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // still denied with the lists absent). The FILE rules still ship, and a
     // deny rule outranks any allow, so the credential stores stay closed.
     // Full access is about commands, not secrets.
-    args.push("--allowedTools", "Bash(*)", ...(opts.run ? MCP_BROWSER_TOOLS : []));
+    // The Workflow tool is listed AND pre-approved under ultracode: listed
+    // alone it is refused headlessly (see WORKFLOW_TOOL).
+    args.push("--allowedTools", "Bash(*)", ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run ? MCP_BROWSER_TOOLS : []));
     args.push("--disallowedTools", ...fileDenyRules());
   }
   return args;
@@ -2190,8 +2293,17 @@ interface StreamEvent {
   session_id?: string;
   /** Set on events a SUB-AGENT produced; the main loop's events carry none. */
   parent_tool_use_id?: string;
+  /** system/task_started, task_progress, task_notification: the tool_use the
+   *  background task answers, and (on the notification) what it spent. */
+  tool_use_id?: string;
+  task_type?: string;
+  usage?: unknown;
   model?: string;
-  message?: { content?: unknown; usage?: unknown };
+  /** `id` is the API message: the CLI emits one assistant event PER CONTENT
+   *  BLOCK of it (thinking, then text or tool_use), each with the same usage. */
+  message?: { id?: unknown; content?: unknown; usage?: unknown };
+  /** system/task_started: what the helper was asked, in the CLI's words. */
+  description?: unknown;
   result?: unknown;
   is_error?: boolean;
   num_turns?: number;
@@ -2256,6 +2368,111 @@ function parseTodos(raw: unknown): CodingTodo[] | null {
 /** Exported for the test, for the same reason. */
 export const parseTodosForTests = parseTodos;
 
+/**
+ * Add to the run's bill and stop it at the owner's ceiling. The CLI has no
+ * flag for a token limit, so the device enforces it from the usage the stream
+ * reports. Marked resumable: the work is real, it simply ran out of room —
+ * the same shape as a step ceiling.
+ */
+function noteTokens(run: CodingRun, state: LiveRun, tokens: number): boolean {
+  if (!(tokens > 0)) return false;
+  run.tokensUsed += tokens;
+  if (run.tokenLimit !== null && run.tokensUsed >= run.tokenLimit && state.endRequested === null) {
+    state.endRequested = "stop";
+    run.resumable = true;
+    run.error = `Stopped at the token limit (${run.tokensUsed.toLocaleString("en-US")} of ${run.tokenLimit.toLocaleString("en-US")}). Raise the limit or resume with a narrower task.`;
+    pushProgress(run, "Token limit reached");
+    console.error(`[coding-agent] ${run.id} hit its token limit at ${run.tokensUsed}`);
+    endProcess(state);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * A workflow's agents never appear on the stream; the CLI reports the
+ * workflow's cumulative spend on every task_progress and once more on its
+ * task_notification. Bill the delta each time, so the owner's ceiling holds
+ * WHILE a fan-out runs rather than after it, and a workflow the run was
+ * stopped under has still been billed for what it did.
+ */
+function billWorkflowProgress(run: CodingRun, state: LiveRun, id: string, usage: unknown): boolean {
+  const helper = state.openSubagents.get(id);
+  if (!helper || helper.type !== WORKFLOW_SUBAGENT_TYPE) return false;
+  const total = usage && typeof usage === "object" ? (usage as { total_tokens?: unknown }).total_tokens : undefined;
+  if (typeof total !== "number") return false;
+  const billed = state.helperBilled.get(id) ?? 0;
+  if (total <= billed) return false;
+  state.helperBilled.set(id, total);
+  return noteTokens(run, state, total - billed);
+}
+
+/** The text of a tool_result, whether the CLI sent a string or text blocks. */
+function toolResultText(block: Record<string, unknown>): string {
+  const content = block.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : ""))
+    .join("\n");
+}
+
+/**
+ * The installed Claude Code (2.1.259, measured 2026-09-03) launches
+ * sub-agents and workflows in the BACKGROUND: the
+ * tool_result that answers the Agent or Workflow call is only the launch
+ * receipt ("Async agent launched successfully…", "Workflow launched in
+ * background…") and the helper is still out. Its `task_notification` is what
+ * closes it. Measured on this box, 2026-09-03: read as a completion, the
+ * receipt made every helper "finished" the moment it started, so the card
+ * never showed one working.
+ */
+function isBackgroundLaunchReceipt(block: Record<string, unknown>): boolean {
+  if (block.is_error === true) return false;
+  return /^\s*(Async agent launched|Workflow launched in background)/.test(toolResultText(block));
+}
+
+/** The sub-agent's "kind" a Workflow call gets: one helper of type "workflow". */
+const WORKFLOW_SUBAGENT_TYPE = "workflow";
+/** Message ids remembered for billing — a few turns of interleaved helpers. */
+const BILLED_IDS_KEPT = 64;
+
+function openSubagent(run: CodingRun, state: LiveRun, id: unknown, kind: string, what: string): void {
+  if (typeof id === "string" && id) {
+    state.openSubagents.set(id, { type: kind, description: what.slice(0, 120), startedAt: Date.now() });
+  }
+  run.subagentsTotal += 1;
+  run.subagentsByType[kind] = (run.subagentsByType[kind] ?? 0) + 1;
+  run.subagentsActive = state.openSubagents.size;
+  run.activeSubagents = [...state.openSubagents.values()];
+}
+
+/**
+ * Closes the helper `id` names, if it is still out. Answers which it was.
+ * A REFUSED launch (an is_error tool_result — the CLI's "Review dynamic
+ * workflow before running", or a sub-agent type it does not know) is taken
+ * back out of the counts: a helper that never ran is not one that finished.
+ */
+function closeSubagent(run: CodingRun, state: LiveRun, id: string, refused = false): ActiveSubagent | null {
+  const done = state.openSubagents.get(id);
+  if (!done || !state.openSubagents.delete(id)) return null;
+  state.helperBilled.delete(id);
+  run.subagentsActive = state.openSubagents.size;
+  run.activeSubagents = [...state.openSubagents.values()];
+  const noun = done.type === WORKFLOW_SUBAGENT_TYPE ? "Workflow" : "Sub-agent";
+  const kind = done.type === WORKFLOW_SUBAGENT_TYPE || done.type === "sub-agent" ? "" : ` (${done.type})`;
+  if (refused) {
+    run.subagentsTotal = Math.max(0, run.subagentsTotal - 1);
+    const left = (run.subagentsByType[done.type] ?? 1) - 1;
+    if (left > 0) run.subagentsByType[done.type] = left;
+    else delete run.subagentsByType[done.type];
+    pushProgress(run, `${noun} refused${kind}`);
+  } else {
+    pushProgress(run, `${noun} finished${kind}`);
+  }
+  return done;
+}
+
 /** One line of `--output-format stream-json`. */
 function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   if (typeof event.session_id === "string" && event.session_id && !run.sessionId) run.sessionId = event.session_id;
@@ -2280,32 +2497,74 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
 
   if (event.type === "system" && event.subtype === "init") {
     if (typeof event.model === "string" && event.model) run.model = event.model;
-    pushProgress(run, `Started${run.model ? ` with ${run.model}` : ""}`);
+    // A -p run with a helper out is started AGAIN by the CLI when that
+    // helper reports: a second init, and a second result when the model had
+    // ended its turn (measured on 2.1.259) — or no result yet when it had
+    // not (run-roo5mgvd: the notification and the init landed mid-turn).
+    // Same session, same process: any init after the first is a
+    // continuation, not a fresh start.
+    pushProgress(run, state.sawInit
+      ? "Continuing after a background helper finished"
+      : `Started${run.model ? ` with ${run.model}` : ""}`);
+    state.sawInit = true;
+    return;
+  }
+
+  // The CLI's own words for a helper it just launched — for a workflow, the
+  // description the parser could only guess at from the script.
+  if (event.type === "system" && event.subtype === "task_started") {
+    const id = typeof event.tool_use_id === "string" ? event.tool_use_id : "";
+    const helper = id ? state.openSubagents.get(id) : undefined;
+    if (helper && typeof event.description === "string" && event.description.trim()) {
+      helper.description = event.description.trim().slice(0, 120);
+      run.activeSubagents = [...state.openSubagents.values()];
+    }
+    return;
+  }
+
+  if (event.type === "system" && event.subtype === "task_progress") {
+    const id = typeof event.tool_use_id === "string" ? event.tool_use_id : "";
+    if (id) billWorkflowProgress(run, state, id, event.usage);
+    return;
+  }
+
+  // A background helper came back (see isBackgroundLaunchReceipt). A
+  // sub-agent's own turns were on this stream and billed as they came; a
+  // workflow's were not — its notification carries the final total.
+  if (event.type === "system" && event.subtype === "task_notification") {
+    const id = typeof event.tool_use_id === "string" ? event.tool_use_id : "";
+    if (!id) return;
+    billWorkflowProgress(run, state, id, event.usage);
+    closeSubagent(run, state, id);
     return;
   }
 
   if (event.type === "assistant") {
     // Every request pays for the input it carries, so input is summed per turn
-    // even though the conversation repeats — that is what a bill counts.
+    // even though the conversation repeats — that is what a bill counts. Per
+    // MESSAGE, not per event: see LiveRun.lastBilledMessageId.
     const usage = event.message?.usage;
-    if (usage && typeof usage === "object") {
+    const messageId = typeof event.message?.id === "string" && event.message.id ? event.message.id : null;
+    if (usage && typeof usage === "object" && (messageId === null || !state.billedMessageIds.has(messageId))) {
+      if (messageId !== null) {
+        state.billedMessageIds.add(messageId);
+        if (state.billedMessageIds.size > BILLED_IDS_KEPT) {
+          const oldest = state.billedMessageIds.values().next().value;
+          if (oldest !== undefined) state.billedMessageIds.delete(oldest);
+        }
+      }
       const u = usage as Record<string, unknown>;
       const n = (k: string) => (typeof u[k] === "number" ? (u[k] as number) : 0);
-      run.tokensUsed += n("input_tokens") + n("output_tokens")
-        + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
-      if (run.tokenLimit !== null && run.tokensUsed >= run.tokenLimit && state.endRequested === null) {
-        // The CLI has no flag for this, so the device stops the run itself.
-        // Marked resumable: the work is real, it simply ran out of room —
-        // the same shape as a step ceiling.
-        state.endRequested = "stop";
-        run.resumable = true;
-        run.error = `Stopped at the token limit (${run.tokensUsed.toLocaleString("en-US")} of ${run.tokenLimit.toLocaleString("en-US")}). Raise the limit or resume with a narrower task.`;
-        pushProgress(run, "Token limit reached");
-        console.error(`[coding-agent] ${run.id} hit its token limit at ${run.tokensUsed}`);
-        endProcess(state);
-        return;
-      }
+      state.outputBilledInSegment += n("output_tokens");
+      const stoppedNow = noteTokens(run, state, n("input_tokens") + n("output_tokens")
+        + n("cache_creation_input_tokens") + n("cache_read_input_tokens"));
+      if (stoppedNow) return;
     }
+    // A helper's own turns (parent_tool_use_id set) are billed above and
+    // nothing more: its words are not the run's words, its Bash is not the
+    // run's command, and a tester's `npm test` must not mark the run as one
+    // with side effects. The card already names the helper that is out.
+    if (typeof event.parent_tool_use_id === "string" && event.parent_tool_use_id) return;
     // numTurns stays the CLI's own number from the final result event.
     // A live per-event count was tried and measured 291 events against the
     // CLI's 38 turns on run-5vt51ppv — no event arithmetic reproduces the
@@ -2346,19 +2605,21 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
             // A sub-agent is out. Its id is what tells us when it comes back.
             const what = typeof input.description === "string" ? input.description : "";
             const kind = typeof input.subagent_type === "string" ? input.subagent_type : "";
-            if (typeof block.id === "string" && block.id) {
-              state.openSubagents.set(block.id, {
-                type: kind || "sub-agent",
-                description: what.slice(0, 120),
-                startedAt: Date.now(),
-              });
-            }
-            run.subagentsTotal += 1;
-            const typeKey = kind || "sub-agent";
-            run.subagentsByType[typeKey] = (run.subagentsByType[typeKey] ?? 0) + 1;
-            run.subagentsActive = state.openSubagents.size;
-            run.activeSubagents = [...state.openSubagents.values()];
+            openSubagent(run, state, block.id, kind || "sub-agent", what);
             pushProgress(run, `Sub-agent started${kind ? ` (${kind})` : ""}${what ? `: ${what}` : ""}`);
+            break;
+          }
+          case WORKFLOW_TOOL: {
+            // A dynamic workflow: ONE helper of type "workflow" on the
+            // record, by choice — its agents are not on this stream (their
+            // spend arrives as task_progress totals, the models they used in
+            // the final modelUsage), and a fan-out is one decision of the
+            // run's, not twelve. Named after its script's own meta until
+            // task_started brings the CLI's own description.
+            const script = typeof input.script === "string" ? input.script : "";
+            const what = /description\s*:\s*(['"`])((?:(?!\1).)*)\1/.exec(script)?.[2] ?? "";
+            openSubagent(run, state, block.id, WORKFLOW_SUBAGENT_TYPE, what);
+            pushProgress(run, `Workflow started${what ? `: ${what}` : ""}`);
             break;
           }
           case "Read":
@@ -2398,11 +2659,11 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     const content = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
     for (const block of content) {
       if (block.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
-      const done = state.openSubagents.get(block.tool_use_id);
-      if (done && state.openSubagents.delete(block.tool_use_id)) {
-        run.subagentsActive = state.openSubagents.size;
-        run.activeSubagents = [...state.openSubagents.values()];
-        pushProgress(run, `Sub-agent finished${done.type !== "sub-agent" ? ` (${done.type})` : ""}`);
+      // A launch receipt is not a result: the helper stays out until its
+      // task_notification (see isBackgroundLaunchReceipt). Anything else
+      // closes it — a synchronous answer as finished, a refusal as refused.
+      if (state.openSubagents.has(block.tool_use_id) && !isBackgroundLaunchReceipt(block as Record<string, unknown>)) {
+        closeSubagent(run, state, block.tool_use_id, block.is_error === true);
       }
       const pending = state.pendingFiles.get(block.tool_use_id);
       if (pending !== undefined) {
@@ -2415,15 +2676,42 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   }
 
   if (event.type === "result") {
+    // A result per CLI segment: the first for the model's own turn, one more
+    // each time it was restarted by a background helper (see the init
+    // handler). num_turns and permission_denials are PER SEGMENT — the
+    // second result of the probe said 1 turn and no denials — so they add
+    // up; modelUsage and the summary are cumulative, and the last one wins.
+    const continuation = state.sawResult;
     state.sawResult = true;
-    if (typeof event.num_turns === "number") run.numTurns = event.num_turns;
+    if (typeof event.num_turns === "number") run.numTurns = continuation ? run.numTurns + event.num_turns : event.num_turns;
+    // The segment's output, less what its assistant events already billed.
+    if (event.usage && typeof event.usage === "object") {
+      const out = (event.usage as { output_tokens?: unknown }).output_tokens;
+      if (typeof out === "number" && out > state.outputBilledInSegment) noteTokens(run, state, out - state.outputBilledInSegment);
+    }
+    state.outputBilledInSegment = 0;
     // Which models actually did work — the main run and every sub-agent.
     if (event.modelUsage && typeof event.modelUsage === "object") {
-      run.modelsUsed = Object.keys(event.modelUsage as Record<string, unknown>).sort();
+      const usage = event.modelUsage as Record<string, unknown>;
+      run.modelsUsed = Object.keys(usage).sort();
+      // The CLI's own bill for everything the process ran — main loop,
+      // sub-agents AND workflow agents, cache reads included — cumulative
+      // across segments. The live sum above under-counts a workflow (its
+      // task_progress totals leave out cache reads: measured 118k reported
+      // against 540k in the agents' transcripts on run-roo5mgvd), so the
+      // record is raised to the CLI's number here, never lowered.
+      const total = Object.values(usage).reduce<number>((sum, m) => {
+        if (!m || typeof m !== "object") return sum;
+        const u = m as Record<string, unknown>;
+        const n = (k: string) => (typeof u[k] === "number" ? (u[k] as number) : 0);
+        return sum + n("inputTokens") + n("outputTokens") + n("cacheReadInputTokens") + n("cacheCreationInputTokens");
+      }, 0);
+      if (total > run.tokensUsed) noteTokens(run, state, total - run.tokensUsed);
     }
     if (Array.isArray(event.permission_denials)) {
-      run.permissionDenials = event.permission_denials.length;
-      run.deniedActions = event.permission_denials.slice(0, MAX_DENIALS_KEPT).map(describeDenial);
+      const described = event.permission_denials.map(describeDenial);
+      run.permissionDenials = (continuation ? run.permissionDenials : 0) + event.permission_denials.length;
+      run.deniedActions = (continuation ? [...run.deniedActions, ...described] : described).slice(0, MAX_DENIALS_KEPT);
     }
     const text = typeof event.result === "string" ? event.result.trim() : "";
     if (text) run.summary = text.slice(0, MAX_SUMMARY_CHARS);
@@ -3018,6 +3306,9 @@ function spawnRun(
   const state: LiveRun = {
     child,
     openSubagents: new Map<string, ActiveSubagent>(),
+    billedMessageIds: new Set<string>(),
+    outputBilledInSegment: 0,
+    helperBilled: new Map<string, number>(),
     pendingFiles: new Map<string, string>(),
     sawWriteAttempt: false,
     sawThinking: false,
@@ -3036,6 +3327,7 @@ function spawnRun(
     endRequested: null,
     timedOut: false,
     sawResult: false,
+    sawInit: false,
     outcome: null,
     stderr: "",
   };
