@@ -99,16 +99,23 @@ export default function AiProviderList() {
       {/* A default that WAS written, with the box still settling behind it —
           the gateway restart had not finished when the route answered. Amber
           and `status`, never the red `alert` above: the change landed, and a
-          failure here sends the owner to click it again for another restart. */}
-      {defaultWarning && (
-        <div
-          role="status"
-          data-testid="ai-provider-default-warning"
-          className="mb-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-200"
-        >
-          {defaultWarning}
-        </div>
-      )}
+          failure here sends the owner to click it again for another restart.
+
+          MOUNTED IN EVERY STATE, for the same reason the checking region below
+          is: a live region that appears together with its text announces a node
+          insertion, which assistive tech may drop entirely — and this sentence
+          is the only thing on screen saying the change landed at all. The
+          chrome is what is conditional, not the node. */}
+      <div
+        role="status"
+        aria-live="polite"
+        data-testid="ai-provider-default-warning"
+        className={defaultWarning
+          ? "mb-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-200"
+          : ""}
+      >
+        {defaultWarning ?? ""}
+      </div>
 
       {/* Three grey bars are indistinguishable from a hung page, and the wait
           they stand for is the unit's own start window — up to

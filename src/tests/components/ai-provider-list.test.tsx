@@ -145,10 +145,13 @@ describe("AiProviderList", () => {
     renderList();
     fireEvent.click(await screen.findByTestId("ai-provider-make-default-openai"));
 
-    const notice = await screen.findByTestId("ai-provider-default-warning");
-    expect(notice).toHaveTextContent("the gateway did not come back");
+    // waitFor on the TEXT, not on the node: the region is mounted in every
+    // state (so the announcement is a text change rather than a node
+    // insertion), which means finding it proves nothing on its own.
+    await waitFor(() =>
+      expect(screen.getByTestId("ai-provider-default-warning")).toHaveTextContent("the gateway did not come back"));
     // A notice, not the red failure line: `role="status"` and no `alert`.
-    expect(notice).toHaveAttribute("role", "status");
+    expect(screen.getByTestId("ai-provider-default-warning")).toHaveAttribute("role", "status");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     // ...and the panel still re-read the box, which is what repaints the star.
     await waitFor(() => {

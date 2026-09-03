@@ -2023,10 +2023,18 @@ export default function AIModelsStep({
       // The wizard advances off this step, so nothing rendered here survives
       // the transition. The device-auth card it lands on has no manual
       // continue control, so HOLDING here would strand a first-run owner
-      // behind a link labelled "Skip — use local only". The warning is logged
-      // for the journal and the same notice appears on the Settings panel,
-      // which is where a second OpenAI credential — the only state that
-      // produces it — is ever added.
+      // behind a link labelled "Skip — use local only".
+      //
+      // What is being traded, stated plainly rather than wished away: since
+      // TASK-608 the configure route also warns when the gateway has not
+      // finished restarting, and a cold first boot is the MOST likely place
+      // for that — so this is now the one screen that produces the warning and
+      // the one that discards it. The trade is deliberate: a slow gateway must
+      // not stop a first-run wizard, and the box recovers on its own within
+      // seconds. A gateway that never comes back is not silent either — it
+      // surfaces at the chat step, which cannot open a session without one.
+      // (The older ChatGPT-order warning is a Settings-only state and really
+      // does reappear there.)
       if (saveWarning) console.warn("[ai-models] configure warning:", saveWarning);
       onNext();
     } else {

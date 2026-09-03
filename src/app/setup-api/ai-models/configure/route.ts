@@ -1475,7 +1475,12 @@ type GatewayState =
   | "untouched"
   /** Stopped for `doctor --fix`; no later step has restarted it. */
   | "stopped-for-doctor"
-  /** Step 9 issued its restart — it came up, or step 9 answered its own 502. */
+  /**
+   * Step 9 issued its restart. It came up; or it had not finished coming up and
+   * step 9 answered its own 200 with a warning; or the restart was refused and
+   * step 9 answered its own 502. Either way the gateway is not left stopped, so
+   * the wrapper below has nothing to restore.
+   */
   | "restart-issued";
 
 /** Shared by reference: `configureModel` has too many exits to return it. */

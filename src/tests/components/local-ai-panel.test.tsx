@@ -146,8 +146,42 @@ describe("LocalAiPanel", () => {
     fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-fallback"));
 
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/providers/default", body: { provider: "clawai" } }));
-    const notice = await screen.findByTestId("local-ai-notice");
-    expect(notice).toHaveTextContent("the gateway did not come back");
+    // waitFor on the TEXT: the region is mounted in every state, so finding the
+    // node proves nothing.
+    await waitFor(() =>
+      expect(screen.getByTestId("local-ai-notice")).toHaveTextContent("the gateway did not come back"));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  /**
+   * TASK-608, the sibling the round-2 review caught. `/setup-api/stt` answers
+   * with a `warning` and NO `error` key when the transcription engine change
+   * landed but the gateway has not finished restarting. As a 502 that body is
+   * unreachable — `runAction` discards it on `!res.ok` and paints the red
+   * generic "couldn't change that" over a change that went through, sending the
+   * owner to click again and pay a second gateway restart. The route now
+   * answers 200 for that case, so the sentence reaches this panel.
+   */
+  it("shows a transcription change whose gateway is still coming back as a notice", async () => {
+    stubFetch({
+      sttPrimary: "cloud",
+      post: (url) => (url === "/setup-api/stt"
+        ? new Response(JSON.stringify({
+            primary: "local",
+            restarted: false,
+            engines: { cloud: { configured: true, label: "c" }, local: { installed: true, label: "l" } },
+            chain: ["local", "cloud"],
+            warning: "Saved, but the gateway has not finished restarting — channel voice notes switch over once it is serving again.",
+          }), { status: 200, headers: { "content-type": "application/json" } })
+        : undefined),
+    });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-stt");
+    fireEvent.click(screen.getByTestId("local-model-menu-whisper"));
+    fireEvent.click(await screen.findByTestId("local-model-action-whisper-primary"));
+
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/stt", body: { primary: "local" } }));
+    await waitFor(() => expect(screen.getByTestId("local-ai-notice")).toHaveTextContent("has not finished restarting"));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 

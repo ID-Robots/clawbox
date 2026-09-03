@@ -205,13 +205,25 @@ describe("bounceHermesDashboard", () => {
         return true;
       });
 
-      const startedAt = Date.now();
+      // Measured from the stop, which is where the shared deadline starts — not
+      // from the call, so the two `systemctl show` reads before it cannot push a
+      // loaded CI worker over the tolerance and turn this red for the wrong
+      // reason. The tolerance then only has to absorb scheduler jitter between
+      // the stop resolving and the deadline being taken.
+      let deadlineStartedAt = 0;
+      cliMock.mockImplementation(async () => {
+        deadlineStartedAt = Date.now();
+        return { code: 0, stdout: "", stderr: "" };
+      });
+
       await expect(bounceHermesDashboard()).resolves.toBe(true);
 
       const [, , options] = waitForPortOpenMock.mock.calls[0] as [number, string, { timeoutMs: number }];
       // The budget the socket half was handed, plus what the PID half already
-      // spent, may not exceed the one budget the whole bounce has.
-      expect((probeStartedAt - startedAt) + options.timeoutMs).toBeLessThanOrEqual(budgetMs + 150);
+      // spent, may not exceed the ONE budget the whole bounce has. Two separate
+      // budgets put this at roughly 2x.
+      expect((probeStartedAt - deadlineStartedAt) + options.timeoutMs)
+        .toBeLessThanOrEqual(budgetMs + 150);
     } finally {
       delete process.env.HERMES_DASHBOARD_WAIT_MS;
     }

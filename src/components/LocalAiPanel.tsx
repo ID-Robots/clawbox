@@ -427,6 +427,10 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     try {
       const res = await post("/setup-api/local-ai/exclusive", { enabled: next });
       const data = await res.json().catch(() => ({}));
+      // That route answers 200 with a `warning` when the flip was written but
+      // the gateway restart behind it was not — the one sentence explaining why
+      // the switch has not taken effect yet, and it was being dropped.
+      if (typeof data?.warning === "string" && data.warning) setNotice(data.warning);
       if (!res.ok) setError(typeof data?.error === "string" ? data.error : t("localModels.error.changeFailed"));
       setLocalOnly(res.ok ? next : !next);
     } catch {
@@ -533,11 +537,20 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
           {error}
         </div>
       )}
-      {notice && (
-        <div role="status" className="rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200" data-testid="local-ai-notice">
-          {notice}
-        </div>
-      )}
+      {/* Mounted in every state: a live region that appears along with its text
+          announces a node insertion, which assistive tech may drop — and this
+          sentence is the only thing saying the change landed. Chrome is
+          conditional, the node is not. */}
+      <div
+        role="status"
+        aria-live="polite"
+        data-testid="local-ai-notice"
+        className={notice
+          ? "rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200"
+          : ""}
+      >
+        {notice ?? ""}
+      </div>
       {snapshot.unavailable.length > 0 && (
         <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200" data-testid="local-ai-unavailable">
           {t("localModels.unavailable", { list: snapshot.unavailable.map((id) => unavailableName(id, t)).join(", ") })}

@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "util";
 import { getActiveHarness } from "@/lib/harness";
 import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "@/lib/harness/credentials";
 import {
+  GatewayNotReadyError,
   openclawIsAbsent,
   readConfig,
   restartGateway,
@@ -165,13 +166,27 @@ export async function POST(req: Request) {
         console.warn("[setup-api/stt] gateway restart failed after the audio write:", err);
         // The preference and the config are both saved; only the switch-over
         // of channel voice notes is deferred to whenever the gateway next starts.
+        //
+        // A gateway that has not finished coming back answers 200, NOT 502, and
+        // the status code is what decides it for the owner: this route's only
+        // client is `LocalAiPanel.runAction`, which on `!res.ok` discards the
+        // body — so the `warning` below would be unreachable, the panel would
+        // paint its red generic "couldn't change that" over a change that
+        // landed, and it would skip `applySnapshot`, leaving the row showing
+        // the old engine. A 200 reaches both the amber notice and the repaint.
+        //
+        // A restart that was REFUSED keeps the 502: nothing is coming back on
+        // its own there, and the owner does have to act.
+        const pending = err instanceof GatewayNotReadyError;
         return noStore(
           {
             ...(await status()),
             restarted: false,
-            warning: "Saved, but the gateway restart failed — channel voice notes switch over at the next restart.",
+            warning: pending
+              ? "Saved, but the gateway has not finished restarting — channel voice notes switch over once it is serving again."
+              : "Saved, but the gateway restart failed — channel voice notes switch over at the next restart.",
           },
-          { status: 502 },
+          { status: pending ? 200 : 502 },
         );
       }
     }
