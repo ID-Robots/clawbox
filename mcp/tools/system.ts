@@ -197,27 +197,34 @@ const NOT_ON_THIS_EDITION =
  * Emitted here, only the caveats that are true of THIS box are paid for, and
  * only when the tool is actually called.
  */
-function backupNotes(body: BackupStatusBody, protection: Protection): string[] {
+function backupNotes(body: BackupStatusBody, protection: Protection | null): string[] {
   const notes: string[] = [];
   if (body.paired === false) {
     notes.push(
-      "This ClawBox is not paired with cloud backup. Tell the user to set it up in Settings -> Backup; no tool here can pair it.",
+      "This ClawBox is not paired with cloud backup, so no backup can run and there is no verdict to report. "
+      + "Tell the user to set it up in Settings -> Backup; no tool here can pair it.",
     );
   }
-  // Unconditional while the field is present: the whole point is that it can
-  // read "ok" on a box whose backups died weeks ago, so the agent must never
-  // meet it without the warning attached.
+  // Not gated on the value: "error" and "needs-passphrase" ARE outcomes
+  // deriveProtection() acts on, so the note says the field is not the answer
+  // BY ITSELF rather than that it is never an outcome. The value is not
+  // interpolated — it is already in the body, and result text is screened by
+  // neither the length cap nor BANNED_DESCRIPTION_RE.
   if (body.lastHeartbeatStatus) {
     notes.push(
-      `lastHeartbeatStatus is "${body.lastHeartbeatStatus}" — the last thing the daemon published, not an outcome. `
-      + "The failures that keep a box unprotected longest write no heartbeat at all, so this field can read \"ok\" on a box "
-      + "that has not backed up for weeks. Answer from protection, not from this.",
+      "lastHeartbeatStatus is the last thing the daemon published, not the outcome by itself. "
+      + "The failures that keep a box unprotected longest write no heartbeat at all, so it can still "
+      + "read \"ok\" on a box that has not backed up for weeks. Answer from protection.",
     );
   }
-  if (protection.state === "protected" && body.schedule?.enabled === false) {
+  // `!enabled`, not `=== false`: a null or absent schedule takes the same
+  // lenient no-schedule window in expectedBackupWindowMs(), and the ClawKeep
+  // card switches its copy on exactly this predicate (ClawKeepApp.tsx).
+  if (protection?.state === "protected" && !body.schedule?.enabled) {
     notes.push(
-      "schedule.enabled is false, so this verdict says only that the last backup is recent enough for a box with no "
-      + "schedule: nothing is scheduled to make a newer one. Say that, rather than \"you're protected\".",
+      "No backup schedule is armed (schedule.enabled), so this verdict says only that the last backup is recent "
+      + "enough for a box with no schedule: nothing is scheduled to make a newer one. Say that, rather than "
+      + "\"you're protected\".",
     );
   }
   return notes;
@@ -571,7 +578,7 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "backup_status",
-    "Report whether this ClawBox is protected by cloud backup. Answer from `protection`, never from the raw fields: {state: protected|lapsed|unprotected, reason: ok|error|blocked|stale|never} — the same verdict the ClawKeep shield and the desktop shelf draw. reason=ok means a recent backup succeeded; stale means no recent backup; error means a run failed; blocked means no backup can run until this box has an encryption passphrase (Settings -> Backup); never means it has never backed up. The result's `notes` are the caveats that apply to THIS box — read them out rather than drawing your own conclusion from the other fields.",
+    "Report whether this ClawBox is protected by cloud backup. `protection` is the answer — {state: protected|lapsed|unprotected, reason: ok|error|blocked|stale|never}, the same verdict the ClawKeep shield and the desktop shelf draw. It is null when the box is not paired, which is not a verdict but the answer itself. reason=stale means no recent backup; error means a run failed; blocked means no backup can run until this box has an encryption passphrase (Settings -> Backup); never means it has never backed up. Read the result's `notes` out too: they are the caveats that apply to THIS box, and they qualify the verdict.",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 4_000 },
     async () => {
@@ -591,10 +598,17 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
       // the same verdict the two shields draw, plus the notes that rank the
       // fields for this box: leaving the misleading one in the body with
       // nothing to rank them keeps that read one plausible step away.
-      const protection = deriveProtection(
-        { ...body, lastBackupAtMs: body.lastBackupAtMs ?? 0 },
-        Date.now(),
-      );
+      // An unpaired box publishes NO verdict, exactly as the shelf shield does
+      // (`useClawkeepShieldStatus.ts`: "paired: false is the opt-in that has
+      // not happened"). deriveProtection() judges lastBackupAtMs alone and
+      // never sees `paired`, and unpairLocal() deliberately KEEPS the last
+      // successful stats — so deriving one here answered {protected, ok} for a
+      // box that had just been unpaired and can never back up again, while the
+      // shelf two inches away drew the calm setup shield. The three surfaces
+      // are required not to disagree (src/lib/clawkeep-protection.ts).
+      const protection = body.paired === false
+        ? null
+        : deriveProtection({ ...body, lastBackupAtMs: body.lastBackupAtMs ?? 0 }, Date.now());
       return json({ ...body, protection, notes: backupNotes(body, protection) });
     },
   );
