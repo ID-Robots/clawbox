@@ -55,8 +55,32 @@ let terminalGeneration = 0
 let llamaCppChild: ChildProcess | null = null
 let llamaCppStopping = false
 let llamaCppRestartDelayMs = LLAMACPP_RESTART_MIN_MS
+/**
+ * A restart this supervisor has already armed. Held so a deliberate stop can
+ * cancel it: `llamaCppStopping` alone cannot, because startLlamaCppServer
+ * clears that flag as its first act, so a timer firing after the stop un-stops
+ * the very thing that stopped it — the owner switches Local AI off in Settings
+ * and gigabytes come back a minute later. Beta's window for that was a fixed
+ * 5 s; the backoff above stretches it to a minute, so it is cancelled properly
+ * now rather than raced.
+ */
+let llamaCppRestartTimer: ReturnType<typeof setTimeout> | null = null
 let llamaCppStartPromise: Promise<LlamaCppStartStatus> | null = null
 let cleanupRegistered = false
+
+/**
+ * The supervision chain is over: drop any armed restart and put the backoff
+ * back at its floor. Deliberate stops only — a retry must NOT come through
+ * here, or the delay would reset on every attempt and the crash loop would be
+ * flat 5 s again, which is the defect this file was rewritten for.
+ */
+function endLlamaCppRestartChain() {
+  if (llamaCppRestartTimer) {
+    clearTimeout(llamaCppRestartTimer)
+    llamaCppRestartTimer = null
+  }
+  llamaCppRestartDelayMs = LLAMACPP_RESTART_MIN_MS
+}
 
 function cleanupChildren() {
   terminalStopping = true
@@ -65,6 +89,7 @@ function cleanupChildren() {
     terminalChild = null
   }
   llamaCppStopping = true
+  endLlamaCppRestartChain()
   if (llamaCppChild) {
     try { llamaCppChild.kill('SIGTERM') } catch {}
     llamaCppChild = null
@@ -102,7 +127,11 @@ export function startTerminalServer() {
   // dev server — used to be accepted as the terminal, and the Terminal app
   // then talked to it. The banner is what scripts/terminal-server.mjs writes
   // for exactly this handshake.
-  fetch(`http://127.0.0.1:${PORT}`)
+  // Timed out, because reading the banner means reading a body from whatever
+  // is on that port: something that answers 200 and then stalls would hold the
+  // Terminal off for undici's five-minute default. Two seconds is generous for
+  // loopback, and a timeout lands in the .catch() below, which starts ours.
+  fetch(`http://127.0.0.1:${PORT}`, { signal: AbortSignal.timeout(2_000) })
     .then(async (res) => {
       if (res.ok && (await res.text()).includes(TERMINAL_SERVER_BANNER)) {
         console.log(`[instrumentation] Terminal server already running on port ${PORT}`)
@@ -134,7 +163,9 @@ export function startTerminalServer() {
     // minute instead of a fork storm.
     if (!fs.existsSync(serverPath)) {
       console.error(`[instrumentation] Terminal server not started: ${serverPath} does not exist, so the Terminal app will not work. Restore it with 'sudo bash install.sh --step git_pull'; retrying meanwhile.`)
-      restartDelayMs = CHILD_RESTART_MAX_MS
+      // A minute between looks, and deliberately WITHOUT touching
+      // restartDelayMs: a missing file is not a crash loop, so the child that
+      // spawns once it returns must still get the 2 s floor if it then dies.
       setTimeout(startServer, CHILD_RESTART_MAX_MS)
       return
     }
@@ -171,7 +202,11 @@ export function startTerminalServer() {
     // exactly once, so it needs no double-schedule guard.
     child.on('close', (code) => {
       if (terminalStopping || generation !== terminalGeneration) return
-      scheduleRestart(`exited (code=${code})`, uptimeClockMs() - startedAt)
+      // A child that never spawned reports -errno here, not an exit status, so
+      // saying "exited (code=-2)" would send an operator hunting for a status
+      // that does not exist. The 'error' handler above already logged why.
+      const reason = child.pid === undefined ? 'could not start' : `exited (code=${code})`
+      scheduleRestart(reason, uptimeClockMs() - startedAt)
     })
 
     console.log(`[instrumentation] Terminal server starting on port ${PORT} (pid=${child.pid})`)
@@ -310,9 +345,11 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
   // spawned, and only 'close' is delivered for that. This one is demand-started
   // by ensureLocalAiReady, which awaits it: a spawn that failed is reported to
   // that caller by the pid check above, so there is no supervision to restore
-  // and a retry behind the caller's back would be new behaviour. Past that
-  // check the child really exists, and 'exit' is guaranteed for it — one
-  // listener, one retry per death, no double-schedule guard needed.
+  // and a retry behind the caller's back would be new behaviour. (The one
+  // exception is the retry below, which is fire-and-forget — a respawn that
+  // cannot spawn ends the chain, and the next proxied request starts it again.)
+  // Past that check the child really exists, and 'exit' is guaranteed for it —
+  // one listener, one retry per death, no double-schedule guard needed.
   child.on('exit', (code) => {
     void (async () => {
       try {
@@ -331,7 +368,8 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
         const delayMs = llamaCppRestartDelayMs
         llamaCppRestartDelayMs = Math.min(llamaCppRestartDelayMs * 2, CHILD_RESTART_MAX_MS)
         console.log(`[instrumentation] llama.cpp exited (code=${code}), retrying in ${delayMs / 1000}s...`)
-        setTimeout(() => {
+        llamaCppRestartTimer = setTimeout(() => {
+          llamaCppRestartTimer = null
           // Restart the SAME alias. Re-deriving it would send the crash-restart
           // back through the configuration gate, which on a Hermes device is a
           // different question from "what was just running".
@@ -350,6 +388,7 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
 
 export async function stopLlamaCppServer() {
   llamaCppStopping = true
+  endLlamaCppRestartChain()
 
   const llamaCpp = await import('./lib/llamacpp-server')
   const spec = llamaCpp.getLlamaCppLaunchSpec()

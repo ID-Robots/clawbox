@@ -73,6 +73,9 @@ function fakeChild(pid = 4242) {
 
 type EmittingChild = EventEmitter & { pid: number | undefined; kill: () => void };
 
+/** The supervisor's restart ceiling — the longest a pending retry can be armed for. */
+const CHILD_RESTART_CEILING_MS = 60_000;
+
 /**
  * A child that emits for real, so a missing listener fails the way Node fails:
  * an 'error' event nobody is listening for is an uncaught exception.
@@ -247,5 +250,32 @@ describe("llama.cpp child supervision", () => {
     await vi.advanceTimersByTimeAsync(5000);
 
     expect(spawnMock).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * Turning Local AI off has to stay off. `llamaCppStopping` alone cannot do
+   * that: startLlamaCppServer clears it as its first act, so a restart timer
+   * that fires after the stop un-stops the very thing that stopped it. Beta's
+   * window for that was a fixed 5 s; with the backoff it reaches a minute.
+   */
+  it("a deliberate stop cancels a restart the supervisor had already armed", async () => {
+    vi.useFakeTimers();
+    const child = emittingChild(4242);
+    spawnMock.mockReturnValue(child);
+
+    const mod = await loadModule();
+    expect(await mod.startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+
+    // It dies, so a restart is armed...
+    spawnMock.mockReturnValue(emittingChild(4243));
+    child.emit("exit", 1);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // ...and the owner switches Local AI off while it is still pending.
+    await mod.stopLlamaCppServer();
+    await vi.advanceTimersByTimeAsync(CHILD_RESTART_CEILING_MS);
+
+    expect(spawnMock, "a runtime the owner stopped restarted itself anyway").toHaveBeenCalledTimes(1);
   });
 });
