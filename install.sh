@@ -102,24 +102,40 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
       # literal because the constants block has not been parsed yet.
       #
       # A failure here is NOT a warning. The root dispatcher fails closed on a
-      # stale manifest, so every root step of this very update — and the owner's
+      # stale manifest, so every NON-UPDATE root step is then refused with exit
+      # 65 — openclaw_install, performance_mode, gateway_setup, and the owner's
       # password change, hostname change, hotspot restart and llama.cpp install
-      # afterwards — is refused with exit 65 until the record is written again
-      # (seen live: `--verify` returned 65 and every root step was refused).
-      # A single line on the stderr of an update nobody watches is how that
-      # became invisible. TASK-584.
+      # (the update family is deliberately exempt; see SELF_UPDATING_STEPS in
+      # config/clawbox-root-step.sh). Seen live: `--verify` returned 65 and every
+      # root step was refused, and a single line on the stderr of an update
+      # nobody watches was the whole trace. TASK-584.
       _mf=/usr/local/libexec/clawbox/clawbox-root-manifest.sh
+      # --write AND --verify, never --write alone: a truncated or empty helper
+      # exits 0 for both verbs without writing anything, so believing the write's
+      # own status is how this failure would go quiet again.
       if [ "$_b" = "/home/clawbox/clawbox" ] && [ -x "$_mf" ]; then
-        if ! "$_mf" --write; then
+        if ! { "$_mf" --write && "$_mf" --verify >/dev/null; }; then
           # Repair before reporting. The most likely reason the INSTALLED helper
           # failed is that it is the one from before this reset, so replace it
           # from the tree we just checked out and try once more. Best-effort:
           # this is the bootstrap of the boot path and it must never abort.
           echo "[bootstrap] WARN: could not re-record the root-exec manifest — refreshing the helper and retrying" >&2
           if [ -f "$_b/config/clawbox-root-manifest.sh" ]; then
-            install -o root -g root -m 0755 "$_b/config/clawbox-root-manifest.sh" "$_mf" 2>/dev/null || true
+            # Temp name + rename, NEVER a copy over the live file. `install`
+            # writes into the existing inode with O_TRUNC, so a copy that fails
+            # halfway (a full or read-only root filesystem — the same condition
+            # that most often fails the write above) would leave a 0-byte
+            # clawbox-root-manifest.sh behind. That is worse than the stale
+            # manifest: an empty helper exits 0 for --verify, which turns the
+            # root dispatcher from fail-closed into fail-open.
+            if install -o root -g root -m 0755 "$_b/config/clawbox-root-manifest.sh" "$_mf.new"; then
+              mv -f "$_mf.new" "$_mf" || echo "[bootstrap] WARN: could not replace $_mf" >&2
+            else
+              echo "[bootstrap] WARN: could not stage a fresh root-exec manifest helper" >&2
+              rm -f "$_mf.new" 2>/dev/null || true
+            fi
           fi
-          if ! "$_mf" --write; then
+          if ! { "$_mf" --write && "$_mf" --verify >/dev/null; }; then
             # Carried into the re-exec rather than acted on here: the process
             # that can record it against the run's verdict is the one about to
             # start. It re-checks before believing this.
@@ -180,10 +196,24 @@ clear_provision_failure() {
   PROVISION_FAILURES=("${kept[@]}")
 }
 
+# The step an operator should re-run to repair a recorded failure. Almost every
+# token IS its step, which is what both verdict printers assume — but
+# `root_exec_manifest` is recorded before any step runs and is not dispatchable,
+# so printing `--step root_exec_manifest` would hand the operator an "Unknown
+# step". `systemd_services` is the repair: it re-installs the helper AND the
+# dispatcher and re-records the manifest, which is also the hint
+# config/clawbox-root-step.sh gives when it refuses.
+provision_repair_step() {
+  case "$1" in
+    root_exec_manifest) printf 'systemd_services' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 # The bootstrap could not re-record the root-exec manifest before re-exec'ing
 # into this process (TASK-584). The dispatcher fails closed on a stale manifest,
-# so this update's own root steps — and the owner's password and hostname
-# changes after it — are being refused with exit 65.
+# so every NON-UPDATE root step — openclaw_install, gateway_setup, and the
+# owner's password and hostname changes — is being refused with exit 65.
 #
 # Verified rather than believed: the marker says the bootstrap's write failed,
 # not that the record is still wrong, and reporting a failure over a manifest
@@ -196,9 +226,9 @@ if [ "${CLAWBOX_ROOT_MANIFEST_STALE:-0}" = "1" ]; then
     record_provision_failure root_exec_manifest
     echo "  ############################################################" >&2
     echo "  # The root-exec manifest could not be re-recorded." >&2
-    echo "  # Root steps are being REFUSED (exit 65): password change," >&2
-    echo "  # hostname, hotspot restart and llama.cpp install included." >&2
-    echo "  # Repair:  sudo /usr/local/libexec/clawbox/clawbox-root-manifest.sh --write" >&2
+    echo "  # Non-update root steps are being REFUSED (exit 65): password" >&2
+    echo "  # change, hostname, hotspot restart, llama.cpp install." >&2
+    echo "  # Repair:  sudo bash $PROJECT_DIR/install.sh --step systemd_services" >&2
     echo "  ############################################################" >&2
   fi
 fi
@@ -3547,7 +3577,15 @@ write_root_exec_manifest() {
 # is current again.
 refresh_root_exec_manifest() {
   [ -x "$ROOT_EXEC_MANIFEST_HELPER" ] || return 0
-  write_root_exec_manifest || echo "  Warning: could not re-record the root-exec manifest; root steps will refuse until an operator runs 'sudo bash $PROJECT_DIR/install.sh --step systemd_services'" >&2
+  # RECORDED, not just warned. This is the second place install.sh re-records the
+  # manifest after a `git reset --hard` (sync_repo_to_update_target), and it had
+  # the same defect the bootstrap did: a failure here left the step exiting 0
+  # with a stale manifest, and the operator then met it as an opaque exit-65 on
+  # some later step instead. Non-fatal on purpose — the update should finish —
+  # but the run's verdict says so. TASK-584.
+  write_root_exec_manifest && return 0
+  echo "  Warning: could not re-record the root-exec manifest; root steps will refuse until an operator runs 'sudo bash $PROJECT_DIR/install.sh --step systemd_services'" >&2
+  record_provision_failure root_exec_manifest
 }
 
 install_root_libexec() {
@@ -6071,7 +6109,7 @@ if [ "${1:-}" = "--step" ]; then
       echo "  ############################################################"
       echo "  # PROVISIONING INCOMPLETE — step $local_step reported errors."
       echo "  # Steps that failed: ${PROVISION_FAILURES[*]}"
-      echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step ${PROVISION_FAILURES[0]}"
+      echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step $(provision_repair_step "${PROVISION_FAILURES[0]}")"
       echo "  ############################################################"
       write_provision_status incomplete "${PROVISION_FAILURES[*]}" || true
       # Same stdout contract as the full install: the flash host greps these
@@ -6287,7 +6325,7 @@ if [ "$FINAL_RC" -ne 0 ]; then
   echo "  # reported errors. Do NOT ship this box as healthy."
   if [ "${#PROVISION_FAILURES[@]}" -gt 0 ]; then
     echo "  # Steps that failed: ${PROVISION_FAILURES[*]}"
-    echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step ${PROVISION_FAILURES[0]}"
+    echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step $(provision_repair_step "${PROVISION_FAILURES[0]}")"
   fi
   if [ "${VALIDATE_RC:-0}" -ne 0 ]; then
     echo "  # Service validation FAILED (see the checks listed above)."

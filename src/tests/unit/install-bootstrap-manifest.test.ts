@@ -57,14 +57,21 @@ afterEach(() => {
  * adding an env seam: these paths select WHICH code root executes and must stay
  * literal in the shipped file.
  */
-function shipped(fromLine: string, toLine: string, paths: { helper: string; project: string }): string {
+function shipped(
+  fromLine: string,
+  toLine: string,
+  paths: { helper: string; project: string; inclusive?: boolean; must?: string },
+): string {
   const start = INSTALL_SH.indexOf(fromLine);
   if (start < 0) throw new Error(`bootstrap slice start not found: ${fromLine}`);
   const end = INSTALL_SH.indexOf(toLine, start);
   if (end < 0) throw new Error(`bootstrap slice end not found: ${toLine}`);
-  const text = INSTALL_SH.slice(start, end);
-  if (!text.includes(HELPER_PATH)) {
-    throw new Error("the slice no longer names the manifest helper — it was extracted wrong");
+  const text = INSTALL_SH.slice(start, paths.inclusive ? end + toLine.length : end);
+  // A slice that lost its subject would make every assertion over it pass for
+  // the wrong reason, so each caller names something its region must contain.
+  const must = paths.must ?? HELPER_PATH;
+  if (!text.includes(must)) {
+    throw new Error(`the slice no longer contains ${JSON.stringify(must)} — it was extracted wrong`);
   }
   return text
     .split(HELPER_PATH).join(paths.helper)
@@ -122,10 +129,26 @@ function runBootstrap(opts: { failWrites: number; helperInTree?: boolean }): Boo
     chmodSync(path.join(project, "config", "clawbox-root-manifest.sh"), 0o755);
   }
 
+  // The slice runs THROUGH the `exec`, into a stub install.sh that prints the
+  // environment it was handed. Asserting the exec line by substring instead
+  // would pass over a hard-coded 0 or a typo'd inner expansion — the marker
+  // surviving the re-exec is the single most important link in this chain.
+  writeFileSync(
+    path.join(project, "install.sh"),
+    [
+      "#!/usr/bin/env bash",
+      'echo "MARKER=${CLAWBOX_ROOT_MANIFEST_STALE:-unset}"',
+      'echo "BOOTSTRAPPED=${CLAWBOX_INSTALL_BOOTSTRAPPED:-unset}"',
+      'echo "REACHED_EXEC=1"',
+      "",
+    ].join("\n"),
+  );
+  chmodSync(path.join(project, "install.sh"), 0o755);
+
   const block = shipped(
     "      _mf=/usr/local/libexec/clawbox/clawbox-root-manifest.sh",
-    '      echo "[bootstrap] Re-executing as',
-    { helper, project },
+    'bash "$_b/install.sh" "$@"',
+    { helper, project, inclusive: true },
   );
 
   const program = [
@@ -133,9 +156,8 @@ function runBootstrap(opts: { failWrites: number; helperInTree?: boolean }): Boo
     "set -euo pipefail",
     `_b=${JSON.stringify(project)}`,
     block,
-    // What `exec env … CLAWBOX_ROOT_MANIFEST_STALE=…` would carry forward.
-    'echo "MARKER=${CLAWBOX_ROOT_MANIFEST_STALE:-0}"',
-    'echo "REACHED_EXEC=1"',
+    // Never reached: the block above ends in `exec`.
+    'echo "MARKER=exec-did-not-happen"',
     "",
   ].join("\n");
   const file = path.join(root, "bootstrap.sh");
@@ -155,7 +177,13 @@ function runBootstrap(opts: { failWrites: number; helperInTree?: boolean }): Boo
  * Run the verdict block — the marker check that decides whether this run
  * reports a failure — with a helper stub whose `--verify` answers `verifies`.
  */
-function runVerdict(opts: { marker: string; verifies: boolean; alsoWrite?: boolean }): {
+function runVerdict(opts: {
+  marker: string;
+  verifies: boolean;
+  alsoWrite?: boolean;
+  /** Also call refresh_root_exec_manifest, with a helper whose --write does this. */
+  refresh?: "works" | "fails";
+}): {
   status: number | null;
   out: string;
   failures: string;
@@ -164,21 +192,35 @@ function runVerdict(opts: { marker: string; verifies: boolean; alsoWrite?: boole
   mkdirSync(path.dirname(helper), { recursive: true });
   writeFileSync(
     helper,
-    ["#!/usr/bin/env bash", `[ "\${1:-}" = "--verify" ] && exit ${opts.verifies ? 0 : 65}`, "exit 0", ""].join("\n"),
+    [
+      "#!/usr/bin/env bash",
+      `[ "\${1:-}" = "--verify" ] && exit ${opts.verifies ? 0 : 65}`,
+      `[ "\${1:-}" = "--write" ] && exit ${opts.refresh === "fails" ? 1 : 0}`,
+      "exit 0",
+      "",
+    ].join("\n"),
   );
   chmodSync(helper, 0o755);
 
-  const block = shipped("record_provision_failure() {", "\n# ── The marker must never speak", {
+  const block = shipped(
+    "record_provision_failure() {",
+    'if [ "${CLAWBOX_ROOT_MANIFEST_STALE:-0}" = "1" ]; then',
+    { helper, project: path.join(root, "project"), must: "clear_provision_failure() {" },
+  ) + shipped('if [ "${CLAWBOX_ROOT_MANIFEST_STALE:-0}" = "1" ]; then', "\nfi", {
     helper,
     project: path.join(root, "project"),
+    inclusive: true,
   });
-  // The repair path: write_root_exec_manifest clears what it fixed.
-  const writer = (() => {
-    const start = INSTALL_SH.indexOf("write_root_exec_manifest() {");
-    if (start < 0) throw new Error("write_root_exec_manifest not found");
+  // The repair path: write_root_exec_manifest clears what it fixed, and
+  // refresh_root_exec_manifest records what it could not.
+  const fn = (name: string) => {
+    const start = INSTALL_SH.indexOf(`${name}() {`);
+    if (start < 0) throw new Error(`${name} not found`);
     const end = INSTALL_SH.indexOf("\n}", start);
+    if (end < 0) throw new Error(`${name} has no closing brace`);
     return INSTALL_SH.slice(start, end + 2);
-  })();
+  };
+  const writer = `${fn("write_root_exec_manifest")}\n${fn("refresh_root_exec_manifest")}`;
 
   const program = [
     "#!/usr/bin/env bash",
@@ -186,9 +228,11 @@ function runVerdict(opts: { marker: string; verifies: boolean; alsoWrite?: boole
     "PROVISION_FAILURES=()",
     `CLAWBOX_ROOT_MANIFEST_STALE=${JSON.stringify(opts.marker)}`,
     `ROOT_EXEC_MANIFEST_HELPER=${JSON.stringify(helper)}`,
+    `PROJECT_DIR=${JSON.stringify(path.join(root, "project"))}`,
     block,
     writer,
     opts.alsoWrite ? "write_root_exec_manifest" : "true",
+    opts.refresh ? "refresh_root_exec_manifest" : "true",
     'echo "FAILURES=${PROVISION_FAILURES[*]-}"',
     "",
   ].join("\n");
@@ -207,7 +251,8 @@ describe.runIf(canRun)("the bootstrap's root-exec manifest re-record", () => {
   it("re-records once and carries nothing forward when it works", () => {
     const run = runBootstrap({ failWrites: 0 });
     expect(run.status).toBe(0);
-    expect(run.calls).toEqual(["installed --write"]);
+    // --write AND --verify: a truncated helper exits 0 for the write alone.
+    expect(run.calls).toEqual(["installed --write", "installed --verify"]);
     expect(run.marker).toBe("0");
   });
 
@@ -217,8 +262,7 @@ describe.runIf(canRun)("the bootstrap's root-exec manifest re-record", () => {
     // before reporting anything.
     const run = runBootstrap({ failWrites: 1 });
     expect(run.status).toBe(0);
-    expect(run.calls).toHaveLength(2);
-    expect(run.calls[1]).toBe("refreshed --write");
+    expect(run.calls).toEqual(["installed --write", "refreshed --write", "refreshed --verify"]);
     expect(run.marker, "a manifest that was repaired must not be carried forward").toBe("0");
   });
 
@@ -239,11 +283,11 @@ describe.runIf(canRun)("the bootstrap's root-exec manifest re-record", () => {
     expect(run.marker).toBe("1");
   });
 
-  it("hands the marker to the re-exec'd process", () => {
-    // The block under test ends before the exec, so the exec line itself is
-    // pinned here: without this the marker is computed and thrown away.
-    const execLine = INSTALL_SH.slice(INSTALL_SH.indexOf('exec env CLAWBOX_INSTALL_BOOTSTRAPPED=1'));
-    expect(execLine.slice(0, 300)).toContain("CLAWBOX_ROOT_MANIFEST_STALE");
+  it("re-execs into the refreshed tree with the bootstrap flag set", () => {
+    // The other half of the exec's contract, executed rather than matched.
+    const run = runBootstrap({ failWrites: 0 });
+    expect(run.out).toContain("REACHED_EXEC=1");
+    expect(run.out).toContain("BOOTSTRAPPED=1");
   });
 });
 
@@ -253,9 +297,10 @@ describe.runIf(canRun)("a stale manifest is reported against the run's verdict",
     expect(run.status).toBe(0);
     expect(run.failures).toContain("root_exec_manifest");
     // The operator is told what is broken and how to repair it, not just that
-    // something failed.
+    // something failed — and the repair is a step that EXISTS and that
+    // re-installs the helper too, not the command that just failed twice.
     expect(run.out).toMatch(/REFUSED \(exit 65\)/);
-    expect(run.out).toContain("--write");
+    expect(run.out).toContain("--step systemd_services");
   });
 
   it("records nothing when the manifest verifies after all", () => {
@@ -268,6 +313,25 @@ describe.runIf(canRun)("a stale manifest is reported against the run's verdict",
 
   it("records nothing when the bootstrap never set the marker", () => {
     const run = runVerdict({ marker: "0", verifies: false });
+    expect(run.failures.trim()).toBe("");
+  });
+
+  it("records the OTHER re-record too — sync_repo_to_update_target's", () => {
+    // install.sh re-records the manifest after a hard reset in TWO places. The
+    // second, `refresh_root_exec_manifest` (reached from
+    // sync_repo_to_update_target), had the same `--write || echo WARN` shape: a
+    // failure there left the step exiting 0 with a stale manifest, and the
+    // operator met it as an opaque exit-65 on some later step instead. Without
+    // this the run's verdict is asymmetric — cleared by a success, never set by
+    // a failure.
+    const run = runVerdict({ marker: "0", verifies: false, refresh: "fails" });
+    expect(run.status).toBe(0);
+    expect(run.failures).toContain("root_exec_manifest");
+    expect(run.out).toMatch(/Warning: could not re-record/);
+  });
+
+  it("stays quiet when that re-record works", () => {
+    const run = runVerdict({ marker: "0", verifies: false, refresh: "works" });
     expect(run.failures.trim()).toBe("");
   });
 
