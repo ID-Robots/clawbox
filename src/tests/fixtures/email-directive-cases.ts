@@ -94,6 +94,25 @@ export const EMAIL_DIRECTIVE_CASES: EmailDirectiveCase[] = [
     stripped: "Done.\nEMAIL:٤٤٧١",
   },
   {
+    name: "a dotted capital I is not an ASCII i (Python's IGNORECASE says otherwise)",
+    // U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE. Python's `re.IGNORECASE`
+    // is Unicode-aware and folds it onto `i`, so `EMAİL:7` matched the keyword
+    // and the Hermes copy DELETED a line the chat window and the OpenClaw
+    // plugin both keep as text — ECMAScript's `/i` canonicalisation refuses any
+    // non-ASCII character whose fold is ASCII. `re.ASCII` is what makes the
+    // three read the keyword identically. The first line is there because all
+    // three bail out early on a reply with no ASCII `email:` in it at all.
+    input: "Done.\nEMAIL:4471\nEMAİL:7",
+    stripped: "Done.\nEMAİL:7",
+  },
+  {
+    name: "a dotless i is not an ASCII i either",
+    // U+0131 LATIN SMALL LETTER DOTLESS I, the other half of the Turkish pair:
+    // Python folds it onto `I` and stripped `emaıl:7` as well.
+    input: "Done.\nEMAIL:4471\nemaıl:7",
+    stripped: "Done.\nemaıl:7",
+  },
+  {
     name: "a byte-order mark before the directive is still a directive",
     // JavaScript's trim() and \s remove U+FEFF; Python's str.strip() does not.
     // Left to each language's default, the Hermes plugin kept this line and the

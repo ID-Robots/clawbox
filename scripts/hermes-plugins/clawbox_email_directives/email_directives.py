@@ -62,7 +62,15 @@ _JS_WHITESPACE = (
 #: Dropping the leading-whitespace group costs nothing: ``_parse_uid`` strips
 #: the payload with ``_JS_WHITESPACE`` before it reads it, exactly as the two
 #: JavaScript copies call ``.trim()``.
-_EMAIL_LINE_RE = re.compile(r"^email:([\s\S]*)$", re.IGNORECASE)
+#:
+#: ``re.ASCII`` FOR THE SAME REASON ``_UID_RE`` SPELLS OUT ``[0-9]``: Python's
+#: ``re.IGNORECASE`` is Unicode-aware and folds ``İ`` (U+0130) and ``ı``
+#: (U+0131) onto the ASCII ``i``, so ``EMAİL:7`` matched the keyword here and
+#: this copy DELETED a line the chat window and the OpenClaw plugin both keep as
+#: text — ECMAScript's ``/i`` refuses any non-ASCII character whose fold is
+#: ASCII. It does not touch the payload class: ``\S`` is the complement of
+#: whichever ``\s`` is in force, so ``[\s\S]`` is still every character.
+_EMAIL_LINE_RE = re.compile(r"^email:([\s\S]*)$", re.IGNORECASE | re.ASCII)
 
 #: Opening or closing marker of a fenced code block.
 _FENCE_RE = re.compile(r"^(?:```|~~~)")
