@@ -438,14 +438,27 @@ export async function hermesSpeaksReplies(): Promise<boolean> {
     // Two of the three cases below settle on the first read alone.
     const provider = trimmed(await hermesConfigGet(KEYS.provider));
     if (provider === HERMES_LOCAL_TTS_PROVIDER) {
-      // Both halves, because a provider NAMED is not a provider that can
-      // answer: a box that lost its command definition must report that it
-      // cannot speak rather than offer a player that plays nothing.
-      const [type, command] = await Promise.all([
+      // Three halves, not two, and the third is the one the config cannot see.
+      //
+      // A provider NAMED is not a provider that can answer, and install.sh
+      // registers and selects `clawbox-local` regardless of Kokoro's own
+      // verdict — a board that declines the engine is a documented, non-fatal
+      // state that step_validate_services reports as "this box has NO working
+      // on-device TTS engine". Asking the config alone therefore said yes on
+      // exactly that box: the chat promised a player, every turn synthesised
+      // nothing, while the Voice tab — which asks `buildTtsInventory()` — read
+      // the same box as not installed. Two surfaces, one box, two answers.
+      //
+      // So the ENGINE is asked the same way the panel asks it. Re-stat'ed per
+      // call (kokoroEntry reads the stamp and the unit every time, and this
+      // module caches no verdict of its own), so installing Kokoro later flips
+      // it without a restart.
+      const [type, command, installed] = await Promise.all([
         hermesConfigGet(KEYS.localType),
         hermesConfigGet(KEYS.localCommand),
+        localTtsEngineInstalled(),
       ]);
-      return trimmed(type) === "command" && trimmed(command) !== null;
+      return trimmed(type) === "command" && trimmed(command) !== null && installed;
     }
     // The endpoint AND the credential: `writeHermesCloudTarget` writes them
     // separately and the first failure throws, so a box can hold one without
@@ -513,6 +526,26 @@ export async function speechEntitledTier(): Promise<boolean> {
   try {
     const { get } = await import("@/lib/config-store");
     return (await get("clawai_tier")) === CLAWBOX_AI_SPEECH_TIER;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Is an on-device TTS engine actually installed on this box?
+ *
+ * The same fact the Voice tab's local engine is judged by — `buildTtsInventory()`
+ * stats Kokoro's own artefacts — so the chat's promise of a player and the
+ * panel's verdict cannot disagree about one box. Imported lazily: `local-models`
+ * reaches systemd and the filesystem, and this module is pulled in by the chat
+ * turn, which has no other reason to load it.
+ *
+ * Fails CLOSED, like every other fact behind a capability.
+ */
+async function localTtsEngineInstalled(): Promise<boolean> {
+  try {
+    const { buildTtsInventory } = await import("@/lib/local-models");
+    return (await buildTtsInventory()).some((m) => m.kind === "tts" && m.installed);
   } catch {
     return false;
   }

@@ -7,7 +7,7 @@ import path from "path";
 import crypto from "crypto";
 import { runChild } from "@/lib/child-run";
 import { getActiveHarness } from "@/lib/harness";
-import { hermesProviderFor, readHermesVoice, speakWithHermes } from "@/lib/hermes-tts";
+import { hermesProviderFor, hermesVoiceConfigView, readHermesVoice, speakWithHermes } from "@/lib/hermes-tts";
 import { readConfig } from "@/lib/openclaw-config";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { cloudSpeechTarget, localCommandPath, cloudVoiceFrom, type VoiceConfigView } from "@/lib/voice-output";
@@ -201,8 +201,13 @@ async function speakWithHermesEngine(
   // lives in Hermes' own key; the on-device one is the file `clawbox-tts.sh`
   // reads, which is what `readLocalVoice` answers.
   if (typeof requestedVoice === "string" && requestedVoice) {
+    // The voice the PANEL SHOWS, not the raw persisted one. `cloudVoiceFrom`
+    // substitutes the default whenever the stored voice is not one the
+    // configured model actually has (tts-1 has no `verse`), so comparing
+    // against the raw value would 409 naming a voice the dropdown is
+    // displaying — refusing the owner for agreeing with us.
     const active = engine === "cloud"
-      ? probe.cloudVoice ?? DEFAULT_CLOUD_VOICE
+      ? cloudVoiceFrom(hermesVoiceConfigView(probe, null, null)) ?? DEFAULT_CLOUD_VOICE
       : (await readLocalVoice()) ?? DEFAULT_LOCAL_VOICE;
     if (requestedVoice !== active) {
       return refuse(

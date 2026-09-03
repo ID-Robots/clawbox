@@ -3004,10 +3004,12 @@ step_openclaw_tts() {
     #     $CLAWBOX_TTS_VOICE_FILE and the script reads it on every utterance;
     #     that is the mechanism, and both harnesses now share it.
     #
-    # `=` spellings, because the placeholders are interpolated UNQUOTED into a
-    # shell-interpreted string: an empty {input_path} in the separated form
-    # collapses to `--text-file -- /out.wav`, and the script would take `--` as
-    # the flag's value and then speak a file path aloud.
+    # `=` spelling. Hermes shell-quotes each placeholder for its context
+    # (_quote_command_tts_placeholder → shlex.quote), so an empty value renders
+    # as '' and the separated form would NOT collapse into the next token — an
+    # earlier comment here claimed it would, and that was wrong. The `=` form
+    # is kept anyway because it cannot be misread whatever the quoting does,
+    # and because it says at a glance that the value belongs to the flag.
     local HERMES_TTS_COMMAND="$TTS_SCRIPT --text-file={input_path} -- {output_path}"
     local HERMES_TTS_FAIL="" HERMES_TTS_READ_FAILED=false
     # Rule (a), the same one the OpenClaw arm applies below: never point a
@@ -3053,11 +3055,29 @@ step_openclaw_tts() {
       # treat the entry as a command provider at all, so writing it second
       # means a half-written provider is never a runnable-looking one.
       #
-      # No `format` key is written. The placeholder list includes {format}, but
-      # nothing in this repo establishes that a command provider READS a
-      # `format` key, and a key invented here would be config the harness does
-      # not own. clawbox-tts.sh derives the container from the output path.
+      # `output_format wav`, and it is load-bearing rather than cosmetic.
+      #
+      # An earlier version of this block wrote no format key at all, on the
+      # reasoning that nothing established a command provider reads one. That
+      # was wrong, and verified wrong on the box: tts_tool.py's
+      # _get_command_tts_output_format reads `format` or `output_format` and
+      # falls back to DEFAULT_COMMAND_TTS_OUTPUT_FORMAT, which is "mp3". With
+      # the key unset Hermes therefore hands clawbox-tts.sh an .mp3 output
+      # path on EVERY utterance — and that is the one path the script cannot
+      # walk alone: it synthesises WAV and then shells out to
+      # `ffmpeg -codec:a libmp3lame`, refusing the whole run when ffmpeg is
+      # absent rather than write WAV bytes into an .mp3. install.sh never
+      # installs ffmpeg in the main flow (step_ffmpeg_install is defined and
+      # dispatchable but uncalled), so on any image that does not happen to
+      # ship it the box's own voice fails 100% of the time; where it IS
+      # present it is a libmp3lame encode per reply inside a 12 s budget.
+      #
+      # wav matches the OpenClaw arm's deliberate `outputFormat: "wav"` a
+      # screen below — same script, same reason ("Kokoro emits WAV natively,
+      # so the happy path needs no ffmpeg at all"). The two harnesses must not
+      # be configured to disagree about one script.
       if as_clawbox "$HERMES_TTS_BIN" config set "tts.providers.$HERMES_TTS_PROVIDER.command" "$HERMES_TTS_COMMAND" \
+        && as_clawbox "$HERMES_TTS_BIN" config set "tts.providers.$HERMES_TTS_PROVIDER.output_format" wav \
         && as_clawbox "$HERMES_TTS_BIN" config set "tts.providers.$HERMES_TTS_PROVIDER.type" command; then
         echo "  Hermes on-device TTS provider defined ($HERMES_TTS_PROVIDER)"
         # ── Seed-if-unset, with ONE extra value counted as unset: `edge` ──────

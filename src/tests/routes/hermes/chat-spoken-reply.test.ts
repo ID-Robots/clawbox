@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { saveEnv } from "@/tests/helpers/env";
 import { EventEmitter } from "events";
 import fs from "fs";
+import fsp from "fs/promises";
 import os from "os";
 import path from "path";
 
@@ -69,6 +70,21 @@ vi.mock("@/lib/hermes-config-cache", async (importOriginal) => ({
   hermesConfigGet: async (k: string) => hermesConfig[k] ?? "",
 }));
 
+/**
+ * Kokoro on the disk. The capability asks the same inventory the Voice tab
+ * asks, so a box whose engine never installed promises no player — see
+ * `localTtsEngineInstalled`. Installed by default here; one case below empties
+ * it.
+ */
+let ttsInstalled = true;
+vi.mock("@/lib/local-models", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/local-models")>()),
+  buildTtsInventory: async () =>
+    ttsInstalled
+      ? [{ id: "kokoro", name: "Kokoro", kind: "tts", installed: true }]
+      : [{ id: "kokoro", name: "Kokoro", kind: "tts", installed: false }],
+}));
+
 /** Hermes' own speak endpoint. */
 let speakCalls: Array<{ path: string; body: unknown }> = [];
 let speakReply: () => Response = () => new Response("", { status: 500 });
@@ -121,6 +137,7 @@ beforeEach(() => {
   spawned.length = 0;
   speakCalls = [];
   speakReply = spokenOk;
+  ttsInstalled = true;
   stdoutReply = "The lantern is green.";
   stderrBanner = "session_id: 20260810_221825_609d1e";
   root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-hermesspeak-"));
@@ -222,6 +239,41 @@ describe("a speak endpoint that answers with far too much", () => {
     // The reply still lands; only the oversized clip is dropped.
     expect(assistant.text).toBe("The lantern is green.");
     expect(assistant.audio).toBeUndefined();
+  });
+});
+
+describe("a Hermes box whose Kokoro never installed", () => {
+  it("promises no player, matching what the Voice tab says about the same box", () => {
+    // install.sh registers and SELECTS clawbox-local regardless of Kokoro's
+    // own verdict, and a board that declines the engine is a documented,
+    // non-fatal state. Asking the config alone said yes on exactly that box:
+    // the chat promised a player and every turn produced nothing, while the
+    // Voice tab read the same box as not installed.
+    ttsInstalled = false;
+    return post({ message: "what colour" }).then(async (res) => {
+      expect(res.status).toBe(200);
+      expect(speakCalls).toHaveLength(0);
+      const assistant = transcript().filter((m) => m.role === "assistant").pop();
+      expect(assistant.audio).toBeUndefined();
+    });
+  });
+});
+
+describe("a clip directory whose mode cannot be enforced", () => {
+  it("drops the clip rather than writing into a directory it could not lock down", () => {
+    // `mkdir` does not re-mode a directory that already exists, so this chmod
+    // is the only thing between a tree created earlier at the umask default
+    // and a listing of the timing, count and size of every reply the box
+    // spoke. Swallowing its failure and writing anyway was the hole; a silent
+    // reply is the right trade against it.
+    const chmod = vi.spyOn(fsp, "chmod").mockRejectedValue(new Error("EPERM"));
+    return post({ message: "what colour" }).then(async (res) => {
+      expect(res.status).toBe(200);
+      const assistant = transcript().filter((m) => m.role === "assistant").pop();
+      expect(assistant.text).toBe("The lantern is green.");
+      expect(assistant.audio).toBeUndefined();
+      chmod.mockRestore();
+    });
   });
 });
 

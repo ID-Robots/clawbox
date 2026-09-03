@@ -260,6 +260,34 @@ describe.skipIf(!hasBash)("the on-device voice is registered with Hermes nativel
     );
   });
 
+  it("pins the output format to wav, so no utterance needs ffmpeg", () => {
+    // VERIFIED ON THE BOX: tts_tool.py's _get_command_tts_output_format reads
+    // `format` or `output_format` and otherwise falls back to
+    // DEFAULT_COMMAND_TTS_OUTPUT_FORMAT = "mp3". Leave the key unset and
+    // Hermes hands clawbox-tts.sh an .mp3 path on EVERY utterance; the script
+    // then needs `ffmpeg -codec:a libmp3lame` and REFUSES the whole run
+    // without it — and install.sh never installs ffmpeg in the main flow, so
+    // on an image that does not happen to ship it the box's own voice fails
+    // every time. The OpenClaw arm writes `outputFormat: "wav"` for the same
+    // script and the same reason; the two harnesses must not disagree.
+    const res = runStep("hermes");
+    expect(res.hermesCalls.join("\n"), `no output_format was pinned:\n${res.out}`).toContain(
+      `config set tts.providers.${HERMES_PROVIDER}.output_format wav`,
+    );
+  });
+
+  it("writes the format BEFORE the type, so a half-written provider is never runnable", () => {
+    // `type: command` is what makes Hermes treat the entry as a command
+    // provider at all, so it stays last: a provider that became runnable
+    // before its format landed would speak .mp3 exactly once.
+    const res = runStep("hermes");
+    const calls = res.hermesCalls.join("\n");
+    const fmt = calls.indexOf(`${HERMES_PROVIDER}.output_format`);
+    const type = calls.indexOf(`${HERMES_PROVIDER}.type`);
+    expect(fmt, `output_format was not written:\n${res.out}`).toBeGreaterThan(-1);
+    expect(fmt, `type landed before the format:\n${res.out}`).toBeLessThan(type);
+  });
+
   it("does not pass --voice, so the Voice tab's own pick is what speaks", () => {
     // clawbox-tts.sh's resolve_voice gives --voice precedence over the saved
     // voice file, and an UNKNOWN --voice falls back to the script default
@@ -398,7 +426,7 @@ describe.skipIf(!hasBash)("the Hermes TTS selection is seeded, never overwritten
  * Run the REAL scripts/openclaw/clawbox-tts.sh against a stub `kokoro` that
  * writes a plausible WAV and records the text it was handed.
  */
-function runTts(args: string[]) {
+function runTts(args: string[], extraEnv: Record<string, string> = {}) {
   const home = path.join(root, "tts-home");
   const kokoroLog = path.join(root, "kokoro-text.log");
   const kokoro = path.join(root, "bin", "kokoro");
@@ -432,6 +460,7 @@ function runTts(args: string[]) {
       KOKORO_LD_PATH: "",
       CLAWBOX_TTS_MEMINFO: meminfo,
       CLAWBOX_TTS_VOICE_FILE: path.join(home, "voice"),
+      ...extraEnv,
     },
   });
   return {
@@ -506,6 +535,39 @@ describe.skipIf(!hasBash)("clawbox-tts.sh --text-file", () => {
     expect(res.status, res.out).toBe(0);
     expect(res.spoken).toBe("positional text");
     expect(existsSync(outWav)).toBe(true);
+  });
+
+  /**
+   * WHY install.sh pins `output_format: wav` on the Hermes provider.
+   *
+   * With that key unset the harness defaults a command provider's format to
+   * `mp3` (tts_tool.py: `config.get("format") or config.get("output_format")
+   * or DEFAULT_COMMAND_TTS_OUTPUT_FORMAT`, and that constant is "mp3"), so it
+   * hands this script an .mp3 path on every utterance. These two cases are
+   * what that costs: the same synthesis succeeds into .wav and refuses into
+   * .mp3 on a box without ffmpeg — which install.sh never installs.
+   */
+  it("refuses an .mp3 output when ffmpeg is absent, rather than writing broken audio", () => {
+    const textFile = path.join(root, "fmt.txt");
+    writeFileSync(textFile, "format matters");
+    const outMp3 = path.join(root, "out-fmt.mp3");
+    const res = runTts([`--text-file=${textFile}`, "--", outMp3], {
+      FFMPEG_BIN: path.join(root, "no-such-ffmpeg"),
+    });
+    expect(res.status, `an .mp3 without ffmpeg was not refused:\n${res.out}`).not.toBe(0);
+    expect(res.out).toMatch(/ffmpeg not available/i);
+    expect(existsSync(outMp3), "a broken .mp3 was left behind").toBe(false);
+  });
+
+  it("writes a .wav with no ffmpeg anywhere, which is why the provider pins wav", () => {
+    const textFile = path.join(root, "fmt2.txt");
+    writeFileSync(textFile, "format matters");
+    const outWav = path.join(root, "out-fmt.wav");
+    const res = runTts([`--text-file=${textFile}`, "--", outWav], {
+      FFMPEG_BIN: path.join(root, "no-such-ffmpeg"),
+    });
+    expect(res.status, `the wav path needed ffmpeg after all:\n${res.out}`).toBe(0);
+    expect(existsSync(outWav), `no audio was written:\n${res.out}`).toBe(true);
   });
 
   it("advertises --text-file in its usage", () => {
