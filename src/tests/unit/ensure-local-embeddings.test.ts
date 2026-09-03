@@ -538,6 +538,8 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     out: string;
     /** Every argv the stub `openclaw` was called with, one per line. */
     cliCalls: string;
+    /** One line per invocation of the stub ensure-local-embeddings.sh. */
+    helperCalls: string;
   }
 
   /**
@@ -549,13 +551,21 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
    *
    * `cli` scripts the stub `openclaw`: a JSON string to print, or `null` to
    * exit 1 saying nothing (a core that is not there, or cannot answer).
+   * `cliExit` is the status it then exits with — the case where a core prints
+   * a complete, parseable answer and still fails.
    */
-  function report(opts: { edition?: "openclaw" | "hermes"; cli: string | null; config?: unknown }): Report {
+  function report(opts: {
+    edition?: "openclaw" | "hermes";
+    cli: string | null;
+    cliExit?: number;
+    config?: unknown;
+  }): Report {
     if (!BLOCK) throw new Error("install.sh post-run check not found, or extracted truncated");
     const home = path.join(dir, "device", "home", "clawbox");
     const project = path.join(dir, "device", "project");
     const stubBin = path.join(dir, "device", "bin");
     const cliLog = path.join(dir, "device", "openclaw-calls.log");
+    const helperLog = path.join(dir, "device", "helper-calls.log");
     mkdirSync(path.join(home, ".openclaw"), { recursive: true });
     mkdirSync(path.join(project, "scripts"), { recursive: true });
     mkdirSync(stubBin, { recursive: true });
@@ -572,20 +582,27 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     );
     // Best-effort and its exit code says nothing; the check under test is what
     // reports afterwards.
-    writeFileSync(path.join(project, "scripts", "ensure-local-embeddings.sh"), "#!/usr/bin/env bash\nexit 0\n");
+    writeFileSync(
+      path.join(project, "scripts", "ensure-local-embeddings.sh"),
+      `#!/usr/bin/env bash\nprintf 'ran\\n' >> ${JSON.stringify(helperLog)}\nexit 0\n`,
+    );
     chmodSync(path.join(project, "scripts", "ensure-local-embeddings.sh"), 0o755);
     const openclaw = path.join(stubBin, "openclaw");
     writeFileSync(
       openclaw,
       opts.cli === null
         ? `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(cliLog)}\nexit 1\n`
-        : `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(cliLog)}\ncat <<'JSON'\n${opts.cli}\nJSON\n`,
+        : `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(cliLog)}\ncat <<'JSON'\n${opts.cli}\nJSON\nexit ${opts.cliExit ?? 0}\n`,
     );
     chmodSync(openclaw, 0o755);
     // A bounded call is part of the contract, but the real `timeout` is not on
     // every dev host; the stub keeps the argv assertable and runs the command.
     const timeoutStub = path.join(stubBin, "timeout");
-    writeFileSync(timeoutStub, '#!/usr/bin/env bash\nshift\nexec "$@"\n');
+    writeFileSync(
+      timeoutStub,
+      // Skip the options (-k takes a value) and the duration, then run it.
+      '#!/usr/bin/env bash\nwhile [ "${1#-}" != "$1" ]; do\n  case "$1" in -k|--kill-after) shift 2 ;; *) shift ;; esac\ndone\nshift\nexec "$@"\n',
+    );
     chmodSync(timeoutStub, 0o755);
 
     const program = [
@@ -623,6 +640,7 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     return {
       out: `${run.stdout ?? ""}${run.stderr ?? ""}`,
       cliCalls: existsSync(cliLog) ? readFileSync(cliLog, "utf-8") : "",
+      helperCalls: existsSync(helperLog) ? readFileSync(helperLog, "utf-8") : "",
     };
   }
 
@@ -637,7 +655,11 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
   it("asks the core, bounded, instead of re-reading openclaw.json", () => {
     const run = report({ cli: status("ollama") });
     expect(run.cliCalls).toContain("memory status --agent main --deep --json");
-    expect(BLOCK).toMatch(/timeout \d+ "\$OPENCLAW_BIN" memory status/);
+    // -k, because `timeout` alone sends SIGTERM only and
+    // collectMemoryStatusJson() escalates to SIGKILL after 5 s: a CLI that
+    // ignores SIGTERM must not hang the installer where it would not hang the
+    // panel this block exists to agree with.
+    expect(BLOCK).toMatch(/timeout -k \d+ \d+ "\$OPENCLAW_BIN" memory status/);
   });
 
   it("reports the model the core resolved as ready", () => {
@@ -678,9 +700,25 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
       // Every one of these used to collapse into a claim about the config.
       const run = report({ cli });
       expect(run.out).not.toContain(READY);
-      expect(run.out).toMatch(/could not ask/i);
+      // One message for three states: the CLI could not be asked, its answer
+      // could not be read, or it answered without naming a provider. Naming
+      // only the first was wrong for the third, which did answer.
+      expect(run.out).toMatch(/could not read an embedder/i);
     });
   }
+
+  it("does not trust a core that printed an answer and then failed", () => {
+    // TASK-659's own defect, re-entered through the exit code instead of the
+    // config key. `--deep` failing its provider probe after emitting the
+    // shallow status, a core that reports and then exits on an unrelated
+    // warning, or `timeout` killing the CLI after a complete document has
+    // already been written — each is a box whose embedder is NOT known.
+    // collectMemoryStatusJson() in src/lib/clawkeep-memory.ts rejects on
+    // `code !== 0`; this block must not disagree with it.
+    const run = report({ cli: status("ollama"), cliExit: 1 });
+    expect(run.out).not.toContain(READY);
+    expect(run.out).toMatch(/could not read an embedder/i);
+  });
 
   it("says memory search is not on this edition on hermes, and asks no core", () => {
     // step_ollama_install has no edition guard, and a hermes box has no core,
@@ -689,5 +727,15 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     expect(run.out).not.toContain(READY);
     expect(run.out).toMatch(/does not include it/i);
     expect(run.cliCalls).toBe("");
+  });
+
+  it("does no embedding work at all on hermes, not just no reporting", () => {
+    // The gate used to sit below the helper, so a hermes box ran
+    // ensure-local-embeddings.sh, found no provider anywhere, and pulled a
+    // ~640 MB model whose config write then failed soft by design — and the
+    // very next line told the operator the edition does not have the feature.
+    expect(report({ edition: "hermes", cli: status("ollama") }).helperCalls).toBe("");
+    // The control: it still runs where there IS a core to configure.
+    expect(report({ cli: status("ollama") }).helperCalls).toContain("ran");
   });
 });
