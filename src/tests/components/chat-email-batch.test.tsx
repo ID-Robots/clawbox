@@ -963,6 +963,32 @@ describe("a verdict that does not cry wolf", () => {
       .toHaveTextContent("Already sent as an identical message");
   });
 
+  it("does not say 'Nothing was sent.' over a draft nobody knows the ending of", async () => {
+    // The twin of the case above, and the one that costs a delete. `gone` is
+    // the bucket this module documents as "decided somewhere else… most often
+    // by SENDING it" — an UNKNOWN, not a zero. `wentOutCount` counts only the
+    // endings the card can name, so a real deletion beside one of these landed
+    // on "1 deleted. Nothing was sent." directly under a row reading "No longer
+    // waiting — it was handled elsewhere".
+    await mount(
+      card({
+        status: "settled",
+        settledByOwner: true,
+        lastGesture: "delete",
+        drafts: [draft(1), draft(2)],
+        outcomes: [
+          { id: "draft-1", ok: true, kind: "rejected" },
+          { id: "draft-2", ok: false, kind: "gone" },
+        ],
+      }),
+    );
+    const result = await screen.findByTestId("chat-email-batch-result");
+    expect(result.textContent).not.toContain("Nothing was sent");
+    // Both halves again: the deletion he made, and the one nobody can vouch for.
+    expect(result).toHaveTextContent("1 deleted");
+    expect(result).toHaveTextContent("decided somewhere else");
+  });
+
   it("still tells an APPROVE that nothing went out", async () => {
     // Reserving "{n} deleted." for a delete must not cost the owner the half of
     // that sentence which was true. He pressed *Approve & send*; the drafts had

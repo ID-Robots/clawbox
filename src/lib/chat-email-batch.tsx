@@ -334,7 +334,11 @@ export function reconcileBatchCards(
      * not build a new card for it, because `shownDraftIds` still covers it — so
      * a live draft ends up with no control on the surface that offered it.
      *
-     * Only a GUESS, never a receipt's ending, and only on a WAITING card:
+     * Only a `gone` row — never a receipt's ending — and only on a WAITING card.
+     * ("Guess" is the usual source but not the only one: the route answers
+     * `reason: "gone"` for a draft it could not find. Withdrawing that one is
+     * right for the same reason — `gone` means "not waiting", and it
+     * demonstrably is waiting again.) The waiting gate is there because
      * re-opening a settled one would put an Approve button back under a verdict
      * the owner has already read.
      */
@@ -379,7 +383,12 @@ export function reconcileBatchCards(
       // not be deleted" — made when the answer never arrived. The store has now
       // said what actually happened, and leaving the old sentence up would put
       // "Nothing was sent" in red directly under "2 sent." in green.
-      requestError: "",
+      //
+      // ONLY when this pass ADDED an ending. A withdrawal is the store saying
+      // "that draft is still waiting", which contradicts nothing the sentence
+      // claims — and wiping it there takes the explanation off a card whose
+      // buttons are still live.
+      ...(added.length > 0 ? { requestError: "" } : {}),
       ...(everyOne ? { status: "settled" as const } : {}),
     };
   });
@@ -888,7 +897,16 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
               no gesture settled — over an approve it claims a deletion this card
               never made. An approve that sent nothing says so plainly instead of
               falling to the vague line, because "did my send happen?" is the one
-              thing that click was asking. And a `duplicate` is on neither side
+              thing that click was asking — but only when nothing is UNKNOWN.
+              `wentOutCount` counts the endings this card can NAME, and a `gone`
+              is the bucket documented above as "most often by SENDING it". So
+              "Nothing was sent." is gated on `elsewhereCount === 0` as well, on
+              BOTH gestures: reading that unknown as a zero is the false failure
+              the owner acts on by sending the message a second time. A deletion
+              beside one gets a sentence of its own rather than the clause
+              alone, because dropping through to the duplicate line would have
+              rendered "1 deleted, 0 already sent as an identical message" and
+              dropping to the vague one would have swallowed the deletion. And a `duplicate` is on neither side
               of that: the words reached the recipient, so it is counted with the
               mail rather than with the deletions, and no sentence over it may
               say nothing was sent. That last rule is enforced by
@@ -921,13 +939,18 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
                   : sentCount > 0
                     ? t("chat.emailBatch.resultAllSent", { count: String(sentCount) })
                     : deletedCount > 0 && card.lastGesture !== "approve"
-                      ? wentOutCount === 0
-                        ? t("chat.emailBatch.resultDiscarded", { count: String(deletedCount) })
-                        : t("chat.emailBatch.resultDiscardedDuplicate", {
+                      ? wentOutCount > 0
+                        ? t("chat.emailBatch.resultDiscardedDuplicate", {
                             discarded: String(deletedCount),
                             duplicates: String(duplicateCount),
                           })
-                      : card.lastGesture === "approve" && wentOutCount === 0
+                        : elsewhereCount > 0
+                          ? t("chat.emailBatch.resultDiscardedElsewhere", {
+                              discarded: String(deletedCount),
+                              elsewhere: String(elsewhereCount),
+                            })
+                          : t("chat.emailBatch.resultDiscarded", { count: String(deletedCount) })
+                      : card.lastGesture === "approve" && wentOutCount === 0 && elsewhereCount === 0
                         ? t("chat.emailBatch.resultNoneSent")
                         : t("chat.emailBatch.resultElsewhere")}
         </div>

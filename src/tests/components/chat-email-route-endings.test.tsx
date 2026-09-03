@@ -74,9 +74,13 @@ function installBoxWithLiveQueue(opts: { breakPost?: (action: string) => Respons
       if (url.includes("/setup-api/email/pending")) {
         if ((init?.method ?? "GET").toUpperCase() === "POST") {
           const body = String(init?.body ?? "{}");
-          const action = String((JSON.parse(body) as { action?: unknown }).action ?? "");
-          const broken = opts.breakPost?.(action);
-          if (broken) return broken;
+          // Parsed ONLY when a test asked to break something. The fixture is
+          // shared, and a case that posts a malformed body to prove the route's
+          // own 400 must fail on the route rather than on a SyntaxError in here.
+          if (opts.breakPost) {
+            const broken = opts.breakPost(String((JSON.parse(body) as { action?: unknown }).action ?? ""));
+            if (broken) return broken;
+          }
           return POST(
             new Request("http://localhost/setup-api/email/pending", {
               method: "POST",
@@ -544,5 +548,57 @@ describe("a delete answered 'gone' whose receipt lands a second later", () => {
     // whether or not its own request survived the trip.
     expect(verdict()).toEqual({ text: "chat.emailBatch.resultSentElsewhere", color: WARN_FG });
     expect(outcomeRow(only)?.style.color).not.toBe(OK_FG);
+  });
+  it("does not say 'Nothing was sent' when the APPROVE's own request never came back", async () => {
+    // The mirror of the case above, and the one the click-time gesture opened.
+    // The owner presses *Approve & send*; the route claims the draft and is
+    // mid-SMTP when the reply is lost. The card falls back to `waiting`, the
+    // poll finds the draft in neither list and writes the provisional "gone",
+    // and the card settles — now with `lastGesture: "approve"`, which reaches
+    // the branch that says "Nothing was sent." about a message being handed to
+    // a mail server this second. `wentOutCount` counts only endings the card
+    // KNOWS went out; `gone` is the bucket this module documents as "most often
+    // by SENDING it", and reading that unknown as a zero is the false failure
+    // the owner acts on by sending the message again.
+    const only = queue("The one still in flight");
+
+    let breakApprovals = false;
+    const box = installBoxWithLiveQueue({
+      breakPost: (action) =>
+        breakApprovals && action === "approve_batch"
+          ? new Response("<html>502 Bad Gateway</html>", { status: 502 })
+          : null,
+    });
+    await mountHermesChat(box);
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-approve")).toBeTruthy());
+
+    // The send this box is making, held open: the draft is claimed and has no
+    // receipt, which is the window the whole scenario lives in.
+    const release = holdOneSend();
+    const inFlight = POST(
+      new Request("http://localhost/setup-api/email/pending", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", cookie },
+        body: JSON.stringify({ action: "approve", id: only }),
+      }),
+    );
+    await waitFor(() => expect(store.listPending()).toHaveLength(0));
+    expect(outcomes.getOutcome(only)).toBeNull();
+
+    breakApprovals = true;
+    fireEvent.click(screen.getByTestId("chat-email-batch-approve"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-error")).toBeTruthy());
+
+    // The poll lands while the message is still going out.
+    fireEvent.focus(window);
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-result")).toBeTruthy());
+    expect(endingFor(only)).toBe("gone");
+
+    // Vague is allowed here; absolute is not. Nobody knows the ending yet.
+    expect(verdict().text).toBe("chat.emailBatch.resultElsewhere");
+    expect(verdict().text).not.toBe("chat.emailBatch.resultNoneSent");
+
+    release();
+    expect((await inFlight).status).toBe(200);
   });
 });

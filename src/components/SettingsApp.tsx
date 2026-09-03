@@ -112,7 +112,10 @@ interface HandledEmail {
    * That list exists so a sixth ending cannot be added in one place and go
    * unread in another — its own comment calls a partial copy "how a real ending
    * quietly becomes 'no idea'". A hand-written union here made this strip the
-   * one reader the compiler could not warn.
+   * one reader the compiler could not warn; the renderer below carries the
+   * other half of that promise, an exhaustive chain ending in `never`, because
+   * the type alone would have let a sixth ending render as "Failed: " with no
+   * reason.
    */
   kind: EmailEnding;
   at: number;
@@ -4516,7 +4519,22 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                                 // over and never heard back, and a confident
                                 // "not sent" is how a person sends it twice.
                                 ? t("settings.emailHandledUnconfirmed")
-                                : t("settings.emailHandledFailed", { reason: entry.error || "" })}
+                                : entry.kind === "failed"
+                                  ? t("settings.emailHandledFailed", { reason: entry.error || "" })
+                                  // `entry.kind` is `never` here, so a sixth
+                                  // member of `EMAIL_ENDINGS` is a COMPILE
+                                  // ERROR rather than a row announced as
+                                  // "Failed: " with an empty reason. Reading
+                                  // the wire through `emailEnding` is what lets
+                                  // an unknown ending reach this renderer at
+                                  // all — the hand-written filter dropped it —
+                                  // so the guard has to travel with it. If it
+                                  // were ever reached it answers with the one
+                                  // sentence that claims nothing.
+                                  : ((unreachable: never) => {
+                                      void unreachable;
+                                      return t("settings.emailHandledUnconfirmed");
+                                    })(entry.kind)}
                       </div>
                     </div>
                   ))}
