@@ -15,7 +15,6 @@ import { get as getConfigStoreValue } from "@/lib/config-store";
 import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-status";
 import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
 import { isSafeDiscordToken } from "@/lib/discord-api";
-import { logSafe } from "@/lib/log-safe";
 
 const exec = promisify(execFile);
 
@@ -493,6 +492,61 @@ function valueAtConfigPath(config: unknown, segments: readonly string[]): unknow
 }
 
 /**
+ * The config areas this module is willing to NAME in a log line.
+ *
+ * A config path is caller text. `POST /setup-api/chat/model` builds one out of
+ * the model reference in its request body (`chatgptRuntimeEntryPath`) and
+ * `POST /setup-api/tts` out of the voice provider — the two sources CodeQL
+ * traced into the journal line below (js/log-injection, alert #473). Escaping
+ * that text is not enough to make the record ours: a caller who chooses the
+ * content, and with it the length, of what one API call writes to the journal
+ * can forge entries inside a line as well as across two.
+ *
+ * So the path is mapped onto one of these literals and the caller's own text
+ * never reaches the line. The write is still diagnosable — which subsystem was
+ * being configured is the part an operator reads — and a path under anything
+ * else is named "other" rather than quoted.
+ */
+const LOGGED_CONFIG_AREAS = [
+  "agents",
+  "channels",
+  "memory",
+  "messages",
+  "models",
+  "plugins",
+  "tools",
+  "tts",
+] as const;
+
+/**
+ * The path a `config set` entry assigns: the first non-flag argv element, the
+ * same rule {@link parseConfigSetArgs} reads it by. Total where that one throws
+ * — an entry this cannot read yields `""`, which {@link loggedConfigAreas}
+ * names "other". A log line describing a success must not be able to turn it
+ * into a failure.
+ */
+function configSetEntryPath(args: OpenclawConfigSetArgs): string {
+  return args.find((arg) => !arg.startsWith("--")) ?? "";
+}
+
+/**
+ * Name the areas some config paths write to, using only the literals above.
+ *
+ * `find`, not a membership test: what is returned is the element of
+ * {@link LOGGED_CONFIG_AREAS}, so nothing derived from the caller's path is
+ * what gets logged. `LOGGED_CONFIG_AREAS.includes(root) ? root : "other"` would
+ * read the same and put the request's text straight back into the record.
+ */
+function loggedConfigAreas(configPaths: readonly string[]): string {
+  const areas = new Set<string>();
+  for (const configPath of configPaths) {
+    const root = configPathSegments(configPath)?.[0];
+    areas.add(LOGGED_CONFIG_AREAS.find((area) => area === root) ?? "other");
+  }
+  return [...areas].sort().join(", ");
+}
+
+/**
  * Did the assignments of a killed `config set` actually reach the file?
  *
  * Measured on the OpenClaw box (TASK-654): `POST /setup-api/chat/model`
@@ -548,14 +602,12 @@ async function runConfigSetVerified(
   } catch (err) {
     if (!(err instanceof OpenclawSpawnTimeoutError)) throw err;
     if (!(await configSetLanded(batch))) throw err;
-    // logSafe, not the raw message: a config PATH can be built from request
-    // input (`chatgptRuntimeEntryPath(modelRef)`, `models.providers.<provider>`)
-    // and rides into `err.message` through the spawn label. Unbounded and
-    // un-escaped, that would let a caller decide how many journal records one
-    // API call produces (CWE-117). The VALUES are already elided by
-    // configSetLabelArgs / configSetBatchLabelArgs.
+    // Not `err.message`: the spawn label carries the caller's config path. (The
+    // VALUES are already elided by configSetLabelArgs / configSetBatchLabelArgs;
+    // the paths are not, and they are the half built from a request body.)
+    const areas = loggedConfigAreas(batch.map(configSetEntryPath));
     console.warn(
-      `[openclaw-config] ${logSafe(err.message)}; every assignment is on disk, so the write landed — reporting success`,
+      `[openclaw-config] a config set (${areas}) was killed at its deadline, but every assignment is on disk — the write landed, reporting success`,
     );
   }
 }
@@ -691,8 +743,9 @@ export async function runOpenclawConfigUnset(
   } catch (err) {
     if (!(err instanceof OpenclawSpawnTimeoutError)) throw err;
     if (!(await configUnsetLanded(configPath))) throw err;
+    // The path is the caller's text here too — see {@link LOGGED_CONFIG_AREAS}.
     console.warn(
-      `[openclaw-config] ${logSafe(err.message)}; the path is gone from the config, so the removal landed — reporting success`,
+      `[openclaw-config] a config unset (${loggedConfigAreas([configPath])}) was killed at its deadline, but the path is gone from the config — the removal landed, reporting success`,
     );
   }
 }

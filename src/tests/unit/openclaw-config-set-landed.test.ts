@@ -280,6 +280,65 @@ describe("a config set killed at its timeout is verified, not assumed failed", (
     expect(err!.message).toContain("timed out");
   });
 
+  it("keeps the caller's config path out of the journal line", async () => {
+    // CodeQL js/log-injection #473: `POST /setup-api/chat/model` and
+    // `POST /setup-api/tts` both build a config path out of their request body
+    // (`chatgptRuntimeEntryPath(modelRef)`, `models.providers.<provider>`), and
+    // the path rides into the spawn label and out through this line. Escaping
+    // the value is not enough — a record whose CONTENT is the caller's is a
+    // forged record whether or not it also spans two lines.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      mockSpawn.mockImplementation(() => hangingChild());
+      const forgedKey = "evil\n[openclaw-config] forged line";
+      configOnDisk({ models: { providers: { [forgedKey]: { apiKey: "k" } } } });
+
+      const err = await settle(
+        openclawConfig.runOpenclawConfigSet(
+          [`models.providers["${forgedKey}"].apiKey`, "k"],
+          { timeoutMs: 1 },
+        ),
+      );
+
+      expect(err).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(1);
+      const line = String(warn.mock.calls[0]?.[0]);
+      expect(line).not.toMatch(/[\r\n]/); // one write, one record
+      expect(line).not.toContain("forged line");
+      expect(line).not.toContain("evil");
+      // Still says WHICH area was written — a literal of this module's, not the
+      // caller's text.
+      expect(line).toContain("models");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps the caller's config path out of the journal line on unset too", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      mockSpawn.mockImplementation(() => hangingChild());
+      configOnDisk({ models: { providers: {} } });
+
+      const err = await settle(
+        openclawConfig.runOpenclawConfigUnset(
+          'models.providers["evil\n[openclaw-config] forged line"].apiKey',
+          { timeoutMs: 1 },
+        ),
+      );
+
+      expect(err).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(1);
+      const line = String(warn.mock.calls[0]?.[0]);
+      expect(line).not.toMatch(/[\r\n]/);
+      expect(line).not.toContain("forged line");
+      expect(line).not.toContain("evil");
+      expect(line).toContain("models");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("reads a bracket-quoted segment as one key", async () => {
     // The Codex runtime arm: `agents.defaults.models["openai/gpt-5.5"]
     // .agentRuntime.id`. A path split on "." alone would look for a key
