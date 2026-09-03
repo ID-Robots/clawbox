@@ -190,17 +190,6 @@ const REBOOT_PROBE_TIMEOUT_MS = 2_500;
 const REBOOT_HARD_REDIRECT_MS = 45_000;
 type Section = typeof SECTIONS[number];
 
-/** Immutable set add/remove, returning `prev` when nothing would change. */
-function setWith<T>(prev: ReadonlySet<T>, value: T): ReadonlySet<T> {
-  return prev.has(value) ? prev : new Set(prev).add(value);
-}
-function setWithout<T>(prev: ReadonlySet<T>, value: T): ReadonlySet<T> {
-  if (!prev.has(value)) return prev;
-  const next = new Set(prev);
-  next.delete(value);
-  return next;
-}
-
 /** Shape of GET /setup-api/whatsapp/status, normalised client-side. */
 interface WhatsappStatus {
   supported: boolean;
@@ -1389,19 +1378,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [settledChannels, setSettledChannels] = useState<ReadonlySet<ChannelSection>>(
     () => new Set(),
   );
-  /**
-   * Channels whose Retry is waiting on the read it started.
-   *
-   * Only the Retry button writes this, and every settle clears it — the same
-   * `finally` that marks the channel settled, so a read that fails, is
-   * superseded or throws cannot leave a row latched as "retrying".
-   */
-  const [retryingChannels, setRetryingChannels] = useState<ReadonlySet<ChannelSection>>(
-    () => new Set(),
-  );
   const markChannelSettled = useCallback((id: ChannelSection) => {
-    setSettledChannels((prev) => setWith(prev, id));
-    setRetryingChannels((prev) => setWithout(prev, id));
+    setSettledChannels((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
   }, []);
   /**
    * Put a channel back to "being asked".
@@ -1413,9 +1391,27 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
    * state is true afterwards.
    */
   const unsettleChannel = useCallback((id: ChannelSection) => {
-    setSettledChannels((prev) => setWithout(prev, id));
-    setRetryingChannels((prev) => setWith(prev, id));
+    setSettledChannels((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
   }, []);
+
+  /**
+   * The hub row's navigating button, per channel.
+   *
+   * A Retry is rendered only while its row is unreachable, so pressing it
+   * unmounts it — and a focused element that disappears drops focus to
+   * `<body>`, leaving a keyboard or screen-reader owner nowhere, twice: once
+   * while the read runs and again when it lands. Focus moves here instead,
+   * which is the control whose accessible name carries the channel's state, so
+   * focus follows the answer rather than falling out of the page.
+   */
+  const channelRowRefs = useRef<Partial<Record<ChannelSection, HTMLButtonElement | null>>>({});
+  /** The WhatsApp pane's own root, for the same reason. */
+  const whatsappPaneRef = useRef<HTMLDivElement | null>(null);
 
   /* ── Telegram ── */
   const [tgToken, setTgToken] = useState("");
@@ -3683,7 +3679,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 {CHANNEL_ITEMS.map((item) => {
                   const state = channelState(item.id);
                   const connected = state === "connected";
-                  const retrying = retryingChannels.has(item.id);
                   const { subtitle } = sectionStatus(item.id);
                   const refreshChannel = {
                     telegram: refreshTelegramStatus,
@@ -3704,6 +3699,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                           inner one out of reach entirely. */}
                       <button
                         type="button"
+                        ref={(el) => { channelRowRefs.current[item.id] = el; }}
                         onClick={() => setSectionGated(item.id)}
                         data-testid={`settings-channel-${item.id}`}
                         data-state={state}
@@ -3759,29 +3755,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       </button>
                       {/* A dead end needs a way out. Named per channel, because
                           up to four rows can be unreachable at once and four
-                          controls all called "Retry" name nothing.
-                          It stays mounted while the read it started is in
-                          flight, and is refused rather than `disabled`: a
-                          control that unmounts — or is disabled — under its own
-                          click drops keyboard focus to <body>, leaving an owner
-                          who pressed Enter nowhere while the row says
-                          "Checking…", and nowhere again when it comes back. */}
-                      {(state === "unreachable" || retrying) && (
+                          controls all called "Retry" name nothing. */}
+                      {state === "unreachable" && (
                         <button
                           type="button"
                           data-testid={`settings-channel-retry-${item.id}`}
                           aria-label={`${t("settings.retry")} — ${t(item.labelKey)}`}
-                          aria-disabled={retrying}
                           onClick={() => {
-                            if (retrying) return;
+                            // Before anything re-renders: this button is about
+                            // to unmount under its own click, and focus must
+                            // land on the row rather than on <body>.
+                            channelRowRefs.current[item.id]?.focus();
                             unsettleChannel(item.id);
                             void refreshChannel();
                           }}
-                          className={`text-[11px] shrink-0 mr-3 px-1 py-1 bg-transparent border-none ${
-                            retrying
-                              ? "text-[var(--text-muted)] cursor-default"
-                              : "text-[var(--coral-bright)] cursor-pointer hover:underline"
-                          }`}
+                          className="text-[11px] text-[var(--coral-bright)] shrink-0 mr-3 px-1 py-1 bg-transparent border-none cursor-pointer hover:underline"
                         >
                           {t("settings.retry")}
                         </button>
@@ -4590,7 +4578,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         {/* ─── WhatsApp ─── */}
         {activeSection === "whatsapp" && (
-          <div className="max-w-xl space-y-5" data-testid="settings-section-whatsapp">
+          /* `tabIndex={-1}` is not a tab stop; it is somewhere for focus to
+             land when the status card's Retry replaces itself. */
+          <div className="max-w-xl space-y-5" data-testid="settings-section-whatsapp" ref={whatsappPaneRef} tabIndex={-1}>
 
             {/* Upstream's ban-risk warning, shown before anything else rather
                 than hidden behind a docs link — it is the single most important
@@ -4616,13 +4606,45 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                   <h3 className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-4">{t("settings.status")}</h3>
                   {waStatus === null ? (
-                    <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
-                      <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
-                      <div className="flex-1 space-y-2">
-                        <div className="h-3 w-32 rounded bg-white/[0.08]" />
-                        <div className="h-2 w-20 rounded bg-white/[0.06]" />
+                    /* Nothing known — but there are two ways to know nothing,
+                       and the pane owes the owner the same distinction the hub
+                       row draws. Pulsing "loading" over a read that has already
+                       come back empty is the row's own bug one screen along:
+                       nothing re-asks while the pane is open, so the pulse would
+                       run for the life of the mount. */
+                    channelState("whatsapp") === "unreachable" ? (
+                      <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5" data-testid="whatsapp-status-unavailable">
+                        <div className="w-10 h-10 rounded-full bg-white/[0.06] flex items-center justify-center shrink-0">
+                          <span className="material-symbols-rounded" style={{ fontSize: 22 }} aria-hidden="true">cloud_off</span>
+                        </div>
+                        <div className="min-w-0 flex-1 text-sm text-[var(--text-primary)] font-medium">
+                          {t("settings.statusUnavailable")}
+                        </div>
+                        <button
+                          type="button"
+                          data-testid="whatsapp-status-retry"
+                          onClick={() => {
+                            // Same reason as the hub's Retry: this card is about
+                            // to be replaced by the skeleton, so move focus to
+                            // the pane before it goes.
+                            whatsappPaneRef.current?.focus();
+                            unsettleChannel("whatsapp");
+                            void refreshWhatsapp();
+                          }}
+                          className="text-xs text-[var(--coral-bright)] shrink-0 px-2 py-1 bg-transparent border-none cursor-pointer hover:underline"
+                        >
+                          {t("settings.retry")}
+                        </button>
                       </div>
-                    </div>
+                    ) : (
+                      <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
+                        <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
+                        <div className="flex-1 space-y-2">
+                          <div className="h-3 w-32 rounded bg-white/[0.08]" />
+                          <div className="h-2 w-20 rounded bg-white/[0.06]" />
+                        </div>
+                      </div>
+                    )
                   ) : (
                     <div className={`flex items-center gap-4 rounded-xl px-4 py-3.5 border ${
                       waStatus.receiving
@@ -4871,6 +4893,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   </div>
                 )}
 
+                {/* Everything below edits the channel, so it may only be
+                    offered over a channel that was actually read — the same
+                    gate the pairing card above already carries. A live "Add
+                    number", mode picker and Enable switch under a "Could not
+                    check" card is the hub-versus-pane contradiction again,
+                    one card down. */}
+                {waStatus && (<>
                 {/* Allowlist — the security-critical field */}
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                   <h3 className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">{t("settings.whatsappAllowedTitle")}</h3>
@@ -4970,6 +4999,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${waStatus?.enabled ? "translate-x-6" : "translate-x-1"}`} />
                   </button>
                 </div>
+                </>)}
 
                 {waMsg && (
                   <div

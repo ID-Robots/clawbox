@@ -425,27 +425,82 @@ describe("Settings → Channels on a cold open", () => {
 
     expect(pane).not.toHaveTextContent("settings.notConfigured");
     expect(pane).not.toHaveTextContent("settings.whatsappNotConfiguredHint");
-    // And no invitation to link a number over a channel nobody could read.
+    // And no invitation to link a number, add an allowed number or flip the
+    // channel on, over a channel nobody could read.
     expect(within(pane).queryByTestId("whatsapp-pairing")).toBeNull();
+    expect(pane).not.toHaveTextContent("settings.whatsappAddNumber");
+    expect(pane).not.toHaveTextContent("settings.whatsappEnable");
+
+    // Saying nothing is not the answer either: a skeleton that pulses for the
+    // life of the mount is the row's own bug one screen along, and nothing
+    // re-asks while the pane is open. It must say so, and offer a way out.
+    expect(pane).toHaveTextContent("settings.statusUnavailable");
+    expect(within(pane).getByTestId("whatsapp-status-retry")).toBeTruthy();
+    expect(pane.querySelector(".animate-pulse")).toBeNull();
   });
 
-  it("keeps the retry focused while the read it started is in flight", async () => {
-    // A keyboard or screen-reader owner tabs to Retry and presses Enter. The
-    // button used to be rendered only in the `unreachable` state, so it
-    // unmounted under its own click and dropped focus to <body> — and if the
-    // retry failed it came back with focus still nowhere.
+  it("re-asks from the pane and shows the skeleton again while it does", async () => {
     let waCalls = 0;
+    let release: (() => void) | null = null;
     vi.stubGlobal(
       "fetch",
       vi.fn((input: string | URL) => {
-        if (input.toString().startsWith("/setup-api/whatsapp/status")) {
-          waCalls += 1;
-          if (waCalls === 1) {
-            return Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) } as Response);
-          }
-          return new Promise<Response>(() => {});
+        if (!input.toString().startsWith("/setup-api/whatsapp/status")) return boxFetch(input);
+        waCalls += 1;
+        if (waCalls <= 2) return openclawWhatsapp({ state: "not_configured", verified: false })(input);
+        return new Promise<Response>((resolve) => {
+          release = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: () => Promise.resolve({ supported: true, state: "paired", enabled: true, paired: true, receiving: true, verified: true }),
+            } as Response);
+        });
+      }),
+    );
+
+    openHub();
+    const list = await screen.findByTestId("settings-channels-list");
+    fireEvent.click(within(list).getByTestId("settings-channel-whatsapp"));
+    const pane = await screen.findByTestId("settings-section-whatsapp");
+    const retry = await within(pane).findByTestId("whatsapp-status-retry");
+
+    fireEvent.click(retry);
+
+    // Honest for the duration, and never a dead end: the card gives way to the
+    // skeleton, and focus stays in the page rather than falling to <body>.
+    await waitFor(() => expect(pane.querySelector(".animate-pulse")).not.toBeNull());
+    expect(document.activeElement).not.toBe(document.body);
+
+    await waitFor(() => expect(release).not.toBeNull());
+    release!();
+    await waitFor(() => expect(pane).toHaveTextContent("settings.whatsappActive"));
+  });
+
+  it("never drops keyboard focus when a retry is pressed", async () => {
+    // A keyboard or screen-reader owner tabs to Retry and presses Enter. The
+    // control is rendered only while the row is unreachable, so its own click
+    // unmounts it — and it unmounts again, for good, when the retry succeeds.
+    // Both used to leave `document.activeElement` on <body>: nowhere while the
+    // row said "Checking…", and nowhere again once it came back.
+    let waCalls = 0;
+    let release: (() => void) | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        if (!input.toString().startsWith("/setup-api/whatsapp/status")) return boxFetch(input);
+        waCalls += 1;
+        if (waCalls === 1) {
+          return Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) } as Response);
         }
-        return boxFetch(input);
+        return new Promise<Response>((resolve) => {
+          release = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: () => Promise.resolve({ supported: true, state: "paired", enabled: true, paired: true, receiving: true, verified: true }),
+            } as Response);
+        });
       }),
     );
 
@@ -460,8 +515,17 @@ describe("Settings → Channels on a cold open", () => {
 
     fireEvent.click(retry);
 
+    // In flight: focus is on the row, which is the control whose accessible
+    // name carries the state the owner is waiting for.
     await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "unknown"));
-    expect(document.activeElement).toBe(retry);
+    expect(document.activeElement).toBe(whatsapp);
+
+    // And when it succeeds and the Retry is gone for good.
+    await waitFor(() => expect(release).not.toBeNull());
+    release!();
+    await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "connected"));
+    expect(within(list).queryByTestId("settings-channel-retry-whatsapp")).toBeNull();
+    expect(document.activeElement).toBe(whatsapp);
   });
 
   it("never claims the sidebar entry is unconfigured before anything has been read", () => {
