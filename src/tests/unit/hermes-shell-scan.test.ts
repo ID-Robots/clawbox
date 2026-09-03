@@ -316,6 +316,30 @@ describe("readShellScanStatus — a present-but-falsy setting is not an unset on
     });
   }
 
+  it("lets TIRITH_FAIL_OPEN override config.yaml, in both directions", async () => {
+    // The env var wins over the YAML key upstream, and this branch is what
+    // picks between two OPPOSITE sentences in the card — "commands run
+    // unchecked" versus "commands are blocked". A wrong env name here would
+    // change a security message with nothing failing.
+    configText = securityYaml("  tirith_fail_open: true\n");
+    envFile = { TIRITH_FAIL_OPEN: "0" };
+    expect((await readStatus()).failOpen).toBe(false);
+
+    vi.resetModules();
+    configText = securityYaml("  tirith_fail_open: false\n");
+    envFile = { TIRITH_FAIL_OPEN: "1" };
+    expect((await readStatus()).failOpen).toBe(true);
+  });
+
+  it("applies upstream's _env_bool truthiness to TIRITH_FAIL_OPEN", async () => {
+    // `_env_bool` counts only 1/true/yes as true, so "on" — which IS true for
+    // the YAML key one line above — is false as an env var. The asymmetry is
+    // upstream's; mirroring only one half of it would invert the card.
+    envFile = { TIRITH_FAIL_OPEN: "on" };
+
+    expect((await readStatus()).failOpen).toBe(false);
+  });
+
   it("reads a key written with no value at all as OFF", async () => {
     // `tirith_enabled:` — a truncated write or a templated blank. YAML reads it
     // as null, which Python calls false; `getYamlPath` alone cannot tell it
