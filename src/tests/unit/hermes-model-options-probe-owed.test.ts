@@ -246,6 +246,35 @@ describe("probeStillOwed — a dashboard that is still booting is not a dashboar
     expect(await mod.probeStillOwed()).toBe(false);
   });
 
+  it("does not open a debt on a failure a NEWER read has already disproved", async () => {
+    // `load()` single-flights per MODE, so a plain load and an explicit refresh
+    // really can be in flight together — and they settle out of order whenever
+    // the plain one is an 8 s dashboard timeout from before the box came up and
+    // the refresh lands the moment it does. That stale failure used to open a
+    // debt against a dashboard that had just answered, and the panel then said
+    // "Checking..." over a live box.
+    let failTheFirstRead: () => void = () => {};
+    const firstRead = new Promise<never>((_resolve, reject) => {
+      failTheFirstRead = () => reject(new Error("connect ECONNREFUSED"));
+    });
+    dashboardUp();
+    const answering = dashboardFetchMock.getMockImplementation()!;
+    let asked = 0;
+    dashboardFetchMock.mockImplementation(async (path: string) => {
+      if (path.startsWith("/api/model/options") && ++asked === 1) return firstRead;
+      return answering(path);
+    });
+
+    const plain = mod.getModelOptions();
+    const refreshed = await mod.getModelOptions({ refresh: true });
+    expect(refreshed.stale).toBe(false);
+
+    failTheFirstRead();
+    await plain;
+
+    expect(await mod.probeStillOwed()).toBe(false);
+  });
+
   it("clears the debt on a live answer, so the NEXT outage gets a full window", async () => {
     dashboardDown();
     await mod.getModelOptions();

@@ -279,6 +279,15 @@ async function cachedUnitState() {
  *  by a later failure in the same outage, or the grace above would renew
  *  itself once a second and never expire. */
 let firstUnansweredAt = 0;
+/** Sequence of every dashboard read, and of the newest one that ANSWERED.
+ *  Two reads overlap whenever an explicit refresh lands on top of a plain load
+ *  (`load()` single-flights per mode, not across them), and they can settle out
+ *  of order: an 8 s timeout from before the dashboard came up finishing after a
+ *  refresh that just succeeded. Without this, that stale failure opens a debt
+ *  against a box that is answering, and the panel says "Checking..." over a live
+ *  dashboard until the next read clears it. */
+let readSeq = 0;
+let lastAnsweredSeq = 0;
 
 /**
  * Is an answer from the dashboard still OWED, rather than overdue?
@@ -652,6 +661,7 @@ export async function readCurrentFromCli(): Promise<{ provider: string; model: s
 }
 
 async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
+  const seq = ++readSeq;
   // `agent.reasoning_effort` is not in the dashboard envelope, so it always
   // comes from the CLI. Run it alongside the dashboard call rather than after.
   const [dash, cli] = await Promise.all([
@@ -661,8 +671,16 @@ async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
 
   // One live answer clears the debt; the first failure after an answer opens
   // it. See `probeStillOwed`, which is what reads this.
-  if (dash) firstUnansweredAt = 0;
-  else if (!firstUnansweredAt) firstUnansweredAt = Date.now();
+  //
+  // ...unless a NEWER read has already answered, in which case this failure is
+  // stale news about a dashboard that is demonstrably up, and opening a debt on
+  // it would paint "Checking..." over a live box.
+  if (dash) {
+    firstUnansweredAt = 0;
+    lastAnsweredSeq = seq;
+  } else if (!firstUnansweredAt && lastAnsweredSeq < seq) {
+    firstUnansweredAt = Date.now();
+  }
 
   if (dash) {
     return {

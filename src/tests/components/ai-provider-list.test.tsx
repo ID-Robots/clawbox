@@ -248,7 +248,7 @@ describe("AiProviderList", () => {
 });
 
 /**
- * REVIEW-RED (TASK-663) — the client half of the same promise.
+ * TASK-663 — the client half of the same promise.
  *
  * The server says `checking` while an answer from the harness is still owed,
  * and that window is the unit's own: a dashboard sitting in `ExecStartPre` on a
