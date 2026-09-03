@@ -3071,13 +3071,18 @@ step_openclaw_tts() {
         # owner added by hand — is the owner's own choice and is preserved
         # untouched, exactly as the OpenClaw arm below preserves theirs, and
         # this step re-runs on every update.
+        # SKIP THE SELECTION, never the rest of the step. This was a `return`,
+        # which on the DUAL SKU walked out of the function before the OpenClaw
+        # registration below — so one transient Hermes CLI hiccup left a box
+        # whose OpenClaw harness still needs `tts-local-cli` without it. The
+        # two harnesses are configured independently here and a failure in one
+        # is not a reason to abandon the other.
         if [ "$HERMES_TTS_READ_FAILED" = true ]; then
           # The provider definition above still landed, which is the half that
           # is safe to repeat. What is refused here is CHOOSING for an owner
           # whose current choice could not be read.
           echo "  Warning: could not read tts.provider from Hermes — leaving the selection alone rather than overwriting a choice we could not read" >&2
-          return "$TTS_RC"
-        fi
+        else
         case "$CURRENT_HERMES_TTS" in
           ""|null|edge|"$HERMES_TTS_PROVIDER")
             if as_clawbox "$HERMES_TTS_BIN" config set tts.provider "$HERMES_TTS_PROVIDER"; then
@@ -3094,6 +3099,7 @@ step_openclaw_tts() {
             echo "  Hermes TTS provider already set ($CURRENT_HERMES_TTS) — preserving; the $HERMES_TTS_PROVIDER definition is up to date either way"
             ;;
         esac
+        fi
       else
         HERMES_TTS_FAIL="could not write the $HERMES_TTS_PROVIDER provider definition"
       fi

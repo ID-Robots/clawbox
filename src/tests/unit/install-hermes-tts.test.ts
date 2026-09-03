@@ -85,6 +85,11 @@ interface StepOpts {
   hermesFailKey?: string;
   /** Leave ~/.local/bin/hermes out, to test the "no CLI to write to" guard. */
   omitHermesCli?: boolean;
+  /**
+   * Make `hermes config get tts.provider` FAIL rather than answer "unset".
+   * The two exit the same way and mean opposite things.
+   */
+  hermesReadFails?: boolean;
   /** Publish this to $TTS_STATUS_FILE. */
   ttsStatus?: string | null;
   /** Deploy clawbox-tts.sh without the execute bit. */
@@ -102,6 +107,7 @@ function runStep(edition: string, opts: StepOpts = {}) {
     openclawProvider = "",
     hermesFailKey = "",
     omitHermesCli = false,
+    hermesReadFails = false,
     ttsStatus = "KOKORO=ready\n",
     ttsScriptExecutable = true,
   } = opts;
@@ -147,6 +153,12 @@ function runStep(edition: string, opts: StepOpts = {}) {
         'if [ "$1" = "config" ] && [ "$2" = "get" ]; then',
         // Hermes answers an unset key with exit 1 and `Config key not set` on
         // stderr — verified on the live box, see src/lib/hermes-config-cache.ts.
+        // A read that FAILED — a timeout, an OOM-killed Python start — as
+        // opposed to a key that is simply unset. The two exit the same way and
+        // say different things, which is the whole point of the arm below.
+        ...(hermesReadFails
+          ? [`  if [ "$3" = "tts.provider" ]; then echo "hermes: timed out" >&2; exit 1; fi`]
+          : []),
         `  if [ "$3" = "tts.provider" ] && [ -n "${hermesProvider}" ]; then printf '%s\\n' "${hermesProvider}"; exit 0; fi`,
         '  echo "Config key not set: $3" >&2',
         "  exit 1",
@@ -280,6 +292,30 @@ describe.skipIf(!hasBash)("the on-device voice is registered with Hermes nativel
     expect(res.openclawCalls.join("\n"), `the dual SKU lost its OpenClaw provider:\n${res.out}`).toContain(
       "config set messages.tts.providers.tts-local-cli",
     );
+  });
+
+  it("still configures OpenClaw on a dual box when the Hermes read fails", () => {
+    // The failed-read arm used to `return` — out of the whole function, from
+    // inside the Hermes block — so one transient `hermes config get` hiccup on
+    // a DUAL box left its OpenClaw harness without tts-local-cli. The two
+    // harnesses are configured independently; a failure in one is not a reason
+    // to abandon the other.
+    const res = runStep("dual", { hermesReadFails: true });
+    expect(res.openclawCalls.join("\n"), `the dual SKU lost its OpenClaw provider:\n${res.out}`)
+      .toContain("config set messages.tts.providers.tts-local-cli");
+    // And the selection it could not read is left alone, not overwritten.
+    expect(res.hermesCalls.join("\n"), `an unreadable selection was overwritten:\n${res.out}`)
+      .not.toContain("config set tts.provider ");
+  });
+
+  it("leaves an owner's provider alone when the read failed rather than was unset", () => {
+    // `hermes config get` exits non-zero for both a failed read and an unset
+    // key. Treating them alike would replace a deliberate ElevenLabs pick with
+    // ours on any update that hit a timeout — every update another chance.
+    const res = runStep("hermes", { hermesReadFails: true });
+    expect(res.hermesCalls.join("\n"), `a failed read was treated as unset:\n${res.out}`)
+      .not.toContain("config set tts.provider ");
+    expect(res.out).toMatch(/could not read tts\.provider/i);
   });
 
   it("writes the definition BEFORE selecting the provider", () => {

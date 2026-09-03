@@ -181,7 +181,15 @@ export function hermesVoiceConfigView(
       // What `configured` should mean here is "this box CAN be pointed at the
       // proxy", i.e. it holds a `claw_` token — and the selection is what
       // actually points it. A box already pointed somewhere keeps that value.
-      ...(probe.cloudBaseUrl ?? proxyUrl ? { baseUrl: probe.cloudBaseUrl ?? proxyUrl } : {}),
+      // ENTITLEMENT GATES THE PERSISTED ENDPOINT TOO, not just the derived
+      // one. A box that was entitled, had `tts.openai.base_url` written, and
+      // then dropped off the plan still holds that key — reading it here would
+      // keep reporting a configured cloud voice whose every utterance the
+      // proxy now answers 403. So the endpoint is exposed only while the plan
+      // is: `proxyUrl` null means "not entitled", and the panel then falls to
+      // `cloudCredentialIsUnusable` and its "comes with ClawBox AI Max" line,
+      // which is the true statement about such a box.
+      ...(proxyUrl ? { baseUrl: probe.cloudBaseUrl ?? proxyUrl } : {}),
       ...(probe.cloudVoice ? { voice: probe.cloudVoice } : {}),
       ...(probe.cloudModel ? { model: probe.cloudModel } : {}),
     };
@@ -293,6 +301,46 @@ const SPEAK_TIMEOUT_MS = 90_000;
 /** Below this a clip is a container header and nothing else. */
 const MIN_AUDIO_BYTES = 1024;
 
+/**
+ * The largest speak response worth reading.
+ *
+ * A base64 data URL is ~4/3 of the audio, and the longest reply this path will
+ * ever ask for is 4000 characters — seconds of speech, a few hundred KB at
+ * any sane bitrate. 12 MB is orders of magnitude of headroom and still a bound
+ * a Jetson survives.
+ */
+const MAX_SPEECH_BYTES = 12 * 1024 * 1024;
+
+/**
+ * The response body, or null when it exceeds `limit`.
+ *
+ * Streamed with a running total rather than `res.json()`, so an oversized peer
+ * is abandoned partway instead of being buffered whole and then rejected.
+ */
+async function readBounded(res: Response, limit: number): Promise<string | null> {
+  const reader = res.body?.getReader();
+  if (!reader) return null;
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel().catch(() => {});
+        console.warn("[hermes/tts] speak response exceeded", limit, "bytes — refused");
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return null;
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf8");
+}
+
 export type HermesSpeech =
   | { ok: true; audio: Uint8Array<ArrayBuffer>; mime: string }
   | { ok: false; code: string; status: number; reason?: string };
@@ -332,9 +380,21 @@ export async function speakWithHermes(
   if (!res.ok) {
     return { ok: false, code: res.status === 401 ? "cannot_change" : "cloud_refused", status: 502 };
   }
-  const body = (await res.json().catch(() => null)) as
-    | { ok?: unknown; data_url?: unknown; mime_type?: unknown; error?: unknown }
-    | null;
+  // BOUNDED BEFORE IT IS BUFFERED. This runs on every reply on the chat path,
+  // and neither the character cap on the text nor the abort deadline limits a
+  // peer that returns a huge body quickly — `res.json()` would buffer all of
+  // it into a Jetson's memory and take the chat handler down with it. Read the
+  // stream with a running total instead, and refuse rather than truncate: half
+  // a clip is not a clip. Content-Length is not trusted; it is advisory and
+  // absent on a chunked response.
+  const raw = await readBounded(res, MAX_SPEECH_BYTES);
+  if (raw === null) return { ok: false, code: "cloud_no_audio", status: 502 };
+  let body: { ok?: unknown; data_url?: unknown; mime_type?: unknown; error?: unknown } | null;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    body = null;
+  }
   if (!body || body.ok === false || typeof body.data_url !== "string") {
     return {
       ok: false,
@@ -391,6 +451,10 @@ export async function hermesSpeaksReplies(): Promise<boolean> {
     // separately and the first failure throws, so a box can hold one without
     // the other — and either alone speaks nothing.
     if (provider === HERMES_CLOUD_TTS_PROVIDER) {
+      // The plan first: a box that lost its entitlement keeps the endpoint and
+      // the credential on disk, and speaking through them costs a 403 per
+      // reply while the capability claims a voice.
+      if (!(await speechEntitledTier())) return false;
       const [baseUrl, apiKey] = await Promise.all([
         hermesConfigGet(KEYS.cloudBaseUrl),
         hermesConfigGet(KEYS.cloudApiKey),
@@ -417,7 +481,14 @@ export async function hermesSpeaksReplies(): Promise<boolean> {
  * Reads the memo without touching it, so it never starts a spawn of its own.
  */
 export function hermesVoiceProbePending(): boolean {
-  return hermesConfigReadPending(KEYS.provider);
+  // Every key the verdict can rest on, not just the selection. `tts.provider`
+  // can answer while the read that CONFIRMS it — the command definition, or
+  // the endpoint and credential — is the one that timed out; the verdict is
+  // then a `false` nobody will re-ask for, and the box's voice stays hidden
+  // until the page is reloaded. Over-reporting "ask me again" is the safe
+  // direction here: these accessors read the memo without spawning anything.
+  return [KEYS.provider, KEYS.localType, KEYS.localCommand, KEYS.cloudBaseUrl, KEYS.cloudApiKey]
+    .some(hermesConfigReadPending);
 }
 
 /**

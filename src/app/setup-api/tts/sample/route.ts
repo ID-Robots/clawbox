@@ -12,7 +12,7 @@ import { readConfig } from "@/lib/openclaw-config";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { cloudSpeechTarget, localCommandPath, cloudVoiceFrom, type VoiceConfigView } from "@/lib/voice-output";
 import { readLocalVoice } from "@/lib/voice-output-store";
-import { DEFAULT_LOCAL_VOICE, isCloudVoiceFor, isLocalVoice, SAMPLE_MAX_CHARS } from "@/lib/voice-catalog";
+import { DEFAULT_CLOUD_VOICE, DEFAULT_LOCAL_VOICE, isCloudVoiceFor, isLocalVoice, SAMPLE_MAX_CHARS } from "@/lib/voice-catalog";
 
 /**
  * POST /setup-api/tts/sample {text, engine, voice?} → the audio, for the browser.
@@ -181,14 +181,36 @@ const LOCAL_CODE_FOR: Record<string, string> = {
  * refused, and the sample the owner does get is by construction the same voice
  * their real replies are spoken in.
  */
-async function speakWithHermesEngine(text: string, engine: "local" | "cloud"): Promise<Response> {
-  const configured = (await readHermesVoice()).provider;
-  if (configured !== hermesProviderFor(engine)) {
+async function speakWithHermesEngine(
+  text: string,
+  engine: "local" | "cloud",
+  requestedVoice: unknown,
+): Promise<Response> {
+  const probe = await readHermesVoice();
+  if (probe.provider !== hermesProviderFor(engine)) {
     return refuse(
       "This box is not set to speak with that voice — choose it under Speak from first.",
       "not_available",
       409,
     );
+  }
+  // The VOICE, for the same reason as the engine. `/api/audio/speak` takes no
+  // per-request voice — it speaks with the one persisted for the provider — so
+  // auditioning a voice the box is not set to would play a different one under
+  // a 200, which is exactly what an audition must never do. The cloud voice
+  // lives in Hermes' own key; the on-device one is the file `clawbox-tts.sh`
+  // reads, which is what `readLocalVoice` answers.
+  if (typeof requestedVoice === "string" && requestedVoice) {
+    const active = engine === "cloud"
+      ? probe.cloudVoice ?? DEFAULT_CLOUD_VOICE
+      : (await readLocalVoice()) ?? DEFAULT_LOCAL_VOICE;
+    if (requestedVoice !== active) {
+      return refuse(
+        "This box is not set to speak with that voice — choose it under Voice first.",
+        "not_available",
+        409,
+      );
+    }
   }
   const spoken = await speakWithHermes(text);
   if (!spoken.ok) {
@@ -230,7 +252,7 @@ export async function POST(req: Request) {
     // `/api/audio/speak`, which resolves the very `tts.provider` the Voice tab
     // just wrote. Auditioning through a chain we built ourselves would be
     // auditioning a different box than the one that answers the customer.
-    if ((await getActiveHarness()) === "hermes") return await speakWithHermesEngine(text, engine);
+    if ((await getActiveHarness()) === "hermes") return await speakWithHermesEngine(text, engine, voice);
     const config = await readConfig();
     return engine === "local"
       ? await speakLocally(config, voice, text)

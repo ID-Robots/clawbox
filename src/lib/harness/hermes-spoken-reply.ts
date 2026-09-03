@@ -98,7 +98,13 @@ export async function speakHermesReply(text: string): Promise<string | null> {
     // created earlier at the umask default would keep leaking its listing —
     // the timing, count and size of every reply the box spoke.
     await fsp.mkdir(dir, { recursive: true, mode: DIR_MODE });
-    await fsp.chmod(dir, DIR_MODE).catch(() => {});
+    // NOT swallowed. `mkdir` does not change the mode of a directory that
+    // already exists, so this chmod is the only thing standing between a tree
+    // created earlier at the umask default and a world-readable listing of
+    // every reply the box spoke — timing, count and size. Letting it throw
+    // hands the outer handler a null, i.e. a silent reply, which is the right
+    // trade: the clip is an extra, the owner's privacy is not.
+    await fsp.chmod(dir, DIR_MODE);
     // Both parts are ours: the directory comes from `chatSpokenReplyDir` and
     // the name is a uuid. Nothing the model or the customer influenced reaches
     // this path, which is why it can be written before it is checked.

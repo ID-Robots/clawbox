@@ -204,6 +204,27 @@ describe("a Hermes reply that cannot be spoken", () => {
   });
 });
 
+describe("a speak endpoint that answers with far too much", () => {
+  it("refuses the body instead of buffering it into the box's memory", async () => {
+    // Neither the character cap on the reply nor the abort deadline limits a
+    // peer that returns a huge body quickly, and this path runs on EVERY
+    // reply. `res.json()` would buffer all of it on a Jetson.
+    const huge = "A".repeat(20 * 1024 * 1024);
+    speakReply = () =>
+      new Response(
+        JSON.stringify({ ok: true, mime_type: "audio/wav", data_url: `data:audio/wav;base64,${huge}` }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    const res = await post({ message: "what colour" });
+
+    expect(res.status).toBe(200);
+    const assistant = transcript().filter((m) => m.role === "assistant").pop();
+    // The reply still lands; only the oversized clip is dropped.
+    expect(assistant.text).toBe("The lantern is green.");
+    expect(assistant.audio).toBeUndefined();
+  });
+});
+
 describe("a Hermes box with no voice configured", () => {
   it("is never asked to speak", async () => {
     // Hermes' factory `edge` is Microsoft's cloud voice, which ClawBox does not

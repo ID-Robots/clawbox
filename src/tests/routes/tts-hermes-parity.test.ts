@@ -324,6 +324,21 @@ describe("a factory Hermes box still on Edge", () => {
 });
 
 describe("a Hermes box whose plan has no cloud voice", () => {
+  it("drops a PERSISTED cloud endpoint when the plan no longer covers it", async () => {
+    // The box was entitled once, so `tts.openai.*` is still on disk. Reading
+    // it back would keep the panel reporting a configured cloud voice whose
+    // every utterance the proxy now answers 403.
+    storeValues = { clawai_tier: "flash" };
+    hermesConfig["tts.openai.base_url"] = "https://clawbox.test/api/ai";
+    hermesConfig["tts.openai.api_key"] = "claw_a_linked_hermes_box";
+    const { GET } = await route();
+    const body = await (await GET()).json();
+
+    const cloud = body.engines.find((e: { id: string }) => e.id === "cloud");
+    expect(cloud.configured).toBe(false);
+    expect(cloud.detail).toMatch(/Max/i);
+  });
+
   it("does not offer the cloud voice it would only be refused for", async () => {
     // The proxy serves speech to `pro` and answers 403 below it —
     // gateway-pre-start.sh gates the OpenClaw side on the same tier, and its
