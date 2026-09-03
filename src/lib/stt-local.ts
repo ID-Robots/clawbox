@@ -45,12 +45,15 @@ function whisperUnitPath(): string {
 // fits only a warm server would fail every first call of the day.
 const TRANSCRIBE_TIMEOUT_MS = 120_000;
 const PROBE_TIMEOUT_MS = 15_000;
-// The probe spawns python to import faster-whisper, which is a real cost on
-// this board, and the settings panel and every chat-mic press both ask.
-const PROBE_TTL_MS = 60_000;
-// An installed faster-whisper does not uninstall itself: hold a positive answer
-// for hours, and re-ask a negative one every minute so an install shows up.
-const INSTALLED_TTL_MS = 6 * 60 * 60 * 1000;
+// Spawning python to import faster-whisper is a real cost on this board, and
+// the settings panel and every chat-mic press both ask. ONLY that import is
+// cached: the file checks below are two stat() calls and are asked every time.
+// A successful import is held for hours; a failed one is re-asked every minute
+// so an install shows up. A `pip uninstall` or a python minor-version bump does
+// outlast the positive TTL — an accepted residual, and far rarer than the
+// removed-script case the per-call file checks above close.
+const IMPORT_MISSING_TTL_MS = 60_000;
+const IMPORT_OK_TTL_MS = 6 * 60 * 60 * 1000;
 
 /**
  * The whole environment the script gets. `systemctl --user` needs
@@ -81,9 +84,40 @@ export interface LocalSttProbe {
   detail: string;
 }
 
-let probeCache: { at: number; value: LocalSttProbe } | null = null;
+let importCache: { at: number; ok: boolean } | null = null;
 
-async function probe(): Promise<LocalSttProbe> {
+/** Can python3 import faster-whisper? The one expensive half, and the only
+ *  half that is cached. */
+async function fasterWhisperImports(): Promise<boolean> {
+  const ttl = importCache?.ok ? IMPORT_OK_TTL_MS : IMPORT_MISSING_TTL_MS;
+  if (importCache && Date.now() - importCache.at < ttl) return importCache.ok;
+  const check = await runChild(PYTHON3, ["-c", "import faster_whisper"], {
+    timeoutMs: PROBE_TIMEOUT_MS,
+    env: childEnv(),
+    notStarted: "python3 could not be started",
+  });
+  const ok = check.code === 0;
+  importCache = { at: Date.now(), ok };
+  return ok;
+}
+
+/**
+ * Whether this box can transcribe on its own.
+ *
+ * The two file checks are asked on EVERY call, and only the python import is
+ * cached. Holding the whole answer for six hours meant an engine removed from
+ * the box — by hand, from the Terminal or the agent's shell; nothing in the app
+ * uninstalls it — still read as installed. Settings then offered "On this box"
+ * as a working choice, and /setup-api/stt wrote a `type: "cli"` row into
+ * openclaw.json for a script that is gone. OpenClaw takes such a row on trust —
+ * `openclaw config set` accepts it and no doctor check inspects a configured CLI
+ * entry — and then pays a failed exec for it on every channel voice note before
+ * falling through to the cloud row behind it. The chat microphone runs the same
+ * missing script and answers "Transcription failed on this box." whenever the
+ * cloud leg cannot cover for it. Two stat() calls are what keeps this box from
+ * advertising an engine it no longer has.
+ */
+export async function localSttInstalled(): Promise<LocalSttProbe> {
   // Cheapest checks first, so a box that never installed the engine answers
   // from two stat() calls and never spawns an interpreter.
   if (!(await exists(sttClientScriptPath()))) {
@@ -92,24 +126,10 @@ async function probe(): Promise<LocalSttProbe> {
   if (!(await exists(whisperUnitPath()))) {
     return { installed: false, detail: "The whisper-server service is not installed." };
   }
-  const check = await runChild(PYTHON3, ["-c", "import faster_whisper"], {
-    timeoutMs: PROBE_TIMEOUT_MS,
-    env: childEnv(),
-    notStarted: "python3 could not be started",
-  });
-  if (check.code !== 0) {
+  if (!(await fasterWhisperImports())) {
     return { installed: false, detail: "faster-whisper is not installed for python3." };
   }
   return { installed: true, detail: "faster-whisper, kept warm by whisper-server." };
-}
-
-/** Whether this box can transcribe on its own. Cached — see the TTLs above. */
-export async function localSttInstalled(): Promise<LocalSttProbe> {
-  const ttl = probeCache?.value.installed ? INSTALLED_TTL_MS : PROBE_TTL_MS;
-  if (probeCache && Date.now() - probeCache.at < ttl) return probeCache.value;
-  const value = await probe();
-  probeCache = { at: Date.now(), value };
-  return value;
 }
 
 /**
