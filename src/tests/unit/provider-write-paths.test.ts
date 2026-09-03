@@ -28,7 +28,7 @@ const readConfigMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: rpcMock }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
-const storeGetMock = vi.hoisted(() => vi.fn(async (_key: string) => null as unknown));
+const storeGetMock = vi.hoisted(() => vi.fn<(key: string) => Promise<unknown>>(async () => null));
 vi.mock("@/lib/config-store", () => ({ get: storeGetMock, setMany: vi.fn() }));
 vi.mock("@/lib/hermes-config-yaml", () => ({
   patchHermesConfig: patchMock,
@@ -172,12 +172,19 @@ describe("declaring a catalogue Hermes' own pickers read", () => {
   // followed by calling the INNER write.
   it("asks the agent for nothing when the ClawBox AI catalogue is declared", async () => {
     catalogueGrows(["openrouter", "clawai"], ["openrouter", "clawai"], "clawai");
+    // ONE read of the whole `providers.clawai` block: Hermes decides what
+    // `models:` means from its siblings, and the same entry carries the
+    // `base_url` the orphan guard needs.
     cliMock.mockImplementation(async (args: string[]) => {
-      if (args[1] === "get" && args[2] === "providers.clawai.models") {
-        return { code: 1, stdout: "", stderr: "config key not set" };
-      }
-      if (args[1] === "get" && args[2] === "providers.clawai.base_url") {
-        return { code: 0, stdout: "https://clawbox.com/api/ai\n", stderr: "" };
+      if (args[1] === "get" && args[2] === "providers.clawai") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            base_url: "https://clawbox.com/api/ai",
+            api_mode: "openai",
+          }),
+          stderr: "",
+        };
       }
       return { code: 0, stdout: "", stderr: "" };
     });

@@ -227,6 +227,9 @@ describe("reconciling an already-configured device", () => {
   // between tests — only the behaviour each test needs is established here.
   beforeEach(() => {
     _resetLocalAiReconcileForTests();
+    // A FAILED attempt is held for a minute, so a test that proves a retry has
+    // to say how much later that retry is.
+    vi.useFakeTimers();
     patchMock.mockResolvedValue({ mode: "merge", backupPath: null });
     readMock.mockResolvedValue(null);
     getConfigMock.mockImplementation(async (key: string) => {
@@ -235,6 +238,10 @@ describe("reconciling an already-configured device", () => {
       if (key === "local_ai_model") return "ollama/qwen3:8b";
       return undefined;
     });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   /**
@@ -337,9 +344,49 @@ describe("reconciling an already-configured device", () => {
     await applyLocalAiToHermes({ provider: "ollama", model: "qwen3:8b" });
     expect(sets().some((kv) => kv.startsWith(`providers.${HERMES_LOCAL_PROVIDER}.models=`))).toBe(false);
 
+    vi.advanceTimersByTime(60_001);
     registered({ baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama/v1", models: null });
     await reconcileLocalAiWithHermes();
     expect(sets()).toContain(`providers.${HERMES_LOCAL_PROVIDER}.models=qwen3:8b`);
+  });
+
+  it("does not re-ask on every request while the CLI keeps failing", async () => {
+    // Unlatching is what stops an update from skipping the repair; this is what
+    // stops it becoming a Python start per request. The route awaits this and
+    // the ClawBox AI repair before it serves anything, each read carrying a 15 s
+    // timeout, so an unbounded retry lands on every chat-header load.
+    cliMock.mockResolvedValue({ code: 127, stdout: "", stderr: "" });
+    await reconcileLocalAiWithHermes();
+    const afterFirst = cliMock.mock.calls.length;
+    expect(afterFirst).toBeGreaterThan(0);
+
+    vi.advanceTimersByTime(30_000);
+    await reconcileLocalAiWithHermes();
+    await reconcileLocalAiWithHermes();
+    expect(cliMock.mock.calls.length).toBe(afterFirst);
+
+    vi.advanceTimersByTime(30_001);
+    await reconcileLocalAiWithHermes();
+    expect(cliMock.mock.calls.length).toBeGreaterThan(afterFirst);
+  });
+
+  it("refreshes a declared id this module wrote and no longer matches", async () => {
+    // "scalar" is the shape THIS module writes, so a scalar naming a model the
+    // box no longer runs is our own stale value — the picker would go on
+    // offering it. The enable path has always updated it; the repair only ever
+    // wrote a MISSING key, so a box whose model changed while the CLI was
+    // unreadable kept the old id for the life of that config.
+    readMock.mockResolvedValue("qwen3:4b");
+    registered({ baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama/v1", models: "qwen3:4b" });
+    await reconcileLocalAiWithHermes();
+    expect(sets()).toContain(`providers.${HERMES_LOCAL_PROVIDER}.models=qwen3:8b`);
+  });
+
+  it("leaves a declared id that already names the configured model", async () => {
+    readMock.mockResolvedValue("qwen3:8b");
+    registered({ baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama/v1", models: "qwen3:8b" });
+    await reconcileLocalAiWithHermes();
+    expect(patchMock).not.toHaveBeenCalled();
   });
 
   it("leaves a config it could not read alone", async () => {

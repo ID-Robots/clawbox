@@ -68,7 +68,7 @@ async function applyLocalAi(options: {
   // picker's own repair latches once per process and may already have run, so
   // nothing would ever come back for it and the key would stay missing until
   // the web server restarted. Hand the repair back to the next request.
-  if (catalogue === "unknown") reconciled = false;
+  if (catalogue === "unknown") retryLater();
 
   const set: Record<string, string> = {
     // The OpenAI-compatible root, NOT the bare proxy root: Hermes appends
@@ -134,6 +134,26 @@ async function applyLocalAi(options: {
 }
 
 let reconciled = false;
+let retryAfter = 0;
+
+/**
+ * How long a repair whose QUESTION failed waits before another request retries.
+ *
+ * Same number and the same reasoning as `REPAIR_RETRY_MS` in hermes-clawai.ts
+ * and `FAILED_READ_TTL_MS` in hermes-config-cache.ts: unlatching on a failure
+ * is what stops an update from skipping the repair for the life of the process,
+ * and a bound is what stops that retry from becoming a Python start per request
+ * on `GET /setup-api/hermes/models` — the route the chat header, the Settings
+ * panel and the agent's own `ai_list_models` all read, which awaits BOTH
+ * repairs before it serves anything.
+ */
+const REPAIR_RETRY_MS = 60_000;
+
+/** Let a later request try the repair again, no sooner than `REPAIR_RETRY_MS`. */
+function retryLater(): void {
+  reconciled = false;
+  retryAfter = Date.now() + REPAIR_RETRY_MS;
+}
 
 /**
  * How `providers.clawlocal.models` is currently spelled in config.yaml.
@@ -181,10 +201,18 @@ async function localCatalogueState(): Promise<LocalCatalogueState> {
  */
 async function declareLocalCatalogue(model: string): Promise<boolean> {
   if (!model || model.startsWith("-")) return true;
+  const key = `providers.${HERMES_LOCAL_PROVIDER}.models`;
   const state = await localCatalogueState();
   if (state === "unknown") return false;
-  if (state !== "absent") return true;
-  await patchHermesConfig({ set: { [`providers.${HERMES_LOCAL_PROVIDER}.models`]: model } });
+  // "foreign" is Hermes' own block and never ours. "scalar" IS ours — it is the
+  // one-id form this module writes — so a scalar that no longer names the
+  // configured model is our own value gone stale, and leaving it would have the
+  // picker go on offering a model this box no longer runs. The enable path has
+  // always updated it; the repair used to write only when the key was missing,
+  // so a box whose model changed while the CLI was unreadable kept the old id.
+  if (state === "foreign") return true;
+  if (state === "scalar" && (await readHermesConfigValue(key)) === model) return true;
+  await patchHermesConfig({ set: { [key]: model } });
   invalidateModelOptions();
   return true;
 }
@@ -199,7 +227,7 @@ async function declareLocalCatalogue(model: string): Promise<boolean> {
  * when there is genuinely something to repair.
  */
 export async function reconcileLocalAiWithHermes(): Promise<void> {
-  if (reconciled) return;
+  if (reconciled || Date.now() < retryAfter) return;
   reconciled = true;
   try {
     const configured = await get("local_ai_configured");
@@ -221,8 +249,8 @@ export async function reconcileLocalAiWithHermes(): Promise<void> {
     if (!hermesCliAnswered(existing)) {
       // The CLI did not answer (a `step_hermes_install` rebuild exits 127
       // without reaching argparse). Not evidence about this box — try again on
-      // the next request rather than latching a non-answer for the process.
-      reconciled = false;
+      // a later request rather than latching a non-answer for the process.
+      retryLater();
       return;
     }
     const registered = existing.code === 0 ? existing.stdout.trim() : "";
@@ -237,7 +265,7 @@ export async function reconcileLocalAiWithHermes(): Promise<void> {
     if (registered && !ourStaleUrl) {
       // The endpoint is right; only the catalogue Hermes' own pickers read can
       // still be missing. One key, no re-registration.
-      if (!(await declareLocalCatalogue(model))) reconciled = false;
+      if (!(await declareLocalCatalogue(model))) retryLater();
       return;
     }
     // The INNER write, deliberately — this one repair must not ask for an MCP
@@ -250,13 +278,14 @@ export async function reconcileLocalAiWithHermes(): Promise<void> {
   } catch (err) {
     // Never let a repair break the read it is attached to.
     console.error("[hermes-local-ai] reconcile failed:", err);
-    reconciled = false;
+    retryLater();
   }
 }
 
 /** Test seam. */
 export function _resetLocalAiReconcileForTests(): void {
   reconciled = false;
+  retryAfter = 0;
 }
 
 /**

@@ -34,6 +34,11 @@ vi.mock("fs/promises", () => ({
   readFile: readFileMock,
 }));
 
+// The ids are IMPORTED, never retyped: `CLAWBOX_AI_FLASH_MODEL_ID` and
+// `CLAWBOX_AI_PRO_MODEL_ID` are env-overridable (clawbox-ai-models.ts), so a
+// runner that sets either would fail a suite that spelled them out.
+import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID } from "@/lib/clawbox-ai-models";
+
 /** One clawai row, exactly as `/api/model/options` serves it. */
 function dashboardRow(models: string[]) {
   dashboardFetchMock.mockResolvedValueOnce({
@@ -74,7 +79,7 @@ describe("the ClawBox AI row our own picker builds", () => {
     dashboardRow([]);
     const payload = await mod.getModelOptions();
     const row = payload.providers.find((p) => p.id === "clawai");
-    expect(row?.models.map((m) => m.id)).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
+    expect(row?.models.map((m) => m.id)).toEqual([CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID]);
   });
 
   it("leaves a non-empty row exactly as Hermes reported it", async () => {
@@ -82,10 +87,10 @@ describe("the ClawBox AI row our own picker builds", () => {
     // two would put a model the owner deliberately removed back in the picker
     // — and, on a box whose ids were renamed upstream, would offer two that no
     // longer route at all.
-    dashboardRow(["deepseek-v4-flash"]);
+    dashboardRow([CLAWBOX_AI_FLASH_MODEL_ID]);
     const payload = await mod.getModelOptions();
     const row = payload.providers.find((p) => p.id === "clawai");
-    expect(row?.models.map((m) => m.id)).toEqual(["deepseek-v4-flash"]);
+    expect(row?.models.map((m) => m.id)).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("does not invent our ids beside a live catalogue that renamed them", async () => {

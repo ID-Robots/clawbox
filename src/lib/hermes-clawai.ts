@@ -367,6 +367,23 @@ export async function applyClawaiToHermes(
 }
 
 let clawaiModelsReconciled = false;
+let clawaiRetryAfter = 0;
+
+/**
+ * How long a repair whose QUESTION failed waits before another request retries.
+ *
+ * Unlatching on a failure is right — an update must not be able to skip the
+ * repair for the life of the process — but on its own it removes the only
+ * bound on what that failure costs. `GET /setup-api/hermes/models` awaits both
+ * repairs BEFORE it serves anything, each CLI read carries a 15 s timeout, and
+ * that route is what the chat header, the Settings panel and the agent's own
+ * `ai_list_models` all read: a box whose `hermes` is wedged — a filelock held
+ * by an interactive CLI, a half-built venv — would pay it on every request
+ * instead of once per process. Same number and the same reasoning as
+ * `FAILED_READ_TTL_MS` in hermes-config-cache.ts, which exists so that a
+ * hanging `hermes` cannot become one Python start per request.
+ */
+const REPAIR_RETRY_MS = 60_000;
 
 /**
  * Declare the ClawBox AI catalogue on a box that was linked before this code
@@ -388,39 +405,33 @@ let clawaiModelsReconciled = false;
  * for the life of the process and the owner's `/model` keeps saying
  * "clawai (0)" on the release that was meant to fix it. Every exit that is a
  * failed QUESTION or a failed WRITE unlatches, so the next request retries;
- * only the two real answers ("already declared", "written") stay latched.
+ * only the real answers ("nothing to do", "written") stay latched — and a
+ * retry is bounded by `REPAIR_RETRY_MS`, because a repair that keeps failing
+ * must not become a Python start per request on the busiest route we serve.
+ *
+ * EVERY EXIT SAYS SOMETHING. A silent `return` on the one path the field will
+ * actually reach is how a box ends up wrong with nothing in its journal, so
+ * each verdict that is not "this box is already correct" carries a line.
  */
 export async function reconcileClawaiModelsWithHermes(): Promise<void> {
-  if (clawaiModelsReconciled) return;
+  if (clawaiModelsReconciled || Date.now() < clawaiRetryAfter) return;
   clawaiModelsReconciled = true;
   try {
-    // The catalogue first, because on a settled box it is the answer: one
-    // `hermes config get` (~0.6 s of process spawn) and we are done, rather than
-    // two on every cold process for a repair that will never be needed again.
-    const catalogue = await clawaiCatalogueState();
-    if (catalogue === "unknown") return unlatch();
-    if (catalogue === "allowlist") return;
-
-    // Only now ask whether there is a provider to describe. Not "is a token
-    // stored" — the question is whether HERMES has the block, which is what its
-    // pickers read. Without this a box that has never been linked would get a
-    // `providers.clawai.models` with no endpoint beside it, which Hermes renders
-    // as a picker row offering two models with nowhere to send them — the same
-    // orphan the local provider's removal exists to avoid.
-    const linked = await runHermesCli(
-      ["config", "get", `providers.${CLAWAI_PROVIDER}.base_url`],
-      { timeoutMs: 15_000 },
-    );
-    if (!hermesCliAnswered(linked)) return unlatch();
-    if (linked.code !== 0 || !linked.stdout.trim()) return;
-
-    if (catalogue === "ignored") {
-      // Logged where the write actually happens, not where the shape was read:
-      // the `linked` gate above still returns for a box with no provider block,
-      // and a line claiming an overwrite that never ran is the false-success
-      // shape this module keeps being audited for. This is the one state in
-      // which the file and the symptom disagree — a populated `models:` and
-      // "clawai (0)" on the owner's phone — so it is worth a line of its own.
+    const verdict = await clawaiCatalogueVerdict();
+    if (verdict.action === "retry") {
+      console.warn(`[hermes/clawai] catalogue repair deferred — ${verdict.reason}`);
+      return unlatch();
+    }
+    if (verdict.action === "leave") {
+      if (verdict.reason) console.log(`[hermes/clawai] catalogue left alone — ${verdict.reason}`);
+      return;
+    }
+    if (verdict.overwriting) {
+      // Logged where the write happens, not where the shape was read: a line
+      // claiming an overwrite that never ran is the false-success shape this
+      // module keeps being audited for. This is the one state in which the file
+      // and the symptom disagree — a populated `models:` and "clawai (0)" on the
+      // owner's phone — so it is worth a line of its own.
       console.warn(
         `[hermes/clawai] providers.${CLAWAI_PROVIDER}.models is not a shape Hermes reads`
         + " as an allowlist — declaring the ClawBox AI catalogue over it",
@@ -458,71 +469,145 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
   }
 }
 
-/** Let the next request try the repair again. @see reconcileClawaiModelsWithHermes */
+/** Let a later request try the repair again, no sooner than `REPAIR_RETRY_MS`.
+ *  @see reconcileClawaiModelsWithHermes */
 function unlatch(): void {
   clawaiModelsReconciled = false;
+  clawaiRetryAfter = Date.now() + REPAIR_RETRY_MS;
 }
 
 /**
- * How `providers.clawai.models` is currently spelled in config.yaml — judged by
- * HERMES' rule, not by the exit code.
+ * What to do about `providers.clawai.models`, decided from the WHOLE entry.
  *
- *   "absent"    — not there. Ours to write, and the case every field box is in.
- *   "allowlist" — a non-empty list or string. Hermes reads it as a pin, the
- *                 empty probe cannot replace it, and it may be the owner's own
- *                 narrowing: already right, and never ours to widen.
- *   "ignored"   — there, and NOT allowlist-shaped: a mapping (the per-model
- *                 metadata `_save_custom_provider` and the `hermes model`
- *                 wizard write), an empty list, a null. Hermes' own
- *                 `_models_config_is_allowlist` says False, so the empty probe
- *                 REPLACES it and the keyboard says "clawai (0)" — a key that
- *                 exists is not a key Hermes reads.
- *   "unknown"   — the question failed. Not an answer, and never treated as one.
+ *   "write"  — declare our catalogue. `overwriting` says whether something was
+ *              already there in a shape Hermes refuses to read, which is worth
+ *              a line in the journal.
+ *   "leave"  — this box is not ours to change. A `reason` is logged; the two
+ *              ordinary cases (already declared, never linked) carry none,
+ *              because every box on the fleet would print them once a boot.
+ *   "retry"  — the question failed. Never an answer, always logged, and the
+ *              caller unlatches so a later request asks again.
  *
- * SHAPE, NOT EXISTENCE, and that distinction is why this is four states rather
- * than the exit code. It mirrors `localCatalogueState` in hermes-local-ai.ts,
- * down to mapping a non-zero exit that is not "config key not set" — an EACCES
- * on config.yaml, Hermes' own filelock held by an interactive CLI, a parse
- * error — to "unknown" rather than to a verdict about this box.
+ * THE WHOLE ENTRY, NOT THE `models` LEAF, and that is the difference between a
+ * repair and vandalism. Hermes decides what `models:` MEANS from two of its
+ * siblings:
  *
- * `--json` IS LOAD-BEARING. Plain `hermes config get` renders a list or a
- * mapping through `yaml.safe_dump` (`_format_config_get_value`,
- * hermes_cli/config.py:1203), so the two shapes this function exists to tell
- * apart arrive as two blocks of text that only a YAML reader could separate.
- * `--json` is the CLI's own machine-readable mode for exactly this
- * (`hermes config get <key> [--json]`, config.py:5769) and prints
- * `json.dumps(value)`; verified against the Hermes build `HERMES_PIN_COMMIT`
- * installs, which is the one every box converges on.
+ *   - `discover_models: false` is its documented way to pin a catalogue of any
+ *     shape — "discover_models: false is the documented way to pin, and it is
+ *     honored above" (model_switch.py:3777), read on the installed build. With
+ *     discovery off no probe runs, so even a mapping is exactly what the
+ *     keyboard shows: that owner has NO symptom, and overwriting their pin with
+ *     our flat two-id list would destroy per-model metadata to fix nothing.
+ *   - `models_discovered: true` marks a catalogue Hermes persisted for itself,
+ *     which `_models_config_is_allowlist` refuses WHATEVER the shape (:136). Our
+ *     list would be refused with it, so writing there would latch "repaired"
+ *     over a keyboard still saying "clawai (0)" — a false success.
+ *
+ * One read answers all of that, and carries the `base_url` the orphan guard
+ * needs, so it also replaces the second CLI spawn this repair used to make.
+ *
+ * `--json` IS LOAD-BEARING. Plain `hermes config get` renders a block through
+ * `yaml.safe_dump` (`_format_config_get_value`, hermes_cli/config.py:1203) and a
+ * bare string through `str()`, so the shapes this function exists to tell apart
+ * arrive as text only a YAML reader could separate. `--json` is the CLI's own
+ * machine-readable mode for exactly this (`hermes config get <key> [--json]`,
+ * config.py:5769) and prints `json.dumps(value)`; verified against the build
+ * `HERMES_PIN_COMMIT` installs, which `step_hermes_install` brings every box to.
+ * A box moved off that pin by a hand-run `hermes update` could meet a CLI that
+ * rejects the flag: that answers "retry", which is logged and rate-limited by
+ * `REPAIR_RETRY_MS` rather than repeated per request.
+ *
+ * THE STDOUT OF THIS READ IS A CREDENTIAL. The entry carries `api_key`, so no
+ * branch below logs `stdout` — only exit codes and our own words.
  */
-type ClawaiCatalogueState = "absent" | "allowlist" | "ignored" | "unknown";
+type ClawaiVerdict =
+  | { action: "write"; overwriting: boolean }
+  | { action: "leave"; reason: string }
+  | { action: "retry"; reason: string };
 
-async function clawaiCatalogueState(): Promise<ClawaiCatalogueState> {
-  const declared = await runHermesCli(
-    ["config", "get", `providers.${CLAWAI_PROVIDER}.models`, "--json"],
+async function clawaiCatalogueVerdict(): Promise<ClawaiVerdict> {
+  const read = await runHermesCli(
+    ["config", "get", `providers.${CLAWAI_PROVIDER}`, "--json"],
     { timeoutMs: 15_000 },
   );
-  if (!hermesCliAnswered(declared)) return "unknown";
-  if (declared.code !== 0) {
-    const listing = `${declared.stdout ?? ""}\n${declared.stderr ?? ""}`;
-    return /config key not set/i.test(listing) ? "absent" : "unknown";
+  if (!hermesCliAnswered(read)) {
+    return { action: "retry", reason: `the CLI never answered (exit ${read.code})` };
   }
-  let value: unknown;
+  if (read.code !== 0) {
+    // No `providers.clawai` at all: a box that has never been linked. A real
+    // answer, and there is nothing to describe — writing `models` beside no
+    // endpoint would give Hermes a picker row offering two models with nowhere
+    // to send them, the same orphan the local provider's removal exists to
+    // avoid. Anything else is a config we could not read.
+    if (/config key not set/i.test(`${read.stdout ?? ""}\n${read.stderr ?? ""}`)) {
+      return { action: "leave", reason: "" };
+    }
+    return { action: "retry", reason: `the provider block could not be read (exit ${read.code})` };
+  }
+
+  let entry: unknown;
   try {
-    value = JSON.parse(declared.stdout);
+    entry = JSON.parse(read.stdout);
   } catch {
-    // Exit 0 and something we cannot read is not evidence about this box.
-    return "unknown";
+    return { action: "retry", reason: "the CLI printed a value this build could not parse" };
   }
-  return isHermesAllowlist(value) ? "allowlist" : "ignored";
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    return { action: "retry", reason: "providers.clawai is not a block" };
+  }
+  const row = entry as Record<string, unknown>;
+
+  if (!(typeof row.base_url === "string" && row.base_url.trim())) {
+    return { action: "leave", reason: "" };
+  }
+  if (!hermesDiscoversModels(row)) {
+    return { action: "leave", reason: "the catalogue is pinned with discover_models: false" };
+  }
+  if (hermesOwnsCatalogue(row)) {
+    return { action: "leave", reason: "Hermes persisted this catalogue itself (models_discovered)" };
+  }
+  if (row.models === undefined) return { action: "write", overwriting: false };
+  return isHermesAllowlist(row.models)
+    ? { action: "leave", reason: "" }
+    : { action: "write", overwriting: true };
+}
+
+/**
+ * Will Hermes probe `<base_url>/models` for this entry? `discover_models`,
+ * model_switch.py:3371 — absent means yes, and the string spellings "false",
+ * "no" and "0" mean no, exactly as the Python coerces them.
+ */
+function hermesDiscoversModels(row: Record<string, unknown>): boolean {
+  const flag = row.discover_models;
+  if (flag === undefined) return true;
+  if (typeof flag === "string") return !["false", "no", "0"].includes(flag.trim().toLowerCase());
+  return Boolean(flag);
+}
+
+/**
+ * `_entry_models_discovered` — model_switch.py:116. The current entry-level
+ * `models_discovered: true`, or the in-mapping sentinel older builds wrote and
+ * this one still accepts on read.
+ */
+function hermesOwnsCatalogue(row: Record<string, unknown>): boolean {
+  if (row.models_discovered === true) return true;
+  const models = row.models;
+  return Boolean(
+    models
+    && typeof models === "object"
+    && !Array.isArray(models)
+    && (models as Record<string, unknown>).__discovered_model_catalog__ === true,
+  );
 }
 
 /**
  * Would Hermes read this value as an allowlist? `_models_config_is_allowlist`
- * (hermes_cli/model_switch.py:136): a non-empty string, or a list yielding at
- * least one id through `_declared_model_ids` (:61). Never a mapping — that is
- * metadata Hermes wrote for itself, not a pin.
+ * (model_switch.py:136): a non-empty string, or a list yielding at least one id
+ * through `_declared_model_ids` (:61). Never a mapping — that is metadata
+ * Hermes wrote for itself, not a pin. The `discovered` argument the Python
+ * takes is the caller's `hermesOwnsCatalogue` gate above, which is a different
+ * verdict here (leave alone) rather than a different shape.
  *
- * Transcribed here rather than imported from `src/tests/helpers/
+ * Transcribed rather than imported from `src/tests/helpers/
  * hermes-picker-catalogue.ts` ON PURPOSE: that mirror is what judges this
  * module's writes, and a guard sharing its code could only ever agree with it.
  */
@@ -532,14 +617,15 @@ function isHermesAllowlist(value: unknown): boolean {
   return value.some((entry) => {
     if (typeof entry === "string") return Boolean(entry.trim());
     if (!entry || typeof entry !== "object") return false;
-    const row = entry as { id?: unknown; name?: unknown };
-    return [row.id, row.name].some((field) => typeof field === "string" && field.trim());
+    const nested = entry as { id?: unknown; name?: unknown };
+    return [nested.id, nested.name].some((field) => typeof field === "string" && field.trim());
   });
 }
 
 /** Test seam. */
 export function _resetClawaiModelsReconcileForTests(): void {
   clawaiModelsReconciled = false;
+  clawaiRetryAfter = 0;
 }
 
 /**
