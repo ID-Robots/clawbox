@@ -661,7 +661,12 @@ install_kokoro_tts() {
     # the configured user and --user. `sudo -u clawbox pip3 install` without
     # --user is a system install run by an unprivileged account, so the printed
     # remedy would fail on the box it was printed for.
-    echo "  Fix:   su - $CLAWBOX_USER -c '$PIP install --user --force-reinstall espeakng-loader misaki'" >&2
+    # %q on the user, because this line IS shell source -- the operator pastes
+    # it -- and CLAWBOX_USER is overridable. The command itself stays inside
+    # single quotes rather than %q'd as well: %q would backslash every space in
+    # it, and a remedy nobody can read is the failure this line already had.
+    # $PIP is a constant in this file, not input.
+    printf "  Fix:   su - %q -c '%s install --user --force-reinstall espeakng-loader misaki'\n" "$CLAWBOX_USER" "$PIP" >&2
     kokoro_report "failed:phonemiser"
     return 12
   fi
@@ -886,7 +891,7 @@ fi
 if $KOKORO_FULL_OK && ! kokoro_check_phonemiser; then
   KOKORO_FULL_OK=false
   echo "  Warning: Kokoro cannot phonemise out-of-vocabulary words — names and brands would be dropped from speech"
-  echo "  Warning: reinstall the wheel that carries it: su - $CLAWBOX_USER -c '$PIP install --user --force-reinstall espeakng-loader misaki'"
+  printf "  Warning: reinstall the wheel that carries it: su - %q -c '%s install --user --force-reinstall espeakng-loader misaki'\n" "$CLAWBOX_USER" "$PIP"
 fi
 
 echo "[7/7] Deploying voice server scripts..."

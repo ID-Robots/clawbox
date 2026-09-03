@@ -444,12 +444,73 @@ describe("the phonemiser remediation prints a command that works on the box", ()
    * operator believes it was told what to do.
    */
   const remediations = INSTALL_VOICE_SH.split("\n").filter(
-    (line) => /^\s*echo /.test(line) && /espeakng-loader misaki/.test(line),
+    (line) => /^\s*(echo|printf) /.test(line) && /espeakng-loader misaki/.test(line),
   );
 
   it("finds both of them", () => {
     expect(remediations).toHaveLength(2);
   });
+
+  /** Bash single-quoting, for putting a hostile value into a fixture safely. */
+  const sq = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+
+  /**
+   * Render one remediation line with `CLAWBOX_USER` set to `user`, then EVAL
+   * what it printed with `su` stubbed — which is what an operator pasting it
+   * does. Returns the argv `su` actually received and whether the paste had a
+   * side effect of its own.
+   */
+  function paste(line: string, user: string): { argv: string[]; sideEffect: boolean; user: string } {
+    const stubBin = path.join(root, "paste-bin");
+    mkdirSync(stubBin, { recursive: true });
+    const argvLog = path.join(root, "su-argv.log");
+    const marker = path.join(root, "SIDE-EFFECT");
+    const resolved = user.replace("SIDE_EFFECT_MARKER", marker);
+    writeFileSync(path.join(stubBin, "su"), `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > ${JSON.stringify(argvLog)}\n`);
+    chmodSync(path.join(stubBin, "su"), 0o755);
+    const harness = path.join(root, "paste.sh");
+    writeFileSync(
+      harness,
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        `CLAWBOX_USER=${sq(resolved)}`,
+        'PIP="pip3"',
+        // What the operator sees, off whichever stream the line uses.
+        `raw="$(${line.trim().replace(/ >&2$/, "")} 2>&1)"`,
+        // What they paste: everything from the command onwards.
+        'cmd="su - ${raw#*su - }"',
+        `PATH=${JSON.stringify(stubBin)}:$PATH eval "$cmd"`,
+        "",
+      ].join("\n"),
+    );
+    spawnSync("bash", [harness], { encoding: "utf-8", timeout: 30_000 });
+    return {
+      argv: existsSync(argvLog) ? readFileSync(argvLog, "utf-8").split("\n").filter(Boolean) : [],
+      sideEffect: existsSync(marker),
+      user: resolved,
+    };
+  }
+
+  for (const line of remediations) {
+    it(`renders one argument per argument, whatever CLAWBOX_USER holds: ${line.trim().slice(0, 44)}…`, () => {
+      // These lines ARE shell source: the operator pastes them. A user name
+      // carrying shell syntax must reach `su` as one word, not as a second
+      // command — and the same escaping is what keeps a name with a space in
+      // it pasteable at all, which is the whole reason these lines changed.
+      const hostile = "evil $(touch SIDE_EFFECT_MARKER)";
+      const r = paste(line, hostile);
+      expect(r.sideEffect, "the pasted command ran something of its own").toBe(false);
+      expect(r.argv).toEqual(["-", r.user, "-c", "pip3 install --user --force-reinstall espeakng-loader misaki"]);
+    });
+
+    it(`stays readable for the name every box actually has: ${line.trim().slice(0, 44)}…`, () => {
+      // The control: escaping must not turn the normal case into a wall of
+      // backslashes. Nobody pastes a remedy they cannot read.
+      const r = paste(line, "clawbox");
+      expect(r.argv).toEqual(["-", "clawbox", "-c", "pip3 install --user --force-reinstall espeakng-loader misaki"]);
+    });
+  }
 
   for (const line of remediations) {
     it(`installs the way install_python_package does: ${line.trim().slice(0, 60)}…`, () => {
