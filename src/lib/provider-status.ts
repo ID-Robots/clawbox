@@ -26,7 +26,7 @@ import {
 import { getModelOptions } from "@/lib/hermes-model-options";
 
 /**
- * What the strip paints, and the only four things it may say.
+ * What the strip paints, and the only five things it may say.
  *
  * `needs-reauth` is NOT a guess. It is the one genuinely diagnosable failure:
  * the box is POINTED AT this provider as its default and cannot authenticate to
@@ -34,11 +34,24 @@ import { getModelOptions } from "@/lib/hermes-model-options";
  * colour, because chat is broken until it is fixed. Anything else we cannot
  * tell apart from "never set up" gets `disconnected`, and anything we could not
  * ask about at all gets `unknown` rather than a cheerful default.
+ *
+ * `checking` and `unknown` are the two halves of what used to be one word, and
+ * the split is the whole of TASK-663. `unknown` is a RESULT — we asked and the
+ * source could not tell us. `checking` is the absence of a result: the harness
+ * has not been reachable yet and no probe has happened at all. They looked the
+ * same on the wire, so a box in its first seconds after a reboot painted every
+ * provider "Unknown" under a "couldn't reach the agent" banner — a healthy box
+ * reported as broken. A `checking` row therefore also counts for NOTHING
+ * toward {@link ProviderStatusSummary.degraded}: there is no bad answer yet,
+ * only no answer. It is time-bounded at the source (`PROBE_GRACE_MS` in
+ * `hermes-model-options.ts`) so a harness that never comes back falls back to
+ * `unknown` and a degraded summary rather than spinning for ever.
  */
 export type ProviderConnectionState =
   | "connected"
   | "disconnected"
   | "needs-reauth"
+  | "checking"
   | "unknown";
 
 export interface ProviderStatusRow {
@@ -74,6 +87,10 @@ export interface ProviderStatusSummary {
    * True when the answer came from a fallback rather than from the live box —
    * a Hermes dashboard that did not respond, or an unreadable config. The strip
    * says so rather than painting a stale answer as fact.
+   *
+   * A harness that is merely still STARTING is not degraded: those rows say
+   * `checking` and this stays false until the wait outlives the boot window.
+   * See {@link ProviderConnectionState}.
    */
   degraded: boolean;
 }
@@ -169,9 +186,15 @@ interface UnstampedSummary extends Omit<ProviderStatusSummary, "providers"> {
  * Painting "not connected" over a provider we simply failed to ask about is the
  * failure mode most likely to send someone to re-enter a key that was fine.
  */
-function stateFor(credentialed: boolean | null, isDefault: boolean): ProviderConnectionState {
+function stateFor(
+  credentialed: boolean | null,
+  isDefault: boolean,
+  /** True while the harness has not been reachable YET — see
+   *  {@link ProviderConnectionState}. Only ever splits the `null` case. */
+  awaitingProbe = false,
+): ProviderConnectionState {
   if (credentialed === true) return "connected";
-  if (credentialed === null) return "unknown";
+  if (credentialed === null) return awaitingProbe ? "checking" : "unknown";
   return isDefault ? "needs-reauth" : "disconnected";
 }
 
@@ -204,6 +227,20 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
   // stores.
   const probeAnswered = !payload.stale;
 
+  // ...and if it did not, has it simply not had a chance yet? The dashboard is
+  // not up when this server is (~11-12 s after every boot and after every
+  // restart we ourselves trigger), and `hermes-model-options` is the one place
+  // that knows how long its silence has lasted. Within that window a row with
+  // no auth state is `checking`, not `unknown`, and the summary is not
+  // degraded — there is no bad answer yet, only no answer. Past it the payload
+  // drops the flag on its own and every row goes back to today's behaviour.
+  //
+  // Guarded on `stale` as well as the flag: the downgrade path can carry this
+  // marker onto a payload that DID come from the live dashboard, and a live
+  // row the dashboard declined to judge is a real result that keeps its own
+  // word.
+  const awaitingProbe = payload.stale === true && payload.awaitingProbe === true;
+
   const providers = ids.map((id) => {
     const isDefault = id === defaultProvider;
     const reported = byId.get(id)?.authenticated ?? null;
@@ -231,13 +268,13 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
     return {
       id,
       label: hermesProviderLabel(id, byId.get(id)?.name),
-      state: stateFor(credentialed, isDefault),
+      state: stateFor(credentialed, isDefault, awaitingProbe),
       isDefault,
       section: sectionFor(id),
     };
   });
 
-  return { harness: "hermes", providers, defaultProvider, degraded: payload.stale };
+  return { harness: "hermes", providers, defaultProvider, degraded: payload.stale && !awaitingProbe };
 }
 
 /** The `claw_` prefix is the ClawBox AI portal token format (see clawkeep.ts). */
@@ -309,6 +346,12 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
     return {
       id,
       label,
+      // No `awaitingProbe` here, deliberately: this reader PROBES NOTHING. It
+      // answers from `openclaw.json` on disk, so `credentialed.has` is always
+      // a definite yes or no and there is no window in which an answer is
+      // owed. OpenClaw's gateway has no equivalent to ask either — its only
+      // non-WebSocket endpoints are the `/healthz`, `/readyz` and `/startupz`
+      // liveness probes, none of which carries provider auth.
       state: stateFor(credentialed.has(id), isDefault),
       isDefault,
       section: sectionFor(id),

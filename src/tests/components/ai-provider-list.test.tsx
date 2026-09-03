@@ -154,4 +154,58 @@ describe("AiProviderList", () => {
     renderList();
     expect(await screen.findByText(translations.fr["settings.providers.empty"])).toBeInTheDocument();
   });
+
+  // TASK-663. "Nothing is connected yet" and "we have not been able to ask
+  // yet" are different sentences, and this list could only say the first one:
+  // an unprobed row cannot pass the connected/needs-sign-in filter, so a box
+  // whose harness was still booting read as having no providers at all.
+  it("waits rather than announcing an empty box while rows are still being checked", async () => {
+    stubFetch(ROWS.map((r) => ({ ...r, state: "checking", isDefault: false })));
+    renderList();
+
+    expect(await screen.findByTestId("ai-provider-list-loading")).toBeInTheDocument();
+    expect(screen.queryByText(translations.en["settings.providers.empty"])).not.toBeInTheDocument();
+  });
+
+  // The other half of TASK-663, and the reason `checking` cannot be a state
+  // that never resolves: NOTHING emits a provider-change signal when a harness
+  // finishes booting, so a panel opened during those seconds used to hold its
+  // first answer until the customer navigated away and back. The hook goes
+  // back on its own — on a bounded schedule, and only while there is something
+  // left to check.
+  it("re-asks on its own while rows are being checked, and stops once they settle", async () => {
+    let rows: Record<string, unknown>[] = ROWS.map((r) => ({ ...r, state: "checking", isDefault: false }));
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      const json = (body: unknown) =>
+        new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+      if (url.startsWith("/setup-api/preferences")) return json({});
+      if (url.startsWith("/setup-api/providers/status")) {
+        return json({ harness: "hermes", providers: rows, defaultProvider: "clawai", degraded: false });
+      }
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const statusCalls = () =>
+      fetchMock.mock.calls.filter(([u]) => String(u).startsWith("/setup-api/providers/status")).length;
+
+    renderList();
+    await screen.findByTestId("ai-provider-list-loading");
+    const asked = statusCalls();
+
+    // The dashboard finished booting. No signal, no navigation — the row has
+    // to appear because the hook asked again.
+    rows = ROWS as unknown as Record<string, unknown>[];
+    await waitFor(
+      () => expect(screen.getByTestId("ai-provider-openai")).toBeInTheDocument(),
+      { timeout: 4_000 },
+    );
+    expect(statusCalls()).toBeGreaterThan(asked);
+
+    // ...and an answer with nothing left to check ends the polling, rather
+    // than leaving a timer running against the box for the life of the panel.
+    const settled = statusCalls();
+    await new Promise((resolve) => setTimeout(resolve, 1_600));
+    expect(statusCalls()).toBe(settled);
+  });
 });

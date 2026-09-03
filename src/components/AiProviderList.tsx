@@ -62,6 +62,14 @@ export default function AiProviderList() {
     (row.state === "connected" || row.state === "needs-reauth") && row.section !== "localAi",
   );
 
+  // A row nobody has probed yet cannot be filtered INTO this list — it is not
+  // known to hold a sign-in — and the filter above therefore turns a box whose
+  // harness is still booting into "No providers connected", which is a
+  // confident lie about a working box. Stay on the skeleton until the answers
+  // arrive; `useProviderStatus` re-asks on its own until they do, and the
+  // server stops saying `checking` either way (TASK-663).
+  const awaitingProbe = (summary?.providers ?? []).some((row) => row.state === "checking");
+
   return (
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="ai-provider-list">
       <div className="flex items-center gap-2 mb-1">
@@ -85,7 +93,7 @@ export default function AiProviderList() {
         </div>
       )}
 
-      {loading ? (
+      {loading || awaitingProbe ? (
         <div className="space-y-2" data-testid="ai-provider-list-loading">
           {[0, 1, 2].map((i) => (
             <div key={i} className="h-12 rounded-xl bg-white/[0.04] motion-safe:animate-pulse" />

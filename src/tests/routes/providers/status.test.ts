@@ -172,6 +172,66 @@ describe("GET /setup-api/providers/status — Hermes", () => {
     expect((await (await GET()).json()).degraded).toBe(true);
   });
 
+  // ── TASK-663: "checking…" is a state, and it is not a failure ──────────────
+  //
+  // Right after a reboot the Hermes dashboard is not up yet — `clawbox-setup`
+  // answers in 0 ms and `clawbox-hermes-dashboard` needs another ~11-12 s — so
+  // `getModelOptions` answers from the on-disk manifest, which carries no auth
+  // state for any row. Reporting THAT as `degraded: true` with every provider
+  // "Unknown" paints a healthy box as broken over an answer nobody has been
+  // able to ask for yet: a false failure, and the one the Providers panel
+  // opened on.
+  //
+  // `awaitingProbe` is the payload's own word for "the live dashboard has not
+  // answered yet and has not been unreachable long enough to call it broken".
+  function unprobedPayload(awaitingProbe: boolean) {
+    return hermesPayload({
+      providers: [
+        { id: "anthropic", name: "anthropic", authenticated: null, verified: null, isUserDefined: null, source: "catalog-file", total: 0, models: [] },
+      ],
+      source: "catalog-file",
+      stale: true,
+      awaitingProbe,
+    });
+  }
+
+  it("says CHECKING, not degraded, while the first probe is still owed", async () => {
+    getModelOptions.mockResolvedValue(unprobedPayload(true));
+    const body = await (await GET()).json();
+
+    expect(body.degraded).toBe(false);
+    expect(rowFor(body, "anthropic")!.state).toBe("checking");
+    // Every row, not only the default one: none of them has been probed.
+    expect(rowFor(body, "gemini")!.state).toBe("checking");
+    // ClawBox AI has no live answer and no token of our own either, and that
+    // is still "not asked yet" rather than "not linked".
+    expect(rowFor(body, "clawai")!.state).toBe("checking");
+  });
+
+  // The other half, and the reason `awaitingProbe` is time-bounded rather than
+  // a plain "have we ever succeeded": a dashboard that never comes back must
+  // stop reading as "Checking…" and go back to reading as degraded. A probe
+  // that failed shown as checking forever is the same lie in the other
+  // direction.
+  it("stops checking and degrades once the probe has been owed too long", async () => {
+    getModelOptions.mockResolvedValue(unprobedPayload(false));
+    const body = await (await GET()).json();
+
+    expect(body.degraded).toBe(true);
+    expect(rowFor(body, "anthropic")!.state).toBe("unknown");
+  });
+
+  // A LIVE answer that says "this provider could not be judged" is a real probe
+  // result and keeps its own word. `checking` is only ever about the absence of
+  // a probe, never about what one returned.
+  it("still says unknown for a row the live dashboard could not judge", async () => {
+    getModelOptions.mockResolvedValue(hermesPayload({ awaitingProbe: false }));
+    const body = await (await GET()).json();
+
+    expect(body.degraded).toBe(false);
+    expect(rowFor(body, "gemini")!.state).toBe("unknown");
+  });
+
   it("keys the owner's switch by Hermes' own id, not a folded one", async () => {
     // `openai-codex` is what the Hermes row is called; folding it onto
     // `openai` the way OpenClaw's normaliser does would leave a switch flipped
@@ -262,6 +322,17 @@ describe("GET /setup-api/providers/status — OpenClaw", () => {
     // them on a panel that cannot change it.
     expect(rowFor(body, "llamacpp")!.section).toBe("localAi");
     expect(rowFor(body, "anthropic")!.section).toBe("ai");
+  });
+
+  // TASK-663, the OpenClaw leg. This path reads `openclaw.json` off disk and
+  // performs NO probe at all, so it has no window in which an answer is owed:
+  // it must never emit `checking`, and it must never degrade over a cold box.
+  it("never says checking on OpenClaw, which probes nothing", async () => {
+    readConfig.mockResolvedValue({});
+    const body = await (await GET()).json();
+
+    expect(body.degraded).toBe(false);
+    expect(body.providers.map((p: Row) => p.state)).not.toContain("checking");
   });
 });
 

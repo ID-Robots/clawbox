@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import { forgetHermesProviderPreference } from "@/lib/hermes-chat-prefs";
+import { degradedRetryDelayMs } from "@/hooks/useHermesModelOptions";
 import type { ProviderStatusSummary } from "@/lib/provider-status";
 
 /**
@@ -17,7 +18,23 @@ import type { ProviderStatusSummary } from "@/lib/provider-status";
  * than for the other listeners: on Hermes this endpoint's answer comes from the
  * dashboard, and saving a key legitimately emits the signal twice (once for the
  * credential, once for the pairing).
+ *
+ * ...and it re-reads ON ITS OWN while any row is `checking`. Nothing emits a
+ * signal when a harness finishes booting, so without this the panel that
+ * happened to open during those seconds would sit on a spinner until the
+ * customer navigated away and back — which is how a state that resolves in
+ * eleven seconds server-side was on screen for minutes.
  */
+
+/**
+ * How many times a `checking` answer is re-asked, on the schedule the model
+ * catalogue's own degraded retries use (1+2+4+8+8+8 s ≈ 31 s).
+ *
+ * It must OUTLAST the server's own checking window (`PROBE_GRACE_MS`, 25 s):
+ * the last poll has to land after the server has made up its mind, or the
+ * panel settles for good on a spinner the server has already stopped serving.
+ */
+const CHECKING_RETRY_ATTEMPTS = 6;
 
 export interface UseProviderStatus {
   /** Null until the first load lands. */
@@ -43,6 +60,10 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
   // Guards a setState after unmount, and lets a slow answer for a previous
   // nonce be discarded rather than overwriting a newer one.
   const controllerRef = useRef<AbortController | null>(null);
+  // How many `checking` answers this hook has already re-asked. Reset by the
+  // first answer with nothing left to check, so a later boot (a gateway
+  // restart from Settings) gets a fresh budget rather than the exhausted one.
+  const checkingAttemptRef = useRef(0);
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
 
@@ -51,6 +72,7 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
     fetch("/setup-api/providers/status", { cache: "no-store", signal: controller.signal })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
@@ -63,6 +85,17 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
         if (!data || !Array.isArray(data.providers)) throw new Error("Malformed status");
         setSummary(data);
         setError(false);
+        // A `checking` row is a promise that this answer is going to change.
+        // Keep it only as long as the server can still be waiting; past the
+        // budget the server has already replaced it with a real state, so a
+        // further poll would be asking about nothing.
+        if (!data.providers.some((row) => row.state === "checking")) {
+          checkingAttemptRef.current = 0;
+          return;
+        }
+        if (checkingAttemptRef.current >= CHECKING_RETRY_ATTEMPTS) return;
+        retryTimer = setTimeout(refresh, degradedRetryDelayMs(checkingAttemptRef.current));
+        checkingAttemptRef.current += 1;
       })
       .catch((err) => {
         if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) return;
@@ -72,8 +105,11 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
         setError(true);
       });
 
-    return () => controller.abort();
-  }, [enabled, nonce]);
+    return () => {
+      controller.abort();
+      if (retryTimer) clearTimeout(retryTimer);
+    };
+  }, [enabled, nonce, refresh]);
 
   useEffect(() => {
     if (!enabled) return;

@@ -156,6 +156,19 @@ export interface ModelOptionsPayload {
    * were a moment ago.
    */
   degraded?: "dashboard-unreachable";
+  /**
+   * True on a fallback payload built while the dashboard is still only
+   * STARTING — see {@link PROBE_GRACE_MS}. It is the difference between "we
+   * have not been able to ask yet" and "we asked and it is broken", and
+   * `/setup-api/providers/status` is what turns it into the row state
+   * `checking` instead of `unknown` plus a degraded banner (TASK-663).
+   *
+   * Never set on a live payload. Computed when the payload is BUILT, so a
+   * cached fallback can carry it for up to `DEGRADED_REFRESH_GAP_MS` past the
+   * moment the window closes; the background re-ask that every degraded read
+   * schedules replaces it within the second.
+   */
+  awaitingProbe?: boolean;
 }
 
 export interface ProviderScope {
@@ -211,6 +224,26 @@ const DEGRADED_REFRESH_GAP_MS = 1_000;
 // A click-spammer on "Refresh" must not fan out into 40 upstream /v1/models
 // calls, so an explicit refresh is throttled per process.
 const EXPLICIT_REFRESH_MIN_GAP_MS = 10_000;
+/**
+ * How long the dashboard may be unreachable before its silence stops meaning
+ * "still coming up" and starts meaning "not answering".
+ *
+ * It is NOT up when this server is: `clawbox-setup` answers in 0 ms and
+ * `clawbox-hermes-dashboard` needs another ~11-12 s — after every boot, and
+ * again after every restart this app itself triggers. About twice that window,
+ * the same headroom `degradedRetryDelayMs`' 23 s budget is built on.
+ *
+ * BOUNDED on purpose. A plain "has the dashboard ever answered in this
+ * process?" would leave a permanently dead one reading as "Checking…" forever
+ * — the same lie as the degraded banner it replaces, pointing the other way.
+ */
+const PROBE_GRACE_MS = 25_000;
+
+/** When the live dashboard first failed to answer, or 0 while it is answering.
+ *  Started by the first failure, cleared by the next success — never restarted
+ *  by a later failure in the same outage, or the grace above would renew
+ *  itself once a second and never expire. */
+let firstUnansweredAt = 0;
 
 let cached: ModelOptionsPayload | null = null;
 let inflight: Promise<ModelOptionsPayload> | null = null;
@@ -541,6 +574,13 @@ async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
     readCurrentFromCli(),
   ]);
 
+  // One live answer clears the debt; the first failure after an answer opens
+  // it. Everything below that is served without auth state is "not asked yet"
+  // rather than "asked and broken" for as long as the grace lasts.
+  if (dash) firstUnansweredAt = 0;
+  else if (!firstUnansweredAt) firstUnansweredAt = Date.now();
+  const awaitingProbe = !dash && Date.now() - firstUnansweredAt < PROBE_GRACE_MS;
+
   if (dash) {
     return {
       ...dash,
@@ -563,6 +603,7 @@ async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
       fetchedAt: Date.now(),
       source: "catalog-file",
       stale: true,
+      awaitingProbe,
     };
   }
 
@@ -582,6 +623,7 @@ async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
     fetchedAt: Date.now(),
     source: "cold-start",
     stale: true,
+    awaitingProbe,
   };
 }
 
@@ -620,7 +662,17 @@ function load(refresh: boolean): Promise<ModelOptionsPayload> {
       // Serve the better payload we already have and SAY that the refresh
       // failed. TASK-446.
       if (previous && isDowngrade(payload, previous)) {
-        const kept: ModelOptionsPayload = { ...previous, degraded: "dashboard-unreachable" };
+        const kept: ModelOptionsPayload = {
+          ...previous,
+          degraded: "dashboard-unreachable",
+          // The CATALOGUE we keep is the old one; the probe debt is a fact
+          // about now, so it comes from the read we just made. Without this, a
+          // dashboard that stays dead — every fresh answer a downgrade against
+          // this same kept payload — would carry the first minute's
+          // `awaitingProbe: true` for the life of the process, and the
+          // Providers panel would say "Checking…" forever.
+          awaitingProbe: payload.awaitingProbe,
+        };
         if (gen === generation) cached = kept;
         return kept;
       }

@@ -25,6 +25,13 @@ import type { ProviderConnectionState } from "@/lib/provider-status";
  *    customer is most likely to be squinting at because something is wrong.
  *    The word is now `--text-secondary` (6.79:1 plain, 5.08:1 on a hovered
  *    row) and the dot alone carries "we are less sure about this one".
+ *  - `checking` is the one state with MOTION, and it is the only thing that
+ *    separates it from `unknown` at a glance: both are quiet and grey, and one
+ *    of them is going to change on its own. Under `motion-safe:` — with the
+ *    animation off it is still a ring rather than a filled dot, and the word
+ *    still says so. Its word is `settings.checking`, the catalogue's existing
+ *    "Checking…" in all ten locales, rather than a fifth `settings.providers.*`
+ *    key saying the same thing in one.
  */
 const STATE_STYLES: Record<
   ProviderConnectionState,
@@ -50,6 +57,12 @@ const STATE_STYLES: Record<
     text: "text-[var(--text-secondary)]",
     labelKey: "settings.providers.unknown",
   },
+  checking: {
+    // A ring with a gap rather than a filled dot, so the spin is visible.
+    dot: "border border-[var(--text-muted)] border-t-transparent motion-safe:animate-spin",
+    text: "text-[var(--text-secondary)]",
+    labelKey: "settings.checking",
+  },
 };
 
 interface ProviderConnectionLabelProps {
@@ -63,12 +76,15 @@ export default function ProviderConnectionLabel({
 }: ProviderConnectionLabelProps) {
   const { t } = useT();
   const style = STATE_STYLES[state];
+  // The spinning ring reads as a ring only with a little more room than a dot.
+  const checking = state === "checking";
   return (
     <span
       className={`inline-flex items-center gap-1.5 text-[11px] font-semibold leading-none ${style.text} ${className}`}
     >
       <span
-        className={`inline-block w-[7px] h-[7px] rounded-[var(--r-full)] shrink-0 ${style.dot}`}
+        data-testid={checking ? "provider-state-spinner" : undefined}
+        className={`inline-block rounded-[var(--r-full)] shrink-0 ${checking ? "w-[9px] h-[9px]" : "w-[7px] h-[7px]"} ${style.dot}`}
         aria-hidden="true"
       />
       {t(style.labelKey)}
