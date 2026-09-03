@@ -200,6 +200,10 @@ export interface ScopedModelsReply extends ProviderScope {
 const FRESH_MS = 60_000;
 const STALE_MS = 6 * 60 * 60 * 1000;
 const DASHBOARD_TIMEOUT_MS = 8_000;
+/** How often a DEGRADED payload may trigger a background re-ask. See the rule
+ *  in `getModelOptions`; kept at the client's first retry step so a scheduled
+ *  retry always lands on a real attempt. */
+const DEGRADED_REFRESH_GAP_MS = 1_000;
 // A click-spammer on "Refresh" must not fan out into 40 upstream /v1/models
 // calls, so an explicit refresh is throttled per process.
 const EXPLICIT_REFRESH_MIN_GAP_MS = 10_000;
@@ -627,7 +631,7 @@ function load(refresh: boolean): Promise<ModelOptionsPayload> {
  * Serve the provider/model catalogue.
  *   live, fresh (<60 s)  → cached, no network
  *   live, stale (<6 h)   → cached instantly + background refresh (never awaited)
- *   fallback (`stale`)   → await a live fetch; it is not an answer to keep
+ *   fallback (`stale`)   → cached instantly + background refresh, once a second
  *   older / absent       → await a live fetch
  *   { refresh }          → await a live fetch that also busts Hermes'
  *                          per-provider disk cache (one per 10 s per process)
@@ -636,14 +640,19 @@ export async function getModelOptions(opts: { refresh?: boolean } = {}): Promise
   const now = Date.now();
 
   if (opts.refresh) {
-    if (now - lastExplicitRefreshAt < EXPLICIT_REFRESH_MIN_GAP_MS && cached) return cached;
-    lastExplicitRefreshAt = now;
-    return load(true);
+    // Throttled: fall through to the plain path rather than returning here, so
+    // a click-spammer is denied the EXPENSIVE upstream sweep without also being
+    // handed a placeholder the rule below would have gone back for.
+    if (now - lastExplicitRefreshAt >= EXPLICIT_REFRESH_MIN_GAP_MS || !cached) {
+      lastExplicitRefreshAt = now;
+      return load(true);
+    }
   }
 
   if (cached) {
     const age = now - cached.fetchedAt;
-    // A FALLBACK IS NOT AN ANSWER, so it gets no answer's freshness window.
+    // A FALLBACK IS NOT AN ANSWER, so it does not earn an answer's freshness
+    // window.
     //
     // It is Hermes' on-disk manifest (`openrouter` + `nous`, and nothing about
     // this device) or the cold-start floor, and it is served precisely because
@@ -655,17 +664,31 @@ export async function getModelOptions(opts: { refresh?: boolean } = {}): Promise
     // `isDowngrade` cannot help there: it compares against the previous CACHED
     // payload, and on a cold process there is none.
     //
-    // Awaited rather than served-and-refreshed-behind, because the caller does
-    // NOT already have a usable payload — that is the whole difference from the
-    // branch below. `load()` single-flights, so concurrent callers still share
-    // one round-trip, and a dashboard that is down refuses the connection
-    // rather than spending the timeout.
+    // Refreshed BEHIND the request rather than awaited, though. Awaiting was
+    // tried and is wrong: it deletes the cache for as long as the box is
+    // degraded, and every caller pays for that — the per-turn chat path
+    // (hermes/chat), the OAuth device-code poll (twice per tick through
+    // `readUsableProviderIds`), `provider-mcp-refresh` twice per credential
+    // write under its 3 s deadline, and the deliberately session-less GET on
+    // this route, which would then drive a dashboard round-trip per anonymous
+    // request. `DASHBOARD_TIMEOUT_MS` does not bound that either: the login
+    // `dashboardFetch` performs before its first attempt carries no signal. The
+    // client re-asks on its own now (`degradedRetryDelayMs` in
+    // useHermesModelOptions), so nothing has to block for recovery to happen —
+    // the next poll finds what this refresh installed.
     //
     // The flag read here is `payload.stale` — "did not come from the live
     // dashboard" — and NOT the `degraded` marker: a payload the downgrade guard
     // KEPT is a live catalogue whose refresh failed, and holding on to that is
     // the whole point of the guard.
-    if (cached.stale) return load(false);
+    if (cached.stale) {
+      // One attempt per second at most, so a burst of readers cannot turn a
+      // degraded box into a request loop against its own dashboard. Matched to
+      // the client's first retry step, so a retry arriving on schedule always
+      // triggers a real attempt rather than joining a throttled window.
+      if (age >= DEGRADED_REFRESH_GAP_MS) void load(false).catch(() => {});
+      return cached;
+    }
     if (age < FRESH_MS) return cached;
     if (age < STALE_MS) {
       // Serve stale immediately; refresh behind the request. Failures here are

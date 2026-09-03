@@ -3767,6 +3767,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     clearTimeout(seedRetryTimerRef.current)
     seedRetryTimerRef.current = null
   }, [])
+  // Whether anything is currently on offer in the header, read inside the seed
+  // (a stable useCallback, so it cannot close over the state).
+  const hermesProvidersRef = useRef<HermesChatProvider[]>([])
+  useEffect(() => { hermesProvidersRef.current = hermesProviders }, [hermesProviders])
 
   const seedHermesHeader = useCallback(async (signal?: AbortSignal, attempt = 0) => {
     const generation = ++seedGenerationRef.current
@@ -3778,8 +3782,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const abortThis = () => controller.abort()
     if (signal?.aborted) abortThis()
     else signal?.addEventListener('abort', abortThis)
+    // Ask again later, keeping what is on screen. True when one was booked.
+    const retryLater = (): boolean => {
+      if (attempt >= DEGRADED_RETRY_ATTEMPTS) return false
+      if (controller.signal.aborted || generation !== seedGenerationRef.current) return false
+      seedRetryTimerRef.current = setTimeout(
+        () => { void seedRef.current(signal, attempt + 1) },
+        degradedRetryDelayMs(attempt),
+      )
+      return true
+    }
     try {
       const mRes = await fetch('/setup-api/hermes/models', { cache: 'no-store', signal: controller.signal })
+      // A non-OK answer has no `providers` and no `stale` (the route's own 502
+      // arm is `{ error }`), so without this it read as a LIVE empty catalogue
+      // and unmounted the header outright.
+      if (!mRes.ok) throw new Error(`HTTP ${mRes.status}`)
       const mData = await mRes.json() as {
         providers?: { id?: unknown; name?: unknown; authenticated?: unknown }[]
         provider?: unknown
@@ -3805,6 +3823,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // this box either way — and the retry at the end of this function goes
       // back for the real list.
       const degraded = mData?.stale === true
+      // A degraded answer must never REPLACE a good one. The header is seeded
+      // again on every providers-changed signal, so a key saved during a
+      // dashboard blip used to collapse a live four-provider list to the one
+      // configured provider and silently move the active provider off the
+      // owner's pick — every turn in that window then ran on the device default.
+      // Keep what is rendered and go back for the real list; only a header with
+      // nothing on offer yet falls back to the device's own provider.
+      if (degraded && hermesProvidersRef.current.length > 0) {
+        retryLater()
+        return
+      }
       const reported = !degraded && Array.isArray(mData?.providers) ? mData.providers : []
       // Offer only providers Hermes has credentials for (`authenticated:
       // false` rows would give an empty model list and a failing turn).
@@ -3844,18 +3873,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // runs, and the same one #587 gave the OpenClaw picker for `warming`.
       // Without it a chat opened during the ~11-12 s the Hermes dashboard needs
       // to come up after a reboot kept the placeholder for the whole session.
-      if (degraded && attempt < DEGRADED_RETRY_ATTEMPTS) {
-        seedRetryTimerRef.current = setTimeout(
-          () => { void seedRef.current(signal, attempt + 1) },
-          degradedRetryDelayMs(attempt),
-        )
-      }
-    } catch { /* header falls back to a plain label */ }
+      if (degraded) retryLater()
+    } catch {
+      // A dropped connection is the same news as a degraded body, and it is the
+      // shape the reported incident took: the box restarted three times inside
+      // four minutes, so the seeds in that window were rejections and 502s.
+      // Without this the header fell back to a plain label for the session.
+      retryLater()
+    }
     finally {
       signal?.removeEventListener('abort', abortThis)
       if (seedControllerRef.current === controller) seedControllerRef.current = null
     }
-  }, [])
+  }, [clearSeedRetry])
   useEffect(() => { seedRef.current = seedHermesHeader }, [seedHermesHeader])
 
   // Seed the Hermes header once the harness is known. This is the one place

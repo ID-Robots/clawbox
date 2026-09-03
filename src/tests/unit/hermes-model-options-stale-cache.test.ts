@@ -15,7 +15,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * and on a cold process there is nothing to compare against.
  *
  * A fallback is not an answer, so it does not earn an answer's freshness
- * window: the next read goes back to the dashboard.
+ * window: the next read goes back to the dashboard — behind the request, and at
+ * most once a second, because six other callers read this catalogue and none of
+ * them may be made to block on a dashboard that is down.
  */
 
 const dashboardFetchMock = vi.fn();
@@ -120,13 +122,41 @@ describe("hermes-model-options — a fallback must not be cached as an answer", 
 
     // The dashboard finished booting a second later. Nothing invalidates the
     // cache — nothing changed on the device — so recovery depends entirely on
-    // this read not being answered from the placeholder.
+    // this read going back for the answer instead of being satisfied by the
+    // placeholder for FRESH_MS.
     dashboardUp();
+    // Past the one-second floor that keeps a degraded box from re-asking on
+    // every single request (pinned by the test below). Real time rather than a
+    // fake clock: the module's own single-flight and the background refresh are
+    // promises, and freezing time around them tests the mock, not the module.
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
     const second = await mod.getModelOptions();
 
     expect(optionsCalls()).toBeGreaterThan(1);
-    expect(second.source).toBe("dashboard");
-    expect(second.providers.find((p) => p.id === "openai-codex")?.models).toHaveLength(7);
+    // The caller is NOT blocked on that attempt — it is refreshed behind the
+    // request, because a degraded box has six other callers (the per-turn chat
+    // path, the OAuth poll, the session-less GET) that must not pay for it.
+    expect(second.source).toBe("catalog-file");
+
+    // ...and the answer the refresh installed is what the next read serves.
+    await vi.waitFor(() => expect(mod.cachedModelOptions()?.source).toBe("dashboard"));
+    const third = await mod.getModelOptions();
+    expect(third.source).toBe("dashboard");
+    expect(third.providers.find((p) => p.id === "openai-codex")?.models).toHaveLength(7);
+  });
+
+  it("does not re-ask on every read while the dashboard is down", async () => {
+    // The floor under the rule above. Without it a box whose dashboard is not
+    // answering turns every request — including the deliberately session-less
+    // GET on the models route — into a dashboard attempt.
+    dashboardDown();
+    await mod.getModelOptions();
+    expect(optionsCalls()).toBe(1);
+
+    await mod.getModelOptions();
+    await mod.getModelOptions();
+
+    expect(optionsCalls()).toBe(1);
   });
 
   it("still spends nothing re-asking once a live answer is in hand", async () => {

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { screen, waitFor, fireEvent, within } from "@/tests/helpers/test-utils";
+import { act, screen, waitFor, fireEvent, within } from "@/tests/helpers/test-utils";
 import { installHermesBox, mountHermesChat, type HermesBox } from "@/tests/helpers/hermes-chat-box";
 import { resetHarnessCache } from "@/lib/client-harness";
-import { DEGRADED_RETRY_ATTEMPTS, degradedRetryDelayMs } from "@/hooks/useHermesModelOptions";
+import { notifyHermesModelState } from "@/hooks/useHermesModelOptions";
 
 /**
  * TASK-677 — the Hermes chat header rendered a DEGRADED catalogue as if it were
@@ -95,16 +95,19 @@ const LIVE_SEED = {
 /** Every `/setup-api/hermes/models` URL the surface asked for, in order. */
 let modelUrls: string[] = [];
 
+/** How the box answers the models route right now. */
+type BoxMode = "live" | "degraded" | "down";
+
 /**
- * A Hermes box whose models route is degraded for the first `staleAnswers`
- * reads of each form and live afterwards — the boot window, then the dashboard
- * coming up. Nothing else changes: no signal is emitted and nothing remounts.
+ * A Hermes box whose models route answers per `mode()`. `down` is a dropped
+ * connection — the shape the reported incident took, since the box restarted
+ * three times inside four minutes — and `degraded` is the tidy fallback body.
+ * Nothing else changes: no signal is emitted and nothing remounts unless the
+ * test says so.
  */
-function installBootWindowBox(staleAnswers = 1): HermesBox {
+function installModedBox(mode: () => BoxMode): HermesBox {
   const box = installHermesBox();
   const inner = globalThis.fetch;
-  let seedReads = 0;
-  let scopeReads = 0;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -112,18 +115,32 @@ function installBootWindowBox(staleAnswers = 1): HermesBox {
       if (url.includes("/setup-api/hermes/models")) {
         box.fetchedUrls.push(url);
         modelUrls.push(url);
+        const now = mode();
+        if (now === "down") throw new TypeError("Failed to fetch");
         const scoped = new URL(url, "http://box").searchParams.get("provider");
-        if (scoped) {
-          scopeReads += 1;
-          return { ok: true, json: async () => (scopeReads <= staleAnswers ? STALE_SCOPE : LIVE_SCOPE) };
-        }
-        seedReads += 1;
-        return { ok: true, json: async () => (seedReads <= staleAnswers ? STALE_SEED : LIVE_SEED) };
+        const body = scoped
+          ? (now === "degraded" ? STALE_SCOPE : LIVE_SCOPE)
+          : (now === "degraded" ? STALE_SEED : LIVE_SEED);
+        return { ok: true, json: async () => body };
       }
       return inner(input as RequestInfo, init);
     }),
   );
   return box;
+}
+
+/**
+ * The boot window: degraded for the first `bad` reads of the route, live
+ * afterwards — the dashboard finishing its start-up while the chat is open.
+ */
+function installBootWindowBox(bad = 1, kind: BoxMode = "degraded"): HermesBox {
+  let reads = 0;
+  return installModedBox(() => {
+    reads += 1;
+    // Two forms of the route are in flight, so the budget is counted per form
+    // rather than in total.
+    return reads <= bad * 2 ? kind : "live";
+  });
 }
 
 /** The provider pill's options, with the popover opened. */
@@ -201,18 +218,46 @@ describe("the Hermes chat header during the dashboard's boot window", () => {
     expect(labels.some((l) => l.includes("Nous"))).toBe(false);
   }, 15000);
 
-  it("gives up in well under a minute rather than polling a dead dashboard", () => {
-    // While these retries run, every surface reads as LOADING — the header's
-    // pill holds its place and the Settings panel's model select holds back its
-    // "this list is stale" note. So the budget is a promise to the owner of a
-    // box whose dashboard is not coming back, not just a brake on traffic: the
-    // honest empty state has to arrive promptly. Asserted as arithmetic because
-    // waiting it out in a render test would cost the same seconds.
-    const total = Array.from({ length: DEGRADED_RETRY_ATTEMPTS }, (_, i) => degradedRetryDelayMs(i))
-      .reduce((a, b) => a + b, 0);
-    // Comfortably past the measured 11-12 s boot window, comfortably short of
-    // a spinner someone would reload the page over.
-    expect(total).toBeGreaterThan(20_000);
-    expect(total).toBeLessThan(30_000);
-  });
+  it("recovers from a dropped connection, not only from a tidy 200", async () => {
+    // The observed incident: the box took SIGTERM mid-flight and restarted
+    // three times in four minutes, so the reads in that window were rejections
+    // and 502s. Retrying only the polite `stale: true` body would have left the
+    // reported case exactly as broken as before.
+    const box = installBootWindowBox(1, "down");
+    await mountHermesChat(box);
+
+    const picker = await waitFor(
+      () => screen.getByLabelText(/^Hermes model:/),
+      { timeout: 8000 },
+    );
+    expect(picker).toBeTruthy();
+    const labels = await providerOptions();
+    expect(labels.some((l) => l.includes("Anthropic"))).toBe(true);
+  }, 15000);
+
+  it("never lets a degraded seed replace a provider list it already has", async () => {
+    // A key saved in Settings emits providers-changed, which re-seeds the
+    // header. If that re-seed lands during a dashboard blip, a degraded answer
+    // used to collapse the live list to the one configured provider and move
+    // the active provider off the owner's pick — every turn in that window then
+    // ran on the device default, with nothing on screen to say so.
+    let mode: BoxMode = "live";
+    const box = installModedBox(() => mode);
+    await mountHermesChat(box);
+    await waitFor(() => expect(screen.getByLabelText(/^Hermes model:/)).toBeTruthy());
+    expect((await providerOptions()).some((l) => l.includes("Anthropic"))).toBe(true);
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    mode = "degraded";
+    await act(async () => {
+      notifyHermesModelState();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+
+    // Still the box's real answer, not the manifest's two rows.
+    const labels = await providerOptions();
+    expect(labels.some((l) => l.includes("Anthropic"))).toBe(true);
+    expect(labels.some((l) => l.includes("OpenAI Codex"))).toBe(true);
+    expect(screen.getByLabelText(/^Chat provider:/).textContent).toContain("Codex");
+  }, 15000);
 });

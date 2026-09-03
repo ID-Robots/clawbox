@@ -187,30 +187,51 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
     let timer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
 
+    /** Ask again later, keeping what is on screen. True when one was booked. */
+    const retryLater = (): boolean => {
+      if (attempt >= DEGRADED_RETRY_ATTEMPTS) return false;
+      // The user's explicit Refresh is NOT consumed by a retry — a placeholder
+      // and a dropped connection are both "the request did not complete", which
+      // is the condition `pendingRefreshRef` exists to carry across.
+      timer = setTimeout(() => load(pendingRefreshRef.current), degradedRetryDelayMs(attempt));
+      attempt += 1;
+      return true;
+    };
+
     const load = (refresh: boolean) => {
       const url = `/setup-api/hermes/models?provider=${encodeURIComponent(provider)}${refresh ? "&refresh=1" : ""}`;
       fetch(url, { cache: "no-store", signal: controller.signal })
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .then((data: HermesModelScope) => {
           if (controller.signal.aborted) return;
-          pendingRefreshRef.current = false;
-          // Guard against a stale/garbled payload naming a different provider.
-          const scope = data?.provider === provider ? data : emptyScope(provider);
-          if (isPlaceholder(scope) && attempt < DEGRADED_RETRY_ATTEMPTS) {
+          // Read the RESPONSE's own flag, not the substituted scope's:
+          // `emptyScope` is `stale: true` by construction, so gating on it would
+          // put the provider-mismatch guard below into the retry loop as well.
+          if (isPlaceholder(data) && retryLater()) {
             // Deliberately NOT installed: `loaded` is what makes `loading` go
             // false, and a placeholder is not something to settle on. Holding
             // it keeps the model pill in its place with the loading label
             // instead of collapsing the header, and keeps the send path saying
             // "still loading this provider's models" (`modelsReady`) rather
             // than "this provider has none".
-            timer = setTimeout(() => load(false), degradedRetryDelayMs(attempt));
-            attempt += 1;
             return;
           }
-          setLoaded({ provider, scope, error: null });
+          pendingRefreshRef.current = false;
+          // Guard against a stale/garbled payload naming a different provider.
+          setLoaded({
+            provider,
+            scope: data?.provider === provider ? data : emptyScope(provider),
+            error: null,
+          });
         })
         .catch((err) => {
           if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) return;
+          // A REJECTED request is the same news as a placeholder, and it is the
+          // shape the reported incident actually took: the box restarted three
+          // times inside four minutes, so the reads in that window were dropped
+          // connections and 502s, not tidy degraded 200s. Retrying only the
+          // polite failure would have left the observed case unfixed.
+          if (retryLater()) return;
           pendingRefreshRef.current = false;
           setLoaded({ provider, scope: emptyScope(provider), error: "Couldn't load models" });
         });

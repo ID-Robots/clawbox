@@ -55,8 +55,12 @@ export async function GET(request: Request) {
   // Sampled BEFORE the tick that may report the sign-in, because after it the
   // answer already includes the provider that just connected and no change can
   // be seen. It is a read of the SWR-cached catalogue the panel is holding open
-  // anyway (FRESH_MS = 60 s), not a dashboard round-trip per tick — and the
-  // guard below is what keeps a pending tick from asking the agent for anything.
+  // anyway (FRESH_MS = 60 s), so no tick BLOCKS on a dashboard round-trip — and
+  // the guard below is what keeps a pending tick from asking the agent for
+  // anything. While the catalogue is a fallback rather than an answer, a tick
+  // does start a background re-ask (throttled to one a second, see
+  // `getModelOptions`); that is deliberate — this poll runs on exactly the box
+  // whose dashboard has just come back.
   const providersBefore = await readUsableProviderIds();
 
   try {
