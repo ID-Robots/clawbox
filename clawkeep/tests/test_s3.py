@@ -45,8 +45,15 @@ def test_upload_calls_put_with_correct_key(tmp_path: Path) -> None:
         key = s3.upload(CREDS, archive_path=archive, object_name="snap.tar.gz")
     assert key == "users/u_x/repo/snap.tar.gz"
     fake_client.upload_file.assert_called_once_with(
-        str(archive), "clawkeep", "users/u_x/repo/snap.tar.gz",
+        str(archive),
+        "clawkeep",
+        "users/u_x/repo/snap.tar.gz",
+        Callback=None,
+        Config=fake_client.upload_file.call_args.kwargs["Config"],
     )
+    transfer = fake_client.upload_file.call_args.kwargs["Config"]
+    assert transfer.multipart_chunksize == s3.MULTIPART_CHUNK_BYTES
+    assert transfer.max_concurrency == s3.MAX_UPLOAD_CONCURRENCY
 
 
 def test_upload_translates_botocore_error(tmp_path: Path) -> None:
