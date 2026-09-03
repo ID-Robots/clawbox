@@ -293,24 +293,37 @@ export interface ClawKeepScheduleSnapshot {
  * the stamp of the next. That pair is a verdict neither version would give.
  */
 export async function readScheduleSnapshot(): Promise<ClawKeepScheduleSnapshot> {
+  const unknownFile = { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0, unreadable: true };
   let raw: string;
   try {
     raw = await fs.readFile(SCHEDULE_PATH, "utf8");
-  } catch {
-    // No file: no schedule, and no window has ever been started here.
+  } catch (err) {
+    // "No file" is one error code, not all of them. ENOENT — and ENOTDIR on a
+    // broken parent — really does mean no schedule has ever been written here.
+    // EACCES on a file left root-owned, EIO on failing storage (the box that
+    // needs the alarm most), EMFILE on a loaded Jetson: each is a file that IS
+    // there and says nothing we can read, which is evidence of nothing.
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") return unknownFile;
     return { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0, unreadable: false };
   }
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw) as { armedAtMs?: unknown };
-    const stamp = Number(parsed?.armedAtMs);
-    return {
-      schedule: sanitiseSchedule(parsed),
-      armedAtMs: Number.isFinite(stamp) && stamp > 0 ? Math.round(stamp) : 0,
-      unreadable: false,
-    };
+    parsed = JSON.parse(raw);
   } catch {
-    return { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0, unreadable: true };
+    return unknownFile;
   }
+  // `sanitiseSchedule` coerces rather than throwing (`r.enabled === true`), so
+  // a file holding `null`, an array or a bare string would otherwise come back
+  // as a perfectly readable "auto-backup is off" — and buy the next arming
+  // click a fresh window. Parsing is not the same as being a schedule.
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return unknownFile;
+  const stamp = Number((parsed as { armedAtMs?: unknown }).armedAtMs);
+  return {
+    schedule: sanitiseSchedule(parsed),
+    armedAtMs: Number.isFinite(stamp) && stamp > 0 ? Math.round(stamp) : 0,
+    unreadable: false,
+  };
 }
 
 export async function readSchedule(): Promise<ClawKeepSchedule> {

@@ -86,7 +86,9 @@ export function useClawkeepShieldStatus(): ClawkeepShieldStatus {
       try {
         const res = await fetch("/setup-api/clawkeep", { cache: "no-store" });
         if (!res.ok) return;
-        const data = await res.json() as ProtectionInput & {
+        // Partial: this is an untrusted response, and asserting more about it
+        // than the wire guarantees is how a missing field becomes a verdict.
+        const data = await res.json() as Partial<ProtectionInput> & {
           paired?: boolean;
           restoring?: boolean;
         };

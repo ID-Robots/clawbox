@@ -218,7 +218,10 @@ describe("/setup-api/clawkeep/schedule", () => {
       // owner's re-arming click must not buy 36 h of green on a box whose
       // backups have been dead for five days.
       const lastBackupAtMs = now - 5 * DAY_MS;
-      for (const corpse of ["{not-json", ""]) {
+      // Parsing is not the same as being a schedule: `sanitiseSchedule` coerces
+      // rather than throwing, so `null` and `[]` would otherwise come back as a
+      // perfectly readable "auto-backup is off" and buy the same false window.
+      for (const corpse of ["{not-json", "", "null", "[]"]) {
         await writeLastBackup(lastBackupAtMs);
         await fs.writeFile(SCHEDULE_FILE, corpse);
 
@@ -226,6 +229,22 @@ describe("/setup-api/clawkeep/schedule", () => {
         expect(deriveProtection({ ...armed, ...deadBox, lastBackupAtMs }, now))
           .toEqual({ state: "lapsed", reason: "stale" });
       }
+    });
+
+    it("does not read an I/O failure as 'no schedule was ever armed'", async () => {
+      // "No file" is one error code, not all of them. EACCES on a file left
+      // root-owned, EIO on failing storage — the box that needs the alarm most
+      // — is a file that IS there, and reading it as "auto-backup was off"
+      // hands the owner's next re-arming click 36 h of green on a dead box.
+      // A directory where the file should be reproduces that class (EISDIR)
+      // without the test depending on not running as root.
+      await fs.mkdir(SCHEDULE_FILE);
+      await expect(clawkeep.readScheduleSnapshot()).resolves.toMatchObject({ unreadable: true });
+      await fs.rmdir(SCHEDULE_FILE);
+
+      // ...and a file that is simply absent still means what it says: this box
+      // has never armed a schedule, so its first arm keeps its grace.
+      await expect(clawkeep.readScheduleSnapshot()).resolves.toMatchObject({ unreadable: false });
     });
 
     it("does not regrant the window when an armed schedule is merely re-saved", async () => {
