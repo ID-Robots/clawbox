@@ -27,6 +27,15 @@ const MANIFEST_SRC = path.join(REPO, "config", "clawbox-root-manifest.sh");
 const DISPATCHER_SRC = path.join(REPO, "config", "clawbox-root-step.sh");
 const INSTALL_SH = fs.readFileSync(path.join(REPO, "install.sh"), "utf-8");
 
+/** Lift one function out of install.sh, so the block under test runs the real one. */
+function shellFn(name: string): string {
+  const start = INSTALL_SH.indexOf(`${name}() {`);
+  if (start < 0) throw new Error(`${name} not found in install.sh`);
+  const end = INSTALL_SH.indexOf("\n}", start);
+  if (end < 0) throw new Error(`${name} has no closing brace`);
+  return INSTALL_SH.slice(start, end + 2);
+}
+
 const CAN_RUN =
   process.platform !== "win32"
   && spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0
@@ -343,6 +352,12 @@ d("install.sh::install_root_libexec", () => {
       "set -uo pipefail",
       `PROJECT_DIR="${project}"`,
       'record_provision_failure() { echo "provision-failure:$1"; }',
+      // write_root_exec_manifest now CLEARS what it repaired (TASK-584): a
+      // manifest the bootstrap could not write and a later step did is not a
+      // failure of the run. The real helper is lifted out of install.sh rather
+      // than stubbed, so this block exercises the clearing it actually does.
+      "PROVISION_FAILURES=()",
+      shellFn("clear_provision_failure"),
       block,
       extra,
       "install_root_libexec",
