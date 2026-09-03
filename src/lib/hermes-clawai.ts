@@ -400,15 +400,6 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
     const catalogue = await clawaiCatalogueState();
     if (catalogue === "unknown") return unlatch();
     if (catalogue === "allowlist") return;
-    if (catalogue === "ignored") {
-      // The key is there and Hermes does not read it, so the box shows
-      // "clawai (0)" with a populated `models:` in its config — the one state
-      // where the file and the symptom disagree. Say so before overwriting it.
-      console.warn(
-        `[hermes/clawai] providers.${CLAWAI_PROVIDER}.models is not an allowlist Hermes reads`
-        + " — declaring the ClawBox AI catalogue over it",
-      );
-    }
 
     // Only now ask whether there is a provider to describe. Not "is a token
     // stored" — the question is whether HERMES has the block, which is what its
@@ -423,6 +414,18 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
     if (!hermesCliAnswered(linked)) return unlatch();
     if (linked.code !== 0 || !linked.stdout.trim()) return;
 
+    if (catalogue === "ignored") {
+      // Logged where the write actually happens, not where the shape was read:
+      // the `linked` gate above still returns for a box with no provider block,
+      // and a line claiming an overwrite that never ran is the false-success
+      // shape this module keeps being audited for. This is the one state in
+      // which the file and the symptom disagree — a populated `models:` and
+      // "clawai (0)" on the owner's phone — so it is worth a line of its own.
+      console.warn(
+        `[hermes/clawai] providers.${CLAWAI_PROVIDER}.models is not a shape Hermes reads`
+        + " as an allowlist — declaring the ClawBox AI catalogue over it",
+      );
+    }
     const written = await runHermesCli(
       ["config", "set", `providers.${CLAWAI_PROVIDER}.models`, JSON.stringify(CLAWBOX_AI_CHAT_MODEL_IDS)],
       { timeoutMs: 15_000 },
