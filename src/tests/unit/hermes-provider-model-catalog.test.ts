@@ -257,21 +257,6 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     expect(wrote()).toBe(false);
   });
 
-  it("leaves a catalogue the owner pinned with discover_models: false alone", async () => {
-    // The one shape that looks broken and is not. `discover_models: false` is
-    // Hermes' documented way to pin a catalogue of ANY shape
-    // (model_switch.py:3777), and with discovery off no probe runs — so the
-    // mapping IS what the keyboard shows and this owner has no symptom at all.
-    // Overwriting it would drop their per-model metadata to fix nothing.
-    providerBlock({
-      ...LINKED,
-      discover_models: false,
-      models: { [CLAWBOX_AI_FLASH_MODEL_ID]: { context_length: 65536 } },
-    });
-    await reconcileClawaiModelsWithHermes();
-    expect(wrote()).toBe(false);
-  });
-
   it("leaves a catalogue Hermes persisted for itself alone", async () => {
     // `models_discovered: true` makes `_models_config_is_allowlist` return
     // False WHATEVER the shape (model_switch.py:136), so our list would be
@@ -325,9 +310,12 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
   });
 
   it("still honours a pin that actually pins something", async () => {
-    // The boundary the two above must not move: with discovery off AND ids
-    // present, `_declared_model_ids` reads even a mapping's keys, so the
-    // keyboard shows them and this owner has nothing wrong with their box.
+    // The boundary the two above must not move, and the one shape that looks
+    // broken and is not. `discover_models: false` is Hermes' documented way to
+    // pin a catalogue of ANY shape (model_switch.py:3777): with discovery off no
+    // probe runs and `_declared_model_ids` reads even a mapping's keys, so the
+    // mapping IS what the keyboard shows and this owner has no symptom at all.
+    // Overwriting it would drop their per-model metadata to fix nothing.
     providerBlock({
       ...LINKED,
       discover_models: false,
@@ -396,6 +384,58 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     await reconcileClawaiModelsWithHermes();
     expect(cliMock.mock.calls.filter((c) => (c[0] as string[])[1] === "set").length)
       .toBeGreaterThan(firstAttempt);
+  });
+  /**
+   * The same fault, found on the NEXT request instead of at the write.
+   *
+   * `hermes config set` stores the literal text and exits 0, so the guard above
+   * unlatches and asks again — and what the re-read finds is a `models:` that
+   * is a STRING. Confirmed against the installed Hermes 0.20.5 by running its
+   * own functions over that value: `_declared_model_ids` returns ONE id, the
+   * whole literal `["deepseek-v4-flash","deepseek-v4-pro"]`, and
+   * `_models_config_is_allowlist` returns True. So Hermes reads it as a
+   * perfectly good one-model allowlist, the keyboard offers that one unusable
+   * entry, and every "already declared" branch here walks away from it —
+   * the silent one silently. A write guard alone therefore fixes nothing that
+   * outlives the process: the residue is in the file, and only a re-declare
+   * clears it.
+   */
+  const STORED_AS_TEXT = JSON.stringify([CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID]);
+
+  it("shows the symptom a stored-as-text catalogue leaves on the keyboard", async () => {
+    // The premise, stated through Hermes' own reader rather than asserted: one
+    // bogus id. If this ever stops being true the two repairs below are moot.
+    expect(hermesPickerModels({ ...LINKED, models: STORED_AS_TEXT }, [])).toEqual([STORED_AS_TEXT]);
+  });
+
+  it("re-declares a catalogue an earlier write stored as text", async () => {
+    providerBlock({ ...LINKED, models: STORED_AS_TEXT });
+    await reconcileClawaiModelsWithHermes();
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
+      CLAWBOX_AI_FLASH_MODEL_ID,
+      CLAWBOX_AI_PRO_MODEL_ID,
+    ]);
+  });
+
+  it("re-declares stored-as-text even where a pin claims to protect it", async () => {
+    // The other discovery state. `discover_models: false` stops the probe, so
+    // the bogus id is not merely offered — it is the whole row, permanently.
+    providerBlock({ ...LINKED, discover_models: false, models: STORED_AS_TEXT });
+    await reconcileClawaiModelsWithHermes();
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
+      CLAWBOX_AI_FLASH_MODEL_ID,
+      CLAWBOX_AI_PRO_MODEL_ID,
+    ]);
+  });
+
+  it("leaves stored-as-text alone when Hermes owns the catalogue", async () => {
+    // The boundary the two above must not move. With `models_discovered: true`
+    // beside it our list is refused whatever its shape (model_switch.py:136),
+    // so re-declaring here would latch "repaired" over a keyboard that still
+    // says "clawai (0)" — the false success this module is audited for.
+    providerBlock({ ...LINKED, models_discovered: true, models: STORED_AS_TEXT });
+    await reconcileClawaiModelsWithHermes();
+    expect(wrote()).toBe(false);
   });
 
   it("declares the catalogue over an empty list", async () => {

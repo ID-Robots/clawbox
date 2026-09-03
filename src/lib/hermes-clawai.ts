@@ -429,12 +429,12 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
     if (verdict.overwriting) {
       // Logged where the write happens, not where the shape was read: a line
       // claiming an overwrite that never ran is the false-success shape this
-      // module keeps being audited for. This is the one state in which the file
-      // and the symptom disagree — a populated `models:` and "clawai (0)" on the
-      // owner's phone — so it is worth a line of its own.
+      // module keeps being audited for. These are the states in which the file
+      // and the symptom disagree — a populated `models:` and "clawai (0)" or one
+      // bogus entry on the owner's phone — so each is worth naming.
       console.warn(
-        `[hermes/clawai] providers.${CLAWAI_PROVIDER}.models is not a shape Hermes reads`
-        + " as an allowlist — declaring the ClawBox AI catalogue over it",
+        `[hermes/clawai] providers.${CLAWAI_PROVIDER}.models holds ${verdict.overwriting}`
+        + " — declaring the ClawBox AI catalogue over it",
       );
     }
     const written = await runHermesCli(
@@ -488,9 +488,10 @@ function unlatch(): void {
 /**
  * What to do about `providers.clawai.models`, decided from the WHOLE entry.
  *
- *   "write"  — declare our catalogue. `overwriting` says whether something was
- *              already there in a shape Hermes refuses to read, which is worth
- *              a line in the journal.
+ *   "write"  — declare our catalogue. `overwriting` names what was already
+ *              there, when something was, because a repair that replaces a
+ *              populated key is worth a line in the journal saying which fault
+ *              it found.
  *   "leave"  — this box is not ours to change. A `reason` is logged; the two
  *              ordinary cases (already declared, never linked) carry none,
  *              because every box on the fleet would print them once a boot.
@@ -530,7 +531,7 @@ function unlatch(): void {
  * branch below logs `stdout` — only exit codes and our own words.
  */
 type ClawaiVerdict =
-  | { action: "write"; overwriting: boolean }
+  | { action: "write"; overwriting?: string }
   | { action: "leave"; reason: string }
   | { action: "retry"; reason: string };
 
@@ -575,6 +576,29 @@ async function clawaiCatalogueVerdict(): Promise<ClawaiVerdict> {
     // `api_key`.
     return { action: "leave", reason: `providers.${CLAWAI_PROVIDER} carries no endpoint` };
   }
+  // FIRST, because it beats every other reading of `models:`. With
+  // `models_discovered: true` beside it our list is refused whatever its shape
+  // (:136), so any verdict below that wrote would latch "repaired" over a
+  // keyboard still saying "clawai (0)".
+  if (hermesOwnsCatalogue(row)) {
+    return { action: "leave", reason: "Hermes persisted this catalogue itself (models_discovered)" };
+  }
+  // A LIST STORED AS TEXT IS NOT A CATALOGUE — and it is the one broken shape
+  // Hermes reads as a perfectly good one. Ran on the installed 0.20.5 over the
+  // string `["deepseek-v4-flash","deepseek-v4-pro"]`: `_declared_model_ids`
+  // (:61) yields ONE id, the whole literal, and `_models_config_is_allowlist`
+  // (:136) says True. So the keyboard offers a single unusable entry and BOTH
+  // "already declared" branches below walk away from it.
+  //
+  // This is the residue of the failed write the guard in
+  // `reconcileClawaiModelsWithHermes` catches: `hermes config set` saves the
+  // literal text and exits 0, so the value is in the file before that guard
+  // ever sees the warning, and on a CLI old enough to lack the coercion block
+  // there is no warning to see. Unlatching without this check re-reads the
+  // string we just wrote and calls it declared — the guard would defeat itself.
+  if (typeof row.models === "string" && looksLikeStructuredText(row.models)) {
+    return { action: "write", overwriting: "a list Hermes stored as text" };
+  }
   // A PIN THAT PINS NOTHING IS NOT A PIN. `discover_models: false` only protects
   // something if there is something to protect: with discovery off Hermes runs
   // no probe (`_discovery_allowed`, model_switch.py:3788) and shows exactly the
@@ -586,13 +610,30 @@ async function clawaiCatalogueVerdict(): Promise<ClawaiVerdict> {
   if (!hermesDiscoversModels(row) && hermesDeclaresAnyId(row.models)) {
     return { action: "leave", reason: "the catalogue is pinned with discover_models: false" };
   }
-  if (hermesOwnsCatalogue(row)) {
-    return { action: "leave", reason: "Hermes persisted this catalogue itself (models_discovered)" };
-  }
-  if (row.models === undefined) return { action: "write", overwriting: false };
+  if (row.models === undefined) return { action: "write" };
   return isHermesAllowlist(row.models)
     ? { action: "leave", reason: "" }
-    : { action: "write", overwriting: true };
+    : { action: "write", overwriting: "a value Hermes does not read as an allowlist" };
+}
+
+/**
+ * Does this text plausibly encode a YAML/JSON list or mapping?
+ * `_looks_structured_value`, hermes_cli/config.py:5322 — the CLI's OWN test for
+ * "this argument is a structure, not a scalar", and the one that decides
+ * whether `config set` attempts a `yaml.safe_load` at all. Borrowing it here
+ * rather than inventing a rule keeps the two ends of the same write agreeing:
+ * every value the CLI meant to store as a list, and failed to, answers true.
+ *
+ * ONLY THE FLOW-STYLE TRIGGER IS MODELLED, deliberately. The Python also fires
+ * on multi-line block style (`- item` / `key: value` lines), which cannot be
+ * residue here: this module writes `JSON.stringify(ids)` and nothing else, and a
+ * hand-edited block in config.yaml is loaded by PyYAML as a real list long
+ * before any of this runs. The conservatism is the point either way — a model
+ * id is a scalar, so `deepseek-v4-flash` and even `-5` stay pins.
+ */
+function looksLikeStructuredText(value: string): boolean {
+  const stripped = value.replace(/^\s+/, "");
+  return stripped.startsWith("[") || stripped.startsWith("{");
 }
 
 /**
