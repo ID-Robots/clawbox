@@ -465,13 +465,23 @@ export async function applyApprovalCallback(query: TelegramCallbackQuery): Promi
     // mail server spoke is "not sent", a dropped connection is something this
     // process cannot know either way — and "not sent" there is how an owner is
     // talked into sending the same message twice.
-    recordOutcome(draft, outcomeKindFor(err), { error: reason });
-    await say(`Not sent: ${reason}`);
+    const ending = outcomeKindFor(err);
+    recordOutcome(draft, ending, { error: reason });
+    // AND THE SAME JUDGEMENT IN THE WORDS HE READS. The receipt has said
+    // `unconfirmed` since this feature shipped; the sentence in the owner's own
+    // chat still said "Not sent", two lines under the comment above explaining
+    // why it must not. Telegram is where the tap happened, so it is the surface
+    // he acts on — a receipt no one is looking at cannot correct it.
+    const verdict =
+      ending === "unconfirmed"
+        ? "Handed to the mail server, and the answer never came back — check your Sent folder before sending it again."
+        : `Not sent: ${reason}`;
+    await say(verdict);
     // The draft was claimed before the send and is out of the queue — the same
     // trade the desktop path makes, for the same reason (never send twice). It
     // is not lost: the message above this reply still holds the whole draft,
     // which is exactly why the question is never overwritten with its verdict.
-    await settle(token, prompt, `Not sent: ${reason} The draft above is no longer queued.`);
+    await settle(token, prompt, `${verdict} The draft above is no longer queued.`);
     return "send_failed";
   }
 }

@@ -59,17 +59,31 @@ function jsonResponse(body: unknown) {
   return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response);
 }
 
+/** What the route answers a decide POST with. Null means the ordinary success. */
+let decideAnswer: { ok: boolean; status: number; body: unknown } | null = null;
+
 beforeEach(() => {
   queued = [DRAFT];
   receipts = [];
+  decideAnswer = null;
   const pendingSection = window as Window & { __clawboxPendingSettingsSection?: string };
   pendingSection.__clawboxPendingSettingsSection = "email";
 
   vi.stubGlobal(
     "fetch",
-    vi.fn((input: string | URL) => {
+    vi.fn((input: string | URL, init?: RequestInit) => {
       const url = input.toString();
-      if (url.startsWith("/setup-api/email/pending")) return jsonResponse({ pending: queued, outcomes: receipts });
+      if (url.startsWith("/setup-api/email/pending")) {
+        if ((init?.method ?? "GET").toUpperCase() === "POST" && decideAnswer) {
+          const answer = decideAnswer;
+          return Promise.resolve({
+            ok: answer.ok,
+            status: answer.status,
+            json: () => Promise.resolve(answer.body),
+          } as Response);
+        }
+        return jsonResponse({ pending: queued, outcomes: receipts });
+      }
       if (url.startsWith("/setup-api/email/status")) {
         return jsonResponse({
           configured: true,
@@ -152,5 +166,109 @@ describe("a send the box could not confirm", () => {
     await waitFor(() => expect(receiptFor("draft-1")).toBeTruthy());
     expect(receiptFor("draft-1")?.getAttribute("data-outcome-kind")).toBe("unconfirmed");
     expect(receiptFor("draft-1")?.textContent).toContain("settings.emailHandledUnconfirmed");
+  });
+});
+
+describe("approving a draft somebody already decided", () => {
+  it("is reported as news, never as this click failing", async () => {
+    // The owner tapped *Approve & send* in Telegram and the message went out.
+    // This row was still on screen — the queue is re-read on a schedule — so he
+    // clicked Approve here too. The route answers 404 "already sent", which is
+    // true and is NOT a failure of anything: painting it red put an error over
+    // a send that succeeded, next to the green "Sent ✓" the handled strip below
+    // was about to show for the very same message.
+    render(<SettingsApp ui={ui} />);
+    await waitFor(() => expect(screen.getByTestId("settings-email-approvals")).toBeTruthy());
+
+    decideAnswer = {
+      ok: false,
+      status: 404,
+      body: { error: "That message was already sent.", kind: "gone", ending: "sent", at: 1_700_000_000_500 },
+    };
+    await act(async () => {
+      screen.getByText("settings.emailApprove").click();
+    });
+
+    const message = await screen.findByText("That message was already sent.");
+    // `polite`, which is what a success is announced with; an error is
+    // `assertive` and red.
+    expect(message).toHaveAttribute("aria-live", "polite");
+    expect(message.className).not.toContain("text-red-400");
+  });
+
+  it("does not congratulate him for a send he was trying to stop", async () => {
+    // The crossed case, and the worst outcome available on that click. He sees
+    // a draft he does NOT want sent and presses Discard; in the seconds before,
+    // the same draft was approved on Telegram and went out. Reading the ending
+    // without the gesture paints that green — the box congratulating him for
+    // the one thing he was trying to prevent.
+    render(<SettingsApp ui={ui} />);
+    await waitFor(() => expect(screen.getByTestId("settings-email-approvals")).toBeTruthy());
+
+    decideAnswer = {
+      ok: false,
+      status: 404,
+      body: { error: "That message was already sent.", kind: "gone", ending: "sent" },
+    };
+    await act(async () => {
+      screen.getByText("settings.emailReject").click();
+    });
+
+    expect(await screen.findByText("That message was already sent.")).toHaveAttribute("aria-live", "assertive");
+  });
+
+  it("does not paint an approve green when the draft had been deleted", async () => {
+    // The mirror. The words are honest — "That draft was deleted." — and the
+    // colour is what is read first: nothing was sent and nothing will be.
+    render(<SettingsApp ui={ui} />);
+    await waitFor(() => expect(screen.getByTestId("settings-email-approvals")).toBeTruthy());
+
+    decideAnswer = {
+      ok: false,
+      status: 404,
+      body: { error: "That draft was deleted.", kind: "gone", ending: "rejected" },
+    };
+    await act(async () => {
+      screen.getByText("settings.emailApprove").click();
+    });
+
+    expect(await screen.findByText("That draft was deleted.")).toHaveAttribute("aria-live", "assertive");
+  });
+
+  it("reports a discard that a deletion elsewhere had already made true as news", async () => {
+    // And the uncrossed reject: he asked for it not to be waiting, and it is
+    // not waiting, for the reason he wanted.
+    render(<SettingsApp ui={ui} />);
+    await waitFor(() => expect(screen.getByTestId("settings-email-approvals")).toBeTruthy());
+
+    decideAnswer = {
+      ok: false,
+      status: 404,
+      body: { error: "That draft was deleted.", kind: "gone", ending: "rejected" },
+    };
+    await act(async () => {
+      screen.getByText("settings.emailReject").click();
+    });
+
+    expect(await screen.findByText("That draft was deleted.")).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("still reports a draft that vanished with no word about it as an error", async () => {
+    // The guard on the rule above. No receipt means nobody knows what happened,
+    // and that is exactly the case the red banner is for.
+    render(<SettingsApp ui={ui} />);
+    await waitFor(() => expect(screen.getByTestId("settings-email-approvals")).toBeTruthy());
+
+    decideAnswer = {
+      ok: false,
+      status: 404,
+      body: { error: "That draft is no longer waiting.", kind: "gone" },
+    };
+    await act(async () => {
+      screen.getByText("settings.emailApprove").click();
+    });
+
+    const message = await screen.findByText("That draft is no longer waiting.");
+    expect(message).toHaveAttribute("aria-live", "assertive");
   });
 });

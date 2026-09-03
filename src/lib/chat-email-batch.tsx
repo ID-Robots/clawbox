@@ -406,7 +406,16 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
    * and that is the one sentence this card must never be able to produce.
    */
   const nothingAttempted = outcomes.length === 0;
-  const canSend = !busy && included.length > 0;
+  const noneSelected = included.length === 0;
+  const canSend = !busy && !noneSelected;
+  /**
+   * The id of the sentence explaining why the buttons are inert.
+   *
+   * Named rather than inlined because both controls point at it: an unassociated
+   * sibling `<span>` is invisible to a screen reader that has just landed on a
+   * button it cannot press.
+   */
+  const noneId = `${idPrefix}-none`;
 
   if (drafts.length === 0) return null;
 
@@ -486,16 +495,35 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
           <button
             type="button"
             data-testid="chat-email-batch-approve"
-            disabled={!canSend}
+            /* `aria-disabled`, never the native `disabled`. A disabled button is
+               out of the sequential focus order, so a keyboard or screen-reader
+               user who unticks every draft tabs past both controls AND past the
+               sentence beside them, and is left with a card that has gone
+               silent for no reason they can discover. The button stays
+               reachable and announces itself as unavailable; the HANDLER below
+               is what makes it unpressable.
+
+               The described reason is wired for the EMPTY SELECTION only, and
+               that is the whole of it: that state is indefinite and its label
+               ("Send it") explains nothing, so it needs a sentence. Being busy
+               is momentary and already spoken — the primary button's own label
+               becomes "Sending…" / "Deleting…" and the card's summary is a
+               polite live region — so a second description there would repeat
+               what the accessible name just said. */
             aria-disabled={!canSend}
-            onClick={() =>
+            aria-describedby={noneSelected ? noneId : undefined}
+            onClick={() => {
+              // The guard the removed `disabled` attribute used to be. It is
+              // the real one either way: `disabled` is a hint to the browser,
+              // this is the rule.
+              if (!canSend) return;
               void onApprove({
                 batchId,
                 // Read off the FROZEN card state, never re-fetched: this is the
                 // client half of the guarantee that what was read is what goes.
                 entries: included.map((d) => ({ id: d.id, fingerprint: d.fingerprint })),
-              })
-            }
+              });
+            }}
             style={{
               padding: "6px 14px",
               borderRadius: 8,
@@ -521,10 +549,12 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
             data-testid="chat-email-batch-cancel"
             // Nothing ticked, nothing to delete — the same rule the send
             // button follows, so neither control ever claims to act on an
-            // empty set.
-            disabled={!canSend}
+            // empty set. Announced rather than enforced by the attribute, for
+            // the reason written on the send button above.
             aria-disabled={!canSend}
-            onClick={() =>
+            aria-describedby={noneSelected ? noneId : undefined}
+            onClick={() => {
+              if (!canSend) return;
               void onCancel({
                 batchId,
                 // The TICKED set, the same one the send button acts on. A
@@ -533,8 +563,8 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
                 // "delete it anyway" for the other — and of the two readings,
                 // the one that destroys less is the one to be wrong about.
                 entries: included.map((d) => ({ id: d.id, fingerprint: d.fingerprint })),
-              })
-            }
+              });
+            }}
             style={{
               padding: "6px 12px",
               borderRadius: 8,
@@ -549,12 +579,12 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
           >
             {deleting
               ? t("chat.emailBatch.deleting")
-              : included.length === 1 || included.length === 0
+              : included.length === 1 || noneSelected
                 ? t("chat.emailBatch.cancelOne")
                 : t("chat.emailBatch.cancel", { count: String(included.length) })}
           </button>
-          {included.length === 0 && (
-            <span data-testid="chat-email-batch-none" style={{ color: MUTED_FG, fontSize: 11.5 }}>
+          {noneSelected && (
+            <span id={noneId} data-testid="chat-email-batch-none" style={{ color: MUTED_FG, fontSize: 11.5 }}>
               {t("chat.emailBatch.noneSelected")}
             </span>
           )}

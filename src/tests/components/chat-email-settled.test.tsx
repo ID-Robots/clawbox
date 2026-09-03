@@ -292,7 +292,8 @@ describe("a draft approved somewhere else", () => {
 //
 // (The card is rebuilt from GET /setup-api/email/pending, NOT from the
 // transcript's `EMAIL:` directives — those are IMAP uids for opening received
-// mail, a different mechanism entirely. The 20 seconds is PENDING_REFRESH_MS.)
+// mail, a different mechanism entirely. The owner counted about 20 seconds; the
+// schedule behind it is PENDING_REFRESH_MS, which is 15.)
 
 describe("send nothing", () => {
   it("deletes the drafts it is showing, and says so on the card", async () => {

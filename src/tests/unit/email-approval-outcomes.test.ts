@@ -180,6 +180,43 @@ describe("a tap that sends", () => {
     expect(outcomes.getOutcome(queued.draft.id)).toMatchObject({ kind: "unconfirmed" });
   });
 
+  it("does not TELL him it was not sent, either — the receipt is not the only surface", async () => {
+    // The receipt above has said `unconfirmed` since this feature shipped. The
+    // words in the owner's own chat still said "Not sent:", two lines under a
+    // comment explaining why they must not — and Telegram is where the tap
+    // happened, so it is the surface he reads. The pop-up answering the tap and
+    // the reply left under the question both have to match the receipt.
+    const queued = pending.queuePending(MESSAGE);
+    expect(queued.ok).toBe(true);
+    if (!queued.ok) return;
+    await approval.sendApprovalPrompt(queued.draft);
+    vi.mocked(smtp.sendMail).mockRejectedValue(new Error("socket hang up"));
+
+    await approval.applyApprovalCallback(tap(`ea:${postedHandle()}`));
+
+    const popup = vi.mocked(telegram.answerCallback).mock.calls.at(-1)?.[2] ?? "";
+    const reply = vi.mocked(telegram.replyInChat).mock.calls.at(-1)?.[2] ?? "";
+    for (const said of [popup, reply]) {
+      expect(said).not.toMatch(/not sent/i);
+      expect(said).toMatch(/sent folder/i);
+    }
+  });
+
+  it("still says 'not sent' when the mail server refused it out loud", async () => {
+    // The other half of the same judgement: a refusal the server SPOKE is a
+    // definite failure and must keep reading like one.
+    const queued = pending.queuePending(MESSAGE);
+    expect(queued.ok).toBe(true);
+    if (!queued.ok) return;
+    await approval.sendApprovalPrompt(queued.draft);
+    vi.mocked(smtp.sendMail).mockRejectedValue(new smtp.SmtpError("auth", "The mail server refused it."));
+
+    await approval.applyApprovalCallback(tap(`ea:${postedHandle()}`));
+
+    expect(vi.mocked(telegram.answerCallback).mock.calls.at(-1)?.[2] ?? "").toMatch(/not sent/i);
+    expect(vi.mocked(telegram.replyInChat).mock.calls.at(-1)?.[2] ?? "").toMatch(/not sent/i);
+  });
+
   it("leaves a twin queued long after the first alone", async () => {
     // The sweep is bounded by the same window queueing is: two identical
     // messages queued an hour apart are two messages, and one of them going

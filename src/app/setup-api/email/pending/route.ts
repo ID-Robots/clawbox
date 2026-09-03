@@ -115,9 +115,7 @@ export async function POST(request: Request) {
     // are synchronous with nothing between them, which is what keeps the
     // removal itself the single atomic step the queue documents.
     const doomed = getPending(id);
-    if (!removePending(id)) {
-      return NextResponse.json({ error: "That draft is no longer waiting.", kind: "gone" }, { status: 404 });
-    }
+    if (!removePending(id)) return staleAnswer(id);
     // Deliberately does NOT resolve duplicates. Nothing was delivered, so
     // nothing is covered — and deleting a message the owner did not point at
     // is not this route's to do.
@@ -144,9 +142,7 @@ export async function POST(request: Request) {
   // failure response below hands the whole message back, so nothing the owner
   // approved is lost to a transient SMTP error.
   const draft = claimPending(id);
-  if (!draft) {
-    return NextResponse.json({ error: "That draft is no longer waiting.", kind: "gone" }, { status: 404 });
-  }
+  if (!draft) return staleAnswer(id);
   // After the claim and before the send: the draft can no longer be sent by a
   // tap, so the button is already dead and taking it away now is honest either
   // way the send goes.
@@ -171,17 +167,26 @@ export async function POST(request: Request) {
   } catch (err) {
     const kind = err instanceof SmtpError ? err.kind : "network";
     const error = err instanceof SmtpError ? err.message : "Could not send the message.";
-    console.error(`[email/pending] approved send failed: kind=${kind} host=${settings.smtpHost}`);
     // The draft is out of the queue and no twin is touched — nothing is covered
     // by a send that did not happen. WHICH failure it was decides what the
     // receipt may claim: a refusal the mail server spoke is "not sent", while a
     // dropped connection is a thing this process cannot know either way, and
     // saying "not sent" there is how an owner is talked into sending twice.
-    recordOutcome(draft, outcomeKindFor(err), { error });
+    //
+    // COMPUTED ONCE AND SENT BACK, not just written down. The receipt and the
+    // answer are this one request's two statements about one message, and they
+    // used to disagree: the receipt said `unconfirmed` while the response said
+    // only "send_failed", which every surface renders as a definite failure.
+    // Two screens contradicting each other about mail that may well have gone
+    // out is how an owner is talked into sending it twice.
+    console.error(`[email/pending] approved send failed: kind=${kind} host=${settings.smtpHost}`);
+    const ending = outcomeKindFor(err);
+    recordOutcome(draft, ending, { error });
     return NextResponse.json(
       {
         error,
         kind,
+        ending,
         // The draft is already out of the queue — return it so the panel can
         // show what was lost rather than silently swallowing the owner's mail.
         draft: { to: draft.to, subject: draft.subject, body: draft.body },
@@ -248,6 +253,10 @@ async function rejectBatch(raw: unknown): Promise<NextResponse> {
   // apart, the same way approveBatch counts its duplicates apart: reporting it
   // among the failures would put a red verdict on a card where nothing went
   // wrong, which is the reading that trains an owner to ignore the line.
+  // EVERY ending, deliberately — and deliberately unlike `approveBatch`, which
+  // counts only the two that mean the message arrived. The gesture here is
+  // "stop waiting for this", and a draft that was sent, refused, deleted or
+  // left unconfirmed is not waiting under any of them.
   const resolved = results.filter((r) => !r.ok && r.ending !== undefined).length;
   // What is left is a real refusal: a draft whose text moved, or one that left
   // the queue with no word about it at all.
@@ -288,6 +297,45 @@ function whatBecameOf(id: string): GoneOutcome {
     at: receipt.at,
     error: receipt.error ?? endingSentence(receipt.kind),
   };
+}
+
+/**
+ * The single-draft answer for a decision that had already been made elsewhere.
+ *
+ * THE SAME RECEIPT THE BATCH PATHS READ, and it is the sibling call site this
+ * codebase keeps leaving unguarded. `approveBatch` and `rejectBatch` were
+ * taught to ask `whatBecameOf`; these two branches, sixty lines away, went on
+ * answering the bare "That draft is no longer waiting." — and their only caller
+ * is Settings → Email, which paints any non-OK answer red.
+ *
+ * The owner tapped *Approve & send* in Telegram, the message went out, and the
+ * desktop row was still on screen because the queue is re-read on a schedule.
+ * Clicking Approve there produced a red error over a send that succeeded, next
+ * to a green "Sent ✓" in the handled strip below it — one message, two verdicts,
+ * and the red one is the one he acts on.
+ *
+ * Still a 404: the request really did not do anything, and a caller reading the
+ * status line must not be told otherwise. What changes is that the body now
+ * says WHICH ending it was, so the surface can tell "already sent" from "the
+ * mail server refused it" instead of rendering both as a failure of the click.
+ */
+function staleAnswer(id: string): NextResponse {
+  const became = whatBecameOf(id);
+  return NextResponse.json(
+    {
+      error: became.error,
+      // Unchanged, and deliberately: `kind` here is the REFUSAL vocabulary the
+      // single-draft path has always spoken ("gone", "unconfigured",
+      // "owner_only"), not the receipt's. The ending rides beside it.
+      kind: "gone",
+      // The ending and nothing else. The receipt's timestamp is deliberately
+      // NOT copied here: the handled strip already renders it from the receipt
+      // in the next queue read, and a second source for one fact is how two
+      // surfaces come to disagree about when a message went.
+      ...(became.ending ? { ending: became.ending } : {}),
+    },
+    { status: 404 },
+  );
 }
 
 /**
@@ -365,6 +413,13 @@ type BatchOutcome =
       error: string;
       /** The SMTP failure's own kind — "auth", "network", … — never an ending. */
       kind?: string;
+      /**
+       * What the RECEIPT says, which is the only one of the two words a surface
+       * may render. "failed" is a refusal the mail server spoke; "unconfirmed"
+       * is a silence this box cannot read either way, and rendering that as a
+       * failure is what makes an owner send the message a second time.
+       */
+      ending: "failed" | "unconfirmed";
       /** Returned for a draft that was claimed and then failed — see below. */
       draft?: { to: string[]; subject: string; body: string };
     };
@@ -512,13 +567,17 @@ async function approveBatch(request: Request, raw: unknown): Promise<NextRespons
       // Never the recipient, never the subject, never a line of the body: this
       // log is the one part of an approved send that outlives the request.
       console.error(`[email/pending] batch send failed: kind=${kind} host=${settings.smtpHost}`);
-      recordOutcome(draft, outcomeKindFor(err), { error });
+      // One judgement, written to the receipt AND carried on the row — see the
+      // single-draft catch above for why the two must not be allowed to drift.
+      const ending = outcomeKindFor(err);
+      recordOutcome(draft, ending, { error });
       results.push({
         id: draft.id,
         ok: false,
         reason: "send_failed",
         error,
         kind,
+        ending,
         draft: { to: draft.to, subject: draft.subject, body: draft.body },
       });
     }
@@ -529,7 +588,41 @@ async function approveBatch(request: Request, raw: unknown): Promise<NextRespons
   // send of its own is not something that went wrong, and a status line that
   // called it one would train the owner to ignore the line that matters.
   const duplicates = results.filter((r) => !r.ok && r.reason === "duplicate").length;
-  const failed = results.length - sent - duplicates;
+  /**
+   * Sent somewhere else, with a receipt to prove it.
+   *
+   * The draft went out from Settings or from Telegram while the card sat on
+   * screen. Nothing went wrong — the words reached the recipient, which is what
+   * the gesture asked for — so counting it among the failures put a red verdict
+   * and a 207 on a batch where every message arrived.
+   *
+   * NAMED ENDINGS, NOT "has an ending", and both halves of that are
+   * load-bearing.
+   *
+   *   `reason === "gone"` keeps `send_failed` rows out: they carry an `ending`
+   *   too now, and a predicate that only asked whether one was present would
+   *   swallow the very failures this count exists to leave alone.
+   *
+   *   The KIND check keeps the other three out. `whatBecameOf` says "gone" for
+   *   `rejected`, `failed` and `unconfirmed` as well, and under every one of
+   *   those the message reached nobody. Subtracting them from `failed` would
+   *   answer `success: true` and a 200 over a batch containing a draft the mail
+   *   server refused — a caller reading only the status line would conclude
+   *   both messages went, which is the one reading this route's header says
+   *   must never be possible.
+   *
+   * And RECEIPT-BACKED throughout: a draft that left the queue with nothing
+   * recorded about it is an unknown, not a resolution, and it stays in `failed`.
+   *
+   * `rejectBatch` deliberately does NOT narrow this way, and the two siblings
+   * are supposed to differ: that gesture asks for the draft not to be waiting,
+   * and under EVERY ending it is not waiting. Harmonising them would be wrong
+   * in one direction or the other.
+   */
+  const resolved = results.filter(
+    (r) => !r.ok && r.reason === "gone" && (r.ending === "sent" || r.ending === "duplicate"),
+  ).length;
+  const failed = results.length - sent - duplicates - resolved;
   // Entries the loop never reached, because the request was abandoned partway.
   // Counted rather than ignored: with an empty `results` — an abort before the
   // FIRST send — `failed === 0` is true and nothing was sent, so a verdict
@@ -541,7 +634,7 @@ async function approveBatch(request: Request, raw: unknown): Promise<NextRespons
   // line must not be able to mistake "six of eight" for success — which is
   // precisely the reading a 200 invites.
   return NextResponse.json(
-    { success: everythingWent, approved: true, sent, failed, duplicates, skipped, results },
+    { success: everythingWent, approved: true, sent, failed, duplicates, resolved, skipped, results },
     { status: everythingWent ? 200 : 207 },
   );
 }

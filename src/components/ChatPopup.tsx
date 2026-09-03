@@ -3350,6 +3350,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    */
   const cancelEmailBatch = useCallback(async (approval: EmailBatchApproval) => {
     const { batchId, entries } = approval
+    // The same guard `approveEmailBatch` opens with, and the sibling this one
+    // was missing. It did not matter while the button carried a native
+    // `disabled` the browser enforced; the button now announces itself with
+    // `aria-disabled` and is guarded in its own handler, so this is the second
+    // layer — and posting an empty set would only earn a 400 rendered as "the
+    // deletion did not get through", a red line about nothing.
+    if (entries.length === 0) return
     // `deleting`, not `sending`: the primary button's label keys off the
     // status, and a card that reads "Sending…" over the two messages the owner
     // has just said must not be sent is the surface asserting the opposite of

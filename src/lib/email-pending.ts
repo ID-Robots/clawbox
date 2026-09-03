@@ -105,9 +105,13 @@ export const PREVIEW_CHARS = 160;
  * so a fresh draft is queued and he is asked about a message that has gone. The
  * queue is deliberately not given a memory of decided drafts — folding into one
  * would swallow a second message he really did ask for — and the tool that used
- * to produce that retry no longer asks for one (mcp/tools/email.ts). The
- * receipts store knows enough to close the rest of this window; it has not been
- * asked to yet.
+ * to produce that retry no longer asks for one (mcp/tools/email.ts).
+ *
+ * Nor can the receipts store close the rest of this window as it stands: it
+ * deliberately keeps NO body (email-outcomes.ts), so it cannot produce a
+ * `draftContentKey` and can recognise a retry only by recipients and subject.
+ * Closing it would mean giving a receipt a content-key column — a hash, never
+ * the text — which is a change to that file, not a lookup this one is missing.
  */
 export const DEDUPE_WINDOW_MS = 5 * 60 * 1000;
 

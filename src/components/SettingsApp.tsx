@@ -1941,7 +1941,39 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
-        setEmailMsg({ type: "error", message: data?.error || t("settings.emailApproveFailed") });
+        /**
+         * A decision somebody already made is NOT this click failing — but only
+         * when it is the decision this click was asking for.
+         *
+         * The owner tapped *Approve & send* in Telegram, the message went out,
+         * and this row was still on screen because the queue is re-read on a
+         * schedule. The route answers 404 "no longer waiting" — correctly, this
+         * request did nothing — and painting that red put a failure over a send
+         * that succeeded, directly above the green "Sent ✓" the handled strip
+         * was about to show for the same message.
+         *
+         * KEYED ON THE GESTURE, because the two directions are not symmetric and
+         * reading the ending alone gets both of the crossed cases backwards.
+         * *Discard* answered `sent` is the worst outcome available on that click
+         * — the owner asked for a message NOT to go out and it went out — and a
+         * green banner there congratulates him for it. *Approve & send* answered
+         * `rejected` means nothing was sent and nothing will be; the words are
+         * honest, and the colour is what is read first.
+         *
+         * `duplicate` is good news either way: an identical message reached the
+         * recipient, so the send happened and this copy is not waiting. An
+         * ending of `failed` or `unconfirmed`, and a 404 with no ending at all,
+         * stay red — all three are something to look at.
+         */
+        const ending = typeof data?.ending === "string" ? data.ending : "";
+        const asAsked =
+          action === "approve"
+            ? ending === "sent" || ending === "duplicate"
+            : ending === "rejected" || ending === "duplicate";
+        setEmailMsg({
+          type: asAsked ? "success" : "error",
+          message: data?.error || t("settings.emailApproveFailed"),
+        });
         // The route claims a draft before it sends, so a failed send has
         // already taken it out of the queue and refreshEmailPending() is about
         // to remove the row. Hold what it handed back, or the message the

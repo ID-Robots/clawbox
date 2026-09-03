@@ -208,7 +208,7 @@ describe("one gesture", () => {
     for (const check of await screen.findAllByTestId("chat-email-batch-include")) fireEvent.click(check);
 
     const button = screen.getByTestId("chat-email-batch-approve");
-    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-disabled", "true");
     fireEvent.click(button);
     expect(onApprove).not.toHaveBeenCalled();
     expect(screen.getByTestId("chat-email-batch-none")).toBeInTheDocument();
@@ -264,16 +264,46 @@ describe("one gesture", () => {
   it("will not offer to delete an empty set", async () => {
     // Nothing ticked, nothing to delete — the same rule the send button keeps,
     // so neither control ever claims to act on nothing.
+    const { onApprove, onCancel } = await mount(card({ drafts: [draft(1)] }));
+    fireEvent.click(await screen.findByTestId("chat-email-batch-include"));
+    const cancel = screen.getByTestId("chat-email-batch-cancel");
+    const approve = screen.getByTestId("chat-email-batch-approve");
+    expect(cancel).toHaveAttribute("aria-disabled", "true");
+    expect(approve).toHaveAttribute("aria-disabled", "true");
+    // Announced as unavailable AND actually unpressable: the guard is in the
+    // handler, not in an attribute the browser may or may not honour.
+    fireEvent.click(cancel);
+    fireEvent.click(approve);
+    expect(onApprove).not.toHaveBeenCalled();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("keeps both controls reachable, and says why they are inert", async () => {
+    // The escape from an empty selection is to tick something again, and a
+    // native `disabled` took both buttons OUT of the sequential focus order —
+    // so a keyboard or screen-reader user landed on neither them nor the
+    // sentence beside them, and the card had simply gone quiet. `aria-disabled`
+    // keeps the stop; `aria-describedby` is what makes the reason audible from
+    // the control the user is standing on.
     await mount(card({ drafts: [draft(1)] }));
     fireEvent.click(await screen.findByTestId("chat-email-batch-include"));
-    expect(screen.getByTestId("chat-email-batch-cancel")).toBeDisabled();
-    expect(screen.getByTestId("chat-email-batch-approve")).toBeDisabled();
+
+    const reason = screen.getByTestId("chat-email-batch-none");
+    expect(reason.id).toBeTruthy();
+    for (const id of ["chat-email-batch-approve", "chat-email-batch-cancel"]) {
+      const button = screen.getByTestId(id);
+      expect(button).not.toBeDisabled();
+      expect(button).toHaveAttribute("aria-describedby", reason.id);
+      button.focus();
+      expect(document.activeElement).toBe(button);
+    }
+    expect(reason).toHaveTextContent("No messages are selected");
   });
 
   it("cannot be clicked twice while the first send is in flight", async () => {
     const { onApprove, onCancel } = await mount(card({ status: "sending" }));
     const button = await screen.findByTestId("chat-email-batch-approve");
-    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-disabled", "true");
     fireEvent.click(button);
     fireEvent.click(screen.getByTestId("chat-email-batch-cancel"));
     expect(onApprove).not.toHaveBeenCalled();
@@ -464,8 +494,8 @@ describe("a draft decided somewhere other than this card", () => {
     expect(screen.getByTestId("chat-email-batch-cancel")).toHaveTextContent("Deleting…");
     expect(screen.getByTestId("chat-email-batch-approve")).not.toHaveTextContent("Sending…");
     // Neither button may be pressed while the request is out.
-    expect(screen.getByTestId("chat-email-batch-approve")).toBeDisabled();
-    expect(screen.getByTestId("chat-email-batch-cancel")).toBeDisabled();
+    expect(screen.getByTestId("chat-email-batch-approve")).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByTestId("chat-email-batch-cancel")).toHaveAttribute("aria-disabled", "true");
   });
 
   it("paints an ending the owner chose in the colour of a note, not of a fault", async () => {
