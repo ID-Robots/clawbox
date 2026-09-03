@@ -437,9 +437,25 @@ function writeMirror(dest, credential) {
   const existing = readJson(dest);
   const reason = syncReason(existing, credential);
   if (!reason) return null;
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  const dir = path.dirname(dest);
+  fs.mkdirSync(dir, { recursive: true });
   // Holds an OAuth token — owner-only dir, not just the 0600 file.
-  fs.chmodSync(path.dirname(dest), 0o700);
+  //
+  // Guarded for the same reason the file chmod below is, and it costs more
+  // when it is not: this runs BEFORE the write, so an EPERM here (a codex dir
+  // owned by another user) threw out of writeMirror and aborted main()'s whole
+  // destinations loop — losing this mirror AND every later one, including the
+  // app-server's CODEX_HOME copy without which every Codex turn falls back to
+  // the Cloudflare-challenged browser endpoint. One un-tightenable directory
+  // must cost that directory's permissions, not the pass. The credential is
+  // still written 0600, so the file itself stays owner-only either way.
+  try {
+    fs.chmodSync(dir, 0o700);
+  } catch (error) {
+    console.error(
+      `  Codex auth.json: could not tighten permissions on ${dir} — it may be readable by other users (${error.code || error.message}).`,
+    );
+  }
   fs.writeFileSync(
     dest,
     JSON.stringify(buildAuthFile(credential, existing), null, 2),
@@ -587,8 +603,15 @@ function writeBackToCore(agentDirs, tokens, profileId) {
           .run(JSON.stringify(store), Date.now(), "primary");
         db.exec("COMMIT");
         open = false;
-        // Only after the COMMIT: a rotation reported as recorded but rolled
-        // back would leave main() adopting a token core does not hold.
+        // Only after the COMMIT, and the guarantee is THIS loop's alone: a
+        // rotation reported as recorded but rolled back would leave main()
+        // adopting a token core does not hold. `wrote` is an OR across both
+        // stores, and the legacy auth-profiles.json loop above sets it with no
+        // transaction and no relation to this outcome — so on a box holding
+        // both stores a successful JSON write still reports true when the
+        // sqlite write is rolled back. Bounded rather than closed here: the
+        // divergence persists, the next tick retries, and readProfiles prefers
+        // that JSON file on exactly the boxes that have one.
         wrote = true;
       } finally {
         if (open) {
@@ -778,6 +801,13 @@ function main() {
 try {
   main();
 } catch (error) {
-  // Never block gateway start on a credential mirror.
-  log("Codex auth.json: " + error.message);
+  // Never block gateway start on a credential mirror: this stays exit 0.
+  //
+  // console.error, not log(): anything landing here ended the pass early, with
+  // some or all of the mirrors unwritten and no other line saying so — and
+  // log() is silenced by CODEX_AUTH_MIRROR_QUIET=1, the timer unit's own
+  // setting, whose SuccessExitStatus=0 1 then shows the unit green. A failure
+  // that leaves the credential unmirrored is not "normal and idempotent", so
+  // it goes to the channel the timer path can actually see.
+  console.error("  Codex auth.json: " + error.message);
 }

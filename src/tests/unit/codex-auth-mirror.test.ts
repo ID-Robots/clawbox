@@ -125,26 +125,37 @@ function run(): string {
   });
 }
 
+/** The same run as `run()`, with both streams captured instead of stdout only. */
+function runCapturing(): { stdout: string; stderr: string; status: number | null } {
+  const result = spawnSync("node", [SCRIPT, openclawHome, homeAuthPath], {
+    encoding: "utf-8",
+    env: { ...process.env, OPENCLAW_STATE_DIR: "", CODEX_AUTH_MIRROR_QUIET: "" },
+  });
+  return { stdout: result.stdout, stderr: result.stderr, status: result.status };
+}
+
 /**
  * The same script, run as the TIMER runs it (`CODEX_AUTH_MIRROR_QUIET=1`), with
- * `fs.chmodSync` failing on every credential file and on nothing else, and both
- * streams captured.
+ * `fs.chmodSync` failing on the paths ending in `targetSuffix` and on nothing
+ * else, and both streams captured.
  *
  * The syscall is faulted from a `--require` preload rather than stubbed in this
  * process: the script is a real child, and an unprivileged test cannot provoke
  * an EPERM on a file it owns — while a CI job running as root could not provoke
- * one at all. The directory chmod is deliberately left working; only the
- * `auth.json` files fail.
+ * one at all. `writeMirror` chmods two things per destination, the containing
+ * directory and the `auth.json`, so the suffix picks exactly one of them and
+ * the other is left working.
  */
-function runWithFailingCredentialChmod(): { stdout: string; stderr: string; status: number | null } {
+function runWithFailingChmod(targetSuffix: string): { stdout: string; stderr: string; status: number | null } {
   const preload = path.join(home, "chmod-fault.cjs");
   writeFileSync(
     preload,
     [
       'const fs = require("node:fs");',
       "const real = fs.chmodSync;",
+      `const suffix = ${JSON.stringify(targetSuffix)};`,
       "fs.chmodSync = (target, mode) => {",
-      '  if (String(target).endsWith("auth.json")) {',
+      "  if (String(target).endsWith(suffix)) {",
       '    const error = new Error("EPERM: operation not permitted, chmod");',
       '    error.code = "EPERM";',
       "    throw error;",
@@ -734,6 +745,63 @@ describe("codex-auth-mirror.js", () => {
     expect(parsed.tokens.refresh_token).toBe("refresh-shared-live");
   });
 
+  it("ranks a profile with no `expires` BELOW a live one, even under a preferred id", () => {
+    // The middle tier. An entry with no usable `expires` is not "expired" —
+    // core says the same (`resolveTokenExpiryState` returns `missing`, and only
+    // `expired` scores) — but it is not evidence of life either, so it must not
+    // tie with a credential this box can see is still valid and then win on
+    // `openai:chatgpt` heading PROFILE_KEYS. Two tiers did exactly that.
+    seedAgentStore({
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-unknown"),
+        refresh: "refresh-unknown",
+      },
+      "codex:default": {
+        type: "oauth",
+        provider: "codex",
+        access: accessToken("acct-live"),
+        refresh: "refresh-live",
+        expires: Date.now() + 3_600_000,
+      },
+    });
+
+    run();
+
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
+    expect(parsed.tokens.account_id).toBe("acct-live");
+    expect(parsed.tokens.refresh_token).toBe("refresh-live");
+  });
+
+  it("ranks a profile with no `expires` ABOVE an expired one — unknown is not dead", () => {
+    // The other side of the same tier, so it cannot degenerate into "treat
+    // unknown as expired": expiry only ever DEMOTES here, it never drops a
+    // candidate, because a dead credential still beats none and core keeps an
+    // expired OAuth profile eligible and refreshes it.
+    seedAgentStore({
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-expired"),
+        refresh: "refresh-expired",
+        expires: Date.now() - 7_200_000,
+      },
+      "codex:default": {
+        type: "oauth",
+        provider: "codex",
+        access: accessToken("acct-unknown"),
+        refresh: "refresh-unknown",
+      },
+    });
+
+    run();
+
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
+    expect(parsed.tokens.account_id).toBe("acct-unknown");
+    expect(parsed.tokens.refresh_token).toBe("refresh-unknown");
+  });
+
   it("leaves the state-db store unread on a legacy-main box — core does not resolve through it", () => {
     // An ABSENT `auth.sharedStore` row means `legacy-main`
     // (`parseSharedAuthStoreOwnership`), and core then resolves the shared
@@ -1019,6 +1087,66 @@ describe("codex-auth-mirror.js", () => {
     expect(statSync(homeAuthPath).mode & 0o777).toBe(0o600);
   });
 
+  it("fails CLOSED when another writer holds core's store — no adoption, nothing overwritten", () => {
+    // The write-back is one transaction, and a rotation may only be reported as
+    // recorded once it has COMMITTED. Here a second connection holds the write
+    // lock for the whole pass, so `BEGIN IMMEDIATE` waits out the 5 s
+    // busy_timeout and throws: `writeBackToCore` must then return false, and
+    // main() must take the could-not-record branch rather than claiming the
+    // adoption. Claiming it would leave the box mirroring a refresh token core
+    // does not hold — one of the two tokens of a single-use family, which is
+    // the `refresh_token_reused` shape this whole file exists to prevent.
+    //
+    // Only the sqlite store is seeded: an auth-profiles.json would make `wrote`
+    // true through the untransactional legacy loop and prove nothing about this
+    // one (see the note at its `wrote = true`).
+    seedAgentStore({
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-1", "old"),
+        refresh: "refresh-spent",
+        expires: Date.now() + 3_600_000,
+      },
+    });
+    mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
+    writeFileSync(
+      codexHomeAuthPath,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: accessToken("acct-1", "rotated"),
+          refresh_token: "refresh-rotated-by-appserver",
+          account_id: "acct-1",
+        },
+      }),
+    );
+
+    // Held across the whole child run: spawnSync blocks this process, and the
+    // RESERVED lock BEGIN IMMEDIATE takes is held by the connection, not the
+    // thread, so the child cannot get it and cannot be raced into getting it.
+    const blocker = new DatabaseSync(path.join(agentDir, "openclaw-agent.sqlite"));
+    blocker.exec("BEGIN IMMEDIATE");
+    let result: { stdout: string; stderr: string; status: number | null };
+    try {
+      result = runCapturing();
+    } finally {
+      blocker.exec("ROLLBACK");
+      blocker.close();
+    }
+
+    expect(result.stdout).not.toContain("adopted app-server rotation");
+    // Loud on the channel the timer keeps, and non-fatal — the next tick retries.
+    expect(result.stderr).toContain("core's store could not be updated");
+    expect(result.status).toBe(0);
+    // Nothing was half-written: core still holds the token it held, and the
+    // app-server's live rotation was left alone rather than overwritten with
+    // the spent one.
+    expect(readAgentStore().profiles["openai:chatgpt"].refresh).toBe("refresh-spent");
+    expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-rotated-by-appserver");
+  }, 20_000);
+
   it("reports a failed chmod where the TIMER can see it, not through the quiet log", () => {
     // The timer unit runs with CODEX_AUTH_MIRROR_QUIET=1, so a failure reported
     // through log() is silent on the path that runs 144 times a day — a mirror
@@ -1027,7 +1155,7 @@ describe("codex-auth-mirror.js", () => {
     // written by the same helper.
     seedProfile(accessToken("acct-1"));
 
-    const { stdout, stderr, status } = runWithFailingCredentialChmod();
+    const { stdout, stderr, status } = runWithFailingChmod("auth.json");
 
     expect(stdout).toBe(""); // quiet mode: nothing on the channel the timer drops
     expect(stderr).toContain("could not tighten permissions");
@@ -1037,6 +1165,37 @@ describe("codex-auth-mirror.js", () => {
     // pass must never be blocked by a permissions failure.
     expect(status).toBe(0);
     expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-secret");
+  });
+
+  it("keeps mirroring the REMAINING destinations when a directory chmod fails, and says so", () => {
+    // The sibling of the case above, and the one that costs more: the
+    // directory chmod runs first, so an EPERM there (a codex dir owned by
+    // another user) threw out of writeMirror, aborted main()'s whole
+    // destinations loop, and left every LATER mirror — the app-server's
+    // CODEX_HOME copy, without which every Codex turn falls back to the
+    // Cloudflare-challenged browser endpoint — unwritten. It reported that
+    // only through the top-level log(), which CODEX_AUTH_MIRROR_QUIET=1
+    // silences, so on the timer path 144 aborted passes a day were
+    // indistinguishable from 144 clean ones.
+    //
+    // `~/.codex` is the FIRST destination, so faulting its directory is what
+    // pins "the pass continued": the assertion below is about the destination
+    // that came after it.
+    seedProfile(accessToken("acct-1"));
+
+    const { stdout, stderr, status } = runWithFailingChmod(".codex");
+
+    expect(stdout).toBe("");
+    expect(stderr).toContain("could not tighten permissions");
+    expect(stderr).toContain(path.dirname(homeAuthPath));
+    expect(stderr).toContain("EPERM");
+    expect(status).toBe(0);
+    // Both destinations written: the faulted one, whose file mode still makes
+    // the credential owner-only, and the one that used to be skipped.
+    expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-secret");
+    expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.refresh_token)
       .toBe("refresh-secret");
   });
 });
