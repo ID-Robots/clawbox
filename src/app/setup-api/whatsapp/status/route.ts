@@ -6,10 +6,6 @@ import { readOpenclawWhatsappStatus } from "@/lib/openclaw-whatsapp";
 
 export const dynamic = "force-dynamic";
 
-// The env/session reads are plain stat+read calls and cost nothing, but
-// `hermes gateway status` shells out (~2 s on a Jetson) and the Settings panel
-// polls this route. Cache the CLI half only, and coalesce concurrent callers
-// onto one in-flight probe — the same shape the Telegram status route uses.
 /**
  * The gateway probe lives in `hermesGatewayStatus()`, not here.
  *

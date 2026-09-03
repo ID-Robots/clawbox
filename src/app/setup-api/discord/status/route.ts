@@ -125,46 +125,51 @@ interface HermesDiscordProbe {
 }
 
 const HERMES_PROBE_TTL = 15_000;
-// The GATEWAY half is deliberately NOT in here. `hermesGatewayStatus()` owns
-// one shared memo for the whole process, with its own failure TTL and an
-// invalidation the restart paths call; a second 15 s copy here would shadow
-// both. The rest — `send --list discord`, plus two plain file reads — is this
-// route's own and stays cached.
-type HermesDiscordLocal = Omit<HermesDiscordProbe, "gateway">;
-let cachedHermesProbe: { token: string; probe: HermesDiscordLocal; at: number } | null = null;
-const inFlightHermesProbe = new Map<string, Promise<HermesDiscordLocal>>();
+// ONLY `send --list discord` is memoised here — the same shape the Telegram
+// status route uses.
+//
+// The GATEWAY half is not: `hermesGatewayStatus()` owns one shared memo for the
+// whole process, with its own failure TTL and an invalidation the restart paths
+// call, and a second 15 s copy here would shadow both.
+//
+// The snapshot and the access env are not either, and their own comment is why:
+// one `fs.readFile` and one `readHermesEnv()` cost nothing, so caching them
+// bought nothing and composed a FRESH `gateway.running` with a stale allowlist.
+// The owner saved the Discord allowlist, the gateway restarted, and for up to
+// 15 s afterwards this route still reported `denied-no-allowlist` — "every
+// message is being dropped" — over the thing he had just fixed.
+let cachedRegistered: { token: string; registered: boolean | null; at: number } | null = null;
+const inFlightRegistered = new Map<string, Promise<boolean | null>>();
 
-function probeHermesLocal(token: string): Promise<HermesDiscordLocal> {
+function probeRegistered(token: string): Promise<boolean | null> {
   if (
-    cachedHermesProbe &&
-    cachedHermesProbe.token === token &&
-    Date.now() - cachedHermesProbe.at < HERMES_PROBE_TTL
+    cachedRegistered &&
+    cachedRegistered.token === token &&
+    Date.now() - cachedRegistered.at < HERMES_PROBE_TTL
   ) {
-    return Promise.resolve(cachedHermesProbe.probe);
+    return Promise.resolve(cachedRegistered.registered);
   }
-  const existing = inFlightHermesProbe.get(token);
+  const existing = inFlightRegistered.get(token);
   if (existing) return existing;
   const pending = (async () => {
-    // The snapshot and the env are plain file reads and cost nothing; only
-    // `send --list` shells out here, and it is what this cache is for.
-    const [registered, snapshot, access] = await Promise.all([
-      hermesDiscordRegistered(),
-      readHermesGatewaySnapshot(),
-      readHermesDiscordAccess(),
-    ]);
-    const probe: HermesDiscordLocal = { registered, snapshot, access };
-    cachedHermesProbe = { token, probe, at: Date.now() };
-    return probe;
+    const registered = await hermesDiscordRegistered();
+    cachedRegistered = { token, registered, at: Date.now() };
+    return registered;
   })().finally(() => {
-    inFlightHermesProbe.delete(token);
+    inFlightRegistered.delete(token);
   });
-  inFlightHermesProbe.set(token, pending);
+  inFlightRegistered.set(token, pending);
   return pending;
 }
 
 async function probeHermes(token: string): Promise<HermesDiscordProbe> {
-  const [local, gateway] = await Promise.all([probeHermesLocal(token), hermesGatewayStatus()]);
-  return { ...local, gateway };
+  const [registered, gateway, snapshot, access] = await Promise.all([
+    probeRegistered(token),
+    hermesGatewayStatus(),
+    readHermesGatewaySnapshot(),
+    readHermesDiscordAccess(),
+  ]);
+  return { registered, gateway, snapshot, access };
 }
 
 export async function GET() {
