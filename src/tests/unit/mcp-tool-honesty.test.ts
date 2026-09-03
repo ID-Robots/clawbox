@@ -68,6 +68,7 @@ import { registerBrowserTools } from "../../../mcp/tools/browser";
 import { registerSkillTools } from "../../../mcp/tools/skills";
 import { buildContext } from "../../../mcp/lib/context";
 import { registerOrientationTools } from "../../../mcp/tools/orientation";
+import { registerDesktopTools } from "../../../mcp/tools/desktop";
 import { desktopDisplay, registerSystemTools } from "../../../mcp/tools/system";
 
 const ctx = (
@@ -571,17 +572,41 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     expect(h.has("backup_status")).toBe(true);
   });
 
-  it("keeps every system tool inside the contract check:mcp-tools enforces", () => {
+  it("keeps every system and desktop tool inside the contract check:mcp-tools enforces", () => {
     // backup_status shipped at 1002 chars on beta — over MAX_DESCRIPTION_CHARS,
     // which `npm run check:mcp-tools` fails on. No CI job runs that checker
     // (TASK-708 covers adding it) and the registrar logs a violation without
     // failing, by design, so nothing caught it. Assert the repo's own contract
     // function over the whole file rather than one tool's length: the next
     // description to grow is not going to be this one.
+    //
+    // Both capability postures, because four system tools register only when a
+    // probe says yes — disk_usage/disk_cleanup on `du`, logs_tail on `journal`,
+    // screen_capture on a grabber — and ctx()'s defaults have every probe off.
+    // A guard that skips whatever a device happens to have is a guard that
+    // green-lights the description it exists to catch. registerDesktopTools
+    // rides along for app_uninstall, the one description written per edition.
+    const postures: Partial<McpContext>[] = [
+      {}, // ctx()'s own defaults: every probe off
+      { capabilities: { screenGrabber: "scrot", imageConvert: true, journal: true, du: true } },
+    ];
+    const checked = new Set<string>();
     for (const edition of ["openclaw", "hermes"] as const) {
-      for (const tool of system(edition).reg.list()) {
-        expect({ [tool.name]: contractViolations(tool) }).toEqual({ [tool.name]: [] });
+      for (const overrides of postures) {
+        const h = captureRegistrar(edition);
+        registerSystemTools(h.reg, ctx(edition, [], overrides));
+        registerDesktopTools(h.reg, ctx(edition, [], overrides));
+        for (const tool of h.reg.list()) {
+          checked.add(tool.name);
+          expect({ [tool.name]: contractViolations(tool) }).toEqual({ [tool.name]: [] });
+        }
       }
+    }
+    // Name the probe-gated four: a gate rewritten so its tool no longer
+    // registers would otherwise shrink this loop back to what it used to cover,
+    // silently and while staying green.
+    for (const name of ["disk_usage", "disk_cleanup", "logs_tail", "screen_capture", "app_uninstall"]) {
+      expect([...checked]).toContain(name);
     }
     // What the length budget must never cost: the verdict vocabulary the
     // agent answers from.
