@@ -686,6 +686,62 @@ describe("reconciling live cards against the store", () => {
     expect(reconcileBatchCards(before, new Set(["draft-2"]), new Map())).toBe(before);
   });
 
+  it("withdraws a guessed 'gone' for a draft that came BACK to the queue", async () => {
+    // The guess is provisional in BOTH directions or it is not provisional.
+    // `approve_batch` restores a draft it claimed when the tab that posted it
+    // aborts before the first byte (`restorePending`), and a second tab that
+    // polled inside that claim window has already written "No longer waiting —
+    // it was handled elsewhere" over it. The draft is queued and still waiting;
+    // the card dropped it from `included` and can never rebuild one for it,
+    // because `shownDraftIds` still covers it. Answerable in Settings → Email
+    // only — a live draft with no control on the surface that offered it.
+    const { reconcileBatchCards } = await import("@/lib/chat-email-batch");
+    const before = [
+      card({
+        drafts: [draft(1), draft(2)],
+        outcomes: [
+          { id: "draft-1", ok: false, kind: "gone" },
+          { id: "draft-2", ok: true, kind: "sent" },
+        ],
+      }),
+    ];
+    const after = reconcileBatchCards(before, new Set(["draft-1"]), new Map());
+    expect(after[0].outcomes.map((o) => o.id)).toEqual(["draft-2"]);
+    // And it must NOT settle: draft-1 is a live draft again, so the card is
+    // still a control for it.
+    expect(after[0].status).toBe("waiting");
+  });
+
+  it("never withdraws a REAL ending, only the guess", async () => {
+    // A receipt is not provisional. A draft the store answered `rejected` and
+    // then somehow listed as pending again keeps its ending: taking that away
+    // would put an Approve button back over a decision already made.
+    const { reconcileBatchCards } = await import("@/lib/chat-email-batch");
+    const before = [
+      card({
+        drafts: [draft(1)],
+        outcomes: [{ id: "draft-1", ok: true, kind: "rejected" }],
+      }),
+    ];
+    expect(reconcileBatchCards(before, new Set(["draft-1"]), new Map())).toBe(before);
+  });
+
+  it("leaves a SETTLED card's 'gone' alone when the draft comes back", async () => {
+    // Deliberately one-sided. Re-opening a settled card would hand the owner a
+    // live Approve button under a verdict he has already read, which is the
+    // exact defect the settled-card guard exists for — so a draft that returns
+    // after the card closed is Settings → Email's to answer.
+    const { reconcileBatchCards } = await import("@/lib/chat-email-batch");
+    const before = [
+      card({
+        status: "settled",
+        drafts: [draft(1)],
+        outcomes: [{ id: "draft-1", ok: false, kind: "gone" }],
+      }),
+    ];
+    expect(reconcileBatchCards(before, new Set(["draft-1"]), new Map())).toBe(before);
+  });
+
   it("still settles a card whose last draft only ever got a 'gone'", async () => {
     // "Provisional" must not mean "never decided": a card that could not settle
     // would keep a live Approve button over mail that is no longer waiting,
@@ -877,6 +933,34 @@ describe("a verdict that does not cry wolf", () => {
     expect(screen.getByTestId("chat-email-batch-outcome")).toHaveTextContent(
       "Already sent as an identical message",
     );
+  });
+
+  it("does not say 'Nothing was sent.' when a deletion sits BESIDE a duplicate", async () => {
+    // The same contradiction one draft further along, and the shape the guard
+    // above misses: he pressed *Delete without sending* over two drafts, one of
+    // which an identical message had already covered. `resultDiscarded` was
+    // gated on `deletedCount`, so a single real deletion beside the duplicate
+    // put "Nothing was sent." back over a message that reached the recipient —
+    // the sentence that gets it sent twice.
+    await mount(
+      card({
+        status: "settled",
+        settledByOwner: true,
+        lastGesture: "delete",
+        drafts: [draft(1), draft(2)],
+        outcomes: [
+          { id: "draft-1", ok: true, kind: "duplicate" },
+          { id: "draft-2", ok: true, kind: "rejected" },
+        ],
+      }),
+    );
+    const result = await screen.findByTestId("chat-email-batch-result");
+    expect(result.textContent).not.toContain("Nothing was sent");
+    // And neither half is dropped: the deletion he made AND the copy that went.
+    expect(result).toHaveTextContent("1 deleted");
+    expect(result).toHaveTextContent("identical message");
+    expect(within(screen.getByTestId("chat-email-batch")).getAllByTestId("chat-email-batch-outcome")[0])
+      .toHaveTextContent("Already sent as an identical message");
   });
 
   it("still tells an APPROVE that nothing went out", async () => {

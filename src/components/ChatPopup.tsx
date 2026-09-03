@@ -3332,7 +3332,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const approveEmailBatch = useCallback(async (approval: EmailBatchApproval) => {
     const { batchId, entries } = approval
     if (entries.length === 0) return
-    setEmailBatches(prev => updateBatchCard(prev, batchId, { status: 'sending', requestError: '' }))
+    // The GESTURE IS RECORDED HERE, on the click, not on the answer.
+    // `settleCard` rewrites the same value when the route replies, but the
+    // reply is exactly what a dropped link, a restarting server or a non-JSON
+    // 502 does not deliver — and the `catch` below puts the card back to
+    // `waiting` with nothing to say which button made it. Every later reader
+    // (the settle, the partial settle, the reconcile's `lastGesture ?? "approve"`)
+    // then weighs a receipt against a default instead of against the click.
+    // `reconcileBatchCards` skips a card in this status, so nothing acts on it
+    // while the request is in flight.
+    setEmailBatches(prev => updateBatchCard(prev, batchId, {
+      status: 'sending',
+      requestError: '',
+      lastGesture: 'approve',
+    }))
     try {
       const res = await fetch('/setup-api/email/pending', {
         method: 'POST',
@@ -3395,7 +3408,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // status, and a card that reads "Sending…" over the two messages the owner
     // has just said must not be sent is the surface asserting the opposite of
     // what it is doing.
-    setEmailBatches(prev => updateBatchCard(prev, batchId, { status: 'deleting', requestError: '' }))
+    // The gesture, on the click — see `approveEmailBatch`. This is the side the
+    // default hides: a *Delete without sending* whose own request never came
+    // back readably left `lastGesture` unwritten, and the receipt of a send
+    // that went out anyway was then read as `approve` and settled the card on a
+    // green "1 sent." over the one thing that click was preventing.
+    setEmailBatches(prev => updateBatchCard(prev, batchId, {
+      status: 'deleting',
+      requestError: '',
+      lastGesture: 'delete',
+    }))
     try {
       const res = await fetch('/setup-api/email/pending', {
         method: 'POST',

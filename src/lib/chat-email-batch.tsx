@@ -323,8 +323,30 @@ export function reconcileBatchCards(
      */
     const guessed = new Set(card.outcomes.filter((o) => o.kind === "gone").map((o) => o.id));
     const added: EmailBatchOutcome[] = [];
+    /**
+     * Guesses TAKEN BACK, because the draft is queued again.
+     *
+     * Provisional in both directions or it is not provisional. `approve_batch`
+     * restores a draft it had claimed when the tab that posted it aborts before
+     * the first byte (`restorePending`), and a second tab that polled inside
+     * that claim window has already written "gone" over it. Leaving the guess
+     * up drops the draft out of `included` for good — `batchFromPending` will
+     * not build a new card for it, because `shownDraftIds` still covers it — so
+     * a live draft ends up with no control on the surface that offered it.
+     *
+     * Only a GUESS, never a receipt's ending, and only on a WAITING card:
+     * re-opening a settled one would put an Approve button back under a verdict
+     * the owner has already read.
+     */
+    const withdrawn = new Set<string>();
     for (const draft of card.drafts) {
-      if (pendingIds.has(draft.id)) continue;
+      if (pendingIds.has(draft.id)) {
+        if (card.status === "waiting" && guessed.has(draft.id)) {
+          withdrawn.add(draft.id);
+          decided.delete(draft.id);
+        }
+        continue;
+      }
       const receipt = resolved.get(draft.id);
       // Already answered for, and only a provisional "gone" may be revised —
       // and only by a receipt, never by a second guess.
@@ -340,9 +362,9 @@ export function reconcileBatchCards(
       );
       decided.add(draft.id);
     }
-    if (added.length === 0) return card;
+    if (added.length === 0 && withdrawn.size === 0) return card;
     moved = true;
-    const replaced = new Set(added.map((o) => o.id));
+    const replaced = new Set([...added.map((o) => o.id), ...withdrawn]);
     const outcomes = [...card.outcomes.filter((o) => !replaced.has(o.id)), ...added];
     // Settled only once EVERY draft on it has an ending. Until then the card
     // is still a live control for the ones that are genuinely still waiting.
@@ -869,8 +891,17 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
               thing that click was asking. And a `duplicate` is on neither side
               of that: the words reached the recipient, so it is counted with the
               mail rather than with the deletions, and no sentence over it may
-              say nothing was sent. The ROW always gives the ending its own
-              words, whichever line the summary lands on. */}
+              say nothing was sent. That last rule is enforced by
+              `wentOutCount === 0` and NOT by the deletions alone, because it is
+              the invariant rather than one of its shapes: gating on
+              `deletedCount` let "{n} deleted. Nothing was sent." come straight
+              back the moment one real deletion sat beside the duplicate. When
+              something did go out, the sibling sentence names both counts — and
+              the only thing `wentOutCount` can hold this far down the chain is a
+              duplicate, the two send buckets having been ruled out three
+              branches up, which is why that is the word it uses. The ROW always
+              gives the ending its own words, whichever line the summary lands
+              on. */}
           {nothingAttempted
             ? t("chat.emailBatch.resultNone")
             : failedCount > 0
@@ -890,7 +921,12 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
                   : sentCount > 0
                     ? t("chat.emailBatch.resultAllSent", { count: String(sentCount) })
                     : deletedCount > 0 && card.lastGesture !== "approve"
-                      ? t("chat.emailBatch.resultDiscarded", { count: String(deletedCount) })
+                      ? wentOutCount === 0
+                        ? t("chat.emailBatch.resultDiscarded", { count: String(deletedCount) })
+                        : t("chat.emailBatch.resultDiscardedDuplicate", {
+                            discarded: String(deletedCount),
+                            duplicates: String(duplicateCount),
+                          })
                       : card.lastGesture === "approve" && wentOutCount === 0
                         ? t("chat.emailBatch.resultNoneSent")
                         : t("chat.emailBatch.resultElsewhere")}

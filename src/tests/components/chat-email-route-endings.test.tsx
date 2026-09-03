@@ -57,8 +57,14 @@ const CONFIGURED: Record<string, unknown> = {
  * wire shape and not live objects. POST is the route handler, called with an
  * owner cookie because that is the only credential it accepts — and its own
  * Response is returned untouched.
+ *
+ * `breakPost` stands in for the one thing the route can never answer: the
+ * request that did not arrive readably. A restarting Next server, a dropped
+ * link or a proxy's own non-JSON 502 all reach the handler as a body it cannot
+ * parse, which is why both handlers have a `catch` at all. The GET polls are
+ * left alone, so the queue keeps answering while that one click fails.
  */
-function installBoxWithLiveQueue(): HermesBox {
+function installBoxWithLiveQueue(opts: { breakPost?: (action: string) => Response | null } = {}): HermesBox {
   const box = installHermesBox();
   const inner = globalThis.fetch;
   vi.stubGlobal(
@@ -67,11 +73,15 @@ function installBoxWithLiveQueue(): HermesBox {
       const url = String(input);
       if (url.includes("/setup-api/email/pending")) {
         if ((init?.method ?? "GET").toUpperCase() === "POST") {
+          const body = String(init?.body ?? "{}");
+          const action = String((JSON.parse(body) as { action?: unknown }).action ?? "");
+          const broken = opts.breakPost?.(action);
+          if (broken) return broken;
           return POST(
             new Request("http://localhost/setup-api/email/pending", {
               method: "POST",
               headers: { "Content-Type": "application/json", cookie },
-              body: String(init?.body ?? "{}"),
+              body,
             }),
           );
         }
@@ -483,5 +493,56 @@ describe("a delete answered 'gone' whose receipt lands a second later", () => {
     // Both halves in one sentence: the send he must look at AND the deletion
     // he actually made. "resultAllSent" here mentions neither.
     expect(verdict()).toEqual({ text: "chat.emailBatch.resultDiscardedSentElsewhere", color: WARN_FG });
+  });
+  it("keeps the gesture when the delete's own request never came back", async () => {
+    // The one branch of the delete handler that never reaches `settleCard`.
+    // The owner presses *Delete without sending*; the POST does not come back
+    // readable — the box's Next server restarts mid-click, the link drops, or a
+    // proxy answers a non-JSON 502 — so the handler puts the card back to
+    // `waiting` with its red sentence and records nothing. The draft had been
+    // approved on Telegram a moment earlier, that send lands, and the poll then
+    // reconciled its receipt against the DEFAULT gesture: a green "1 sent."
+    // over the click that was asking for exactly the opposite.
+    const only = queue("The one he deleted");
+
+    let breakDeletes = false;
+    const box = installBoxWithLiveQueue({
+      breakPost: (action) =>
+        breakDeletes && action === "reject_batch"
+          ? new Response("<html>502 Bad Gateway</html>", { status: 502 })
+          : null,
+    });
+    await mountHermesChat(box);
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-cancel")).toBeTruthy());
+
+    const release = holdOneSend();
+    const elsewhere = POST(
+      new Request("http://localhost/setup-api/email/pending", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", cookie },
+        body: JSON.stringify({ action: "approve", id: only }),
+      }),
+    );
+    await waitFor(() => expect(store.listPending()).toHaveLength(0));
+    expect(outcomes.getOutcome(only)).toBeNull();
+
+    breakDeletes = true;
+    fireEvent.click(screen.getByTestId("chat-email-batch-cancel"));
+    // The card really did take the failure branch: the red sentence is up and
+    // the button is back, which is the state this test is about.
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-error")).toBeTruthy());
+    expect(screen.getByTestId("chat-email-batch-cancel")).toBeTruthy();
+
+    // The Telegram send finishes and writes its receipt; the poll reconciles it.
+    release();
+    expect((await elsewhere).status).toBe(200);
+    await waitFor(() => expect(outcomes.getOutcome(only)).toMatchObject({ kind: "sent" }));
+    fireEvent.focus(window);
+    await waitFor(() => expect(endingFor(only)).toBe("sent"));
+
+    // A click that asked for a deletion may never settle on the green sentence,
+    // whether or not its own request survived the trip.
+    expect(verdict()).toEqual({ text: "chat.emailBatch.resultSentElsewhere", color: WARN_FG });
+    expect(outcomeRow(only)?.style.color).not.toBe(OK_FG);
   });
 });

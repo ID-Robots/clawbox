@@ -23,7 +23,7 @@ import { copyToClipboard } from "@/lib/clipboard";
 // The ending vocabulary and the gesture table, from the module that owns the
 // outcome shape — never a second copy of either. Both are plain functions on a
 // const list; the card component beside them is not pulled in by naming these.
-import { emailEnding, endingAsAsked } from "@/lib/chat-email-batch";
+import { emailEnding, endingAsAsked, type EmailEnding } from "@/lib/chat-email-batch";
 import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
 import { installPendingRefresh } from "@/lib/email-pending-refresh";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
@@ -106,7 +106,15 @@ interface PendingEmail {
  */
 interface HandledEmail {
   id: string;
-  kind: "sent" | "rejected" | "failed" | "unconfirmed" | "duplicate";
+  /**
+   * DERIVED from `EMAIL_ENDINGS`, never spelled out again.
+   *
+   * That list exists so a sixth ending cannot be added in one place and go
+   * unread in another — its own comment calls a partial copy "how a real ending
+   * quietly becomes 'no idea'". A hand-written union here made this strip the
+   * one reader the compiler could not warn.
+   */
+  kind: EmailEnding;
   at: number;
   to: string[];
   subject: string;
@@ -1808,21 +1816,22 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         Array.isArray(d?.outcomes)
           ? d.outcomes
               .filter((o: unknown): o is Record<string, unknown> => typeof o === "object" && o !== null)
-              .filter(
-                (o: Record<string, unknown>) =>
-                  typeof o.id === "string"
-                  && typeof o.at === "number"
-                  && (o.kind === "sent" || o.kind === "rejected" || o.kind === "failed"
-                    || o.kind === "unconfirmed" || o.kind === "duplicate"),
-              )
-              .map((o: Record<string, unknown>): HandledEmail => ({
-                id: String(o.id),
-                kind: o.kind as HandledEmail["kind"],
-                at: o.at as number,
-                to: Array.isArray(o.to) ? o.to.filter((x): x is string => typeof x === "string") : [],
-                subject: typeof o.subject === "string" ? o.subject : "",
-                ...(typeof o.error === "string" ? { error: o.error } : {}),
-              }))
+              // `emailEnding` is the vocabulary, so the wire is read through it
+              // rather than against a fourth hand-written copy of the same five
+              // words — and it NARROWS, which is what removes the cast the row
+              // below used to need.
+              .flatMap((o: Record<string, unknown>): HandledEmail[] => {
+                const kind = emailEnding(o.kind);
+                if (typeof o.id !== "string" || typeof o.at !== "number" || !kind) return [];
+                return [{
+                  id: o.id,
+                  kind,
+                  at: o.at,
+                  to: Array.isArray(o.to) ? o.to.filter((x): x is string => typeof x === "string") : [],
+                  subject: typeof o.subject === "string" ? o.subject : "",
+                  ...(typeof o.error === "string" ? { error: o.error } : {}),
+                }];
+              })
           : [],
       );
     } catch {
@@ -2021,14 +2030,26 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         /**
          * The third of them: a 404 the receipts could not explain.
          *
-         * `whatBecameOf` found nothing, which happens while ANOTHER surface is
-         * between claiming the draft and the end of its SMTP conversation — so
-         * the message may well be going out this second. Red "That draft is no
-         * longer waiting." is a failure claimed over an unknown, and the chat
-         * card renders the identical row muted. Narrowed to the stale answer by
-         * `kind === "gone"`: a 409 with no account, a 400 or a 502 the mail
-         * server spoke carry their own kinds and stay red, because those really
-         * are this click failing.
+         * `whatBecameOf` found nothing, and THREE different things put it
+         * there, which is why the amber says "no idea" rather than naming one:
+         *
+         *   - another surface is between claiming the draft and the end of its
+         *     SMTP conversation, so the message may be going out this second;
+         *   - the receipt EXPIRED — they live 24 h (`route.ts`), and a draft
+         *     decided before that is indistinguishable here from one that was
+         *     never queued;
+         *   - `email-pending.json` could not be read at all, so the claim
+         *     failed and produced this identical 404.
+         *
+         * Only the first is a race. The other two are recorded as filed-not-
+         * fixed in the PR that introduced this branch: the way out of both is a
+         * `kind` of its own from the route, which would let the strip say which
+         * one it is instead of guessing. Red "That draft is no longer waiting."
+         * over any of the three is a failure claimed over an unknown, and the
+         * chat card renders the identical row muted. Narrowed to the stale
+         * answer by `kind === "gone"`: a 409 with no account, a 400 or a 502 the
+         * mail server spoke carry their own kinds and stay red, because those
+         * really are this click failing.
          */
         const endingUnknown = data?.kind === "gone" && ending === undefined;
         setEmailMsg({
