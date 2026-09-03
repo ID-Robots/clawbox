@@ -190,10 +190,14 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
     /** Ask again later, keeping what is on screen. True when one was booked. */
     const retryLater = (): boolean => {
       if (attempt >= DEGRADED_RETRY_ATTEMPTS) return false;
-      // The user's explicit Refresh is NOT consumed by a retry — a placeholder
-      // and a dropped connection are both "the request did not complete", which
-      // is the condition `pendingRefreshRef` exists to carry across.
-      timer = setTimeout(() => load(pendingRefreshRef.current), degradedRetryDelayMs(attempt));
+      // ALWAYS a plain load, never the user's `refresh=1`. That flag busts
+      // Hermes' per-provider disk cache and re-enumerates every provider's live
+      // /v1/models, and this schedule (1+2+4+8+8 s) crosses the server's 10 s
+      // throttle twice — so carrying it would turn one Refresh click on a
+      // degraded box into three device-wide sweeps. It also could not help: a
+      // placeholder means the dashboard is unreachable, and `?refresh=true`
+      // goes to that same dashboard.
+      timer = setTimeout(() => load(false), degradedRetryDelayMs(attempt));
       attempt += 1;
       return true;
     };
@@ -204,6 +208,11 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .then((data: HermesModelScope) => {
           if (controller.signal.aborted) return;
+          // The request COMPLETED, which is the condition this flag is cleared
+          // on — a degraded body is still the server answering. Only an ABORT
+          // (fast provider switch, StrictMode double-mount) carries the intent
+          // over, because that request never got an answer at all.
+          pendingRefreshRef.current = false;
           // Read the RESPONSE's own flag, not the substituted scope's:
           // `emptyScope` is `stale: true` by construction, so gating on it would
           // put the provider-mismatch guard below into the retry loop as well.
@@ -216,7 +225,6 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
             // than "this provider has none".
             return;
           }
-          pendingRefreshRef.current = false;
           // Guard against a stale/garbled payload naming a different provider.
           setLoaded({
             provider,
