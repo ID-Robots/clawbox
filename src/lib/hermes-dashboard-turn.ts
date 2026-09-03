@@ -184,6 +184,15 @@ const IDLE_TIMEOUT_MS = Number(process.env.HERMES_STREAM_IDLE_TIMEOUT_MS || 180_
  * moment the turn's own frames resume — see `TURN_PROGRESS` — so a turn that
  * really does wedge after the answer lands is still given up on in three
  * minutes rather than in an hour.
+ *
+ * An UPPER BOUND now, not a matching pair. A ClawBox seeds
+ * `agent.clarify_timeout: 300` (scripts/register-mcp.sh), so on this appliance
+ * the AGENT gives up first and says so — `_block` emits `clarify.expire`
+ * (server.py:3552), which stands this window down through the `clarifyExpire`
+ * branch below. Keeping the ceiling at hermes' own default is what covers the
+ * other direction: an owner who sets a longer window of their own keeps a
+ * reader that waits with them, up to the hour, instead of one pinned to a value
+ * the box no longer runs.
  */
 const CLARIFY_IDLE_TIMEOUT_MS = Number(process.env.HERMES_CLARIFY_IDLE_TIMEOUT_MS || 3_600_000);
 
@@ -277,11 +286,15 @@ export type DashboardActivity =
    * `requestId` — that value, and not the session, is what `clarify.respond`
    * is addressed by.
    *
-   * `answered` appears only on a REPLAYED batch: the gateway hands back the
-   * answers already locked in (`{ qid: answer }`) so a reconnecting surface can
-   * restore the half-filled form instead of asking everything again. An empty
-   * string in there is a real answer — hermes treats it as a locked SKIP — so
-   * a reader must not mistake it for an unanswered question.
+   * `answered` carries the answers hermes has LOCKED IN (`{ qid: answer }`),
+   * from either of the two places they can come from: a replay, where the
+   * gateway hands back what was already answered so a reconnecting surface can
+   * restore the half-filled form instead of asking everything again, and this
+   * turn's own forwarded message, where the qid it answered is added to that
+   * map so the card says the question was answered rather than offering it
+   * again. A single-question clarify appears under its own empty qid. An empty
+   * ANSWER in there is a real answer — hermes treats it as a locked SKIP — so a
+   * reader must not mistake it for an unanswered question.
    */
   | {
       kind: "clarify";
@@ -662,6 +675,12 @@ function clarifyQuestions(payload: Record<string, unknown>): ClarifyQuestion[] {
  * that the batch counts as done, so dropping it here would show a reconnecting
  * customer an unanswered question they had already dismissed — and any answer
  * they then gave would be refused, because that qid is already locked.
+ *
+ * An empty QID is dropped, which is the opposite rule and about a different
+ * field: upstream attaches `answers` only to a batch, where every qid is real,
+ * so a blank key there is a malformed row. The empty qid of a single-question
+ * clarify is never read from the wire — it is written locally, by the forwarder
+ * below, onto the map this function returns.
  */
 function clarifyAnswers(raw: unknown): Record<string, string> | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
@@ -691,6 +710,67 @@ function normaliseClarify(raw: unknown): ClarifyActivity | null {
   if (!questions.length) return null;
   const answered = clarifyAnswers(payload.answers);
   return { kind: "clarify", requestId, questions, ...(answered ? { answered } : {}) };
+}
+
+/**
+ * The question a fresh message should be delivered to, or null for none.
+ *
+ * A batch answers per question, so the message goes to the first one still
+ * outstanding — the answers already locked in are upstream's, and re-answering
+ * one of those would be refused. Its `qid` is what `clarify.respond` addresses;
+ * for the single-question shape that qid is `""`, which means the answer goes
+ * out with NO `question_id` at all.
+ *
+ * Null when every question already has an answer. Falling back to "no
+ * question_id" there would not be a harmless default: `_respond` takes the
+ * batch branch only when a question_id is present (server.py:11911), so an
+ * answer without one sets the Event immediately and `_block` returns the raw
+ * string (server.py:3524), discarding every answer locked so far — silently,
+ * under a `{"status":"ok"}`.
+ */
+function answerableQuestion(clarify: ClarifyActivity): ClarifyQuestion | null {
+  const answered = clarify.answered ?? {};
+  // `Object.hasOwn`, never `in`: a qid is a string the model chose, and
+  // `"toString" in {}` is true. A batch that happened to name a question
+  // `constructor` would otherwise look answered before anybody answered it.
+  return clarify.questions.find((question) => !Object.hasOwn(answered, question.qid)) ?? null;
+}
+
+/**
+ * The customer's message, in the shape that question's answer is read in.
+ *
+ * Prose for an ordinary question. For a MULTI-SELECT one, a JSON array of the
+ * single thing they said — the same encoding the card sends
+ * (`encodeMultiSelectAnswer`) and the same one hermes' own channel path emits
+ * (tools/clarify_gateway.py:425), and it is not cosmetic. The decoder that
+ * reads a multi-select answer tries JSON first and otherwise falls back to
+ * `raw.split(",")` (tools/clarify_tool.py:162) without ever looking at the
+ * choices it offered: sent as prose, "the second one, I think" reaches the
+ * agent as TWO selections it never offered, with no error anywhere. Wrapped,
+ * it arrives as the one free-text answer the customer actually gave.
+ */
+function clarifyAnswerText(question: ClarifyQuestion, text: string): string {
+  return question.multiSelect ? JSON.stringify([text]) : text;
+}
+
+/**
+ * Whether a batch still has a question in it after an answer landed.
+ *
+ * The gateway's own `remaining` is preferred over anything computed here,
+ * because only it knows: answers accumulate in ITS registry across every
+ * surface that has answered anything — this chat, the dashboard SPA, a second
+ * browser — so a client's own arithmetic can be out of date the moment it is
+ * done. Computed only when the reply says nothing.
+ */
+function clarifyStillOpen(
+  raw: unknown,
+  clarify: ClarifyActivity,
+  answered: Readonly<Record<string, string>>,
+): boolean {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw > 0;
+  if (Array.isArray(raw)) return raw.some((value) => typeof value === "string");
+  // Own properties only — see `answerableQuestion`.
+  return clarify.questions.some((question) => !Object.hasOwn(answered, question.qid));
 }
 
 /**
@@ -1114,40 +1194,150 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
          * covering many questions, not many requests.
          */
         let pendingClarifyId = "";
-        try {
-          // The replayed question goes out FIRST, before the prompt is even
-          // submitted: it is older than this turn, the agent is already parked
-          // on it, and a surface that receives it after this turn's own
-          // activity would render it as though it had just been asked.
-          if (replayClarify) {
-            announcedClarifies.add(replayClarify.requestId);
-            // Armed ONLY when there is somewhere for the question to go.
-            //
-            // The hour-long window is justified by a PERSON being able to read
-            // the prompt and answer it. `onActivity` is optional — a caller
-            // that only wants the answer text passes none — and such a caller
-            // can never show the question to anybody. Arming the long window
-            // for it would park the turn for an hour on a prompt with no
-            // surface, which is precisely the failure this whole branch exists
-            // to prevent, merely reintroduced from the other side.
-            //
-            // Without a surface the turn keeps the ordinary idle window and
-            // gives up in three minutes. That is the honest outcome: the
-            // question cannot be answered on this transport, and saying so
-            // quickly beats waiting an hour to say the same thing.
-            if (onActivity) {
-              pendingClarifyId = replayClarify.requestId;
-              onActivity(replayClarify);
-            }
-          }
+        /**
+         * The `clarify.respond` this turn sent on the customer's behalf.
+         *
+         * Held until the gateway acknowledges it, because until then nothing
+         * is known: whether the answer landed, whether the prompt had already
+         * expired, and whether the batch still has questions in it. Nulled the
+         * moment the acknowledgement is read.
+         */
+        let forwarded: { rpcId: number; clarify: ClarifyActivity; questionId: string; answer: string } | null = null;
+        /**
+         * The turn's own prompt, sent at most once whichever path gets there.
+         *
+         * `queued` is upstream's own "never interrupt" flag and the only way in
+         * is this parameter (`params["queued"]`, methods_prompt.py:359). It
+         * OVERRIDES `display.busy_input_mode` outright — `mode = "queue" if
+         * queued else _load_busy_input_mode()` (server.py:8255) — so the text is
+         * enqueued behind whatever is running instead of steering or
+         * interrupting it. Used on the paths below that submit AFTER an answer
+         * has been acknowledged, because by then the agent may well be running
+         * again and the box's default mode is `interrupt`
+         * (config_defaults.py:1275). It guarantees "never interrupt", not
+         * "always queue": a turn that ended between the checks still runs this
+         * as an ordinary live prompt (server.py:8258, methods_prompt.py:346).
+         */
+        let promptSent = false;
+        const submitPrompt = (queued = false) => {
+          if (promptSent) return;
+          promptSent = true;
           socket.send(
             JSON.stringify({
               jsonrpc: "2.0",
               id: nextRpcId(),
               method: "prompt.submit",
-              params: { session_id: transportSid, text: req.text },
+              params: { session_id: transportSid, text: req.text, ...(queued ? { queued: true } : {}) },
             }),
           );
+        };
+        try {
+          // ── A message arriving on a session parked on a question ─────────
+          //
+          // That message IS the answer, and forwarding it is the whole of
+          // TASK-610. What used to happen instead, read out of hermes 0.20.5
+          // on the box: `prompt.submit` for a session whose worker is parked
+          // takes the BUSY path (methods_prompt.py:346 → `_handle_busy_submit`
+          // server.py:8233), which queues the text and fires
+          // `agent.interrupt()` at a thread sitting in `ev.wait()`. Nothing on
+          // that path touches the clarify registry — the only thing that
+          // releases the Event is `_clear_pending` (server.py:3693), reached
+          // only from `session.interrupt`. So the customer got their own
+          // question replayed at them, their message sat in `queued_prompt`,
+          // and the session stayed unusable for the rest of the window.
+          //
+          // `clarify.respond` is hermes' own door for this (dispatch
+          // methods_prompt.py:1413 → `_respond` server.py:11900) and needs no
+          // session id: `_pending` is a flat request_id → (sid, Event) map
+          // (server.py:3496), which is why the dashboard SPA, a second browser
+          // and this turn can all answer the same prompt.
+          //
+          // Checking the message against the pending question before treating
+          // it as a turn is what hermes' OWN channel adapters do: an inbound
+          // Telegram/WhatsApp/Discord/Slack message goes through the text
+          // intercept at gateway/run.py:16824, reached by the busy-bypass at
+          // gateway/platforms/base.py:6171 — whose comment names the failure
+          // this branch is also about, "leaving the agent blocked and
+          // discarding the user's answer". Those run on hermes' second,
+          // session-indexed registry (tools/clarify_gateway.py:71), which this
+          // transport cannot reach, so the same idea is carried out here
+          // through the RPC this surface does own.
+          //
+          // NOT a copy of it, in one deliberate respect. Upstream's intercept
+          // is three-way (clarify_gateway.py:428): text that matches no choice
+          // of a native-choice prompt is REJECTED, the clarify released with
+          // an empty answer, and the message routed on as an ordinary turn
+          // (run.py:16895-16904). Here every message is delivered as the
+          // answer, by the product ruling on TASK-610: on this surface the
+          // question is a card the customer can still click, what they type in
+          // the composer instead is aimed at the agent, and a box that decided
+          // for itself whether their sentence "counted" would silently drop
+          // half of them. What the ruling does NOT permit is claiming it was
+          // answered when hermes says otherwise — hence the branches below.
+          //
+          // Deliberately NOT capped at the HTTP route's MAX_ANSWER_CHARS: that
+          // cap exists because that route takes a body from any client against
+          // an arbitrary request id, while this text is this turn's own prompt,
+          // which the transport was about to carry wholesale anyway.
+          if (replayClarify) {
+            announcedClarifies.add(replayClarify.requestId);
+            const target = req.text ? answerableQuestion(replayClarify) : null;
+            if (target) {
+              const rpcId = nextRpcId();
+              const answerText = clarifyAnswerText(target, req.text);
+              forwarded = { rpcId, clarify: replayClarify, questionId: target.qid, answer: answerText };
+              socket.send(
+                JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: rpcId,
+                  method: "clarify.respond",
+                  params: {
+                    request_id: replayClarify.requestId,
+                    answer: answerText,
+                    // Only when there is one. An empty `question_id` against a
+                    // batch is upstream's cancel-all, not a harmless default.
+                    ...(target.qid ? { question_id: target.qid } : {}),
+                  },
+                }),
+              );
+              // The question is NOT announced yet, and the long window is NOT
+              // armed yet. Both wait for the acknowledgement, on purpose:
+              // drawing an answerable form for a question this turn has just
+              // answered invites the customer to answer it twice, and while
+              // the gateway is the one being waited on — for milliseconds —
+              // silence is evidence exactly as it is anywhere else. If the
+              // acknowledgement never comes, the ordinary watchdog says so in
+              // three minutes instead of holding the turn open for an hour.
+            } else if (onActivity) {
+              // Nothing to forward it to — every question is already answered,
+              // or this turn has no text of its own. The question goes out as
+              // it always did.
+              //
+              // Armed ONLY when there is somewhere for the question to go.
+              //
+              // The hour-long window is justified by a PERSON being able to
+              // read the prompt and answer it. `onActivity` is optional — a
+              // caller that only wants the answer text passes none — and such
+              // a caller can never show the question to anybody. Arming the
+              // long window for it would park the turn for an hour on a prompt
+              // with no surface, which is precisely the failure this whole
+              // branch exists to prevent, merely reintroduced from the other
+              // side.
+              //
+              // Without a surface the turn keeps the ordinary idle window and
+              // gives up in three minutes. That is the honest outcome: the
+              // question cannot be answered on this transport, and saying so
+              // quickly beats waiting an hour to say the same thing.
+              pendingClarifyId = replayClarify.requestId;
+              onActivity(replayClarify);
+            }
+          }
+          // Held back only while an answer this turn forwarded is in flight:
+          // the same text as both the answer AND a fresh prompt would be two
+          // turns off one message. Every other path submits immediately, and
+          // the acknowledgement branch below submits it after a refusal or an
+          // expiry, so a message is never swallowed.
+          if (!forwarded) submitPrompt();
           let answer = "";
           let reasoning = "";
           let truncated = false;
@@ -1158,6 +1348,63 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
             // rest of the time silence is evidence and three minutes is plenty.
             const frame = await nextFrame(pendingClarifyId ? CLARIFY_IDLE_TIMEOUT_MS : IDLE_TIMEOUT_MS);
             const type = frameType(frame);
+            // ── What the gateway made of the answer we forwarded ───────────
+            //
+            // Read HERE, in the frame loop, and never with `awaitReply`: that
+            // helper discards every frame that is not the reply it wants, and
+            // the answer UNPARKS the agent — so the resumed turn's own deltas
+            // can arrive before the acknowledgement does, and awaiting it
+            // would eat the beginning of the customer's answer.
+            if (forwarded && frame.id === forwarded.rpcId) {
+              const sent = forwarded;
+              forwarded = null;
+              const result = (frame.result || {}) as Record<string, unknown>;
+              const refused = frame.error ? String(frame.error.message || "the dashboard refused the answer") : "";
+              const expired = !refused && result.status === "expired";
+              if (refused || expired) {
+                // NOT reported as answered — the whole false-success class in
+                // one branch. A refusal leaves the question standing, so it
+                // goes out as a live prompt; an expiry means the window had
+                // already closed, and the surface is told the question is gone.
+                //
+                // That expiry notice is belt-and-braces rather than a card
+                // coming down: this turn had not announced the question yet,
+                // and the chat clears its cards when a turn ends
+                // (ChatPopup `clearClarifies`), so there is normally nothing on
+                // screen to take away. It is still sent, because a surface that
+                // DID keep the card must not be left with an answerable form
+                // for a request id nothing can deliver to.
+                if (refused) console.warn(`[hermes-stream] clarify answer refused: ${refused}`);
+                if (onActivity) {
+                  if (expired) {
+                    onActivity({ kind: "clarifyExpire", requestId: sent.clarify.requestId });
+                  } else {
+                    pendingClarifyId = sent.clarify.requestId;
+                    onActivity(sent.clarify);
+                  }
+                }
+                // And the message is still the customer's turn either way —
+                // enqueued rather than submitted live. `expired` means the
+                // worker has already left `ev.wait()` (`_pending` no longer
+                // holds the id, server.py:11906) and is therefore RUNNING, so a
+                // plain submit at this instant would interrupt the very turn
+                // the customer is waiting to read. A refusal is the other side
+                // of the same coin: the agent is still parked, and the
+                // interrupt a live submit fires would be waiting for it when it
+                // resumes on the answer the customer is about to give.
+                submitPrompt(true);
+                continue;
+              }
+              const answered = { ...(sent.clarify.answered ?? {}), [sent.questionId]: sent.answer };
+              const stillOpen = clarifyStillOpen(result.remaining, sent.clarify, answered);
+              if (onActivity) onActivity({ ...sent.clarify, answered });
+              // Still open means a person is still being waited on — the rest
+              // of the batch — so the human-shaped window stays. Fully
+              // answered means the AGENT is working again, and a working agent
+              // is held to the same three minutes as any other turn.
+              pendingClarifyId = stillOpen && onActivity ? sent.clarify.requestId : "";
+              continue;
+            }
             // The turn talking again is the only proof available here that the
             // answer landed — it was sent over someone else's socket, and no
             // acknowledgement of it ever reaches this reader. Narrowing the

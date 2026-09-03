@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { backupSourceFor } from "@/lib/harness/backup-source";
+import { deriveProtection, isBackupRunning, type ProtectionState } from "@/lib/clawkeep-protection";
 import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, FIELD } from "./coding-agent-ui";
 import ClawKeepWizard from "./ClawKeepWizard";
 import { PairChallengeCard, type PairStartResponse } from "./ClawKeepPairChallengeCard";
@@ -70,6 +71,9 @@ interface ClawKeepStatus {
   backupContainsCredentials?: boolean;
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
+  /** When auto-backup was last armed or tightened. Optional so a status from
+   *  an older server still renders; see deriveProtection() for what it guards. */
+  scheduleArmedAtMs?: number;
   /** True when the device has a stored backup-encryption passphrase. The
    * "Run a backup now" button is gated on this; without it the runner
    * refuses to run since unencrypted backups would leak to the operator. */
@@ -88,27 +92,10 @@ const STEP_LABEL_KEYS: Record<string, string> = {
   "checking-stats": "clawkeep.step.checkingStats",
 };
 
-// If a "running" status hasn't been refreshed in this many ms, assume the
-// daemon crashed (systemd timer kill, OOM, …) and stop showing the
-// progress panel — otherwise reopens would spin forever after a fault.
-//
-// Real backups on Jetson finish in 2-5 minutes (archive build + upload to
-// R2 over a typical home connection). 30 minutes is a comfortable upper
-// bound — a backup that genuinely takes longer almost always means the
-// upload is stuck, in which case the user wants the "Reset stuck backup"
-// affordance below, not a 4-hour spinner that pretends progress is fine.
-const STALE_RUNNING_MS = 30 * 60 * 1000;
 // Show a "Looks stuck?" reset button after this much wall-clock time on
 // the same heartbeat. Tighter than STALE_RUNNING_MS so the user has a
 // recovery path *before* the panel auto-hides.
 const RESET_HINT_AFTER_MS = 6 * 60 * 1000;
-
-function isBackupRunning(status: ClawKeepStatus | null): boolean {
-  if (!status) return false;
-  if (status.lastHeartbeatStatus !== "running") return false;
-  if (!status.lastHeartbeatAtMs) return false;
-  return Date.now() - status.lastHeartbeatAtMs < STALE_RUNNING_MS;
-}
 
 interface CloudSnapshot {
   name: string;
@@ -209,6 +196,19 @@ export default function ClawKeepApp() {
     onConfirm: () => void;
   } | null>(null);
   const pollIntervalRef = useRef<number | null>(null);
+  // One clock for every judgement this window draws — the protection verdict,
+  // the "how long ago" beside it, and whether a backup is still in flight.
+  // Sampled on a tick of its own rather than read during render: a box whose
+  // daemon is gone answers /setup-api/clawkeep with the same bytes for ever,
+  // and a refresh that throws leaves `status` untouched, so a verdict drawn
+  // only from new data would freeze. Seeded with the current time so a lapsed
+  // box never flashes green on first paint. A minute is finer than anything it
+  // decides (a 36 h window, a 1 h run cap) and coarse enough to cost nothing.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -236,7 +236,10 @@ export default function ClawKeepApp() {
   // `status` changes, so the period re-evaluates the moment a backup starts or
   // ends.
   useEffect(() => {
-    const intervalMs = isBackupRunning(status) ? 3000 : 10000;
+    // Reads the clock directly rather than `nowMs`: this is an effect, not a
+    // render, and taking `nowMs` as a dependency would tear the poll down and
+    // re-arm it every minute.
+    const intervalMs = isBackupRunning(status, Date.now()) ? 3000 : 10000;
     // Skip a tick if the previous refresh is still in flight, so a slow/hung
     // fetch can't stack concurrent requests on the Jetson.
     let inFlight = false;
@@ -622,10 +625,11 @@ export default function ClawKeepApp() {
                 // mid-run. The local `busy` flag is only authoritative right
                 // after a click, before the daemon has heartbeat-published its
                 // "running" state.
+                nowMs={nowMs}
                 busyKind={
                   busy === "restore"
                     ? "restore"
-                    : busy === "backup" || isBackupRunning(status)
+                    : busy === "backup" || isBackupRunning(status, nowMs)
                     ? "backup"
                     : null
                 }
@@ -634,7 +638,20 @@ export default function ClawKeepApp() {
                 schedule={status.schedule}
                 nextRunAtMs={status.nextRunAtMs}
                 onSaved={(next) => {
-                  setStatus((prev) => prev ? { ...prev, schedule: next.schedule, nextRunAtMs: next.nextRunAtMs } : prev);
+                  setStatus((prev) => prev
+                    ? {
+                      ...prev,
+                      schedule: next.schedule,
+                      nextRunAtMs: next.nextRunAtMs,
+                      // Without this the shield would judge the new, tighter
+                      // window against the OLD arm stamp and lapse the box on
+                      // the same click. It comes from the route rather than
+                      // this clock: the browser's and the box's are not the
+                      // same clock, and a save that armed nothing returns the
+                      // OLD stamp — which is the point.
+                      scheduleArmedAtMs: next.scheduleArmedAtMs,
+                    }
+                    : prev);
                 }}
                 onError={setError}
               />
@@ -714,6 +731,14 @@ export default function ClawKeepApp() {
   );
 }
 
+/** What PUT /setup-api/clawkeep/schedule answers with. `scheduleArmedAtMs` is
+ *  load-bearing — the shield reads it — so it is declared, not assumed. */
+interface ScheduleSaveResponse {
+  schedule: ClawKeepSchedule;
+  nextRunAtMs: number;
+  scheduleArmedAtMs: number;
+}
+
 function ScheduleCard({
   schedule,
   nextRunAtMs,
@@ -722,7 +747,7 @@ function ScheduleCard({
 }: {
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
-  onSaved: (next: { schedule: ClawKeepSchedule; nextRunAtMs: number }) => void;
+  onSaved: (next: ScheduleSaveResponse) => void;
   onError: (msg: string) => void;
 }) {
   const { t } = useT();
@@ -743,7 +768,7 @@ function ScheduleCard({
     const payload = override ?? draft;
     setSaving(true);
     try {
-      const body = await jsonOrError<{ schedule: ClawKeepSchedule; nextRunAtMs: number }>(
+      const body = await jsonOrError<ScheduleSaveResponse>(
         await fetch("/setup-api/clawkeep/schedule", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -1065,14 +1090,6 @@ function BackupProgressPanel({
   );
 }
 
-type ProtectionState = "protected" | "lapsed" | "unprotected";
-
-function deriveProtection(status: ClawKeepStatus): ProtectionState {
-  if (status.lastHeartbeatStatus === "error") return "lapsed";
-  if (status.lastBackupAtMs > 0) return "protected";
-  return "unprotected";
-}
-
 interface ProtectionCopy {
   headlineKey: string;
   subheadKey: string;
@@ -1082,15 +1099,6 @@ interface ProtectionCopy {
   discClass: string;
   iconClass: string;
 }
-
-// Lapsed and unprotected share an "at-risk" red palette; only headline/
-// subhead/icon/badge differ. Spread a single base into both.
-const RED_PALETTE = {
-  badgeClass: "bg-red-500/15 text-red-300 border-red-500/30",
-  discClass:
-    "bg-gradient-to-br from-red-400 via-red-500 to-rose-600 shadow-[0_0_28px_rgba(239,68,68,0.35)]",
-  iconClass: "text-white drop-shadow-[0_0_10px_rgba(239,68,68,0.55)]",
-} as const;
 
 const COPY_BY_STATE: Record<ProtectionState, ProtectionCopy> = {
   protected: {
@@ -1103,19 +1111,28 @@ const COPY_BY_STATE: Record<ProtectionState, ProtectionCopy> = {
       "bg-gradient-to-br from-emerald-400 via-emerald-500 to-teal-600 shadow-[0_0_28px_rgba(16,185,129,0.35)]",
     iconClass: "text-white drop-shadow-[0_0_10px_rgba(16,185,129,0.55)]",
   },
+  // Amber, not red: a box that was protected and has drifted is a different
+  // thing from one that never was, and the two used to be indistinguishable
+  // at a glance because they shared a palette.
   lapsed: {
-    ...RED_PALETTE,
     headlineKey: "clawkeep.status.lapsed",
     subheadKey: "clawkeep.status.lapsedSub",
     badgeKey: "clawkeep.badge.atRisk",
     iconName: "gpp_maybe",
+    badgeClass: "bg-amber-500/15 text-amber-300 border-amber-500/30",
+    discClass:
+      "bg-gradient-to-br from-amber-400 via-amber-500 to-orange-600 shadow-[0_0_28px_rgba(245,158,11,0.35)]",
+    iconClass: "text-white drop-shadow-[0_0_10px_rgba(245,158,11,0.55)]",
   },
   unprotected: {
-    ...RED_PALETTE,
     headlineKey: "clawkeep.status.unprotected",
     subheadKey: "clawkeep.status.unprotectedSub",
     badgeKey: "clawkeep.badge.unprotected",
     iconName: "gpp_bad",
+    badgeClass: "bg-red-500/15 text-red-300 border-red-500/30",
+    discClass:
+      "bg-gradient-to-br from-red-400 via-red-500 to-rose-600 shadow-[0_0_28px_rgba(239,68,68,0.35)]",
+    iconClass: "text-white drop-shadow-[0_0_10px_rgba(239,68,68,0.55)]",
   },
 };
 
@@ -1125,12 +1142,16 @@ function DashboardCard({
   onOpenRestore,
   onResetStuck,
   busyKind,
+  nowMs,
 }: {
   status: ClawKeepStatus;
   onBackup: (label?: string) => void;
   onOpenRestore: () => void;
   onResetStuck: () => void;
   busyKind: "backup" | "restore" | null;
+  /** The window's shared clock — see ClawKeepApp. Passed in so the verdict and
+   *  the "when" printed beside it cannot be drawn from two different reads. */
+  nowMs: number;
 }) {
   const { t } = useT();
   const agent = agentLabelFor(status.agent);
@@ -1157,8 +1178,27 @@ function DashboardCard({
   // guaranteed to be empty.
   const canRestore = !disabled && status.snapshotCount > 0;
 
-  const state = deriveProtection(status);
-  const copy = COPY_BY_STATE[state];
+  const protection = deriveProtection(status, nowMs);
+  const copy = COPY_BY_STATE[protection.state];
+  // A backup that simply aged out needs its own sentence: the generic "your
+  // last backup didn't complete" is wrong when the last one completed fine
+  // and nothing has run since.
+  const subheadKey = protection.reason === "stale"
+    ? "clawkeep.status.staleSub"
+    : protection.reason === "blocked"
+    ? "clawkeep.status.blockedSub"
+    // A green shield over a box with auto-backup off is the truth about the
+    // snapshot in the cloud and silence about what happens next. Nothing will
+    // make a newer one, and the window that called this box protected is the
+    // no-schedule week rather than the cadence it used to keep — so one click
+    // on the switch turns a five-day-stale nightly box green. The verdict is
+    // deliberately left alone (judging a box its owner took off auto-backup
+    // against the cadence they abandoned would cry wolf at every manual box);
+    // what changes is that the card stops saying "safe, the works" and says
+    // how old the backup is and that nothing is scheduled.
+    : protection.state === "protected" && !status.schedule?.enabled
+    ? "clawkeep.status.protectedOffSub"
+    : copy.subheadKey;
 
   return (
     <div className={`${CARD} relative flex flex-col items-center text-center pt-8 pb-6`}>
@@ -1186,12 +1226,12 @@ function DashboardCard({
 
       <h2 className="relative text-lg font-semibold text-[var(--text-primary)] mt-4">{t(copy.headlineKey)}</h2>
       <p className="relative mt-1 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
-        {t(copy.subheadKey, { agent })}
+        {t(subheadKey, { agent, when: timeAgo(status.lastBackupAtMs, t, nowMs) })}
       </p>
 
       {/* Stats strip — compact, equal-width, no card chrome to keep the eye on the shield */}
       <div className="relative mt-5 grid grid-cols-3 gap-6 w-full max-w-md text-center">
-        <Stat label={t("clawkeep.stat.lastBackup")} value={timeAgo(status.lastBackupAtMs, t)} />
+        <Stat label={t("clawkeep.stat.lastBackup")} value={timeAgo(status.lastBackupAtMs, t, nowMs)} />
         <Stat label={t("clawkeep.stat.cloudUsage")} value={formatBytes(status.cloudBytes)} />
         <Stat label={t("clawkeep.stat.snapshots")} value={status.snapshotCount.toString()} />
       </div>
@@ -1225,7 +1265,7 @@ function DashboardCard({
           disabled={disabled}
           className={BTN_PRIMARY}
         >
-          {state === "protected" ? t("clawkeep.backupNow") : t("clawkeep.protectMyOpenclaw", { agent })}
+          {protection.state === "protected" ? t("clawkeep.backupNow") : t("clawkeep.protectMyOpenclaw", { agent })}
         </button>
         {canRestore && (
           <button

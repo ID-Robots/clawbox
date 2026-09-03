@@ -23,9 +23,11 @@ export const CARD = KIT_CARD;
 
 export type Translator = (key: string, params?: Record<string, string | number>) => string;
 
-export function timeAgo(ms: number, t: Translator): string {
+/** `nowMs` lets a caller share the clock it already sampled, so a verdict and
+ *  the "when" printed beside it cannot be drawn from two different reads. */
+export function timeAgo(ms: number, t: Translator, nowMs?: number): string {
   if (!ms) return t("clawkeep.never");
-  const diff = Date.now() - ms;
+  const diff = (nowMs ?? Date.now()) - ms;
   if (diff < 0) return t("clawkeep.inFuture");
   const minutes = Math.floor(diff / 60_000);
   const hours = Math.floor(diff / 3_600_000);

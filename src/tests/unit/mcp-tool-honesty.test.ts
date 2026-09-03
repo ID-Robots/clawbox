@@ -570,6 +570,18 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     expect(h.has("backup_status")).toBe(true);
   });
 
+  it("says a protected verdict with the schedule off is not a promise of a newer backup", () => {
+    // Turning auto-backup off widens the tolerated backup age to the
+    // no-schedule week, so a five-day-stale nightly box answers
+    // {protected, ok} on one click. The ClawKeep card says so in prose; the
+    // agent reading this tool has only the verdict unless the description
+    // ranks it, and "you're protected" over a box nothing will back up again
+    // is the same false success the rest of this description exists to stop.
+    const desc = system("openclaw").get("backup_status").description;
+    expect(desc).toMatch(/schedule\.enabled/);
+    expect(desc).toMatch(/nothing is scheduled to make a newer one/i);
+  });
+
   it("answers backup_status honestly when the edition cannot run ClawKeep", async () => {
     // HTTP 200 — which is why the existing 404-only NOT_SUPPORTED_HERE rule
     // never fired and the agent read this as "not paired yet".

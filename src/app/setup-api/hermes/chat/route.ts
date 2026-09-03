@@ -698,8 +698,9 @@ function streamTurn(
                 send("clarify", {
                   requestId: activity.requestId,
                   questions: activity.questions,
-                  // Only on a replayed batch, and only when something really is
-                  // already answered — an empty map would read as "nothing
+                  // Only when something really is already answered — a replay
+                  // of a half-filled batch, or the question this turn's own
+                  // message answered. An empty map would read as "nothing
                   // filled in", which is what it means, so it is not sent.
                   ...(activity.answered ? { answered: activity.answered } : {}),
                 });
@@ -785,6 +786,23 @@ function streamTurn(
         // from the LAST user row, which is this turn's question, and returns
         // null unless an assistant answer follows it. A turn that really is
         // still thinking has no such row and still reports the failure.
+        //
+        // ONE EXCEPTION, named rather than hidden: a message delivered as the
+        // answer to a pending clarify (see hermes-dashboard-turn.ts) writes no
+        // user row of its own — that is what answering by `clarify.respond`
+        // means — so on that turn the slice starts at the EARLIER prompt and
+        // can already hold whatever the agent said before it asked its
+        // question. When such a turn goes quiet before the resumed agent has
+        // written anything, this recovery can therefore hand back that earlier
+        // sentence as though it were the reply. It is bounded — the customer
+        // sees the agent's own words, never another session's, and the same
+        // rows are what the settled turn shows when the stream does complete
+        // (which is why `settleTurn` is left alone: on the normal path those
+        // words belong to the answer and are otherwise never stored at all) —
+        // but it is not the guard the paragraph above describes. Telling the
+        // two apart needs a snapshot of the record taken before the answer was
+        // forwarded, which is a change to this route's read pattern rather
+        // than to the transport, and it is deliberately not made here.
         if (isQuietStreamError(err) && !isAbort(err)) {
           const recovered = await readHermesTurn(threaded).catch(() => null);
           if (recovered?.text) {
@@ -1211,6 +1229,16 @@ export async function POST(request: Request) {
   // command, and `prompt.submit` takes its attachments through a separate
   // `image.attach` handshake this route has not been taught. A turn carrying a
   // picture is rare and already slow; correctness first.
+  //
+  // What the CLI path CANNOT do, stated where the choice is made: answer a
+  // question the agent is parked on. `hermes chat -q --resume` starts a second,
+  // independent agent from the session's stored row (`--resume` is a database
+  // read, not a live attach), while the parked prompt is a `threading.Event` in
+  // the gateway process — no CLI subcommand and no HTTP endpoint can reach it,
+  // only the JSON-RPC socket the branch below opens. So a turn that falls to
+  // the CLI while a clarify is outstanding leaves it outstanding; what bounds
+  // that is the `agent.clarify_timeout: 300` this device seeds
+  // (scripts/register-mcp.sh), after which the agent gives up on its own.
   if (wantsStream(request) && imagePaths.length === 0) {
     // The catalogue knows which providers are user-defined; the transport
     // needs that one bit to read the dashboard's provider KIND honestly. Only
