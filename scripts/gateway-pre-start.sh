@@ -2216,6 +2216,160 @@ print("  Updated MCP server registration with bearer token")
 PY
 unset CLAWBOX_MCP_TOKEN_VAL
 
+# ── The outbound EMAIL:-directive hook plugin ───────────────────────────────
+#
+# `EMAIL:4471` is how the agent tells a ClawBox CHAT that its reply points at a
+# message the owner can open: chat-email-refs.ts lifts the line out and the
+# bubble shows a card. Telegram, WhatsApp and Discord have no cards, so there
+# the line is an internal id printed at the owner (TASK-679). PR #605 stopped
+# the email tools ASKING for it on a channel; that half is a sentence in a tool
+# result, and a sentence is something a model can misread. This is the
+# guarantee behind it.
+#
+# THE SEAM IS THE CORE'S OWN: `reply_payload_sending`, the typed outbound hook
+# ("Mutate or cancel normalized reply payloads before delivery"). It runs after
+# the core has already parsed its own MEDIA: and [[…]] directives out and
+# before the channel adapter sends, on every delivery path — and it is
+# fail-open with a 15 s ceiling, so a fault in our handler is logged and
+# skipped, never a reply that does not arrive.
+#
+# THE FIRST PLUGIN CLAWBOX HAS EVER SHIPPED INTO OPENCLAW. The four non-stock
+# plugins on a box today (deepseek, codex, discord, whatsapp) are all upstream
+# packages installed by npm; this one is ours, so it is copied from the
+# checkout instead — no registry, no network, and it moves with the app.
+#
+# WHY HERE. `~/.openclaw` does not survive a factory reset (setup/reset's
+# OPENCLAW_DIR wipe), and this script is an ExecStartPre of the gateway unit,
+# so every boot puts the plugin back. Same reason register-mcp.sh owns the
+# Hermes twin.
+CLAWBOX_HOOK_PLUGIN_ID="clawbox-email-directives"
+CLAWBOX_HOOK_PLUGIN_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_HOOK_PLUGIN_ID"
+CLAWBOX_HOOK_PLUGIN_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_HOOK_PLUGIN_ID"
+CLAWBOX_HOOK_PLUGIN_FILES="openclaw.plugin.json package.json index.mjs email-directives.mjs"
+CLAWBOX_HOOK_PLUGIN_READY=0
+
+CLAWBOX_HOOK_PLUGIN_COMPLETE=1
+for f in $CLAWBOX_HOOK_PLUGIN_FILES; do
+  [ -f "$CLAWBOX_HOOK_PLUGIN_SRC/$f" ] || CLAWBOX_HOOK_PLUGIN_COMPLETE=0
+done
+
+if [ "$CLAWBOX_HOOK_PLUGIN_COMPLETE" != "1" ]; then
+  echo "  WARNING: $CLAWBOX_HOOK_PLUGIN_SRC is not a complete plugin — EMAIL: directives will reach channels" >&2
+# Overwritten unconditionally: the files are OURS and versioned with the app, so
+# an update that ships a fixed plugin has to actually deliver it. There is no
+# customer edit here to preserve.
+elif mkdir -p "$CLAWBOX_HOOK_PLUGIN_DST" 2>/dev/null \
+  && (cd "$CLAWBOX_HOOK_PLUGIN_SRC" && cp -f $CLAWBOX_HOOK_PLUGIN_FILES "$CLAWBOX_HOOK_PLUGIN_DST/") 2>/dev/null; then
+  CLAWBOX_HOOK_PLUGIN_READY=1
+else
+  # Never fatal. Without the plugin the box behaves exactly as it did before
+  # this existed; a gateway that refuses to start would be strictly worse.
+  echo "  WARNING: could not install the $CLAWBOX_HOOK_PLUGIN_ID plugin into $CLAWBOX_HOOK_PLUGIN_DST" >&2
+fi
+
+# Enabled only once the files are on disk, so the config can never name a
+# plugin that is not there. `plugins.entries.<id>.enabled` is the core's own
+# load-permission key; the manifest's `activation.onStartup` is what makes a
+# HOOK-ONLY plugin load at all (a plugin with no tool, provider or channel has
+# no other reason to be constructed) — the two together are the documented
+# startup intent.
+if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ]; then
+  CLAWBOX_HOOK_PLUGIN_ID="$CLAWBOX_HOOK_PLUGIN_ID" python3 - "$OPENCLAW_CONFIG" <<'PY'
+import json, os, sys, tempfile
+
+cfg_path = sys.argv[1]
+plugin_id = os.environ["CLAWBOX_HOOK_PLUGIN_ID"]
+try:
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    # A config this script could not read is one the blocks above already
+    # reported on; writing a fresh one from here would discard it.
+    sys.exit(0)
+
+plugins = cfg.get("plugins")
+if not isinstance(plugins, dict):
+    plugins = {}
+    cfg["plugins"] = plugins
+entries = plugins.get("entries")
+if not isinstance(entries, dict):
+    entries = {}
+    plugins["entries"] = entries
+entry = entries.get(plugin_id)
+if not isinstance(entry, dict):
+    entry = {}
+    entries[plugin_id] = entry
+
+if entry.get("enabled") is True:
+    print("  EMAIL: directive hook plugin already enabled, skipping write")
+    sys.exit(0)
+
+entry["enabled"] = True
+tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
+try:
+    with os.fdopen(tmp_fd, "w") as f:
+        json.dump(cfg, f, indent=2)
+    os.replace(tmp_path, cfg_path)
+except Exception:
+    try:
+        os.unlink(tmp_path)
+    except Exception:
+        pass
+    raise
+print("  Enabled the EMAIL: directive hook plugin")
+PY
+
+  # PROVE IT LOADS, EVERY BOOT — not once at install.
+  #
+  # `plugins list` is a cold inventory: it reads the config and the manifests,
+  # so it would call this plugin "enabled" while its module throws on import or
+  # registers nothing. `inspect --runtime` actually loads the module and
+  # reports what registered, and the hook names live in the TOP-LEVEL
+  # `typedHooks[]` — `plugin.hookNames` is empty even when `hookCount` is not.
+  #
+  # Advisory, and time-boxed: this is an ExecStartPre, and a plugin that failed
+  # to load must cost the box its directive strip, never its gateway.
+  # The `|| true` is load-bearing: this script runs under `set -o pipefail` and
+  # `set -e`, where a command substitution that exits non-zero aborts the
+  # assignment — i.e. a missing or wedged `openclaw` would stop the gateway from
+  # starting because a DIAGNOSTIC could not run.
+  #
+  # The answer travels in the environment rather than down a pipe, because the
+  # reader's own program arrives on stdin (`python3 -` plus a heredoc), and a
+  # heredoc replaces the pipe rather than queueing behind it.
+  CLAWBOX_HOOK_JSON="$(timeout 45 "$OPENCLAW_BIN" plugins inspect "$CLAWBOX_HOOK_PLUGIN_ID" --runtime --json 2>/dev/null || true)"
+  CLAWBOX_HOOK_VERDICT="$(CLAWBOX_HOOK_JSON="$CLAWBOX_HOOK_JSON" python3 - <<'PY'
+import json, os
+
+try:
+    data = json.loads(os.environ.get("CLAWBOX_HOOK_JSON") or "")
+except Exception:
+    print("no runtime inspection")
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    print("no runtime inspection")
+    raise SystemExit(0)
+plugin = data.get("plugin") if isinstance(data.get("plugin"), dict) else {}
+hooks = data.get("typedHooks") if isinstance(data.get("typedHooks"), list) else []
+names = [h.get("name") for h in hooks if isinstance(h, dict)]
+if "reply_payload_sending" in names:
+    print("ok")
+else:
+    # The diagnostics are what tell an operator WHICH of the failures this is:
+    # a manifest the core rejected, a module that threw, a plugin the config
+    # never enabled.
+    diagnostics = data.get("diagnostics") if isinstance(data.get("diagnostics"), list) else []
+    detail = "; ".join(str(d)[:120] for d in diagnostics[:2])
+    print("status={} hooks={} {}".format(plugin.get("status"), names or "none", detail).strip())
+PY
+  )" || CLAWBOX_HOOK_VERDICT="no runtime inspection"
+  if [ "$CLAWBOX_HOOK_VERDICT" = "ok" ]; then
+    echo "  EMAIL: directive hook plugin loaded (reply_payload_sending registered)"
+  else
+    echo "  WARNING: the $CLAWBOX_HOOK_PLUGIN_ID plugin did not register reply_payload_sending — EMAIL: directives will still reach channels ($CLAWBOX_HOOK_VERDICT)" >&2
+  fi
+fi
+
 # Seed CLAWBOX.md in the OpenClaw workspace so the agent's session-start
 # context includes ClawBox-specific guidance (where user-installed skills
 # actually live, how to control the desktop Chromium via the browser_*
