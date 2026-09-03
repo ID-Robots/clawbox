@@ -178,21 +178,52 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
   };
 
   /**
-   * What `hermes config get providers.clawai --json` answers here.
+   * The box's `providers.clawai` block, answered by a `hermes` CLI that
+   * REMEMBERS what it was told.
    *
-   * ONE read of the whole block, because Hermes decides what `models:` means
-   * from its siblings — `discover_models` and `models_discovered` — and the
-   * `base_url` orphan guard needs the same entry.
+   * The whole block for `config get providers.clawai --json`, because Hermes
+   * decides what `models:` means from its siblings — `discover_models` and
+   * `models_discovered` — and the `base_url` orphan guard needs the same entry.
+   * A leaf read answers from the same store, which is what makes a write
+   * verifiable here at all rather than assumed from an exit code.
+   *
+   * `coerces: false` is a CLI old enough to lack the block that parses a
+   * flow-style literal into a real list before storing it
+   * (hermes_cli/config.py:5479-5530): it keeps the literal TEXT, exits 0 and
+   * prints no warning. That is the build this repair exists for, and the one
+   * where an exit code is least like an outcome.
    */
   function providerBlock(
     entry: Record<string, unknown> | null,
-    failure: { code?: number; stderr?: string } = {},
+    failure: { code?: number; stderr?: string; coerces?: boolean } = {},
   ) {
+    const prefix = `providers.${CLAWAI_PROVIDER}.`;
+    const stored = entry ? { ...entry } : null;
+    const coerces = failure.coerces !== false;
     cliMock.mockImplementation(async (args: string[]) => {
-      if (args[1] === "get" && args[2] === `providers.${CLAWAI_PROVIDER}`) {
-        return entry
-          ? { code: 0, stdout: `${JSON.stringify(entry)}\n`, stderr: "" }
+      const [, verb, key, raw] = args;
+      if (verb === "set" && stored && key?.startsWith(prefix)) {
+        let value: unknown = raw;
+        if (coerces && /^\s*[[{]/.test(raw)) {
+          try {
+            value = JSON.parse(raw);
+          } catch {
+            /* stored as a string, exactly as the CLI would */
+          }
+        }
+        stored[key.slice(prefix.length)] = value;
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (verb === "get" && key === `providers.${CLAWAI_PROVIDER}`) {
+        return stored
+          ? { code: 0, stdout: `${JSON.stringify(stored)}\n`, stderr: "" }
           : { code: failure.code ?? 1, stdout: "", stderr: failure.stderr ?? "config key not set" };
+      }
+      if (verb === "get" && key?.startsWith(prefix)) {
+        const leaf = key.slice(prefix.length);
+        return stored && leaf in stored
+          ? { code: 0, stdout: `${JSON.stringify(stored[leaf])}\n`, stderr: "" }
+          : { code: 1, stdout: "", stderr: "config key not set" };
       }
       return { code: 0, stdout: "", stderr: "" };
     });
@@ -220,10 +251,12 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     // instead of two.
     providerBlock(LINKED);
     await reconcileClawaiModelsWithHermes();
-    const reads = cliMock.mock.calls
-      .map((c) => c[0] as string[])
-      .filter((args) => args[1] === "get");
-    expect(reads).toEqual([["config", "get", `providers.${CLAWAI_PROVIDER}`, "--json"]]);
+    // Everything BEFORE the write, which is what "decide in one Python start"
+    // means. The write is verified by a read of its own key afterwards — see
+    // the silent-stored-as-text test — and that one is a different question.
+    const args = cliMock.mock.calls.map((c) => c[0] as string[]);
+    const deciding = args.slice(0, args.findIndex((a) => a[1] === "set"));
+    expect(deciding).toEqual([["config", "get", `providers.${CLAWAI_PROVIDER}`, "--json"]]);
   });
 
   it("asks the CLI for the catalogue as JSON", async () => {
@@ -269,6 +302,26 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     });
     await reconcileClawaiModelsWithHermes();
     expect(wrote()).toBe(false);
+  });
+
+  it("declares a catalogue Hermes flagged as discovered but can never re-probe", async () => {
+    // `models_discovered: true` strips the ALLOWLIST reading and nothing else
+    // (`_models_config_is_allowlist`, model_switch.py:136), and that reading
+    // only decides anything if a PROBE can act on it. With `discover_models:
+    // false` beside it Hermes takes `_discovery_allowed = False`
+    // (model_switch.py:3788) and never reaches `grp["models"] = live_models`
+    // (:3823), so nothing replaces anything: the row is exactly what
+    // `_declared_model_ids` finds, which here is nothing at all — "clawai (0)",
+    // permanently. Declining this pair would strand a box a single write fixes
+    // for good, precisely because no probe can come back to undo it.
+    const block = { ...LINKED, models_discovered: true, discover_models: false };
+    providerBlock(block);
+    await reconcileClawaiModelsWithHermes();
+    // `null`, not `[]`: with discovery off there is no probe to answer.
+    expect(hermesPickerModels({ ...block, ...providerEntry(CLAWAI_PROVIDER) }, null)).toEqual([
+      CLAWBOX_AI_FLASH_MODEL_ID,
+      CLAWBOX_AI_PRO_MODEL_ID,
+    ]);
   });
 
   it("declares the catalogue over a value Hermes does not read as an allowlist", async () => {
@@ -385,6 +438,32 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     expect(cliMock.mock.calls.filter((c) => (c[0] as string[])[1] === "set").length)
       .toBeGreaterThan(firstAttempt);
   });
+
+  it("does not claim a repair the CLI stored as text without saying so", async () => {
+    // The stderr guard above can only fire on a CLI whose coercion block exists
+    // to print that warning. On one old enough to lack it — the build this
+    // repair is reached on — the same literal is stored as TEXT with an empty
+    // stderr and exit 0, so the write looks perfect and the residue is in the
+    // file. Claiming it would latch "repaired" over a keyboard showing one
+    // unusable id, and rewrite config.yaml once per boot to no effect forever.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const setCount = () => cliMock.mock.calls.filter((c) => (c[0] as string[])[1] === "set").length;
+    try {
+      providerBlock(LINKED, { coerces: false });
+      await reconcileClawaiModelsWithHermes();
+      // Not claimed: the catalogue cache is only dropped for a write that landed.
+      expect(invalidateMock).not.toHaveBeenCalled();
+      expect(warn.mock.calls.flat().map(String).join(" ")).toContain("could not declare");
+
+      const firstAttempt = setCount();
+      vi.advanceTimersByTime(60_001);
+      await reconcileClawaiModelsWithHermes();
+      expect(setCount()).toBeGreaterThan(firstAttempt);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   /**
    * The same fault, found on the NEXT request instead of at the write.
    *
@@ -442,6 +521,39 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     // Same rule, the other unusable shape: an allowlist needs at least one id,
     // so `models: []` leaves the probe free to win with nothing.
     providerBlock({ ...LINKED, models: [] });
+    await reconcileClawaiModelsWithHermes();
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
+      CLAWBOX_AI_FLASH_MODEL_ID,
+      CLAWBOX_AI_PRO_MODEL_ID,
+    ]);
+  });
+
+  it("looks again at the catalogue the LINK path just wrote", async () => {
+    // `applyClawaiToHermes` writes the SAME key through the same
+    // `hermes config set`, so it can fail the same silent way — and it must not
+    // throw over it: a box whose `models:` went in as text still chats, sees and
+    // draws, so failing the link would be a false failure over a working device.
+    // The link hands the repair back instead, and the read that follows it is
+    // what verifies the write.
+    //
+    // Handing it back is also the only way the residue is ever looked at. On an
+    // UNLINKED box this repair has usually already run and latched its silent
+    // "no providers.clawai" — so without this the value the link just wrote is
+    // not re-examined until the web server restarts.
+    providerBlock(null);
+    await reconcileClawaiModelsWithHermes();
+    expect(wrote()).toBe(false);
+
+    resolveVisionMock.mockResolvedValue({
+      id: CLAWBOX_AI_VISION_MODEL_ID,
+      verified: true,
+      reason: "proxy-allows",
+    });
+    cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    cliMock.mockReset();
+    providerBlock(LINKED);
     await reconcileClawaiModelsWithHermes();
     expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
       CLAWBOX_AI_FLASH_MODEL_ID,

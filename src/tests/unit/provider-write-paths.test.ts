@@ -182,16 +182,29 @@ describe("declaring a catalogue Hermes' own pickers read", () => {
     // ONE read of the whole `providers.clawai` block: Hermes decides what
     // `models:` means from its siblings, and the same entry carries the
     // `base_url` the orphan guard needs.
+    //
+    // The leaf read is the write's VERIFICATION: `hermes config set` exits 0
+    // even when it stored the list as text, so the repair reads the key back
+    // with `--json` and only then counts the write as done. A CLI that answers
+    // it with the list is the one this assertion is about — the browser is told
+    // the catalogue moved because it actually did.
+    const stored: Record<string, unknown> = {
+      base_url: "https://clawbox.com/api/ai",
+      api_mode: "openai",
+    };
     cliMock.mockImplementation(async (args: string[]) => {
-      if (args[1] === "get" && args[2] === "providers.clawai") {
-        return {
-          code: 0,
-          stdout: JSON.stringify({
-            base_url: "https://clawbox.com/api/ai",
-            api_mode: "openai",
-          }),
-          stderr: "",
-        };
+      const [, verb, key, raw] = args;
+      if (verb === "set" && key === "providers.clawai.models") {
+        stored.models = JSON.parse(raw);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (verb === "get" && key === "providers.clawai") {
+        return { code: 0, stdout: JSON.stringify(stored), stderr: "" };
+      }
+      if (verb === "get" && key === "providers.clawai.models") {
+        return "models" in stored
+          ? { code: 0, stdout: JSON.stringify(stored.models), stderr: "" }
+          : { code: 1, stdout: "", stderr: "config key not set" };
       }
       return { code: 0, stdout: "", stderr: "" };
     });
