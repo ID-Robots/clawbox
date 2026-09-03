@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, symlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, symlinkSync, chmodSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -75,15 +75,24 @@ function sharedStorePath(): string {
   return path.join(openclawHome, "state", "openclaw.sqlite");
 }
 
-function seedSharedStore(profiles: Record<string, unknown>): void {
+function seedSharedStore(
+  profiles: Record<string, unknown>,
+  ownership: { location: string } | null = { location: "state-db" },
+): void {
   mkdirSync(path.dirname(sharedStorePath()), { recursive: true });
   const db = new DatabaseSync(sharedStorePath());
   db.exec(
     "CREATE TABLE IF NOT EXISTS config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)",
   );
-  db.prepare(
+  const upsert = db.prepare(
     "INSERT OR REPLACE INTO config_machine_state (state_key, value_json, updated_at_ms) VALUES (?, ?, ?)",
-  ).run("authProfiles.store", JSON.stringify({ version: 1, profiles }), Date.now());
+  );
+  upsert.run("authProfiles.store", JSON.stringify({ version: 1, profiles }), Date.now());
+  // `auth.sharedStore` is the row core keys the decision on: it resolves the
+  // shared store from THIS database only when the location is `state-db`, and
+  // from `<stateDir>/agents/main/agent/openclaw-agent.sqlite` otherwise. A box
+  // that has been through `doctor --fix` carries the row, so the fixture does.
+  if (ownership) upsert.run("auth.sharedStore", JSON.stringify(ownership), Date.now());
   db.close();
 }
 
@@ -614,6 +623,163 @@ describe("codex-auth-mirror.js", () => {
     run();
 
     expect(existsSync(path.join(second, "codex-home", "auth.json"))).toBe(true);
+  });
+
+  it("prefers a LIVE local profile over an EXPIRED shared one filed under a preferred id", () => {
+    // Reading both stores widened the candidate set; the ranking did not
+    // follow. `openai:chatgpt` heads PROFILE_KEYS, so a shared entry whose
+    // access token expired two hours ago outranked the agent's OWN live
+    // credential — and `openai:default` is exactly the id `doctor --fix`
+    // allocates when it migrates a legacy `openai-codex:default`. The Codex
+    // runtime then got a spent refresh token rewritten over a live one every
+    // ten minutes, and every turn 401ed.
+    //
+    // Core ranks by usability, never by id: `orderProfilesByMode` sorts oauth
+    // before token before api_key, then an unexpired credential ahead of an
+    // expired one (`resolveTokenExpiryState`) — openclaw dist/order-*.js.
+    seedAgentStore({
+      "openai:default": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-local"),
+        refresh: "refresh-local-live",
+        expires: Date.now() + 3_600_000,
+      },
+    });
+    seedSharedStore({
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-shared"),
+        refresh: "refresh-shared-stale",
+        expires: Date.now() - 7_200_000,
+      },
+    });
+
+    run();
+
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
+    expect(parsed.tokens.account_id).toBe("acct-local");
+    expect(parsed.tokens.refresh_token).toBe("refresh-local-live");
+  });
+
+  it("prefers the LIVE shared profile when the agent's own copy is the expired one", () => {
+    // The same rule in the other direction, so the fix cannot degenerate into
+    // "always prefer the agent's own": here the local entry heads PROFILE_KEYS
+    // and is dead, and the shared one is the sign-in that still works.
+    seedAgentStore({
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-local"),
+        refresh: "refresh-local-stale",
+        expires: Date.now() - 7_200_000,
+      },
+    });
+    seedSharedStore({
+      "codex:default": {
+        type: "oauth",
+        provider: "codex",
+        access: accessToken("acct-shared"),
+        refresh: "refresh-shared-live",
+        expires: Date.now() + 3_600_000,
+      },
+    });
+
+    run();
+
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
+    expect(parsed.tokens.account_id).toBe("acct-shared");
+    expect(parsed.tokens.refresh_token).toBe("refresh-shared-live");
+  });
+
+  it("leaves the state-db store unread on a legacy-main box — core does not resolve through it", () => {
+    // An ABSENT `auth.sharedStore` row means `legacy-main`
+    // (`parseSharedAuthStoreOwnership`), and core then resolves the shared
+    // store from `<stateDir>/agents/main/agent/openclaw-agent.sqlite` — never
+    // from this row (`resolveSharedAuthStorePath`). Reading it anyway mirrors a
+    // credential core does not resolve. The shared entry here is the fresher of
+    // the two, so only knowing which store is authoritative can pick the right
+    // one.
+    seedAgentStore({
+      "openai:default": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-local"),
+        refresh: "refresh-local-live",
+        expires: Date.now() + 3_600_000,
+      },
+    });
+    seedSharedStore(
+      {
+        "openai:chatgpt": {
+          type: "oauth",
+          provider: "openai",
+          access: accessToken("acct-shared"),
+          refresh: "refresh-shared",
+          expires: Date.now() + 7_200_000,
+        },
+      },
+      null,
+    );
+
+    run();
+
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
+    expect(parsed.tokens.account_id).toBe("acct-local");
+    expect(parsed.tokens.refresh_token).toBe("refresh-local-live");
+  });
+
+  it("realigns a stale ~/.codex/auth.json when codex-home is a symlink to it", () => {
+    // dedupePaths collapses both destinations onto the plugin's own file, and
+    // that one surviving path is then also an app-server home — so a
+    // divergence there put the ONLY destination in `skip` and the plugin kept
+    // reading the previous account's token for the life of the box. On a box
+    // where the two are one file, the plugin's need for a usable credential
+    // outranks the rotation risk: abandoning it is exactly the `401 Missing
+    // bearer` this script exists to prevent.
+    mkdirSync(path.dirname(homeAuthPath), { recursive: true });
+    symlinkSync(path.dirname(homeAuthPath), path.join(agentDir, "codex-home"));
+    writeFileSync(
+      homeAuthPath,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: accessToken("acct-old"),
+          refresh_token: "refresh-previous-signin",
+          account_id: "acct-old",
+        },
+      }),
+    );
+    seedAgentStore({});
+    seedSharedStore({
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-live"),
+        refresh: "refresh-live",
+        expires: Date.now() + 3_600_000,
+      },
+    });
+
+    run();
+
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
+    expect(parsed.tokens.refresh_token).toBe("refresh-live");
+    expect(parsed.tokens.account_id).toBe("acct-live");
+  });
+
+  it("tightens an existing world-readable mirror to 0600, not only a freshly created one", () => {
+    // `writeFileSync(..., { mode })` applies the mode on CREATION only, so a
+    // file left 0644 by an earlier tool stayed 0644 through every rewrite while
+    // holding a refresh token.
+    seedProfile(accessToken("acct-1"), "refresh-1");
+    run();
+    chmodSync(homeAuthPath, 0o644);
+    seedProfile(accessToken("acct-1", "rotated"), "refresh-1");
+    run();
+
+    expect(statSync(homeAuthPath).mode & 0o777).toBe(0o600);
   });
 });
 

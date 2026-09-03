@@ -2813,10 +2813,29 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // stale file so the restart below regenerates it with the fresh token —
     // afterward the Codex app-server owns its own refresh, so we don't touch
     // it again.
+    //
+    // Every agent's `codex-home/auth.json` goes with it. That file is the
+    // Codex app-server's own CODEX_HOME copy, and scripts/codex-auth-mirror.js
+    // deliberately refuses to overwrite one holding a refresh token core does
+    // not have: overwriting a live app-server rotation with core's spent copy
+    // is what burnt the token family in #278. On a 2026.8 box that script can
+    // no longer write core's store back (the per-agent `auth_profile_store`
+    // row holds zero profiles after `doctor --fix`), so a diverged file never
+    // leaves that state — it keeps the PREVIOUS account's token for the life of
+    // the box and the sync timer warns about it every ten minutes, advising a
+    // re-login that did not clear it. A sign-in is the one moment the account
+    // genuinely changes, which makes it the only place the divergence can be
+    // settled without guessing.
     if (isChatgptSubscription) {
-      await fs
-        .rm(path.join(CLAWBOX_HOME_DIR, ".codex", "auth.json"), { force: true })
-        .catch(() => {});
+      const agentsRoot = path.join(OPENCLAW_HOME_DIR, "agents");
+      const agentIds = await fs.readdir(agentsRoot).catch(() => [] as string[]);
+      const staleMirrors = [
+        path.join(CLAWBOX_HOME_DIR, ".codex", "auth.json"),
+        ...agentIds.map((id) => path.join(agentsRoot, id, "agent", "codex-home", "auth.json")),
+      ];
+      await Promise.all(
+        staleMirrors.map((file) => fs.rm(file, { force: true }).catch(() => {})),
+      );
     }
 
     // (The OAuth doctor migration runs right after the store write in step 1

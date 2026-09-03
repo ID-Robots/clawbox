@@ -106,6 +106,36 @@ function stateDbPath() {
 }
 
 const SHARED_STORE_KEY = "authProfiles.store";
+const SHARED_STORE_OWNERSHIP_KEY = "auth.sharedStore";
+
+/**
+ * Does core resolve the shared store from the state DB, or from the main
+ * agent's own file?
+ *
+ * `auth.sharedStore` is the row core keys that entire decision on:
+ * `resolveSharedAuthStorePath` returns `<stateDir>/state/openclaw.sqlite` only
+ * when `location === "state-db"`, and otherwise
+ * `<stateDir>/agents/main/agent/openclaw-agent.sqlite` — the per-agent table
+ * this script already reads. An ABSENT row means `legacy-main`
+ * (`parseSharedAuthStoreOwnership`). So on a box `doctor --fix` has not
+ * relocated, the `authProfiles.store` row may exist and still be something core
+ * never consults; mirroring from it hands the Codex runtime a credential core
+ * does not resolve.
+ *
+ * Core throws on an unparseable value. A credential mirror must not — anything
+ * that is not an explicit `state-db` is treated as `legacy-main` and the row is
+ * left unread, which is the same answer core reaches for every legal value but
+ * one.
+ */
+function ownsSharedStore(valueJson) {
+  if (typeof valueJson !== "string") return false;
+  try {
+    const parsed = JSON.parse(valueJson);
+    return Boolean(parsed) && parsed.location === "state-db";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The gateway-wide store, where core keeps the profiles on 2026.8:
@@ -113,7 +143,9 @@ const SHARED_STORE_KEY = "authProfiles.store";
  * `authProfiles.store`. `openclaw doctor --fix` performs the relocation once
  * and every agent then resolves through it — read-through inheritance, core's
  * own `docs/auth-credential-semantics.md`. The box records the move as
- * `auth.sharedStore = {"location":"state-db"}` in the same table.
+ * `auth.sharedStore = {"location":"state-db"}` in the same table, and both rows
+ * are read in one statement so a locked database cannot answer "profiles, but
+ * no ownership" and make this store look authoritative when it is not.
  */
 function readSharedProfiles() {
   const dbPath = stateDbPath();
@@ -126,15 +158,18 @@ function readSharedProfiles() {
     // SQLITE_BUSY here is swallowed to null and surfaces as "no codex OAuth
     // profile yet", which is the message that hid this bug in the first place.
     db.exec("PRAGMA busy_timeout = 5000");
-    let row;
+    let rows;
     try {
-      row = db
-        .prepare("SELECT value_json FROM config_machine_state WHERE state_key = ?")
-        .get(SHARED_STORE_KEY);
+      rows = db
+        .prepare("SELECT state_key, value_json FROM config_machine_state WHERE state_key IN (?, ?)")
+        .all(SHARED_STORE_OWNERSHIP_KEY, SHARED_STORE_KEY);
     } finally {
       db.close();
     }
-    const parsed = row && row.value_json ? JSON.parse(row.value_json) : null;
+    const byKey = new Map(rows.map((row) => [row.state_key, row.value_json]));
+    if (!ownsSharedStore(byKey.get(SHARED_STORE_OWNERSHIP_KEY))) return null;
+    const value = byKey.get(SHARED_STORE_KEY);
+    const parsed = value ? JSON.parse(value) : null;
     return hasProfiles(parsed) ? parsed.profiles : null;
   } catch {
     return null; // no node:sqlite, no table, or locked — non-fatal
@@ -190,16 +225,15 @@ const PROFILE_KEYS = ["openai:chatgpt", "codex:default", "openai-codex:default"]
  * The ONE profile this box's ChatGPT credential lives in — for reading it and
  * for writing a rotation back.
  *
- * The first entry that actually carries `access`, because a canonical entry
- * left half-written by an interrupted sign-in must not hide a legacy one that
- * still works; the first entry that merely EXISTS only as a last resort, so a
- * rotation still lands somewhere when nothing is credentialed yet.
+ * The most usable entry, by core's own ranking (see profileKeyIn). A canonical
+ * entry left half-written by an interrupted sign-in must not hide a legacy one
+ * that still works; an entry that merely EXISTS is a last resort, so a rotation
+ * still lands somewhere when nothing is credentialed yet.
  *
- * One rule for both directions, deliberately. Reading by "has a credential"
- * while writing back by "exists" is how a box ends up reading `codex:default`
- * and writing the rotated token into `openai:chatgpt`, leaving the entry it
- * reads next holding a refresh token that has already been spent — the exact
- * split this list exists to prevent.
+ * One rule for both directions, deliberately. Reading by one rule and writing
+ * back by another is how a box ends up reading `codex:default` and writing the
+ * rotated token into `openai:chatgpt`, leaving the entry it reads next holding
+ * a refresh token that has already been spent.
  */
 /** An openai-provider OAuth profile is a ChatGPT sign-in, whatever it is keyed. */
 function isChatgptProfile(key, entry) {
@@ -210,23 +244,73 @@ function isChatgptProfile(key, entry) {
   return provider === "openai" || provider === "codex" || provider === "openai-codex";
 }
 
+/**
+ * `expires` as core validates it: a finite number of Unix epoch MILLISECONDS,
+ * greater than 0 and no larger than the maximum JavaScript timestamp. Anything
+ * else is "unknown", never "expired" — `resolveTokenExpiryState`.
+ */
+function expiryOf(entry) {
+  const expires = entry && entry.expires;
+  const valid =
+    typeof expires === "number" &&
+    Number.isFinite(expires) &&
+    expires > 0 &&
+    expires <= 864e13;
+  return valid ? expires : null;
+}
+
 function profileKeyIn(profiles) {
   if (!profiles) return null;
-  // PROFILE_KEYS first, as the preference order, then ANY profile that is a
-  // ChatGPT sign-in by shape. The three literal ids miss the two `doctor --fix`
-  // itself allocates when it migrates a legacy `openai-codex:default`:
-  // `openai:default`, or `openai:chatgpt-default` when that is taken. The rest
-  // of this PR already treats "provider openai + oauth" as the sign-in — so a
-  // doctor-migrated box produced an available ChatGPT row, a runtime arm and a
-  // subscription entitlement while THIS script found no credential, never
-  // synthesized ~/.codex/auth.json and never wrote a rotation back.
-  const keys = [
-    ...PROFILE_KEYS.filter((key) => isChatgptProfile(key, profiles[key])),
-    ...Object.keys(profiles).filter(
-      (key) => !PROFILE_KEYS.includes(key) && isChatgptProfile(key, profiles[key]),
-    ).sort(),
-  ];
-  return keys.find((key) => profiles[key] && profiles[key].access) || keys[0] || null;
+  // Every profile that is a ChatGPT sign-in by shape, not just the three
+  // literal ids: those miss the two `doctor --fix` itself allocates when it
+  // migrates a legacy `openai-codex:default` (`openai:default`, or
+  // `openai:chatgpt-default` when that is taken), so a doctor-migrated box
+  // produced an available ChatGPT row, a runtime arm and a subscription
+  // entitlement while THIS script found no credential.
+  const candidates = Object.keys(profiles).filter((key) => isChatgptProfile(key, profiles[key]));
+  if (candidates.length === 0) return null;
+
+  // Rank the way core ranks, not by id. `orderProfilesByMode` sorts oauth
+  // before token before api_key, then an UNEXPIRED credential ahead of an
+  // expired one, and only then reaches a stable tie-break — and an expired
+  // OAuth profile stays *eligible* there, because core refreshes it (the
+  // `expired` reason code is scoped to `type: "token"` in
+  // docs/auth-credential-semantics.md). So expiry demotes a candidate here; it
+  // never drops one, and a dead credential is still better than none.
+  //
+  // Ranking by id alone is what broke: the read set spans the shared and the
+  // per-agent store, so `openai:chatgpt` at the head of PROFILE_KEYS let a
+  // shared entry that expired hours ago outrank an agent's OWN live
+  // `openai:default`, and the timer rewrote the spent token over the live one
+  // every ten minutes. PROFILE_KEYS is the tie-break among equally usable
+  // candidates, which is all it was ever measuring.
+  const now = Date.now();
+  const ranked = candidates
+    .map((key) => {
+      const entry = profiles[key];
+      const expires = expiryOf(entry);
+      const preference = PROFILE_KEYS.indexOf(key);
+      return {
+        key,
+        // A profile with no access token cannot be mirrored at all; it is only
+        // a candidate so a rotation still has somewhere to land.
+        uncredentialed: entry && entry.access ? 0 : 1,
+        expired: expires !== null && expires <= now ? 1 : 0,
+        // Later expiry means more recently issued: after a re-login the
+        // freshest credential is the account the owner actually signed in to.
+        staleness: -(expires ?? 0),
+        preference: preference === -1 ? PROFILE_KEYS.length : preference,
+      };
+    })
+    .sort(
+      (a, b) =>
+        a.uncredentialed - b.uncredentialed ||
+        a.expired - b.expired ||
+        a.staleness - b.staleness ||
+        a.preference - b.preference ||
+        a.key.localeCompare(b.key),
+    );
+  return ranked[0].key;
 }
 
 function credentialFromProfiles(agentDir) {
@@ -281,8 +365,10 @@ function buildAuthFile(credential, existing) {
 }
 
 /**
- * Rewrite whenever the file drifts from core's profile. Core is the only
- * rotator, so "different from core" always means "stale copy", never "newer".
+ * Rewrite whenever the file drifts from core's profile. Whether a drift means
+ * "stale copy" or "the app-server rotated ahead of core" depends on WHICH file
+ * it is; main() decides that (see appServerHomes) and only calls this for the
+ * destinations it has already ruled writable.
  */
 function syncReason(existing, credential) {
   if (!existing) return "created";
@@ -304,6 +390,9 @@ function writeMirror(dest, credential) {
     JSON.stringify(buildAuthFile(credential, existing), null, 2),
     { mode: 0o600 },
   );
+  // `mode` applies on CREATION only, so a file another tool left 0644 stayed
+  // 0644 through every rewrite while holding a refresh token.
+  fs.chmodSync(dest, 0o600);
   return reason;
 }
 
@@ -334,14 +423,21 @@ function dedupePaths(files) {
  * Write an app-server rotation back into core's auth profile store, so core
  * stops handing out a refresh token that has already been spent.
  *
- * Reaches the legacy JSON file and the per-agent table only. The shared state
- * store 2026.8 relocates the profiles into is deliberately READ-ONLY here: core
- * refreshes an `oauth` profile itself and serialises every refresh through
+ * Reaches the legacy JSON file and the per-agent table only. The state DB row
+ * `authProfiles.store` is deliberately never written: on a `state-db` box that
+ * row is the gateway-wide store every agent resolves through, and core
+ * serialises every OAuth refresh through
  * `<stateDir>/locks/oauth-refresh/lock-<digest>` precisely to stop a
- * `refresh_token_reused` storm, so an unlocked read-modify-write of that
- * gateway-wide row from a timer could overwrite a live token with a spent one
- * for every agent at once. `main()` therefore leaves the mirrors alone rather
- * than guessing when it cannot write a rotation back.
+ * `refresh_token_reused` storm, so an unlocked read-modify-write of it from a
+ * timer could overwrite a live token with a spent one for every agent at once.
+ * (On a `legacy-main` box the shared store IS the main agent's own
+ * `openclaw-agent.sqlite`, which the loop below does write — unlocked, as beta
+ * did; that hazard is older than this script's shared-store read and is not
+ * settled here.)
+ *
+ * When a rotation cannot be recorded, `main()` leaves the app-server home that
+ * carries it alone rather than guessing — per destination, never the whole
+ * pass, and never the plugin's own file.
  */
 function writeBackToCore(agentDirs, tokens, profileId) {
   if (!tokens || !tokens.refresh_token || !profileId) return false;
@@ -371,6 +467,10 @@ function writeBackToCore(agentDirs, tokens, profileId) {
     try {
       const { DatabaseSync } = require("node:sqlite");
       const db = new DatabaseSync(dbPath);
+      // Same timeout as both readers: without it a transient SQLITE_BUSY is
+      // swallowed below, becomes `wrote = false`, and is reported to the
+      // operator as an unsettleable divergence — a false failure over a lock.
+      db.exec("PRAGMA busy_timeout = 5000");
       try {
         const row = db
           .prepare("SELECT store_json FROM auth_profile_store WHERE store_key = ?")
@@ -449,7 +549,15 @@ function main() {
   const appServerHomes = new Set(
     agentDirs.map((dir) => fileKey(path.join(dir, "codex-home", "auth.json"))),
   );
+  const homeAuthKey = fileKey(homeAuthPath);
   const isAppServerHome = (dest) => appServerHomes.has(fileKey(dest));
+  // ...but the plugin's own file is never abandoned, even when it is also an
+  // app-server home. On a symlinked box dedupePaths collapses both
+  // destinations onto it, so skipping it leaves the box with NO usable
+  // credential anywhere and every Codex turn dies on `401 Missing bearer` —
+  // the failure this script exists to prevent — while the worst case of
+  // writing it is one rotation lost on a configuration ClawBox never creates.
+  const isPluginOwnFile = (dest) => fileKey(dest) === homeAuthKey;
 
   // The app-server rotates its own CODEX_HOME credential. Refresh tokens are
   // single-use, so if it has already rotated, core's stored copy is the DEAD
@@ -493,15 +601,24 @@ function main() {
       // app-server home that still disagrees is left as it is; everything else
       // is written.
       for (const { dest } of diverged) {
-        if (isAppServerHome(dest)) skip.add(dest);
+        if (isAppServerHome(dest) && !isPluginOwnFile(dest)) skip.add(dest);
       }
+      // Only about files actually left behind, and naming those rather than
+      // whichever divergence was found first: on a symlinked box the sole
+      // destination is the plugin's own file, which this pass then rewrites,
+      // and warning about it would be a false failure.
+      //
       // console.error, not log(): the timer unit runs with
       // CODEX_AUTH_MIRROR_QUIET=1, and this is the one state that is not
-      // "normal and idempotent" — a box stuck here needs a person.
-      console.error(
-        `  Codex auth.json: ${rotated.dest} holds a refresh token core does not have and core's store could not be updated; leaving that file alone. `
-        + "If Codex turns keep failing, delete it and sign in to ChatGPT again.",
-      );
+      // "normal and idempotent". A ChatGPT sign-in clears these mirrors at the
+      // source (the configure route), so this survives at most until the next
+      // one.
+      if (skip.size > 0) {
+        console.error(
+          `  Codex auth.json: ${[...skip].join(", ")} holds a refresh token core does not have and core's store could not be updated; leaving that file alone. `
+          + "If Codex turns keep failing, delete it and sign in to ChatGPT again.",
+        );
+      }
     }
   }
 

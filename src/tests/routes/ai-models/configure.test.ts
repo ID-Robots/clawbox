@@ -1608,6 +1608,45 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(written.profiles["openai:chatgpt"].id).toBe("id.token.jwt");
   });
 
+  it("clears EVERY agent's codex-home mirror on a ChatGPT sign-in, not just ~/.codex", async () => {
+    // The sync timer refuses to overwrite a `<agentDir>/codex-home/auth.json`
+    // whose refresh token core does not have — overwriting a live app-server
+    // rotation with core's spent copy is what burnt the token family in #278.
+    // On a 2026.8 box core's store can no longer be written from that script
+    // (the per-agent table holds zero profiles after `doctor --fix`), so the
+    // file never leaves that state: it keeps the PREVIOUS account's token for
+    // the life of the box and the timer warns about it every ten minutes.
+    //
+    // A sign-in is the one moment the account genuinely changes, so it is the
+    // only place the divergence can be settled. Clearing both mirrors here lets
+    // the restart below regenerate them from the fresh profile.
+    mockFs.readdir.mockResolvedValue(["main", "support"] as unknown as never);
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? JSON.stringify({
+            provider: "openai",
+            access_token: "access.token.jwt",
+            id_token: "id.token.jwt",
+            refresh_token: "refresh-token",
+            expires_in: 3600,
+            createdAt: Date.now(),
+          })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+    expect(res.status).toBe(200);
+
+    const removed = mockFs.rm.mock.calls.map((call) => String(call[0]));
+    expect(removed.some((file) => file.endsWith("/.codex/auth.json"))).toBe(true);
+    expect(removed.some((file) => file.endsWith("/agents/main/agent/codex-home/auth.json"))).toBe(true);
+    expect(removed.some((file) => file.endsWith("/agents/support/agent/codex-home/auth.json"))).toBe(true);
+  });
+
   it("binds the handoff tokens to the provider recorded in the file, not the body", async () => {
     // The file says openai (→ the ChatGPT profile); the body claims google. The
     // tokens were minted for openai, so the file's provider must win — binding
