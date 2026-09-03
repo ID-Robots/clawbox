@@ -264,6 +264,51 @@ against a server that records every command it is sent.
 information, never instructions — an email is the payload most likely to carry an
 injected instruction, being text a stranger wrote and chose to send to the device.
 
+**The `EMAIL:<id>` line is asked for where it can become a card, and not on the
+channels.** Both read tools tell the agent to end its reply with one such line
+per message; ClawBox's chat windows lift them out and show an "open full
+message" card in their place (`src/lib/chat-email-refs.ts`), and nothing else
+knows what the line means. The same reply sent over Telegram, WhatsApp or
+Discord therefore ended with a bare internal id, so the instruction now names a
+closed exception: Telegram, WhatsApp, Discord, Slack, and a reply that is itself
+being sent as an email.
+
+That is half one of the harness's own two-half pattern for its `MEDIA:`
+convention — advertised per platform in the system prompt AND stripped by the
+platform adapter on every outbound path. Half one is a sentence the MODEL
+evaluates about itself, so it rests on the model being told which platform it is
+on. Both editions do tell it: Hermes writes a per-platform hint from a central
+dict, and OpenClaw states the channel three ways per turn (a trusted
+`### Message Context` block, `channel=<id>` in the `## Runtime` line, and the
+`[<Channel> …]` envelope on the body). ClawBox's own chat is `webchat` there and
+a CLI or TUI on Hermes, which is why the instruction names all of those as
+surfaces to make the card on. Half two is native and unbuilt: Hermes'
+`transform_llm_output` plugin hook, handed the final text and the platform and
+free to replace it, and on OpenClaw `reply_payload_sending` — which gets the
+whole outbound payload — beside the older `message_sending`, whose stage the
+core itself labels "legacy … retained for low-level SDK compatibility". Either
+is handed a context carrying `channelId`, which is enough to tell a channel from
+`webchat`.
+
+**`webchat` is not exclusive to a card-making surface.** The gateway's own
+Control UI chat at `/chat` — a ClawBox-served, default-pinned app on the
+OpenClaw edition — is `webchat` too, and it renders the line as text. Both
+ClawBox chats connect as `openclaw-control-ui` in `webchat` mode, impersonating
+it deliberately, and against the pinned core nothing the gateway passes tells
+the three apart: the model's `### Message Context` block carries only `schema`,
+`account_id`, `channel`, `provider`, `surface`, `chat_type` and
+`response_format`, and an outbound hook is handed `channelId`, `accountId`,
+`conversationId` and `sessionKey` on the delivery path — the declared type adds
+message, reply and trace fields, none of them client-shaped. ClawBox's connect
+frame does send `version: "clawbox-chat"`, but the gateway puts it only where
+the model and a hook cannot read it: the live connection record, the presence
+row and its own logs.
+So the instruction leans towards the card — the card is the feature, the stray
+line is one line — and the Control UI keeps showing the line, as it did before
+the instruction said anything at all. Fixing that is TASK-700: it needs the page
+ClawBox already serves and injects into (`src/lib/gateway-proxy.ts`), not this
+sentence and not TASK-697's outbound hook, which sees `webchat` for all three.
+
 The only outbound-mail capability the agent has, and on the OpenClaw edition the
 only email capability at all — OpenClaw has no email channel, and inventing one
 in its config would fail the gateway's strict schema and silence the channels
