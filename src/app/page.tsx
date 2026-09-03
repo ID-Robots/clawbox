@@ -37,6 +37,7 @@ import { cleanVersion } from "@/lib/version-utils";
 import { fetchHarness } from "@/lib/client-harness";
 import { samePairingToken } from "@/lib/telegram-pairing-token";
 import type { InstalledMeta } from "@/lib/store-categories";
+import { apps, type AppDef } from "@/lib/desktop-apps";
 import {
   layoutIcons,
   layoutsEqual,
@@ -49,53 +50,6 @@ import {
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
 
-// App definitions
-interface AppDef {
-  id: string;
-  name: string;
-  color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "memory_shard" | "system_update" | "chat";
-  url?: string;
-  // Webapps only: how the desktop opens it (InstalledMeta.launch).
-  launch?: "window";
-  pinned: boolean;
-  defaultWidth?: number;
-  defaultHeight?: number;
-  storeApp?: StoreApp;
-}
-
-const apps: AppDef[] = [
-  { id: "settings", name: "app.settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
-  { id: "clawbox", name: "app.chat", color: "#0a0f1a", type: "chat", pinned: true },
-  { id: "openclaw", name: "app.openclaw", color: "#0a0f1a", type: "external", url: "/chat", pinned: true },
-  // Hermes dashboard — only shown on the Hermes edition. Opened via the
-  // auth-gated dashboard proxy (url computed at click time from the host).
-  { id: "hermes", name: "Hermes", color: "#1a1230", type: "external", url: "hermes-dashboard", pinned: true },
-  // Hermes Skills Store — only shown on the Hermes edition (gated below via
-  // HERMES_ONLY_APP_IDS / harnessHiddenAppIds, same mechanism as `hermes`).
-  { id: "hermes-skills", name: "app.skills", color: "#1a1230", type: "hermes_skills", pinned: true, defaultWidth: 900, defaultHeight: 600 },
-  { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
-  // The coding agent: the owner's switch for letting the assistant delegate a
-  // whole task to a headless `claude-ds` run, what such a run needs, and the
-  // recent runs. Pinned like OpenClaw because it is a headline capability, not
-  // a power-user shortcut, and shown on both harnesses — the harness needs only
-  // the portal token and the CLI, both of which every edition installs. (It
-  // used to open an interactive terminal running the harness; that is still a
-  // `claude-ds` away in the Terminal app.)
-  { id: "coding", name: "app.codingAgent", color: "#14304d", type: "coding" as const, pinned: true, defaultWidth: 960, defaultHeight: 640 },
-  { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
-  { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
-  // The memory index — health, "Index now", the schedule — as its own window.
-  // It used to be a card inside ClawKeep and borrowed its green; it has its own
-  // tile colour now, because the app was rebuilt on the Coding Agent's pattern
-  // and green is reserved there for a STATE (on, healthy) rather than for an
-  // identity. Sized for the single card it shows.
-  { id: "memory-shard", name: "app.memoryShard", color: "#2f2a52", type: "memory_shard", pinned: true, defaultWidth: 720, defaultHeight: 640 },
-  { id: "system_update", name: "app.systemUpdate", color: "#0ea5e9", type: "system_update", pinned: false, defaultWidth: 900, defaultHeight: 720 },
-  { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
-  { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
-  { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
-];
 // Every built-in id. This is the VALIDITY filter for a saved desktop list —
 // an id naming no built-in reserves an empty grid slot — and it is deliberately
 // wider than the default set below, so an icon the owner added from the
@@ -1211,7 +1165,7 @@ function ChromeDesktopInner() {
       ...installedAppDefs,
       {
         id: "setup",
-        name: "Setup",
+        name: "app.setup",
         color: "#f97316",
         type: "setup",
         pinned: false,
@@ -2792,7 +2746,7 @@ function ChromeDesktopInner() {
                   wrong one. */}
               {!harnessHiddenAppIds.includes("hermes-skills") && (
                 <button onClick={() => openApp("hermes-skills")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>extension</span> Hermes Skills
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>extension</span> {t("app.skills")}
                 </button>
               )}
               {!harnessHiddenAppIds.includes("store") && (

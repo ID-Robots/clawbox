@@ -9,6 +9,8 @@ import path from "path";
 //   - auto-add from BUILT_IN_APP_IDS and it returns to every desktop, which is
 //     the behaviour this change removed.
 const src = fs.readFileSync(path.join(process.cwd(), "src/app/page.tsx"), "utf8");
+// The app registry moved to a module both the desktop and `/app/<id>` import.
+const registrySrc = fs.readFileSync(path.join(process.cwd(), "src/lib/desktop-apps.ts"), "utf8");
 
 describe("default desktop icons", () => {
   it("keeps Remote Desktop out of the default grid but in the built-in set", () => {
@@ -18,7 +20,7 @@ describe("default desktop icons", () => {
       /const DEFAULT_DESKTOP_APPS = BUILT_IN_APP_IDS\.filter\(id => !OFF_DESKTOP_BY_DEFAULT\.has\(id\)\)/
     );
     // Still a real app, so the launcher can offer it and "Add to desktop" works.
-    expect(src).toMatch(/id: "vnc", name: "app\.remoteDesktop"/);
+    expect(registrySrc).toMatch(/id: "vnc", name: "app\.remoteDesktop"/);
   });
 
   it("validates a saved layout against every built-in, not just the defaults", () => {

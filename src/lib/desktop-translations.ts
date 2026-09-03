@@ -18,6 +18,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "app.remoteDesktop": "Remote Desktop",
     "app.chat": "Chat",
     "app.skills": "Skills",
+    "app.setup": "Setup",
 
     // === ChromeShelf ===
     "shelf.appLauncher": "App Launcher",
