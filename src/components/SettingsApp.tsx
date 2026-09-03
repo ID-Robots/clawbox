@@ -190,17 +190,20 @@ const REBOOT_PROBE_TIMEOUT_MS = 2_500;
 const REBOOT_HARD_REDIRECT_MS = 45_000;
 type Section = typeof SECTIONS[number];
 
+/** Immutable set add/remove, returning `prev` when nothing would change. */
+function setWith<T>(prev: ReadonlySet<T>, value: T): ReadonlySet<T> {
+  return prev.has(value) ? prev : new Set(prev).add(value);
+}
+function setWithout<T>(prev: ReadonlySet<T>, value: T): ReadonlySet<T> {
+  if (!prev.has(value)) return prev;
+  const next = new Set(prev);
+  next.delete(value);
+  return next;
+}
+
 /** Shape of GET /setup-api/whatsapp/status, normalised client-side. */
 interface WhatsappStatus {
   supported: boolean;
-  /**
-   * False when the gateway could not be asked at all. The route still has to
-   * answer `state: "not_configured"` (the panel needs something to offer an
-   * action for), so this is the only thing separating "there is no WhatsApp
-   * here" from "nobody could tell us" — and drawing the first over the second
-   * is the false failure this hub is being fixed for.
-   */
-  verified?: boolean;
   state?: "not_configured" | "enabled_not_paired" | "paired" | "unsupported";
   enabled?: boolean;
   paired?: boolean;
@@ -1386,8 +1389,19 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [settledChannels, setSettledChannels] = useState<ReadonlySet<ChannelSection>>(
     () => new Set(),
   );
+  /**
+   * Channels whose Retry is waiting on the read it started.
+   *
+   * Only the Retry button writes this, and every settle clears it — the same
+   * `finally` that marks the channel settled, so a read that fails, is
+   * superseded or throws cannot leave a row latched as "retrying".
+   */
+  const [retryingChannels, setRetryingChannels] = useState<ReadonlySet<ChannelSection>>(
+    () => new Set(),
+  );
   const markChannelSettled = useCallback((id: ChannelSection) => {
-    setSettledChannels((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+    setSettledChannels((prev) => setWith(prev, id));
+    setRetryingChannels((prev) => setWithout(prev, id));
   }, []);
   /**
    * Put a channel back to "being asked".
@@ -1399,12 +1413,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
    * state is true afterwards.
    */
   const unsettleChannel = useCallback((id: ChannelSection) => {
-    setSettledChannels((prev) => {
-      if (!prev.has(id)) return prev;
-      const next = new Set(prev);
-      next.delete(id);
-      return next;
-    });
+    setSettledChannels((prev) => setWithout(prev, id));
+    setRetryingChannels((prev) => setWith(prev, id));
   }, []);
 
   /* ── Telegram ── */
@@ -2025,6 +2035,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       if (!isCurrent() || !r.ok) return;
       const d = await r.json();
       if (!isCurrent()) return;
+      // `verified: false` is the gateway failing to be asked, dressed up as a
+      // 200 — the route still has to answer `state: "not_configured"` because
+      // the panel needs something to offer an action for. That is the 5xx above
+      // wearing a different hat, so it is handled the same way and, crucially,
+      // in the same PLACE: three readers each deciding what an unverified
+      // answer means is how the hub came to say "Could not check" while the
+      // pane one click later said "Not configured", with a Link-a-number button
+      // under a phone that was paired. Absent means an older build that cannot
+      // tell us either way — verified, so an upgrade never blanks every row.
+      if (d?.verified === false) return;
       // Every field is defaulted: an older build (or a stubbed fetch) answering
       // `{}` must render as "no WhatsApp here", never as a half-populated panel.
       setWaStatus({
@@ -2038,9 +2058,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         bridgeReady: d?.bridgeReady ?? null,
         authorized: d?.authorized === true,
         receiving: d?.receiving === true,
-        // Absent means an older build that cannot tell us either way; treated
-        // as verified so an upgrade path never turns every row unreachable.
-        verified: d?.verified !== false,
       });
     } catch {
       // transient — keep the previous state
@@ -3666,6 +3683,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 {CHANNEL_ITEMS.map((item) => {
                   const state = channelState(item.id);
                   const connected = state === "connected";
+                  const retrying = retryingChannels.has(item.id);
                   const { subtitle } = sectionStatus(item.id);
                   const refreshChannel = {
                     telegram: refreshTelegramStatus,
@@ -3691,7 +3709,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         data-state={state}
                         className="flex-1 min-w-0 flex items-center gap-3 px-3 py-3 text-left bg-transparent border-none cursor-pointer"
                       >
-                        <span className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06]">
+                        {/* The ligature IS the glyph's text, so without this the
+                            row's accessible name began "chat", "send", "mail",
+                            "forum" — read out before the channel's own name. */}
+                        <span className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06]" aria-hidden="true">
                           <span className="material-symbols-rounded" style={{ fontSize: 20, color: connected ? "var(--coral-bright)" : "var(--text-muted)" }}>
                             {item.icon}
                           </span>
@@ -3738,17 +3759,29 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       </button>
                       {/* A dead end needs a way out. Named per channel, because
                           up to four rows can be unreachable at once and four
-                          controls all called "Retry" name nothing. */}
-                      {state === "unreachable" && (
+                          controls all called "Retry" name nothing.
+                          It stays mounted while the read it started is in
+                          flight, and is refused rather than `disabled`: a
+                          control that unmounts — or is disabled — under its own
+                          click drops keyboard focus to <body>, leaving an owner
+                          who pressed Enter nowhere while the row says
+                          "Checking…", and nowhere again when it comes back. */}
+                      {(state === "unreachable" || retrying) && (
                         <button
                           type="button"
                           data-testid={`settings-channel-retry-${item.id}`}
                           aria-label={`${t("settings.retry")} — ${t(item.labelKey)}`}
+                          aria-disabled={retrying}
                           onClick={() => {
+                            if (retrying) return;
                             unsettleChannel(item.id);
                             void refreshChannel();
                           }}
-                          className="text-[11px] text-[var(--coral-bright)] shrink-0 mr-3 px-1 py-1 bg-transparent border-none cursor-pointer hover:underline"
+                          className={`text-[11px] shrink-0 mr-3 px-1 py-1 bg-transparent border-none ${
+                            retrying
+                              ? "text-[var(--text-muted)] cursor-default"
+                              : "text-[var(--coral-bright)] cursor-pointer hover:underline"
+                          }`}
                         >
                           {t("settings.retry")}
                         </button>
@@ -5759,9 +5792,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     switch (id) {
       case "telegram": return tgConfigured !== null;
       case "email": return emailStatus !== null;
-      // An unverified answer is the gateway failing to be asked, dressed up as
-      // "not configured" with a 200. It is not knowledge.
-      case "whatsapp": return waStatus !== null && waStatus.verified !== false;
+      case "whatsapp": return waStatus !== null;
       case "discord": return dcConfigured !== null;
     }
   };
@@ -5842,10 +5873,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         return { subtitle: emailStatus.address };
       }
       case "whatsapp": {
-        // `verified: false` is the gateway failing to be asked, dressed up as
-        // "not configured" with a 200. Claiming either way over it is the false
-        // failure this panel is being fixed for.
-        if (waStatus === null || waStatus.verified === false) return { subtitle: null };
+        if (waStatus === null) return { subtitle: null };
         if (!waStatus.supported) return { subtitle: t("settings.whatsappUnavailable") };
         if (waStatus.state === "paired") {
           return { subtitle: waStatus.receiving ? t("settings.whatsappActive") : t("settings.whatsappPairedIdle") };

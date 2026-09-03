@@ -19,7 +19,7 @@
 
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 
 vi.setConfig({ testTimeout: 20_000 });
@@ -376,6 +376,92 @@ describe("Settings → Channels on a cold open", () => {
     await waitFor(() => expect(release).not.toBeNull());
     release!();
     await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "connected"));
+  });
+
+  it("does not send an unreadable row into a pane that says 'Not configured'", async () => {
+    // THE SIBLING CALL SITE. The row is a button whose only job is to open the
+    // pane, and the pane re-asks the same route inside the same failure window.
+    // Teaching only the row to say "Could not check" left the destination
+    // printing the exact TASK-689 words — with a "Link a number" button under
+    // them, over a phone that is paired. Two clicks, two contradictory answers.
+    let waCalls = 0;
+    let paneAnswerRead = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        if (!input.toString().startsWith("/setup-api/whatsapp/status")) return boxFetch(input);
+        waCalls += 1;
+        const calls = waCalls;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => {
+            if (calls > 1) paneAnswerRead = true;
+            return Promise.resolve({
+              supported: true,
+              harness: "openclaw",
+              allowlistSupported: false,
+              mode: null,
+              allowedUsers: [],
+              state: "not_configured",
+              verified: false,
+            });
+          },
+        } as unknown as Response);
+      }),
+    );
+
+    openHub();
+    const list = await screen.findByTestId("settings-channels-list");
+    const whatsapp = within(list).getByTestId("settings-channel-whatsapp");
+    await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "unreachable"));
+
+    fireEvent.click(whatsapp);
+    const pane = await screen.findByTestId("settings-section-whatsapp");
+    // Wait for the pane's OWN read to come back, so this is not asserting on a
+    // skeleton that simply has not been overwritten yet.
+    await waitFor(() => expect(paneAnswerRead).toBe(true));
+    await act(async () => {});
+
+    expect(pane).not.toHaveTextContent("settings.notConfigured");
+    expect(pane).not.toHaveTextContent("settings.whatsappNotConfiguredHint");
+    // And no invitation to link a number over a channel nobody could read.
+    expect(within(pane).queryByTestId("whatsapp-pairing")).toBeNull();
+  });
+
+  it("keeps the retry focused while the read it started is in flight", async () => {
+    // A keyboard or screen-reader owner tabs to Retry and presses Enter. The
+    // button used to be rendered only in the `unreachable` state, so it
+    // unmounted under its own click and dropped focus to <body> — and if the
+    // retry failed it came back with focus still nowhere.
+    let waCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        if (input.toString().startsWith("/setup-api/whatsapp/status")) {
+          waCalls += 1;
+          if (waCalls === 1) {
+            return Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) } as Response);
+          }
+          return new Promise<Response>(() => {});
+        }
+        return boxFetch(input);
+      }),
+    );
+
+    openHub();
+    const list = await screen.findByTestId("settings-channels-list");
+    const whatsapp = within(list).getByTestId("settings-channel-whatsapp");
+    await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "unreachable"));
+
+    const retry = within(list).getByTestId("settings-channel-retry-whatsapp");
+    retry.focus();
+    expect(document.activeElement).toBe(retry);
+
+    fireEvent.click(retry);
+
+    await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "unknown"));
+    expect(document.activeElement).toBe(retry);
   });
 
   it("never claims the sidebar entry is unconfigured before anything has been read", () => {
