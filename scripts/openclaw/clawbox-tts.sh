@@ -428,6 +428,50 @@ try_kokoro() {
   return 1
 }
 
+# ── EMAIL: directives are for a chat, not for a voice ───────────────────────
+# `EMAIL:4471` is how the agent tells a ClawBox CHAT that its reply refers to a
+# message the owner can open: chat-email-refs.ts lifts the line out and the
+# bubble shows a card instead of the id. Speech has no cards. Both editions hand
+# this script the reply text with the directive still in it — OpenClaw as
+# `{{Text}}` in argv (install.sh step_openclaw_tts), Hermes through
+# --text-file — so without this the box says "EMAIL four four seven one" after
+# the summary. That is TASK-697's local-voice half.
+#
+# NOT A SECOND GRAMMAR. The rule lives in the plugin module the Hermes hook
+# already uses, and this calls it: one file, two consumers, and the parity test
+# pins it to the chat's own parser. python3 is not a new dependency here —
+# `kokoro` IS a Python entry point, so a box where this cannot run is a box that
+# cannot speak anyway.
+#
+# FAILS OPEN, LOUDLY. A missing parser or a failed call speaks the reply as it
+# arrived and says so on stderr: a directive read aloud is a blemish, a silent
+# box is the failure this whole script exists to prevent.
+EMAIL_DIRECTIVES_DIR="${EMAIL_DIRECTIVES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../hermes-plugins/hooks/clawbox_email_directives" 2>/dev/null && pwd)}"
+EMAIL_DIRECTIVES_TIMEOUT="${EMAIL_DIRECTIVES_TIMEOUT:-10}"
+
+strip_email_directives() {
+  local text="$1" out
+  if [ -z "$EMAIL_DIRECTIVES_DIR" ] || [ ! -r "$EMAIL_DIRECTIVES_DIR/email_directives.py" ]; then
+    echo "clawbox-tts: no EMAIL: directive parser at '${EMAIL_DIRECTIVES_DIR:-<unresolved>}' — speaking the reply as it arrived" >&2
+    printf '%s' "$text"
+    return 0
+  fi
+  # The reply travels in the environment, never in argv or a shell string: it is
+  # model output, it can be long, and this is the same rule kokoro_via_server
+  # already follows.
+  if ! out=$(CLAWBOX_TTS_RAW_TEXT="$text" timeout "$EMAIL_DIRECTIVES_TIMEOUT" "$PYTHON_BIN" -c '
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from email_directives import strip_email_directives
+sys.stdout.write(strip_email_directives(os.environ["CLAWBOX_TTS_RAW_TEXT"]))
+' "$EMAIL_DIRECTIVES_DIR" 2>/dev/null); then
+    echo "clawbox-tts: could not strip EMAIL: directives — speaking the reply as it arrived" >&2
+    printf '%s' "$text"
+    return 0
+  fi
+  printf '%s' "$out"
+}
+
 # ── Entry ───────────────────────────────────────────────────────────────────
 
 # Refuse an option that was handed no value, rather than looping on it.
@@ -544,10 +588,27 @@ else
   OUTPUT="${ARGS[1]}"
 fi
 
+# Only a reply that carries the marker pays for the strip, so the ordinary
+# reply's bytes reach the engine exactly as they did before this existed —
+# `$(…)` would otherwise eat a trailing newline off every utterance on the box.
+case "$TEXT" in
+  *[Ee][Mm][Aa][Ii][Ll]:*)
+    TEXT_BEFORE_STRIP="$TEXT"
+    TEXT="$(strip_email_directives "$TEXT")"
+    ;;
+esac
+
 if [ -z "$TEXT" ]; then
   # Named by its source: "empty text" over a --text-file that exists and is
   # empty sends the operator looking at the wrong end of the call.
-  if [ -n "$TEXT_FILE" ]; then
+  if [ -n "${TEXT_BEFORE_STRIP:-}" ]; then
+    # A reply that was NOTHING but directives. Exiting non-zero rather than
+    # synthesising silence, for the reason at the bottom of this file: a run
+    # that exits 0 with no audio is indistinguishable from a working TTS to
+    # everything upstream. The gateway's cloud voice answers instead, and it
+    # gets the same nothing to say.
+    echo "clawbox-tts: the reply was only EMAIL: card directives — nothing left to speak" >&2
+  elif [ -n "$TEXT_FILE" ]; then
     echo "clawbox-tts: --text-file $TEXT_FILE is empty — refusing to speak nothing" >&2
   else
     echo "clawbox-tts: empty text" >&2
