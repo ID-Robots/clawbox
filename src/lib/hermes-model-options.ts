@@ -297,10 +297,11 @@ let firstUnansweredAt = 0;
  *  not from the first unanswered read: `Type=simple` reports `active/running`
  *  when ExecStart forks, so a start that spent a minute in `ExecStartPre` would
  *  otherwise arrive in `running` with its whole grace already spent and degrade
- *  a healthy boot on the last eleven seconds of it. Only ever advanced while
- *  systemd itself says the unit is starting, which is capped by
- *  {@link UNIT_START_BUDGET_MS} — so this can lengthen the window by one
- *  {@link PROBE_GRACE_MS} at most, never renew it indefinitely. */
+ *  a healthy boot on the last eleven seconds of it. Advanced ONLY while the
+ *  start budget is still unspent (`probeStillOwed` checks the budget before it
+ *  stamps, not after), so it can never exceed
+ *  `firstUnansweredAt + `{@link UNIT_START_BUDGET_MS} — which is what makes
+ *  {@link MAX_CHECKING_WINDOW_MS} a sum rather than an open end. */
 let lastSeenStartingAt = 0;
 /** Sequence of every dashboard read, and of the newest one that ANSWERED.
  *  Two reads overlap whenever an explicit refresh lands on top of a plain load
@@ -356,8 +357,16 @@ export async function probeStillOwed(): Promise<boolean> {
   // a long outage is called degraded for the ~11 s until it answers, which is
   // exactly what a box that has been broken for ten minutes should say.
   if (unit === "starting") {
+    // Checked BEFORE the latch is stamped, never after. A start we have already
+    // given up on must not hand the socket clock below a fresh
+    // `PROBE_GRACE_MS`: a unit that sits in `activating` for an hour would
+    // otherwise buy back a `checking` window every time it finally forked, and
+    // the panel would come back to "Checking..." long after it had honestly
+    // degraded — the same unbounded window as before, reached from the far side
+    // of the bound instead of through it.
+    if (now - firstUnansweredAt >= UNIT_START_BUDGET_MS) return false;
     lastSeenStartingAt = now;
-    return now - firstUnansweredAt < UNIT_START_BUDGET_MS;
+    return true;
   }
   // `running` (up, but a just-started process still has to bind its socket),
   // `restarting` (it died and systemd will start it again in RestartSec — this

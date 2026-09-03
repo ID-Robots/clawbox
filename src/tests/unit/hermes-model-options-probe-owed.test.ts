@@ -238,6 +238,40 @@ describe("probeStillOwed — a dashboard that is still booting is not a dashboar
     expect(await mod.probeStillOwed()).toBe(false);
   });
 
+  it("never comes BACK to checking once the start budget is spent", async () => {
+    // The hand-over clock is a latch, and a latch is how a bounded window comes
+    // undone from the far side. The panel polls the whole time, so every one of
+    // those polls used to re-stamp the latch — including the ones already being
+    // answered "degraded" — and the first fork after ANY of them handed the
+    // socket clock a fresh `PROBE_GRACE_MS`. A unit stuck in `activating` since
+    // boot could therefore buy `checking` back an hour later, with no total
+    // bound on the window at all.
+    dashboardDown();
+    await mod.getModelOptions();
+    unitStateMock.mockResolvedValue("starting");
+
+    const realNow = Date.now();
+    let offset = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow + offset);
+
+    // Inside the budget it is genuinely still starting, and says so.
+    offset = mod.UNIT_START_BUDGET_MS - 1_000;
+    expect(await mod.probeStillOwed()).toBe(true);
+
+    // Past it the panel degrades honestly — and keeps polling, which is the
+    // step that used to re-arm the latch behind the honest answer.
+    for (const past of [1_000, 30_000, 60_000]) {
+      offset = mod.UNIT_START_BUDGET_MS + past;
+      expect(await mod.probeStillOwed()).toBe(false);
+    }
+
+    // Now it finally forks. There is no grace left to hand it: the window is
+    // spent, and `checking` does not come back.
+    offset += 2_000;
+    unitStateMock.mockResolvedValue("running");
+    expect(await mod.probeStillOwed()).toBe(false);
+  });
+
   it.each(["starting", "restarting", "running", "unknown"] as const)(
     "stops owing an answer past the worst case whatever systemd says (%s)",
     async (unit) => {
