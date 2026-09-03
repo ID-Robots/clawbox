@@ -4564,7 +4564,16 @@ step_ollama_install() {
     if ! EMBED_JSON="$(as_clawbox timeout -k 5 60 "$OPENCLAW_BIN" memory status --agent main --deep --json 2>/dev/null)"; then
       EMBED_JSON=""
     fi
-    EMBED_STATE="$(python3 - "$EMBED_JSON" <<'PY' 2>/dev/null || true
+    # `command -v` first, and a state of its own. `--step ollama_install` runs
+    # standalone -- step_apt_update, which installs python3, is not on that
+    # path -- so without the interpreter the parse below fails and the catch-all
+    # would tell the operator the CORE did not answer, about a core that
+    # answered perfectly. A warning that names the wrong thing sends them to the
+    # wrong box. Nothing here can abort: `command -v` in if-condition position.
+    if ! command -v python3 >/dev/null 2>&1; then
+      EMBED_STATE="noparser"
+    else
+      EMBED_STATE="$(python3 - "$EMBED_JSON" <<'PY' 2>/dev/null || true
 import json, sys
 try:
     doc = json.loads(sys.argv[1])
@@ -4596,9 +4605,17 @@ else:
     print("cloud:%s" % provider)
 PY
 )"
+    fi
     case "$EMBED_STATE" in
       local:qwen3-embedding:0.6b)
         echo "  Local embeddings ready (qwen3-embedding:0.6b, semantic memory needs no API key)"
+        ;;
+      local:)
+        # provider says on-device and keyless, which is true and worth saying,
+        # but the core named no model. "ready on , not qwen3-embedding:0.6b" is
+        # a sentence with a hole in it that still claims READY over a box whose
+        # index cannot be matched to anything.
+        echo "  Local embeddings are on-device and keyless, but the core named no model, so this run cannot say whether the index matches qwen3-embedding:0.6b (non-fatal)"
         ;;
       local:*)
         # On-device and keyless, so not a warning -- but the index belongs to
@@ -4608,6 +4625,10 @@ PY
         ;;
       cloud:*)
         echo "  WARN: semantic memory is on a CLOUD embedder (${EMBED_STATE#cloud:}) — every indexed note is embedded off the box and it needs that provider's API key; the Memory Shard app moves it back on-device (non-fatal)"
+        ;;
+      noparser)
+        # Named as the installer's own gap, not the core's.
+        echo "  WARN: python3 is not installed on this box, so this run cannot read the embedder answer the core gave; the Memory Shard app shows the live one (non-fatal)"
         ;;
       disabled)
         echo "  WARN: memory search is switched off on this box (the core reports provider \"none\"); semantic memory stays on lexical FTS (non-fatal)"

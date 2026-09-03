@@ -1,5 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, readdirSync, existsSync, chmodSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  mkdirSync,
+  readdirSync,
+  existsSync,
+  chmodSync,
+  symlinkSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -559,6 +569,13 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     cli: string | null;
     cliExit?: number;
     config?: unknown;
+    /**
+     * Run the block on a box with no `python3`. `--step ollama_install` runs
+     * standalone, without `step_apt_update`, so the interpreter this block
+     * parses with is not guaranteed on that path — and the message it prints
+     * when it cannot parse names the wrong culprit if it blames the core.
+     */
+    withoutPython?: boolean;
   }): Report {
     if (!BLOCK) throw new Error("install.sh post-run check not found, or extracted truncated");
     const home = path.join(dir, "device", "home", "clawbox");
@@ -613,7 +630,11 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
       'CLAWBOX_HOME="/home/clawbox"',
       `PROJECT_DIR=${JSON.stringify(project)}`,
       `OPENCLAW_BIN=${JSON.stringify(openclaw)}`,
-      `PATH=${JSON.stringify(stubBin)}:$PATH`,
+      // A PATH with no python3 on it still has to resolve `bash` for the stub
+      // shebangs, so it is the real bash by symlink and nothing else.
+      opts.withoutPython
+        ? `PATH=${JSON.stringify(stubBin)}:${JSON.stringify(pythonlessBin())}`
+        : `PATH=${JSON.stringify(stubBin)}:$PATH`,
       "as_clawbox() {",
       "  local a; local -a mapped=()",
       '  for a in "$@"; do',
@@ -642,6 +663,20 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
       cliCalls: existsSync(cliLog) ? readFileSync(cliLog, "utf-8") : "",
       helperCalls: existsSync(helperLog) ? readFileSync(helperLog, "utf-8") : "",
     };
+  }
+
+  /**
+   * A PATH directory carrying `bash` and nothing else, so `python3` is
+   * genuinely unresolvable rather than merely stubbed to fail — which is what
+   * a box that never ran `step_apt_update` looks like to this block.
+   */
+  function pythonlessBin(): string {
+    const bin = path.join(dir, "device", "nopython");
+    mkdirSync(bin, { recursive: true });
+    const bash = spawnSync("bash", ["-c", "command -v bash"], { encoding: "utf-8" }).stdout.trim();
+    if (!bash) throw new Error("could not locate bash");
+    symlinkSync(bash, path.join(bin, "bash"));
+    return bin;
   }
 
   /** One `openclaw memory status --json` row, as the core shapes it. */
@@ -718,6 +753,34 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     const run = report({ cli: status("ollama"), cliExit: 1 });
     expect(run.out).not.toContain(READY);
     expect(run.out).toMatch(/could not read an embedder/i);
+  });
+
+  it("does not report a local provider the core named no model for as ready on nothing", () => {
+    // `local:` + an empty model fell through to the `local:*` arm and printed
+    // "Local embeddings ready on , not qwen3-embedding:0.6b" — a sentence with
+    // a hole in it that still claims READY over a box whose index cannot be
+    // matched to anything.
+    const run = report({ cli: status("ollama", "") });
+    expect(run.out).not.toMatch(/ready on\s*,/);
+    expect(run.out).not.toMatch(/on\s+,\s+not/);
+    // On-device and keyless is still true and worth saying; the model is not.
+    expect(run.out).toMatch(/named no model/i);
+    expect(run.out).toMatch(/non-fatal/);
+  });
+
+  it("blames its own missing interpreter, not the core, when it cannot parse", () => {
+    // The catch-all says "openclaw memory status did not answer, or named no
+    // provider". With no python3 the core answered perfectly and the installer
+    // could not read it — a warning that names the wrong thing sends the
+    // operator to the wrong box.
+    const run = report({ cli: status("ollama"), withoutPython: true });
+    expect(run.out).not.toContain(READY);
+    expect(run.out).toMatch(/python3/i);
+    expect(run.out).not.toMatch(/did not answer/i);
+    expect(run.out).toMatch(/non-fatal/);
+    // It still ASKED: the core was reached and answered, which is why blaming
+    // it would be false.
+    expect(run.cliCalls).toContain("memory status");
   });
 
   it("says memory search is not on this edition on hermes, and asks no core", () => {
