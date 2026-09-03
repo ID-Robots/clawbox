@@ -341,3 +341,53 @@ d("register-mcp.sh — bundled email-skill distractors", () => {
     expect(clawboxEntry().enabled).toBe(true);
   });
 });
+
+// Hermes parks the agent's worker thread on a clarify for `agent.clarify_timeout`
+// seconds — 3600 by default, and `<= 0` means forever. On an appliance that is
+// an hour of a session nobody can use for anything else because one question
+// went unanswered. 300s is the ClawBox default, written where the rest of this
+// device's Hermes config is rendered.
+d("register-mcp.sh — the clarify window this appliance ships with", () => {
+  function agentBlock(): Record<string, unknown> {
+    return (readConfig().agent as Record<string, unknown>) ?? {};
+  }
+
+  it("pins agent.clarify_timeout to 300 on a config that never set it", () => {
+    fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    // A NUMBER, not the string `hermes config set` would have stored: upstream
+    // reads it as a number and a quoted one is a different value.
+    expect(agentBlock().clarify_timeout).toBe(300);
+  });
+
+  it("leaves a window the owner chose for themselves alone", () => {
+    fs.writeFileSync(configPath, "agent:\n  clarify_timeout: 900\n");
+    run();
+    expect(agentBlock().clarify_timeout).toBe(900);
+  });
+
+  it("keeps the rest of the agent block untouched", () => {
+    fs.writeFileSync(configPath, "agent:\n  reasoning_effort: medium\n");
+    run();
+    expect(agentBlock().reasoning_effort).toBe("medium");
+    expect(agentBlock().clarify_timeout).toBe(300);
+  });
+
+  it("is part of the idempotence contract: a second run rewrites nothing", () => {
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
+    run();
+    const first = fs.readFileSync(configPath, "utf-8");
+    const second = run();
+    expect(second.stdout).toContain("already current");
+    expect(fs.readFileSync(configPath, "utf-8")).toBe(first);
+  });
+
+  it("leaves an agent key it cannot read alone but still registers the MCP", () => {
+    fs.writeFileSync(configPath, "agent: broken\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(readConfig().agent).toBe("broken");
+    expect(clawboxEntry().enabled).toBe(true);
+  });
+});
