@@ -154,38 +154,125 @@ describe.runIf(canRun)("kokoro_check_phonemiser fails a box that drops out-of-vo
   }
 
   /**
-   * Run the captured payload against a fake `kokoro`. `phonemes` is what the
-   * pipeline's g2p returns for the out-of-vocabulary line, or "raise" to make
-   * it throw, or "no-g2p" to remove the attribute entirely.
+   * Fault to inject into the fake `kokoro` the payload imports.
+   *
+   * A string is what the pipeline's g2p returns for the out-of-vocabulary line;
+   * the named modes are the ways the box itself, rather than the phonemiser,
+   * can be broken or merely different.
    */
-  function check(phonemes: string | "raise" | "no-g2p"): { status: number | null; out: string } {
-    const payload = capturePayload();
+  type Fault =
+    | string
+    | "raise" // g2p throws
+    | "no-g2p" // the pipeline has no g2p attribute
+    | "no-module" // `kokoro` is not installed at all
+    | "init-raise" // KPipeline() throws (torch/CUDA init, a CUDA OOM, an HF fetch)
+    | "model-must-be-false"; // KPipeline() refuses to load TTS weights
+
+  /**
+   * Write a fake `kokoro` package and return the PYTHONPATH that finds it, or
+   * null for the box where `kokoro` is absent.
+   *
+   * `KPipeline.__init__` takes `model` because the real one does: the check
+   * wants the G2P only, and constructing with the weights is a torch import
+   * plus a KModel load onto a Jetson's shared GPU on every in-app update.
+   */
+  function writeFakeKokoro(fault: Fault): string | null {
+    if (fault === "no-module") return null;
     const pkg = path.join(root, "fake", "kokoro");
     mkdirSync(pkg, { recursive: true });
     const g2p =
-      phonemes === "raise"
+      fault === "raise"
         ? "    def __call__(self, text):\n        raise RuntimeError('boom')"
-        : `    def __call__(self, text):\n        return (${JSON.stringify(phonemes)}, [])`;
+        : `    def __call__(self, text):\n        return (${JSON.stringify(
+            NAMED_FAULTS.has(fault) ? WORKING_PHONEMES : fault,
+          )}, [])`;
+    const init: string[] = [];
+    if (fault === "init-raise") {
+      // What a box under memory pressure actually raises: kokoro-server.service
+      // already holds the model on ~8 GB of shared Orin memory.
+      init.push("        raise RuntimeError('CUDA out of memory')");
+    } else if (fault === "model-must-be-false") {
+      // SystemExit, not Exception, so a check that catches broadly still fails
+      // here: this pins the kwarg, not the error handling.
+      init.push("        if model is not False:");
+      init.push("            raise SystemExit('the check loaded the TTS model')");
+      init.push("        self.g2p = _G2P()");
+    } else if (fault === "no-g2p") {
+      init.push("        pass");
+    } else {
+      init.push("        self.g2p = _G2P()");
+    }
     writeFileSync(
       path.join(pkg, "__init__.py"),
-      [
-        "class _G2P:",
-        g2p,
-        "",
-        "class KPipeline:",
-        "    def __init__(self, lang_code):",
-        phonemes === "no-g2p" ? "        pass" : "        self.g2p = _G2P()",
-        "",
-      ].join("\n"),
+      ["class _G2P:", g2p, "", "class KPipeline:", "    def __init__(self, lang_code, model=True):", ...init, ""].join(
+        "\n",
+      ),
     );
+    return path.join(root, "fake");
+  }
+
+  const NAMED_FAULTS = new Set(["raise", "no-g2p", "no-module", "init-raise", "model-must-be-false"]);
+  /** What a shipped Orin with a working espeakng-loader wheel actually returns. */
+  const WORKING_PHONEMES = "zɔɹblˈæTɪk fɹˈɑbnᵻkˌATəɹ skwˈɪbᵊld";
+
+  /** Run the captured payload against a fake `kokoro` carrying `fault`. */
+  function check(fault: Fault): { status: number | null; out: string } {
+    const payload = capturePayload();
+    const pythonPath = writeFakeKokoro(fault);
     const script = path.join(root, "run-payload.py");
     writeFileSync(script, payload.endsWith("\n") ? payload : `${payload}\n`);
     const run = spawnSync("python3", [script], {
       encoding: "utf-8",
       timeout: 30_000,
-      env: { ...process.env, PYTHONPATH: path.join(root, "fake") },
+      // An empty PYTHONPATH is the box with no kokoro: the import must fail.
+      env: { ...process.env, PYTHONPATH: pythonPath ?? path.join(root, "empty") },
     });
     return { status: run.status, out: `${run.stdout ?? ""}${run.stderr ?? ""}` };
+  }
+
+  /**
+   * The verdict the CALLER reaches, running the shipped `if ! ... ; then`
+   * arm out of `install_kokoro_tts` rather than a paraphrase of it. The payload
+   * exiting non-zero is only interesting because of what this arm does with it:
+   * `failed:phonemiser`, return 12, and install.sh's "Kokoro GPU TTS was
+   * REQUESTED and did NOT install" banner plus a recorded provision failure.
+   */
+  function verdict(fault: Fault): { rc: number; out: string } {
+    const armStart = INSTALL_VOICE_SH.indexOf("  if ! kokoro_check_phonemiser; then");
+    if (armStart < 0) throw new Error("the install_kokoro_tts phonemiser arm is no longer shaped as this test expects");
+    const armEnd = INSTALL_VOICE_SH.indexOf("\n  fi\n", armStart);
+    if (armEnd < 0) throw new Error("the phonemiser arm has no closing fi");
+    const arm = INSTALL_VOICE_SH.slice(armStart, armEnd + "\n  fi".length);
+
+    const start = INSTALL_VOICE_SH.indexOf("kokoro_check_phonemiser() {");
+    const end = INSTALL_VOICE_SH.indexOf("\n}", start);
+    const body = INSTALL_VOICE_SH.slice(start, end + 2);
+
+    const pythonPath = writeFakeKokoro(fault) ?? path.join(root, "empty");
+    const harness = path.join(root, "verdict.sh");
+    writeFileSync(
+      harness,
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        'kokoro_report() { echo "REPORT $1"; }',
+        `clawbox_python() { PYTHONPATH=${JSON.stringify(pythonPath)} python3 -c "$1"; }`,
+        body,
+        "caller() {",
+        arm,
+        "  return 0",
+        "}",
+        "rc=0",
+        "caller || rc=$?",
+        'echo "RC=$rc"',
+        "",
+      ].join("\n"),
+    );
+    const run = spawnSync("bash", [harness], { encoding: "utf-8", timeout: 60_000 });
+    const out = `${run.stdout ?? ""}${run.stderr ?? ""}`;
+    const m = out.match(/RC=(\d+)/);
+    if (!m) throw new Error(`the harness never reached its verdict: ${out}`);
+    return { rc: Number(m[1]), out };
   }
 
   it("carries no shell metacharacter, so what bash builds is what was written", () => {
@@ -217,6 +304,13 @@ describe.runIf(canRun)("kokoro_check_phonemiser fails a box that drops out-of-vo
   for (const [name, mode] of [
     ["the g2p raises", "raise"],
     ["the pipeline has no g2p at all", "no-g2p"],
+    // The two the check used to run OUTSIDE its own try/except. Neither says
+    // anything about the phonemiser: `kokoro` absent is a box that was never
+    // asked for GPU TTS or whose pip install is gone, and a constructor that
+    // raises is torch/CUDA init, a CUDA OOM while kokoro-server already holds
+    // the model on ~8 GB of shared Orin memory, or a HuggingFace fetch.
+    ["kokoro is not installed at all", "no-module"],
+    ["the pipeline constructor raises", "init-raise"],
   ] as const) {
     it(`warns rather than failing a working box when ${name}`, () => {
       // `kokoro` is installed unpinned, so a shape this cannot read is an
@@ -228,4 +322,44 @@ describe.runIf(canRun)("kokoro_check_phonemiser fails a box that drops out-of-vo
       expect(run.out).toMatch(/WARN/);
     });
   }
+
+  it("builds the G2P only, without loading the TTS model", () => {
+    // --tts-only runs on EVERY in-app update of every box on the fleet, so a
+    // full pipeline construction here is a torch import and a KModel load onto
+    // a GPU kokoro-server.service may already be holding — and it is what makes
+    // the check need the HuggingFace cache, and a network round trip, at all.
+    // The probe uses `pipeline.g2p`, which is built whatever `model` says.
+    const run = check("model-must-be-false");
+    expect(run.out).not.toContain("the check loaded the TTS model");
+    expect(run.status).toBe(0);
+    expect(run.out).toContain("Phonemiser OK");
+  });
+
+  describe("a box that is merely different is never graded as a failed provision", () => {
+    /**
+     * The shipped caller arm turns a non-zero check into `failed:phonemiser` and
+     * `return 12`, which install.sh reads as VOICE_RC=12 -> TTS_RC=12 -> "Kokoro
+     * GPU TTS was REQUESTED and did NOT install" + record_provision_failure. So
+     * every fault that is not "this box drops out-of-vocabulary words" has to
+     * stop before it.
+     */
+    for (const [name, mode] of [
+      ["kokoro is not installed at all", "no-module"],
+      ["the pipeline constructor raises (CUDA OOM, torch init, an HF fetch)", "init-raise"],
+    ] as const) {
+      it(`does not fail the provision when ${name}`, () => {
+        const run = verdict(mode);
+        expect(run.out).not.toContain("REPORT failed:phonemiser");
+        expect(run.rc, `the arm returned ${run.rc}:\n${run.out}`).toBe(0);
+      });
+    }
+
+    it("still fails the provision for the fault it exists to catch", () => {
+      // The control: without this, the two assertions above would also pass over
+      // a check that had been quietly turned into a no-op.
+      const run = verdict("  ");
+      expect(run.out).toContain("REPORT failed:phonemiser");
+      expect(run.rc).toBe(12);
+    });
+  });
 });

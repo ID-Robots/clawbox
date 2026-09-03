@@ -348,23 +348,35 @@ print('Kokoro model ready on', next(pipeline.model.parameters()).device)
 # out-of-vocabulary word -- a name, a brand, 'ClawBox' itself -- from every
 # spoken reply.
 #
-# BEHAVIOUR, not structure: it phonemises a word no lexicon has, which is the
-# thing that actually matters and which survives an upstream rename. `kokoro` is
-# installed unpinned, so a check written against today's attribute names would
-# start failing WORKING boxes the day misaki moves one. An empty result, or the
-# unknown-token marker misaki emits when it has no fallback, is the failure; a
-# shape this cannot read at all is a warning, never a verdict.
+# BEHAVIOUR, not structure: it asks for SOMETHING back for a word no lexicon
+# has, which is the thing that actually matters and which survives an upstream
+# rename. `kokoro` is installed unpinned, so a check written against today's
+# attribute names would start failing WORKING boxes the day misaki moves one. An
+# empty result, or the unknown-token marker misaki emits when it has no
+# fallback, is the failure; a shape this cannot read at all is a warning, never
+# a verdict -- and that rule covers the import and the construction too, not
+# just the call. Everything from the import down is inside the try for that
+# reason: kokoro absent, a torch/CUDA init failure and a CUDA OOM all say
+# nothing whatsoever about the phonemiser, and grading them would print "Kokoro
+# GPU TTS was REQUESTED and did NOT install" over a box that speaks fine.
 #
-# It costs a pipeline construction against an already-cached model, so it runs on
-# EVERY run -- including the box that skips the whole GPU install because it is
-# already stamped, which is precisely the box a broken wheel would be found on.
+# It builds the G2P and nothing else, so it runs on EVERY run -- including the
+# box that skips the whole GPU install because it is already stamped, which is
+# precisely the box a broken wheel would be found on, and which --tts-only
+# reaches on every in-app update of every box on the fleet.
 kokoro_check_phonemiser() {
   local out rc=0
   echo "  Checking the phonemiser..."
   out=$(clawbox_python "
-from kokoro import KPipeline
-pipeline = KPipeline(lang_code='a')
 try:
+    from kokoro import KPipeline
+    # model=False: build the G2P, not the TTS weights. pipeline.g2p is built
+    # either way, so the probe loses nothing, while the check stops loading a
+    # KModel onto a GPU kokoro-server.service may already be holding on ~8 GB
+    # of shared Orin memory, and stops needing the HuggingFace cache -- and a
+    # network round trip -- at all. If a future kokoro drops the argument, the
+    # TypeError lands in the WARN arm below, not on a box's verdict.
+    pipeline = KPipeline(lang_code='a', model=False)
     g2p = pipeline.g2p
     phonemes = g2p('zorblattic frobnicator squibbled')[0] or ''
 except Exception as exc:
@@ -635,6 +647,10 @@ install_kokoro_tts() {
   # every box on the fleet, including the one this fix is being shipped to.
   if ! kokoro_check_phonemiser; then
     echo "  ERROR: Kokoro cannot phonemise out-of-vocabulary words — names and brands would be dropped from speech" >&2
+    # Re-running the step lands on the idempotence gate and re-runs this same
+    # check, so the caller's "Re-run: --step openclaw_tts" is not a remedy here.
+    # The wheel that carries the espeak library and its data is.
+    echo "  Fix:   sudo -u clawbox pip3 install --force-reinstall espeakng-loader misaki" >&2
     kokoro_report "failed:phonemiser"
     return 12
   fi
@@ -851,9 +867,15 @@ fi
 
 # ── Step 7: Deploy scripts ───────────────────────────────────────────────────
 
-if ! kokoro_check_phonemiser; then
+# Gated on KOKORO_FULL_OK: this path reaches here after install_kokoro_packages
+# or the model download may already have failed, and on that box the honest
+# statement is "kokoro is not installed", not "kokoro cannot phonemise". The
+# flag is already false there, so no verdict changes -- only the sentence the
+# operator reads.
+if $KOKORO_FULL_OK && ! kokoro_check_phonemiser; then
   KOKORO_FULL_OK=false
   echo "  Warning: Kokoro cannot phonemise out-of-vocabulary words — names and brands would be dropped from speech"
+  echo "  Warning: reinstall the wheel that carries it: sudo -u clawbox pip3 install --force-reinstall espeakng-loader misaki"
 fi
 
 echo "[7/7] Deploying voice server scripts..."
