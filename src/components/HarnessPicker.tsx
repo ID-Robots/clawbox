@@ -182,7 +182,7 @@ export default function HarnessPicker() {
           className="mt-3 flex items-start gap-2 rounded-xl border border-amber-400/40 bg-amber-400/10 p-3"
         >
           <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 16 }} aria-hidden="true">
-            shield_with_heart
+            warning
           </span>
           <span className="text-xs text-[var(--text-secondary)]">
             <span className="block font-medium text-[var(--text-primary)]">{warning.title}</span>
