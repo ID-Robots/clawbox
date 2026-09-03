@@ -68,7 +68,7 @@ function loadedInspection(hookNames: string[]) {
   })}\nJSON`;
 }
 
-function run(root = REPO, coreTarget = "2026.8.1") {
+function run(root = REPO, coreTarget = "2026.8.1", extraEnv: Record<string, string> = {}) {
   const program = [
     "set -euo pipefail",
     `CLAWBOX_ROOT=${JSON.stringify(root)}`,
@@ -80,7 +80,7 @@ function run(root = REPO, coreTarget = "2026.8.1") {
   ].join("\n");
   const r = spawnSync("bash", ["-c", program], {
     encoding: "utf-8",
-    env: testEnv({ PATH: `${binDir}:/usr/bin:/bin`, OC_CALLS: path.join(dir, "calls.log") }),
+    env: testEnv({ PATH: `${binDir}:/usr/bin:/bin`, OC_CALLS: path.join(dir, "calls.log"), ...extraEnv }),
     timeout: 60_000,
   });
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
@@ -101,6 +101,17 @@ function installed(): string[] {
 function calls(): string {
   const p = path.join(dir, "calls.log");
   return existsSync(p) ? readFileSync(p, "utf-8") : "";
+}
+
+/** The success stamp and the attempt stamp, which live BESIDE `extensions/`. */
+const verifiedStamp = () => path.join(openclawHome, `.${PLUGIN_ID}-verified`);
+const attemptStamp = () => path.join(openclawHome, `.${PLUGIN_ID}-attempted`);
+
+/** Ages the attempt stamp past the retry window, as a day of uptime would. */
+function ageAttempt(seconds: number) {
+  const [stamp, , ...why] = readFileSync(attemptStamp(), "utf-8").trim().split(" ");
+  const when = Math.floor(Date.now() / 1000) - seconds;
+  writeFileSync(attemptStamp(), `${stamp} ${when} ${why.join(" ")}\n`);
 }
 
 d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
@@ -202,22 +213,94 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     }
   });
 
-  it("re-verifies for ever while the hook is NOT registered", () => {
-    // The stamp is written only on success, so a broken box never stops asking.
+  it("still reports a broken box on every boot, without paying the CLI again", () => {
+    // The success stamp is written only on success, so a box whose hook never
+    // registered keeps asking rather than settling for "checked once". But it
+    // asks at a BOUNDED rate: the states that never register are mostly
+    // PERMANENT (a build with no `plugins inspect`, a plugin the CLI cannot
+    // resolve, an Orin that cannot module-load 44 plugins inside 45 s), and
+    // paying a 10-45 s CLI cold start on every skill install, provider change
+    // and crash for ever is the delay this file's header exists to prevent.
+    stubOpenclaw(loadedInspection(["gateway_start"]));
+    const first = run();
+    expect(first.stderr).toMatch(/WARNING.*did not register reply_payload_sending/);
+    writeFileSync(path.join(dir, "calls.log"), "");
+    const second = run();
+    // Silent it is not — only cheap.
+    expect(second.stderr).toMatch(/WARNING.*did not confirm its hook/);
+    expect(second.stderr).toContain("gateway_start");
+    expect(calls()).not.toContain("plugins inspect");
+  });
+
+  it("asks again once the retry window has passed", () => {
     stubOpenclaw(loadedInspection(["gateway_start"]));
     run();
+    ageAttempt(86_401);
     writeFileSync(path.join(dir, "calls.log"), "");
     const r = run();
     expect(calls()).toContain("plugins inspect");
     expect(r.stderr).toMatch(/WARNING.*did not register reply_payload_sending/);
   });
 
-  it("re-verifies after a factory reset takes the extensions tree with it", () => {
+  it("asks again inside the window when the plugin's own bytes change", () => {
+    // The backoff is keyed on the SAME hash as the success stamp, so an update
+    // that ships a fixed plugin is never made to wait out a day.
+    stubOpenclaw(loadedInspection(["gateway_start"]));
+    run();
+    writeFileSync(path.join(dir, "calls.log"), "");
+    run(REPO, "2026.9.9");
+    expect(calls()).toContain("plugins inspect");
+  });
+
+  it("clears the attempt stamp once the hook finally registers", () => {
+    stubOpenclaw(loadedInspection(["gateway_start"]));
+    run();
+    expect(existsSync(attemptStamp())).toBe(true);
+    stubOpenclaw(loadedInspection(["reply_payload_sending"]));
+    ageAttempt(86_401);
+    run();
+    expect(existsSync(attemptStamp())).toBe(false);
+    expect(existsSync(verifiedStamp())).toBe(true);
+  });
+
+  it("keeps its bookkeeping out of the core's own plugin root", () => {
+    // `~/.openclaw/extensions/` is the directory the loader enumerates.
+    // ClawBox state goes beside it, not in it.
+    run();
+    expect(existsSync(verifiedStamp())).toBe(true);
+    expect(readdirSync(path.join(openclawHome, "extensions"))).toEqual([PLUGIN_ID]);
+  });
+
+  it("re-verifies after a factory reset empties ~/.openclaw", () => {
+    // `removeDirectoryContents(OPENCLAW_DIR)` (setup/reset/route.ts:508) reads
+    // the directory with `fs.readdir`, which lists dot-entries — so the stamp
+    // beside `extensions/` goes with the plugin it describes, exactly as it did
+    // when it lived inside `extensions/`. The route then writes a fresh
+    // openclaw.json back (:541), which is why this does too.
+    run();
+    for (const entry of readdirSync(openclawHome)) {
+      rmSync(path.join(openclawHome, entry), { recursive: true, force: true });
+    }
+    writeFileSync(configPath, JSON.stringify({ plugins: { entries: {} } }));
+    writeFileSync(path.join(dir, "calls.log"), "");
+    const r = run();
+    expect(calls()).toContain("plugins inspect");
+    expect(r.stdout).toContain("reply_payload_sending registered");
+  });
+
+  it("repairs a lost extensions tree without paying for the check again", () => {
+    // The narrower case: `extensions/` went but the stamp did not. The plugin
+    // is copied back byte for byte against the same pinned core, so the answer
+    // the check would give cannot have changed — and the stamp is keyed on
+    // exactly those two things. Re-running the CLI here would buy nothing and
+    // cost the boot 10-45 s.
     run();
     rmSync(path.join(openclawHome, "extensions"), { recursive: true, force: true });
     writeFileSync(path.join(dir, "calls.log"), "");
-    run();
-    expect(calls()).toContain("plugins inspect");
+    const r = run();
+    expect(installed()).toHaveLength(4);
+    expect(calls()).not.toContain("plugins inspect");
+    expect(r.stdout).toContain("unchanged since it was last verified");
   });
 
   it("warns when the plugin loaded but registered no outbound hook", () => {
@@ -266,7 +349,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     const r = run();
     expect(r.status).toBe(0);
     expect(readConfig().plugins?.entries?.[PLUGIN_ID]).toEqual({ enabled: true });
-    expect(r.stderr).toMatch(/NOTE: could not verify/);
+    expect(r.stderr).toMatch(/NOTE: the openclaw CLI could not be run/);
   });
 
   it("does not fail the gateway when the config cannot be written", () => {
@@ -288,21 +371,188 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     }
   });
 
-  it("calls an unanswerable CLI unknown, not a defect", () => {
-    // "directives will still reach channels" said every boot about a box where
-    // the hook is registered and working is a false failure, and one the
-    // operator learns to scroll past.
-    stubOpenclaw('echo "not json at all"; exit 3');
+  // ── The two ways the check can fail to answer, told apart ─────────────────
+  //
+  // These used to print the SAME mild NOTE, and one of them is the shape an
+  // undiscovered plugin makes: this plugin is `cp`'d into `extensions/` rather
+  // than installed, which is the core's lowest discovery tier, and an `inspect`
+  // that cannot resolve a bare untracked id exits non-zero. "The whole OpenClaw
+  // half does nothing" and "the CLI was unavailable" must not read alike.
+  it("calls a CLI that could not run at all an UNKNOWN, not a defect", () => {
+    // Exit 127 is `command not found`; 126 not executable; 124 is `timeout`
+    // killing it. In none of them did the CLI have an opinion about us.
+    stubOpenclaw("exit 127");
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stderr).toMatch(/NOTE: could not verify/);
+    expect(r.stderr).toMatch(/NOTE: the openclaw CLI could not be run/);
+    expect(r.stderr).toContain("exit 127");
+    // "directives will still reach channels", said every boot about a box where
+    // the hook is registered and working, is a false failure — and one the
+    // operator learns to scroll past.
     expect(r.stderr).not.toMatch(/WARNING/);
   });
 
-  it("does not stamp a plugin it could not verify", () => {
-    stubOpenclaw('echo "not json at all"; exit 3');
+  it("calls a CLI that RAN and refused a defect, and names discovery", () => {
+    stubOpenclaw('echo "unknown plugin: clawbox-email-directives" >&2; exit 3');
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stderr).toMatch(/WARNING.*may not be discovered at all/);
+    // The CLI's own words, so an operator can tell which refusal this was.
+    expect(r.stderr).toContain("unknown plugin: clawbox-email-directives");
+    expect(r.stderr).not.toMatch(/NOTE/);
+  });
+
+  it("calls a CLI that answered with something that is not JSON a defect", () => {
+    stubOpenclaw('echo "not json at all"');
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stderr).toMatch(/WARNING.*may not be discovered at all/);
+    expect(r.stderr).toContain("not JSON");
+  });
+
+  it("asks again on the very NEXT boot when the CLI could not be run at all", () => {
+    // 126/127 come back in microseconds — a failed `execve` — and they are the
+    // most transient states on the box: `openclaw` absent or not yet executable
+    // during the first boot after an update, a moved binary, a mid-update
+    // restart. Backing off for a day over one would print a daily warning about
+    // a plugin that is almost certainly loaded and working. So neither stamp is
+    // written and the next boot asks properly.
+    stubOpenclaw("exit 127");
+    const first = run();
+    expect(first.stderr).toMatch(/NOTE: the openclaw CLI could not be run/);
+    expect(existsSync(verifiedStamp())).toBe(false);
+    expect(existsSync(attemptStamp())).toBe(false);
+    writeFileSync(path.join(dir, "calls.log"), "");
+    const second = run();
+    expect(calls()).toContain("plugins inspect");
+    expect(second.stderr).not.toMatch(/WARNING/);
+  });
+
+  it("DOES back off the 45 s timeout, which is the expensive unknown", () => {
+    // 124 is `timeout` killing it. Also an unknown, but a box that cannot
+    // module-load its plugins inside 45 s will usually not manage it on the
+    // next restart either — and that one costs the boot 45 seconds.
+    stubOpenclaw("exit 124");
+    const first = run();
+    expect(first.stderr).toMatch(/NOTE: the openclaw CLI could not be run/);
+    expect(existsSync(attemptStamp())).toBe(true);
+    writeFileSync(path.join(dir, "calls.log"), "");
+    run();
+    expect(calls()).not.toContain("plugins inspect");
+  });
+
+  it("leaves the installed plugin ALONE when it is the sources that cannot be read", () => {
+    // `cp` opens its source first and never touches the destination when that
+    // open fails, so a source-side problem — a checkout still being written by
+    // the updater, a permission slip — leaves the last good plugin exactly
+    // where it was. Removing it there would turn "the box keeps stripping with
+    // what it already had" into "no plugin, and a config that names one".
+    run();
+    expect(installed()).toHaveLength(4);
+    const bare = mkdtempSync(path.join(tmpdir(), "oc-unreadable-src-"));
+    try {
+      const src = path.join(bare, "scripts", "openclaw-plugins", PLUGIN_ID);
+      mkdirSync(src, { recursive: true });
+      for (const f of ["openclaw.plugin.json", "package.json", "index.mjs", "email-directives.mjs"]) {
+        writeFileSync(path.join(src, f), "x");
+        chmodSync(path.join(src, f), 0o000);
+      }
+      const r = run(bare);
+      expect(r.status).toBe(0);
+      expect(r.stderr).toMatch(/WARNING: could not read .* plugin sources/);
+      expect(r.stderr).toContain("leaving whatever is already installed in place");
+      expect(installed()).toHaveLength(4);
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
+  });
+
+  it("removes a partial copy rather than leaving the gateway to import it", () => {
+    // The other side: the sources read fine and the WRITE failed part-way, so
+    // the destination is now a mixture of new, truncated and stale files while
+    // `plugins.entries.<id>.enabled` is still true from the boot before. One
+    // state, and a line that names it, beats a module that may throw halfway
+    // through parsing. Provoked by making the third of the four targets a
+    // directory, which `cp -f` cannot overwrite.
+    run();
+    const third = path.join(openclawHome, "extensions", PLUGIN_ID, "index.mjs");
+    rmSync(third);
+    mkdirSync(third);
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stderr).toMatch(/WARNING: could not install/);
+    expect(r.stderr).toContain("a partial copy has been removed");
+    expect(installed()).toEqual([]);
+  });
+
+  // ── A CORRUPT attempt stamp must never cost the box its gateway ───────────
+  //
+  // These write the file BY HAND rather than letting the script write it: every
+  // other attempt-stamp test uses one this script produced, which only ever
+  // proves the script can read its own output. The stamp is rewritten on any
+  // boot the check does not confirm, so it is regularly half-written when a box
+  // loses power — which these boxes do.
+  it.each([
+    ["a leading-zero timestamp, which bash arithmetic reads as invalid octal", "deadbeef 0899 unregistered"],
+    ["a leading-zero timestamp that IS valid octal", "deadbeef 0755 unregistered"],
+    ["a timestamp far too large for one", `deadbeef ${"9".repeat(24)} unregistered`],
+    ["a timestamp that is not a number at all", "deadbeef not-a-time unregistered"],
+    ["a single field", "deadbeef"],
+    ["an empty file", ""],
+    ["a line with no fields but spaces", "   "],
+    ["binary", "\u0000\u0001\u0002 \u0003 \u0004"],
+  ])("exits 0 on an attempt stamp with %s", (_name, contents) => {
+    run();
+    writeFileSync(attemptStamp(), contents);
+    // The success stamp has to be gone, or the attempt file is never read.
+    rmSync(verifiedStamp(), { force: true });
+    const r = run();
+    // An ExecStartPre with no leading `-` under `set -euo pipefail`: a non-zero
+    // status here fails the unit, and with Restart=always the gateway burns its
+    // start limit and sits failed for the hour — over a DIAGNOSTIC.
+    expect(r.status).toBe(0);
+    expect(r.stderr).not.toContain("value too great for base");
+  });
+
+  it("does not read an EMPTY recorded verdict as a box that passed", () => {
+    // The verdict is also the "did we back off" answer, and an attempt line
+    // whose verdict came back empty used to fall through to "unchanged since it
+    // was last verified" — a box that failed the check reported as one that
+    // passed it.
+    run();
+    const stamp = readFileSync(verifiedStamp(), "utf-8").trim();
+    rmSync(verifiedStamp());
+    writeFileSync(attemptStamp(), `${stamp} ${Math.floor(Date.now() / 1000)} \n`);
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain("unchanged since it was last verified");
+    expect(r.stderr).toMatch(/WARNING: the last runtime check .* did not confirm its hook/);
+    expect(r.stderr).toContain("no verdict recorded");
+  });
+
+  it("still verifies honestly when no temp file can be made for the CLI's stderr", () => {
+    // The stderr capture must not become a way to FAIL: a redirection that
+    // cannot be opened fails the command before it runs, and that would be
+    // reported as the CLI refusing — i.e. "the plugin may not be discovered" —
+    // on a box whose only real problem is a full /tmp.
+    const r = run(REPO, "2026.8.1", { TMPDIR: path.join(dir, "no-such-tmpdir") });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("reply_payload_sending registered");
+    expect(r.stderr).not.toMatch(/may not be discovered/);
+  });
+
+  it("re-verifies when the set of OTHER enabled plugins changes", () => {
+    // `inspect --runtime` module-loads every enabled plugin, so the answer also
+    // depends on the plugin set — and ClawBox changes it after a good
+    // verification (the Discord configure route and openclaw-config.ts both
+    // write `plugins.entries`, and the gateway restarts). Without this, a
+    // plugin added later that breaks the loader would stop ours registering
+    // while the boot log claimed "unchanged since it was last verified".
     run();
     writeFileSync(path.join(dir, "calls.log"), "");
+    const cfg = readConfig();
+    cfg.plugins!.entries!["some-new-channel"] = { enabled: true };
+    writeFileSync(configPath, JSON.stringify(cfg));
     run();
     expect(calls()).toContain("plugins inspect");
   });

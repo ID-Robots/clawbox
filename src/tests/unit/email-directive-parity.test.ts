@@ -47,6 +47,16 @@ function pythonAnswers(inputs: string[]): string[] {
 }
 
 describe("EMAIL: directive grammar — one rule, three implementations", () => {
+  // ASSERTED, NOT SKIPPED ON. `describe.skip`/`it.skip` on a missing `python3`
+  // turned the only thing standing between the three grammars into a green
+  // no-op: the guard would leave the build with nothing saying so. That is the
+  // same failure `check:sudoers` was given its own CI step for. `ubuntu-latest`
+  // ships python3, so this costs nothing where it runs and is loud where it
+  // would otherwise be silent.
+  it("has a python3 to run the Hermes copy with — this suite is the drift guard", () => {
+    expect(hasPython3).toBe(true);
+  });
+
   it.each(EMAIL_DIRECTIVE_CASES)("TypeScript (the chat's own parser): $name", ({ input, stripped }) => {
     expect(splitEmailRefs(input).text).toBe(stripped);
   });
@@ -55,7 +65,7 @@ describe("EMAIL: directive grammar — one rule, three implementations", () => {
     expect(stripEmailDirectives(input)).toBe(stripped);
   });
 
-  (hasPython3 ? it : it.skip)("Python (the Hermes plugin) answers the whole table identically", () => {
+  it("Python (the Hermes plugin) answers the whole table identically", () => {
     const answers = pythonAnswers(EMAIL_DIRECTIVE_CASES.map((c) => c.input));
     expect(answers).toEqual(EMAIL_DIRECTIVE_CASES.map((c) => c.stripped));
   });
@@ -78,7 +88,7 @@ describe("EMAIL: directive grammar — one rule, three implementations", () => {
     0x200b, 0x200c, 0x200d, 0x2060, 0x180e,
   ];
 
-  (hasPython3 ? it : it.skip)("the three agree on every whitespace-boundary character", () => {
+  it("the three agree on every whitespace-boundary character", () => {
     const inputs: string[] = [];
     for (const cp of BOUNDARY_CODE_POINTS) {
       const c = String.fromCodePoint(cp);
@@ -88,6 +98,15 @@ describe("EMAIL: directive grammar — one rule, three implementations", () => {
       inputs.push(`Done.\nEMAIL:${c}4471${c}`);
       inputs.push(`Done.\nEMAIL:4471${c}`);
       inputs.push(`${c}\`\`\`\nEMAIL:1\n\`\`\``);
+      // ...and INSIDE the quotes, which is the only position that separated
+      // the two grammars: JavaScript's `.` excludes \r, \u2028 and \u2029 and
+      // Python's excludes only \n, so with `\s*(.*)$` the JS copies kept a
+      // line Python carded — 18 disagreements over exactly this sweep. The
+      // three earlier positions could not see it, which is why it is here.
+      for (const q of ["`", '"', "'"]) {
+        inputs.push(`Done.\nEMAIL:${q}4471${c}${q}`);
+        inputs.push(`Done.\nEMAIL:${q}${c}4471${q}`);
+      }
     }
     const ts = inputs.map((raw) => splitEmailRefs(raw).text);
     const js = inputs.map((raw) => stripEmailDirectives(raw));
@@ -99,6 +118,89 @@ describe("EMAIL: directive grammar — one rule, three implementations", () => {
       .filter((row) => row.ts !== row.js || row.ts !== row.py)
       .map((row) => JSON.stringify(row));
     expect(disagreements).toEqual([]);
+  });
+
+  // ── The line grammar must be LINEAR in the length of a line ───────────────
+  //
+  // The parser's input is model output relaying attacker-influenced content: an
+  // email body is exactly that. `^email:\s*(.*)$` made that a denial of
+  // service — `\s*` and `.*` overlap on the space character, and `$` (no `m`
+  // flag) can only match at the end of the input while `.` cannot cross `\r`,
+  // `\u2028` or `\u2029`. A line that starts `email:`, carries a long run of
+  // spaces and holds one of those three terminators away from its end forces
+  // the engine through every split of the spaces between the two quantifiers.
+  //
+  // Measured on the old pattern through `stripEmailDirectives` on this machine:
+  // 8.3 ms at 2,000 spaces, 134.4 ms at 8,000, 433.6 ms at 16,000, 1,924.4 ms at
+  // 32,000 — 4x per doubling, the signature of an O(n^2) scan. An Orin Nano is
+  // several times slower again, and the OpenClaw hook is fail-open with a 15 s
+  // ceiling: the box pegs a core and then delivers the reply UNSTRIPPED.
+  //
+  // The same shape as `src/tests/unit/local-model-profile.test.ts`: a generous
+  // absolute ceiling plus a growth ratio, because the point is the shape of the
+  // curve and not a benchmark.
+  describe("the line grammar is linear in the length of a line", () => {
+    /** `email:` + n spaces + a line terminator that is not at the end. */
+    const pathological = (n: number) => `email:${" ".repeat(n)}x\ry`;
+
+    const timeMs = (strip: (raw: string) => string, input: string): number => {
+      const started = performance.now();
+      strip(input);
+      return performance.now() - started;
+    };
+
+    /**
+     * The FASTEST of five runs, not one run.
+     *
+     * The ratio below compares two sub-millisecond measurements, where a single
+     * GC pause on a loaded runner is larger than the thing being measured. The
+     * minimum is the robust statistic here: a pause has to land on all five
+     * runs to move it. Measured over twelve rounds on this machine it gives the
+     * same ratio to two decimal places every time; a single measurement did
+     * not.
+     */
+    const bestMs = (strip: (raw: string) => string, input: string): number => {
+      let best = Infinity;
+      for (let i = 0; i < 5; i++) best = Math.min(best, timeMs(strip, input));
+      return best;
+    };
+
+    const PARSERS: [string, (raw: string) => string][] = [
+      ["TypeScript (the chat's own parser)", (raw) => splitEmailRefs(raw).text],
+      ["JavaScript (the OpenClaw plugin)", (raw) => stripEmailDirectives(raw)],
+    ];
+
+    it.each(PARSERS)("%s does not blow up on a long run of spaces", (_name, strip) => {
+      // Linear needs well under a millisecond for 100k characters; the old
+      // pattern needs ~19 s here and ~5 s on a fast machine, so 2 s sits
+      // between the two with room for a loaded CI runner.
+      expect(timeMs(strip, pathological(100_000))).toBeLessThan(2_000);
+    }, 60_000);
+
+    it.each(PARSERS)("%s costs the same whether or not the line backtracks", (_name, strip) => {
+      // The SAME LENGTH either way — the only difference is the `\r` held back
+      // from the end, which is what the two quantifiers used to fight over. A
+      // ratio rather than a wall clock, so this reads the algorithm and not the
+      // machine: a linear scan answers both in the same time, the old pattern
+      // needed 3,635x longer at 16k characters and 19,075x at 32k.
+      const benign = (n: number) => `email:${" ".repeat(n)}xy`;
+      // Warm the JIT so the first call's compile time is not read as cost.
+      bestMs(strip, benign(1_000));
+      bestMs(strip, pathological(1_000));
+      const flat = Math.max(bestMs(strip, benign(32_000)), 0.05);
+      const backtracking = bestMs(strip, pathological(32_000));
+      // TWO WAYS TO PASS, because both sides are a fraction of a millisecond
+      // and a ratio of two such numbers is noise over noise if either one is
+      // disturbed. `backtracking` under 25 ms is on its own proof of a linear
+      // scan — the old pattern needed 1,924 ms at this size, a 77x separation —
+      // so the ratio only has to carry the argument when the absolute number is
+      // large enough to mean something. Measured here: 0.05 ms and a ratio of
+      // 0.46; with the old pattern, 570 ms and a ratio of 11,391.
+      const linear = backtracking < 25 || backtracking / flat < 50;
+      // Asserted as an object so a failure prints the numbers rather than
+      // `expected false to be true`.
+      expect({ backtracking, flat, ratio: backtracking / flat, linear }).toMatchObject({ linear: true });
+    }, 60_000);
   });
 
   it("a non-string is not a crash in either plugin — a hook must never break delivery", () => {

@@ -65,29 +65,66 @@ describe("OpenClaw reply_payload_sending plugin — EMAIL: directives", () => {
     expect(onReplyPayloadSending({ payload: { text: REPLY }, kind: "final" }, {})).toBeUndefined();
   });
 
-  it("keys on the delivery SURFACE, not the channel the session came from", () => {
-    // `event.channel` is where this reply is going (`Surface ?? Provider`);
-    // `ctx.channelId` is `OriginatingChannel ?? Surface ?? Provider`, so on a
-    // webchat delivery for a session that started on Telegram the two disagree.
-    // Keying on ctx would strip the directive out of a reply being handed to a
-    // browser — the card never renders and the owner cannot open the mail.
-    expect(onReplyPayloadSending(event({ text: REPLY }, "webchat"), ctx("telegram"))).toBeUndefined();
-    // And the mirror: a channel delivery on a session that began in the chat.
+  // ── The two signals, as the pinned core actually fills them ───────────────
+  //
+  // Read off the 2026.8.1 core installed on the OpenClaw box, read-only:
+  //   event.channel  = Surface ?? Provider                (deliver-prepare:125)
+  //   ctx.channelId  = OriginatingChannel ?? Surface ?? Provider
+  //                                              (message-hook-mappers:50)
+  //
+  // These cases are the VALUES the box produces, not values a test invented, so
+  // a core that changes what either field means fails here rather than in the
+  // owner's chat. If one of them ever starts disagreeing on a real delivery,
+  // this block is the thing to re-derive from the box.
+  it("KEEPS the line when both signals say webchat — the dashboard chat", () => {
+    // chat-send-handler:2367-2371 sets Provider AND Surface to
+    // INTERNAL_MESSAGE_CHANNEL ("webchat", message-channel-constants:3), and
+    // resolveChatSendOriginatingRoute (:355/365/382) makes OriginatingChannel
+    // the same for every send that is not an explicit deliver route.
+    expect(onReplyPayloadSending(event({ text: REPLY }, "webchat"), ctx("webchat"))).toBeUndefined();
+  });
+
+  it("STRIPS when both signals say a channel — a reply arriving from Telegram", () => {
+    // channel-inbound:153-162 sets all three to the channel id.
+    expect(onReplyPayloadSending(event({ text: REPLY }, "telegram"), ctx("telegram"))).toEqual({
+      payload: { text: STRIPPED },
+    });
+  });
+
+  it("STRIPS when the ctx names a channel and the event still says webchat", () => {
+    // THE ONE THAT MATTERS. A `chat.send` with `deliver: true` and an explicit
+    // route leaves Surface/Provider pinned to "webchat" while
+    // OriginatingChannel becomes the destination
+    // (chat-send-handler:346-392) — so `event.channel` says "webchat" for a
+    // reply headed to Telegram. Believing the event first would print the id in
+    // Telegram, which is the whole bug.
+    expect(onReplyPayloadSending(event({ text: REPLY }, "webchat"), ctx("telegram"))).toEqual({
+      payload: { text: STRIPPED },
+    });
+  });
+
+  it("STRIPS when the event names a channel and the ctx says webchat", () => {
+    // The mirror. No path was found on the box that produces this pair, but a
+    // reply whose delivery surface is a channel must not carry the id whatever
+    // the session started as.
     expect(onReplyPayloadSending(event({ text: REPLY }, "telegram"), ctx("webchat"))).toEqual({
       payload: { text: STRIPPED },
     });
   });
 
-  it("falls back to ctx.channelId only when the event names no surface", () => {
+  it("an empty signal is not a vote — it can never force a strip on its own", () => {
     // `channelId` is a required string the core sets to "" when it knows
-    // nothing, so this is first-non-EMPTY, not first-non-nullish.
-    expect(onReplyPayloadSending({ payload: { text: REPLY }, kind: "final" }, ctx("telegram"))).toEqual({
-      payload: { text: STRIPPED },
-    });
+    // nothing, so "" means UNKNOWN and the other signal decides. A delivery
+    // this plugin cannot place at all keeps the line, because the cost of
+    // guessing wrong is the card gone from the chat the owner uses daily.
+    expect(onReplyPayloadSending(event({ text: REPLY }, ""), ctx("webchat"))).toBeUndefined();
+    expect(onReplyPayloadSending(event({ text: REPLY }, "webchat"), ctx(""))).toBeUndefined();
     expect(onReplyPayloadSending(event({ text: REPLY }, ""), ctx("telegram"))).toEqual({
       payload: { text: STRIPPED },
     });
-    expect(onReplyPayloadSending(event({ text: REPLY }, ""), ctx("webchat"))).toBeUndefined();
+    expect(onReplyPayloadSending({ payload: { text: REPLY }, kind: "final" }, ctx("telegram"))).toEqual({
+      payload: { text: STRIPPED },
+    });
   });
 
   it("returns undefined when there was no directive to remove", () => {

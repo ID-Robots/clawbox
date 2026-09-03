@@ -47,10 +47,22 @@ _JS_WHITESPACE = (
     "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
     "\u2028\u2029\u202f\u205f\u3000\ufeff"
 )
-_JS_WS_CLASS = "[" + re.escape(_JS_WHITESPACE) + "]"
 
 #: A directive line: ``EMAIL:`` at the very start of the (stripped) line.
-_EMAIL_LINE_RE = re.compile(r"^email:" + _JS_WS_CLASS + r"*(.*)$", re.IGNORECASE)
+#:
+#: ``[\s\S]`` AND NOT ``<ws>*(.*)``, matching the other two copies character for
+#: character. In JavaScript the two quantifiers overlapped on the space and the
+#: pattern was quadratic (see ``email-directives.mjs``); here the cost was the
+#: OTHER divergence, because Python's ``.`` excludes only ``\n`` while
+#: JavaScript's also excludes ``\r``, ``\u2028`` and ``\u2029`` — so a quoted
+#: payload holding one of those three was a card to this copy and text to the
+#: chat window. One character class removes both problems at once: it cannot
+#: backtrack against itself, and it means the same thing in both languages.
+#:
+#: Dropping the leading-whitespace group costs nothing: ``_parse_uid`` strips
+#: the payload with ``_JS_WHITESPACE`` before it reads it, exactly as the two
+#: JavaScript copies call ``.trim()``.
+_EMAIL_LINE_RE = re.compile(r"^email:([\s\S]*)$", re.IGNORECASE)
 
 #: Opening or closing marker of a fenced code block.
 _FENCE_RE = re.compile(r"^(?:```|~~~)")
@@ -94,7 +106,8 @@ def split_email_refs(raw: str) -> Tuple[str, List[int]]:
     kept: List[str] = []
     in_fence = False
 
-    for line in raw.split("\n"):
+    lines = raw.split("\n")
+    for line in lines:
         trimmed = line.strip(_JS_WHITESPACE)
         if _FENCE_RE.match(trimmed):
             in_fence = not in_fence
@@ -121,6 +134,15 @@ def split_email_refs(raw: str) -> Tuple[str, List[int]]:
 
     # Removing a line from the middle of a reply leaves a hole; collapse the run
     # of blank lines behind it so the prose keeps its shape.
+    #
+    # ONLY WHEN A LINE ACTUALLY WENT. The bail-out above already returns ``raw``
+    # untouched for a reply with no ``email:`` in it; without this the SAME
+    # reply with the word in it somewhere came back stripped and re-spaced
+    # instead, so two otherwise identical replies were delivered differently
+    # because one of them mentioned an address. This function may change a reply
+    # only when it removed something from it.
+    if len(kept) == len(lines):
+        return (raw, uids)
     text = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip(_JS_WHITESPACE)
     return (text, uids)
 

@@ -16,8 +16,26 @@
 // A bare specifier resolves under the loader's alias map and NOT under plain
 // node, so importing nothing is the only shape that works in both.
 
-/** A directive line: `EMAIL:` at the very start of the (trimmed) line. */
-const EMAIL_LINE_RE = /^email:\s*(.*)$/i;
+/**
+ * A directive line: `EMAIL:` at the very start of the (trimmed) line.
+ *
+ * `[\s\S]` AND NOT `\s*(.*)`. The payload is model output relaying content the
+ * box did not write, so this pattern has to be linear. `\s*` and `.*` overlap on
+ * the space character, and `$` (no `m` flag) can only match at the end of the
+ * input while `.` cannot cross `\r`, `\u2028` or `\u2029` — so a line starting
+ * `email:` with a long run of spaces and one of those terminators held back
+ * from its end sent the engine through every split of the spaces between the
+ * two quantifiers: O(n^2), 434 ms at 16k characters, and a hook that is
+ * fail-open at 15 s then delivers the reply UNSTRIPPED. One character class
+ * cannot backtrack against itself, so this is a single left-to-right pass.
+ *
+ * Dropping the `\s*` costs nothing: every reader of the group runs it through
+ * `parseUid`, whose first act is `payload.trim()`.
+ *
+ * Pinned by `src/tests/unit/email-directive-parity.test.ts`
+ * ("the line grammar is linear in the length of a line").
+ */
+const EMAIL_LINE_RE = /^email:([\s\S]*)$/i;
 
 /** Opening or closing marker of a fenced code block. */
 const FENCE_RE = /^(?:```|~~~)/;
@@ -55,7 +73,8 @@ export function splitEmailRefs(raw) {
   const kept = [];
   let inFence = false;
 
-  for (const line of raw.split("\n")) {
+  const lines = raw.split("\n");
+  for (const line of lines) {
     const trimmed = line.trim();
     if (FENCE_RE.test(trimmed)) {
       inFence = !inFence;
@@ -86,6 +105,14 @@ export function splitEmailRefs(raw) {
 
   // Removing a line from the middle of a reply leaves a hole; collapse the run
   // of blank lines behind it so the prose keeps its shape.
+  //
+  // ONLY WHEN A LINE ACTUALLY WENT. The bail-out above already returns `raw`
+  // untouched for a reply with no `email:` in it; without this the SAME reply
+  // with the word in it somewhere came back trimmed and re-spaced instead, so
+  // two otherwise identical replies were delivered differently because one of
+  // them mentioned an address. This function may change a reply only when it
+  // removed something from it — the rule the rest of it already follows.
+  if (kept.length === lines.length) return { text: raw, uids };
   const text = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   return { text, uids };
 }

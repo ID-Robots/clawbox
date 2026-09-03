@@ -298,7 +298,8 @@ and a standalone `tui` looks the same from inside the agent. That is why the
 instruction names all of those as surfaces to make the card on. Half two is native and now BUILT (TASK-697):
 Hermes' `transform_llm_output` plugin hook, handed the final text and the
 `platform` and free to replace it, and on OpenClaw `reply_payload_sending` —
-which gets the whole outbound payload and is keyed on `channelId` — chosen over
+which gets the whole outbound payload and is keyed on BOTH `ctx.channelId` and
+`event.channel`, because neither names the destination on its own — chosen over
 the older `message_sending`, whose stage the core itself labels "legacy …
 retained for low-level SDK compatibility". Both plugins ship in `scripts/`
 (`scripts/hermes-plugins/clawbox_email_directives/`,

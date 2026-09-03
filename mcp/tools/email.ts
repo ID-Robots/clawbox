@@ -107,8 +107,9 @@ const NOT_READABLE_NEXT =
  * then have the adapter strip whatever survives. Half one is a sentence; half
  * two is a guarantee, and half two is native and now BUILT on each harness's
  * own hook (TASK-697): Hermes' `transform_llm_output`, keyed on the `platform`
- * it is handed, and on OpenClaw `reply_payload_sending`, keyed on `channelId`
- * and given the whole outbound payload — chosen over `message_sending`, whose
+ * it is handed, and on OpenClaw `reply_payload_sending`, keyed on BOTH
+ * `ctx.channelId` and `event.channel` (neither names the destination on its
+ * own) and given the whole outbound payload — chosen over `message_sending`, whose
  * stage the core itself labels "legacy … retained for low-level SDK
  * compatibility". Both plugins live in scripts/, are installed and enabled by
  * the boot reconciles (scripts/register-mcp.sh, scripts/gateway-pre-start.sh),

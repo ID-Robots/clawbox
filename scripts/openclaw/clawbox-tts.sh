@@ -482,12 +482,16 @@ import os, sys
 sys.path.insert(0, sys.argv[1])
 from email_directives import strip_email_directives
 sys.stdout.write(strip_email_directives(os.environ["CLAWBOX_TTS_RAW_TEXT"]))
+# The sentinel is what survives `$(…)`, which strips every trailing newline
+# from what it captures. Removing exactly one trailing X is safe even when
+# the reply itself ends in one, because exactly one was added.
+sys.stdout.write("X")
 ' "$EMAIL_DIRECTIVES_DIR" 2>/dev/null); then
     echo "clawbox-tts: could not strip EMAIL: directives — speaking the reply as it arrived" >&2
     printf '%s' "$text"
     return 0
   fi
-  printf '%s' "$out"
+  printf '%s' "${out%X}"
 }
 
 # ── Entry ───────────────────────────────────────────────────────────────────
@@ -609,10 +613,17 @@ fi
 # Only a reply that carries the marker pays for the strip, so the ordinary
 # reply's bytes reach the engine exactly as they did before this existed —
 # `$(…)` would otherwise eat a trailing newline off every utterance on the box.
+#
+# The sentinel extends that to a reply which merely MENTIONS an address: the
+# parser now returns such a reply untouched (it removed no line), and this is
+# what stops `$(…)` reshaping it anyway. Same rule in all four places that
+# understand the grammar — a reply is changed only when a directive was taken
+# out of it.
 case "$TEXT" in
   *[Ee][Mm][Aa][Ii][Ll]:*)
     TEXT_BEFORE_STRIP="$TEXT"
-    TEXT="$(strip_email_directives "$TEXT")"
+    TEXT="$(strip_email_directives "$TEXT"; printf X)"
+    TEXT="${TEXT%X}"
     ;;
 esac
 

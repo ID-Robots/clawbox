@@ -168,6 +168,19 @@ d("clawbox-tts.sh does not speak EMAIL: directives", () => {
     expect(spoken()).toBe("Your ClawBox is ready.");
   });
 
+  it("leaves a reply that merely MENTIONS an address exactly as it was, too", () => {
+    // The case above never reaches the parser at all — the `case` gate sees no
+    // `email:` and skips it, so it proves nothing about the strip. This one
+    // does go through it: the word is there, no directive is, and the reply
+    // must still arrive at the engine byte for byte, trailing newline and all.
+    // Two command substitutions sit between the two, and each of them eats
+    // every trailing newline it captures.
+    const reply = "Mail me: email: bob@example.com\n\n\n\nRegards,\n";
+    const r = run(["--", reply, outPath]);
+    expect(r.status).toBe(0);
+    expect(spoken()).toBe(reply);
+  });
+
   it("keeps a line whose payload is not a usable id, rather than swallowing it", () => {
     // Same rule as splitEmailRefs: a directive that names nothing openable
     // stays as text, because dropping it would hide that the agent meant to

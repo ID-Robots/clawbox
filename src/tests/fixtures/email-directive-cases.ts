@@ -153,6 +153,41 @@ export const EMAIL_DIRECTIVE_CASES: EmailDirectiveCase[] = [
     stripped: "Twenty-six of them.\nEMAIL:26",
   },
   {
+    name: "a line terminator INSIDE the quotes — the axis the three used to differ on",
+    // JavaScript's `.` excludes \r, \u2028 and \u2029; Python's excludes only
+    // \n. With `\s*(.*)$` the JS copies could not match past the \r and kept
+    // the line, while Python matched, unwrapped the quotes and carded it —
+    // 27 disagreements across a generated sweep, all this one shape. `[\s\S]`
+    // is what makes the three read the payload identically.
+    input: "Done.\nEMAIL:'4471\r'",
+    stripped: "Done.",
+  },
+  {
+    name: "a line separator inside the quotes reads the same way",
+    input: "Done.\nEMAIL:`4471\u2028`",
+    stripped: "Done.",
+  },
+  {
+    name: "a paragraph separator inside the quotes reads the same way",
+    input: 'Done.\nEMAIL:"4471\u2029"',
+    stripped: "Done.",
+  },
+  {
+    name: "a directive whose payload is only spaces and a line terminator is still text",
+    // The pathological shape from the ReDoS test, at a length a person can
+    // read: it must cost nothing AND still be kept, because it names no id.
+    input: "Done.\nEMAIL:      x\ry",
+    stripped: "Done.\nEMAIL:      x\ry",
+  },
+  {
+    name: "a reply that merely MENTIONS an address is not re-spaced either",
+    // The word `email:` is not a licence to reformat: this reply carries no
+    // directive, so it must leave exactly as it arrived — trailing newline,
+    // blank run and all — the same as one that never says the word.
+    input: "Mail me: email: bob@example.com\n\n\n\nRegards,\n",
+    stripped: "Mail me: email: bob@example.com\n\n\n\nRegards,\n",
+  },
+  {
     name: "the empty string",
     input: "",
     stripped: "",

@@ -53,15 +53,16 @@ const PLUGIN_ID = "clawbox-email-directives";
  * That is TASK-700, and it is why this keeps all three rather than breaking the
  * two that work.
  *
- * The empty string is here for the same reason: a delivery path that could not
- * name its channel is one this plugin cannot place, and the cost of guessing
- * wrong is the card disappearing from the chat the owner uses every day.
+ * ONLY THE NAMED SURFACES. A field that names nothing is not looked up here at
+ * all — `keepsDirectives` skips an empty signal before it asks this set — so
+ * "could not place this delivery" is one rule expressed in one place rather
+ * than a `""` member that has to be remembered.
  *
  * KEEP-LIST, NEVER A DENY-LIST OF CHANNELS. A channel plugin installed
  * tomorrow arrives with a channel id nothing here has heard of, and it must
  * strip by default.
  */
-const KEEP_CHANNELS = new Set(["", "webchat"]);
+const KEEP_CHANNELS = new Set(["webchat"]);
 
 /** The reply payload fields that carry prose a person reads or hears. */
 function strippedPayload(payload) {
@@ -120,30 +121,53 @@ function strippedPayload(payload) {
 }
 
 /**
- * WHERE THIS REPLY IS BEING DELIVERED — which is not always where the
- * conversation came from.
+ * WHERE THIS REPLY IS GOING — asked of BOTH signals, because neither one is
+ * right on its own.
  *
- * `event.channel` is the delivery surface: the core fills it from
- * `finalized.Surface ?? finalized.Provider`. `ctx.channelId` answers a
- * different question — it is `OriginatingChannel ?? Surface ?? Provider`, so it
- * prefers the channel the SESSION started on. On a webchat delivery for a
- * session that originated on Telegram those two disagree, and keying on
- * `channelId` would strip the directive out of a reply being handed to a
- * browser: the card never renders and the owner is left with a summary and no
- * way to open the mail. That is the worst outcome available here, so the
- * surface wins and the originating channel is only the fallback.
+ * Read off the pinned 2026.8.1 core installed on the OpenClaw box (read-only,
+ * nothing mutated) rather than assumed:
  *
- * Empty is not the same as absent — `channelId` is a required string the core
- * sets to `""` when it knows nothing — so this takes the first NON-EMPTY of the
- * two rather than the first non-nullish.
+ *   `event.channel`   `deliver-prepare-BMUQRpAJ.js:125` — `finalized.Surface ??
+ *                     finalized.Provider`.
+ *   `ctx.channelId`   `message-hook-mappers-BvcG8vBF.js:50` — `OriginatingChannel
+ *                     ?? Surface ?? Provider`, lower-cased, `""` when unknown.
+ *
+ * On the dashboard chat BOTH are the literal `"webchat"`:
+ * `chat-send-handler-VKdsT8Lk.js:2367-2371` sets `Provider` and `Surface` to
+ * `INTERNAL_MESSAGE_CHANNEL` (`message-channel-constants-2zSoJXQC.js:3`), and
+ * `resolveChatSendOriginatingRoute` (`:355/365/382`) makes `OriginatingChannel`
+ * the same for every send that is not an explicit deliver route. On a reply
+ * arriving from a channel all three are that channel id
+ * (`channel-inbound-CxNf-7n7.js:153-162`), and a routed outbound send builds
+ * both fields from the destination (`route-reply-B6JDR0Lx.js:194-197`,
+ * `delivery.runtime-Dz8vF_W2.js:619-622`).
+ *
+ * WHERE THEY COME APART, AND WHY THIS ASKS BOTH. A `chat.send` with
+ * `deliver: true` and an explicit route keeps `Surface`/`Provider` pinned to
+ * `"webchat"` while `OriginatingChannel` becomes the real channel
+ * (`chat-send-handler-VKdsT8Lk.js:346-392`). So `event.channel` says `webchat`
+ * for a reply headed to Telegram, and trusting it FIRST would print the id in
+ * Telegram — the exact bug this plugin exists to stop. No case was found in the
+ * other direction, where the event names a channel and the ctx names the chat.
+ *
+ * So the line is kept only when NOTHING about the delivery names a surface that
+ * cannot draw a card. An empty or absent field is not a vote either way — the
+ * core sets `channelId` to `""` when it knows nothing — so it cannot force a
+ * strip, and a delivery this plugin cannot place at all still keeps the line,
+ * because the cost of guessing wrong there is the card disappearing from the
+ * chat the owner uses every day.
+ *
+ * Asking both also removes the precedence question altogether: there is no
+ * order to get wrong, and a core that changes what one field means is caught by
+ * the other rather than silently believed.
  */
-function deliverySurface(event, ctx) {
-  for (const candidate of [event?.channel, ctx?.channelId]) {
+function keepsDirectives(event, ctx) {
+  for (const candidate of [ctx?.channelId, event?.channel]) {
     if (typeof candidate !== "string") continue;
     const surface = candidate.trim().toLowerCase();
-    if (surface) return surface;
+    if (surface && !KEEP_CHANNELS.has(surface)) return false;
   }
-  return "";
+  return true;
 }
 
 /**
@@ -152,7 +176,7 @@ function deliverySurface(event, ctx) {
  * re-accepting the payload.
  */
 export function onReplyPayloadSending(event, ctx) {
-  if (KEEP_CHANNELS.has(deliverySurface(event, ctx))) return undefined;
+  if (keepsDirectives(event, ctx)) return undefined;
   const payload = event?.payload;
   if (!payload || typeof payload !== "object") return undefined;
   const next = strippedPayload(payload);
