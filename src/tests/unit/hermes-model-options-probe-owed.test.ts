@@ -242,7 +242,7 @@ describe("probeStillOwed — a dashboard that is still booting is not a dashboar
     expect(await mod.probeStillOwed()).toBe(false);
   });
 
-  it("never comes BACK to checking once the start budget is spent", async () => {
+  it("does not buy a FRESH window once the start budget is spent", async () => {
     // The hand-over clock is a latch, and a latch is how a bounded window comes
     // undone from the far side. The panel polls the whole time, so every one of
     // those polls used to re-stamp the latch — including the ones already being
@@ -258,7 +258,8 @@ describe("probeStillOwed — a dashboard that is still booting is not a dashboar
     let offset = 0;
     vi.spyOn(Date, "now").mockImplementation(() => realNow + offset);
 
-    // Inside the budget it is genuinely still starting, and says so.
+    // Inside the budget it is genuinely still starting, and says so. This is
+    // also the last moment the latch is stamped.
     offset = mod.UNIT_START_BUDGET_MS - 1_000;
     expect(await mod.probeStillOwed()).toBe(true);
 
@@ -269,10 +270,51 @@ describe("probeStillOwed — a dashboard that is still booting is not a dashboar
       expect(await mod.probeStillOwed()).toBe(false);
     }
 
-    // Now it finally forks. There is no grace left to hand it: the window is
-    // spent, and `checking` does not come back.
+    // Now it finally forks — a whole minute past the total bound, so the grace
+    // measured from that last stamp is long gone and there is nothing left to
+    // hand out. `checking` does not come back.
     offset += 2_000;
+    expect(offset).toBeGreaterThan(mod.MAX_CHECKING_WINDOW_MS);
     unitStateMock.mockResolvedValue("running");
+    expect(await mod.probeStillOwed()).toBe(false);
+  });
+
+  it("hands a fork just after the budget only the REMAINDER, inside the total bound", async () => {
+    // What the module actually guarantees, stated exactly: the fork does not
+    // reset the socket clock, it inherits what is left of the grace measured
+    // from the last `starting` stamp. So a unit that forks seconds after the
+    // budget runs out DOES read `checking` again for a moment — and cannot
+    // outlive `MAX_CHECKING_WINDOW_MS`, because the stamp itself can never be
+    // later than the budget. That sum is the number the client polls through.
+    dashboardDown();
+    await mod.getModelOptions();
+    unitStateMock.mockResolvedValue("starting");
+
+    const realNow = Date.now();
+    let offset = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow + offset);
+
+    // The last stamp the budget allows.
+    const stampedAt = mod.UNIT_START_BUDGET_MS - 1_000;
+    offset = stampedAt;
+    expect(await mod.probeStillOwed()).toBe(true);
+
+    // Budget spent: degraded, and no new stamp.
+    offset = mod.UNIT_START_BUDGET_MS + 1_000;
+    expect(await mod.probeStillOwed()).toBe(false);
+
+    // It forks two seconds later, and the remainder of the grace is real.
+    offset = mod.UNIT_START_BUDGET_MS + 3_000;
+    unitStateMock.mockResolvedValue("running");
+    expect(await mod.probeStillOwed()).toBe(true);
+
+    // The remainder runs out at stamp + grace — one second INSIDE the advertised
+    // total, which is the property the bound rests on.
+    offset = stampedAt + mod.PROBE_GRACE_MS - 1_000;
+    expect(await mod.probeStillOwed()).toBe(true);
+
+    offset = stampedAt + mod.PROBE_GRACE_MS;
+    expect(offset).toBeLessThan(mod.MAX_CHECKING_WINDOW_MS);
     expect(await mod.probeStillOwed()).toBe(false);
   });
 
@@ -360,6 +402,54 @@ describe("probeStillOwed — a dashboard that is still booting is not a dashboar
     await plain;
 
     expect(await mod.probeStillOwed()).toBe(false);
+  });
+
+  it("does not let a STALE success clear a debt a NEWER read has just opened", async () => {
+    // The same out-of-order settle as above, with the answer on the OLD read
+    // instead of the new one — the sibling write, which is where this repo's
+    // fixes keep leaving half the guard behind. A read from before the
+    // dashboard died lands after a newer read has demonstrably failed; a
+    // success that old is not news about a box that is down NOW. Clearing the
+    // debt there flaps the panel `checking -> degraded -> checking`, and by
+    // dragging the answered sequence BACKWARDS it lets the next failure open a
+    // second full `MAX_CHECKING_WINDOW_MS` on the same outage.
+    let answerTheFirstRead: () => void = () => {};
+    const firstRead = new Promise<void>((resolve) => {
+      answerTheFirstRead = resolve;
+    });
+    dashboardUp();
+    const answering = dashboardFetchMock.getMockImplementation()!;
+    let asked = 0;
+    dashboardFetchMock.mockImplementation(async (path: string) => {
+      if (!path.startsWith("/api/model/options")) return answering(path);
+      asked += 1;
+      // 1: the slow read, from before the box went away — it answers LAST.
+      if (asked === 1) {
+        await firstRead;
+        return answering(path);
+      }
+      // 2: a newer read, which answers straight away...
+      if (asked === 2) return answering(path);
+      // 3: ...and then the dashboard goes away, which is the newest fact.
+      throw new Error("connect ECONNREFUSED");
+    });
+
+    const plain = mod.getModelOptions();
+    const refreshed = await mod.getModelOptions({ refresh: true });
+    expect(refreshed.stale).toBe(false);
+
+    // Past the explicit-refresh gap so the third read is a real attempt.
+    const realNow = Date.now();
+    const offset = 11_000;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow + offset);
+    await mod.getModelOptions({ refresh: true });
+    expect(await mod.probeStillOwed()).toBe(true);
+
+    // Only now does the read from before the outage finally answer.
+    answerTheFirstRead();
+    await plain;
+
+    expect(await mod.probeStillOwed()).toBe(true);
   });
 
   it("clears the debt on a live answer, so the NEXT outage gets a full window", async () => {

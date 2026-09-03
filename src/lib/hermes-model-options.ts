@@ -309,7 +309,9 @@ let lastSeenStartingAt = 0;
  *  of order: an 8 s timeout from before the dashboard came up finishing after a
  *  refresh that just succeeded. Without this, that stale failure opens a debt
  *  against a box that is answering, and the panel says "Checking..." over a live
- *  dashboard until the next read clears it. */
+ *  dashboard until the next read clears it. Monotonic: only a read NEWER than
+ *  the last answered one may advance it, so it cannot walk backwards and hand
+ *  an already-answered sequence back to the failure guard. */
 let readSeq = 0;
 let lastAnsweredSeq = 0;
 
@@ -711,14 +713,19 @@ async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
   // One live answer clears the debt; the first failure after an answer opens
   // it. See `probeStillOwed`, which is what reads this.
   //
-  // ...unless a NEWER read has already answered, in which case this failure is
-  // stale news about a dashboard that is demonstrably up, and opening a debt on
-  // it would paint "Checking..." over a live box.
-  if (dash) {
+  // BOTH writes are ordered, because reads settle out of order in both
+  // directions. A failure older than an answer is stale news about a dashboard
+  // that is demonstrably up, and opening a debt on it paints "Checking..." over
+  // a live box. A SUCCESS older than an answer is stale news too: it must not
+  // clear a debt the newest read just opened — that flaps the panel
+  // `checking -> degraded -> checking`, and dragging `lastAnsweredSeq` backwards
+  // re-opens the guard below so the next failure buys a second full
+  // `MAX_CHECKING_WINDOW_MS` on the same outage.
+  if (dash && seq > lastAnsweredSeq) {
     firstUnansweredAt = 0;
     lastSeenStartingAt = 0;
     lastAnsweredSeq = seq;
-  } else if (!firstUnansweredAt && lastAnsweredSeq < seq) {
+  } else if (!dash && !firstUnansweredAt && lastAnsweredSeq < seq) {
     firstUnansweredAt = Date.now();
   }
 
