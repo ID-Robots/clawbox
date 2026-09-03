@@ -27,26 +27,39 @@ import type { ProviderStatusSummary } from "@/lib/provider-status";
  */
 
 /**
- * How many times a `checking` answer is re-asked, on the schedule the model
- * catalogue's own degraded retries use.
+ * The self-polling rule, in one place because it is the half of TASK-663 the
+ * server cannot enforce.
  *
- * The budget must OUTLAST the server's own checking window (`PROBE_GRACE_MS`),
- * or the last poll is answered "still checking" by a window that is about to
- * close and the panel settles for good on a spinner. The two constants live in
- * different modules — one of them server-only — so the relationship is pinned
- * by a test rather than by these two comments agreeing; see
- * `checking-retry-budget.test.ts` and {@link checkingRetryBudgetMs}.
+ * BOUNDED IN RATE, NEVER IN COUNT, while the box says `checking`. The server's
+ * checking window belongs to the unit, not to a constant here: a dashboard in
+ * `ExecStartPre` on a loaded box is legitimately starting for as long as its
+ * `TimeoutStartSec` allows. A fixed number of polls is therefore a promise this
+ * side cannot keep, and breaking it produces the worst outcome of the three —
+ * the last poll is answered "still checking", nothing books another read, and
+ * the panel holds spinner rows with NO banner for the life of the mount, on a
+ * box that answers fine seconds later. Worse than the "Unknown + degraded"
+ * this feature replaced, because that at least said something.
+ *
+ * What makes unbounded polling safe is the server's side of the same contract:
+ * `probeStillOwed` is bounded in every branch, so a `checking` answer always
+ * stops coming (`MAX_CHECKING_WINDOW_MS`, pinned by
+ * `src/tests/unit/checking-retry-budget.test.ts`). The rate is the shared
+ * degraded schedule, which settles at `DEGRADED_RETRY_MAX_MS`, and the loop
+ * ends with the mount.
  */
-export const CHECKING_RETRY_ATTEMPTS = 7;
 
-/** Wall-clock span of the whole retry schedule, for that test. */
-export function checkingRetryBudgetMs(): number {
-  let total = 0;
-  for (let attempt = 0; attempt < CHECKING_RETRY_ATTEMPTS; attempt++) {
-    total += degradedRetryDelayMs(attempt);
-  }
-  return total;
-}
+/**
+ * A FAILED read is bounded, though, and separately: it is not the box saying
+ * "still checking", it is no answer at all, and nothing bounds how long a
+ * gone setup server keeps not answering. Retried a few times so a transient 500
+ * — this server restarting itself is one — does not end the loop, then left
+ * alone with the read error on screen.
+ */
+const FAILED_READ_RETRIES = 7;
+
+/** Where the backoff counter stops growing. `degradedRetryDelayMs` saturates
+ *  well before this; the clamp is only so an open panel cannot count for ever. */
+const MAX_BACKOFF_STEP = 8;
 
 export interface UseProviderStatus {
   /** Null until the first load lands. */
@@ -72,10 +85,12 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
   // Guards a setState after unmount, and lets a slow answer for a previous
   // nonce be discarded rather than overwriting a newer one.
   const controllerRef = useRef<AbortController | null>(null);
-  // How many `checking` answers this hook has already re-asked. Reset by the
-  // first answer with nothing left to check, so a later boot (a gateway
-  // restart from Settings) gets a fresh budget rather than the exhausted one.
-  const checkingAttemptRef = useRef(0);
+  // Which step of the backoff the next self-poll is on. Reset by the first
+  // answer with nothing left to check, so a later boot (a gateway restart from
+  // Settings) starts again at the fast end rather than at the slow one.
+  const backoffStepRef = useRef(0);
+  // Consecutive FAILED reads, which unlike checking answers are bounded.
+  const failuresRef = useRef(0);
   // Whether the last answer we actually got had a row still being checked. Read
   // by the FAILURE path, which has no body to look at: a read that failed is no
   // evidence the probe finished, and booking no retry there would end the loop
@@ -93,12 +108,13 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
     // Booked from BOTH the success and the failure path — see `checkingRef`.
     const scheduleRetry = () => {
       if (!checkingRef.current) {
-        checkingAttemptRef.current = 0;
+        backoffStepRef.current = 0;
+        failuresRef.current = 0;
         return;
       }
-      if (checkingAttemptRef.current >= CHECKING_RETRY_ATTEMPTS) return;
-      retryTimer = setTimeout(refresh, degradedRetryDelayMs(checkingAttemptRef.current));
-      checkingAttemptRef.current += 1;
+      if (failuresRef.current > FAILED_READ_RETRIES) return;
+      retryTimer = setTimeout(refresh, degradedRetryDelayMs(backoffStepRef.current));
+      backoffStepRef.current = Math.min(backoffStepRef.current + 1, MAX_BACKOFF_STEP);
     };
 
     fetch("/setup-api/providers/status", { cache: "no-store", signal: controller.signal })
@@ -114,8 +130,10 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
         setError(false);
         // A `checking` row is a promise that this answer is going to change,
         // and nothing else on the page emits a signal when a harness finishes
-        // booting. Bounded, so a box that never answers still stops polling.
+        // booting. Asked again for as long as that promise stands — see the
+        // rule at the top of this file.
         checkingRef.current = data.providers.some((row) => row.state === "checking");
+        failuresRef.current = 0;
         scheduleRetry();
       })
       .catch((err) => {
@@ -124,6 +142,7 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
         // transient failure reads as "everything disconnected", which is the one
         // thing it must never say by accident.
         setError(true);
+        failuresRef.current += 1;
         scheduleRetry();
       });
 

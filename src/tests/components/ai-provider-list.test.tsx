@@ -8,8 +8,8 @@
  * provider's switch is LOCKED — nothing on this card may re-route the chat
  * behind the owner's back.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
 import { translations } from "@/lib/translations";
 import AiProviderList from "@/components/AiProviderList";
@@ -244,5 +244,78 @@ describe("AiProviderList", () => {
       () => expect(screen.getByTestId("ai-provider-openai")).toBeInTheDocument(),
       { timeout: 6_000 },
     );
+  });
+});
+
+/**
+ * REVIEW-RED (TASK-663) — the client half of the same promise.
+ *
+ * The server says `checking` while an answer from the harness is still owed,
+ * and that window is the unit's own: a dashboard sitting in `ExecStartPre` on a
+ * loaded box can legitimately be starting for minutes, and systemd does not give
+ * up before `TimeoutStartSec`. A client that gives up FIRST is the worst of the
+ * three outcomes: the last poll is answered "still checking", nothing books
+ * another read, and the panel holds spinner rows with no banner for the life of
+ * the mount — no error to click, no state to read, and the box answering fine
+ * ten seconds later.
+ *
+ * So the polling is bounded in RATE, never in COUNT: while the answer says
+ * checking, the panel keeps asking, and the moment the answer changes it shows
+ * what it got.
+ */
+describe("a checking answer that outlasts any fixed retry budget", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function stubSlowBoot(answer: () => "checking" | "settled") {
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      const json = (body: unknown) =>
+        new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+      if (url.startsWith("/setup-api/preferences")) return json({});
+      if (url.startsWith("/setup-api/providers/status")) {
+        const rows = answer() === "checking"
+          ? ROWS.map((r) => ({ ...r, state: "checking", isDefault: false }))
+          : ROWS;
+        return json({ harness: "hermes", providers: rows, defaultProvider: "clawai", degraded: false });
+      }
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return () =>
+      fetchMock.mock.calls.filter(([u]) => String(u).startsWith("/setup-api/providers/status")).length;
+  }
+
+  /** Fake time, one second at a time: each `act` exit is what lets React flush
+   *  the state change a fired retry timer produced, and book the next one. */
+  async function advance(ms: number): Promise<void> {
+    for (let elapsed = 0; elapsed < ms; elapsed += 1_000) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    }
+  }
+
+  it("keeps asking for as long as the box says checking, and never freezes on the spinner", async () => {
+    let answer: "checking" | "settled" = "checking";
+    const statusCalls = stubSlowBoot(() => answer);
+
+    renderList();
+    await advance(1_000);
+    expect(screen.getByTestId("ai-provider-list-loading")).toBeInTheDocument();
+
+    // Two minutes of `checking` — well inside what the unit's TimeoutStartSec
+    // allows, and three times the fixed budget the panel used to have.
+    await advance(120_000);
+    expect(statusCalls()).toBeGreaterThanOrEqual(12);
+
+    // ...and when the box finally answers, the panel shows it. Nobody navigated
+    // away and back; nothing emitted a signal.
+    answer = "settled";
+    await advance(30_000);
+    expect(screen.getByTestId("ai-provider-openai")).toBeInTheDocument();
   });
 });

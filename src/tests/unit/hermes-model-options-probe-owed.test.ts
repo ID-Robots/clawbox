@@ -126,23 +126,50 @@ describe("probeStillOwed — a dashboard that is still booting is not a dashboar
     expect(await mod.probeStillOwed()).toBe(true);
   });
 
-  it("keeps owing it for as long as SYSTEMD says the unit is still starting", async () => {
+  it("keeps owing it while SYSTEMD says the unit is still starting, past the clock backstop", async () => {
     dashboardDown();
     await mod.getModelOptions();
     unitStateMock.mockResolvedValue("starting");
 
-    // Well past the clock backstop: a loaded box finishing a start-up migration
-    // is exactly the case a fixed grace calls broken.
+    // Well past the clock backstop, well inside the unit's own start budget: a
+    // loaded box still running its ExecStartPre is exactly the case a short
+    // fixed grace calls broken.
     const realNow = Date.now();
     vi.spyOn(Date, "now").mockImplementation(() => realNow + 10 * mod.PROBE_GRACE_MS);
+    expect(10 * mod.PROBE_GRACE_MS).toBeLessThan(mod.UNIT_START_BUDGET_MS);
 
     expect(await mod.probeStillOwed()).toBe(true);
   });
 
-  it("owes nothing at all when the unit has failed or is masked, however fresh the outage", async () => {
+  it("stops owing it once the unit's own start budget is spent", async () => {
+    // `activating` is not a promise that an answer is coming, only that systemd
+    // has not given up yet — and systemd DOES give up:
+    // `TimeoutStartSec=300` in the shipped unit. An `activating` branch with no
+    // clock at all makes the whole `checking` window unbounded, so the panel
+    // that opened during a crash loop keeps being told "Checking..." for as long
+    // as it stays open. The bound is the point of the state.
+    dashboardDown();
+    await mod.getModelOptions();
+    unitStateMock.mockResolvedValue("starting");
+
+    const realNow = Date.now();
+    // Just inside the budget the unit file allows, then just past it.
+    let offset = mod.UNIT_START_BUDGET_MS - 1_000;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow + offset);
+    expect(await mod.probeStillOwed()).toBe(true);
+
+    offset = mod.UNIT_START_BUDGET_MS + 1_000;
+    expect(await mod.probeStillOwed()).toBe(false);
+  });
+
+  it("owes nothing at all when the unit has failed, is masked, or is CRASH-LOOPING", async () => {
     dashboardDown();
     await mod.getModelOptions();
     // Inside the clock backstop, so only the unit state can produce this answer.
+    // `down` is also what `activating`/`auto-restart` classifies as (see
+    // `hermes-dashboard-control`), and that is the case that matters most here:
+    // a dashboard restarting every 5 s since boot degrades on the first poll
+    // instead of reading "Checking..." for as long as the panel stays open.
     unitStateMock.mockResolvedValue("down");
 
     expect(await mod.probeStillOwed()).toBe(false);
@@ -160,6 +187,46 @@ describe("probeStillOwed — a dashboard that is still booting is not a dashboar
     // Providers panel spins for ever, which is the same lie as the degraded
     // banner it replaces, pointing the other way.
     expect(await mod.probeStillOwed()).toBe(false);
+  });
+
+  it.each(["starting", "running", "unknown"] as const)(
+    "stops owing an answer past the worst case whatever systemd says (%s)",
+    async (unit) => {
+      // The property the whole state depends on: there is NO branch in which
+      // `checking` outlives `MAX_CHECKING_WINDOW_MS`. An unbounded one turns the
+      // honest "Checking..." into a permanent spinner — the same lie as the
+      // degraded banner it replaces, pointing the other way — and it is what the
+      // systemd branch shipped with before this test existed.
+      dashboardDown();
+      await mod.getModelOptions();
+      unitStateMock.mockResolvedValue(unit);
+
+      const realNow = Date.now();
+      vi.spyOn(Date, "now").mockImplementation(() => realNow + mod.MAX_CHECKING_WINDOW_MS + 1_000);
+
+      expect(await mod.probeStillOwed()).toBe(false);
+    },
+  );
+
+  it("asks systemd once a second, not once a request", async () => {
+    // Two panels mount this endpoint's hook on Settings -> AI and each re-asks
+    // while a row is checking, so an unmemoised read forks `systemctl` several
+    // times a second during exactly the window this feature exists for.
+    dashboardDown();
+    await mod.getModelOptions();
+    unitStateMock.mockClear();
+
+    await mod.probeStillOwed();
+    await mod.probeStillOwed();
+    await mod.probeStillOwed();
+    expect(unitStateMock).toHaveBeenCalledTimes(1);
+
+    // ...and the answer never outlives its second: the fact stays as current as
+    // the client's fastest retry step.
+    const realNow = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => realNow + 2_000);
+    await mod.probeStillOwed();
+    expect(unitStateMock).toHaveBeenCalledTimes(2);
   });
 
   it("is read at CALL time, so a cached payload cannot report a window that has closed", async () => {

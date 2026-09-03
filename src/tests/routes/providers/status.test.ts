@@ -345,10 +345,20 @@ describe("GET /setup-api/providers/status — OpenClaw", () => {
   // it must never emit `checking`, and it must never degrade over a cold box.
   it("never says checking on OpenClaw, which probes nothing", async () => {
     readConfig.mockResolvedValue({});
+    // The predicate says an answer IS owed — the shape that would repaint every
+    // unjudged row on the Hermes leg. Left at its `false` default this test
+    // passed on its own fixture and would have gone on passing if a later edit
+    // wired the probe into this reader, which is the one thing it is named for.
+    // Nothing on this path may consult it: `probeStillOwed` is also the only
+    // route from here to the systemd read, so not calling it is what keeps an
+    // OpenClaw box from forking `systemctl` over a Hermes unit it has stopped
+    // and disabled.
+    probeStillOwed.mockResolvedValue(true);
     const body = await (await GET()).json();
 
     expect(body.degraded).toBe(false);
     expect(body.providers.map((p: Row) => p.state)).not.toContain("checking");
+    expect(probeStillOwed).not.toHaveBeenCalled();
   });
 });
 

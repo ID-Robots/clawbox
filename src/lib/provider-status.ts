@@ -43,12 +43,12 @@ import { getModelOptions, probeStillOwed } from "@/lib/hermes-model-options";
  * provider "Unknown" under a "couldn't reach the agent" banner — a healthy box
  * reported as broken. A `checking` row therefore also counts for NOTHING
  * toward {@link ProviderStatusSummary.degraded}: there is no bad answer yet,
- * only no answer. It is time-bounded at the source (`PROBE_GRACE_MS` in
- * `hermes-model-options.ts`) so a harness that never comes back falls back to
- * `unknown` and a degraded summary rather than spinning for ever — see
- * `probeStillOwed` in `hermes-model-options.ts`, which asks systemd whether the
- * dashboard's unit is actually still starting rather than guessing from a
- * clock.
+ * only no answer. It is time-bounded at the source, in EVERY branch, so a
+ * harness that never comes back falls back to `unknown` and a degraded summary
+ * rather than spinning for ever — see `probeStillOwed` in
+ * `hermes-model-options.ts`, which asks systemd whether the dashboard's unit is
+ * actually still starting and then bounds even that answer by the unit's own
+ * `TimeoutStartSec` (`MAX_CHECKING_WINDOW_MS`).
  */
 export type ProviderConnectionState =
   | "connected"
@@ -233,10 +233,11 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
   // ...and if it did not, has it simply not had a chance yet? The dashboard is
   // not up when this server is (~11-12 s after every boot and after every
   // restart we ourselves trigger). `probeStillOwed` is the one place that
-  // knows, and it asks systemd rather than a clock. Within that window a row
-  // with no auth state is `checking`, not `unknown`, and the summary is not
-  // degraded — there is no bad answer yet, only no answer. Once the unit says
-  // it is up (or failed), every row goes back to today's behaviour.
+  // knows: it asks systemd whether the unit is still starting, and bounds that
+  // answer as well as its own clock. Within the window a row with no auth state
+  // is `checking`, not `unknown`, and the summary is not degraded — there is no
+  // bad answer yet, only no answer. Once the unit has died, or either bound is
+  // spent, every row goes back to today's behaviour.
   //
   // Guarded on `stale` as well: `probeStillOwed` describes the DASHBOARD, and
   // on a payload that did come from the live dashboard a row it declined to

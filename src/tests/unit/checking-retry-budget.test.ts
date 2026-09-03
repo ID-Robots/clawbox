@@ -1,32 +1,63 @@
+import { readFileSync } from "fs";
+import path from "path";
 import { describe, expect, it } from "vitest";
-import { PROBE_GRACE_MS } from "@/lib/hermes-model-options";
-import { checkingRetryBudgetMs, CHECKING_RETRY_ATTEMPTS } from "@/hooks/useProviderStatus";
-import { degradedRetryDelayMs } from "@/lib/degraded-retry";
+import {
+  MAX_CHECKING_WINDOW_MS,
+  PROBE_GRACE_MS,
+  UNIT_START_BUDGET_MS,
+} from "@/lib/hermes-model-options";
+import { DEGRADED_RETRY_MAX_MS, degradedRetryDelayMs } from "@/lib/degraded-retry";
 
 /**
- * TASK-663 — the one relationship between the client and the server that two
- * comments agreeing is not enough to keep true.
+ * TASK-663 — the contract between the server's `checking` window and the
+ * panel that waits on it, which no single module can keep on its own.
  *
  * `/setup-api/providers/status` reports a row as `checking` while an answer
- * from the harness is still owed. Nothing emits a signal when a harness
- * finishes booting, so the panel re-asks on its own — and that polling is
- * bounded, because a panel that polls a dead box for ever is its own bug.
+ * from the harness is still owed, and the panel re-asks on its own because
+ * nothing emits a signal when a harness finishes booting. Two things have to be
+ * true for that to end in an honest answer rather than a spinner:
  *
- * If the client's budget runs out BEFORE the server's window closes, the last
- * poll is answered "still checking" by a window that is about to close and the
- * panel settles for good on a spinner: strictly worse than the "Unknown" it
- * replaced, because that at least came with a banner. The margin has to be
- * real, and it has to survive someone tuning either constant.
+ *   1. the server's window is BOUNDED — in every branch, including the one
+ *      systemd answers, since `activating` is a fact about the unit and not a
+ *      promise that anything will arrive;
+ *   2. the client keeps polling until it closes, which means bounded in RATE
+ *      and not in COUNT. A fixed number of polls was the first attempt and it
+ *      was the bug: the budget ran out mid-window, the last poll was answered
+ *      "still checking", and the panel held spinner rows with no banner for the
+ *      life of the mount.
+ *
+ * (1)'s per-branch half lives in `hermes-model-options-probe-owed.test.ts`,
+ * which can drive the predicate; what is pinned here is where its number comes
+ * from. (2)'s behaviour is pinned in `ai-provider-list.test.tsx`, which can
+ * watch a real panel poll; what is pinned here is that the rate it settles at
+ * is finite.
  */
-describe("the self-polling budget outlasts the server's checking window", () => {
-  it("keeps asking past the point the server stops saying checking", () => {
-    expect(checkingRetryBudgetMs()).toBeGreaterThan(PROBE_GRACE_MS);
+describe("the checking window is bounded, and the panel outlives it", () => {
+  it("takes the systemd branch's budget from the unit's own start timeout", () => {
+    // The one number that must not be invented here: past `TimeoutStartSec`
+    // systemd kills the start itself and the unit goes `failed`, which this
+    // code already reads as "nothing is coming". The clock is a backstop for a
+    // transition we might not see, so it may only agree with systemd late —
+    // never contradict it early, which a shorter budget would.
+    const unit = readFileSync(
+      path.join(process.cwd(), "config", "clawbox-hermes-dashboard.service"),
+      "utf-8",
+    );
+    const timeout = /^TimeoutStartSec=(\d+)$/m.exec(unit);
+    expect(timeout, "the shipped unit must declare TimeoutStartSec").not.toBeNull();
+    expect(UNIT_START_BUDGET_MS).toBe(Number(timeout![1]) * 1_000);
   });
 
-  it("leaves room for a poll to land after the window rather than exactly on it", () => {
-    // One full retry step of slack: a poll scheduled at the boundary must not
-    // be the one the answer depends on.
-    expect(checkingRetryBudgetMs() - PROBE_GRACE_MS)
-      .toBeGreaterThanOrEqual(degradedRetryDelayMs(CHECKING_RETRY_ATTEMPTS - 1));
+  it("publishes a worst case that really is the worst of every branch", () => {
+    expect(MAX_CHECKING_WINDOW_MS).toBeGreaterThanOrEqual(PROBE_GRACE_MS);
+    expect(MAX_CHECKING_WINDOW_MS).toBeGreaterThanOrEqual(UNIT_START_BUDGET_MS);
+  });
+
+  it("leaves the panel a finite wait between polls, however long it waits", () => {
+    // The panel's stopping condition is the answer, not a count — so the only
+    // thing its schedule owes is a rate that settles. An unbounded delay would
+    // reintroduce the same freeze by the back door.
+    expect(degradedRetryDelayMs(Number.MAX_SAFE_INTEGER)).toBe(DEGRADED_RETRY_MAX_MS);
+    expect(DEGRADED_RETRY_MAX_MS).toBeLessThan(MAX_CHECKING_WINDOW_MS);
   });
 });

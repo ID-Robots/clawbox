@@ -17,9 +17,12 @@
  * enough that a box whose dashboard is genuinely gone reaches the honest empty
  * state promptly rather than sitting on a spinner.
  *
- * `DEGRADED_RETRY_ATTEMPTS` is the CATALOGUE's budget. A caller waiting on a
- * different server-side window sets its own count over this same schedule —
- * see `CHECKING_RETRY_ATTEMPTS` in `useProviderStatus`.
+ * `DEGRADED_RETRY_ATTEMPTS` is the CATALOGUE's budget, and it is a COUNT
+ * because that caller is waiting on nothing that reports its own progress. A
+ * caller that IS — `useProviderStatus`, waiting on a server-side `checking`
+ * window bounded by the dashboard unit's own start timeout — takes the delays
+ * from here and bounds itself by that answer instead, so the rate is shared and
+ * the stopping condition is not.
  */
 export const DEGRADED_RETRY_BASE_MS = 1_000;
 export const DEGRADED_RETRY_MAX_MS = 8_000;
