@@ -41,6 +41,8 @@ Key properties:
 
 `.next/BUILD_ID` proves two asset sets differ; it never says which source produced them. So every build also writes **`.next/build-info.json`** (commit, short commit, branch, dirty flag, build time, the `BUILD_ID` it belongs to, node/bun versions, the Hermes and OpenClaw pins) via `scripts/write-build-info.mjs`, and the postbuild step copies it into `.next/standalone/.next/` — the tree the service actually runs from.
 
+The same postbuild step also **deletes `.next/standalone/data`**. Next's file tracing follows the `data/` paths in the middleware and the instrumentation hook into the standalone bundle, and its own `outputFileTracingExcludes` only reaches route entries, so a build otherwise leaves a multi-gigabyte second copy of your `data/` tree — model weights, webapps and all — inside a build artifact that nothing reads (the service runs from `/home/clawbox/clawbox`, so every reader resolves `data/` there). Expect `.next/standalone` to shrink by the size of `data/` on the first update that includes this.
+
 `GET /setup-api/system/build-identity` compares three things that are not assumed to agree:
 
 | | |
