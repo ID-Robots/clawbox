@@ -638,7 +638,6 @@ export const nl: Record<string, string> = {
   "codingAgent.liveView": "Bekijken",
   "codingAgent.livePreviewTitle": "Live-terminal",
   "codingAgent.livePreviewOpenApp": "Openen in Terminal",
-  "codingAgent.homeRuns": "Runs buiten je projecten",
   "codingAgent.fullTask": "Hele taak tonen",
   "codingAgent.startedAgo": "gestart {when}",
   "codingAgent.copyId": "Run-id kopiëren",
@@ -664,6 +663,7 @@ export const nl: Record<string, string> = {
 
   // Projects section and the New app wizard.
   "codingAgent.projectsTitle": "Projecten",
+  "codingAgent.navHome": "Start",
   "codingAgent.projectFolderUnset": "Kies in Instellingen een projectmap; elk project met een eigen git-geschiedenis verschijnt dan hier.",
   "codingAgent.noProjects": "Nog geen projecten. Tik op 'Nieuwe app' of vraag je assistent iets te bouwen in {folder}.",
   "codingAgent.onDesktop": "op het bureaublad",

@@ -381,13 +381,13 @@ describe("CodingAgentApp", () => {
     stubFetch({ enabled: true, readiness: READY }, [inRun, outRun], { projects: [project], git });
     render(<CodingAgentApp />);
 
-    // Home lists the projects, and — under them — only the runs that belong
-    // to no listed project: the stranger is there, the project's own is not.
-    // (Those strangers used to be computed and never drawn, so a run in a
-    // folder the projects list does not know was invisible everywhere.)
+    // Home lists the projects and nothing else: every run works in a folder
+    // inside the project folder, and the projects route lists that folder,
+    // so a run always has a project page. No runs list on home, not even for
+    // a stranger.
     await screen.findByTestId("coding-agent-project-site");
-    expect(await screen.findByText("somewhere else")).toBeInTheDocument();
-    expect(screen.getByTestId("coding-agent-runs-toggle").textContent).toContain(translations.en["codingAgent.homeRuns"]);
+    expect(screen.queryByTestId("coding-agent-runs-toggle")).toBeNull();
+    expect(screen.queryByText("somewhere else")).toBeNull();
     expect(screen.queryByText("inside the project")).toBeNull();
 
     fireEvent.click(screen.getByTestId("coding-agent-project-site"));
@@ -407,7 +407,7 @@ describe("CodingAgentApp", () => {
     fireEvent.click(screen.getByTestId("coding-agent-project-back"));
     expect(screen.queryByTestId("coding-agent-project-page")).toBeNull();
     expect(screen.queryByText("inside the project")).toBeNull();
-    expect(screen.getByText("somewhere else")).toBeInTheDocument();
+    expect(screen.queryByText("somewhere else")).toBeNull();
   });
 
   it("shows nothing about runs on home when every run is filed under a project", async () => {
@@ -701,6 +701,37 @@ describe("CodingAgentApp", () => {
         await waitFor(() => expect(heard).toBe(1));
       } finally {
         window.removeEventListener(CODING_RUN_STARTED_EVENT, onStarted);
+      }
+    });
+
+    it("shows the sidebar in a wide window — projects and recent runs that open their pages", async () => {
+      // A window wide enough for the rail: the observer answers at once.
+      const RO = class {
+        private cb: ResizeObserverCallback;
+        constructor(cb: ResizeObserverCallback) { this.cb = cb; }
+        observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
+        unobserve() {}
+        disconnect() {}
+      };
+      vi.stubGlobal("ResizeObserver", RO);
+      try {
+        stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+        render(<CodingAgentApp />);
+        const sidebar = await screen.findByTestId("coding-agent-sidebar");
+        expect(within(sidebar).getByTestId("coding-agent-sidebar-home")).toHaveAttribute("aria-current", "page");
+        // A project entry opens the project's page…
+        fireEvent.click(within(await within(sidebar).findByTestId("coding-agent-sidebar-projects")).getByText(SITE_PROJECT.name));
+        await screen.findByTestId("coding-agent-project-page");
+        // …and a run entry the run's page.
+        fireEvent.click(within(within(sidebar).getByTestId("coding-agent-sidebar-runs")).getByRole("button"));
+        expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", RUN.id);
+        // The run's data sits in the rail beside its story.
+        expect(within(screen.getByTestId("coding-agent-run-rail")).getByTestId("coding-agent-run-figures")).toBeInTheDocument();
+        // Home brings the front page back.
+        fireEvent.click(within(sidebar).getByTestId("coding-agent-sidebar-home"));
+        expect(screen.queryByTestId("coding-agent-run-page")).toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
       }
     });
 

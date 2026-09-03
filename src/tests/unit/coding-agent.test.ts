@@ -270,6 +270,29 @@ describe("where a run may work", () => {
     await expect(lib.resolveWorkingDirectory({ directory: path.join(home, "nope") })).rejects.toMatchObject({ kind: "not_found" });
   });
 
+  it("confines a run to a folder INSIDE the project folder once one is set", async () => {
+    // The owner's rule: every run's folder is a project the owner can find
+    // again, and the project folder is the shelf they all sit on.
+    const projectsDir = path.join(home, "Projects");
+    fs.mkdirSync(path.join(projectsDir, "shop"), { recursive: true });
+    fs.mkdirSync(path.join(home, "elsewhere"), { recursive: true });
+    writeConfig({ coding_agent_default_directory: projectsDir });
+    await expect(lib.resolveWorkingDirectory({ directory: path.join(projectsDir, "shop") })).resolves.toMatchObject({ directory: fs.realpathSync(path.join(projectsDir, "shop")) });
+    await expect(lib.resolveWorkingDirectory({ directory: "shop" })).resolves.toMatchObject({ directory: fs.realpathSync(path.join(projectsDir, "shop")) });
+    await expect(lib.resolveWorkingDirectory({ directory: path.join(home, "elsewhere") })).rejects.toMatchObject({ kind: "invalid", message: expect.stringContaining("inside your project folder") });
+    // The project folder itself is not a run's folder either.
+    await expect(lib.resolveWorkingDirectory({ directory: projectsDir })).rejects.toMatchObject({ kind: "invalid" });
+    // And nothing at all is not "the project folder": it asks for a folder in it.
+    await expect(lib.resolveWorkingDirectory({})).rejects.toMatchObject({ kind: "invalid", message: expect.stringContaining(projectsDir) });
+    // A code project stays fine wherever it lives.
+    fs.mkdirSync(path.join(root, "data", "code-projects", "site"), { recursive: true });
+    await expect(lib.resolveWorkingDirectory({ projectId: "site" })).resolves.toMatchObject({ projectId: "site" });
+    // Moving the project folder itself is still allowed: the setting is
+    // validated as a default, not as a run's folder.
+    fs.mkdirSync(path.join(home, "Work"), { recursive: true });
+    await expect(lib.setDefaultDirectory(path.join(home, "Work"))).resolves.toBe(fs.realpathSync(path.join(home, "Work")));
+  });
+
   it("refuses the home directory itself — acceptEdits would auto-approve edits to ~/.bashrc", async () => {
     await expect(lib.resolveWorkingDirectory({ directory: home })).rejects.toMatchObject({ kind: "invalid" });
   });

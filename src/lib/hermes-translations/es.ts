@@ -633,7 +633,6 @@ export const es: Record<string, string> = {
   "codingAgent.liveView": "Ver",
   "codingAgent.livePreviewTitle": "Terminal en vivo",
   "codingAgent.livePreviewOpenApp": "Abrir en Terminal",
-  "codingAgent.homeRuns": "Ejecuciones fuera de tus proyectos",
   "codingAgent.fullTask": "Mostrar la tarea completa",
   "codingAgent.startedAgo": "iniciado {when}",
   "codingAgent.copyId": "Copiar el id de la ejecución",
@@ -659,6 +658,7 @@ export const es: Record<string, string> = {
 
   // Projects section and the New app wizard.
   "codingAgent.projectsTitle": "Proyectos",
+  "codingAgent.navHome": "Inicio",
   "codingAgent.projectFolderUnset": "Elige una carpeta de proyectos en Ajustes y aquí aparecerá cada proyecto con su propio historial de git.",
   "codingAgent.noProjects": "Aún no hay proyectos. Pulsa «Nueva app» o pide a tu asistente que construya algo en {folder}.",
   "codingAgent.onDesktop": "en el escritorio",

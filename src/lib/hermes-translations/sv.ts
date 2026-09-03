@@ -634,7 +634,6 @@ export const sv: Record<string, string> = {
   "codingAgent.liveView": "Visa",
   "codingAgent.livePreviewTitle": "Live-terminal",
   "codingAgent.livePreviewOpenApp": "Öppna i Terminal",
-  "codingAgent.homeRuns": "Körningar utanför dina projekt",
   "codingAgent.fullTask": "Visa hela uppgiften",
   "codingAgent.startedAgo": "startad {when}",
   "codingAgent.copyId": "Kopiera körningens id",
@@ -660,6 +659,7 @@ export const sv: Record<string, string> = {
 
   // Projects section and the New app wizard.
   "codingAgent.projectsTitle": "Projekt",
+  "codingAgent.navHome": "Hem",
   "codingAgent.projectFolderUnset": "Välj en projektmapp i Inställningar, så visas varje projekt med egen git-historik här.",
   "codingAgent.noProjects": "Inga projekt ännu. Tryck på Ny app eller be din assistent bygga något i {folder}.",
   "codingAgent.onDesktop": "på skrivbordet",

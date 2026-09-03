@@ -625,7 +625,6 @@ export const bg: Record<string, string> = {
   "codingAgent.liveView": "Виж",
   "codingAgent.livePreviewTitle": "Терминал на живо",
   "codingAgent.livePreviewOpenApp": "Отвори в Терминал",
-  "codingAgent.homeRuns": "Изпълнения извън проектите ти",
   "codingAgent.fullTask": "Покажи цялата задача",
   "codingAgent.startedAgo": "стартирано {when}",
   "codingAgent.copyId": "Копирай id на изпълнението",
@@ -651,6 +650,7 @@ export const bg: Record<string, string> = {
 
   // Projects section and the New app wizard.
   "codingAgent.projectsTitle": "Проекти",
+  "codingAgent.navHome": "Начало",
   "codingAgent.projectFolderUnset": "Изберете папка за проекти в Настройки и всеки проект със собствена git история ще се появи тук.",
   "codingAgent.noProjects": "Още няма проекти. Натиснете „Ново приложение“ или помолете асистента си да построи нещо в {folder}.",
   "codingAgent.onDesktop": "на работния плот",

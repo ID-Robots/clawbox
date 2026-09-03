@@ -649,7 +649,6 @@ export const zh: Record<string, string> = {
   "codingAgent.liveView": "查看",
   "codingAgent.livePreviewTitle": "实时终端",
   "codingAgent.livePreviewOpenApp": "在终端中打开",
-  "codingAgent.homeRuns": "项目之外的运行",
   "codingAgent.fullTask": "显示完整任务",
   "codingAgent.startedAgo": "开始于 {when}",
   "codingAgent.copyId": "复制运行 ID",
@@ -675,6 +674,7 @@ export const zh: Record<string, string> = {
 
   // Projects section and the New app wizard.
   "codingAgent.projectsTitle": "项目",
+  "codingAgent.navHome": "首页",
   "codingAgent.projectFolderUnset": "在设置中选择一个项目文件夹，拥有独立 git 历史的项目就会列在这里。",
   "codingAgent.noProjects": "还没有项目。点击“新建应用”，或让助手在 {folder} 里构建点什么。",
   "codingAgent.onDesktop": "已在桌面",

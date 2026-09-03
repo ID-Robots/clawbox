@@ -821,7 +821,7 @@ export async function setDefaultDirectory(directory: string | null): Promise<str
   // thing to tell someone who just accepted the folder the device proposed.
   // Fenced to the owner's home: outside it, a missing folder is still an error.
   await ensureDirectoryInsideHome(directory.trim());
-  const { directory: resolved } = await resolveWorkingDirectory({ directory });
+  const { directory: resolved } = await resolveWorkingDirectory({ directory, asDefault: true });
   await configSet(CODING_AGENT_DIR_CONFIG_KEY, resolved);
   return resolved;
 }
@@ -1039,6 +1039,13 @@ interface ProjectCandidate {
   base: string;
   folder: string;
   kind: CodingProjectKind;
+  /**
+   * A folder directly under the project folder that a run has worked in.
+   * Listed even without a `.git` of its own: every run happens in a folder
+   * inside the project folder, and the owner asked for every such folder to
+   * be a project — the run is how they find it again.
+   */
+  fromRun?: boolean;
 }
 
 /**
@@ -1072,9 +1079,29 @@ interface ProjectCandidate {
  */
 export async function listProjects(): Promise<{ directory: string | null; projects: CodingProject[] }> {
   const [folders, codeProjects] = await Promise.all([readProjectFolders(), readFolderNames(CODE_PROJECTS_DIR)]);
-  const candidates: ProjectCandidate[] = folders
-    ? folders.names.map((folder) => ({ base: folders.base, folder, kind: "folder" as const }))
-    : [];
+  const candidates: ProjectCandidate[] = [];
+  if (folders) {
+    // The folders runs have worked in, directly under the project folder: a
+    // project by that run alone, `.git` or not. A run records the folder it
+    // worked in symlink-resolved, so both spellings of the base are matched.
+    // Never a dot-folder: that is state, not a project.
+    const realBase = await fs.promises.realpath(folders.base).catch(() => folders.base);
+    const workedIn = new Set<string>();
+    for (const run of loadRuns()) {
+      if (typeof run.directory !== "string") continue;
+      for (const base of new Set([folders.base, realBase])) {
+        if (!run.directory.startsWith(base + path.sep)) continue;
+        const first = path.relative(base, run.directory).split(path.sep)[0];
+        if (first && !first.startsWith(".")) workedIn.add(first);
+      }
+    }
+    for (const folder of folders.names) {
+      candidates.push({ base: folders.base, folder, kind: "folder", fromRun: workedIn.has(folder) });
+    }
+    for (const folder of workedIn) {
+      if (!folders.names.includes(folder)) candidates.push({ base: folders.base, folder, kind: "folder", fromRun: true });
+    }
+  }
   for (const folder of codeProjects) {
     if (folder === HARNESS_TEST_PROJECT_ID) continue;
     candidates.push({ base: CODE_PROJECTS_DIR, folder, kind: "codeProject" });
@@ -1096,16 +1123,19 @@ export async function listProjects(): Promise<{ directory: string | null; projec
   return { directory: folders?.base ?? null, projects };
 }
 
-async function describeProject({ base, folder, kind }: ProjectCandidate): Promise<{ project: CodingProject; real: string } | null> {
+async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate): Promise<{ project: CodingProject; real: string } | null> {
   const directory = path.join(base, folder);
-  const [dotGit, metaName] = await Promise.all([
+  const [dotGit, metaName, self] = await Promise.all([
     fs.promises.stat(path.join(directory, ".git")).catch(() => null),
     projectNameOf(directory, folder),
+    fromRun ? fs.promises.stat(directory).catch(() => null) : Promise.resolve(null),
   ]);
   const hasGit = dotGit?.isDirectory() === true;
   // A plain folder is a project by its history alone; a code project by its
-  // project.json as well, since the scaffold comes before the first commit.
-  if (!hasGit && !(kind === "codeProject" && metaName !== null)) return null;
+  // project.json as well, since the scaffold comes before the first commit;
+  // and a folder a run has worked in by that run, as long as it still exists.
+  const workedIn = fromRun === true && self?.isDirectory() === true;
+  if (!hasGit && !workedIn && !(kind === "codeProject" && metaName !== null)) return null;
   const [commit, onDesktop, real] = await Promise.all([
     // Only a folder with its own history is asked. `git log` in one without
     // walks UP to the nearest repository — for a code project, ClawBox's own
@@ -1827,6 +1857,12 @@ async function realDirectory(abs: string): Promise<string> {
 export async function resolveWorkingDirectory(input: {
   projectId?: string | null;
   directory?: string | null;
+  /**
+   * Skip the project-folder rule: the one caller that needs to is
+   * setDefaultDirectory, which validates the project folder ITSELF (and a
+   * new one is never inside the old). A run never passes this.
+   */
+  asDefault?: boolean;
 }): Promise<{ directory: string; projectId: string | null }> {
   const projectId = typeof input.projectId === "string" && input.projectId.trim() ? input.projectId.trim() : null;
   const directory = typeof input.directory === "string" && input.directory.trim() ? input.directory.trim() : null;
@@ -1861,7 +1897,10 @@ export async function resolveWorkingDirectory(input: {
     if (!fallback) {
       throw new CodingAgentError("invalid", "Give a code project id or a folder to work in.");
     }
-    return resolveWorkingDirectory({ directory: fallback });
+    // Every run happens in a folder INSIDE the project folder, never in the
+    // project folder itself — a run's folder is a project the owner can find
+    // again, and the project folder is the shelf they all sit on.
+    throw new CodingAgentError("invalid", `Give a folder inside your project folder (${fallback}) — its name is enough — or a code project id.`);
   }
   if (directory.length > MAX_DIRECTORY_CHARS) {
     throw new CodingAgentError("invalid", "The folder path is too long.");
@@ -1910,6 +1949,22 @@ export async function resolveWorkingDirectory(input: {
   for (const sub of DENIED_HOME_SUBTREES) {
     if (isInside(real, path.join(realHome, sub))) {
       throw new CodingAgentError("invalid", "That folder holds credentials or ClawBox's own state and cannot be a working folder.");
+    }
+  }
+  // The owner's rule: every run happens in a folder inside the project
+  // folder, so every run's folder is listed under Projects. Only once a
+  // project folder is set (a box without one keeps the home rule above), and
+  // never for the setting that says where "inside" is (`asDefault`).
+  if (!input.asDefault) {
+    const base = await getDefaultDirectory();
+    if (base) {
+      const realBase = await fs.promises.realpath(base).catch(() => path.resolve(base));
+      if (real === realBase) {
+        throw new CodingAgentError("invalid", `Use a folder inside your project folder (${base}), not the project folder itself.`);
+      }
+      if (!isInside(real, realBase)) {
+        throw new CodingAgentError("invalid", `The working folder must be inside your project folder (${base}), or be a code project.`);
+      }
     }
   }
   const checkout = await fs.promises.realpath(CONFIG_ROOT).catch(() => path.resolve(CONFIG_ROOT));

@@ -171,7 +171,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.liveView": "View",
   "codingAgent.livePreviewTitle": "Live terminal",
   "codingAgent.livePreviewOpenApp": "Open in Terminal",
-  "codingAgent.homeRuns": "Runs outside your projects",
   "codingAgent.fullTask": "Show the whole task",
   "codingAgent.startedAgo": "started {when}",
   "codingAgent.copyId": "Copy the run id",
@@ -201,6 +200,7 @@ export const codingAgentEn: Record<string, string> = {
   // mascot chat: the assistant scaffolds, delegates and verifies, and the
   // owner carries on there. `newHanded` is the last thing the card says.
   "codingAgent.projectsTitle": "Projects",
+  "codingAgent.navHome": "Home",
   "codingAgent.projectFolderUnset": "Choose a project folder in Settings, and every project with its own git history will be listed here.",
   "codingAgent.noProjects": "No projects yet. Tap New app, or ask your assistant to build something in {folder}.",
   "codingAgent.onDesktop": "on desktop",

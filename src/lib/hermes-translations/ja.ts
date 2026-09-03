@@ -640,7 +640,6 @@ export const ja: Record<string, string> = {
   "codingAgent.liveView": "表示",
   "codingAgent.livePreviewTitle": "ライブターミナル",
   "codingAgent.livePreviewOpenApp": "ターミナルで開く",
-  "codingAgent.homeRuns": "プロジェクト外の実行",
   "codingAgent.fullTask": "タスク全文を表示",
   "codingAgent.startedAgo": "{when}に開始",
   "codingAgent.copyId": "実行 ID をコピー",
@@ -666,6 +665,7 @@ export const ja: Record<string, string> = {
 
   // Projects section and the New app wizard.
   "codingAgent.projectsTitle": "プロジェクト",
+  "codingAgent.navHome": "ホーム",
   "codingAgent.projectFolderUnset": "設定でプロジェクトフォルダーを選ぶと、独自の git 履歴を持つプロジェクトがここに並びます。",
   "codingAgent.noProjects": "まだプロジェクトはありません。「新しいアプリ」を押すか、{folder} に何かを作るようアシスタントに頼んでください。",
   "codingAgent.onDesktop": "デスクトップにあり",
