@@ -159,22 +159,33 @@ describe("deriveProtection", () => {
     )).toEqual({ state: "lapsed", reason: "stale" });
   });
 
-  it("does not let arming auto-backup rescue a box no window would forgive", () => {
-    // Toggling the switch off and on IS an arm, so the stamp genuinely moves.
-    // It still cannot vouch for a snapshot older than the loosest window any
-    // box gets — otherwise two clicks would buy 36 h of green on a box that
-    // cannot back up at all.
-    const dead = {
-      lastBackupAtMs: NOW - 10 * DAY,
-      lastHeartbeatStatus: "ok",
-      schedule: DAILY,
-      scheduleArmedAtMs: NOW - MINUTE,
-    };
-    expect(deriveProtection(dead, NOW)).toEqual({ state: "lapsed", reason: "stale" });
-    // Inside that week the grace is real: the schedule has genuinely not had
-    // its first window yet.
-    expect(deriveProtection({ ...dead, lastBackupAtMs: NOW - 6 * DAY }, NOW))
-      .toEqual({ state: "protected", reason: "ok" });
+  it("does not let an arm stamp reach past the longest window any cadence allows", () => {
+    // The stamp is taken at face value here — whether the arm was *earned* is
+    // `writeSchedule()`'s question, because only it knows the window the box was
+    // being judged against a moment ago (see the schedule route tests). What
+    // this function still refuses is a grace that outlives every cadence there
+    // is: a backup older than the weekly window is stale under all of them.
+    expect(deriveProtection(
+      {
+        lastBackupAtMs: NOW - 10 * DAY,
+        lastHeartbeatStatus: "ok",
+        schedule: DAILY,
+        scheduleArmedAtMs: NOW - MINUTE,
+      },
+      NOW,
+    )).toEqual({ state: "lapsed", reason: "stale" });
+    // And the ceiling is the weekly window, not a week: a weekly box at 7 d 6 h
+    // is legitimately protected, so tightening it to Daily must not lapse it on
+    // the click — which is the one thing the grace exists to prevent.
+    expect(deriveProtection(
+      {
+        lastBackupAtMs: NOW - (7 * DAY + 6 * HOUR),
+        lastHeartbeatStatus: "ok",
+        schedule: DAILY,
+        scheduleArmedAtMs: NOW - MINUTE,
+      },
+      NOW,
+    )).toEqual({ state: "protected", reason: "ok" });
   });
 
   it("does not let an arm stamp dated ahead of the clock hold a box green for ever", () => {

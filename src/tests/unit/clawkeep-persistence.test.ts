@@ -43,7 +43,7 @@ describe("readSchedule / writeSchedule", () => {
   });
 
   it("round-trips a valid schedule", async () => {
-    const written = await clawkeep.writeSchedule({
+    const { schedule: written } = await clawkeep.writeSchedule({
       enabled: true,
       frequency: "weekly",
       timeOfDay: "09:30",
@@ -62,7 +62,7 @@ describe("readSchedule / writeSchedule", () => {
   });
 
   it("sanitises a bogus frequency to 'daily'", async () => {
-    const out = await clawkeep.writeSchedule({
+    const { schedule: out } = await clawkeep.writeSchedule({
       enabled: true,
       // @ts-expect-error -- testing runtime coercion
       frequency: "hourly",
@@ -74,7 +74,7 @@ describe("readSchedule / writeSchedule", () => {
   });
 
   it("sanitises a malformed timeOfDay to the default", async () => {
-    const out = await clawkeep.writeSchedule({
+    const { schedule: out } = await clawkeep.writeSchedule({
       enabled: true,
       frequency: "daily",
       timeOfDay: "midnight",
@@ -85,7 +85,7 @@ describe("readSchedule / writeSchedule", () => {
   });
 
   it("sanitises a bogus retentionKeepLast to the default", async () => {
-    const out = await clawkeep.writeSchedule({
+    const { schedule: out } = await clawkeep.writeSchedule({
       enabled: true,
       frequency: "daily",
       timeOfDay: "02:00",
@@ -97,7 +97,7 @@ describe("readSchedule / writeSchedule", () => {
   });
 
   it("keeps retentionKeepLast=0 (auto-cleanup disabled)", async () => {
-    const out = await clawkeep.writeSchedule({
+    const { schedule: out } = await clawkeep.writeSchedule({
       enabled: true,
       frequency: "daily",
       timeOfDay: "02:00",
@@ -108,7 +108,7 @@ describe("readSchedule / writeSchedule", () => {
   });
 
   it("clamps an out-of-range weekday back to the default", async () => {
-    const out = await clawkeep.writeSchedule({
+    const { schedule: out } = await clawkeep.writeSchedule({
       enabled: true,
       frequency: "weekly",
       timeOfDay: "02:00",
@@ -119,7 +119,7 @@ describe("readSchedule / writeSchedule", () => {
   });
 
   it("treats truthy-but-non-true `enabled` as disabled (strict)", async () => {
-    const out = await clawkeep.writeSchedule({
+    const { schedule: out } = await clawkeep.writeSchedule({
       // @ts-expect-error -- runtime coercion check
       enabled: "yes",
       frequency: "daily",

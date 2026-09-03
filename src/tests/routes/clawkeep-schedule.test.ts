@@ -77,6 +77,20 @@ async function backdateArm(atMs: number): Promise<void> {
   await fs.utimes(SCHEDULE_FILE, new Date(atMs), new Date(atMs));
 }
 
+/** A `schedule.json` as beta wrote it: no `armedAtMs`, a recent mtime. */
+async function writeLegacySchedule(schedule: unknown): Promise<void> {
+  await fs.writeFile(SCHEDULE_FILE, JSON.stringify(schedule, null, 2));
+}
+
+/** The daemon's `state.json` — what the arm gate reads to ask "was this box
+ *  already lapsed when the owner armed it?". */
+async function writeLastBackup(atMs: number): Promise<void> {
+  await fs.writeFile(
+    path.join(DATA_DIR, "state.json"),
+    JSON.stringify({ last_backup_at_ms: atMs, last_heartbeat_status: "ok" }, null, 2),
+  );
+}
+
 describe("/setup-api/clawkeep/schedule", () => {
   describe("GET", () => {
     it("returns DEFAULT_SCHEDULE when nothing is persisted", async () => {
@@ -205,17 +219,70 @@ describe("/setup-api/clawkeep/schedule", () => {
         .toEqual({ state: "lapsed", reason: "stale" });
     });
 
+
+    it("does not un-lapse a dead box when the owner toggles auto-backup off and on", async () => {
+      const now = Date.now();
+      // Five days without a backup on a nightly schedule: amber, and the copy
+      // invites exactly this — the owner opens the schedule card and flips the
+      // switch. Two PUTs, the second of which genuinely arms.
+      const lastBackupAtMs = now - 5 * DAY_MS;
+      await writeLastBackup(lastBackupAtMs);
+      await PUT(jsonReq(ARMED_DAILY));
+      await backdateArm(now - 60 * DAY_MS);
+
+      await PUT(jsonReq({ ...ARMED_DAILY, enabled: false }));
+      const rearmed = await (await PUT(jsonReq(ARMED_DAILY))).json();
+
+      // Arming must not lapse a box for a run that is not due yet. It must not
+      // un-lapse one either — those are different things, and only the first
+      // needs granting.
+      expect(deriveProtection({ ...rearmed, ...deadBox, lastBackupAtMs }, now))
+        .toEqual({ state: "lapsed", reason: "stale" });
+    });
+
+    it("does not un-lapse a dead box by tightening the cadence either", async () => {
+      const now = Date.now();
+      const lastBackupAtMs = now - 10 * DAY_MS;
+      await writeLastBackup(lastBackupAtMs);
+      await PUT(jsonReq({ ...ARMED_DAILY, frequency: "weekly" }));
+      await backdateArm(now - 60 * DAY_MS);
+
+      // Ten days is past the weekly window too, so the box was already lapsed
+      // when the tightening arrived — one click, and it must stay lapsed.
+      const tightened = await (await PUT(jsonReq(ARMED_DAILY))).json();
+      expect(deriveProtection({ ...tightened, ...deadBox, lastBackupAtMs }, now))
+        .toEqual({ state: "lapsed", reason: "stale" });
+    });
+
+    it("gives no grace to a schedule.json written before the stamp existed", async () => {
+      const now = Date.now();
+      // The upgrade path every box takes: beta's file, no `armedAtMs`, and an
+      // mtime the owner refreshed minutes ago by nudging retention. Judged on
+      // that mtime the box would read green for another 36 h.
+      const lastBackupAtMs = now - 6 * DAY_MS;
+      await writeLastBackup(lastBackupAtMs);
+      await writeLegacySchedule(ARMED_DAILY);
+
+      const body = await (await GET()).json();
+      expect(body.scheduleArmedAtMs).toBe(0);
+      expect(deriveProtection({ ...body, ...deadBox, lastBackupAtMs }, now))
+        .toEqual({ state: "lapsed", reason: "stale" });
+    });
+
     it("still gives a schedule the owner has just armed its own window", async () => {
       const now = Date.now();
-      // Green under the week-long manual window. Arming Daily shrinks that to
+      // The case the grace exists for, and the one every box starts in: auto-
+      // backup has never been armed here, so the window is the no-schedule week
+      // and a three-day-old manual backup is green. Arming Daily shrinks that to
       // 36 h; applying it retroactively would lapse the box on the click for a
       // run that is not due yet.
       const lastBackupAtMs = now - 3 * DAY_MS;
+      await writeLastBackup(lastBackupAtMs);
 
       await PUT(jsonReq({ ...ARMED_DAILY, enabled: false }));
-      await backdateArm(now - 60 * DAY_MS);
       const armed = await (await PUT(jsonReq(ARMED_DAILY))).json();
 
+      expect(armed.scheduleArmedAtMs).toBeGreaterThan(0);
       expect(deriveProtection({ ...armed, ...deadBox, lastBackupAtMs }, now))
         .toEqual({ state: "protected", reason: "ok" });
     });
@@ -223,6 +290,7 @@ describe("/setup-api/clawkeep/schedule", () => {
     it("re-arms when the cadence tightens from weekly to daily", async () => {
       const now = Date.now();
       const lastBackupAtMs = now - 3 * DAY_MS;
+      await writeLastBackup(lastBackupAtMs);
 
       await PUT(jsonReq({ ...ARMED_DAILY, frequency: "weekly" }));
       await backdateArm(now - 60 * DAY_MS);

@@ -91,12 +91,19 @@ export const BACKUP_GRACE_MS = 12 * HOUR_MS;
 export const UNSCHEDULED_MAX_AGE_MS = 7 * DAY_MS;
 
 /**
+ * The longest window {@link expectedBackupWindowMs} ever returns — the weekly
+ * one. A backup older than this is stale under every cadence there is, so no
+ * grace may reach past it.
+ */
+export const MAX_BACKUP_WINDOW_MS = 7 * DAY_MS + BACKUP_GRACE_MS;
+
+/**
  * The hard cap on a single backup run. `runBackup()` in `src/lib/clawkeep.ts`
  * spawns every backup on this box — manual and scheduled alike, since the
  * standalone `clawkeep/systemd/` timers are deliberately not installed and the
- * in-Next scheduler drives runs instead — and SIGKILLs the daemon at this
- * mark. Declared here, where nothing is imported, so the kill timer and the
- * UI's liveness rule below are the same number by construction.
+ * in-Next scheduler drives runs instead — and SIGKILLs the daemon at this mark.
+ * Declared here, where nothing is imported, so the kill timer and the UI's
+ * liveness rule below are the same number by construction.
  */
 export const BACKUP_RUN_CAP_MS = 60 * MINUTE_MS;
 
@@ -104,26 +111,33 @@ export const BACKUP_RUN_CAP_MS = 60 * MINUTE_MS;
  * How long a `"running"` status may stand before the run behind it is a corpse
  * rather than a slow backup.
  *
- * This is not "silence since the last sign of life": `runner.py` stamps
+ * This is not "silence since the last sign of life". `runner.py` stamps
  * `last_heartbeat_at_ms` once, as the run starts, and writes it again only on a
- * terminal status. What it *does* keep publishing while a run is in flight is
+ * terminal status; what it keeps publishing while a run is in flight is
  * `last_step_at_ms` (one stamp per phase) and `upload_bytes_done` (re-saved
- * every 250 ms) — neither of which refreshes the heartbeat, and neither of
- * which moves at all during the archive build. So the heartbeat measures how
- * long the run has been going, and the honest bound on that is the cap the
- * process that spawned it enforces: past {@link BACKUP_RUN_CAP_MS} the daemon
- * has been killed, before it the run may well be alive.
+ * every 250 ms), neither of which touches the heartbeat and neither of which
+ * moves at all during the archive build. So the heartbeat measures how long the
+ * run has been going — and the only honest bound on that is the cap the process
+ * that spawned it enforces. Past {@link BACKUP_RUN_CAP_MS} the daemon has been
+ * SIGKILLed and there is nothing left to pulse for; before it, the run may well
+ * be alive, and the old 30-minute rule (written when a Jetson backup took 2-5
+ * minutes) declared healthy ones dead — dropping the shelf's progress pulse
+ * and, on a box whose first backup it was, turning the shelf shield red while
+ * the upload was fine.
  *
- * It used to be 30 minutes, on the grounds that "real Jetson backups finish in
- * 2-5 minutes". TASK-675 retired that: 10 GB+ archives are the supported case,
- * and a rule that calls a healthy multi-hour backup dead turns the shelf shield
- * red over a box that is uploading normally.
+ * What this deliberately does NOT do is invent a looser window than the cap.
+ * TASK-675 made 10 GB+ archives the supported case, and such a run plausibly
+ * does not fit in 60 minutes — but that is the cap's problem, not this
+ * constant's: pulsing past the cap would be a progress indicator for a process
+ * that no longer exists. Raising the cap (and giving `_on_upload_progress` a
+ * liveness stamp so the window can be measured from real progress rather than
+ * from run duration) belongs with the large-backup work, on hardware.
  *
- * Two edges this does not close, neither of which touches the protection
- * verdict itself — `lastBackupAtMs` stops moving either way, so the age term
- * below still lapses the box on schedule:
+ * Two edges this leaves open, neither of which touches the protection verdict —
+ * `lastBackupAtMs` stops moving either way, so the age term below still lapses
+ * the box on schedule:
  *   - a SIGKILLed run leaves `"running"` in state.json for ever (nothing gets
- *     to write a terminal status), so the pulse stays on for up to the cap;
+ *     to write a terminal status), so the pulse stays on until the cap;
  *   - if the Next process restarts mid-run its kill timer dies with it, and a
  *     daemon that then outlives the cap keeps working while the pulse stops.
  * Making a failed run stop answering "ok" at all is TASK-672's job, not this
@@ -188,25 +202,24 @@ export function deriveProtection(status: ProtectionInput, nowMs: number): Protec
   // same click for a run that is not due yet, so while the new window runs its
   // first course the age is measured from the arm rather than from the backup.
   //
-  // Two limits stop that grace becoming a false success:
-  //   - the stamp moves only when a schedule is switched on or tightened
-  //     (`writeSchedule`), never on a plain re-save. Keyed on the file being
-  //     written, nudging the backup time or the retention count would hand a
-  //     box whose backups died ten days ago a fresh 36 h of green — on the
-  //     very card the lapsed copy sends the owner to;
-  //   - and it is ignored once the last backup is older than the loosest
-  //     window any box gets, so toggling auto-backup off and on again cannot
-  //     vouch for a snapshot no window would forgive.
+  // `scheduleArmedAtMs` is minted by `writeSchedule()`, and only there, because
+  // only there is the window the box was being judged against a moment ago
+  // known. It does not move on a plain re-save — otherwise nudging the backup
+  // time or the retention count would hand a box whose backups died ten days
+  // ago a fresh 36 h of green, on the very card the lapsed copy sends the owner
+  // to — and it is not minted at all for a box the previous window had already
+  // lapsed, so toggling the switch off and on cannot rescue one either.
   //
-  // The stamp is also clamped to `now`: it comes off the box's clock and is
-  // judged against the reader's, these boxes have no battery-backed RTC, and
-  // an anchor left in the future would hold `now - anchor` at or below zero on
-  // every read — green for as long as the skew lasted, renewed each time it
-  // was drawn. Clamped, the skew buys at most what the ceiling above allows.
+  // It is clamped to `now` here because it comes off the box's clock and is
+  // judged against the reader's, which is a browser sampling a 60 s tick: a
+  // stamp a few seconds "ahead" is that gap, not skew, and discarding it would
+  // lapse the box on the very click the grace exists for. Clamping honours it
+  // as "just armed" instead — and the ceiling below is what stops a genuinely
+  // skewed RTC (these boxes have no battery-backed clock) turning that into
+  // green for as long as wall-clock takes to catch up.
   const armedAtMs = Math.min(status.scheduleArmedAtMs ?? 0, nowMs);
   const armGrace = status.schedule?.enabled
-    && armedAtMs > status.lastBackupAtMs
-    && nowMs - status.lastBackupAtMs <= UNSCHEDULED_MAX_AGE_MS
+    && nowMs - status.lastBackupAtMs <= MAX_BACKUP_WINDOW_MS
     ? armedAtMs
     : 0;
   const anchor = Math.max(status.lastBackupAtMs, armGrace);

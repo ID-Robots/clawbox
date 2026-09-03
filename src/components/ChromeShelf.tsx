@@ -2,7 +2,10 @@
 
 import { ReactNode, useState, useEffect, useRef, useCallback } from "react";
 import { useT } from "@/lib/i18n";
-import type { ProtectionReason, ProtectionState } from "@/lib/clawkeep-protection";
+import type { Protection, ProtectionReason } from "@/lib/clawkeep-protection";
+
+/** The reasons that put a shield in an at-risk state. `ok` is not among them. */
+type AtRiskReason = Exclude<ProtectionReason, "ok">;
 
 /**
  * What the shield says out loud for each way a box can be unprotected. The
@@ -11,9 +14,12 @@ import type { ProtectionReason, ProtectionState } from "@/lib/clawkeep-protectio
  * reached only people who can see the difference between amber and red
  * (WCAG 2.2 SC 1.4.1). "Overdue" was also wrong for a run that ran and failed,
  * for one refusing to start, and for a backup that was never scheduled.
+ *
+ * Keyed on the at-risk reasons alone: an unprotected shield must never be able
+ * to fall back to a reassuring "Open ClawKeep", so the type refuses the entry
+ * rather than the code having to remember not to use it.
  */
-const AT_RISK_TITLE_KEY: Record<ProtectionReason, string> = {
-  ok: "shelf.openClawKeep",
+const AT_RISK_TITLE_KEY: Record<AtRiskReason, string> = {
   stale: "shelf.clawkeepStale",
   error: "shelf.clawkeepFailed",
   blocked: "shelf.clawkeepBlocked",
@@ -39,11 +45,11 @@ interface ChromeShelfProps {
   onTrayClick: () => void;
   onClawKeepShieldClick?: () => void;
   clawkeepStatus?: {
-    /** The shared protection verdict (see `deriveProtection`), or null while it
-     *  is not yet known — on a box that is not paired, or before the first
-     *  status arrives. */
-    state?: ProtectionState | null;
-    reason?: ProtectionReason | null;
+    /** The shared protection verdict (see `deriveProtection`), whole or not at
+     *  all — null while it is not yet known: on a box that is not paired, or
+     *  before the first status arrives. State and reason travel together so a
+     *  shield can never be at risk without a sentence to say why. */
+    protection?: Protection | null;
     unconfigured?: boolean;
     busy: boolean;
     restoring: boolean;
@@ -66,7 +72,7 @@ export default function ChromeShelf({
   onLauncherClick,
   onTrayClick,
   onClawKeepShieldClick,
-  clawkeepStatus = { state: null, reason: null, unconfigured: false, busy: false, restoring: false },
+  clawkeepStatus = { protection: null, unconfigured: false, busy: false, restoring: false },
   onPinApp,
   onUnpinApp,
   onCloseApp,
@@ -142,8 +148,9 @@ export default function ChromeShelf({
   // > never-protected (red) > ok.
   // Restore is the rarer, longer, more user-blocking operation, so it wins
   // even if a backup heartbeat happens to be in flight at the same time.
+  const protection = clawkeepStatus.protection;
   const atRisk = clawAiAuthenticated
-    && !!clawkeepStatus.state && clawkeepStatus.state !== "protected";
+    && !!protection && protection.state !== "protected" && protection.reason !== "ok";
   // Never-paired is not "overdue": nothing is late on a box that has never
   // been set up. It gets its own invitation and a calm colour instead of the
   // red alert a genuinely missed backup earns.
@@ -151,14 +158,14 @@ export default function ChromeShelf({
   const baseTitle = !clawAiAuthenticated
     ? t("shelf.connectClawBoxAI")
     : atRisk
-    ? t(AT_RISK_TITLE_KEY[clawkeepStatus.reason ?? "stale"])
+    ? t(AT_RISK_TITLE_KEY[protection!.reason as AtRiskReason])
     : needsSetup
     ? t("shelf.clawkeepNotSetUp")
     : t("shelf.openClawKeep");
   // A box that WAS protected and has drifted is not the same as one that
   // never was — the card says so in amber, and the shelf has to agree or the
   // distinction only exists on the screen the owner has not opened.
-  const lapsed = atRisk && clawkeepStatus.state === "lapsed";
+  const lapsed = atRisk && protection!.state === "lapsed";
   const mode: "restoring" | "busy" | "lapsed" | "alert" | "setup" | "ok" =
     clawkeepStatus.restoring ? "restoring"
     : clawkeepStatus.busy ? "busy"

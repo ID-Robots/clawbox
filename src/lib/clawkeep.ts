@@ -263,11 +263,15 @@ export async function readSchedule(): Promise<ClawKeepSchedule> {
  *
  * The stamp lives inside `schedule.json` rather than being its mtime, because
  * an mtime answers "when was this file written" and the question here is "when
- * did the cadence change". The same file carries the retention count and the
- * time of day, so on the mtime a box whose backups died ten days ago would go
- * green the moment its owner nudged either — and a `cp -a` or an image restore
- * of `~/.clawkeep` would do it too. Files written before the stamp existed
- * fall back to the mtime, which is what they were judged on anyway.
+ * was a window started". The same file carries the retention count and the time
+ * of day, so on the mtime a box whose backups died ten days ago went green the
+ * moment its owner nudged either — and a `cp -a` or an image restore of
+ * `~/.clawkeep` did it too.
+ *
+ * A file written before the stamp existed therefore answers 0, NOT its mtime:
+ * falling back would carry exactly that defect onto every box that upgrades. 0
+ * costs a box armed shortly before the update its remaining grace, which the
+ * owner's next save restores; the mtime would cost a dead box's owner the alarm.
  */
 export async function readScheduleArmedAtMs(): Promise<number> {
   try {
@@ -275,21 +279,17 @@ export async function readScheduleArmedAtMs(): Promise<number> {
     const stamp = Number(raw?.armedAtMs);
     if (Number.isFinite(stamp) && stamp > 0) return Math.round(stamp);
   } catch {
-    // Unreadable or not JSON — fall through to the mtime.
+    // Missing, unreadable or not JSON — no schedule has been armed here.
   }
-  try {
-    return Math.round((await fs.stat(SCHEDULE_PATH)).mtimeMs);
-  } catch {
-    return 0;
-  }
+  return 0;
 }
 
 /**
- * Does this save arm the schedule, i.e. start a window that was not running
- * before? Switching auto-backup on does; so does tightening the cadence, which
- * shrinks the tolerated age and would otherwise lapse the box on the click.
- * Loosening it cannot lapse a box the tighter cadence already allowed, and a
- * plain re-save — retention, time of day, weekday — changes no window at all.
+ * Does this save start a window that was not running before? Switching
+ * auto-backup on does; so does tightening the cadence, which shrinks the
+ * tolerated age and would otherwise lapse the box on the click. Loosening it
+ * cannot lapse a box the tighter cadence already allowed, and a plain re-save —
+ * retention, time of day, weekday — changes no window at all.
  */
 function armsTheSchedule(prev: ClawKeepSchedule, next: ClawKeepSchedule): boolean {
   if (!next.enabled) return false;
@@ -297,21 +297,70 @@ function armsTheSchedule(prev: ClawKeepSchedule, next: ClawKeepSchedule): boolea
   return expectedBackupWindowMs(next) < expectedBackupWindowMs(prev);
 }
 
-export async function writeSchedule(next: ClawKeepSchedule): Promise<ClawKeepSchedule> {
+/**
+ * The arm stamp to persist with this save.
+ *
+ * Arming must not lapse a box for a run that is not due yet — but it must not
+ * un-lapse one either, and those are different things. Only the first buys
+ * anything, so only the first is granted:
+ *
+ *   - a plain re-save (retention, time of day, weekday) arms nothing and keeps
+ *     the stamp it had — otherwise nudging either would hand a box whose
+ *     backups died ten days ago a fresh 36 h of green, on the very card the
+ *     lapsed copy sends its owner to;
+ *   - switching auto-backup ON only mints a stamp on a box that has never had a
+ *     schedule. Switching it OFF widens the tolerated age from the cadence's own
+ *     window to the no-schedule week, so a box that was amber under its nightly
+ *     schedule reads green the moment the switch goes off; minting on the way
+ *     back on would make that round trip permanent — two clicks, another 36 h,
+ *     repeatable for ever. A box that has been armed before keeps its stamp;
+ *   - tightening the cadence mints only for a box the PREVIOUS window still
+ *     called protected. One already past it stays lapsed.
+ *
+ * This is the one place those questions can be asked, because it is the only
+ * place that knows the window the box was being judged against a moment ago.
+ */
+async function nextArmedAtMs(
+  prev: ClawKeepSchedule,
+  next: ClawKeepSchedule,
+  prevArmedAtMs: number,
+): Promise<number> {
+  if (!armsTheSchedule(prev, next)) return prevArmedAtMs;
+  const now = Date.now();
+  const lastBackupAtMs = (await readStateFile()).last_backup_at_ms ?? 0;
+  // Nothing has ever backed this box up: it reads "Not Protected" on its own
+  // account and never reaches the age term, so there is no verdict to rescue.
+  if (lastBackupAtMs <= 0) return now;
+  if (!prev.enabled) return prevArmedAtMs > 0 ? prevArmedAtMs : now;
+  return now - lastBackupAtMs > expectedBackupWindowMs(prev) ? prevArmedAtMs : now;
+}
+
+export async function writeSchedule(next: ClawKeepSchedule): Promise<{
+  schedule: ClawKeepSchedule;
+  armedAtMs: number;
+}> {
   await ensureDataDir();
   const sanitised = sanitiseSchedule(next);
   const prev = await readSchedule();
-  const armedAtMs = armsTheSchedule(prev, sanitised)
-    ? Date.now()
-    : await readScheduleArmedAtMs();
-  const tmp = `${SCHEDULE_PATH}.tmp`;
+  const armedAtMs = await nextArmedAtMs(prev, sanitised, await readScheduleArmedAtMs());
+  // Per-call temp name (pid + monotonic counter), like writeStateFile: this is
+  // a read-modify-write now, and two saves from the same card must not
+  // interleave into one temp file and rename a torn schedule into place —
+  // readSchedule() would then fall back to DEFAULT_SCHEDULE and silently turn
+  // auto-backup off.
+  const tmp = `${SCHEDULE_PATH}.tmp.${process.pid}.${++scheduleWriteSeq}`;
   // `armedAtMs` rides alongside the schedule rather than in it: it is not a
   // setting the owner edits, and `sanitiseSchedule` drops it on the way back
   // out so `ClawKeepSchedule` stays exactly what the PUT body may contain.
   await fs.writeFile(tmp, JSON.stringify({ ...sanitised, armedAtMs }, null, 2), { mode: 0o600 });
   await fs.rename(tmp, SCHEDULE_PATH);
-  return sanitised;
+  // The stamp comes back with the schedule rather than being re-read: a second
+  // save landing between the rename and a re-read would pair this schedule with
+  // that one's stamp, and the card folds the pair into its local status.
+  return { schedule: sanitised, armedAtMs };
 }
+
+let scheduleWriteSeq = 0;
 
 /** Compute the next wall-clock ms a backup should fire, given a schedule
  * and a "now" reference. Pure function — exported for unit tests. */

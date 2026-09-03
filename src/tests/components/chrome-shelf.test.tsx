@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@/tests/helpers/test-utils";
 import ChromeShelf from "@/components/ChromeShelf";
 import { desktopTranslations } from "@/lib/desktop-translations";
+import type { Protection } from "@/lib/clawkeep-protection";
 
 // The shipped English strings, not a hand-copied set: a mock that drifts from
 // production turns "the shield announces X" into "the mock returns X".
@@ -59,7 +60,7 @@ describe("ChromeShelf", () => {
         {...baseProps}
         onClawKeepShieldClick={vi.fn()}
         clawAiAuthenticated
-        clawkeepStatus={{ state: null, reason: null, unconfigured: true, busy: false, restoring: false }}
+        clawkeepStatus={{ protection: null, unconfigured: true, busy: false, restoring: false }}
       />,
     );
 
@@ -85,7 +86,7 @@ describe("ChromeShelf", () => {
         {...baseProps}
         onClawKeepShieldClick={vi.fn()}
         clawAiAuthenticated
-        clawkeepStatus={{ state: "lapsed", reason: "stale", unconfigured: false, busy: false, restoring: false }}
+        clawkeepStatus={{ protection: { state: "lapsed", reason: "stale" }, unconfigured: false, busy: false, restoring: false }}
       />,
     );
 
@@ -106,7 +107,7 @@ describe("ChromeShelf", () => {
         {...baseProps}
         onClawKeepShieldClick={vi.fn()}
         clawAiAuthenticated
-        clawkeepStatus={{ state: "unprotected", reason: "never", unconfigured: false, busy: false, restoring: false }}
+        clawkeepStatus={{ protection: { state: "unprotected", reason: "never" }, unconfigured: false, busy: false, restoring: false }}
       />,
     );
 
@@ -122,13 +123,13 @@ describe("ChromeShelf", () => {
     // (WCAG 2.2 SC 1.4.1). "Overdue" was wrong for the other two reasons too —
     // a run that ran and failed is not late, and neither is one refusing to
     // start.
-    const say = (over: Record<string, unknown>) => {
+    const say = (protection: Protection) => {
       const { unmount } = render(
         <ChromeShelf
           {...baseProps}
           onClawKeepShieldClick={vi.fn()}
           clawAiAuthenticated
-          clawkeepStatus={{ unconfigured: false, busy: false, restoring: false, ...over }}
+          clawkeepStatus={{ protection, unconfigured: false, busy: false, restoring: false }}
         />,
       );
       const shield = screen.getByTestId("shelf-clawkeep-shield-button");
@@ -162,7 +163,7 @@ describe("ChromeShelf", () => {
         {...baseProps}
         onClawKeepShieldClick={vi.fn()}
         clawAiAuthenticated
-        clawkeepStatus={{ state: "lapsed", reason: "stale", unconfigured: true, busy: false, restoring: false }}
+        clawkeepStatus={{ protection: { state: "lapsed", reason: "stale" }, unconfigured: true, busy: false, restoring: false }}
       />,
     );
 

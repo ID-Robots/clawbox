@@ -532,7 +532,7 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "backup_status",
-    "Report whether this ClawBox backs up to the cloud, when it last ran, and whether it succeeded. If backup is not paired, tell the user to set it up in Settings -> Backup — there is no tool that pairs it.",
+    "Report whether this ClawBox is protected by cloud backup. `protection` is the answer: {state: protected|lapsed|unprotected, reason: ok|error|blocked|stale|never} — the same verdict the ClawKeep shield and the desktop shelf draw. `lastHeartbeatStatus` is the last thing the daemon published, NOT an outcome: the failures that keep a box unprotected longest write no heartbeat at all, so it can read \"ok\" on a box that has not backed up for weeks. reason=stale means no recent backup; error means a run failed; blocked means backups refuse to start until this box has an encryption passphrase (Settings -> Backup); never means it has never backed up. If backup is not paired, tell the user to set it up in Settings -> Backup — there is no tool that pairs it.",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 4_000 },
     async () => {
@@ -549,7 +549,9 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
       // that stop backups longest write no heartbeat, so a box whose backups
       // died days ago still reports `lastHeartbeatStatus: "ok"` — read
       // literally, the agent tells the owner the last run succeeded. Attach
-      // the same verdict the two shields draw so it cannot.
+      // the same verdict the two shields draw, and say in the description which
+      // of the two fields is the answer: leaving the misleading one in the body
+      // with nothing to rank them keeps that read one plausible step away.
       return json({
         ...body,
         protection: deriveProtection(

@@ -27,17 +27,17 @@ export async function GET() {
 export async function PUT(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   try {
-    const schedule = await writeSchedule(body);
+    const { schedule, armedAtMs } = await writeSchedule(body);
     await refreshScheduler();
-    // Hand back the arm stamp with the schedule: the card folds both into its
-    // local status, so arming auto-backup cannot lapse the shield on the same
-    // click for a run that has not come round yet — and so a save that armed
-    // nothing cannot un-lapse it either.
+    // Hand back the arm stamp the write itself produced: the card folds both
+    // into its local status, so arming auto-backup cannot lapse the shield on
+    // the same click for a run that has not come round yet — and a save that
+    // armed nothing cannot un-lapse it either.
     return NextResponse.json(
       {
         schedule,
         nextRunAtMs: computeNextRunMs(schedule, new Date()),
-        scheduleArmedAtMs: await readScheduleArmedAtMs(),
+        scheduleArmedAtMs: armedAtMs,
       },
       { headers: { "Cache-Control": "no-store" } },
     );
