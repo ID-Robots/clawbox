@@ -50,7 +50,7 @@ const BASE_STATUS = {
     retentionKeepLast: 10,
   },
   nextRunAtMs: 0,
-  scheduleChangedAtMs: 0,
+  scheduleArmedAtMs: 0,
 };
 
 let status: Record<string, unknown> = { ...BASE_STATUS };
@@ -157,7 +157,7 @@ describe("the ClawKeep shield's age term", () => {
       lastBackupAtMs: Date.now() - 3 * 24 * HOUR,
       lastHeartbeatAtMs: Date.now() - 3 * 24 * HOUR,
       lastHeartbeatStatus: "ok",
-      scheduleChangedAtMs: Date.now() - 60_000,
+      scheduleArmedAtMs: Date.now() - 60_000,
     };
     expect(await shieldHeadline()).toBe("You're Protected");
   });

@@ -44,11 +44,13 @@ export interface ProtectionInput {
   lastHeartbeatStatus?: string;
   schedule?: ProtectionSchedule | null;
   /**
-   * When the schedule was last written (`schedule.json`'s mtime — the file is
-   * landed by atomic rename, so its mtime is exactly that moment). Arming a
-   * schedule must not lapse a box retroactively; see {@link deriveProtection}.
+   * When the schedule was last *armed* — switched on, or tightened to a
+   * shorter cadence. Not "when schedule.json was last written": `writeSchedule`
+   * lands the file on every save, and the same file holds the retention count
+   * and the time of day, so a file stamp would restart this grace every time
+   * the owner nudged a setting. See {@link deriveProtection}.
    */
-  scheduleChangedAtMs?: number;
+  scheduleArmedAtMs?: number;
   /**
    * False when the device has no backup-encryption passphrase. Encryption is
    * mandatory, so the runner refuses every run (`EXIT_NEED_PASSPHRASE`) until
@@ -89,12 +91,45 @@ export const BACKUP_GRACE_MS = 12 * HOUR_MS;
 export const UNSCHEDULED_MAX_AGE_MS = 7 * DAY_MS;
 
 /**
- * If a "running" status has not been refreshed in this long, the run is dead
- * (systemd kill, OOM, power cut mid-backup) rather than slow — `runner.py`
- * persists `"running"` before it starts, and nothing overwrites it if the
- * process never returns. Real Jetson backups finish in 2-5 minutes.
+ * The hard cap on a single backup run. `runBackup()` in `src/lib/clawkeep.ts`
+ * spawns every backup on this box — manual and scheduled alike, since the
+ * standalone `clawkeep/systemd/` timers are deliberately not installed and the
+ * in-Next scheduler drives runs instead — and SIGKILLs the daemon at this
+ * mark. Declared here, where nothing is imported, so the kill timer and the
+ * UI's liveness rule below are the same number by construction.
  */
-export const STALE_RUNNING_MS = 30 * MINUTE_MS;
+export const BACKUP_RUN_CAP_MS = 60 * MINUTE_MS;
+
+/**
+ * How long a `"running"` status may stand before the run behind it is a corpse
+ * rather than a slow backup.
+ *
+ * This is not "silence since the last sign of life": `runner.py` stamps
+ * `last_heartbeat_at_ms` once, as the run starts, and writes it again only on a
+ * terminal status. What it *does* keep publishing while a run is in flight is
+ * `last_step_at_ms` (one stamp per phase) and `upload_bytes_done` (re-saved
+ * every 250 ms) — neither of which refreshes the heartbeat, and neither of
+ * which moves at all during the archive build. So the heartbeat measures how
+ * long the run has been going, and the honest bound on that is the cap the
+ * process that spawned it enforces: past {@link BACKUP_RUN_CAP_MS} the daemon
+ * has been killed, before it the run may well be alive.
+ *
+ * It used to be 30 minutes, on the grounds that "real Jetson backups finish in
+ * 2-5 minutes". TASK-675 retired that: 10 GB+ archives are the supported case,
+ * and a rule that calls a healthy multi-hour backup dead turns the shelf shield
+ * red over a box that is uploading normally.
+ *
+ * Two edges this does not close, neither of which touches the protection
+ * verdict itself — `lastBackupAtMs` stops moving either way, so the age term
+ * below still lapses the box on schedule:
+ *   - a SIGKILLed run leaves `"running"` in state.json for ever (nothing gets
+ *     to write a terminal status), so the pulse stays on for up to the cap;
+ *   - if the Next process restarts mid-run its kill timer dies with it, and a
+ *     daemon that then outlives the cap keeps working while the pulse stops.
+ * Making a failed run stop answering "ok" at all is TASK-672's job, not this
+ * module's — it judges the facts as they are published today.
+ */
+export const STALE_RUNNING_MS = BACKUP_RUN_CAP_MS;
 
 /** How old the last good backup may get before the box counts as lapsed. */
 export function expectedBackupWindowMs(schedule?: ProtectionSchedule | null): number {
@@ -105,7 +140,8 @@ export function expectedBackupWindowMs(schedule?: ProtectionSchedule | null): nu
 
 /**
  * Is a backup genuinely in flight? A stuck `"running"` must not be shown as
- * progress for ever, and must not hide the protection verdict behind it.
+ * progress for ever, and must not hide the protection verdict behind it — but
+ * a slow one must not be declared dead either. See {@link STALE_RUNNING_MS}.
  */
 export function isBackupRunning(
   status: { lastHeartbeatStatus?: string; lastHeartbeatAtMs?: number } | null | undefined,
@@ -126,32 +162,56 @@ export function isBackupRunning(
  * changes must still age.
  */
 export function deriveProtection(status: ProtectionInput, nowMs: number): Protection {
-  // An explicit failure outranks the clock: the daemon ran, and said so.
-  if (status.lastHeartbeatStatus === "error") return { state: "lapsed", reason: "error" };
-
   const everRan = status.lastBackupAtMs > 0;
   // A refusal is not a slow run — waiting out the window would report green
   // over a box on which nothing can succeed. `EXIT_NEED_PASSPHRASE` (9) stamps
   // "needs-passphrase"; `encryptionConfigured === false` says the same thing
   // before the runner has even been asked.
-  if ((status.lastHeartbeatStatus === "needs-passphrase" || status.encryptionConfigured === false)
-    && everRan) {
+  //
+  // This outranks a plain "error" because the runner publishes
+  // `"needs-passphrase" if ok else "error"` — a box with no passphrase whose
+  // heartbeat could not reach the portal lands on "error", and "one retry and
+  // we'll lock it back down" is the wrong remedy for a box that has nothing to
+  // retry with.
+  if (everRan
+    && (status.lastHeartbeatStatus === "needs-passphrase"
+      || status.encryptionConfigured === false)) {
     return { state: "lapsed", reason: "blocked" };
   }
+  // An explicit failure outranks the clock: the daemon ran, and said so.
+  if (status.lastHeartbeatStatus === "error") return { state: "lapsed", reason: "error" };
   // Never ran one — a fresh install is "not set up yet", not "lapsed".
   if (!everRan) return { state: "unprotected", reason: "never" };
 
-  // Age from whichever is later: the last good backup, or the moment the
-  // schedule changed. Arming auto-backup shrinks the window (7 days → 36 h),
-  // and applying that retroactively would lapse a box on the same click for a
-  // run that is not due yet — blaming a scheduled run that has never run.
-  // Only an armed schedule gets the grace; with auto-backup off there is no
-  // run to wait for.
-  const anchor = status.schedule?.enabled
-    ? Math.max(status.lastBackupAtMs, status.scheduleChangedAtMs ?? 0)
-    : status.lastBackupAtMs;
-  // A backup dated ahead of the clock is skew, not staleness: the subtraction
-  // goes negative and the box stays protected.
+  // Arming auto-backup, or tightening its cadence, shrinks the tolerated age
+  // (7 days to 36 h). Applying that retroactively would lapse a box on the
+  // same click for a run that is not due yet, so while the new window runs its
+  // first course the age is measured from the arm rather than from the backup.
+  //
+  // Two limits stop that grace becoming a false success:
+  //   - the stamp moves only when a schedule is switched on or tightened
+  //     (`writeSchedule`), never on a plain re-save. Keyed on the file being
+  //     written, nudging the backup time or the retention count would hand a
+  //     box whose backups died ten days ago a fresh 36 h of green — on the
+  //     very card the lapsed copy sends the owner to;
+  //   - and it is ignored once the last backup is older than the loosest
+  //     window any box gets, so toggling auto-backup off and on again cannot
+  //     vouch for a snapshot no window would forgive.
+  //
+  // The stamp is also clamped to `now`: it comes off the box's clock and is
+  // judged against the reader's, these boxes have no battery-backed RTC, and
+  // an anchor left in the future would hold `now - anchor` at or below zero on
+  // every read — green for as long as the skew lasted, renewed each time it
+  // was drawn. Clamped, the skew buys at most what the ceiling above allows.
+  const armedAtMs = Math.min(status.scheduleArmedAtMs ?? 0, nowMs);
+  const armGrace = status.schedule?.enabled
+    && armedAtMs > status.lastBackupAtMs
+    && nowMs - status.lastBackupAtMs <= UNSCHEDULED_MAX_AGE_MS
+    ? armedAtMs
+    : 0;
+  const anchor = Math.max(status.lastBackupAtMs, armGrace);
+  // A *backup* dated ahead of the clock is the harmless kind of skew: the
+  // snapshot exists, so the subtraction goes negative and the box stays green.
   if (nowMs - anchor > expectedBackupWindowMs(status.schedule)) {
     return { state: "lapsed", reason: "stale" };
   }

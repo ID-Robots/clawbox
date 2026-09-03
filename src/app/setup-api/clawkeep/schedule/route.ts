@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { computeNextRunMs, readSchedule, readScheduleChangedAtMs, writeSchedule } from "@/lib/clawkeep";
+import { computeNextRunMs, readSchedule, readScheduleArmedAtMs, writeSchedule } from "@/lib/clawkeep";
 import { refresh as refreshScheduler } from "@/lib/clawkeep-scheduler";
 
 export const dynamic = "force-dynamic";
@@ -12,7 +12,7 @@ export async function GET() {
       {
         schedule,
         nextRunAtMs: computeNextRunMs(schedule, new Date()),
-        scheduleChangedAtMs: await readScheduleChangedAtMs(),
+        scheduleArmedAtMs: await readScheduleArmedAtMs(),
       },
       { headers: { "Cache-Control": "no-store" } },
     );
@@ -29,14 +29,15 @@ export async function PUT(request: NextRequest) {
   try {
     const schedule = await writeSchedule(body);
     await refreshScheduler();
-    // Hand back the new change stamp with the schedule: the card folds both
-    // into its local status, so arming auto-backup cannot lapse the shield on
-    // the same click for a run that has not come round yet.
+    // Hand back the arm stamp with the schedule: the card folds both into its
+    // local status, so arming auto-backup cannot lapse the shield on the same
+    // click for a run that has not come round yet — and so a save that armed
+    // nothing cannot un-lapse it either.
     return NextResponse.json(
       {
         schedule,
         nextRunAtMs: computeNextRunMs(schedule, new Date()),
-        scheduleChangedAtMs: await readScheduleChangedAtMs(),
+        scheduleArmedAtMs: await readScheduleArmedAtMs(),
       },
       { headers: { "Cache-Control": "no-store" } },
     );

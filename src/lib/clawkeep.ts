@@ -23,6 +23,7 @@ import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
+import { BACKUP_RUN_CAP_MS, expectedBackupWindowMs } from "@/lib/clawkeep-protection";
 import { findOpenclawBin } from "@/lib/openclaw-config";
 import { getEdition } from "@/lib/harness";
 import { backupSourceFor } from "@/lib/harness/backup-source";
@@ -153,10 +154,12 @@ export interface ClawKeepStatus {
   schedule: ClawKeepSchedule;
   /** Wall-clock ms of the next scheduled run, or 0 when disabled. */
   nextRunAtMs: number;
-  /** When the schedule was last saved (`schedule.json` mtime), or 0. Read by
-   * the protection shield so arming a schedule does not lapse a box for a run
-   * that has not come round yet. */
-  scheduleChangedAtMs: number;
+  /** When auto-backup was last armed — switched on, or tightened to a shorter
+   * cadence — or 0. Read by the protection shield so arming a schedule does not
+   * lapse a box for a run that has not come round yet. Deliberately NOT "when
+   * schedule.json was last saved": the same file holds the retention count and
+   * the time of day. */
+  scheduleArmedAtMs: number;
   /** True when the device-local passphrase file is present (and non-empty).
    * `paired && !encryptionConfigured` is the gate the UI watches to surface
    * the "Set encryption passphrase" CTA before the first backup. */
@@ -252,15 +255,28 @@ export async function readSchedule(): Promise<ClawKeepSchedule> {
 }
 
 /**
- * When the schedule was last changed, as unix ms — `schedule.json`'s mtime.
- * `writeSchedule` lands the file by atomic rename, so its mtime is exactly the
- * moment the owner last saved a schedule. 0 when it has never been written.
+ * When auto-backup was last *armed*, as unix ms; 0 if it never has been.
  *
  * The protection shield needs it: arming auto-backup shrinks the tolerated
  * backup age from a week to 36 h, and applying that retroactively would lapse
  * a box on the same click for a run that is not due yet.
+ *
+ * The stamp lives inside `schedule.json` rather than being its mtime, because
+ * an mtime answers "when was this file written" and the question here is "when
+ * did the cadence change". The same file carries the retention count and the
+ * time of day, so on the mtime a box whose backups died ten days ago would go
+ * green the moment its owner nudged either — and a `cp -a` or an image restore
+ * of `~/.clawkeep` would do it too. Files written before the stamp existed
+ * fall back to the mtime, which is what they were judged on anyway.
  */
-export async function readScheduleChangedAtMs(): Promise<number> {
+export async function readScheduleArmedAtMs(): Promise<number> {
+  try {
+    const raw = JSON.parse(await fs.readFile(SCHEDULE_PATH, "utf8")) as { armedAtMs?: unknown };
+    const stamp = Number(raw?.armedAtMs);
+    if (Number.isFinite(stamp) && stamp > 0) return Math.round(stamp);
+  } catch {
+    // Unreadable or not JSON — fall through to the mtime.
+  }
   try {
     return Math.round((await fs.stat(SCHEDULE_PATH)).mtimeMs);
   } catch {
@@ -268,11 +284,31 @@ export async function readScheduleChangedAtMs(): Promise<number> {
   }
 }
 
+/**
+ * Does this save arm the schedule, i.e. start a window that was not running
+ * before? Switching auto-backup on does; so does tightening the cadence, which
+ * shrinks the tolerated age and would otherwise lapse the box on the click.
+ * Loosening it cannot lapse a box the tighter cadence already allowed, and a
+ * plain re-save — retention, time of day, weekday — changes no window at all.
+ */
+function armsTheSchedule(prev: ClawKeepSchedule, next: ClawKeepSchedule): boolean {
+  if (!next.enabled) return false;
+  if (!prev.enabled) return true;
+  return expectedBackupWindowMs(next) < expectedBackupWindowMs(prev);
+}
+
 export async function writeSchedule(next: ClawKeepSchedule): Promise<ClawKeepSchedule> {
   await ensureDataDir();
   const sanitised = sanitiseSchedule(next);
+  const prev = await readSchedule();
+  const armedAtMs = armsTheSchedule(prev, sanitised)
+    ? Date.now()
+    : await readScheduleArmedAtMs();
   const tmp = `${SCHEDULE_PATH}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(sanitised, null, 2), { mode: 0o600 });
+  // `armedAtMs` rides alongside the schedule rather than in it: it is not a
+  // setting the owner edits, and `sanitiseSchedule` drops it on the way back
+  // out so `ClawKeepSchedule` stays exactly what the PUT body may contain.
+  await fs.writeFile(tmp, JSON.stringify({ ...sanitised, armedAtMs }, null, 2), { mode: 0o600 });
   await fs.rename(tmp, SCHEDULE_PATH);
   return sanitised;
 }
@@ -720,7 +756,7 @@ export async function clearPassphrase(): Promise<{ removed: boolean }> {
 
 export async function getStatus(): Promise<ClawKeepStatus> {
   await ensureDataDir();
-  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, schedule, scheduleChangedAtMs, encryptionConfigured] = await Promise.all([
+  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, schedule, scheduleArmedAtMs, encryptionConfigured] = await Promise.all([
     readToken(),
     readConfigToml(),
     readStateFile(),
@@ -728,7 +764,7 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     getDaemonBin(),
     isRestoring(),
     readSchedule(),
-    readScheduleChangedAtMs(),
+    readScheduleArmedAtMs(),
     isEncryptionConfigured(),
   ]);
 
@@ -776,7 +812,7 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     restoring,
     schedule,
     nextRunAtMs: computeNextRunMs(schedule, new Date()),
-    scheduleChangedAtMs,
+    scheduleArmedAtMs,
     encryptionConfigured,
   };
 }
@@ -901,8 +937,10 @@ export class RestoreNeedsPassphraseError extends ClawKeepError {
 
 const RESTORE_TIMEOUT_MS = 30 * 60 * 1000; // hard cap matches openclaw verify + multipart download
 // Generous cap for a full backup (openclaw backup create + multipart upload).
-// A hung clawkeepd must not hold a Next.js worker open forever.
-const BACKUP_TIMEOUT_MS = 60 * 60 * 1000;
+// A hung clawkeepd must not hold a Next.js worker open forever. Shared with
+// the UI's "is this `running` heartbeat still alive" rule, which is only
+// honest if it is the same number as the kill timer below.
+const BACKUP_TIMEOUT_MS = BACKUP_RUN_CAP_MS;
 
 function spawnCliJson<T>(
   bin: string,

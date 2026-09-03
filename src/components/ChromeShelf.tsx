@@ -2,6 +2,23 @@
 
 import { ReactNode, useState, useEffect, useRef, useCallback } from "react";
 import { useT } from "@/lib/i18n";
+import type { ProtectionReason, ProtectionState } from "@/lib/clawkeep-protection";
+
+/**
+ * What the shield says out loud for each way a box can be unprotected. The
+ * amber "has drifted" shield and the red "never protected" one used to share
+ * one sentence — "ClawKeep backup overdue" — so the distinction between them
+ * reached only people who can see the difference between amber and red
+ * (WCAG 2.2 SC 1.4.1). "Overdue" was also wrong for a run that ran and failed,
+ * for one refusing to start, and for a backup that was never scheduled.
+ */
+const AT_RISK_TITLE_KEY: Record<ProtectionReason, string> = {
+  ok: "shelf.openClawKeep",
+  stale: "shelf.clawkeepStale",
+  error: "shelf.clawkeepFailed",
+  blocked: "shelf.clawkeepBlocked",
+  never: "shelf.clawkeepNeverBackedUp",
+};
 
 interface ShelfApp {
   id: string;
@@ -21,7 +38,16 @@ interface ChromeShelfProps {
   onLauncherClick: () => void;
   onTrayClick: () => void;
   onClawKeepShieldClick?: () => void;
-  clawkeepStatus?: { stale: boolean; lapsed?: boolean; unconfigured?: boolean; busy: boolean; restoring: boolean };
+  clawkeepStatus?: {
+    /** The shared protection verdict (see `deriveProtection`), or null while it
+     *  is not yet known — on a box that is not paired, or before the first
+     *  status arrives. */
+    state?: ProtectionState | null;
+    reason?: ProtectionReason | null;
+    unconfigured?: boolean;
+    busy: boolean;
+    restoring: boolean;
+  };
   onPinApp?: (id: string) => void;
   onUnpinApp?: (id: string) => void;
   onCloseApp?: (id: string) => void;
@@ -40,7 +66,7 @@ export default function ChromeShelf({
   onLauncherClick,
   onTrayClick,
   onClawKeepShieldClick,
-  clawkeepStatus = { stale: false, lapsed: false, unconfigured: false, busy: false, restoring: false },
+  clawkeepStatus = { state: null, reason: null, unconfigured: false, busy: false, restoring: false },
   onPinApp,
   onUnpinApp,
   onCloseApp,
@@ -116,28 +142,29 @@ export default function ChromeShelf({
   // > never-protected (red) > ok.
   // Restore is the rarer, longer, more user-blocking operation, so it wins
   // even if a backup heartbeat happens to be in flight at the same time.
-  const stale = clawAiAuthenticated && clawkeepStatus.stale;
+  const atRisk = clawAiAuthenticated
+    && !!clawkeepStatus.state && clawkeepStatus.state !== "protected";
   // Never-paired is not "overdue": nothing is late on a box that has never
   // been set up. It gets its own invitation and a calm colour instead of the
   // red alert a genuinely missed backup earns.
-  const needsSetup = clawAiAuthenticated && !clawkeepStatus.stale && !!clawkeepStatus.unconfigured;
+  const needsSetup = clawAiAuthenticated && !atRisk && !!clawkeepStatus.unconfigured;
   const baseTitle = !clawAiAuthenticated
     ? t("shelf.connectClawBoxAI")
-    : stale
-    ? t("shelf.clawkeepStale")
+    : atRisk
+    ? t(AT_RISK_TITLE_KEY[clawkeepStatus.reason ?? "stale"])
     : needsSetup
     ? t("shelf.clawkeepNotSetUp")
     : t("shelf.openClawKeep");
   // A box that WAS protected and has drifted is not the same as one that
   // never was — the card says so in amber, and the shelf has to agree or the
   // distinction only exists on the screen the owner has not opened.
-  const lapsed = clawAiAuthenticated && !!clawkeepStatus.lapsed;
+  const lapsed = atRisk && clawkeepStatus.state === "lapsed";
   const mode: "restoring" | "busy" | "lapsed" | "alert" | "setup" | "ok" =
     clawkeepStatus.restoring ? "restoring"
     : clawkeepStatus.busy ? "busy"
     : !clawAiAuthenticated ? "alert"
     : lapsed ? "lapsed"
-    : clawkeepStatus.stale ? "alert"
+    : atRisk ? "alert"
     : needsSetup ? "setup"
     : "ok";
   // Tailwind JIT can only see *literal* class strings, so each variant
@@ -155,9 +182,9 @@ export default function ChromeShelf({
       pulseDelayed: "bg-emerald-400/15",
       tooltip: t("shelf.clawkeepBusy"),
     },
-    // Was protected, has drifted: the backup is overdue whichever cause put it
-    // there (a failed run, a run that never happened, a refused one), so the
-    // "overdue" title still reads true and only the colour changes.
+    // Was protected, has drifted. The colour is the only thing this entry
+    // changes: `baseTitle` already names the cause, so a screen reader is told
+    // amber from red rather than being left to see it.
     lapsed: {
       icon: "text-amber-400 clawkeep-shelf-glow-orange",
       pulse: "bg-amber-400/25",

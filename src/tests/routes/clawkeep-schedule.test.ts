@@ -4,6 +4,8 @@ import path from "path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
+import { deriveProtection } from "@/lib/clawkeep-protection";
+
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-schedule-route-${process.pid}-${Date.now()}`);
 const DATA_DIR = path.join(TEST_ROOT, "clawkeep");
 
@@ -52,6 +54,27 @@ function jsonReq(body: unknown): NextRequest {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const SCHEDULE_FILE = path.join(DATA_DIR, "schedule.json");
+const ARMED_DAILY = {
+  enabled: true,
+  frequency: "daily",
+  timeOfDay: "02:00",
+  weekday: 0,
+  retentionKeepLast: 10,
+};
+
+/**
+ * Make the persisted schedule look like one armed at `atMs`. Both provenances
+ * are backdated — the file's mtime and the stamp the file carries — so the
+ * fixture is a fair starting point whichever of the two the shield reads.
+ */
+async function backdateArm(atMs: number): Promise<void> {
+  const raw = JSON.parse(await fs.readFile(SCHEDULE_FILE, "utf8"));
+  await fs.writeFile(SCHEDULE_FILE, JSON.stringify({ ...raw, armedAtMs: atMs }, null, 2));
+  await fs.utimes(SCHEDULE_FILE, new Date(atMs), new Date(atMs));
 }
 
 describe("/setup-api/clawkeep/schedule", () => {
@@ -131,6 +154,99 @@ describe("/setup-api/clawkeep/schedule", () => {
       }));
       const body = await res.json();
       expect(body.schedule).toEqual(clawkeep.DEFAULT_SCHEDULE);
+    });
+  });
+
+  // The shield ages a box out against the schedule this route publishes, so
+  // what the route hands back about *when the cadence was armed* is part of
+  // the protection verdict, not decoration.
+  describe("the arm stamp the protection shield reads", () => {
+    // A box whose backups died ten days ago. EXIT_AUTH_REVOKED returns before
+    // any portal exchange, so the last heartbeat still reads "ok" and the age
+    // of the last good backup is the only thing that gives it away.
+    const deadBox = { lastHeartbeatStatus: "ok", encryptionConfigured: true };
+
+    it("does not regrant the window when an armed schedule is merely re-saved", async () => {
+      const now = Date.now();
+      const lastBackupAtMs = now - 10 * DAY_MS;
+
+      await PUT(jsonReq(ARMED_DAILY));
+      await backdateArm(now - 60 * DAY_MS);
+
+      const before = await (await GET()).json();
+      expect(deriveProtection({ ...before, ...deadBox, lastBackupAtMs }, now))
+        .toEqual({ state: "lapsed", reason: "stale" });
+
+      // The lapsed card tells the owner the scheduled run is failing, so they
+      // open the schedule card and change the one thing they can — keep-last
+      // from 10 to 7. Same switch, same cadence, same time of day.
+      const saved = await (await PUT(jsonReq({ ...ARMED_DAILY, retentionKeepLast: 7 }))).json();
+      expect(saved.schedule.retentionKeepLast).toBe(7);
+
+      // Nothing about the box has changed, so the shield must not turn green —
+      // not on the response the card folds in, and not on the next poll.
+      expect(deriveProtection({ ...saved, ...deadBox, lastBackupAtMs }, now))
+        .toEqual({ state: "lapsed", reason: "stale" });
+      const after = await (await GET()).json();
+      expect(deriveProtection({ ...after, ...deadBox, lastBackupAtMs }, now))
+        .toEqual({ state: "lapsed", reason: "stale" });
+    });
+
+    it("does not regrant the window for a time-of-day nudge either", async () => {
+      const now = Date.now();
+      const lastBackupAtMs = now - 10 * DAY_MS;
+
+      await PUT(jsonReq(ARMED_DAILY));
+      await backdateArm(now - 60 * DAY_MS);
+      const saved = await (await PUT(jsonReq({ ...ARMED_DAILY, timeOfDay: "03:00" }))).json();
+
+      expect(saved.schedule.timeOfDay).toBe("03:00");
+      expect(deriveProtection({ ...saved, ...deadBox, lastBackupAtMs }, now))
+        .toEqual({ state: "lapsed", reason: "stale" });
+    });
+
+    it("still gives a schedule the owner has just armed its own window", async () => {
+      const now = Date.now();
+      // Green under the week-long manual window. Arming Daily shrinks that to
+      // 36 h; applying it retroactively would lapse the box on the click for a
+      // run that is not due yet.
+      const lastBackupAtMs = now - 3 * DAY_MS;
+
+      await PUT(jsonReq({ ...ARMED_DAILY, enabled: false }));
+      await backdateArm(now - 60 * DAY_MS);
+      const armed = await (await PUT(jsonReq(ARMED_DAILY))).json();
+
+      expect(deriveProtection({ ...armed, ...deadBox, lastBackupAtMs }, now))
+        .toEqual({ state: "protected", reason: "ok" });
+    });
+
+    it("re-arms when the cadence tightens from weekly to daily", async () => {
+      const now = Date.now();
+      const lastBackupAtMs = now - 3 * DAY_MS;
+
+      await PUT(jsonReq({ ...ARMED_DAILY, frequency: "weekly" }));
+      await backdateArm(now - 60 * DAY_MS);
+      const tightened = await (await PUT(jsonReq(ARMED_DAILY))).json();
+
+      // Weekly held it green on age alone; Daily would not, so the tightening
+      // gets its own window rather than lapsing the box on the click.
+      expect(deriveProtection({ ...tightened, ...deadBox, lastBackupAtMs }, now))
+        .toEqual({ state: "protected", reason: "ok" });
+    });
+
+    it("does not re-arm when the cadence loosens from daily to weekly", async () => {
+      const now = Date.now();
+      const lastBackupAtMs = now - 10 * DAY_MS;
+
+      await PUT(jsonReq(ARMED_DAILY));
+      await backdateArm(now - 60 * DAY_MS);
+      const loosened = await (await PUT(jsonReq({ ...ARMED_DAILY, frequency: "weekly" }))).json();
+
+      // Ten days is past the weekly window too, and loosening a cadence cannot
+      // lapse a box that the tighter one already allowed — so there is nothing
+      // to forgive and nothing to re-anchor.
+      expect(deriveProtection({ ...loosened, ...deadBox, lastBackupAtMs }, now))
+        .toEqual({ state: "lapsed", reason: "stale" });
     });
   });
 });

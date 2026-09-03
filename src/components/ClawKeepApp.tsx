@@ -67,9 +67,9 @@ interface ClawKeepStatus {
   backupContainsCredentials?: boolean;
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
-  /** When the schedule was last saved. Optional so a status from an older
-   *  server still renders; see deriveProtection() for what it guards. */
-  scheduleChangedAtMs?: number;
+  /** When auto-backup was last armed or tightened. Optional so a status from
+   *  an older server still renders; see deriveProtection() for what it guards. */
+  scheduleArmedAtMs?: number;
   /** True when the device has a stored backup-encryption passphrase. The
    * "Run a backup now" button is gated on this; without it the runner
    * refuses to run since unencrypted backups would leak to the operator. */
@@ -198,6 +198,19 @@ export default function ClawKeepApp() {
     onConfirm: () => void;
   } | null>(null);
   const pollIntervalRef = useRef<number | null>(null);
+  // One clock for every judgement this window draws — the protection verdict,
+  // the "how long ago" beside it, and whether a backup is still in flight.
+  // Sampled on a tick of its own rather than read during render: a box whose
+  // daemon is gone answers /setup-api/clawkeep with the same bytes for ever,
+  // and a refresh that throws leaves `status` untouched, so a verdict drawn
+  // only from new data would freeze. Seeded with the current time so a lapsed
+  // box never flashes green on first paint. A minute is finer than anything it
+  // decides (a 36 h window, a 1 h run cap) and coarse enough to cost nothing.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -225,6 +238,9 @@ export default function ClawKeepApp() {
   // `status` changes, so the period re-evaluates the moment a backup starts or
   // ends.
   useEffect(() => {
+    // Reads the clock directly rather than `nowMs`: this is an effect, not a
+    // render, and taking `nowMs` as a dependency would tear the poll down and
+    // re-arm it every minute.
     const intervalMs = isBackupRunning(status, Date.now()) ? 3000 : 10000;
     // Skip a tick if the previous refresh is still in flight, so a slow/hung
     // fetch can't stack concurrent requests on the Jetson.
@@ -585,10 +601,11 @@ export default function ClawKeepApp() {
                 // mid-run. The local `busy` flag is only authoritative right
                 // after a click, before the daemon has heartbeat-published its
                 // "running" state.
+                nowMs={nowMs}
                 busyKind={
                   busy === "restore"
                     ? "restore"
-                    : busy === "backup" || isBackupRunning(status, Date.now())
+                    : busy === "backup" || isBackupRunning(status, nowMs)
                     ? "backup"
                     : null
                 }
@@ -603,9 +620,12 @@ export default function ClawKeepApp() {
                       schedule: next.schedule,
                       nextRunAtMs: next.nextRunAtMs,
                       // Without this the shield would judge the new, tighter
-                      // window against the OLD change stamp and lapse the box
-                      // on the same click.
-                      scheduleChangedAtMs: next.scheduleChangedAtMs ?? Date.now(),
+                      // window against the OLD arm stamp and lapse the box on
+                      // the same click. It comes from the route rather than
+                      // this clock: the browser's and the box's are not the
+                      // same clock, and a save that armed nothing returns the
+                      // OLD stamp — which is the point.
+                      scheduleArmedAtMs: next.scheduleArmedAtMs,
                     }
                     : prev);
                 }}
@@ -689,6 +709,14 @@ export default function ClawKeepApp() {
   );
 }
 
+/** What PUT /setup-api/clawkeep/schedule answers with. `scheduleArmedAtMs` is
+ *  load-bearing — the shield reads it — so it is declared, not assumed. */
+interface ScheduleSaveResponse {
+  schedule: ClawKeepSchedule;
+  nextRunAtMs: number;
+  scheduleArmedAtMs: number;
+}
+
 function ScheduleCard({
   schedule,
   nextRunAtMs,
@@ -697,7 +725,7 @@ function ScheduleCard({
 }: {
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
-  onSaved: (next: { schedule: ClawKeepSchedule; nextRunAtMs: number; scheduleChangedAtMs?: number }) => void;
+  onSaved: (next: ScheduleSaveResponse) => void;
   onError: (msg: string) => void;
 }) {
   const { t } = useT();
@@ -718,7 +746,7 @@ function ScheduleCard({
     const payload = override ?? draft;
     setSaving(true);
     try {
-      const body = await jsonOrError<{ schedule: ClawKeepSchedule; nextRunAtMs: number }>(
+      const body = await jsonOrError<ScheduleSaveResponse>(
         await fetch("/setup-api/clawkeep/schedule", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -1216,29 +1244,22 @@ function DashboardCard({
   onOpenRestore,
   onResetStuck,
   busyKind,
+  nowMs,
 }: {
   status: ClawKeepStatus;
   onBackup: (label?: string) => void;
   onOpenRestore: () => void;
   onResetStuck: () => void;
   busyKind: "backup" | "restore" | null;
+  /** The window's shared clock — see ClawKeepApp. Passed in so the verdict and
+   *  the "when" printed beside it cannot be drawn from two different reads. */
+  nowMs: number;
 }) {
   const { t } = useT();
   const agent = agentLabelFor(status.agent);
   // Optional "Name this backup" field for the manual run — passed to the
   // daemon as the snapshot label. Cleared after we hand it off.
   const [backupName, setBackupName] = useState("");
-  // The age term has to keep ageing even when nothing else changes. A box
-  // whose daemon is gone answers /setup-api/clawkeep with the same bytes
-  // forever, and a refresh that throws leaves `status` untouched — deriving
-  // the shield only from a new status would hold "protected" for as long as
-  // the window lasts. Sample the clock on a tick of its own instead, seeded
-  // with the current time so a lapsed box never flashes green on first paint.
-  const [protectionNowMs, setProtectionNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    const id = window.setInterval(() => setProtectionNowMs(Date.now()), 60_000);
-    return () => window.clearInterval(id);
-  }, []);
   if (busyKind) {
     const stepKey = busyKind === "backup" ? STEP_LABEL_KEYS[status.currentStep] : undefined;
     return (
@@ -1259,7 +1280,7 @@ function DashboardCard({
   // guaranteed to be empty.
   const canRestore = !disabled && status.snapshotCount > 0;
 
-  const protection = deriveProtection(status, protectionNowMs);
+  const protection = deriveProtection(status, nowMs);
   const copy = COPY_BY_STATE[protection.state];
   // A backup that simply aged out needs its own sentence: the generic "your
   // last backup didn't complete" is wrong when the last one completed fine
@@ -1296,12 +1317,12 @@ function DashboardCard({
 
       <h2 className="relative text-lg font-semibold text-[var(--text-primary)] mt-4">{t(copy.headlineKey)}</h2>
       <p className="relative mt-1 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
-        {t(subheadKey, { agent, when: timeAgo(status.lastBackupAtMs, t, protectionNowMs) })}
+        {t(subheadKey, { agent, when: timeAgo(status.lastBackupAtMs, t, nowMs) })}
       </p>
 
       {/* Stats strip — compact, equal-width, no card chrome to keep the eye on the shield */}
       <div className="relative mt-5 grid grid-cols-3 gap-6 w-full max-w-md text-center">
-        <Stat label={t("clawkeep.stat.lastBackup")} value={timeAgo(status.lastBackupAtMs, t, protectionNowMs)} />
+        <Stat label={t("clawkeep.stat.lastBackup")} value={timeAgo(status.lastBackupAtMs, t, nowMs)} />
         <Stat label={t("clawkeep.stat.cloudUsage")} value={formatBytes(status.cloudBytes)} />
         <Stat label={t("clawkeep.stat.snapshots")} value={status.snapshotCount.toString()} />
       </div>

@@ -6,7 +6,8 @@ import * as kv from "@/lib/client-kv";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
-import { deriveProtection, isBackupRunning } from "@/lib/clawkeep-protection";
+import { deriveProtection, isBackupRunning,
+  type ProtectionReason, type ProtectionState } from "@/lib/clawkeep-protection";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT,
   NEW_APP_EVENT, notifyCodingRunStarted } from "@/lib/ui-events";
@@ -543,8 +544,11 @@ function ChromeDesktopInner() {
       .catch(() => { prefsLoaded.current = true; });
   }, []);
 
-  const [clawkeepStale, setClawkeepStale] = useState(false);
-  const [clawkeepLapsed, setClawkeepLapsed] = useState(false);
+  // The shared protection verdict, kept as two primitives rather than one
+  // object so an unchanged verdict does not re-render the whole desktop on
+  // every 5 s poll. Null until the first answer arrives.
+  const [clawkeepState, setClawkeepState] = useState<ProtectionState | null>(null);
+  const [clawkeepReason, setClawkeepReason] = useState<ProtectionReason | null>(null);
   const [clawkeepUnconfigured, setClawkeepUnconfigured] = useState(false);
   const [clawkeepBusy, setClawkeepBusy] = useState(false);
   const [clawkeepRestoring, setClawkeepRestoring] = useState(false);
@@ -565,7 +569,7 @@ function ChromeDesktopInner() {
           lastHeartbeatAtMs?: number;
           lastHeartbeatStatus?: string;
           schedule?: { enabled: boolean; frequency: "daily" | "weekly" };
-          scheduleChangedAtMs?: number;
+          scheduleArmedAtMs?: number;
           encryptionConfigured?: boolean;
           restoring?: boolean;
         };
@@ -585,16 +589,20 @@ function ChromeDesktopInner() {
           lastHeartbeatAtMs: data.lastHeartbeatAtMs,
           lastHeartbeatStatus: data.lastHeartbeatStatus,
           schedule: data.schedule,
-          scheduleChangedAtMs: data.scheduleChangedAtMs,
+          scheduleArmedAtMs: data.scheduleArmedAtMs,
           encryptionConfigured: data.encryptionConfigured,
         }, now);
         setClawkeepUnconfigured(unconfigured);
-        setClawkeepStale(!unconfigured && protection.state !== "protected");
-        // Amber on the shelf too, so a box that has drifted and one that was
-        // never protected are as distinguishable there as on the card.
-        setClawkeepLapsed(!unconfigured && protection.state === "lapsed");
-        // A "running" heartbeat nothing has refreshed for half an hour is a
-        // run that died mid-backup, not progress — the same rule the card
+        // The whole verdict travels, not a pair of booleans: the shelf paints
+        // a drifted box amber and a never-protected one red, and it has to say
+        // WHICH out loud — colour alone is not an announcement. A box that is
+        // not paired publishes no verdict at all: `paired: false` is the opt-in
+        // that has not happened, and it earns the calm setup shield rather than
+        // an alarm about a backup nobody asked for (TASK-510).
+        setClawkeepState(unconfigured ? null : protection.state);
+        setClawkeepReason(unconfigured ? null : protection.reason);
+        // A "running" heartbeat older than the cap `runBackup()` enforces is
+        // a run that has been SIGKILLed, not progress — the same rule the card
         // uses. Without it the shelf pulses green for ever and the protection
         // verdict can never reach it.
         setClawkeepBusy(isBackupRunning(data, now));
@@ -2611,7 +2619,7 @@ function ChromeDesktopInner() {
           openSettingsSection("system");
         }}
         onClawKeepShieldClick={openClawKeepOrAiProvider}
-        clawkeepStatus={{ stale: clawkeepStale, lapsed: clawkeepLapsed, unconfigured: clawkeepUnconfigured, busy: clawkeepBusy, restoring: clawkeepRestoring }}
+        clawkeepStatus={{ state: clawkeepState, reason: clawkeepReason, unconfigured: clawkeepUnconfigured, busy: clawkeepBusy, restoring: clawkeepRestoring }}
         onPowerClick={() => {
           setLauncherOpen(false);
           setTrayOpen((prev) => !prev);

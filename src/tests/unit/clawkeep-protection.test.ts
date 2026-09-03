@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BACKUP_GRACE_MS,
+  BACKUP_RUN_CAP_MS,
   STALE_RUNNING_MS,
   UNSCHEDULED_MAX_AGE_MS,
   deriveProtection,
@@ -124,20 +125,100 @@ describe("deriveProtection", () => {
       lastBackupAtMs: NOW - 3 * DAY,
       lastHeartbeatStatus: "ok",
       schedule: DAILY,
-      scheduleChangedAtMs: NOW - MINUTE,
+      scheduleArmedAtMs: NOW - MINUTE,
     };
     expect(deriveProtection(armedJustNow, NOW).state).toBe("protected");
     // …and it does lapse once that schedule has genuinely had its window.
-    expect(deriveProtection({ ...armedJustNow, scheduleChangedAtMs: NOW - 40 * HOUR }, NOW).state)
+    expect(deriveProtection({ ...armedJustNow, scheduleArmedAtMs: NOW - 40 * HOUR }, NOW).state)
       .toBe("lapsed");
   });
 
   it("gives no grace for a schedule change while auto-backup is off", () => {
     // Nothing is waiting to run, so a save must not extend a stale box's life.
     expect(deriveProtection(
-      { lastBackupAtMs: NOW - 8 * DAY, lastHeartbeatStatus: "ok", schedule: OFF, scheduleChangedAtMs: NOW - MINUTE },
+      { lastBackupAtMs: NOW - 8 * DAY, lastHeartbeatStatus: "ok", schedule: OFF, scheduleArmedAtMs: NOW - MINUTE },
       NOW,
     ).state).toBe("lapsed");
+  });
+
+
+  it("gives the grace to the arm, never to a re-save", () => {
+    // `scheduleArmedAtMs` moves only when a schedule is switched on or
+    // tightened, so a box armed two months ago whose backups died ten days ago
+    // carries a stamp older than its own last backup and gets no grace at all
+    // — however many times its owner has since nudged the retention count or
+    // the backup time on the schedule card the lapsed copy sends them to.
+    expect(deriveProtection(
+      {
+        lastBackupAtMs: NOW - 10 * DAY,
+        lastHeartbeatStatus: "ok",
+        schedule: DAILY,
+        scheduleArmedAtMs: NOW - 60 * DAY,
+      },
+      NOW,
+    )).toEqual({ state: "lapsed", reason: "stale" });
+  });
+
+  it("does not let arming auto-backup rescue a box no window would forgive", () => {
+    // Toggling the switch off and on IS an arm, so the stamp genuinely moves.
+    // It still cannot vouch for a snapshot older than the loosest window any
+    // box gets — otherwise two clicks would buy 36 h of green on a box that
+    // cannot back up at all.
+    const dead = {
+      lastBackupAtMs: NOW - 10 * DAY,
+      lastHeartbeatStatus: "ok",
+      schedule: DAILY,
+      scheduleArmedAtMs: NOW - MINUTE,
+    };
+    expect(deriveProtection(dead, NOW)).toEqual({ state: "lapsed", reason: "stale" });
+    // Inside that week the grace is real: the schedule has genuinely not had
+    // its first window yet.
+    expect(deriveProtection({ ...dead, lastBackupAtMs: NOW - 6 * DAY }, NOW))
+      .toEqual({ state: "protected", reason: "ok" });
+  });
+
+  it("does not let an arm stamp dated ahead of the clock hold a box green for ever", () => {
+    // A Jetson whose RTC jumped forward before a save (no battery-backed clock,
+    // NTP only) writes a stamp a month ahead. Unclamped, the anchor never falls
+    // behind `now`, so the shield reads green until wall-clock catches up — and
+    // re-grants itself on every read.
+    const skewed = {
+      lastBackupAtMs: NOW - 3 * DAY,
+      lastHeartbeatStatus: "ok",
+      schedule: DAILY,
+      scheduleArmedAtMs: NOW + 30 * DAY,
+    };
+    expect(deriveProtection(skewed, NOW).state).toBe("protected");
+    // Clamped to now and still ceilinged by the week: the skew buys days, not
+    // the month it claims.
+    expect(deriveProtection(skewed, NOW + 5 * DAY))
+      .toEqual({ state: "lapsed", reason: "stale" });
+  });
+
+  it("tells a box with no passphrase to set one even when the heartbeat says 'error'", () => {
+    // runner.py publishes `"needs-passphrase" if ok else "error"`, so a run
+    // refused for want of a passphrase lands on "error" whenever the heartbeat
+    // could not reach the portal. "One retry and we'll lock it back down" is
+    // the wrong remedy for a box that has nothing to retry with.
+    expect(deriveProtection(
+      {
+        lastBackupAtMs: NOW - HOUR,
+        lastHeartbeatStatus: "error",
+        encryptionConfigured: false,
+        schedule: DAILY,
+      },
+      NOW,
+    )).toEqual({ state: "lapsed", reason: "blocked" });
+    // With a passphrase in place an error is still just an error.
+    expect(deriveProtection(
+      {
+        lastBackupAtMs: NOW - HOUR,
+        lastHeartbeatStatus: "error",
+        encryptionConfigured: true,
+        schedule: DAILY,
+      },
+      NOW,
+    )).toEqual({ state: "lapsed", reason: "error" });
   });
 
   it("does not lapse a box whose backup is dated ahead of the clock", () => {
@@ -156,7 +237,7 @@ describe("isBackupRunning", () => {
     expect(isBackupRunning(null, NOW)).toBe(false);
   });
 
-  it("stops believing a 'running' nothing has refreshed for half an hour", () => {
+  it("stops believing a 'running' older than the cap the run is spawned under", () => {
     // runner.py persists "running" before the archive starts. A power cut or
     // OOM-kill mid-backup leaves it in state.json for ever, and with
     // auto-backup off nothing overwrites it.
@@ -164,5 +245,20 @@ describe("isBackupRunning", () => {
       { lastHeartbeatStatus: "running", lastHeartbeatAtMs: NOW - STALE_RUNNING_MS - 1 },
       NOW,
     )).toBe(false);
+  });
+
+  it("still believes a backup that has been going for an hour of a large box", () => {
+    // The daemon stamps the heartbeat once, at run start, and TASK-675 made
+    // 10 GB+ archives the supported case. The old half-hour rule called those
+    // runs dead — dropping the shelf's progress pulse and, on a box whose first
+    // backup this is, turning the shield red while the upload was healthy.
+    expect(isBackupRunning(
+      { lastHeartbeatStatus: "running", lastHeartbeatAtMs: NOW - 45 * MINUTE },
+      NOW,
+    )).toBe(true);
+    // The bound is not a guess: `runBackup()` SIGKILLs the daemon at
+    // BACKUP_RUN_CAP_MS, so past it there is nothing left alive to pulse for.
+    expect(STALE_RUNNING_MS).toBe(BACKUP_RUN_CAP_MS);
+    expect(BACKUP_RUN_CAP_MS).toBe(60 * MINUTE);
   });
 });
