@@ -270,8 +270,13 @@ export async function readSchedule(): Promise<ClawKeepSchedule> {
  *
  * A file written before the stamp existed therefore answers 0, NOT its mtime:
  * falling back would carry exactly that defect onto every box that upgrades. 0
- * costs a box armed shortly before the update its remaining grace, which the
- * owner's next save restores; the mtime would cost a dead box's owner the alarm.
+ * costs a box armed shortly before the update its remaining grace; the mtime
+ * would cost a dead box's owner the alarm.
+ *
+ * 0 here means "no window is running", which is the safe answer for a reader.
+ * It does NOT mean "this box has never armed a schedule" — an enabled file
+ * without a stamp was armed, by definition, and {@link nextArmedAtMs} is where
+ * that distinction is made, because it is the only place a stamp is minted.
  */
 export async function readScheduleArmedAtMs(): Promise<number> {
   try {
@@ -283,6 +288,17 @@ export async function readScheduleArmedAtMs(): Promise<number> {
   }
   return 0;
 }
+
+/**
+ * The stamp given to a schedule that was armed before stamps existed. Any
+ * value above 0 answers "a window has been started on this box"; 1 ms past the
+ * epoch adds "too long ago to be worth anything", which is the honest reading
+ * of a file that was armed but does not say when.
+ *
+ * It is inert in the verdict: `deriveProtection` anchors on
+ * `Math.max(lastBackupAtMs, armedAtMs)`, and every real backup is newer.
+ */
+const LEGACY_ARM_STAMP_MS = 1;
 
 /**
  * Does this save start a window that was not running before? Switching
@@ -313,9 +329,12 @@ function armsTheSchedule(prev: ClawKeepSchedule, next: ClawKeepSchedule): boolea
  *     window to the no-schedule week, so a box that was amber under its nightly
  *     schedule reads green the moment the switch goes off; minting on the way
  *     back on would make that round trip permanent — two clicks, another 36 h,
- *     repeatable for ever. A box that has been armed before keeps its stamp;
- *   - tightening the cadence mints only for a box the PREVIOUS window still
- *     called protected. One already past it stays lapsed.
+ *     repeatable for ever. A box that has been armed before keeps its stamp,
+ *     and an enabled schedule with no stamp — every box in the field, the
+ *     moment it takes this build — HAS been armed before;
+ *   - and what it mints, first arm or tightened cadence alike, it mints only
+ *     for a box the PREVIOUS window still called protected. One already past
+ *     it stays lapsed.
  *
  * This is the one place those questions can be asked, because it is the only
  * place that knows the window the box was being judged against a moment ago.
@@ -323,15 +342,29 @@ function armsTheSchedule(prev: ClawKeepSchedule, next: ClawKeepSchedule): boolea
 async function nextArmedAtMs(
   prev: ClawKeepSchedule,
   next: ClawKeepSchedule,
-  prevArmedAtMs: number,
+  fileArmedAtMs: number,
 ): Promise<number> {
+  // "No stamp" is two different facts: no window is running (a box that has
+  // never armed one) and no window was recorded (a schedule.json written
+  // before the stamp existed). Only the first may be granted a fresh window,
+  // and every deployed box is the second the moment it updates — read as the
+  // first, the off→on toggle below hands a box whose backups are dead the very
+  // rescue this function exists to refuse. An enabled schedule is evidence of
+  // its own arming, so carry that rather than a claim the file cannot make.
+  const prevArmedAtMs = fileArmedAtMs === 0 && prev.enabled ? LEGACY_ARM_STAMP_MS : fileArmedAtMs;
   if (!armsTheSchedule(prev, next)) return prevArmedAtMs;
   const now = Date.now();
   const lastBackupAtMs = (await readStateFile()).last_backup_at_ms ?? 0;
   // Nothing has ever backed this box up: it reads "Not Protected" on its own
   // account and never reaches the age term, so there is no verdict to rescue.
   if (lastBackupAtMs <= 0) return now;
-  if (!prev.enabled) return prevArmedAtMs > 0 ? prevArmedAtMs : now;
+  // Switching back ON is not a new window for a box that has had one. The
+  // window it is leaving is the one OFF widened, so measuring the return trip
+  // against that would forgive precisely the box the widening had flattered.
+  if (!prev.enabled && prevArmedAtMs > 0) return prevArmedAtMs;
+  // A first arm is owed a window only where applying the new one retroactively
+  // would lapse a box the old one still called protected. Past that, arming is
+  // not evidence of anything and the box keeps the stamp it had.
   return now - lastBackupAtMs > expectedBackupWindowMs(prev) ? prevArmedAtMs : now;
 }
 

@@ -240,6 +240,34 @@ describe("/setup-api/clawkeep/schedule", () => {
         .toEqual({ state: "lapsed", reason: "stale" });
     });
 
+    it("does not un-lapse a dead box whose schedule.json predates the stamp", async () => {
+      const now = Date.now();
+      // The upgrade path, and the state EVERY deployed box is in the moment it
+      // takes this build: beta's `schedule.json`, auto-backup on, no
+      // `armedAtMs`. Five days without a backup on a nightly schedule is amber,
+      // and the lapsed copy sends the owner to the schedule card — where the
+      // first instinct is to flip the switch off and back on.
+      const lastBackupAtMs = now - 5 * DAY_MS;
+      await writeLastBackup(lastBackupAtMs);
+      await writeLegacySchedule(ARMED_DAILY);
+
+      const before = await (await GET()).json();
+      expect(deriveProtection({ ...before, ...deadBox, lastBackupAtMs }, now))
+        .toEqual({ state: "lapsed", reason: "stale" });
+
+      await PUT(jsonReq({ ...ARMED_DAILY, enabled: false }));
+      const rearmed = await (await PUT(jsonReq(ARMED_DAILY))).json();
+
+      // A missing stamp means "no window is running", not "this box has never
+      // had a schedule" — reading it as the latter hands the toggle the very
+      // rescue the stamp exists to refuse.
+      expect(deriveProtection({ ...rearmed, ...deadBox, lastBackupAtMs }, now))
+        .toEqual({ state: "lapsed", reason: "stale" });
+      const after = await (await GET()).json();
+      expect(deriveProtection({ ...after, ...deadBox, lastBackupAtMs }, now))
+        .toEqual({ state: "lapsed", reason: "stale" });
+    });
+
     it("does not un-lapse a dead box by tightening the cadence either", async () => {
       const now = Date.now();
       const lastBackupAtMs = now - 10 * DAY_MS;
@@ -267,6 +295,21 @@ describe("/setup-api/clawkeep/schedule", () => {
       expect(body.scheduleArmedAtMs).toBe(0);
       expect(deriveProtection({ ...body, ...deadBox, lastBackupAtMs }, now))
         .toEqual({ state: "lapsed", reason: "stale" });
+    });
+
+    it("gives no window to a first arm on a box the no-schedule week had lapsed", async () => {
+      const now = Date.now();
+      // Seven days and an hour, never scheduled: the window this box is leaving
+      // had already called it lapsed, and MAX_BACKUP_WINDOW_MS (7 d 12 h) is
+      // wide enough for a minted stamp to reach past it. Arming a cadence is a
+      // promise about future runs, not evidence about the last one.
+      const lastBackupAtMs = now - 7 * DAY_MS - 60 * 60 * 1000;
+      await writeLastBackup(lastBackupAtMs);
+
+      const armed = await (await PUT(jsonReq(ARMED_DAILY))).json();
+      expect(deriveProtection({ ...armed, ...deadBox, lastBackupAtMs }, now))
+        .toEqual({ state: "lapsed", reason: "stale" });
+      expect(armed.scheduleArmedAtMs).toBe(0);
     });
 
     it("still gives a schedule the owner has just armed its own window", async () => {
