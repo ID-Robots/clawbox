@@ -1,4 +1,5 @@
 import { runHermesCli } from "@/lib/hermes-cli";
+import { hermesCliAnswered } from "@/lib/hermes-cli-answered";
 import { get } from "@/lib/config-store";
 import { patchHermesConfig, readHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
@@ -61,6 +62,7 @@ async function applyLocalAi(options: {
   if (!model || model.startsWith("-")) {
     throw new HermesLocalApplyError("Local model id is missing or malformed.");
   }
+  const catalogue = await localCatalogueState();
 
   const set: Record<string, string> = {
     // The OpenAI-compatible root, NOT the bare proxy root: Hermes appends
@@ -85,9 +87,18 @@ async function applyLocalAi(options: {
     // A plain scalar rather than a list: there is exactly one configured local
     // model, and a string is an allowlist shape as far as Hermes is concerned
     // (`_declared_model_ids` at model_switch.py:61, `_models_config_is_allowlist`
-    // at :136) — which also keeps it inside what the comment-preserving YAML
-    // writer can splice.
-    [`providers.${HERMES_LOCAL_PROVIDER}.models`]: model,
+    // at :136 — both verified against the installed Hermes) — which also keeps
+    // it inside what the comment-preserving YAML writer can splice.
+    //
+    // WRITTEN ONLY WHEN THE KEY IS OURS. If Hermes has cached its own discovered
+    // catalogue there it is a nested block, and `setYamlPath` refuses a leaf
+    // that opens one — which aborts the WHOLE patch onto `hermes config set`
+    // and takes every comment in config.yaml with it, the exact loss this
+    // module exists to prevent. Leaving a richer catalogue alone is also just
+    // right: a live probe beats our one id whenever the model is awake.
+    ...(catalogue === "absent" || catalogue === "scalar"
+      ? { [`providers.${HERMES_LOCAL_PROVIDER}.models`]: model }
+      : {}),
   };
   if (options.makeDefault) {
     set["model.provider"] = HERMES_LOCAL_PROVIDER;
@@ -119,21 +130,57 @@ async function applyLocalAi(options: {
 let reconciled = false;
 
 /**
- * True only when Hermes has NO model declared for our local provider.
+ * How `providers.clawlocal.models` is currently spelled in config.yaml.
  *
- * Three answers, not two: `hermes config get` exits non-zero both for a key
- * that is unset and for a config it could not read, and repairing off a failed
- * read would overwrite whatever is really in the file — so only the "not set"
- * wording counts as missing. A value of any shape is left alone; it may be
- * Hermes' own discovered catalogue, which is richer than the one id we know.
+ *   "absent"  — not there. Ours to write, and the case every field box is in.
+ *   "scalar"  — the one-id form THIS module writes. Ours to update, which is
+ *               what makes a changed local model land.
+ *   "foreign" — there, and not a scalar: Hermes' own discovered catalogue,
+ *               which is a nested block. Never ours to touch — see the write
+ *               site for what splicing over it would cost.
+ *   "unknown" — the question failed. Not an answer, and never treated as one.
+ *
+ * Two reads because one cannot tell those four apart. `readHermesConfigValue`
+ * parses the file and returns a value only for a scalar; it answers null for
+ * absent, for a block AND for a file it could not read, so a non-null result is
+ * the only thing it settles on its own. The CLI splits the remaining three:
+ * exit 0 means the key is there in some other shape, "config key not set" means
+ * it is not, and anything else — including the 126/127 a `step_hermes_install`
+ * rebuild produces without ever reaching argparse — is the CLI failing to
+ * answer rather than answering "no".
  */
-async function localCatalogueMissing(): Promise<boolean> {
-  const declared = await runHermesCli(
-    ["config", "get", `providers.${HERMES_LOCAL_PROVIDER}.models`],
-    { timeoutMs: 15_000 },
-  );
-  if (declared.code === 0) return false;
-  return /config key not set/i.test(`${declared.stdout ?? ""}\n${declared.stderr ?? ""}`);
+type LocalCatalogueState = "absent" | "scalar" | "foreign" | "unknown";
+
+async function localCatalogueState(): Promise<LocalCatalogueState> {
+  const key = `providers.${HERMES_LOCAL_PROVIDER}.models`;
+  if ((await readHermesConfigValue(key)) !== null) return "scalar";
+  const declared = await runHermesCli(["config", "get", key], { timeoutMs: 15_000 });
+  if (!hermesCliAnswered(declared)) return "unknown";
+  if (declared.code === 0) return "foreign";
+  return /config key not set/i.test(`${declared.stdout ?? ""}\n${declared.stderr ?? ""}`)
+    ? "absent"
+    : "unknown";
+}
+
+/**
+ * Declare the local model where Hermes' own pickers read it, for a box
+ * registered before this code existed.
+ *
+ * NARROW ON PURPOSE: one key, and never a re-registration. Re-running the full
+ * apply would drag every field box down the repair path built for a stale
+ * self-written URL — and that path substitutes `getDefaultLlamaCppModel()` for
+ * an unreadable `local_ai_model`, which on an Ollama box would declare a
+ * llama.cpp id as the Ollama endpoint's model and put it in Hermes' picker.
+ * An id we do not have is a reason to write nothing, not to invent one.
+ */
+async function declareLocalCatalogue(model: string): Promise<boolean> {
+  if (!model || model.startsWith("-")) return true;
+  const state = await localCatalogueState();
+  if (state === "unknown") return false;
+  if (state !== "absent") return true;
+  await patchHermesConfig({ set: { [`providers.${HERMES_LOCAL_PROVIDER}.models`]: model } });
+  invalidateModelOptions();
+  return true;
 }
 
 /**
@@ -165,15 +212,28 @@ export async function reconcileLocalAiWithHermes(): Promise<void> {
       ["config", "get", `providers.${HERMES_LOCAL_PROVIDER}.base_url`],
       { timeoutMs: 15_000 },
     );
+    if (!hermesCliAnswered(existing)) {
+      // The CLI did not answer (a `step_hermes_install` rebuild exits 127
+      // without reaching argparse). Not evidence about this box — try again on
+      // the next request rather than latching a non-answer for the process.
+      reconciled = false;
+      return;
+    }
     const registered = existing.code === 0 ? existing.stdout.trim() : "";
     const ourStaleUrl =
       registered.startsWith(`${getLocalAiProxyRootUrl()}/setup-api/local-ai/`)
       && registered !== getLocalAiOpenAiBaseUrl(provider);
-    if (registered && !ourStaleUrl && !(await localCatalogueMissing())) return;
 
     const stored = await get("local_ai_model");
     // Stored as "llamacpp/gemma4-e2b-it-q4_0"; Hermes wants the bare id.
     const model = typeof stored === "string" ? stored.split("/").pop() || "" : "";
+
+    if (registered && !ourStaleUrl) {
+      // The endpoint is right; only the catalogue Hermes' own pickers read can
+      // still be missing. One key, no re-registration.
+      if (!(await declareLocalCatalogue(model))) reconciled = false;
+      return;
+    }
     // The INNER write, deliberately — this one repair must not ask for an MCP
     // reload. It hangs off `GET /setup-api/hermes/models`, and that route is
     // what the agent's own `ai_list_models` reads: a `reload.mcp` from in here

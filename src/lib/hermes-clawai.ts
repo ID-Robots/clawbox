@@ -2,6 +2,7 @@ import { setMany } from "@/lib/config-store";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
 import { runHermesCli } from "@/lib/hermes-cli";
+import { hermesCliAnswered } from "@/lib/hermes-cli-answered";
 import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { refreshHermesImageTools } from "@/lib/hermes-image-refresh";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
@@ -384,6 +385,17 @@ let clawaiModelsReconciled = false;
  * "not set" wording leaves the file alone. And an existing value of ANY shape
  * is left alone too: it may be Hermes' own discovered catalogue, which is
  * richer than ours.
+ *
+ * THE LATCH IS FOR ANSWERS ONLY, and that is the whole difference between a
+ * repair and a coin toss. `hermes` on the box is a shim over a venv Python, and
+ * `step_hermes_install` moves the checkout aside and rebuilds it for about 90 s
+ * with NO web-server restart afterwards (install.sh) — so during the very
+ * update that ships this fix the shim runs and exits 127 without reaching
+ * argparse. Latching on that would mean the box never declares its catalogue
+ * for the life of the process and the owner's `/model` keeps saying
+ * "clawai (0)" on the release that was meant to fix it. Every exit that is a
+ * failed QUESTION or a failed WRITE unlatches, so the next request retries;
+ * only the two real answers ("already declared", "written") stay latched.
  */
 export async function reconcileClawaiModelsWithHermes(): Promise<void> {
   if (clawaiModelsReconciled) return;
@@ -396,8 +408,11 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
       ["config", "get", `providers.${CLAWAI_PROVIDER}.models`],
       { timeoutMs: 15_000 },
     );
+    if (!hermesCliAnswered(declared)) return unlatch();
     if (declared.code === 0) return;
     const listing = `${declared.stdout ?? ""}\n${declared.stderr ?? ""}`;
+    // A non-zero exit that is not "not set" is a config we could not read.
+    // Nothing to unlatch for: the CLI answered, and its answer was "no".
     if (!/config key not set/i.test(listing)) return;
 
     // Only now ask whether there is a provider to describe. Not "is a token
@@ -410,6 +425,7 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
       ["config", "get", `providers.${CLAWAI_PROVIDER}.base_url`],
       { timeoutMs: 15_000 },
     );
+    if (!hermesCliAnswered(linked)) return unlatch();
     if (linked.code !== 0 || !linked.stdout.trim()) return;
 
     const written = await runHermesCli(
@@ -418,16 +434,35 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
     );
     if (written.code !== 0) {
       // A repair that could not be made is reported, never claimed: the picker
-      // keeps showing what the box actually has.
-      console.warn("[hermes/clawai] could not declare the ClawBox AI catalogue", written.code);
-      return;
+      // keeps showing what the box actually has, and the next request tries
+      // again. No credential is in this argv — the value is a constant model
+      // list — so the stream can be logged whole.
+      console.warn(
+        "[hermes/clawai] could not declare the ClawBox AI catalogue",
+        written.code,
+        written.stderr?.trim() || written.stdout?.trim() || "",
+      );
+      return unlatch();
     }
     // The catalogue this device serves just changed — don't serve the old one.
+    //
+    // NO MCP RELOAD HERE, deliberately, and the same reason `reconcileLocalAiWithHermes`
+    // uses its INNER write: this hangs off `GET /setup-api/hermes/models`, which
+    // is the route the agent's own `ai_list_models` reads, so a `reload.mcp`
+    // would shut down the MCP child that is mid-tool-call. Nor does it move the
+    // provider SET the enum is built from — the provider already existed; only
+    // the models it lists changed — so there is nothing for
+    // `refreshProviderToolsIfSetChanged` to notice. See provider-write-paths.test.ts.
     invalidateModelOptions();
   } catch (err) {
     console.error("[hermes/clawai] catalogue reconcile failed:", err);
-    clawaiModelsReconciled = false;
+    unlatch();
   }
+}
+
+/** Let the next request try the repair again. @see reconcileClawaiModelsWithHermes */
+function unlatch(): void {
+  clawaiModelsReconciled = false;
 }
 
 /** Test seam. */

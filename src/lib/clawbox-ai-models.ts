@@ -37,18 +37,35 @@ export const CLAWBOX_AI_MODEL_BY_TIER: Record<ClawboxAiTier, string> = {
 
 /**
  * The BARE ids the ClawBox AI proxy serves as CHAT models, in the order a
- * picker should show them. The device runs one of them (its tier's), and the
- * subscription covers both, so both belong in every catalogue.
+ * picker should show them.
+ *
+ * BOTH, ON EVERY BOX, AND THE PROXY STILL GATES BY PLAN. `deepseek-v4-pro` is
+ * Max-only (see `clawbox-ai-tiers.ts`, and the "Max plan only" note the wizard
+ * picker carries), so a Free or Pro box that picks it gets a model-gate
+ * rejection. Offering both anyway is the existing product behaviour, not a
+ * choice invented here: `normalizeRow` seeds both regardless of tier and the
+ * OpenClaw provider definition declares both for every tier. It is also the
+ * only behaviour that stays TRUE — the portal can move a device's tier without
+ * re-running any of these writers, so a list derived from the tier at link time
+ * would lock an upgraded box out of the model it now pays for.
+ *
+ * What is genuinely worse on the Hermes side is that its own picker shows a
+ * bare id with no plan label, where the ClawBox pickers say "Max plan only".
+ * That is a gap to close in Hermes' row metadata, not a reason to hide a model
+ * the account may already be entitled to.
  *
  * Deliberately excludes the image and vision ids: those exist so a picture can
  * be drawn or looked at, and offering them as something to talk to is a turn
  * the proxy answers with "Model not allowed".
  *
- * This is the list every surface must agree on, which is why it lives beside
- * the ids rather than being re-typed per writer: `applyClawaiToHermes` declares
- * it in Hermes' own `providers.clawai.models` (the block Hermes' `/model`
- * picker and its dashboard both read), and hermes-model-options.ts uses it as
- * the cold-start floor for the same provider.
+ * Lives beside the ids rather than being re-typed by each writer:
+ * `applyClawaiToHermes` declares it in Hermes' own `providers.clawai.models`
+ * (the block Hermes' `/model` picker and its dashboard both read), and
+ * hermes-model-options.ts uses it as the cold-start floor for the same
+ * provider. `CLAWAI_MODELS` and `CLAWAI_STATIC_MODELS` still spell the ids out
+ * as literals beside their labels, so a staging box that sets
+ * `CLAWBOX_AI_FLASH_MODEL_ID` will see them disagree — pre-existing, and worth
+ * folding through here the next time that pair is touched.
  */
 export const CLAWBOX_AI_CHAT_MODEL_IDS: readonly string[] = [
   CLAWBOX_AI_FLASH_MODEL_ID,

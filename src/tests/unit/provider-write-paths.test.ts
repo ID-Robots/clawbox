@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * The OTHER four write paths that move the provider set.
+ * The OTHER write paths that move the provider set.
  *
  * The customer-facing pair (`/setup-api/hermes/provider-key` and the OAuth
  * completion) is pinned in src/tests/routes/hermes/provider-mcp-refresh.test.ts.
@@ -12,6 +12,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * finds — every place that already tells the BROWSER the catalogue moved, which
  * is exactly the population that has to tell the running agent too. Wiring four
  * of six is how #514 came back as a residual in the first place.
+ *
+ * A site that must NOT reload belongs here just as much as one that must: the
+ * last two are catalogue repairs that hang off `GET /setup-api/hermes/models`,
+ * and the whole point of pinning them is that "no reload" is a decision with a
+ * reason, not an omission nobody noticed.
  */
 
 const rpcMock = vi.hoisted(() => vi.fn());
@@ -23,7 +28,8 @@ const readConfigMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: rpcMock }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
-vi.mock("@/lib/config-store", () => ({ get: vi.fn(async () => null), setMany: vi.fn() }));
+const storeGetMock = vi.hoisted(() => vi.fn(async (_key: string) => null as unknown));
+vi.mock("@/lib/config-store", () => ({ get: storeGetMock, setMany: vi.fn() }));
 vi.mock("@/lib/hermes-config-yaml", () => ({
   patchHermesConfig: patchMock,
   readHermesConfigValue: readConfigMock,
@@ -40,7 +46,16 @@ vi.mock("@/lib/hermes-model-options", async (importOriginal) => ({
 }));
 
 import { applyCloudProviderKeyToHermes } from "@/lib/hermes-cloud-provider";
-import { applyLocalAiToHermes, removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
+import {
+  _resetLocalAiReconcileForTests,
+  applyLocalAiToHermes,
+  reconcileLocalAiWithHermes,
+  removeLocalAiFromHermes,
+} from "@/lib/hermes-local-ai";
+import {
+  _resetClawaiModelsReconcileForTests,
+  reconcileClawaiModelsWithHermes,
+} from "@/lib/hermes-clawai";
 
 function payload(ids: string[], current = "openrouter") {
   return {
@@ -82,6 +97,10 @@ beforeEach(() => {
   patchMock.mockResolvedValue(undefined);
   readConfigMock.mockReset();
   readConfigMock.mockResolvedValue(null);
+  storeGetMock.mockReset();
+  storeGetMock.mockResolvedValue(null);
+  _resetLocalAiReconcileForTests();
+  _resetClawaiModelsReconcileForTests();
 });
 
 describe("saving a cloud provider key through the OpenClaw-shaped panel", () => {
@@ -139,6 +158,48 @@ describe("turning the local model on and off", () => {
   it("costs nothing when the set did not actually move", async () => {
     catalogueGrows(["openrouter", "local"], ["openrouter", "local"], "openrouter");
     await applyLocalAiToHermes({ provider: "ollama", model: "gemma4:e2b", makeDefault: false });
+    expect(reloadCount()).toBe(0);
+  });
+});
+
+describe("declaring a catalogue Hermes' own pickers read", () => {
+  // Both repairs run inside `GET /setup-api/hermes/models` — the route the
+  // agent's own `ai_list_models` reads — so a `reload.mcp` from in here would
+  // shut down the MCP child that is mid-tool-call. And neither moves the
+  // provider SET the enum is built from: the provider already exists, only the
+  // models it lists change. Invalidate the browser's catalogue, ask the agent
+  // for nothing. This is the same rule `reconcileLocalAiWithHermes` already
+  // followed by calling the INNER write.
+  it("asks the agent for nothing when the ClawBox AI catalogue is declared", async () => {
+    catalogueGrows(["openrouter", "clawai"], ["openrouter", "clawai"], "clawai");
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (args[1] === "get" && args[2] === "providers.clawai.models") {
+        return { code: 1, stdout: "", stderr: "config key not set" };
+      }
+      if (args[1] === "get" && args[2] === "providers.clawai.base_url") {
+        return { code: 0, stdout: "https://clawbox.com/api/ai\n", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    await reconcileClawaiModelsWithHermes();
+    expect(cliMock.mock.calls.some((c) => (c[0] as string[])[1] === "set")).toBe(true);
+    expect(reloadCount()).toBe(0);
+  });
+
+  it("asks the agent for nothing when the local catalogue is declared", async () => {
+    catalogueGrows(["openrouter", "clawlocal"], ["openrouter", "clawlocal"], "clawlocal");
+    storeGetMock.mockImplementation(async (key: string) => {
+      if (key === "local_ai_configured") return true;
+      if (key === "local_ai_provider") return "ollama";
+      if (key === "local_ai_model") return "ollama/qwen3:8b";
+      return null;
+    });
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[2] === "providers.clawlocal.models"
+        ? { code: 1, stdout: "", stderr: "config key not set" }
+        : { code: 0, stdout: "http://127.0.0.1/setup-api/local-ai/ollama/v1\n", stderr: "" });
+    await reconcileLocalAiWithHermes();
+    expect(patchMock).toHaveBeenCalledWith({ set: { "providers.clawlocal.models": "qwen3:8b" } });
     expect(reloadCount()).toBe(0);
   });
 });

@@ -31,6 +31,7 @@ vi.mock("@/lib/local-ai-runtime", () => ({
 const getConfigMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/config-store", () => ({ get: getConfigMock }));
 
+import { hermesPickerModels } from "@/tests/helpers/hermes-picker-catalogue";
 import {
   HERMES_LOCAL_PROVIDER,
   HermesLocalApplyError,
@@ -60,7 +61,12 @@ function unsets(): string[] {
 describe("registering the local model with Hermes", () => {
   beforeEach(() => {
     cliMock.mockReset();
-    cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
+    // `providers.clawlocal.models` absent — the state every device in the field
+    // is in, and the one the registration is allowed to write.
+    cliMock.mockImplementation(async (args: string[]) =>
+      args?.[2] === `providers.${HERMES_LOCAL_PROVIDER}.models`
+        ? { code: 1, stdout: "", stderr: "config key not set" }
+        : { code: 0, stdout: "", stderr: "" });
     patchMock.mockReset();
     patchMock.mockResolvedValue({ mode: "merge", backupPath: null });
     readMock.mockReset();
@@ -88,6 +94,55 @@ describe("registering the local model with Hermes", () => {
     // still wins (model_switch.py:3423-3431).
     await applyLocalAiToHermes({ provider: "llamacpp", model: "gemma4-e2b-it-q4_0" });
     expect(sets()).toContain(`providers.${HERMES_LOCAL_PROVIDER}.models=gemma4-e2b-it-q4_0`);
+  });
+
+  it("declares it in a shape Hermes' own picker reads", async () => {
+    // The write above is only half the claim; this is the half that matters.
+    // A bare STRING has to count as an allowlist for Hermes, or the sleeping
+    // model's empty probe replaces it and the picker is empty again. Judged by
+    // the same mirror of `list_authenticated_providers` the ClawBox AI side is.
+    await applyLocalAiToHermes({ provider: "ollama", model: "qwen2.5:3b" });
+    const declared = patchMock.mock.calls[0][0].set[`providers.${HERMES_LOCAL_PROVIDER}.models`];
+    // `[]` is the sleeping model: standby answers no /v1/models at all.
+    expect(hermesPickerModels({ models: declared }, [])).toEqual(["qwen2.5:3b"]);
+    // Awake, whatever it is actually running still wins.
+    expect(hermesPickerModels({ models: declared }, ["qwen2.5:3b", "llama3.2:3b"]))
+      .toEqual(["qwen2.5:3b", "llama3.2:3b"]);
+  });
+
+  it("leaves a catalogue Hermes wrote itself alone", async () => {
+    // Hermes caches its own discovered catalogue under the same key, as a
+    // nested block. The comment-preserving splice refuses a leaf that opens
+    // one, and that refusal drops the WHOLE patch onto `hermes config set` —
+    // which deletes every comment in config.yaml. So the key is skipped, and
+    // the endpoint keys still land.
+    cliMock.mockImplementation(async (args: string[]) =>
+      args?.[2] === `providers.${HERMES_LOCAL_PROVIDER}.models`
+        ? { code: 0, stdout: "{'qwen3:8b': {'context_length': 40960}}\n", stderr: "" }
+        : { code: 0, stdout: "", stderr: "" });
+    await applyLocalAiToHermes({ provider: "ollama", model: "qwen3:8b" });
+    expect(sets().some((kv) => kv.startsWith(`providers.${HERMES_LOCAL_PROVIDER}.models=`))).toBe(false);
+    expect(sets()).toContain(`providers.${HERMES_LOCAL_PROVIDER}.api_mode=openai`);
+  });
+
+  it("updates the declared id when the local model changes", async () => {
+    // A scalar there is OUR shape, so it is ours to move — otherwise switching
+    // Gemma to Qwen leaves the picker offering the model that is gone.
+    readMock.mockImplementation(async (key: string) =>
+      key === `providers.${HERMES_LOCAL_PROVIDER}.models` ? "gemma4-e2b-it-q4_0" : null,
+    );
+    await applyLocalAiToHermes({ provider: "ollama", model: "qwen3:8b" });
+    expect(sets()).toContain(`providers.${HERMES_LOCAL_PROVIDER}.models=qwen3:8b`);
+  });
+
+  it("writes no catalogue when the CLI never answered", async () => {
+    // 127 is the shim over a rebuilding venv, not "the key is unset".
+    cliMock.mockImplementation(async (args: string[]) =>
+      args?.[2] === `providers.${HERMES_LOCAL_PROVIDER}.models`
+        ? { code: 127, stdout: "", stderr: "" }
+        : { code: 0, stdout: "", stderr: "" });
+    await applyLocalAiToHermes({ provider: "ollama", model: "qwen3:8b" });
+    expect(sets().some((kv) => kv.startsWith(`providers.${HERMES_LOCAL_PROVIDER}.models=`))).toBe(false);
   });
 
   it("uses the ollama proxy when ollama is the local provider", async () => {
@@ -241,7 +296,29 @@ describe("reconciling an already-configured device", () => {
     // asleep, which is most of the time.
     registered({ baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama/v1", models: null });
     await reconcileLocalAiWithHermes();
-    expect(sets()).toContain(`providers.${HERMES_LOCAL_PROVIDER}.models=qwen3:8b`);
+    expect(sets()).toEqual([`providers.${HERMES_LOCAL_PROVIDER}.models=qwen3:8b`]);
+  });
+
+  it("repairs the catalogue WITHOUT re-registering the endpoint", async () => {
+    // Re-running the full apply would drag every field box down the path built
+    // for a stale self-written URL, and that path substitutes a llama.cpp
+    // default for an unreadable model id — which on this Ollama box would put
+    // `gemma4-e2b-it-q4_0` in the picker for an endpoint that cannot serve it.
+    registered({ baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama/v1", models: null });
+    await reconcileLocalAiWithHermes();
+    expect(sets().some((kv) => kv.startsWith(`providers.${HERMES_LOCAL_PROVIDER}.base_url=`))).toBe(false);
+  });
+
+  it("declares nothing when it does not know what the model is", async () => {
+    getConfigMock.mockImplementation(async (key: string) => {
+      if (key === "local_ai_configured") return true;
+      if (key === "local_ai_provider") return "ollama";
+      return undefined;
+    });
+    registered({ baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama/v1", models: null });
+    await reconcileLocalAiWithHermes();
+    // An id we do not have is a reason to write nothing, never to invent one.
+    expect(patchMock).not.toHaveBeenCalled();
   });
 
   it("leaves a config it could not read alone", async () => {

@@ -60,67 +60,12 @@ import {
   reconcileClawaiModelsWithHermes,
   _resetClawaiModelsReconcileForTests,
 } from "@/lib/hermes-clawai";
+import { hermesPickerModels } from "@/tests/helpers/hermes-picker-catalogue";
 import {
   CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_PRO_MODEL_ID,
   CLAWBOX_AI_VISION_MODEL_ID,
 } from "@/lib/clawbox-ai-models";
-
-// ── Hermes' reader, mirrored ────────────────────────────────────────────────
-//
-// Small on purpose: it is the CONTRACT the writer has to satisfy, pinned so a
-// change of shape (a comma-joined string, a list of objects, a bare default)
-// fails here rather than on a customer's phone.
-
-/** `_declared_model_ids` — hermes_cli/model_switch.py:61. */
-function declaredModelIds(value: unknown): string[] {
-  const ids: string[] = [];
-  const add = (candidate: unknown) => {
-    if (typeof candidate !== "string") return;
-    const id = candidate.trim();
-    if (!id || ids.some((seen) => seen.toLowerCase() === id.toLowerCase())) return;
-    ids.push(id);
-  };
-  if (typeof value === "string") add(value);
-  else if (Array.isArray(value)) {
-    for (const item of value) {
-      if (typeof item === "string") add(item);
-      else if (item && typeof item === "object") {
-        const row = item as { id?: unknown; name?: unknown };
-        add(typeof row.id === "string" && row.id.trim() ? row.id : row.name);
-      }
-    }
-  } else if (value && typeof value === "object") {
-    for (const key of Object.keys(value)) {
-      if (key === "__explicit_model_allowlist__" || key === "__discovered_model_catalog__") continue;
-      add(key);
-    }
-  }
-  return ids;
-}
-
-/** `_models_config_is_allowlist` — hermes_cli/model_switch.py:136. */
-function modelsConfigIsAllowlist(value: unknown): boolean {
-  if (typeof value === "string") return Boolean(value.trim());
-  if (Array.isArray(value)) return declaredModelIds(value).length > 0;
-  return false;
-}
-
-/**
- * The model ids Hermes' `/model` picker offers for one `providers:` entry.
- * `liveProbe` is what `<base_url>/models` yielded — `[]` when the endpoint
- * answered in a shape Hermes could not read, `null` when it did not answer.
- */
-function hermesPickerModels(entry: Record<string, unknown>, liveProbe: string[] | null): string[] {
-  const declared = declaredModelIds(entry.models);
-  const fallbackDefault = entry.default_model ?? entry.model;
-  const models = typeof fallbackDefault === "string" && fallbackDefault.trim()
-    ? [fallbackDefault.trim(), ...declared.filter((id) => id !== fallbackDefault.trim())]
-    : declared;
-  const hasExplicitModels = modelsConfigIsAllowlist(entry.models);
-  if (liveProbe !== null && (liveProbe.length > 0 || !hasExplicitModels)) return liveProbe;
-  return models;
-}
 
 /**
  * The `providers.<slug>` block the writer left behind, decoded the way
@@ -239,11 +184,52 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     expect(cliMock.mock.calls.some((c) => (c[0] as string[])[1] === "set")).toBe(false);
   });
 
-  it("writes nothing when the config could not be read at all", async () => {
+  it("writes nothing when the catalogue key could not be read", async () => {
     // An unreadable config is not an unconfigured one — the same rule the
-    // plugins.enabled read-modify-write follows.
-    cliMock.mockResolvedValue({ code: 1, stdout: "", stderr: "permission denied" });
+    // plugins.enabled read-modify-write follows. The provider block is
+    // deliberately readable here, so this can only pass through the gate it is
+    // named after rather than through the "no clawai block" one above.
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[2] === `providers.${CLAWAI_PROVIDER}.models`
+        ? { code: 1, stdout: "", stderr: "permission denied" }
+        : { code: 0, stdout: "https://clawbox.com/api/ai\n", stderr: "" });
     await reconcileClawaiModelsWithHermes();
     expect(cliMock.mock.calls.some((c) => (c[0] as string[])[1] === "set")).toBe(false);
+  });
+
+  it("tries again after a read the CLI never answered", async () => {
+    // `hermes` is a shim over a venv Python, and `step_hermes_install` rebuilds
+    // that checkout for ~90 s with no web-server restart — the shim runs and
+    // exits 127 without reaching argparse. Latching on that would skip the
+    // repair for the life of the process, on the very update shipping it.
+    cliMock.mockResolvedValue({ code: 127, stdout: "", stderr: "" });
+    await reconcileClawaiModelsWithHermes();
+    expect(cliMock.mock.calls.some((c) => (c[0] as string[])[1] === "set")).toBe(false);
+
+    cliMock.mockReset();
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[2] === `providers.${CLAWAI_PROVIDER}.models`
+        ? { code: 1, stdout: "", stderr: "config key not set" }
+        : { code: 0, stdout: "https://clawbox.com/api/ai\n", stderr: "" });
+    await reconcileClawaiModelsWithHermes();
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
+      CLAWBOX_AI_FLASH_MODEL_ID,
+      CLAWBOX_AI_PRO_MODEL_ID,
+    ]);
+  });
+
+  it("tries again after a write that failed", async () => {
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (args[1] === "set") return { code: 1, stdout: "", stderr: "config is locked" };
+      return args[2] === `providers.${CLAWAI_PROVIDER}.models`
+        ? { code: 1, stdout: "", stderr: "config key not set" }
+        : { code: 0, stdout: "https://clawbox.com/api/ai\n", stderr: "" };
+    });
+    await reconcileClawaiModelsWithHermes();
+    const firstAttempt = cliMock.mock.calls.filter((c) => (c[0] as string[])[1] === "set").length;
+    await reconcileClawaiModelsWithHermes();
+    // A failed repair is not a repair: the next request must try it again.
+    expect(cliMock.mock.calls.filter((c) => (c[0] as string[])[1] === "set").length)
+      .toBeGreaterThan(firstAttempt);
   });
 });

@@ -372,7 +372,13 @@ function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesPr
   // Only ClawBox AI is seeded: these are ids we have PROVEN route on this
   // hardware. We never invent ids for a third-party provider — that is the
   // mismatch class this module exists to prevent.
-  if (id === CLAWAI_PROVIDER) {
+  //
+  // ONLY when the row is EMPTY, which is what "fallback" has to mean in code:
+  // if Hermes ever reports a non-empty clawai list that differs from ours (a
+  // renamed tier id, or the proxy starting to speak the OpenAI envelope with a
+  // different set), topping it up would show the live ids PLUS two stale ones —
+  // the provider/model mismatch this module exists to prevent.
+  if (id === CLAWAI_PROVIDER && models.length === 0) {
     for (const known of COLD_START_MODELS[CLAWAI_PROVIDER] ?? []) {
       if (seen.has(known)) continue;
       seen.add(known);
