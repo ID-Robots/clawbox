@@ -51,6 +51,41 @@ STEP_ENCRYPTING = "encrypting"
 STEP_UPLOADING = "uploading"
 STEP_CHECKING_STATS = "checking-stats"
 
+ARCHIVE_RACE_ATTEMPTS = 3
+ARCHIVE_RACE_DELAYS = (1.0, 3.0)
+
+
+def _create_archive_with_race_retry(cfg: Config, staging: Path) -> openclaw.Archive:
+    """Retry OpenClaw's transient session-file race without hiding real errors.
+
+    Active sessions rotate ``.jsonl``/``.trajectory.jsonl`` files while the
+    backup tar walk is running. OpenClaw currently reports that as ENOENT.
+    A fresh walk is safe; configuration, permission, disk and timeout errors
+    must still fail immediately.
+    """
+    for attempt in range(ARCHIVE_RACE_ATTEMPTS):
+        try:
+            return agent.create_archive(cfg, output_dir=staging)
+        except agent.ARCHIVE_ERRORS as exc:
+            message = str(exc).lower()
+            transient = "enoent" in message and (
+                ".jsonl" in message or ".jsonl.lock" in message
+            )
+            if not transient or attempt + 1 >= ARCHIVE_RACE_ATTEMPTS:
+                raise
+            delay = ARCHIVE_RACE_DELAYS[attempt]
+            log.warning(
+                "session file changed during archive walk; retrying archive "
+                "(%d/%d) in %.0fs: %s",
+                attempt + 1,
+                ARCHIVE_RACE_ATTEMPTS,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+
+    raise AssertionError("archive retry loop exhausted")
+
 
 def _heartbeat_safe(server: str, token: str, **kwargs: object) -> bool:
     """Section 9: don't retry heartbeat aggressively. Log + move on.
@@ -262,7 +297,7 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
             # business, not this function's: OpenClaw shells out to
             # `openclaw backup create`, Hermes packs `~/.hermes` itself. Both
             # return the same `Archive`, so everything below is identical.
-            archive = agent.create_archive(cfg, output_dir=staging)
+            archive = _create_archive_with_race_retry(cfg, staging)
         except agent.ARCHIVE_ERRORS as e:
             which = agent.device_agent()
             log.error("%s backup create failed: %s", which, e)

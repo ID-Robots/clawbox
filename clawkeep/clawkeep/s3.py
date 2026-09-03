@@ -27,6 +27,13 @@ from .api import Credentials
 MANIFEST_OBJECT = "manifest.json"
 MANIFEST_VERSION = 1
 
+# Large ClawBox archives regularly exceed 10 GB. R2 is happier with fewer,
+# larger parts and modest concurrency than boto3's 8 MiB/high-concurrency
+# defaults (which turn a 12 GB backup into ~1,500 separate UploadPart calls).
+MULTIPART_CHUNK_BYTES = 64 * 1024 * 1024
+MULTIPART_THRESHOLD_BYTES = 64 * 1024 * 1024
+MAX_UPLOAD_CONCURRENCY = 2
+
 
 class S3Error(Exception):
     pass
@@ -83,7 +90,10 @@ def _client(creds: Credentials) -> Any:
         # presigned URLs. "auto" is the documented value.
         region_name="auto",
         signature_version="s3v4",
-        retries={"max_attempts": 3, "mode": "standard"},
+        retries={"max_attempts": 8, "mode": "adaptive"},
+        connect_timeout=10,
+        read_timeout=120,
+        tcp_keepalive=True,
         s3={"addressing_style": "path"},
     )
     return boto3.client(
@@ -122,7 +132,21 @@ def upload(
     cli = _client(creds)
     key = _join(creds.prefix, object_name)
     try:
-        cli.upload_file(str(archive_path), creds.bucket, key, Callback=progress_cb)
+        from boto3.s3.transfer import TransferConfig
+
+        transfer = TransferConfig(
+            multipart_threshold=MULTIPART_THRESHOLD_BYTES,
+            multipart_chunksize=MULTIPART_CHUNK_BYTES,
+            max_concurrency=MAX_UPLOAD_CONCURRENCY,
+            use_threads=True,
+        )
+        cli.upload_file(
+            str(archive_path),
+            creds.bucket,
+            key,
+            Callback=progress_cb,
+            Config=transfer,
+        )
     except (BotoCoreError, ClientError, OSError) as e:
         raise S3Error(f"upload failed for s3://{creds.bucket}/{key}: {e}") from e
     return key
