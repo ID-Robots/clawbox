@@ -76,32 +76,42 @@ interface HermesTelegramProbe {
 const HERMES_PROBE_TTL = 15_000;
 // Keyed by token, like the bot-info cache above: saving a different bot must
 // not be answered from the previous bot's probe for the next 15 seconds.
-let cachedHermesProbe: { token: string; probe: HermesTelegramProbe; at: number } | null = null;
-const inFlightHermesProbe = new Map<string, Promise<HermesTelegramProbe>>();
+//
+// The GATEWAY half is deliberately NOT in here. `hermesGatewayStatus()` owns
+// one shared memo for the whole process, with its own failure TTL and an
+// invalidation the restart paths call; a second 15 s copy here would shadow
+// both, so a save that restarted the gateway kept being answered with the
+// pre-restart process until this cache aged out on its own.
+let cachedRegistered: { token: string; registered: boolean | null; at: number } | null = null;
+const inFlightRegistered = new Map<string, Promise<boolean | null>>();
 
-async function probeHermes(token: string): Promise<HermesTelegramProbe> {
+function probeRegistered(token: string): Promise<boolean | null> {
   if (
-    cachedHermesProbe &&
-    cachedHermesProbe.token === token &&
-    Date.now() - cachedHermesProbe.at < HERMES_PROBE_TTL
+    cachedRegistered &&
+    cachedRegistered.token === token &&
+    Date.now() - cachedRegistered.at < HERMES_PROBE_TTL
   ) {
-    return cachedHermesProbe.probe;
+    return Promise.resolve(cachedRegistered.registered);
   }
-  const existing = inFlightHermesProbe.get(token);
+  const existing = inFlightRegistered.get(token);
   if (existing) return existing;
   const pending = (async () => {
-    const [registered, gateway] = await Promise.all([
-      hermesTelegramRegistered(),
-      hermesGatewayStatus(),
-    ]);
-    const probe: HermesTelegramProbe = { registered, gateway };
-    cachedHermesProbe = { token, probe, at: Date.now() };
-    return probe;
+    const registered = await hermesTelegramRegistered();
+    cachedRegistered = { token, registered, at: Date.now() };
+    return registered;
   })().finally(() => {
-    inFlightHermesProbe.delete(token);
+    inFlightRegistered.delete(token);
   });
-  inFlightHermesProbe.set(token, pending);
+  inFlightRegistered.set(token, pending);
   return pending;
+}
+
+async function probeHermes(token: string): Promise<HermesTelegramProbe> {
+  const [registered, gateway] = await Promise.all([
+    probeRegistered(token),
+    hermesGatewayStatus(),
+  ]);
+  return { registered, gateway };
 }
 
 export async function GET() {

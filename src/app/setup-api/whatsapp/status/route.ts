@@ -10,36 +10,26 @@ export const dynamic = "force-dynamic";
 // `hermes gateway status` shells out (~2 s on a Jetson) and the Settings panel
 // polls this route. Cache the CLI half only, and coalesce concurrent callers
 // onto one in-flight probe — the same shape the Telegram status route uses.
-const GATEWAY_PROBE_TTL = 15_000;
-let cachedGateway: { value: { installed: boolean; running: boolean }; at: number } | null = null;
-let inFlightGateway: Promise<{ installed: boolean; running: boolean }> | null = null;
-
+/**
+ * The gateway probe lives in `hermesGatewayStatus()`, not here.
+ *
+ * This route used to keep its own 15 s memo of it. So did the Telegram and
+ * Discord status routes — three private copies of one ~2 s CLI cold start,
+ * which a cold Settings → Channels open ran concurrently. The dedup now sits
+ * at the one place that runs the command, together with the short failure TTL
+ * and the invalidation the gateway restart paths call; a copy here would
+ * shadow all three, and did: after a save restarted the gateway this panel
+ * kept being told about the pre-restart process until the local cache aged out.
+ */
 async function probeGateway(): Promise<{ installed: boolean; running: boolean }> {
-  if (cachedGateway && Date.now() - cachedGateway.at < GATEWAY_PROBE_TTL) {
-    return cachedGateway.value;
+  try {
+    const status = await hermesGatewayStatus();
+    return { installed: status.installed, running: status.running };
+  } catch {
+    // A wedged or missing CLI must not turn into a 500 for the whole panel;
+    // report "not running" and let the state below stay honest about it.
+    return { installed: false, running: false };
   }
-  if (inFlightGateway) return inFlightGateway;
-  const pending = (async () => {
-    let value: { installed: boolean; running: boolean };
-    try {
-      const status = await hermesGatewayStatus();
-      value = { installed: status.installed, running: status.running };
-    } catch {
-      // A wedged or missing CLI must not turn into a 500 for the whole panel;
-      // report "not running" and let the state below stay honest about it.
-      value = { installed: false, running: false };
-    }
-    // Cache the failure exactly like the success. Caching only the happy path
-    // meant that the slower the CLI got, the more often the panel paid for it:
-    // a wedged `hermes gateway status` costs ~2 s and the panel polls this
-    // route, so every poll re-ran the shell-out it had just given up on.
-    cachedGateway = { value, at: Date.now() };
-    return value;
-  })().finally(() => {
-    inFlightGateway = null;
-  });
-  inFlightGateway = pending;
-  return pending;
 }
 
 export async function GET() {

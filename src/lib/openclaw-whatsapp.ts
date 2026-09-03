@@ -34,7 +34,7 @@
 // env-backed credential here and nothing for envSecretRef() to mint.
 
 import { spawnOpenclawCli } from "@/lib/openclaw-config";
-import { invalidateChannelStatus, readCachedChannelRow } from "@/lib/openclaw-channels";
+import { invalidateChannelStatus, readCachedChannelRowResult } from "@/lib/openclaw-channels";
 
 /** OpenClaw's id for this channel — the plugin's, the config key's, the CLI's. */
 export const WHATSAPP_CHANNEL_ID = "whatsapp";
@@ -418,18 +418,22 @@ export interface OpenclawWhatsappStatus {
  * overtaken.
  */
 export async function readOpenclawWhatsappStatus(): Promise<OpenclawWhatsappStatus> {
-  const row = await readCachedChannelRow(WHATSAPP_CHANNEL_ID);
+  // The RESULT form, not the row: a null row means both "the gateway answered
+  // and there is no such channel" and "the gateway could not be asked", and
+  // reporting the second as the first is the false failure this reader feeds.
+  const { answered, row } = await readCachedChannelRowResult(WHATSAPP_CHANNEL_ID);
   if (!row) {
-    // Unknown, not "off". Reported as not_configured because that is the only
-    // honest thing the panel can offer an action for, and the status card's
-    // `receiving: false` says the rest — but `verified: false` says plainly
-    // that nobody answered, so a caller need not read this as "not set up".
+    // Reported as not_configured because that is the only thing the panel can
+    // offer an action for. `verified` carries the distinction the row alone
+    // cannot: the gateway ANSWERING "there is no such channel" is a real fact
+    // about an unconfigured box, and only a gateway that could not be asked is
+    // unverified.
     return {
       state: "not_configured",
       enabled: false,
       paired: false,
       connected: false,
-      verified: false,
+      verified: answered,
     };
   }
 

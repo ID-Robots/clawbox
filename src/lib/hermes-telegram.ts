@@ -440,10 +440,18 @@ async function readHermesGatewayStatus(
 const GATEWAY_STATUS_TTL_MS = 15_000;
 const GATEWAY_STATUS_FAILURE_TTL_MS = 3_000;
 let cachedGatewayStatus: { value: HermesGatewayStatus; at: number; answered: boolean } | null = null;
-let inFlightGatewayStatus: Promise<HermesGatewayStatus> | null = null;
+let inFlightGatewayStatus: { epoch: number; promise: Promise<HermesGatewayStatus> } | null = null;
+/**
+ * Invalidation count. A read that started before the last invalidation is
+ * describing the process that the invalidation was called BECAUSE it changed,
+ * so it may neither be joined nor stored — clearing the cache alone would let
+ * an in-flight probe repopulate it with the pre-restart answer a moment later.
+ * Same guard as the per-channel one in `openclaw-channels.ts`.
+ */
+let gatewayStatusEpoch = 0;
 
 /**
- * Drop the remembered gateway status.
+ * Drop the remembered gateway status, including a read still in flight.
  *
  * Anything that restarts, installs or reconfigures the gateway must call this:
  * a memo that outlives the thing it describes is how a probe-once bug is born,
@@ -451,6 +459,7 @@ let inFlightGatewayStatus: Promise<HermesGatewayStatus> | null = null;
  */
 export function invalidateHermesGatewayStatus(): void {
   cachedGatewayStatus = null;
+  gatewayStatusEpoch += 1;
 }
 
 export async function hermesGatewayStatus(signal?: AbortSignal): Promise<HermesGatewayStatus> {
@@ -459,22 +468,37 @@ export async function hermesGatewayStatus(signal?: AbortSignal): Promise<HermesG
   // paths need the truth as of now, not as of fifteen seconds ago.
   if (signal) return (await readHermesGatewayStatus(signal)).value;
 
-  const fresh =
+  const epoch = gatewayStatusEpoch;
+  const age = cachedGatewayStatus ? Date.now() - cachedGatewayStatus.at : Infinity;
+  if (
     cachedGatewayStatus
-    && Date.now() - cachedGatewayStatus.at
-      < (cachedGatewayStatus.answered ? GATEWAY_STATUS_TTL_MS : GATEWAY_STATUS_FAILURE_TTL_MS);
-  if (fresh && cachedGatewayStatus) return cachedGatewayStatus.value;
-  if (inFlightGatewayStatus) return inFlightGatewayStatus;
+    // `age >= 0` because the clock is wall-clock: an RTC corrected BACKWARDS by
+    // NTP would otherwise pin the entry until the clock caught up.
+    && age >= 0
+    && age < (cachedGatewayStatus.answered ? GATEWAY_STATUS_TTL_MS : GATEWAY_STATUS_FAILURE_TTL_MS)
+  ) {
+    return cachedGatewayStatus.value;
+  }
+  // Join a read in flight, but only one started since the last invalidation.
+  if (inFlightGatewayStatus && inFlightGatewayStatus.epoch === epoch) {
+    return inFlightGatewayStatus.promise;
+  }
 
-  const pending = (async () => {
+  const promise = (async () => {
     const { value, answered } = await readHermesGatewayStatus();
-    cachedGatewayStatus = { value, at: Date.now(), answered };
+    // An invalidation that landed while this was in flight means the answer
+    // predates the change that caused it.
+    if (gatewayStatusEpoch === epoch) {
+      cachedGatewayStatus = { value, at: Date.now(), answered };
+    }
     return value;
   })().finally(() => {
-    inFlightGatewayStatus = null;
+    // Only ever clear our OWN entry, or an abandoned read evicts the
+    // replacement an invalidation started.
+    if (inFlightGatewayStatus?.epoch === epoch) inFlightGatewayStatus = null;
   });
-  inFlightGatewayStatus = pending;
-  return pending;
+  inFlightGatewayStatus = { epoch, promise };
+  return promise;
 }
 
 /** Unix user the gateway system service should run as. */
@@ -578,7 +602,12 @@ async function restartHermesGatewayUserService(signal?: AbortSignal): Promise<bo
  * the unit is correct even though the install runs through sudo.
  */
 export async function ensureHermesGateway(signal?: AbortSignal): Promise<HermesGatewayEnsureResult> {
-  const before = await hermesGatewayStatus(signal);
+  // Uncached, always. Whether this installs or restarts turns on `before`, and
+  // a fifteen-second-old answer picks the wrong branch: the WhatsApp pairing
+  // flow is the one caller that passes no signal, and a stale `installed:false`
+  // would send it down the install path on a box where the gateway is already
+  // installed.
+  const before = (await readHermesGatewayStatus(signal)).value;
 
   if (before.installed) {
     // A system unit can only be controlled by root; a user unit must NOT be,

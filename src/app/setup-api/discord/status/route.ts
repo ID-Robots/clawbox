@@ -125,30 +125,34 @@ interface HermesDiscordProbe {
 }
 
 const HERMES_PROBE_TTL = 15_000;
-let cachedHermesProbe: { token: string; probe: HermesDiscordProbe; at: number } | null = null;
-const inFlightHermesProbe = new Map<string, Promise<HermesDiscordProbe>>();
+// The GATEWAY half is deliberately NOT in here. `hermesGatewayStatus()` owns
+// one shared memo for the whole process, with its own failure TTL and an
+// invalidation the restart paths call; a second 15 s copy here would shadow
+// both. The rest — `send --list discord`, plus two plain file reads — is this
+// route's own and stays cached.
+type HermesDiscordLocal = Omit<HermesDiscordProbe, "gateway">;
+let cachedHermesProbe: { token: string; probe: HermesDiscordLocal; at: number } | null = null;
+const inFlightHermesProbe = new Map<string, Promise<HermesDiscordLocal>>();
 
-async function probeHermes(token: string): Promise<HermesDiscordProbe> {
+function probeHermesLocal(token: string): Promise<HermesDiscordLocal> {
   if (
     cachedHermesProbe &&
     cachedHermesProbe.token === token &&
     Date.now() - cachedHermesProbe.at < HERMES_PROBE_TTL
   ) {
-    return cachedHermesProbe.probe;
+    return Promise.resolve(cachedHermesProbe.probe);
   }
   const existing = inFlightHermesProbe.get(token);
   if (existing) return existing;
   const pending = (async () => {
     // The snapshot and the env are plain file reads and cost nothing; only
-    // `hermes gateway status` and `send --list` shell out, and they are what
-    // this cache is for.
-    const [registered, gateway, snapshot, access] = await Promise.all([
+    // `send --list` shells out here, and it is what this cache is for.
+    const [registered, snapshot, access] = await Promise.all([
       hermesDiscordRegistered(),
-      hermesGatewayStatus(),
       readHermesGatewaySnapshot(),
       readHermesDiscordAccess(),
     ]);
-    const probe: HermesDiscordProbe = { registered, gateway, snapshot, access };
+    const probe: HermesDiscordLocal = { registered, snapshot, access };
     cachedHermesProbe = { token, probe, at: Date.now() };
     return probe;
   })().finally(() => {
@@ -156,6 +160,11 @@ async function probeHermes(token: string): Promise<HermesDiscordProbe> {
   });
   inFlightHermesProbe.set(token, pending);
   return pending;
+}
+
+async function probeHermes(token: string): Promise<HermesDiscordProbe> {
+  const [local, gateway] = await Promise.all([probeHermesLocal(token), hermesGatewayStatus()]);
+  return { ...local, gateway };
 }
 
 export async function GET() {

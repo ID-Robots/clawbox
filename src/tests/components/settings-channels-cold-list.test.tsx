@@ -274,9 +274,107 @@ describe("Settings → Channels on a cold open", () => {
     expect(whatsapp).toHaveTextContent("settings.statusUnavailable");
     expect(whatsapp).not.toHaveTextContent("settings.channelsWhatsappHint");
 
-    const retry = within(whatsapp).getByTestId("settings-channel-retry-whatsapp");
+    const retry = within(list).getByTestId("settings-channel-retry-whatsapp");
     fireEvent.click(retry);
 
+    await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "connected"));
+  });
+
+  /**
+   * THE OTHER SKU. On OpenClaw and dual, /setup-api/whatsapp/status answers
+   * HTTP 200 with `state: "not_configured"` when the gateway could not be
+   * asked at all — so "the route answered" is not the same as "the route knew
+   * anything", and a list that cannot tell the two apart prints "Not
+   * configured" over a paired phone. `verified` is what separates them.
+   */
+  function openclawWhatsapp(extra: Record<string, unknown>) {
+    return (input: string | URL) =>
+      input.toString().startsWith("/setup-api/whatsapp/status")
+        ? jsonResponse({
+            supported: true,
+            harness: "openclaw",
+            allowlistSupported: false,
+            mode: null,
+            allowedUsers: [],
+            ...extra,
+          })
+        : boxFetch(input);
+  }
+
+  it("says a paired OpenClaw channel could not be checked, never 'not configured'", async () => {
+    // Gateway restarting: the row is null, so the route has to say
+    // not_configured — but it says so unverified.
+    vi.stubGlobal("fetch", vi.fn(openclawWhatsapp({ state: "not_configured", verified: false })));
+
+    openHub();
+    const list = await screen.findByTestId("settings-channels-list");
+    const whatsapp = within(list).getByTestId("settings-channel-whatsapp");
+
+    await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "unreachable"));
+    expect(whatsapp).toHaveTextContent("settings.statusUnavailable");
+    // The exact words TASK-689 exists to remove, on the other edition.
+    expect(whatsapp).not.toHaveTextContent("settings.notConfigured");
+    expect(within(list).getByTestId("settings-channel-retry-whatsapp")).toBeTruthy();
+  });
+
+  it("still calls an unconfigured OpenClaw channel unconfigured when the gateway answered", async () => {
+    // The DEFAULT state of the SKU: gateway healthy, WhatsApp never set up.
+    // This must not become a permanent "could not check" with a Retry that can
+    // never clear it.
+    vi.stubGlobal("fetch", vi.fn(openclawWhatsapp({ state: "not_configured", verified: true })));
+
+    openHub();
+    const list = await screen.findByTestId("settings-channels-list");
+    const whatsapp = within(list).getByTestId("settings-channel-whatsapp");
+
+    await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "not-configured"));
+    expect(whatsapp).toHaveTextContent("settings.notConfigured");
+    expect(whatsapp).not.toHaveTextContent("settings.statusUnavailable");
+    expect(within(list).queryByTestId("settings-channel-retry-whatsapp")).toBeNull();
+
+    // And the sidebar must not go permanently blank: an answered "no such
+    // channel" is knowledge, so the count can be completed. (Telegram and
+    // Email are configured in this fixture, hence a count rather than
+    // "Not configured".)
+    const nav = document.querySelector("nav");
+    const row = [...(nav?.querySelectorAll(":scope > button") ?? [])].find((b) =>
+      (b.textContent ?? "").includes("settings.channels"),
+    );
+    await waitFor(() => expect(row?.textContent).toContain("settings.channelsConnectedCount"));
+  });
+
+  it("shows 'checking' again while a retry is in flight", async () => {
+    let release: (() => void) | null = null;
+    let waCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        if (input.toString().startsWith("/setup-api/whatsapp/status")) {
+          waCalls += 1;
+          if (waCalls === 1) {
+            return Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) } as Response);
+          }
+          return new Promise<Response>((resolve) => {
+            release = () => resolve({ ok: true, status: 200, json: () => Promise.resolve({ supported: true, state: "paired", enabled: true, paired: true, receiving: true, verified: true }) } as Response);
+          });
+        }
+        return boxFetch(input);
+      }),
+    );
+
+    openHub();
+    const list = await screen.findByTestId("settings-channels-list");
+    const whatsapp = within(list).getByTestId("settings-channel-whatsapp");
+    await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "unreachable"));
+
+    fireEvent.click(within(list).getByTestId("settings-channel-retry-whatsapp"));
+
+    // A dead press otherwise: the row said "could not check" throughout.
+    await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "unknown"));
+    expect(whatsapp).toHaveTextContent("settings.checking");
+
+    await waitFor(() => expect(release).not.toBeNull());
+    release!();
     await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "connected"));
   });
 

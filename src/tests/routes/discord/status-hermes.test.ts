@@ -118,8 +118,14 @@ describe("GET /setup-api/discord/status — Hermes", () => {
 
   it("asks Hermes only once for concurrent callers", async () => {
     await Promise.all([GET(), GET(), GET()]);
+    // `send --list discord` is this route's own read and stays memoised here.
     expect(mockRegistered).toHaveBeenCalledTimes(1);
-    expect(mockGatewayStatus).toHaveBeenCalledTimes(1);
+    // `hermes gateway status` is NOT: three status routes ask for that same
+    // command, so its dedup, its short failure TTL and the invalidation the
+    // gateway restart paths call all live in `hermesGatewayStatus()`. A second
+    // 15 s copy here shadowed all three — see
+    // `src/tests/unit/hermes-gateway-status-memo.test.ts`.
+    expect(mockGatewayStatus).toHaveBeenCalledTimes(3);
   });
 
   it("never returns the token itself", async () => {

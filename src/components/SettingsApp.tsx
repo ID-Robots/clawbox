@@ -1389,6 +1389,23 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const markChannelSettled = useCallback((id: ChannelSection) => {
     setSettledChannels((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
   }, []);
+  /**
+   * Put a channel back to "being asked".
+   *
+   * Retrying an unreadable row otherwise changed nothing on screen for the two
+   * seconds the CLI takes, and changed nothing again if it failed — a dead
+   * press, twice. Dropping the settled mark first makes the row honestly
+   * `unknown` ("Checking…", pulsing) for the duration and land on whichever
+   * state is true afterwards.
+   */
+  const unsettleChannel = useCallback((id: ChannelSection) => {
+    setSettledChannels((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
 
   /* ── Telegram ── */
   const [tgToken, setTgToken] = useState("");
@@ -3657,80 +3674,86 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     discord: refreshDiscordStatus,
                   }[item.id];
                   return (
-                    <button
+                    <div
                       key={item.id}
-                      type="button"
-                      onClick={() => setSectionGated(item.id)}
-                      data-testid={`settings-channel-${item.id}`}
-                      data-state={state}
-                      className="w-full flex items-center gap-3 px-3 py-3 text-left bg-transparent border-none cursor-pointer hover:bg-white/[0.04] transition-colors"
+                      className="w-full flex items-center hover:bg-white/[0.04] transition-colors"
                     >
-                      <span className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06]">
-                        <span className="material-symbols-rounded" style={{ fontSize: 20, color: connected ? "var(--coral-bright)" : "var(--text-muted)" }}>
-                          {item.icon}
+                      {/* The row navigates; Retry is its SIBLING, not a control
+                          nested inside it. A <button> may not contain another
+                          interactive element: the retry's label would be
+                          absorbed into the accessible name of the control that
+                          navigates away, and browse mode commonly flattens the
+                          inner one out of reach entirely. */}
+                      <button
+                        type="button"
+                        onClick={() => setSectionGated(item.id)}
+                        data-testid={`settings-channel-${item.id}`}
+                        data-state={state}
+                        className="flex-1 min-w-0 flex items-center gap-3 px-3 py-3 text-left bg-transparent border-none cursor-pointer"
+                      >
+                        <span className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06]">
+                          <span className="material-symbols-rounded" style={{ fontSize: 20, color: connected ? "var(--coral-bright)" : "var(--text-muted)" }}>
+                            {item.icon}
+                          </span>
                         </span>
-                      </span>
-                      <span className="flex-1 min-w-0">
-                        <span className="block text-sm text-[var(--text-primary)] font-medium truncate">{t(item.labelKey)}</span>
-                        {/* While the status is genuinely in flight the row says
-                            so in words, not only in the pulsing dot — the hint
-                            alone reads like a description of a channel that is
-                            not set up, which is how this list misled the owner
-                            in the first place. */}
-                        <span
-                          className="block text-[11px] text-[var(--text-muted)] truncate"
-                          role={state === "unreachable" ? "status" : undefined}
-                        >
-                          {subtitle
-                            ?? (state === "unknown"
+                        <span className="flex-1 min-w-0">
+                          <span className="block text-sm text-[var(--text-primary)] font-medium truncate">{t(item.labelKey)}</span>
+                          {/* State first, subtitle second. A subtitle is only
+                              ever a description of an ANSWER, so when there is
+                              no answer it must not be allowed to speak: reading
+                              `subtitle ?? …` here let a route that says "not
+                              configured" without being able to verify it print
+                              those very words over a live channel.
+                              The words are part of the row's accessible name,
+                              which is what actually carries the state to a
+                              screen reader — a live region that appears already
+                              populated does not reliably announce. */}
+                          <span className="block text-[11px] text-[var(--text-muted)] truncate">
+                            {state === "unknown"
                               ? t("settings.checking")
                               : state === "unreachable"
                                 ? t("settings.statusUnavailable")
-                                : t(item.hintKey))}
+                                : (subtitle ?? t(item.hintKey))}
+                          </span>
                         </span>
-                      </span>
-                      {/* A mark per state: set up, still asking, and asked but
-                          unanswered. "Still asking" used to look exactly like
-                          "nothing there", which is the bug this row had. The
-                          dot means the channel is CONFIGURED, not that traffic
-                          is flowing — `channelConnected` does not read the
-                          routes' `receiving` field (TASK-693). */}
-                      {connected ? (
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" aria-hidden="true" />
-                      ) : state === "unknown" ? (
-                        <span
-                          className="w-1.5 h-1.5 rounded-full bg-white/25 shrink-0 animate-pulse motion-reduce:animate-none"
-                          aria-hidden="true"
-                        />
-                      ) : state === "unreachable" ? (
-                        <span className="w-1.5 h-1.5 rounded-full bg-white/25 shrink-0" aria-hidden="true" />
-                      ) : null}
-                      {/* A dead end needs a way out. Rendered as a real control
-                          rather than only a colour, because the row that could
-                          not be read is exactly the one the owner has to act
-                          on. `stopPropagation` so retrying does not also
-                          navigate into the pane. */}
+                        {/* A mark per state: set up, still asking, and asked but
+                            unanswered. "Still asking" used to look exactly like
+                            "nothing there", which is the bug this row had. The
+                            dot means the channel is CONFIGURED, not that traffic
+                            is flowing — `channelConnected` does not read the
+                            routes' `receiving` field (TASK-693). */}
+                        {connected ? (
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" aria-hidden="true" />
+                        ) : state === "unknown" ? (
+                          <span
+                            className="w-1.5 h-1.5 rounded-full bg-white/25 shrink-0 animate-pulse motion-reduce:animate-none"
+                            aria-hidden="true"
+                          />
+                        ) : state === "unreachable" ? (
+                          <span className="w-1.5 h-1.5 rounded-full bg-white/25 shrink-0" aria-hidden="true" />
+                        ) : null}
+                        <span className="material-symbols-rounded text-[var(--text-muted)] shrink-0" style={{ fontSize: 18 }} aria-hidden="true">
+                          chevron_right
+                        </span>
+                      </button>
+                      {/* A dead end needs a way out. Named per channel, because
+                          up to four rows can be unreachable at once and four
+                          controls all called "Retry" name nothing. */}
                       {state === "unreachable" && (
-                        <span
-                          role="button"
-                          tabIndex={0}
+                        <button
+                          type="button"
                           data-testid={`settings-channel-retry-${item.id}`}
-                          onClick={(e) => { e.stopPropagation(); void refreshChannel(); }}
-                          onKeyDown={(e) => {
-                            if (e.key !== "Enter" && e.key !== " ") return;
-                            e.preventDefault();
-                            e.stopPropagation();
+                          aria-label={`${t("settings.retry")} — ${t(item.labelKey)}`}
+                          onClick={() => {
+                            unsettleChannel(item.id);
                             void refreshChannel();
                           }}
-                          className="text-[11px] text-[var(--coral-bright)] shrink-0 px-1 cursor-pointer hover:underline"
+                          className="text-[11px] text-[var(--coral-bright)] shrink-0 mr-3 px-1 py-1 bg-transparent border-none cursor-pointer hover:underline"
                         >
                           {t("settings.retry")}
-                        </span>
+                        </button>
                       )}
-                      <span className="material-symbols-rounded text-[var(--text-muted)] shrink-0" style={{ fontSize: 18 }} aria-hidden="true">
-                        chevron_right
-                      </span>
-                    </button>
+                    </div>
                   );
                 })}
               </div>
@@ -5754,9 +5777,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     id: ChannelSection,
   ): "connected" | "not-configured" | "unknown" | "unreachable" => {
     if (channelStatusKnown(id)) return channelConnected(id) ? "connected" : "not-configured";
-    // A route that answered without being able to verify has settled — there
-    // is nothing still in flight to wait for.
-    if (id === "whatsapp" && waStatus?.verified === false) return "unreachable";
+    // Nothing known, and a read is outstanding (or has never run) — including
+    // one a Retry just started. Only once it has settled with nothing to show
+    // may the row say the channel could not be read.
     return settledChannels.has(id) ? "unreachable" : "unknown";
   };
 
@@ -5819,7 +5842,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         return { subtitle: emailStatus.address };
       }
       case "whatsapp": {
-        if (waStatus === null) return { subtitle: null };
+        // `verified: false` is the gateway failing to be asked, dressed up as
+        // "not configured" with a 200. Claiming either way over it is the false
+        // failure this panel is being fixed for.
+        if (waStatus === null || waStatus.verified === false) return { subtitle: null };
         if (!waStatus.supported) return { subtitle: t("settings.whatsappUnavailable") };
         if (waStatus.state === "paired") {
           return { subtitle: waStatus.receiving ? t("settings.whatsappActive") : t("settings.whatsappPairedIdle") };

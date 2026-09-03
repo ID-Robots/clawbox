@@ -114,25 +114,18 @@ describe("GET /setup-api/whatsapp/status", () => {
     expect(body.receiving).toBe(false);
   });
 
-  it("coalesces concurrent callers onto one gateway probe", async () => {
+  it("asks the shared gateway reader rather than keeping a second copy of it", async () => {
+    // The dedup and the TTL split live in `hermesGatewayStatus()` now, not
+    // here. Three status routes ask for that same ~2 s CLI cold start, and
+    // three private 15 s memos meant a cold Settings → Channels open ran it
+    // three times concurrently — and, worse, shadowed the invalidation the
+    // gateway restart paths call, so a save that restarted the gateway kept
+    // being answered with the pre-restart process until the local copy aged
+    // out. This route must therefore go to the shared reader every time and
+    // let it decide what is cached; the memo's own behaviour is pinned in
+    // `src/tests/unit/hermes-gateway-status-memo.test.ts`.
     await Promise.all([GET(), GET(), GET()]);
-    expect(mockGateway).toHaveBeenCalledTimes(1);
-  });
-
-  it("caches a FAILING gateway probe, not just a successful one", async () => {
-    // The panel polls this route, and `hermes gateway status` costs ~2 s on a
-    // Jetson. Caching only the success path meant a wedged CLI was re-run on
-    // every single poll — the cost repeated exactly when it was highest.
-    vi.resetModules();
-    mockGateway.mockRejectedValue(new Error("hermes CLI timed out"));
-    GET = (await import("@/app/setup-api/whatsapp/status/route")).GET;
-
-    const first = await (await GET()).json();
-    const second = await (await GET()).json();
-
-    expect(mockGateway).toHaveBeenCalledTimes(1);
-    expect(first.gateway).toEqual({ installed: false, running: false });
-    expect(second.gateway).toEqual({ installed: false, running: false });
+    expect(mockGateway).toHaveBeenCalledTimes(3);
   });
 
   it("returns 500 without echoing the exception message", async () => {
