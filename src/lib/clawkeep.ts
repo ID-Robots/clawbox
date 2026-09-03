@@ -818,7 +818,10 @@ function mapSnapshotsError(resp: SnapshotsResponse): ClawKeepError {
       // `{"ok":false,"error":…}` with no `kind` for `TokenError` too, so these
       // cases are unreached and the token vanishing mid-session still falls to
       // `default:` (502). Kept as the mapping to use when the daemon starts
-      // carrying the `kind` it already owns internally (`api.ApiError.kind`).
+      // classifying its errors — which needs a `no_token` kind that
+      // `api.ApiError` does not have either (its union is auth | quota_full |
+      // tier | server | network | other), so making this branch live is a
+      // daemon-side change, not just a wiring one.
       return new ClawKeepNotPairedError();
     case "auth":
     case "unauthorized":

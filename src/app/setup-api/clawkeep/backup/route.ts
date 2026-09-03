@@ -19,10 +19,12 @@ export const dynamic = "force-dynamic";
 // arrive as a success.
 //
 // 65 is not the only pre-run exit — `daemon.py` returns 64 for a bad config
-// before it reaches the token at all — so a non-zero `exitCode` in a 200 body
-// still means "the daemon ran and failed", which is what the result card
-// reports. Classifying the rest of the daemon's `EXIT_*` taxonomy into HTTP
-// statuses is a separate change to the backup result path.
+// before it reaches the token at all. A non-zero `exitCode` in a 200 body
+// therefore means the daemon was started and did not succeed — or, for the two
+// codes the bridge synthesises itself, that it could not be started at all
+// (127, spawn error) or was killed by our own timer (124). Either way the
+// backup did not happen. Classifying the rest of the daemon's `EXIT_*`
+// taxonomy into HTTP statuses is a separate change to the backup result path.
 export async function POST(request: NextRequest) {
   try {
     let body: unknown = {};

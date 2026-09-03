@@ -609,6 +609,43 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     expect(out.error.next).toMatch(/do not start another one/i);
   });
 
+  it("tells the agent to get the box paired when backup_now hits an unpaired one", async () => {
+    // The route refuses an unpaired box with 409 `not_paired` before it spawns
+    // the daemon, and BACKUP_RULES is what turns that into an instruction the
+    // agent can act on. Without this the contract lives only in a comment: drop
+    // `rules: BACKUP_RULES` from the apiPost call, or reorder the rules, and
+    // the agent gets a bare 409 with no idea what to tell the user.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        409,
+        JSON.stringify({ error: "ClawKeep is not paired with an account", code: "not_paired" }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/not set up on this device/i);
+    expect(out.error.next).toMatch(/Settings -> Backup/);
+    expect(out.error.next).toMatch(/do not retry/i);
+  });
+
+  it("says the same thing for backup_list, which reaches the same 409", async () => {
+    apiGet.mockRejectedValue(
+      new ApiError(
+        409,
+        JSON.stringify({ error: "ClawKeep is not paired with an account", code: "not_paired" }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_list", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.next).toMatch(/Settings -> Backup/);
+  });
+
   it("reports a successful backup as one", async () => {
     apiPost.mockResolvedValue({ exitCode: 0, ok: true });
     const out = await system("openclaw").call("backup_now", {});

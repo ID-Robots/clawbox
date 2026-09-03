@@ -65,6 +65,9 @@ const NOT_PAIRED = { error: "ClawKeep is not paired with an account", code: "not
 let backupPOST: typeof import("@/app/setup-api/clawkeep/backup/route").POST;
 let restorePOST: typeof import("@/app/setup-api/clawkeep/restore/route").POST;
 let snapshotsGET: typeof import("@/app/setup-api/clawkeep/snapshots/route").GET;
+let labelPOST: typeof import("@/app/setup-api/clawkeep/snapshots/label/route").POST;
+let lockPOST: typeof import("@/app/setup-api/clawkeep/snapshots/lock/route").POST;
+let deletePOST: typeof import("@/app/setup-api/clawkeep/snapshots/delete/route").POST;
 
 const post = (route: string, body: Record<string, unknown>) =>
   new Request(`http://localhost/setup-api/clawkeep/${route}`, {
@@ -82,6 +85,9 @@ beforeAll(async () => {
   backupPOST = (await import("@/app/setup-api/clawkeep/backup/route")).POST;
   restorePOST = (await import("@/app/setup-api/clawkeep/restore/route")).POST;
   snapshotsGET = (await import("@/app/setup-api/clawkeep/snapshots/route")).GET;
+  labelPOST = (await import("@/app/setup-api/clawkeep/snapshots/label/route")).POST;
+  lockPOST = (await import("@/app/setup-api/clawkeep/snapshots/lock/route")).POST;
+  deletePOST = (await import("@/app/setup-api/clawkeep/snapshots/delete/route")).POST;
 });
 
 afterAll(async () => {
@@ -137,6 +143,24 @@ describe("ClawKeep on an unpaired box", () => {
 
   it("answers GET /clawkeep/snapshots with the same sentence and code", async () => {
     const res = await snapshotsGET();
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(NOT_PAIRED);
+    expect(daemon.spawns).toEqual([]);
+  });
+
+  // label / lock / delete were spawning the daemon unguarded too — a 502
+  // quoting "No token at <path>". They share pairedDaemonBin() with the routes
+  // above, but they are separate handlers with their own catch blocks, so the
+  // shared envelope is asserted per route rather than inferred.
+  const MUTATIONS: [string, () => Promise<Response>][] = [
+    ["snapshots/label", () => labelPOST(post("snapshots/label", { name: SNAPSHOT, label: "x" }))],
+    ["snapshots/lock", () => lockPOST(post("snapshots/lock", { name: SNAPSHOT, locked: true }))],
+    ["snapshots/delete", () => deletePOST(post("snapshots/delete", { name: SNAPSHOT }))],
+  ];
+
+  it.each(MUTATIONS)("answers POST /clawkeep/%s the same way", async (_route, call) => {
+    const res = await call();
 
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual(NOT_PAIRED);

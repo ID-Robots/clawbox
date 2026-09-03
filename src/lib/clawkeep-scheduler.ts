@@ -39,10 +39,11 @@ function fireBackup(): void {
     .then((result) => {
       // `runBackup` rejects only for an unpaired box; every other failure —
       // the daemon missing from PATH (127), a bad config (64), a token error
-      // (65), the kill-timer (124) — RESOLVES carrying the exit code, so the
-      // `.catch` below never sees it. Unlogged, those were a nightly no-op:
-      // this is the scheduler's only voice, since the Settings card's backup
-      // button is gated on `daemonInstalled` and never reaches this path.
+      // (65), the kill-timer (124), a revoked pairing (3) — RESOLVES carrying
+      // the exit code, so the `.catch` below never sees it, and unlogged those
+      // were a nightly no-op. For the missing-daemon case this is the ONLY
+      // thing that can report it at all: the Settings card's backup button is
+      // disabled on `!daemonInstalled`, so nobody can even try by hand.
       if (result.exitCode !== 0) {
         const tail = result.stderr.trim().slice(-500);
         console.warn(
