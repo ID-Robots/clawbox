@@ -290,9 +290,22 @@ core itself labels "legacy … retained for low-level SDK compatibility". Either
 is handed a context carrying `channelId`, which is enough to tell a channel from
 `webchat`.
 
+Every claim in the paragraph above about the harness's own internals —
+`transform_llm_output`, `PLATFORM_HINTS`, `reply_payload_sending`,
+`message_sending`'s "legacy" label, the hook context fields and the
+`### Message Context` field list — was read off the running core, not from this
+repository. Nothing here can check them: there is no vendored core and no
+`node_modules/@openclaw`, and `config/openclaw-target.txt` holds a version
+string and nothing else. Treat them as a note of where to look, not as verified
+fact, and re-read them against the core before building on them.
+
 **`webchat` is not exclusive to a card-making surface.** The gateway's own
 Control UI chat at `/chat` — a ClawBox-served, default-pinned app on the
-OpenClaw edition — is `webchat` too, and it renders the line as text. Both
+OpenClaw edition — is `webchat` too, and it renders the line as text. Its
+Hermes-edition twin is the **Hermes dashboard**, the pinned `hermes` app
+(`src/lib/desktop-apps.ts`) served through ClawBox's own auth proxy
+(`scripts/hermes-dashboard-proxy.js`); it has never heard of the directive
+either, so TASK-700 is one task per edition, not one for OpenClaw alone. Both
 ClawBox chats connect as `openclaw-control-ui` in `webchat` mode, impersonating
 it deliberately, and against the pinned core nothing the gateway passes tells
 the three apart: the model's `### Message Context` block carries only `schema`,
@@ -303,11 +316,21 @@ message, reply and trace fields, none of them client-shaped. ClawBox's connect
 frame does send `version: "clawbox-chat"`, but the gateway puts it only where
 the model and a hook cannot read it: the live connection record, the presence
 row and its own logs.
+
+The **spoken** reply divides the same way. On Hermes ClawBox synthesises the
+clip itself, so the route strips the directive before speaking it
+(`src/app/setup-api/hermes/chat/route.ts`) — the rule the same function already
+applied to `MEDIA:`, "a box reading a file path aloud would be absurd". On
+OpenClaw the gateway speaks the reply and ClawBox never sees that text, so the
+id is still read aloud there; that half belongs to TASK-697 with the channels.
+
 So the instruction leans towards the card — the card is the feature, the stray
-line is one line — and the Control UI keeps showing the line, as it did before
-the instruction said anything at all. Fixing that is TASK-700: it needs the page
-ClawBox already serves and injects into (`src/lib/gateway-proxy.ts`), not this
-sentence and not TASK-697's outbound hook, which sees `webchat` for all three.
+line is one line — and the two dashboards keep showing the line, as they did
+before the instruction said anything at all. Fixing that is TASK-700, and it
+needs the HTML ClawBox already serves — and, on OpenClaw, already injects into
+(`src/lib/gateway-proxy.ts`; the Hermes proxy streams bodies unmodified today,
+so that half is new code). Not this sentence, and not TASK-697's outbound hook,
+which sees `webchat` for every one of them.
 
 The only outbound-mail capability the agent has, and on the OpenClaw edition the
 only email capability at all — OpenClaw has no email channel, and inventing one

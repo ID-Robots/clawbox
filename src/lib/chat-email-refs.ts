@@ -135,9 +135,13 @@ function unwrapQuoted(value: string): string {
  * the id in backticks, so without it `EMAIL:`4471`` sat on screen as text until
  * its closing quote landed and then vanished.
  *
- * Nine digits, not ten: a tenth can carry the value past `MAX_UID`, and a
- * payload that can no longer become usable is not a directive being typed, it
- * is a line that has settled as text.
+ * Nine digits UNQUOTED, ten inside a quote that has not closed. Unquoted, a
+ * tenth digit settles the line either way: within `MAX_UID` the parser already
+ * makes a card from it, and past `MAX_UID` it can never make one, so in neither
+ * case is it still being typed. Quoted is different — the payload cannot be
+ * read at all until the closing quote lands, so ``EMAIL:`1000000000`` is a
+ * directive mid-arrival; at nine digits it sat on screen as text until its
+ * quote closed, and an interrupt kept it. Eleven digits is nobody's id.
  *
  * A prefix rule cannot be exact, and this one errs towards HIDING: a last line
  * that is only `E`, or the word `Email:` before a prose address, is held back
@@ -145,7 +149,7 @@ function unwrapQuoted(value: string): string {
  * round is the id on screen, which is the whole complaint.
  */
 const PARTIAL_DIRECTIVE_TAIL_RE =
-  /(^|\n)[ \t]*(?:email:[ \t]*["'`]?[ \t]*\d{0,9}|email|emai|ema|em|e)[ \t]*$/i;
+  /(^|\n)[ \t]*(?:email:[ \t]*["'`][ \t]*\d{0,10}|email:[ \t]*\d{0,9}|email|emai|ema|em|e)[ \t]*$/i;
 
 /**
  * The reply as a STREAMING bubble should show it.
@@ -185,9 +189,12 @@ export function streamingEmailRefsText(raw: string): string {
  * whose payload is not a usable id as text — so a Stop landing between `EMAIL`
  * and its digits left a bare `EMAIL:` line in the transcript for good. That is
  * the same stray id this module exists to remove, in the turn that is now worth
- * keeping, and nothing is lost by dropping it: a half-written directive can
+ * keeping. What it buys is STORED == LAST SHOWN: a half-written directive can
  * never become a card, and the bubble was already hiding it, so the stored turn
- * ends up as the last thing the owner actually saw.
+ * ends up as the last thing the owner actually saw. The prefix rule is not
+ * exact and that is its cost — a prose line ending `Email:` is dropped from an
+ * interrupted turn too, having been hidden from the bubble for the same
+ * reason. The two staying in step is the property worth having.
  *
  * Only a trailing one, and only when completing it would make a NEW card — the
  * same question `streamingEmailRefsText` asks, asked once here so the bubble and
@@ -200,7 +207,10 @@ export function dropUnfinishedDirective(raw: string): string {
   const probe = `$1EMAIL:${unusedUid(settled.uids)}`;
   const probed = splitEmailRefs(raw.replace(PARTIAL_DIRECTIVE_TAIL_RE, probe));
   // Not `$1`: the newline goes with the line, or an interrupted reply keeps a
-  // blank one where the directive was.
+  // blank one where the directive was. Exactly one, so a directive the model
+  // separated from its prose with a blank line leaves a trailing "\n"; the
+  // bubble is derived from this same call, so the two still agree, and markdown
+  // renders it as nothing.
   return probed.uids.length > settled.uids.length ? raw.replace(PARTIAL_DIRECTIVE_TAIL_RE, "") : raw;
 }
 

@@ -175,6 +175,28 @@ describe("a Hermes reply on a box with a voice", () => {
     expect((speakCalls[0].body as { text: string }).text).toBe("The lantern is green.");
   });
 
+  it("speaks the words, never the EMAIL: id — the same rule MEDIA: already gets", async () => {
+    // The caption is what gets spoken, and on THIS edition ClawBox builds the
+    // audio itself rather than the gateway doing it. A caption that still
+    // carried its `EMAIL:` lines had the box read "EMAIL four four seven one"
+    // aloud after the summary — the directive is machinery, exactly as the
+    // MEDIA: line twelve lines above it is, and the rule was applied to one
+    // and not the other.
+    stdoutReply = "Jane sent the Wednesday plan.\nEMAIL:4471";
+
+    const res = await post({ message: "read my last email" });
+    expect(res.status).toBe(200);
+
+    expect((speakCalls[0].body as { text: string }).text).toBe("Jane sent the Wednesday plan.");
+    expect((speakCalls[0].body as { text: string }).text).not.toMatch(/EMAIL/);
+    expect((speakCalls[0].body as { text: string }).text).not.toMatch(/\b4471\b/);
+
+    // And the transcript still KEEPS the directive: the bubble's card is made
+    // from it. Only the spoken copy loses it.
+    const assistant = transcript().filter((m) => m.role === "assistant").pop();
+    expect(assistant.text).toContain("EMAIL:4471");
+  });
+
   it("hands the chat a playable clip on the reply", async () => {
     await post({ message: "what colour" });
 

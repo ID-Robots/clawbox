@@ -534,9 +534,10 @@ EMAIL:4471`;
     expect(screen.getAllByTestId("chat-email-card")).toHaveLength(1);
     // And the player's accessible name is the SUMMARY, not the stored text: it
     // is built from the same split body the bubble shows, so a screen reader
-    // does not read "EMAIL 4471" aloud after it. The one place ClawBox owns —
-    // the recorded audio is synthesised upstream from the same text and still
-    // speaks the id, which is the outbound half TASK-697 covers.
+    // does not read "EMAIL 4471" aloud after it. The recorded audio is a second
+    // copy: on Hermes ClawBox synthesises it and now strips the directives
+    // there too (src/tests/routes/hermes/chat-spoken-reply.test.ts); on
+    // OpenClaw the gateway makes it and still speaks the id — TASK-697's half.
     const label = players()[0].getAttribute("aria-label") ?? "";
     expect(label).toContain(summary);
     expect(label).not.toContain("EMAIL:4471");

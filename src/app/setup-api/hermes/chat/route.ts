@@ -41,6 +41,7 @@ import { appendTranscript } from "@/lib/harness/transcript-store";
 import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "@/lib/harness/transcript-key";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
+import { splitEmailRefs } from "@/lib/chat-email-refs";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
 import {
   readHermesBillingProvider,
@@ -397,13 +398,22 @@ async function settleTurn(
   // The CAPTION is what gets spoken, not `answer`: the MEDIA: lines are
   // machinery, and a box reading a file path aloud would be absurd.
   //
+  // `EMAIL:` is machinery for the same reason and loses the same way, so it
+  // comes off the SPOKEN copy only. This is the one edition where the rule has
+  // to be applied here: on OpenClaw the gateway synthesises the reply and
+  // ClawBox never sees the text on its way to the voice, but on Hermes the clip
+  // is built right here — so a caption that kept its directives had the box say
+  // "EMAIL four four seven one" after the summary. `caption` itself is left
+  // alone: `answer` below is the transcript, and the bubble's card is made from
+  // exactly those lines.
+  //
   // Fail-soft and bounded (see speakHermesReply): a reply that could not be
   // spoken still renders, silently. Losing the answer to a busy voice would be
   // a far worse trade than losing the audio.
   // The capability read is inside the try/catch of neither — `hermesSpeaksReplies`
   // fails closed and `speakHermesReply` never throws — so a box that cannot
   // answer the question simply does not speak, and the turn is unaffected.
-  const spokenClip = (await hermesSpeaksReplies()) ? await speakHermesReply(caption) : null;
+  const spokenClip = (await hermesSpeaksReplies()) ? await speakHermesReply(splitEmailRefs(caption).text) : null;
   const answer = [
     caption,
     ...drawn.map((file) => `MEDIA:${file}`),

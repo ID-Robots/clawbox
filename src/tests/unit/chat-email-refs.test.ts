@@ -173,6 +173,40 @@ describe("the half-arrived directive in a live bubble", () => {
     expect(streamingEmailRefsText("Summary.\nEMAIL:`4471`")).toBe("Summary.");
   });
 
+  it("hides a ten-digit id inside a quote that has not closed", () => {
+    // IMAP UIDs run to 4_294_967_295, so `parseUid` takes ten digits — but the
+    // partial matcher took nine, and the tenth digit is exactly where the two
+    // stopped agreeing. Unquoted that is harmless (a ten-digit id in range is
+    // already a card, and one past MAX_UID is settled text), but inside an
+    // unclosed quote the payload cannot be read at all, so the line sat on
+    // screen as text until the closing quote landed — and an interrupt kept it.
+    expect(streamingEmailRefsText("Summary.\nEMAIL:`1000000000")).toBe("Summary.");
+    expect(streamingEmailRefsText('Summary.\nEMAIL:"4294967295')).toBe("Summary.");
+    expect(dropUnfinishedDirective("Summary.\nEMAIL:`1000000000")).toBe("Summary.");
+    // Eleven digits is nobody's id, quoted or not: it stays as text.
+    expect(streamingEmailRefsText("Summary.\nEMAIL:`12345678901")).toBe(
+      "Summary.\nEMAIL:`12345678901",
+    );
+  });
+
+  it("still makes a card from a finished ten-digit id, and still keeps an unusable one", () => {
+    // The guard above must not cost a real card, nor start swallowing a line
+    // the parser would have shown. Both are UNQUOTED, which is what makes them
+    // settled: nothing further can arrive that changes the answer.
+    expect(splitEmailRefs("Summary.\nEMAIL:1000000000").uids).toEqual([1000000000]);
+    expect(dropUnfinishedDirective("Summary.\nEMAIL:1000000000")).toBe(
+      "Summary.\nEMAIL:1000000000",
+    );
+    // Past MAX_UID: text, on the bubble and in an interrupted turn alike.
+    expect(splitEmailRefs("Summary.\nEMAIL:9999999999").uids).toEqual([]);
+    expect(streamingEmailRefsText("Summary.\nEMAIL:9999999999")).toBe(
+      "Summary.\nEMAIL:9999999999",
+    );
+    expect(dropUnfinishedDirective("Summary.\nEMAIL:9999999999")).toBe(
+      "Summary.\nEMAIL:9999999999",
+    );
+  });
+
   it("is the ordinary split for anything not still being typed", () => {
     const raw = "Jane sent the plan.\nEMAIL:4471\nAnd that is all.";
     expect(streamingEmailRefsText(raw)).toBe(splitEmailRefs(raw).text);

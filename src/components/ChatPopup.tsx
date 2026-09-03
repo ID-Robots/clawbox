@@ -1969,7 +1969,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // either way; only what survives an interrupt differs.
             const text = splitMediaDirectives(extractText(msg)).text
             // Sentinels would flash before the final-state filter drops them.
-            if (text && !isSentinel(text) && !isInterSessionEnvelope(text, msg)) {
+            // Asked of the text as the BUBBLE will show it, not of the buffer:
+            // `SENTINEL_RE` anchors the whole string, so once the directives
+            // stopped being stripped on the way in, `NO_REPLY\nEMAIL:4471`
+            // stopped looking like a sentinel and the marker reached the
+            // bubble. The buffer is still what gets STORED, so an interrupt
+            // keeps the directives and their cards.
+            if (text && !isSentinel(streamingEmailRefsText(text)) && !isInterSessionEnvelope(text, msg)) {
               setStreaming(text); setReloadingSkill(false)
             }
           } else if (state === 'final') {
@@ -4780,10 +4786,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                         // for one more reason: the stored text keeps its
                         // `EMAIL:` directives, so the raw string announced
                         // "EMAIL 4471" after a summary short enough to survive
-                        // the 100-character trim. This is the spoken id in the
-                        // one place ClawBox owns — the recorded reply itself is
-                        // synthesised upstream (`messages.tts`) from the same
-                        // text, directives and all, and still says it.
+                        // the 100-character trim.
+                        //
+                        // The RECORDED clip is a second copy of the same words,
+                        // and WHERE it is made decides who strips them. On
+                        // Hermes ClawBox makes it, so the route strips there
+                        // too (setup-api/hermes/chat/route.ts). On OpenClaw the
+                        // gateway synthesises it from the reply and ClawBox
+                        // never sees that text, so the id is still spoken on
+                        // that edition — the outbound half, TASK-697.
                         aria-label={audioLabel(bodyText, t("chat.audioReply"))}
                         controls
                         preload="metadata"
