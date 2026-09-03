@@ -77,8 +77,13 @@ solution (scores 100) and the untouched seed (scores low).
 - **Money is not tracked** — the product records no cost, by decision
   (2026-08-29), and the bench prices nothing. Tokens and wall-clock are the
   footprint record. The orchestrator-vs-sub-agent split comes from per-model
-  usage sums over the session transcript (sub-agents all run on
-  `deepseek-v4-flash`; the main loop on the tier model).
+  usage sums over the session transcript (the typed helpers — explorer,
+  tester, reviewer — run on `deepseek-v4-flash`; the main loop on the tier
+  model; a workflow `agent()` without an agentType would run on the tier
+  model too, which the ultracode brief forbids). Since 2026-09-03 the CLI
+  streams one assistant line per content block, each with the message's
+  whole usage — sum per `message.id`, not per line, or every turn counts
+  double (the run record does this; `lib/transcript.mjs` does too).
 - **ClawBox writes no per-run sub-agent transcripts** (`agent-*.jsonl` /
   `.meta.json` are claude-ds internals). Capture sweeps
   `~/.claude-ds/projects/<dir-slug>/` defensively for artifacts newer than the
