@@ -112,7 +112,14 @@ describe("the phonemiser check runs on a box that already has Kokoro", () => {
 
   it("refuses the ready verdict when it fails", () => {
     expect(fn).toMatch(/kokoro_check_phonemiser; then[\s\S]*kokoro_report "failed:phonemiser"/);
-    expect(fn.indexOf('kokoro_report "failed:phonemiser"')).toBeLessThan(fn.indexOf('kokoro_report "ready"') + fn.length);
+    // Both indexes, compared directly: `indexOf(a) < indexOf(b) + fn.length`
+    // is satisfied by any position at all, so it would pass a function that
+    // published `ready` first and only then reported the failure.
+    const failed = fn.indexOf('kokoro_report "failed:phonemiser"');
+    const ready = fn.indexOf('kokoro_report "ready"');
+    expect(failed).toBeGreaterThanOrEqual(0);
+    expect(ready).toBeGreaterThanOrEqual(0);
+    expect(failed).toBeLessThan(ready);
   });
 });
 
@@ -163,29 +170,53 @@ describe.runIf(canRun)("kokoro_check_phonemiser fails a box that drops out-of-vo
   type Fault =
     | string
     | "raise" // g2p throws
+    | "partial-drop" // the fallback is gone but SOME words still phonemise
     | "no-g2p" // the pipeline has no g2p attribute
     | "no-module" // `kokoro` is not installed at all
     | "init-raise" // KPipeline() throws (torch/CUDA init, a CUDA OOM, an HF fetch)
     | "model-must-be-false"; // KPipeline() refuses to load TTS weights
 
   /**
-   * Write a fake `kokoro` package and return the PYTHONPATH that finds it, or
-   * null for the box where `kokoro` is absent.
+   * The PYTHONPATH for the box where `kokoro` is absent.
+   *
+   * An empty directory is not enough: PYTHONPATH only PREPENDS to `sys.path`,
+   * so the user and system site-packages are still searched behind it — and a
+   * shipped box, where these suites also run, HAS `kokoro` installed. The host
+   * would then import the real package and the no-module cases would quietly
+   * stop exercising the missing-module path. A module at the front of the path
+   * that raises exactly what a missing package raises makes that box the same
+   * on every host.
+   */
+  function blockedKokoro(): string {
+    const dir = path.join(root, "no-kokoro");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "kokoro.py"), `raise ModuleNotFoundError("No module named 'kokoro'")\n`);
+    return dir;
+  }
+
+  /**
+   * Write a fake `kokoro` package and return the PYTHONPATH that finds it —
+   * or, for the box where `kokoro` is absent, the path that blocks the import.
    *
    * `KPipeline.__init__` takes `model` because the real one does: the check
    * wants the G2P only, and constructing with the weights is a torch import
    * plus a KModel load onto a Jetson's shared GPU on every in-app update.
    */
-  function writeFakeKokoro(fault: Fault): string | null {
-    if (fault === "no-module") return null;
+  function writeFakeKokoro(fault: Fault): string {
+    if (fault === "no-module") return blockedKokoro();
     const pkg = path.join(root, "fake", "kokoro");
     mkdirSync(pkg, { recursive: true });
     const g2p =
       fault === "raise"
         ? "    def __call__(self, text):\n        raise RuntimeError('boom')"
-        : `    def __call__(self, text):\n        return (${JSON.stringify(
-            NAMED_FAULTS.has(fault) ? WORKING_PHONEMES : fault,
-          )}, [])`;
+        : fault === "partial-drop"
+          ? // What a missing fallback does to a real sentence: misaki keeps the
+            // words it can phonemise and drops the rest. Nothing is blanked.
+            "    def __call__(self, text):\n" +
+            "        return (' '.join('f\u0279\u02c8\u0251bn\u1d7ck\u02ccAT\u0259\u0279' if w == 'frobnicator' else '\u2753' for w in text.split()), [])"
+          : `    def __call__(self, text):\n        return (${JSON.stringify(
+              NAMED_FAULTS.has(fault) ? WORKING_PHONEMES : fault,
+            )}, [])`;
     const init: string[] = [];
     if (fault === "init-raise") {
       // What a box under memory pressure actually raises: kokoro-server.service
@@ -211,7 +242,7 @@ describe.runIf(canRun)("kokoro_check_phonemiser fails a box that drops out-of-vo
     return path.join(root, "fake");
   }
 
-  const NAMED_FAULTS = new Set(["raise", "no-g2p", "no-module", "init-raise", "model-must-be-false"]);
+  const NAMED_FAULTS = new Set(["raise", "partial-drop", "no-g2p", "no-module", "init-raise", "model-must-be-false"]);
   /** What a shipped Orin with a working espeakng-loader wheel actually returns. */
   const WORKING_PHONEMES = "zɔɹblˈæTɪk fɹˈɑbnᵻkˌATəɹ skwˈɪbᵊld";
 
@@ -224,10 +255,28 @@ describe.runIf(canRun)("kokoro_check_phonemiser fails a box that drops out-of-vo
     const run = spawnSync("python3", [script], {
       encoding: "utf-8",
       timeout: 30_000,
-      // An empty PYTHONPATH is the box with no kokoro: the import must fail.
-      env: { ...process.env, PYTHONPATH: pythonPath ?? path.join(root, "empty") },
+      env: { ...process.env, PYTHONPATH: pythonPath },
     });
     return { status: run.status, out: `${run.stdout ?? ""}${run.stderr ?? ""}` };
+  }
+
+  /**
+   * The script's own assignments for every name the extracted arm reads, lifted
+   * from the file rather than invented. The arm prints a remediation command
+   * built from them, and the harness runs under `set -u` exactly as the shipped
+   * script does — so an arm that referenced a name install-voice.sh does not set
+   * would abort here instead of aborting a customer's install. A rename in the
+   * script fails this loudly rather than leaving the harness testing a
+   * different arm.
+   */
+  function armPrelude(): string {
+    return ["CLAWBOX_USER", "PIP"]
+      .map((name) => {
+        const m = INSTALL_VOICE_SH.match(new RegExp(`^${name}=.*$`, "m"));
+        if (!m) throw new Error(`install-voice.sh no longer assigns ${name}, which the phonemiser arm reads`);
+        return m[0];
+      })
+      .join("\n");
   }
 
   /**
@@ -248,13 +297,14 @@ describe.runIf(canRun)("kokoro_check_phonemiser fails a box that drops out-of-vo
     const end = INSTALL_VOICE_SH.indexOf("\n}", start);
     const body = INSTALL_VOICE_SH.slice(start, end + 2);
 
-    const pythonPath = writeFakeKokoro(fault) ?? path.join(root, "empty");
+    const pythonPath = writeFakeKokoro(fault);
     const harness = path.join(root, "verdict.sh");
     writeFileSync(
       harness,
       [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
+        armPrelude(),
         'kokoro_report() { echo "REPORT $1"; }',
         `clawbox_python() { PYTHONPATH=${JSON.stringify(pythonPath)} python3 -c "$1"; }`,
         body,
@@ -300,6 +350,29 @@ describe.runIf(canRun)("kokoro_check_phonemiser fails a box that drops out-of-vo
       expect(run.out).toMatch(/espeak/i);
     });
   }
+
+  it("fails when only SOME out-of-vocabulary words are dropped", () => {
+    // The line was judged as ONE string, so a result that still carried the
+    // phonemes of one word passed while the other two had already gone silent
+    // — the exact shape a missing fallback produces on a real sentence, which
+    // mixes lexicon hits with the names this check exists to protect.
+    const run = check("partial-drop");
+    expect(run.status, `the check passed a box that drops words:\n${run.out}`).not.toBe(0);
+    expect(run.out).toMatch(/espeak/i);
+    // Named, so the operator sees WHICH words went silent rather than a verdict
+    // over a sentence that looked half-right.
+    expect(run.out).toContain("zorblattic");
+    expect(run.out).toContain("squibbled");
+  });
+
+  it("really has no kokoro to import on the box that has none", () => {
+    // Guards the guard: PYTHONPATH cannot hide a kokoro the host has
+    // installed, so without the blocker this case would import the real
+    // package and silently stop testing the missing-module path.
+    const run = check("no-module");
+    expect(run.out).toContain("ModuleNotFoundError");
+    expect(run.status).toBe(0);
+  });
 
   for (const [name, mode] of [
     ["the g2p raises", "raise"],
@@ -362,4 +435,34 @@ describe.runIf(canRun)("kokoro_check_phonemiser fails a box that drops out-of-vo
       expect(run.rc).toBe(12);
     });
   });
+});
+
+describe("the phonemiser remediation prints a command that works on the box", () => {
+  /**
+   * Both places that tell an operator how to repair the wheel. A printed fix
+   * that cannot be pasted is a false remedy: the box stays mute and the
+   * operator believes it was told what to do.
+   */
+  const remediations = INSTALL_VOICE_SH.split("\n").filter(
+    (line) => /^\s*echo /.test(line) && /espeakng-loader misaki/.test(line),
+  );
+
+  it("finds both of them", () => {
+    expect(remediations).toHaveLength(2);
+  });
+
+  for (const line of remediations) {
+    it(`installs the way install_python_package does: ${line.trim().slice(0, 60)}…`, () => {
+      // install_python_package is `su - "$CLAWBOX_USER" -c "$PIP install --user …"`.
+      // Dropping --user is what makes the pasted command try a system install
+      // as an unprivileged user, and a hardcoded name is wrong on any box whose
+      // CLAWBOX_USER is not the default.
+      expect(INSTALL_VOICE_SH).toContain('su - "$CLAWBOX_USER" -c "$PIP install --user ');
+      expect(line).toContain("$CLAWBOX_USER");
+      expect(line).toContain("$PIP");
+      expect(line).toContain("install --user ");
+      expect(line).not.toMatch(/\bpip3\b/);
+      expect(line).not.toMatch(/-u clawbox\b|- clawbox\b/);
+    });
+  }
 });

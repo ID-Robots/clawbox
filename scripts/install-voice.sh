@@ -378,15 +378,22 @@ try:
     # TypeError lands in the WARN arm below, not on a box's verdict.
     pipeline = KPipeline(lang_code='a', model=False)
     g2p = pipeline.g2p
-    phonemes = g2p('zorblattic frobnicator squibbled')[0] or ''
+    # ONE WORD AT A TIME. A missing fallback does not blank a sentence -- misaki
+    # keeps what it can phonemise and drops the rest -- so a line judged whole
+    # still reads non-empty once ONE of its words survives, which is exactly
+    # what real speech looks like: lexicon hits mixed with the names this check
+    # exists to protect. Nothing here is in any lexicon, so a working fallback
+    # returns phonemes for every one; without one misaki emits its unknown
+    # marker, or nothing at all when kokoro built the G2P with unk='' -- strip
+    # both. Judged inside the try with the calls: a shape this cannot read is an
+    # upstream change, a WARN, never a verdict.
+    dropped = [w for w in ('zorblattic', 'frobnicator', 'squibbled')
+               if not (g2p(w)[0] or '').replace(chr(10067), '').strip()]
 except Exception as exc:
     print('WARN: could not exercise the phonemiser (' + type(exc).__name__ + ': ' + str(exc) + ') -- not treating that as a verdict')
     raise SystemExit(0)
-# Nothing in that line is in any lexicon, so with a working espeak fallback it
-# is all phonemes. Without one misaki emits its unknown marker, or nothing at
-# all when kokoro built the G2P with unk='' -- strip both before judging.
-if not phonemes.replace(chr(10067), '').strip():
-    raise SystemExit('espeak phonemiser unavailable: out-of-vocabulary words are dropped from speech (the espeakng-loader wheel kokoro pulls in is missing or broken)')
+if dropped:
+    raise SystemExit('espeak phonemiser unavailable: these out-of-vocabulary words are dropped from speech: ' + ', '.join(dropped) + ' (the espeakng-loader wheel kokoro pulls in is missing or broken)')
 print('Phonemiser OK (out-of-vocabulary words phonemise)')
 " 2>&1) || rc=$?
   printf '%s\n' "$out" | tail -3
@@ -650,7 +657,11 @@ install_kokoro_tts() {
     # Re-running the step lands on the idempotence gate and re-runs this same
     # check, so the caller's "Re-run: --step openclaw_tts" is not a remedy here.
     # The wheel that carries the espeak library and its data is.
-    echo "  Fix:   sudo -u clawbox pip3 install --force-reinstall espeakng-loader misaki" >&2
+    # The same shape install_python_package installs with: a login shell for
+    # the configured user and --user. `sudo -u clawbox pip3 install` without
+    # --user is a system install run by an unprivileged account, so the printed
+    # remedy would fail on the box it was printed for.
+    echo "  Fix:   su - $CLAWBOX_USER -c '$PIP install --user --force-reinstall espeakng-loader misaki'" >&2
     kokoro_report "failed:phonemiser"
     return 12
   fi
@@ -875,7 +886,7 @@ fi
 if $KOKORO_FULL_OK && ! kokoro_check_phonemiser; then
   KOKORO_FULL_OK=false
   echo "  Warning: Kokoro cannot phonemise out-of-vocabulary words — names and brands would be dropped from speech"
-  echo "  Warning: reinstall the wheel that carries it: sudo -u clawbox pip3 install --force-reinstall espeakng-loader misaki"
+  echo "  Warning: reinstall the wheel that carries it: su - $CLAWBOX_USER -c '$PIP install --user --force-reinstall espeakng-loader misaki'"
 fi
 
 echo "[7/7] Deploying voice server scripts..."
