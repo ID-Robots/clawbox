@@ -409,11 +409,20 @@ export function parseHermesGatewayStatus(stdout: string): HermesGatewayStatus {
 }
 
 /**
- * `hermes gateway status`, parsed. Reports "down" rather than throwing — with
- * ONE exception: a probe the caller CANCELLED is rethrown, because "down" is an
- * answer and a cancellation is not (see the catch below).
+ * `hermes gateway status`, parsed, and NEVER memoised. Reports "down" rather
+ * than throwing — with ONE exception: a probe the caller CANCELLED is rethrown,
+ * because "down" is an answer and a cancellation is not (see the catch below).
+ *
+ * `answered` is the difference between "the gateway says it is down" and "the
+ * gateway could not be asked". Every caller that BRANCHES on the result — this
+ * module's `ensureHermesGateway`, email's `stopHermesEmailPolling` — has to use
+ * this reader and check that flag, because both of the answers the failure path
+ * fabricates (`installed:false`, `running:false`) pick a wrong branch: one runs
+ * a privileged install on a box that already has a gateway, the other reports
+ * receiving as stopped on a box that is still polling. Callers that only
+ * DISPLAY the status take the memoised `hermesGatewayStatus()` below.
  */
-async function readHermesGatewayStatus(
+export async function readHermesGatewayStatus(
   signal?: AbortSignal,
 ): Promise<{ value: HermesGatewayStatus; answered: boolean }> {
   try {
@@ -614,11 +623,21 @@ async function restartHermesGatewayUserService(signal?: AbortSignal): Promise<bo
  */
 export async function ensureHermesGateway(signal?: AbortSignal): Promise<HermesGatewayEnsureResult> {
   // Uncached, always. Whether this installs or restarts turns on `before`, and
-  // a fifteen-second-old answer picks the wrong branch: the WhatsApp pairing
-  // flow is the one caller that passes no signal, and a stale `installed:false`
-  // would send it down the install path on a box where the gateway is already
-  // installed.
-  const before = (await readHermesGatewayStatus(signal)).value;
+  // a fifteen-second-old answer picks the wrong branch — every caller reaches
+  // this after its own durable write and so passes no signal, which is exactly
+  // the branch of `hermesGatewayStatus` that serves the memo: a stale
+  // `installed:false` would send it down the install path on a box where the
+  // gateway is already installed.
+  const { value: before, answered } = await readHermesGatewayStatus(signal);
+
+  // A probe that FAILED is not an answer of "no gateway here" either. A
+  // `hermes gateway status` that times out on a loaded Jetson, or a wedged CLI,
+  // degrades to `{installed:false, running:false}` — the exact shape that sends
+  // this function on to `sudo hermes gateway install --system` on a box that
+  // already has a unit. Report "nothing applied" instead and let the caller
+  // warn: the owner retries and the next probe usually answers, whereas a
+  // spurious install rewrites a working unit.
+  if (!answered) return { ...before, applied: false };
 
   if (before.installed) {
     // A system unit can only be controlled by root; a user unit must NOT be,

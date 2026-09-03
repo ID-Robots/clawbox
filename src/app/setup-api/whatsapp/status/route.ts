@@ -42,6 +42,10 @@ export async function GET() {
       return NextResponse.json({
         supported: true,
         harness,
+        // Carries `verified`, which is false when the gateway could not be
+        // asked at all. Without it the panel cannot tell that answer apart from
+        // a real "no such channel" and draws "Not configured" over a paired
+        // phone.
         ...status,
         // OpenClaw admits senders through its own owner-approved pairing, so
         // there is no allowlist for the panel to offer and no mode to pick —
@@ -54,9 +58,6 @@ export async function GET() {
         // ONLY when the transport is genuinely up. A stored link and an enabled
         // channel are not evidence that anything reaches the owner's phone.
         receiving: status.connected,
-        // `status.verified` is false when the gateway could not be asked at
-        // all. Without it the panel cannot tell that answer apart from a real
-        // "no such channel" and draws "Not configured" over a paired phone.
       });
     }
 

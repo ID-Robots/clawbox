@@ -32,12 +32,13 @@ const mockSet = vi.mocked(setHermesWhatsappConfig);
 
 let POST: typeof import("@/app/setup-api/whatsapp/configure/route").POST;
 
-const post = (body: unknown) =>
+const post = (body: unknown, signal?: AbortSignal) =>
   POST(
     new Request("http://localhost/setup-api/whatsapp/configure", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: typeof body === "string" ? body : JSON.stringify(body),
+      ...(signal ? { signal } : {}),
     }),
   );
 
@@ -146,6 +147,33 @@ describe("POST /setup-api/whatsapp/configure", () => {
     const body = await (await post({ mode: "bot" })).json();
     expect(mockEnsure).toHaveBeenCalled();
     expect(body).toMatchObject({ success: true, restarted: true });
+  });
+
+  it("does not let a browser that walked away cancel the restart its own write needs", async () => {
+    // The owner adds his number to the allowlist and the browser disconnects
+    // during the save. ~/.hermes/.env already holds the new
+    // WHATSAPP_ALLOWED_USERS, so the only thing that can still make it true is
+    // the gateway restart below — and passing `request.signal` into it means
+    // `runHermesCli` refuses before it even starts. The running gateway keeps
+    // the old allowlist and keeps refusing him, while the "restart_pending"
+    // warning goes to a client that is gone.
+    const controller = new AbortController();
+    mockSet.mockImplementation(async () => {
+      controller.abort();
+      return { changedKeys: ["WHATSAPP_ALLOWED_USERS"], paired: true, authorized: true };
+    });
+    mockEnsure.mockImplementation(async (signal?: AbortSignal) => {
+      if (signal?.aborted) throw new Error("hermes call cancelled");
+      return { installed: true, running: true, scope: "system" as const, applied: true };
+    });
+
+    const res = await post({ allowedUsers: ["15551234567"] }, controller.signal);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({ success: true, restarted: true });
+    // No argument, deliberately: past the first durable write, finish the job.
+    expect(mockEnsure).toHaveBeenCalledWith();
   });
 
   it("still reports success when the gateway will not come up", async () => {

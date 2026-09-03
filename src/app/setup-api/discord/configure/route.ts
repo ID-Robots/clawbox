@@ -380,11 +380,18 @@ export async function POST(request: Request) {
     }
 
     if (harness === "hermes") {
-      // This one KEEPS the signal: on Hermes it is the first durable write of
-      // the request (everything above is a read or an OpenClaw-only step), so a
-      // caller who disconnected before it ran leaves the box untouched. The
-      // allowlist write and `applyRestart` below come after it and take none.
-      await setHermesDiscordToken(rawToken, request.signal);
+      // No `request.signal` here. `set("discord_bot_token", …)` above has
+      // already committed the token to ClawBox's own store — on BOTH harnesses
+      // — so this is not the first durable write of the request, and a browser
+      // that goes away during the three Discord round trips before it (the
+      // member listing takes seconds on a large server) must not be able to
+      // cancel the other half. `runHermesCli` refuses a call whose signal is
+      // already aborted, so passing it would leave the token stored here,
+      // absent from ~/.hermes/.env, no allowlist written and the gateway not
+      // restarted — reliably, not rarely. Past the first durable write, finish
+      // the job; the allowlist write and `applyRestart` below take no signal
+      // for the same reason.
+      await setHermesDiscordToken(rawToken);
     } else {
       // OpenClaw: channel config + the EnvironmentFile the gateway resolves
       // `channels.discord.token` from.

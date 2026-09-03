@@ -1482,10 +1482,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, []);
 
   // The status the hub's dot and the pane's card both read.
+  //
+  // `unsettleChannel` first, and never without the read that follows it: a
+  // channel whose hub read failed keeps its settled mark, so entering its pane
+  // drew "Could not check" for the whole duration of the pane's OWN fresh read
+  // and only then flipped. That is the round-3 pulse pointing the other way —
+  // claiming the question is unanswerable while it is being asked. The other
+  // three status effects below do the same, for the same reason.
   useEffect(() => {
     if (!isMobile && section !== "telegram" && section !== "channels") return;
+    unsettleChannel("telegram");
     refreshTelegramStatus();
-  }, [section, isMobile, refreshTelegramStatus]);
+  }, [section, isMobile, refreshTelegramStatus, unsettleChannel]);
 
   // Pane-only detail — the approved list and the streaming toggle have no
   // reader on the hub, so the hub must not pay for them.
@@ -1770,11 +1778,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   }, []);
 
-  // The status the hub's dot and the pane's card both read.
+  // The status the hub's dot and the pane's card both read. Unsettle-then-read,
+  // as on the Telegram effect above.
   useEffect(() => {
     if (!isMobile && section !== "email" && section !== "channels") return;
+    unsettleChannel("email");
     refreshEmailStatus();
-  }, [section, isMobile, refreshEmailStatus]);
+  }, [section, isMobile, refreshEmailStatus, unsettleChannel]);
 
   // Pane-only detail — the approvals strip and the chat-approval bot.
   useEffect(() => {
@@ -2062,10 +2072,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   }, [markChannelSettled, claimChannelRead]);
 
+  // Unsettle-then-read, as on the Telegram effect above.
   useEffect(() => {
     if (!isMobile && section !== "whatsapp" && section !== "channels") return;
+    unsettleChannel("whatsapp");
     refreshWhatsapp();
-  }, [section, isMobile, refreshWhatsapp]);
+  }, [section, isMobile, refreshWhatsapp, unsettleChannel]);
 
   const saveWhatsapp = useCallback(
     async (payload: { allowedUsers?: string[]; mode?: "bot" | "self-chat"; enabled?: boolean }) => {
@@ -2397,10 +2409,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   }, []);
 
+  // Unsettle-then-read, as on the Telegram effect above.
   useEffect(() => {
     if (!isMobile && section !== "discord" && section !== "channels") return;
+    unsettleChannel("discord");
     refreshDiscordStatus();
-  }, [section, isMobile, refreshDiscordStatus]);
+  }, [section, isMobile, refreshDiscordStatus, unsettleChannel]);
 
   useEffect(() => {
     if (section !== "discord") return;

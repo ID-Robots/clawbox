@@ -103,6 +103,14 @@ function hasDot(row: HTMLElement): boolean {
   return row.querySelector(".bg-emerald-400") !== null;
 }
 
+/** The sidebar's Channels row, whose subtitle is the count under test. */
+function channelsSidebarRow(): Element | undefined {
+  const nav = document.querySelector("nav");
+  return [...(nav?.querySelectorAll(":scope > button") ?? [])].find((b) =>
+    (b.textContent ?? "").includes("settings.channels"),
+  );
+}
+
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(boxFetch));
 });
@@ -333,14 +341,91 @@ describe("Settings → Channels on a cold open", () => {
     expect(within(list).queryByTestId("settings-channel-retry-whatsapp")).toBeNull();
 
     // And the sidebar must not go permanently blank: an answered "no such
-    // channel" is knowledge, so the count can be completed. (Telegram and
-    // Email are configured in this fixture, hence a count rather than
-    // "Not configured".)
-    const nav = document.querySelector("nav");
-    const row = [...(nav?.querySelectorAll(":scope > button") ?? [])].find((b) =>
-      (b.textContent ?? "").includes("settings.channels"),
+    // channel" is knowledge, so EVERY channel is known and the count can be
+    // completed the ordinary way. (Telegram and Email are configured in this
+    // fixture, hence a count rather than "Not configured".) The other branch —
+    // a count completed while one channel stayed unreadable — is pinned in the
+    // test below.
+    await waitFor(() =>
+      expect(channelsSidebarRow()?.textContent).toContain("settings.channelsConnectedCount"),
     );
-    await waitFor(() => expect(row?.textContent).toContain("settings.channelsConnectedCount"));
+  });
+
+  it("still counts the channels it did read when one of them could not be reached", async () => {
+    // THE FALLBACK BRANCH. Not every channel answered, but nothing is still
+    // being asked either — one route was unreachable. Going silent for the rest
+    // of the session over a box with three live channels is the sidebar's own
+    // version of the bug this file exists for; the count can only understate,
+    // and it never says "Not configured" over a channel nobody could read.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        if (input.toString().startsWith("/setup-api/discord/status")) {
+          return Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) } as Response);
+        }
+        return boxFetch(input);
+      }),
+    );
+
+    openHub();
+    const list = await screen.findByTestId("settings-channels-list");
+    const discord = within(list).getByTestId("settings-channel-discord");
+    await waitFor(() => expect(discord).toHaveAttribute("data-state", "unreachable"));
+
+    // Telegram, Email and WhatsApp are all connected in this fixture; Discord
+    // is the one that never answered, so it is not in the count and does not
+    // suppress it either.
+    await waitFor(() =>
+      expect(channelsSidebarRow()?.textContent).toContain("settings.channelsConnectedCount"),
+    );
+    expect(channelsSidebarRow()?.textContent).not.toContain("settings.notConfigured");
+  });
+
+  it("stops saying 'could not check' the moment the pane re-asks", async () => {
+    // The mirror image of the pulse that outlives its request: a channel whose
+    // hub read failed keeps its settled mark, so opening its pane printed
+    // "Could not check" — with a Retry under it — for the whole duration of the
+    // pane's OWN fresh read, and only then flipped. Claiming the question is
+    // unanswerable while it is being asked is as dishonest as the other way
+    // round; the mark is dropped by whatever starts the next read.
+    let waCalls = 0;
+    let release: (() => void) | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        if (!input.toString().startsWith("/setup-api/whatsapp/status")) return boxFetch(input);
+        waCalls += 1;
+        if (waCalls === 1) {
+          return Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) } as Response);
+        }
+        return new Promise<Response>((resolve) => {
+          release = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: () =>
+                Promise.resolve({ supported: true, state: "paired", enabled: true, paired: true, receiving: true, verified: true }),
+            } as Response);
+        });
+      }),
+    );
+
+    openHub();
+    const list = await screen.findByTestId("settings-channels-list");
+    const whatsapp = within(list).getByTestId("settings-channel-whatsapp");
+    await waitFor(() => expect(whatsapp).toHaveAttribute("data-state", "unreachable"));
+
+    fireEvent.click(whatsapp);
+    const pane = await screen.findByTestId("settings-section-whatsapp");
+
+    // The pane's own read is in flight: the skeleton, not the verdict.
+    await waitFor(() => expect(pane.querySelector(".animate-pulse")).not.toBeNull());
+    expect(pane).not.toHaveTextContent("settings.statusUnavailable");
+    expect(within(pane).queryByTestId("whatsapp-status-retry")).toBeNull();
+
+    await waitFor(() => expect(release).not.toBeNull());
+    release!();
+    await waitFor(() => expect(pane).toHaveTextContent("settings.whatsappActive"));
   });
 
   it("shows 'checking' again while a retry is in flight", async () => {
