@@ -9,8 +9,8 @@ import { EMAIL_DIRECTIVE_CASES } from "@/tests/fixtures/email-directive-cases";
 // THE PIN. `EMAIL:<uid>` is understood in three places by three languages:
 //
 //   src/lib/chat-email-refs.ts                    the chat window's cards (TS)
-//   scripts/hermes-plugins/hooks/…/email_directives.py   the Hermes plugin (Py)
-//   scripts/openclaw-plugins/…/email-directives.mjs      the OpenClaw plugin (JS)
+//   scripts/hermes-plugins/…/email_directives.py    the Hermes plugin (Py)
+//   scripts/openclaw-plugins/…/email-directives.mjs   the OpenClaw plugin (JS)
 //
 // They cannot share a file — each is loaded by a different runtime, two of them
 // inside a harness's own process — so the risk is drift: a rule tightened in
@@ -24,7 +24,7 @@ import { EMAIL_DIRECTIVE_CASES } from "@/tests/fixtures/email-directive-cases";
 // digits.
 
 const REPO = path.resolve(__dirname, "../../..");
-const PY_PLUGIN_DIR = path.join(REPO, "scripts/hermes-plugins/hooks/clawbox_email_directives");
+const PY_PLUGIN_DIR = path.join(REPO, "scripts/hermes-plugins/clawbox_email_directives");
 
 const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
 

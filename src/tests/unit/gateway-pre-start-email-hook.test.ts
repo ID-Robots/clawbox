@@ -85,7 +85,10 @@ function run(root = REPO) {
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-function readConfig(): Record<string, any> {
+/** The gateway config as JSON. `entries` is indexed by plugin id in the tests. */
+type OpenclawConfig = { plugins?: { entries?: Record<string, Record<string, unknown> | undefined> } };
+
+function readConfig(): OpenclawConfig {
   return JSON.parse(readFileSync(configPath, "utf-8"));
 }
 
@@ -119,7 +122,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     const r = run();
     expect(r.status).toBe(0);
     expect(installed()).toEqual(["email-directives.mjs", "index.mjs", "openclaw.plugin.json", "package.json"]);
-    expect(readConfig().plugins.entries[PLUGIN_ID]).toEqual({ enabled: true });
+    expect(readConfig().plugins?.entries?.[PLUGIN_ID]).toEqual({ enabled: true });
     expect(r.stdout).toContain("reply_payload_sending registered");
   });
 
@@ -132,7 +135,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
 
   it("leaves every other plugin entry alone", () => {
     run();
-    expect(readConfig().plugins.entries.deepseek).toEqual({ enabled: true });
+    expect(readConfig().plugins?.entries?.deepseek).toEqual({ enabled: true });
   });
 
   it("keeps a config that already carries our entry with extra keys", () => {
@@ -141,7 +144,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
       JSON.stringify({ plugins: { entries: { [PLUGIN_ID]: { hooks: { timeoutMs: 5000 } } } } }),
     );
     run();
-    expect(readConfig().plugins.entries[PLUGIN_ID]).toEqual({ hooks: { timeoutMs: 5000 }, enabled: true });
+    expect(readConfig().plugins?.entries?.[PLUGIN_ID]).toEqual({ hooks: { timeoutMs: 5000 }, enabled: true });
   });
 
   it("does not rewrite the config on a second boot", () => {
@@ -205,7 +208,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     rmSync(path.join(binDir, "openclaw"));
     const r = run();
     expect(r.status).toBe(0);
-    expect(readConfig().plugins.entries[PLUGIN_ID]).toEqual({ enabled: true });
+    expect(readConfig().plugins?.entries?.[PLUGIN_ID]).toEqual({ enabled: true });
     expect(r.stderr).toMatch(/WARNING.*did not register reply_payload_sending/);
   });
 
@@ -222,7 +225,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
       const r = run(bare);
       expect(r.status).toBe(0);
       expect(installed()).toEqual([]);
-      expect(readConfig().plugins.entries[PLUGIN_ID]).toBeUndefined();
+      expect(readConfig().plugins?.entries?.[PLUGIN_ID]).toBeUndefined();
       expect(r.stderr).toContain("not a complete plugin");
       // And it never asked the CLI about a plugin it did not install.
       expect(calls()).not.toContain("plugins inspect");

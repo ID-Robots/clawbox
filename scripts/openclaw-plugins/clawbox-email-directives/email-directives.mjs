@@ -2,7 +2,7 @@
 //
 // THE THIRD OF THREE COPIES. The original is `src/lib/chat-email-refs.ts`
 // (`splitEmailRefs`), which is what a ClawBox chat renders cards from;
-// `scripts/hermes-plugins/hooks/clawbox_email_directives/email_directives.py`
+// `scripts/hermes-plugins/clawbox_email_directives/email_directives.py`
 // is the second. They cannot share a file — this one is loaded by a plugin
 // inside the OpenClaw gateway's own Node process, that one by a Python plugin
 // inside the Hermes agent's, and the original by a Next.js bundle. What they

@@ -446,7 +446,25 @@ try_kokoro() {
 # FAILS OPEN, LOUDLY. A missing parser or a failed call speaks the reply as it
 # arrived and says so on stderr: a directive read aloud is a blemish, a silent
 # box is the failure this whole script exists to prevent.
-EMAIL_DIRECTIVES_DIR="${EMAIL_DIRECTIVES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../hermes-plugins/hooks/clawbox_email_directives" 2>/dev/null && pwd)}"
+# TWO PLACES TO LOOK, because there are two copies of THIS file. Both harnesses
+# register the CHECKOUT's copy as the provider command
+# ("$PROJECT_DIR/scripts/openclaw/clawbox-tts.sh" — install.sh step_openclaw_tts,
+# and the Hermes `clawbox-local` provider defined beside it), while
+# install-voice.sh's deploy_voice_scripts ALSO drops a copy into the agent's
+# workspace at $WORKSPACE/scripts/openclaw/. Resolving only against this file's
+# own directory would leave that second copy speaking the id — and, because the
+# strip fails open, it would do so silently.
+resolve_email_directives_dir() {
+  local d
+  for d in "$(dirname "${BASH_SOURCE[0]}")/../hermes-plugins/clawbox_email_directives" \
+           "${CLAWBOX_ROOT:-/home/clawbox/clawbox}/scripts/hermes-plugins/clawbox_email_directives"; do
+    if [ -r "$d/email_directives.py" ]; then
+      (cd "$d" && pwd) && return 0
+    fi
+  done
+  printf ''
+}
+EMAIL_DIRECTIVES_DIR="${EMAIL_DIRECTIVES_DIR:-$(resolve_email_directives_dir)}"
 EMAIL_DIRECTIVES_TIMEOUT="${EMAIL_DIRECTIVES_TIMEOUT:-10}"
 
 strip_email_directives() {

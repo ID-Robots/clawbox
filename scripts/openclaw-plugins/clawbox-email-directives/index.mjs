@@ -127,7 +127,7 @@ export function onReplyPayloadSending(event, ctx) {
   return next ? { payload: next } : undefined;
 }
 
-export default {
+const clawboxEmailDirectivesPlugin = {
   id: PLUGIN_ID,
   name: "ClawBox email directives",
   description: "Removes EMAIL: card directives from replies leaving the box for a channel.",
@@ -135,3 +135,8 @@ export default {
     api.on("reply_payload_sending", onReplyPayloadSending);
   },
 };
+
+// The loader follows only the `default` and `module` export keys, and its one
+// hard requirement is that `register` is a function — a named export would be
+// ignored, so this default is the plugin's entire contract with the core.
+export default clawboxEmailDirectivesPlugin;

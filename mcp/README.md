@@ -293,13 +293,16 @@ dict, and OpenClaw states the channel three ways per turn (a trusted
 `### Message Context` block, `channel=<id>` in the `## Runtime` line, and the
 `[<Channel> …]` envelope on the body). ClawBox's own chat is `webchat` there and
 a CLI or TUI on Hermes, which is why the instruction names all of those as
-surfaces to make the card on. Half two is native and unbuilt: Hermes'
-`transform_llm_output` plugin hook, handed the final text and the platform and
-free to replace it, and on OpenClaw `reply_payload_sending` — which gets the
-whole outbound payload — beside the older `message_sending`, whose stage the
-core itself labels "legacy … retained for low-level SDK compatibility". Either
-is handed a context carrying `channelId`, which is enough to tell a channel from
-`webchat`.
+surfaces to make the card on. Half two is native and now BUILT (TASK-697):
+Hermes' `transform_llm_output` plugin hook, handed the final text and the
+`platform` and free to replace it, and on OpenClaw `reply_payload_sending` —
+which gets the whole outbound payload and is keyed on `channelId` — chosen over
+the older `message_sending`, whose stage the core itself labels "legacy …
+retained for low-level SDK compatibility". Both plugins ship in `scripts/`
+(`scripts/hermes-plugins/clawbox_email_directives/`,
+`scripts/openclaw-plugins/clawbox-email-directives/`), are installed and enabled
+by the boot reconciles (`scripts/register-mcp.sh`, `scripts/gateway-pre-start.sh`),
+and KEEP the line on the surfaces that render the card.
 
 Every claim in the paragraph above about the harness's own internals —
 `transform_llm_output`, `PLATFORM_HINTS`, `reply_payload_sending`,
@@ -308,7 +311,9 @@ Every claim in the paragraph above about the harness's own internals —
 repository. Nothing here can check them: there is no vendored core and no
 `node_modules/@openclaw`, and `config/openclaw-target.txt` holds a version
 string and nothing else. Treat them as a note of where to look, not as verified
-fact, and re-read them against the core before building on them.
+fact, and re-read them against the core before building on them — TASK-697 did
+exactly that against OpenClaw 2026.8.1 and Hermes 0.20.5 on the two boxes, and
+the PR that built the plugins carries the `file:line` citations.
 
 **`webchat` is not exclusive to a card-making surface.** The gateway's own
 Control UI chat at `/chat` — a ClawBox-served, default-pinned app on the

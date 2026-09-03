@@ -61,11 +61,15 @@ const NOT_READABLE_NEXT =
  * CONTENT on the line, and never invent an id — only ones these tools returned
  * in this conversation address a real message.
  *
- * TWO SURFACES INTERCEPT IT, AND EVERY OTHER ONE SHOWS IT. ClawBox's two chat
- * windows lift the line out (src/lib/chat-email-refs.ts) and nothing else knows
- * what it means, so the same reply sent over Telegram — or Discord, or
- * WhatsApp, on either edition — ended with a bare "EMAIL:4471" under the
- * summary: an internal id the person cannot use and did not ask for.
+ * TWO SURFACES INTERCEPT IT, AND ONE PAIR OF PLUGINS REMOVES IT EVERYWHERE
+ * ELSE. ClawBox's two chat windows lift the line out
+ * (src/lib/chat-email-refs.ts) and nothing else knows what it means, so the same
+ * reply sent over Telegram — or Discord, or WhatsApp, on either edition — ended
+ * with a bare "EMAIL:4471" under the summary: an internal id the person cannot
+ * use and did not ask for. TASK-697 built the second half below, so a line that
+ * survives this instruction is now taken out on the way to the channel. The
+ * instruction still matters: the strip can only delete, so a reply written as
+ * nothing but ids leaves the owner nothing to read.
  *
  * TWO MORE CHATS SHOW IT, ONE PER EDITION, AND ClawBox SERVES BOTH. On OpenClaw
  * it is the gateway's own Control UI at /chat, behind the pinned OpenClaw icon
@@ -83,11 +87,12 @@ const NOT_READABLE_NEXT =
  * Kokoro voice, which it speaks by running ClawBox's own
  * scripts/openclaw/clawbox-tts.sh with `{{Text}}` in argv (install.sh,
  * step_openclaw_tts). So ClawBox does see that text on one of the two engines,
- * but as an engine's INPUT rather than as the reply — stripping there would fix
- * one voice and put chat semantics in a speech script. The id is read aloud on
- * both engines today; that half is TASK-697's, like the channels, and
- * clawbox-tts.sh is named there as the only OpenClaw-side chokepoint that
- * exists so far.
+ * but as an engine's INPUT rather than as the reply. TASK-697 strips it there
+ * anyway, because on OpenClaw there is nowhere else: the core synthesises the
+ * audio BEFORE any outbound hook runs, so `reply_payload_sending` cannot change
+ * what is spoken. The on-device Kokoro voice is therefore quiet about the id on
+ * both editions, and a CLOUD voice on OpenClaw still reads it aloud — no
+ * ClawBox code and no harness hook is upstream of that clip.
  *
  * The condition is stated HERE because a reply on its way to a CHANNEL reaches
  * the platform adapter without passing through any ClawBox code on either
@@ -98,14 +103,14 @@ const NOT_READABLE_NEXT =
  * TASK-697 cannot reach it. It is half one of the pattern the harness uses for
  * its own `MEDIA:` convention — advertise per platform in the system prompt,
  * then have the adapter strip whatever survives. Half one is a sentence; half
- * two is a guarantee, and half two is native and unbuilt: Hermes'
- * `transform_llm_output` plugin hook, and on OpenClaw `reply_payload_sending`
- * beside `message_sending` — the core labels its `message_sending` stage
- * "legacy … retained for low-level SDK compatibility", so TASK-697 should be
- * built on `reply_payload_sending`, which gets the whole outbound payload.
- * Either is handed a context carrying `channelId`, which is enough to tell a
- * channel from `webchat`. TASK-697. Until one of them is registered, this
- * sentence is the whole of the fix.
+ * two is a guarantee, and half two is native and now BUILT on each harness's
+ * own hook (TASK-697): Hermes' `transform_llm_output`, keyed on the `platform`
+ * it is handed, and on OpenClaw `reply_payload_sending`, keyed on `channelId`
+ * and given the whole outbound payload — chosen over `message_sending`, whose
+ * stage the core itself labels "legacy … retained for low-level SDK
+ * compatibility". Both plugins live in scripts/, are installed and enabled by
+ * the boot reconciles (scripts/register-mcp.sh, scripts/gateway-pre-start.sh),
+ * and KEEP the line on the surfaces that make the card.
  *
  * WHICH WAY IT LEANS. Emitting is the default and the channels are a closed
  * exception, and the instruction states the positive case too, because ClawBox's
