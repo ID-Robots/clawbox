@@ -27,6 +27,7 @@ import { GET, POST } from "@/app/setup-api/system/timezone/route";
 import {
   DEFAULT_TIMEZONE,
   TIMEZONE_SYNCED_KEY,
+  InvalidTimezoneError,
   TimezoneUnavailableError,
   listTimezones,
   readTimezone,
@@ -224,6 +225,22 @@ describe("POST /setup-api/system/timezone", () => {
     expect(res.status).toBe(400);
     expect(mockSet).not.toHaveBeenCalled();
     expect(mockAnnounce).not.toHaveBeenCalled();
+  });
+
+
+  // Regression, found on the device: a shape-valid zone the tz database does
+  // not have came back 500 with `Command failed: /usr/bin/sudo -n
+  // /usr/local/libexec/clawbox/clawbox-timezone.sh --set Europe/Nowhere`.
+  // Wrong status, and the box's sudo command line in a string the UI renders.
+  it("answers 400 for a well-formed zone the box does not have", async () => {
+    mockSet.mockRejectedValue(new InvalidTimezoneError("unknown timezone: Europe/Nowhere"));
+    const res = await post({ timezone: "Europe/Nowhere" });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("unknown timezone: Europe/Nowhere");
+    expect(body.error).not.toMatch(/sudo|libexec/);
+    expect(mockAnnounce).not.toHaveBeenCalled();
+    expect(store.has(TIMEZONE_SYNCED_KEY)).toBe(false);
   });
 
   it("answers 503 when the root-owned helper is not installed", async () => {

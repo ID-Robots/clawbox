@@ -71,6 +71,42 @@ export function isValidTimezoneName(zone: unknown): zone is string {
 
 export class TimezoneUnavailableError extends Error {}
 
+/**
+ * The helper refused the zone. A CLIENT error, not a server fault.
+ *
+ * isValidTimezoneName() can only check the SHAPE of a name — it has no tz
+ * database — so a well-formed zone that simply does not exist ("Europe/Nowhere",
+ * or a real zone dropped by a tzdata update) gets all the way to the helper
+ * before anything can say no. Without this the route answered 500 and echoed
+ * `Command failed: /usr/bin/sudo -n /usr/local/libexec/... --set Europe/Nowhere`
+ * at the owner: the wrong status, and the box's sudo command line in a UI
+ * string. The exit codes are the contract with scripts/clawbox-timezone.sh.
+ */
+export class InvalidTimezoneError extends Error {}
+
+/** Exit codes scripts/clawbox-timezone.sh answers with. */
+const EXIT_ZONE_REFUSED = 3;
+const EXIT_NO_TIMEDATECTL = 4;
+
+/**
+ * Turn a failed helper run into the error the route can map to a status.
+ *
+ * Only the helper's own stderr is carried through — never the command line
+ * execFile puts in `err.message`, which names the sudo invocation and the
+ * libexec path.
+ */
+function helperFailure(err: unknown, zone: string): Error {
+  const detail = err as { code?: unknown; stderr?: unknown };
+  const stderr = typeof detail.stderr === "string" ? detail.stderr.trim().split("\n").pop()?.trim() : "";
+  if (detail.code === EXIT_ZONE_REFUSED) {
+    return new InvalidTimezoneError(stderr || `Unknown timezone: ${zone}`);
+  }
+  if (detail.code === EXIT_NO_TIMEDATECTL) {
+    return new TimezoneUnavailableError(stderr || "This system has no timedatectl, so its timezone cannot be set.");
+  }
+  return new Error(stderr || `Could not set the timezone to ${zone}`);
+}
+
 export interface TimezoneStatus {
   /** false when timedatectl isn't available at all (dev machine, container). */
   supported: boolean;
@@ -149,10 +185,15 @@ export async function setTimezone(zone: string): Promise<TimezoneStatus> {
     throw new Error(`Invalid timezone: ${JSON.stringify(zone)}`);
   }
   const script = scriptPath();
-  const { stdout } = await execFileAsync(
-    "/usr/bin/sudo",
-    ["-n", script, "--set", zone],
-    { timeout: COMMAND_TIMEOUT_MS },
-  );
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync(
+      "/usr/bin/sudo",
+      ["-n", script, "--set", zone],
+      { timeout: COMMAND_TIMEOUT_MS },
+    ));
+  } catch (err) {
+    throw helperFailure(err, zone);
+  }
   return parseStatus(stdout);
 }

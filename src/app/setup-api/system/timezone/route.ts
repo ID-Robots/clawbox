@@ -4,6 +4,7 @@ import { requireSession } from "@/lib/route-auth";
 import { announceTimezoneToAgent } from "@/lib/timezone-agent";
 import {
   DEFAULT_TIMEZONE,
+  InvalidTimezoneError,
   TIMEZONE_SYNCED_KEY,
   TimezoneUnavailableError,
   isValidTimezoneName,
@@ -96,6 +97,12 @@ export async function POST(req: Request) {
     const agent = await announceTimezoneToAgent(status.timezone, { restartHarness: true });
     return NextResponse.json({ success: true, ...status, agent });
   } catch (err) {
+    // A well-formed zone the tz database does not have is the CALLER's mistake,
+    // not a server fault: isValidTimezoneName() checks the shape, and only the
+    // helper knows the actual zone list. 400 with the helper's own sentence.
+    if (err instanceof InvalidTimezoneError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
     if (err instanceof TimezoneUnavailableError) {
       return NextResponse.json({ error: err.message }, { status: 503 });
     }

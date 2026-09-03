@@ -304,3 +304,57 @@ d("scripts/clawbox-timezone.sh", () => {
     expect(typeof parsed.timezone).toBe("string");
   });
 });
+
+/**
+ * Found on the device, not in review: POSTing "Europe/Nowhere" answered 500
+ * with `Command failed: /usr/bin/sudo -n /usr/local/libexec/clawbox/...` in the
+ * `error` field. Wrong status — a zone the tz database does not have is the
+ * caller's mistake — and the box's sudo command line in a string the UI shows.
+ * The exit codes below are the contract with scripts/clawbox-timezone.sh.
+ */
+describe("a well-formed zone the box does not have", () => {
+  const refusal = () => Object.assign(
+    new Error(
+      "Command failed: /usr/bin/sudo -n /usr/local/libexec/clawbox/clawbox-timezone.sh --set Europe/Nowhere",
+    ),
+    { code: 3, stderr: "unknown timezone: Europe/Nowhere\n", stdout: "" },
+  );
+
+  it("is an InvalidTimezoneError, so the route can answer 400 rather than 500", async () => {
+    responses = [{ match: "--set Europe/Nowhere", error: refusal() }];
+    // Shape-valid, so isValidTimezoneName lets it through — only the helper,
+    // which owns the tz database, can refuse it.
+    expect(tz.isValidTimezoneName("Europe/Nowhere")).toBe(true);
+    await expect(tz.setTimezone("Europe/Nowhere")).rejects.toBeInstanceOf(tz.InvalidTimezoneError);
+  });
+
+  it("carries the helper's own sentence and never the sudo command line", async () => {
+    responses = [{ match: "--set Europe/Nowhere", error: refusal() }];
+    await expect(tz.setTimezone("Europe/Nowhere")).rejects.toThrow("unknown timezone: Europe/Nowhere");
+    responses = [{ match: "--set Europe/Nowhere", error: refusal() }];
+    await expect(tz.setTimezone("Europe/Nowhere")).rejects.not.toThrow(/sudo|libexec/);
+  });
+
+  it("maps exit 4 to TimezoneUnavailableError, so a box with no timedatectl is a 503", async () => {
+    responses = [{
+      match: "--set Europe/Sofia",
+      error: Object.assign(new Error("Command failed"), {
+        code: 4, stderr: "timedatectl is not available on this system\n", stdout: "",
+      }),
+    }];
+    await expect(tz.setTimezone("Europe/Sofia")).rejects.toBeInstanceOf(tz.TimezoneUnavailableError);
+  });
+
+  it("keeps any other failure a plain Error, so the route still answers 500", async () => {
+    responses = [{
+      match: "--set Europe/Sofia",
+      error: Object.assign(new Error("Command failed"), {
+        code: 5, stderr: "timedatectl set-timezone failed for Europe/Sofia\n", stdout: "",
+      }),
+    }];
+    const err = await tz.setTimezone("Europe/Sofia").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(tz.InvalidTimezoneError);
+    expect(err).not.toBeInstanceOf(tz.TimezoneUnavailableError);
+  });
+});
