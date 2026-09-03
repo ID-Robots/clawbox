@@ -121,7 +121,7 @@ export async function runOpenclawConfigSet(
   args: string[],
   options: OpenclawConfigSetOptions = {},
 ): Promise<void> {
-  await runConfigSetVerified([args], () =>
+  await runConfigSetVerified([args], options, () =>
     withConfigMutationRetry(
       (timeoutMs) => spawnOpenclawConfigSet(args, { ...options, timeoutMs }),
       options,
@@ -148,7 +148,7 @@ async function withConfigMutationRetry(
   label: string,
 ): Promise<void> {
   const {
-    timeoutMs = 30_000,
+    timeoutMs = DEFAULT_SPAWN_TIMEOUT_MS,
     maxAttempts = 4,
     baseBackoffMs = 100,
   } = options;
@@ -175,7 +175,7 @@ async function withConfigMutationRetry(
 }
 
 export interface SpawnOpenclawOptions {
-  /** Per-call timeout in ms. Default 30_000 (Jetson CLI cold-start is ~10-12s). */
+  /** Per-call timeout in ms. Default {@link DEFAULT_SPAWN_TIMEOUT_MS}. */
   timeoutMs?: number;
   /** Capture and resolve stdout (needed to read `--json` output). Default false. */
   captureStdout?: boolean;
@@ -216,7 +216,7 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
   }
   const bin = findOpenclawBin();
   const { uid, gid, captureStdout = false, stdinData } = options;
-  const timeoutMs = options.timeoutMs ?? 30_000;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
   const cwd = options.cwd ?? process.env.HOME ?? "/home/clawbox";
   const env = { HOME: "/home/clawbox", ...process.env, ...(options.env ?? {}) };
   const label = `${bin} ${(options.labelArgs ?? args).join(" ")}`;
@@ -307,6 +307,9 @@ export function spawnOpenclawCli(
 /** Bound on the gateway round trip itself; the spawn budget adds the CLI's own start-up on top. */
 const GATEWAY_RPC_TIMEOUT_MS = 20_000;
 const GATEWAY_RPC_SPAWN_ALLOWANCE_MS = 30_000;
+
+/** Default per-call deadline. A Jetson CLI cold start is ~10-12s. */
+const DEFAULT_SPAWN_TIMEOUT_MS = 30_000;
 
 /** How long a SIGKILLed child is given to actually exit before we answer anyway. */
 const KILL_REAP_WAIT_MS = 1_000;
@@ -441,7 +444,8 @@ export function parseConfigSetArgs(args: OpenclawConfigSetArgs): { path: string;
  * `.` separates, and a bracket-quoted segment is ONE key however many dots it
  * contains — `agents.defaults.models["openai/gpt-5.5"].agentRuntime.id`, the
  * Codex runtime arm, is the path that made this necessary. Null for anything
- * else (an unterminated bracket, an unquoted index, an empty segment), because
+ * else (an unterminated bracket, an unquoted index, an empty DOTTED segment —
+ * `[""]` is a legal key and parses as one), because
  * the only caller uses this to decide that a write it did not see finish
  * actually landed, and a path it cannot read must not become that claim.
  */
@@ -481,11 +485,18 @@ function configPathSegments(configPath: string): string[] | null {
   return segments.length > 0 ? segments : null;
 }
 
-/** The value at a dotted config path, or `undefined` when the path is absent. */
+/**
+ * The value at a dotted config path, or `undefined` when the path is absent.
+ *
+ * OWN properties only. A plain `current[segment]` walks the prototype chain, so
+ * `constructor` or `toString` would answer with something that is not in
+ * `openclaw.json` — and the one job here is to say what the file holds.
+ */
 function valueAtConfigPath(config: unknown, segments: readonly string[]): unknown {
   let current: unknown = config;
   for (const segment of segments) {
     if (!isPlainObject(current)) return undefined;
+    if (!Object.hasOwn(current, segment)) return undefined;
     current = (current as Record<string, unknown>)[segment];
   }
   return current;
@@ -494,13 +505,16 @@ function valueAtConfigPath(config: unknown, segments: readonly string[]): unknow
 /**
  * The config areas this module is willing to NAME in a log line.
  *
- * A config path is caller text. `POST /setup-api/chat/model` builds one out of
- * the model reference in its request body (`chatgptRuntimeEntryPath`) and
- * `POST /setup-api/tts` out of the voice provider — the two sources CodeQL
- * traced into the journal line below (js/log-injection, alert #473). Escaping
- * that text is not enough to make the record ours: a caller who chooses the
- * content, and with it the length, of what one API call writes to the journal
- * can forge entries inside a line as well as across two.
+ * A config path is caller text. The two request bodies CodeQL traced into the
+ * journal line below (js/log-injection, alert #473) are `POST
+ * /setup-api/chat/model`, whose model reference becomes
+ * `agents.defaults.models[<ref>].agentRuntime` through
+ * `chatgptRuntimeEntryPath`, and `POST /setup-api/tts`, whose provider id
+ * becomes `<tts|messages.tts>.providers.<id>.voice`. (`models.providers.<id>`
+ * is the same shape, from `POST /setup-api/ai-models/configure`.) Escaping that
+ * text is not enough to make the record ours: a caller who chooses the content,
+ * and with it the length, of what one API call writes to the journal can forge
+ * entries inside a line as well as across two.
  *
  * So the path is mapped onto one of these literals and the caller's own text
  * never reaches the line. The write is still diagnosable — which subsystem was
@@ -510,6 +524,7 @@ function valueAtConfigPath(config: unknown, segments: readonly string[]): unknow
 const LOGGED_CONFIG_AREAS = [
   "agents",
   "channels",
+  "gateway",
   "memory",
   "messages",
   "models",
@@ -595,6 +610,7 @@ async function configSetLanded(batch: readonly OpenclawConfigSetArgs[]): Promise
  */
 async function runConfigSetVerified(
   batch: readonly OpenclawConfigSetArgs[],
+  options: OpenclawConfigSetOptions,
   attempt: () => Promise<void>,
 ): Promise<void> {
   try {
@@ -604,10 +620,12 @@ async function runConfigSetVerified(
     if (!(await configSetLanded(batch))) throw err;
     // Not `err.message`: the spawn label carries the caller's config path. (The
     // VALUES are already elided by configSetLabelArgs / configSetBatchLabelArgs;
-    // the paths are not, and they are the half built from a request body.)
+    // the paths are not, and they are the half built from a request body.) The
+    // deadline is read off the caller's options and NOT off the error, every
+    // field of which hangs on an object built from that same path.
     const areas = loggedConfigAreas(batch.map(configSetEntryPath));
     console.warn(
-      `[openclaw-config] a config set (${areas}) was killed at its deadline, but every assignment is on disk — the write landed, reporting success`,
+      `[openclaw-config] a config set (${areas}) was killed at its ${options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS}ms deadline, but every assignment is on disk — the write landed, reporting success`,
     );
   }
 }
@@ -651,7 +669,7 @@ export function configSetBatchLabelArgs(batch: readonly OpenclawConfigSetArgs[])
     "config",
     "set",
     "--batch-json",
-    `[${batch.map((args) => `${args.filter((arg) => !arg.startsWith("--"))[0] ?? "<no path>"}=<redacted>`).join(",")}]`,
+    `[${batch.map((args) => `${configSetEntryPath(args) || "<no path>"}=<redacted>`).join(",")}]`,
   ];
 }
 
@@ -686,7 +704,7 @@ export async function runOpenclawConfigSetBatch(
     return;
   }
   const payload = JSON.stringify(batch.map(parseConfigSetArgs));
-  await runConfigSetVerified(batch, () =>
+  await runConfigSetVerified(batch, options, () =>
     withConfigMutationRetry(
       (timeoutMs) =>
         spawnOpenclaw(["config", "set", "--batch-json", payload], {
@@ -745,7 +763,7 @@ export async function runOpenclawConfigUnset(
     if (!(await configUnsetLanded(configPath))) throw err;
     // The path is the caller's text here too — see {@link LOGGED_CONFIG_AREAS}.
     console.warn(
-      `[openclaw-config] a config unset (${loggedConfigAreas([configPath])}) was killed at its deadline, but the path is gone from the config — the removal landed, reporting success`,
+      `[openclaw-config] a config unset (${loggedConfigAreas([configPath])}) was killed at its ${options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS}ms deadline, but the path is gone from the config — the removal landed, reporting success`,
     );
   }
 }

@@ -280,6 +280,21 @@ describe("a config set killed at its timeout is verified, not assumed failed", (
     expect(err!.message).toContain("timed out");
   });
 
+  it("rejects the timeout TYPE from the real spawn, not just a message", async () => {
+    // `openclaw-channels.ts` decides install_timeout vs install_failed on
+    // `err instanceof OpenclawSpawnTimeoutError`, but its own suite mocks
+    // `spawnOpenclawCli` and hand-builds the error — so nothing there proves the
+    // spawn still produces that type. This drives the real one, on a command
+    // that is not a `config` write, so the coupling cannot rot silently.
+    mockSpawn.mockImplementation(() => hangingChild());
+
+    const err = await settle(
+      openclawConfig.spawnOpenclawCli(["plugins", "install", "openclaw-discord"], { timeoutMs: 1 }),
+    );
+
+    expect(err).toBeInstanceOf(openclawConfig.OpenclawSpawnTimeoutError);
+  });
+
   it("keeps the caller's config path out of the journal line", async () => {
     // CodeQL js/log-injection #473: `POST /setup-api/chat/model` and
     // `POST /setup-api/tts` both build a config path out of their request body
@@ -307,8 +322,10 @@ describe("a config set killed at its timeout is verified, not assumed failed", (
       expect(line).not.toContain("forged line");
       expect(line).not.toContain("evil");
       // Still says WHICH area was written — a literal of this module's, not the
-      // caller's text.
+      // caller's text — and the deadline it was killed at, which is the
+      // caller's own option and never the request's.
       expect(line).toContain("models");
+      expect(line).toContain("1ms deadline");
     } finally {
       warn.mockRestore();
     }
