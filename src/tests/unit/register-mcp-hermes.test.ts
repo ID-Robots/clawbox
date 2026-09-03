@@ -341,3 +341,68 @@ d("register-mcp.sh — bundled email-skill distractors", () => {
     expect(clawboxEntry().enabled).toBe(true);
   });
 });
+
+// Hermes parks the agent's worker thread on a clarify for `agent.clarify_timeout`
+// seconds — 3600 by default, and `<= 0` means forever. On an appliance that is
+// an hour of a session nobody can use for anything else because one question
+// went unanswered. 300s is the ClawBox default, written where the rest of this
+// device's Hermes config is rendered.
+d("register-mcp.sh — the clarify window this appliance ships with", () => {
+  function agentBlock(): Record<string, unknown> {
+    return (readConfig().agent as Record<string, unknown>) ?? {};
+  }
+
+  it("seeds agent.clarify_timeout at 300 on a config that never set it", () => {
+    fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    // A NUMBER, not the string `hermes config set` would have stored: upstream
+    // reads it as a number and a quoted one is a different value.
+    expect(agentBlock().clarify_timeout).toBe(300);
+  });
+
+  it("leaves a window the owner chose for themselves alone", () => {
+    fs.writeFileSync(configPath, "agent:\n  clarify_timeout: 900\n");
+    run();
+    expect(agentBlock().clarify_timeout).toBe(900);
+  });
+
+  it("defers to the legacy clarify.timeout, which wins in hermes' own resolver", () => {
+    // resolve_clarify_timeout reads `clarify.timeout` BEFORE
+    // `agent.clarify_timeout`, so writing ours beside it would leave the file
+    // claiming 300 while the box waited the owner's window.
+    fs.writeFileSync(configPath, "clarify:\n  timeout: 1800\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(readConfig().agent).toBeUndefined();
+    expect(clawboxEntry().enabled).toBe(true);
+  });
+
+  it("keeps the rest of the agent block untouched", () => {
+    fs.writeFileSync(configPath, "agent:\n  reasoning_effort: medium\n");
+    run();
+    expect(agentBlock().reasoning_effort).toBe("medium");
+    expect(agentBlock().clarify_timeout).toBe(300);
+  });
+
+  it("writes nothing on a second run, with the key already seeded", () => {
+    // The idempotence contract, exercised through the branch this block adds:
+    // the first run creates the `agent` block, and the second must find its own
+    // value there and leave the file byte-identical.
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
+    run();
+    const first = fs.readFileSync(configPath, "utf-8");
+    expect(first).toContain("clarify_timeout");
+    const second = run();
+    expect(second.stdout).toContain("already current");
+    expect(fs.readFileSync(configPath, "utf-8")).toBe(first);
+  });
+
+  it("leaves an agent key it cannot read alone but still registers the MCP", () => {
+    fs.writeFileSync(configPath, "agent: broken\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(readConfig().agent).toBe("broken");
+    expect(clawboxEntry().enabled).toBe(true);
+  });
+});
