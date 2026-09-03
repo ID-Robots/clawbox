@@ -617,11 +617,18 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
 
   it("says a protected verdict with the schedule off is not a promise of a newer backup", async () => {
     // Turning auto-backup off widens the tolerated backup age to the
-    // no-schedule week, so a five-day-stale nightly box answers
+    // no-schedule week, so a six-day-stale nightly box answers
     // {protected, ok} on one click. The ClawKeep card says so in prose; the
     // agent reading this tool has only the verdict unless something ranks it,
     // and "you're protected" over a box nothing will back up again is the same
     // false success the rest of this tool exists to stop.
+    //
+    // Six days is chosen, not rounded: it brackets the only two windows the
+    // verdict could be judged against — 36 h (DAY_MS + BACKUP_GRACE_MS, the
+    // armed-daily window) < 6 d < 7 d (UNSCHEDULED_MAX_AGE_MS). Anything under
+    // 36 h reads {protected, ok} whether or not expectedBackupWindowMs()
+    // honours `enabled: false`, so it would prove nothing about the widening
+    // this test is named for.
     //
     // The caveat rides on the RESULT, not the description: it is true of some
     // boxes and not others, and description text is paid for on every turn.
@@ -630,7 +637,7 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
       configured: true,
       supportedOnEdition: true,
       encryptionConfigured: true,
-      lastBackupAtMs: Date.now() - 24 * 60 * 60 * 1000,
+      lastBackupAtMs: Date.now() - 6 * 24 * 60 * 60 * 1000,
       lastHeartbeatStatus: "ok",
       schedule: { enabled: false, frequency: "daily" },
     });
@@ -648,37 +655,43 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     // expectedBackupWindowMs() widens to the no-schedule week on
     // `!schedule?.enabled` — false OR null OR absent — and the ClawKeep card
     // switches its copy on the same predicate. A note gated on `=== false`
-    // would let a null schedule take the lenient window with no caveat.
-    apiGet.mockResolvedValue({
-      paired: true,
-      configured: true,
-      supportedOnEdition: true,
-      encryptionConfigured: true,
-      lastBackupAtMs: Date.now() - 6 * 24 * 60 * 60 * 1000,
-      lastHeartbeatStatus: "ok",
-      schedule: null,
-    });
+    // would let a null schedule take the lenient window with no caveat, so the
+    // two shapes that are not `false` are both walked here. Six days again,
+    // for the reason spelled out above: under 36 h neither shape would prove
+    // the widened window was the one taken.
+    for (const [shape, schedule] of [["null", { schedule: null }], ["omitted", {}]] as const) {
+      apiGet.mockResolvedValue({
+        paired: true,
+        configured: true,
+        supportedOnEdition: true,
+        encryptionConfigured: true,
+        lastBackupAtMs: Date.now() - 6 * 24 * 60 * 60 * 1000,
+        lastHeartbeatStatus: "ok",
+        ...schedule,
+      });
 
-    const out = await system("openclaw").call("backup_status", {});
-    if (out.isError) throw new Error("backup_status failed");
-    const body = JSON.parse(out.text);
-    expect(body.protection).toEqual({ state: "protected", reason: "ok" });
-    expect((body.notes as string[]).join("\n")).toMatch(/nothing is scheduled to make a newer one/i);
+      const out = await system("openclaw").call("backup_status", {});
+      if (out.isError) throw new Error("backup_status failed");
+      const body = JSON.parse(out.text);
+      expect(body.protection, `schedule ${shape}`).toEqual({ state: "protected", reason: "ok" });
+      expect((body.notes as string[]).join("\n"), `schedule ${shape}`)
+        .toMatch(/nothing is scheduled to make a newer one/i);
+    }
   });
 
   it("never hands the agent lastHeartbeatStatus without saying it is not an outcome", async () => {
     // The exact live failure: backups died days ago, the daemon never wrote a
     // heartbeat about it, so the last one still reads "ok". Read literally the
     // agent tells the owner the last run succeeded.
-    apiGet.mockResolvedValue({
+    const staleBox = {
       paired: true,
       configured: true,
       supportedOnEdition: true,
       encryptionConfigured: true,
       lastBackupAtMs: Date.now() - 30 * 24 * 60 * 60 * 1000,
-      lastHeartbeatStatus: "ok",
       schedule: { enabled: true, frequency: "daily" },
-    });
+    };
+    apiGet.mockResolvedValue({ ...staleBox, lastHeartbeatStatus: "ok" });
 
     const out = await system("openclaw").call("backup_status", {});
     if (out.isError) throw new Error("backup_status failed");
@@ -687,10 +700,24 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     const notes = (body.notes as string[]).join("\n");
     expect(notes).toMatch(/not the outcome by itself/i);
     expect(notes).toMatch(/Answer from protection/i);
+
     // The value itself is never interpolated into the note: it is already in
     // the body, and result text is screened by neither the description length
-    // cap nor BANNED_DESCRIPTION_RE.
-    expect(notes).not.toMatch(/lastHeartbeatStatus is "/);
+    // cap nor BANNED_DESCRIPTION_RE. "ok" cannot show that — the note quotes
+    // the word as its own literal example ('can still read "ok"'), so an
+    // absence check on it would read a coincidence as a passing contract. Ask
+    // again with a value nothing but an interpolation could have put there.
+    const sentinel = "zzz-heartbeat-sentinel-622";
+    apiGet.mockResolvedValue({ ...staleBox, lastHeartbeatStatus: sentinel });
+    const probe = await system("openclaw").call("backup_status", {});
+    if (probe.isError) throw new Error("backup_status failed");
+    const probeBody = JSON.parse(probe.text);
+    // The fixture did arrive — otherwise the sentinel's absence from the notes
+    // below would only be saying the mock never landed.
+    expect(probeBody.lastHeartbeatStatus).toBe(sentinel);
+    const probeNotes = (probeBody.notes as string[]).join("\n");
+    expect(probeNotes).toMatch(/not the outcome by itself/i);
+    expect(probeNotes).not.toContain(sentinel);
   });
 
   it("publishes no verdict for an unpaired box, the way the shelf shield does not", async () => {
