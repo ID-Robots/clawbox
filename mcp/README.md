@@ -264,6 +264,82 @@ against a server that records every command it is sent.
 information, never instructions — an email is the payload most likely to carry an
 injected instruction, being text a stranger wrote and chose to send to the device.
 
+**The `EMAIL:<id>` line is asked for where it can become a card, and not on the
+channels.** Both read tools tell the agent to end its reply with one such line
+per message; ClawBox's chat windows lift them out and show an "open full
+message" card in their place (`src/lib/chat-email-refs.ts`), and nothing else
+knows what the line means. The same reply sent over Telegram, WhatsApp or
+Discord therefore ended with a bare internal id, so the instruction now names a
+closed exception: Telegram, WhatsApp, Discord, Slack, and a reply that is itself
+being sent as an email.
+
+That is half one of the harness's own two-half pattern for its `MEDIA:`
+convention — advertised per platform in the system prompt AND stripped by the
+platform adapter on every outbound path. Half one is a sentence the MODEL
+evaluates about itself, so it rests on the model being told which platform it is
+on. Both editions do tell it: Hermes writes a per-platform hint from a central
+dict, and OpenClaw states the channel three ways per turn (a trusted
+`### Message Context` block, `channel=<id>` in the `## Runtime` line, and the
+`[<Channel> …]` envelope on the body). ClawBox's own chat is `webchat` there and
+a CLI or TUI on Hermes, which is why the instruction names all of those as
+surfaces to make the card on. Half two is native and unbuilt: Hermes'
+`transform_llm_output` plugin hook, handed the final text and the platform and
+free to replace it, and on OpenClaw `reply_payload_sending` — which gets the
+whole outbound payload — beside the older `message_sending`, whose stage the
+core itself labels "legacy … retained for low-level SDK compatibility". Either
+is handed a context carrying `channelId`, which is enough to tell a channel from
+`webchat`.
+
+Every claim in the paragraph above about the harness's own internals —
+`transform_llm_output`, `PLATFORM_HINTS`, `reply_payload_sending`,
+`message_sending`'s "legacy" label, the hook context fields and the
+`### Message Context` field list — was read off the running core, not from this
+repository. Nothing here can check them: there is no vendored core and no
+`node_modules/@openclaw`, and `config/openclaw-target.txt` holds a version
+string and nothing else. Treat them as a note of where to look, not as verified
+fact, and re-read them against the core before building on them.
+
+**`webchat` is not exclusive to a card-making surface.** The gateway's own
+Control UI chat at `/chat` — a ClawBox-served, default-pinned app on the
+OpenClaw edition — is `webchat` too, and it renders the line as text. Its
+Hermes-edition twin is the **Hermes dashboard**, the pinned `hermes` app
+(`src/lib/desktop-apps.ts`) served through ClawBox's own auth proxy
+(`scripts/hermes-dashboard-proxy.js`); it has never heard of the directive
+either, so TASK-700 is one task per edition, not one for OpenClaw alone. Both
+ClawBox chats connect as `openclaw-control-ui` in `webchat` mode, impersonating
+it deliberately, and against the pinned core nothing the gateway passes tells
+the three apart: the model's `### Message Context` block carries only `schema`,
+`account_id`, `channel`, `provider`, `surface`, `chat_type` and
+`response_format`, and an outbound hook is handed `channelId`, `accountId`,
+`conversationId` and `sessionKey` on the delivery path — the declared type adds
+message, reply and trace fields, none of them client-shaped. ClawBox's connect
+frame does send `version: "clawbox-chat"`, but the gateway puts it only where
+the model and a hook cannot read it: the live connection record, the presence
+row and its own logs.
+
+The **spoken** reply divides the same way. On Hermes ClawBox synthesises the
+clip itself, so the route strips the directive before speaking it
+(`src/app/setup-api/hermes/chat/route.ts`) — the rule the same function already
+applied to `MEDIA:`, "a box reading a file path aloud would be absurd". On
+OpenClaw the gateway picks the engine, and how far ClawBox can reach depends on
+which one it picks: a cloud provider gets text ClawBox never touches, while the
+on-device Kokoro voice is spoken by running ClawBox's own
+`scripts/openclaw/clawbox-tts.sh`, which `install.sh` (`step_openclaw_tts`)
+wires as the `tts-local-cli` provider command with `{{Text}}` in argv — so on
+that engine ClawBox IS handed the reply, directive included. It is still the
+wrong layer to strip at: it covers one of the two voices and would put chat
+semantics in a speech script. The id is read aloud on both engines today; that
+half belongs to TASK-697 with the channels, where `clawbox-tts.sh` is recorded
+as the one OpenClaw-side chokepoint that exists so far.
+
+So the instruction leans towards the card — the card is the feature, the stray
+line is one line — and the two dashboards keep showing the line, as they did
+before the instruction said anything at all. Fixing that is TASK-700, and it
+needs the HTML ClawBox already serves — and, on OpenClaw, already injects into
+(`src/lib/gateway-proxy.ts`; the Hermes proxy streams bodies unmodified today,
+so that half is new code). Not this sentence, and not TASK-697's outbound hook,
+which sees `webchat` for every one of them.
+
 The only outbound-mail capability the agent has, and on the OpenClaw edition the
 only email capability at all — OpenClaw has no email channel, and inventing one
 in its config would fail the gateway's strict schema and silence the channels

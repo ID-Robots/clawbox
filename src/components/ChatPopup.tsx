@@ -46,7 +46,7 @@ import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-ad
 import { DESKTOP_TRANSCRIPT_KEY } from '@/lib/harness/transcript-key'
 import { HarnessError, type HarnessStatus, type TurnResult, type HarnessAdapter } from '@/lib/harness/transport'
 import { splitMediaDirectives, splitAssistantMedia, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments, boundedAudio } from '@/lib/chat-media'
-import { splitEmailRefs } from '@/lib/chat-email-refs'
+import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective } from '@/lib/chat-email-refs'
 import { EmailCard, EmailFullView } from '@/lib/chat-email'
 import {
   IDLE_STATUS,
@@ -1958,14 +1958,24 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const msg = payload.message
 
           if (state === 'delta') {
-            // Strip MEDIA: directives while streaming too, or the raw path
-            // flashes in the bubble for the moment before `final` lands.
-            // EMAIL: ids are stripped here for the same reason — the card is
-            // built from the finished reply, and the bare directive must not
-            // show while the answer is still arriving.
-            const text = splitEmailRefs(splitMediaDirectives(extractText(msg)).text).text
+            // Strip MEDIA: directives while streaming, or the raw path flashes
+            // in the bubble for the moment before `final` lands.
+            //
+            // `EMAIL:` is deliberately NOT stripped here — only in the render
+            // below. An interrupted turn is appended from this buffer
+            // (`aborted`, further down), so stripping into state left that
+            // turn holding text with its directives already gone and the
+            // messages it named unopenable for good. The bubble looks the same
+            // either way; only what survives an interrupt differs.
+            const text = splitMediaDirectives(extractText(msg)).text
             // Sentinels would flash before the final-state filter drops them.
-            if (text && !isSentinel(text) && !isInterSessionEnvelope(text, msg)) {
+            // Asked of the text as the BUBBLE will show it, not of the buffer:
+            // `SENTINEL_RE` anchors the whole string, so once the directives
+            // stopped being stripped on the way in, `NO_REPLY\nEMAIL:4471`
+            // stopped looking like a sentinel and the marker reached the
+            // bubble. The buffer is still what gets STORED, so an interrupt
+            // keeps the directives and their cards.
+            if (text && !isSentinel(streamingEmailRefsText(text)) && !isInterSessionEnvelope(text, msg)) {
               setStreaming(text); setReloadingSkill(false)
             }
           } else if (state === 'final') {
@@ -2054,8 +2064,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }
           } else if (state === 'aborted' || state === 'error') {
             setStreaming(prev => {
-              if (prev.trim() && !isSentinel(prev)) {
-                setMessages(msgs => [...msgs, { role: 'assistant', text: prev, timestamp: Date.now() }])
+              // Same as the full-screen chat: a Stop between `EMAIL` and its
+              // digits would store the half-written line, which the render
+              // keeps as text, leaving a bare `EMAIL:` in the transcript for
+              // good. It can never become a card and the bubble was already
+              // hiding it, so the stored turn is what the owner last saw.
+              const kept = dropUnfinishedDirective(prev)
+              if (kept.trim() && !isSentinel(kept)) {
+                setMessages(msgs => [...msgs, { role: 'assistant', text: kept, timestamp: Date.now() }])
               }
               return ''
             })
@@ -4674,7 +4690,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 wordBreak: 'break-word',
               }}>
                 {msg.images && msg.images.length > 0 && (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: msg.text ? 6 : 0 }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: bodyText ? 6 : 0 }}>
                     {msg.images.map((src, j) => {
                     // The same block draws both the pictures the assistant made
                     // and, since TASK-436, the ones the customer sent. They are
@@ -4745,7 +4761,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   </button>
                 )}
                 {msg.audio && msg.audio.length > 0 && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: msg.text ? 8 : 0 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0 }}>
                     {msg.audio.map((src) => (
                       // The browser's own player, not a bespoke one: play,
                       // pause, scrub and duration are what "a normal playable
@@ -4766,8 +4782,24 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                         data-testid="chat-audio"
                         // Markdown source must not reach an accessible name —
                         // it is read out character for character. See
-                        // plainTextForLabel.
-                        aria-label={audioLabel(msg.text, t("chat.audioReply"))}
+                        // plainTextForLabel. `bodyText` rather than `msg.text`
+                        // for one more reason: the stored text keeps its
+                        // `EMAIL:` directives, so the raw string announced
+                        // "EMAIL 4471" after a summary short enough to survive
+                        // the 100-character trim.
+                        //
+                        // The RECORDED clip is a second copy of the same words,
+                        // and WHERE it is made decides who strips them. On
+                        // Hermes ClawBox makes it, so the route strips there
+                        // too (setup-api/hermes/chat/route.ts). On OpenClaw the
+                        // gateway picks the engine: a cloud voice, whose text
+                        // ClawBox never touches, or on-device Kokoro, which it
+                        // speaks by running ClawBox's own
+                        // scripts/openclaw/clawbox-tts.sh with the reply in
+                        // argv. Neither engine strips the id, so it is still
+                        // spoken on that edition — the outbound half, TASK-697,
+                        // which covers both voices at once.
+                        aria-label={audioLabel(bodyText, t("chat.audioReply"))}
                         controls
                         preload="metadata"
                         src={src}
@@ -4907,7 +4939,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               color: 'rgba(255,255,255,0.88)',
               fontSize: 13.5, lineHeight: 1.5, wordBreak: 'break-word',
             }}>
-              {renderText(streaming, t("chat.table"))}
+              {/* Lifted out HERE, not on the way into state, so an interrupted
+                  turn keeps the directive and can still become cards. */}
+              {renderText(streamingEmailRefsText(streaming), t("chat.table"))}
               <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
               <style>{`@keyframes blink { 50% { opacity: 0 } }`}</style>
             </div>

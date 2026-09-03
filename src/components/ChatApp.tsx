@@ -17,6 +17,12 @@ import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
 import { prettifyAssistantText, isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
+// The card and the viewer come from the mascot chat's own modules: this surface
+// rendered `EMAIL:<uid>` as text because only one of the two chats had learned
+// to lift the directive out, and sharing the pieces is what stops them drifting
+// apart again.
+import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective } from '@/lib/chat-email-refs'
+import { EmailCard, EmailFullView } from '@/lib/chat-email'
 import { CloudTtsWarning } from '@/components/CloudTtsWarning'
 
 
@@ -65,6 +71,11 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   // Gateway is canonical for chat history; we render an empty list until
   // chat.history arrives over the WS (matches the OpenClaw Control UI).
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  // The uid of the message a card is showing in full, or none. Only the uid:
+  // the mail is fetched from the mailbox when the owner opens a card, so none
+  // of it lands in the transcript or in this state.
+  const [openEmailUid, setOpenEmailUid] = useState<number | null>(null)
+  const closeEmail = useCallback(() => setOpenEmailUid(null), [])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
@@ -306,8 +317,14 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             }
           } else if (state === 'aborted' || state === 'error') {
             setStreaming(prev => {
-              if (prev.trim() && !isSentinel(prev)) {
-                setMessages(msgs => [...msgs, { role: 'assistant', text: prettifyAssistantText(prev), timestamp: Date.now() }])
+              // Stop landing between `EMAIL` and its digits used to store the
+              // half-written line, and the render keeps an unusable directive
+              // as text — so a bare `EMAIL:` stayed in the transcript for good.
+              // The bubble was already hiding it and it can never become a
+              // card, so what is stored is what the owner was looking at.
+              const kept = dropUnfinishedDirective(prev)
+              if (kept.trim() && !isSentinel(kept)) {
+                setMessages(msgs => [...msgs, { role: 'assistant', text: prettifyAssistantText(kept), timestamp: Date.now() }])
               }
               return ''
             })
@@ -668,7 +685,13 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           </div>
         )}
 
-        {messages.map((msg, i) => (
+        {messages.map((msg, i) => {
+          // Derived at render, as the mascot chat does it: a replayed turn
+          // carries the same directive text a live one did, so the history and
+          // live paths agree for free.
+          const emailRefs = msg.role === 'assistant' ? splitEmailRefs(msg.text) : null
+          const bodyText = emailRefs ? emailRefs.text : msg.text
+          return (
           <div key={i} style={{
             display: 'flex',
             justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
@@ -688,16 +711,24 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               wordBreak: 'break-word',
             }}>
               {msg.images && msg.images.length > 0 && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: msg.text ? 6 : 0 }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: bodyText ? 6 : 0 }}>
                   {msg.images.map((src, j) => (
                     <img key={j} src={src} alt="" style={{ maxWidth: 180, maxHeight: 140, borderRadius: 8, objectFit: 'cover' }} />
                   ))}
                 </div>
               )}
-              {msg.role === 'user' ? msg.text : renderText(msg.text, t("chat.table"))}
+              {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"))}
+              {emailRefs && emailRefs.uids.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: bodyText ? 8 : 0 }}>
+                  {emailRefs.uids.map(uid => (
+                    <EmailCard key={uid} uid={uid} onOpen={setOpenEmailUid} t={t} />
+                  ))}
+                </div>
+              )}
             </div>
           </div>
-        ))}
+          )
+        })}
 
         <ToolCallPills toolCalls={toolCalls} runningLabel={t("chat.running")} />
 
@@ -710,7 +741,17 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               color: 'rgba(255,255,255,0.85)',
               fontSize: 13.5, lineHeight: 1.45, wordBreak: 'break-word',
             }}>
-              {renderText(streaming, t("chat.table"))}
+              {/* Stripped at RENDER, not on the way into state: the directive
+                  lands in the last chunk before the turn finalises, so without
+                  this the bare id sits in the bubble for that moment, and an
+                  abort keeps the raw buffer it was holding — so the turn it
+                  leaves behind can still become cards. No cards while
+                  streaming: half a directive is not an id yet.
+
+                  `MEDIA:` is deliberately left as text on this surface, here
+                  and in the body — an existing test pins that today, so
+                  changing it is its own change. TASK-698. */}
+              {renderText(streamingEmailRefsText(streaming), t("chat.table"))}
               <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
             </div>
           </div>
@@ -871,6 +912,12 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           </button>
         )}
       </div>
+
+      {/* Keyed by uid so opening a second card starts a fresh load rather than
+          showing the first message under the second one's header. */}
+      {openEmailUid !== null && (
+        <EmailFullView key={openEmailUid} uid={openEmailUid} onClose={closeEmail} t={t} />
+      )}
     </div>
   )
 }
