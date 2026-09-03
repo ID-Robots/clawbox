@@ -264,6 +264,7 @@ export function registerEmailTools(reg: Registrar, ctx: Pick<McpContext, "emailC
           messageId?: string;
           recipients: number;
           queued?: boolean;
+          duplicate?: boolean;
           approvalPrompt?: string;
         }>("/setup-api/email/send", { to, subject, body }, { timeoutMs: 60_000 });
 
@@ -274,12 +275,42 @@ export function registerEmailTools(reg: Registrar, ctx: Pick<McpContext, "emailC
           return json({
             sent: false,
             queued_for_owner_approval: true,
+            // The device recognised this as the message it is already holding
+            // and added nothing. Reported so the agent says "it is waiting",
+            // not "I have queued another one".
+            ...(result.duplicate ? { already_waiting: true } : {}),
             recipients: result.recipients,
-            what_happens_next: nextStep(result.approvalPrompt),
+            what_happens_next: result.duplicate
+              ? `This exact message was already waiting for approval, so nothing new was queued. ${nextStep(result.approvalPrompt)}`
+              : nextStep(result.approvalPrompt),
           });
         }
         return json({ sent: true, recipients: result.recipients, message_id: result.messageId });
       } catch (err) {
+        // A TIMEOUT IS NOT A FAILURE HERE, and the generic advice for one is
+        // wrong for this tool.
+        //
+        // api() gives every timed-out call the same instruction — "Retry once"
+        // — which is right for a read and dangerous for a send. The budget
+        // above is ClawBox's own 60 s, inside the harness's own tool-call
+        // timeout (Hermes documents 300 s as its MCP default), so what times
+        // out is ClawBox waiting on itself, never the work: the POST may
+        // already have queued the draft, and with the approval gate OFF it may
+        // already have put the message on the wire. That is the FALSE FAILURE
+        // class, and on a real box it produced two identical drafts from one
+        // request, ids one apart.
+        //
+        // The queue now folds an identical retry into the draft already
+        // waiting, so the queued path is covered twice over. This branch is
+        // what covers the UNGATED path, where there is no queue to fold into
+        // and a second attempt is a second real email nobody can recall.
+        if (err instanceof ToolError && err.code === "TIMEOUT") {
+          throw new ToolError(
+            "TIMEOUT",
+            "The ClawBox did not answer in time. The message may already have been queued or sent.",
+            "Do not retry and do not claim it was sent. Tell the user what you were asked to send and ask them to check Settings -> Email.",
+          );
+        }
         // 409 is the "no account connected" case, and the agent must not treat
         // it as a transient failure worth retrying.
         if (err instanceof ApiError && err.status === 409) {

@@ -30,6 +30,10 @@ import {
 } from "@/lib/email-config";
 import { refreshEmailToolsIfReadabilityChanged } from "@/lib/email-mcp-refresh";
 import { clearPending } from "@/lib/email-pending";
+// The receipts go with the drafts. They name recipients and subjects, and a
+// receipt for a mailbox that no longer exists answers a question nobody can
+// still be asking.
+import { clearOutcomes } from "@/lib/email-outcomes";
 import { clearPrompts } from "@/lib/email-approval-prompts";
 import { retireAllChatPrompts } from "@/lib/email-approval";
 import { ImapError, verifyImap } from "@/lib/imap-client";
@@ -254,6 +258,7 @@ export async function DELETE() {
     // only possible answer is an error.
     await retireAllChatPrompts();
     clearPending();
+    clearOutcomes();
     clearPrompts();
     if ((await getActiveHarness()) === "hermes") {
       try {

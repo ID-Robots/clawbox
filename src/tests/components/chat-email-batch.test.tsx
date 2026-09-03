@@ -214,11 +214,60 @@ describe("one gesture", () => {
     expect(screen.getByTestId("chat-email-batch-none")).toBeInTheDocument();
   });
 
-  it("sends nothing when the owner cancels", async () => {
+  it("sends nothing when the owner cancels, and names what it is throwing away", async () => {
+    // Cancelling used to hand back a bare batch id, because it only removed the
+    // card from the screen. It deletes the drafts now, so it names them with
+    // the fingerprints they were shown with — the same freeze approving keeps,
+    // so a draft queued during the reading pause cannot be swept up either.
     const { onApprove, onCancel } = await mount(card());
     fireEvent.click(await screen.findByTestId("chat-email-batch-cancel"));
-    expect(onCancel).toHaveBeenCalledWith("batch-1");
+    expect(screen.getByTestId("chat-email-batch-cancel")).toHaveTextContent("Delete all 3 without sending");
+    expect(onCancel).toHaveBeenCalledWith({
+      batchId: "batch-1",
+      entries: [
+        { id: "draft-1", fingerprint: "fingerprint-1" },
+        { id: "draft-2", fingerprint: "fingerprint-2" },
+        { id: "draft-3", fingerprint: "fingerprint-3" },
+      ],
+    });
     expect(onApprove).not.toHaveBeenCalled();
+  });
+
+  it("leaves an already-decided draft out of a cancel", async () => {
+    // It is not this click's to delete: it is already gone from the queue.
+    const { onCancel } = await mount(
+      card({ drafts: [draft(1), draft(2)], outcomes: [{ id: "draft-1", ok: true, kind: "sent" }] }),
+    );
+    fireEvent.click(await screen.findByTestId("chat-email-batch-cancel"));
+    expect(onCancel).toHaveBeenCalledWith(
+      expect.objectContaining({ entries: [{ id: "draft-2", fingerprint: "fingerprint-2" }] }),
+    );
+  });
+
+  it("spares a draft the owner unticked, and says how many it will take", async () => {
+    // The checkbox is documented in chat-email-batch.tsx as "how one draft is
+    // dropped from the batch". It cannot mean "spare it" for the send button
+    // and "delete it anyway" for the other one — and of the two readings, the
+    // one that destroys less is the one to be wrong about. The count on the
+    // button is what makes the set it acts on visible before the click.
+    const { onCancel } = await mount(card({ drafts: [draft(1), draft(2)] }));
+    await screen.findByTestId("chat-email-batch-cancel");
+    fireEvent.click(screen.getAllByTestId("chat-email-batch-include")[0]);
+
+    expect(screen.getByTestId("chat-email-batch-cancel")).toHaveTextContent("Delete it without sending");
+    fireEvent.click(screen.getByTestId("chat-email-batch-cancel"));
+    expect(onCancel).toHaveBeenCalledWith(
+      expect.objectContaining({ entries: [{ id: "draft-2", fingerprint: "fingerprint-2" }] }),
+    );
+  });
+
+  it("will not offer to delete an empty set", async () => {
+    // Nothing ticked, nothing to delete — the same rule the send button keeps,
+    // so neither control ever claims to act on nothing.
+    await mount(card({ drafts: [draft(1)] }));
+    fireEvent.click(await screen.findByTestId("chat-email-batch-include"));
+    expect(screen.getByTestId("chat-email-batch-cancel")).toBeDisabled();
+    expect(screen.getByTestId("chat-email-batch-approve")).toBeDisabled();
   });
 
   it("cannot be clicked twice while the first send is in flight", async () => {
@@ -323,7 +372,7 @@ describe("reachable without a mouse", () => {
   });
 
   it("moves the caret to the outcome once the buttons it was on are gone", async () => {
-    await mount(card({ status: "settled", outcomes: [{ id: "draft-1", ok: true }] }));
+    await mount(card({ status: "settled", settledByOwner: true, outcomes: [{ id: "draft-1", ok: true }] }));
     const result = await screen.findByTestId("chat-email-batch-result");
     await waitFor(() => expect(document.activeElement).toBe(result));
     // A destination, not a tab stop: the card has finished being a control.
@@ -342,5 +391,375 @@ describe("edition accent", () => {
     await mount(card(), { hermes: false });
     const button = await screen.findByTestId("chat-email-batch-approve");
     expect(button.getAttribute("style")).toContain("--coral-bright");
+  });
+});
+
+// ── Endings the card learned from the store ──────────────────────────────────
+//
+// Three of these cannot come from the card's own approval request: a draft the
+// owner deleted in Settings, one whose twin was sent so it needed no send of
+// its own, and one that simply is not in the queue any more. They arrive
+// through `reconcileBatchCards`, and each has to read as itself — a single
+// "not sent" over all three would tell the owner to go and look at something
+// that is already handled.
+
+describe("a draft decided somewhere other than this card", () => {
+  it("gives each ending its own words, and takes its controls away", async () => {
+    await mount(
+      card({
+        status: "settled",
+        drafts: [draft(1), draft(2), draft(3)],
+        outcomes: [
+          { id: "draft-1", ok: true, kind: "sent", at: Date.UTC(2026, 8, 3, 11, 30) },
+          { id: "draft-2", ok: false, kind: "rejected" },
+          { id: "draft-3", ok: false, kind: "duplicate" },
+        ],
+      }),
+    );
+
+    const rows = screen.getAllByTestId("chat-email-batch-draft");
+    // The time is what answers "did that go out before I left?".
+    expect(within(rows[0]).getByTestId("chat-email-batch-outcome")).toHaveTextContent(/^Sent ✓ at /);
+    expect(within(rows[1]).getByTestId("chat-email-batch-outcome")).toHaveTextContent("Removed — not sent");
+    expect(within(rows[2]).getByTestId("chat-email-batch-outcome")).toHaveTextContent(
+      "Already sent as an identical message",
+    );
+    for (const box of screen.getAllByTestId("chat-email-batch-include")) expect(box).toBeDisabled();
+  });
+
+  it("counts only what is still waiting on the button", async () => {
+    // Two drafts, one already decided elsewhere. The card is still a live
+    // control for the other — and must say "Send it", not "Send all 2".
+    await mount(
+      card({
+        drafts: [draft(1), draft(2)],
+        outcomes: [{ id: "draft-1", ok: true, kind: "sent", at: Date.UTC(2026, 8, 3, 11, 30) }],
+      }),
+    );
+    const approve = await screen.findByTestId("chat-email-batch-approve");
+    expect(approve).toHaveTextContent("Send it");
+    expect(within(screen.getAllByTestId("chat-email-batch-draft")[0]).getByTestId("chat-email-batch-include"))
+      .toBeDisabled();
+  });
+
+  it("sends only the drafts that are still waiting", async () => {
+    const { onApprove } = await mount(
+      card({
+        drafts: [draft(1), draft(2)],
+        outcomes: [{ id: "draft-1", ok: true, kind: "sent" }],
+      }),
+    );
+    fireEvent.click(await screen.findByTestId("chat-email-batch-approve"));
+    expect(onApprove).toHaveBeenCalledWith(
+      expect.objectContaining({ entries: [{ id: "draft-2", fingerprint: "fingerprint-2" }] }),
+    );
+  });
+
+  it("says it is deleting while it deletes, never that it is sending", async () => {
+    // The two in-flight states shared one status, so the amber card's primary
+    // button read "Sending…" over the messages the owner had just said must not
+    // be sent — the surface asserting the opposite of what it is doing, for as
+    // long as the round trip takes.
+    await mount(card({ status: "deleting", drafts: [draft(1), draft(2)] }));
+    expect(screen.getByTestId("chat-email-batch-cancel")).toHaveTextContent("Deleting…");
+    expect(screen.getByTestId("chat-email-batch-approve")).not.toHaveTextContent("Sending…");
+    // Neither button may be pressed while the request is out.
+    expect(screen.getByTestId("chat-email-batch-approve")).toBeDisabled();
+    expect(screen.getByTestId("chat-email-batch-cancel")).toBeDisabled();
+  });
+
+  it("paints an ending the owner chose in the colour of a note, not of a fault", async () => {
+    // The summary line already learned this: "0 sent, 2 not sent." in red over
+    // a card the owner deliberately emptied is a false alarm about his own act.
+    // The per-draft line is the same claim in a smaller place and was still
+    // making it — every ending that is not a failure was painted ERROR_FG.
+    await mount(
+      card({
+        status: "settled",
+        drafts: [draft(1), draft(2), draft(3), draft(4), draft(5)],
+        outcomes: [
+          { id: "draft-1", ok: true, kind: "sent" },
+          { id: "draft-2", ok: false, kind: "rejected" },
+          { id: "draft-3", ok: false, kind: "duplicate" },
+          { id: "draft-4", ok: false, kind: "gone" },
+          { id: "draft-5", ok: false, kind: "failed", error: "mailbox unavailable" },
+        ],
+      }),
+    );
+    const colourOf = (index: number) =>
+      getComputedStyle(
+        within(screen.getAllByTestId("chat-email-batch-draft")[index]).getByTestId("chat-email-batch-outcome"),
+      ).color;
+
+    // Green for the one that went, red for the one the mail server refused —
+    // and the three that simply left without being sent read as notes.
+    expect(colourOf(0)).toBe("rgb(134, 239, 172)");
+    expect(colourOf(4)).toBe("rgb(248, 113, 113)");
+    for (const index of [1, 2, 3]) {
+      expect(colourOf(index)).toBe("rgba(255, 255, 255, 0.5)");
+      expect(colourOf(index)).not.toBe(colourOf(4));
+    }
+  });
+
+  it("does not paint an unconfirmed send as a refusal", async () => {
+    // Amber, the colour of "look at this", not red, the colour of "this went
+    // wrong" — the box handed the message over and never heard back.
+    await mount(
+      card({ status: "settled", drafts: [draft(1)], outcomes: [{ id: "draft-1", ok: false, kind: "unconfirmed" }] }),
+    );
+    expect(getComputedStyle(screen.getByTestId("chat-email-batch-outcome")).color).toBe("rgb(252, 211, 77)");
+  });
+
+  it("never says a send nobody could confirm was decided somewhere else", async () => {
+    // The row says "the box could not tell"; a verdict saying the message was
+    // handled elsewhere over the top of it is the two disagreeing, and the
+    // reading that gets a delivered message sent a second time.
+    await mount(
+      card({ status: "settled", drafts: [draft(1)], outcomes: [{ id: "draft-1", ok: false, kind: "unconfirmed" }] }),
+    );
+    const summary = screen.getByTestId("chat-email-batch-result");
+    expect(summary).toHaveTextContent("not confirmed");
+    expect(summary).not.toHaveTextContent("decided somewhere else");
+    // Amber, like the row: something to look at, not something that failed.
+    expect(getComputedStyle(summary).color).toBe("rgb(252, 211, 77)");
+  });
+
+  it("does not count a draft handled elsewhere as one that failed to send", async () => {
+    // One went from this card; the other had already been decided in Settings
+    // or on Telegram. "1 sent, 1 not sent." in red would be this card claiming
+    // a fault over something that is not one — and is not even its business.
+    await mount(
+      card({
+        status: "settled",
+        drafts: [draft(1), draft(2)],
+        outcomes: [
+          { id: "draft-1", ok: true, kind: "sent" },
+          { id: "draft-2", ok: false, kind: "gone" },
+        ],
+      }),
+    );
+    const summary = screen.getByTestId("chat-email-batch-result");
+    expect(summary).toHaveTextContent("1 sent.");
+    expect(summary).not.toHaveTextContent("not sent");
+  });
+
+  it("says so plainly when everything on it was decided somewhere else", async () => {
+    await mount(
+      card({ status: "settled", drafts: [draft(1)], outcomes: [{ id: "draft-1", ok: false, kind: "gone" }] }),
+    );
+    const summary = screen.getByTestId("chat-email-batch-result");
+    expect(summary).toHaveTextContent("decided somewhere else");
+    // Never "0 deleted": this card deleted nothing. And never a claim about
+    // whether the message went — the same line covers a send this box handed
+    // over and could not confirm, and only the row can say which it was.
+    expect(summary).not.toHaveTextContent("deleted");
+    expect(summary).not.toHaveTextContent("sent");
+  });
+
+  it("says a draft that left the queue with no word about it is no longer waiting", async () => {
+    await mount(
+      card({ status: "settled", drafts: [draft(1)], outcomes: [{ id: "draft-1", ok: false, kind: "gone" }] }),
+    );
+    expect(screen.getByTestId("chat-email-batch-outcome")).toHaveTextContent("No longer waiting");
+  });
+});
+
+describe("reconciling live cards against the store", () => {
+  it("settles a card whose drafts have all been decided", async () => {
+    const { reconcileBatchCards } = await import("@/lib/chat-email-batch");
+    const before = [card({ drafts: [draft(1), draft(2)] })];
+    const after = reconcileBatchCards(
+      before,
+      new Set<string>(),
+      new Map([
+        ["draft-1", { id: "draft-1", ok: true, kind: "sent" as const }],
+        ["draft-2", { id: "draft-2", ok: false, kind: "rejected" as const }],
+      ]),
+    );
+    expect(after[0].status).toBe("settled");
+    expect(after[0].outcomes.map((o) => o.kind)).toEqual(["sent", "rejected"]);
+  });
+
+  it("leaves a card whose drafts are all still waiting exactly as it was", async () => {
+    const { reconcileBatchCards } = await import("@/lib/chat-email-batch");
+    const before = [card({ drafts: [draft(1)] })];
+    // The SAME array back, not a copy: a fresh one is a re-render on every poll.
+    expect(reconcileBatchCards(before, new Set(["draft-1"]), new Map())).toBe(before);
+  });
+
+  it("keeps a card open while one of its drafts is still waiting", async () => {
+    const { reconcileBatchCards } = await import("@/lib/chat-email-batch");
+    const before = [card({ drafts: [draft(1), draft(2)] })];
+    const after = reconcileBatchCards(
+      before,
+      new Set(["draft-2"]),
+      new Map([["draft-1", { id: "draft-1", ok: true, kind: "sent" as const }]]),
+    );
+    expect(after[0].status).toBe("waiting");
+    expect(after[0].outcomes).toHaveLength(1);
+  });
+
+  it("does not touch a card that is mid-send", async () => {
+    // Its own approval request owns it and will settle it; a poll landing in
+    // that window must not decide the card out from under the response.
+    const { reconcileBatchCards } = await import("@/lib/chat-email-batch");
+    const before = [card({ status: "sending", drafts: [draft(1)] })];
+    expect(reconcileBatchCards(before, new Set<string>(), new Map())).toBe(before);
+  });
+});
+
+describe("a verdict that does not cry wolf", () => {
+  it("calls a deletion a deletion, not a failure to send", async () => {
+    // "0 sent, 2 not sent." in the colour that means something needs doing, over
+    // a card the owner deliberately emptied, is a false alarm about their own
+    // act — and it trains them to ignore the line that does matter.
+    await mount(
+      card({
+        status: "settled",
+        drafts: [draft(1), draft(2)],
+        outcomes: [
+          { id: "draft-1", ok: false, kind: "rejected" },
+          { id: "draft-2", ok: false, kind: "rejected" },
+        ],
+      }),
+    );
+    const result = await screen.findByTestId("chat-email-batch-result");
+    expect(result).toHaveTextContent("2 deleted. Nothing was sent.");
+    expect(result.textContent).not.toContain("not sent.");
+  });
+
+  it("still reports a real failure as one, alongside what did go", async () => {
+    await mount(
+      card({
+        status: "settled",
+        drafts: [draft(1), draft(2), draft(3)],
+        outcomes: [
+          { id: "draft-1", ok: true },
+          { id: "draft-2", ok: false, error: "The mail server refused the message." },
+          { id: "draft-3", ok: false, kind: "rejected" },
+        ],
+      }),
+    );
+    // The deleted one is not counted as a failure; the refused one is.
+    expect(await screen.findByTestId("chat-email-batch-result")).toHaveTextContent("1 sent, 1 not sent.");
+  });
+
+  it("does not let a covered duplicate turn a clean batch into a partial one", async () => {
+    await mount(
+      card({
+        status: "settled",
+        drafts: [draft(1), draft(2)],
+        outcomes: [
+          { id: "draft-1", ok: true },
+          { id: "draft-2", ok: false, kind: "duplicate" },
+        ],
+      }),
+    );
+    expect(await screen.findByTestId("chat-email-batch-result")).toHaveTextContent("1 sent.");
+  });
+});
+
+// ── What the card's own answer may overwrite ─────────────────────────────────
+//
+// A card can learn two things at once: the store's word about drafts decided
+// somewhere else (`reconcileBatchCards`, from the poll), and the route's word
+// about the drafts it just posted (`settleCard`). They cover different ids by
+// construction — the posted set excludes anything already decided — so one may
+// never replace the other wholesale.
+
+describe("settling a card against its own request", () => {
+  it("keeps the verdicts the poll had already written", async () => {
+    const { settleCard } = await import("@/lib/chat-email-batch");
+    // Draft 1 was approved on Telegram and reconciled in; draft 2 is the one
+    // the owner then sent from this card.
+    const before = [
+      card({
+        drafts: [draft(1), draft(2)],
+        outcomes: [{ id: "draft-1", ok: true, kind: "sent", at: 1_700_000_000_500 }],
+      }),
+    ];
+    const after = settleCard(before, "batch-1", [{ id: "draft-2", ok: true }]);
+
+    expect(after[0].status).toBe("settled");
+    // Both, in the order they were learned. Replacing wholesale left draft 1
+    // with no verdict, its checkbox live again, and "1 sent." over two rows.
+    expect(after[0].outcomes.map((o) => o.id)).toEqual(["draft-1", "draft-2"]);
+  });
+
+  it("lets the route's answer beat a verdict the poll guessed mid-flight", async () => {
+    const { settleCard } = await import("@/lib/chat-email-batch");
+    // A poll that landed while the send was in flight can have recorded a
+    // premature "gone". The route was there; it knows better.
+    const before = [
+      card({ drafts: [draft(1)], outcomes: [{ id: "draft-1", ok: false, kind: "gone" }] }),
+    ];
+    const after = settleCard(before, "batch-1", [{ id: "draft-1", ok: true }]);
+    expect(after[0].outcomes).toEqual([{ id: "draft-1", ok: true }]);
+  });
+
+  it("stays WAITING while a draft still has no ending", async () => {
+    // A settled card is skipped by the reconcile and never rebuilt by
+    // `batchFromPending`, so settling early makes a draft unmentionable for the
+    // life of the component. This is the deletion-partly-failed case.
+    const { settleCard } = await import("@/lib/chat-email-batch");
+    const before = [card({ drafts: [draft(1), draft(2)] })];
+    const after = settleCard(before, "batch-1", [{ id: "draft-1", ok: false, kind: "rejected" }]);
+    expect(after[0].status).toBe("waiting");
+    expect(after[0].outcomes).toHaveLength(1);
+  });
+
+  it("clears a request error the store has now answered", async () => {
+    // "Nothing was sent" in red directly above "1 sent." in green.
+    const { settleCard } = await import("@/lib/chat-email-batch");
+    const before = [card({ drafts: [draft(1)], requestError: "The approval could not be delivered." })];
+    expect(settleCard(before, "batch-1", [{ id: "draft-1", ok: true }])[0].requestError).toBe("");
+  });
+});
+
+describe("who is allowed to move the caret", () => {
+  it("does not take focus when a background poll settled the card", async () => {
+    // This chat never steals focus. The commonest reconcile trigger is
+    // `window.focus` — the owner clicking back into the tab — and taking the
+    // caret there pulls it out of the composer they are typing in.
+    const { reconcileBatchCards } = await import("@/lib/chat-email-batch");
+    const settled = reconcileBatchCards(
+      [card({ drafts: [draft(1)] })],
+      new Set<string>(),
+      new Map([["draft-1", { id: "draft-1", ok: true, kind: "sent" as const }]]),
+    );
+    expect(settled[0].status).toBe("settled");
+    expect(settled[0].settledByOwner).not.toBe(true);
+
+    const composer = document.createElement("input");
+    document.body.appendChild(composer);
+    composer.focus();
+    await mount(settled[0]);
+    expect(document.activeElement).toBe(composer);
+    composer.remove();
+  });
+
+  it("still takes focus when the owner's own click settled it", async () => {
+    // Approving REMOVES the control that was focused; focus falling to the body
+    // leaves a keyboard user with no idea whether the mail went.
+    await mount(card({ status: "settled", settledByOwner: true, outcomes: [{ id: "draft-1", ok: true }] }));
+    expect(document.activeElement).toBe(await screen.findByTestId("chat-email-batch-result"));
+  });
+});
+
+describe("an unconfirmed send", () => {
+  it("does not claim the message was not sent", async () => {
+    await mount(
+      card({
+        status: "settled",
+        drafts: [draft(1)],
+        outcomes: [{ id: "draft-1", ok: false, kind: "unconfirmed" }],
+      }),
+    );
+    const line = await screen.findByTestId("chat-email-batch-outcome");
+    expect(line).toHaveTextContent(/could not tell/i);
+    expect(line.textContent).not.toMatch(/^Not sent/);
+    // And it is not counted among the failures, which would put a red
+    // "0 sent, 1 not sent." over something nobody knows the answer to.
+    expect(await screen.findByTestId("chat-email-batch-result")).not.toHaveTextContent("not sent.");
   });
 });

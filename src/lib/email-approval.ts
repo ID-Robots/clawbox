@@ -45,6 +45,10 @@
 
 import { getEmailCredentials, toSmtpConfig } from "@/lib/email-config";
 import { claimPendingIfUnchanged, draftFingerprint, type PendingEmail } from "@/lib/email-pending";
+// A tap is a THIRD approval surface, not a special one: it writes the same
+// receipt and resolves the same duplicates as the desktop panel and the chat
+// card, so all three agree about what is still waiting.
+import { getOutcome, outcomeKindFor, recordOutcome, resolveSent } from "@/lib/email-outcomes";
 import {
   advanceOffset,
   claimPrompt,
@@ -307,6 +311,34 @@ export async function retireAllChatPrompts(): Promise<void> {
 // ── Answering ────────────────────────────────────────────────────────────────
 
 /**
+ * What to tell the owner about a draft his tap no longer applies to.
+ *
+ * "It was already sent or deleted" was the honest answer while nothing
+ * remembered which — and it is the ambiguity the receipts store exists to end:
+ * the difference between "it went out" and "you threw it away" is the whole
+ * question the person tapping is asking. The store is one lookup away, so it is
+ * asked, and the vague sentence is kept only for a draft it has no word about
+ * (a receipt older than a day, or a build older than the store).
+ */
+function staleTapAnswer(draftId: string): string {
+  const receipt = getOutcome(draftId);
+  switch (receipt?.kind) {
+    case "sent":
+      return "That message has already been sent.";
+    case "rejected":
+      return "That draft was deleted. Nothing was sent.";
+    case "duplicate":
+      return "An identical message was sent, so that copy was resolved and not sent again.";
+    case "failed":
+      return `That message was not sent: ${receipt.error || "the mail server refused it"}.`;
+    case "unconfirmed":
+      return "That message was handed to the mail server and the answer never came back — check your Sent folder before sending it again.";
+    default:
+      return "That draft is no longer waiting — it was already sent or deleted.";
+  }
+}
+
+/**
  * One tap.
  *
  * THE ORDER OF THE CHECKS IS THE SECURITY PROPERTY, so it is spelled out:
@@ -371,12 +403,13 @@ export async function applyApprovalCallback(query: TelegramCallbackQuery): Promi
     if (!dropped.ok) {
       const text =
         dropped.reason === "gone"
-          ? "That draft is no longer waiting — it was already sent or deleted."
+          ? staleTapAnswer(prompt.draftId)
           : "That draft changed after this message was posted, so it was NOT deleted. Handle it in Settings → Email.";
       await say(text);
       await settle(token, prompt, text);
       return dropped.reason === "gone" ? "gone" : "changed";
     }
+    recordOutcome(dropped.draft, "rejected");
     await say("Draft deleted. Nothing was sent.");
     await settle(token, prompt, "Deleted. This message was not sent.");
     return "rejected";
@@ -396,7 +429,7 @@ export async function applyApprovalCallback(query: TelegramCallbackQuery): Promi
   if (!claim.ok) {
     const text =
       claim.reason === "gone"
-        ? "That draft is no longer waiting — it was already sent or deleted."
+        ? staleTapAnswer(prompt.draftId)
         : "That draft changed after this message was posted, so it was NOT sent. Approve it in Settings → Email.";
     await say(text);
     await settle(token, prompt, text);
@@ -412,6 +445,12 @@ export async function applyApprovalCallback(query: TelegramCallbackQuery): Promi
       subject: draft.subject,
       text: draft.body,
     });
+    // Past the wire. Any exact copy still queued has now been delivered, so it
+    // is resolved rather than left with a live button in Settings or in chat —
+    // which is what the owner met: one request, two identical drafts, one of
+    // them still asking to be sent after the other had gone.
+    const twins = resolveSent(draft);
+    for (const twin of twins) await retireChatPrompt(twin.id);
     await say("Sent.");
     await settle(token, prompt, `Sent to ${draft.to.length} recipient(s).`);
     return "sent";
@@ -421,6 +460,12 @@ export async function applyApprovalCallback(query: TelegramCallbackQuery): Promi
     // same rule the pending route's log follows.
     console.error(`[email/approval] approved send failed: kind=${kind} host=${settings.smtpHost}`);
     const reason = err instanceof SmtpError ? err.message : "Could not send the message.";
+    // Nothing is covered by a send that did not happen, so no twin is touched.
+    // What the receipt may CLAIM depends on which failure it was: a refusal the
+    // mail server spoke is "not sent", a dropped connection is something this
+    // process cannot know either way — and "not sent" there is how an owner is
+    // talked into sending the same message twice.
+    recordOutcome(draft, outcomeKindFor(err), { error: reason });
     await say(`Not sent: ${reason}`);
     // The draft was claimed before the send and is out of the queue — the same
     // trade the desktop path makes, for the same reason (never send twice). It

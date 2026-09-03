@@ -28,9 +28,18 @@ import { accentFor } from "@/lib/edition-accent";
 // exactly this kind of human-length pause.
 //
 // NOT PERSISTED, for the reason a clarify is not (see chat-clarify.tsx): it is
-// a live control, not a record. Unlike a clarify, though, nothing is LOST when
-// it goes — the drafts are on disk and Settings → Email still lists every one
-// of them. Dismissing this card sends nothing and deletes nothing.
+// a live control that becomes a record. What it is NOT is the authority on what
+// is waiting — the queue is, and the card re-reads it (`reconcileBatchCards`):
+// a draft decided in Settings, in another tab or on Telegram loses its checkbox
+// here and says which ending it had, instead of keeping a live Approve button
+// over mail that has already gone.
+//
+// DISMISSING DELETES. It used to drop the card and leave every draft queued,
+// which read to the owner as "when I click dismiss nothing happens; it returns
+// after 20 secs" — because the surface's next scheduled read found them still
+// waiting and offered them again. A control whose only effect is to hide itself
+// until the next poll is not a control, so the button now says what it does and
+// the drafts really go.
 
 /** Amber, the palette this chat already uses for "the box is waiting". */
 const CARD_BG = "rgba(249,115,22,0.10)";
@@ -42,6 +51,14 @@ const FIELD_BG = "rgba(0,0,0,0.25)";
 const ROW_BORDER = "1px solid rgba(255,255,255,0.12)";
 const ERROR_FG = "#f87171";
 const OK_FG = "#86efac";
+/**
+ * Amber: "look at this", not "this went wrong".
+ *
+ * The one ending that is neither — a send the box handed over and never heard
+ * back about. Settings → Email paints the same case the same way, so the two
+ * surfaces do not disagree about how alarming it is.
+ */
+const WARN_FG = "#fcd34d";
 
 /**
  * How much of a body is shown before the card offers to open the rest.
@@ -73,9 +90,27 @@ export interface EmailBatchOutcome {
   readonly ok: boolean;
   /** Why not, when it did not go. Already customer-readable. */
   readonly error?: string;
+  /**
+   * Which ending this was, when the card learned it from the STORE rather than
+   * from its own approval request. `ok` alone cannot tell a message the owner
+   * deleted from one the mail server refused, and those are not the same news.
+   * Absent for the card's own send, which has nothing to disambiguate.
+   */
+  readonly kind?: "sent" | "rejected" | "failed" | "unconfirmed" | "duplicate" | "gone";
+  /** When it happened, epoch ms — only from a receipt. */
+  readonly at?: number;
 }
 
-export type EmailBatchStatus = "waiting" | "sending" | "settled";
+/**
+ * `deleting` is its own state and not a second name for `sending`.
+ *
+ * They looked interchangeable — both mean "a request this card made is in
+ * flight" — and sharing one made the card's primary button read "Sending…"
+ * while the drafts were being thrown away, over messages the owner had just
+ * said must not be sent. On a slow round trip that is several seconds of the
+ * surface asserting the opposite of what it is doing.
+ */
+export type EmailBatchStatus = "waiting" | "sending" | "deleting" | "settled";
 
 export interface EmailBatchCardState {
   readonly batchId: string;
@@ -85,6 +120,18 @@ export interface EmailBatchCardState {
   readonly outcomes: readonly EmailBatchOutcome[];
   /** The request itself failed — nothing was attempted, or we cannot say what was. */
   readonly requestError: string;
+  /**
+   * This card settled because the owner pressed something ON IT, so the caret
+   * may follow the control that just disappeared.
+   *
+   * A card can also settle because a background poll found its drafts already
+   * decided elsewhere, and that must NOT move the caret: the most common
+   * trigger is `window.focus` — the owner clicking back into the tab — and
+   * taking focus there yanks it out of the composer they are typing in. See
+   * the effect below, whose own rule is that the one move it makes is the one
+   * the customer's action forced.
+   */
+  readonly settledByOwner?: boolean;
 }
 
 /**
@@ -120,6 +167,112 @@ export function shownDraftIds(cards: readonly EmailBatchCardState[]): Set<string
   return ids;
 }
 
+/**
+ * Bring every live card back into step with the STORE.
+ *
+ * WHY THE CARD CANNOT JUST TRUST ITSELF. The drafts are frozen at display on
+ * purpose — that is what stops a draft queued during the reading pause from
+ * riding along on the tap. The mistake was to freeze the VERDICT with them: the
+ * card had no way to learn that a draft had been approved in Settings, in
+ * another tab, or with a button in Telegram, so it went on offering "Approve &
+ * send" for a message that was already sent. Harmless on the wire — the route
+ * answers "gone" — and a lie on the screen, which is what the owner acts on.
+ *
+ * Freezing what is ASKED and refreshing the ANSWER are different things. The
+ * text on the card never changes; what stops is the claim that it is waiting.
+ *
+ * `pendingIds` is the queue as the server just reported it and `resolved` the
+ * receipts beside it, so one read of /setup-api/email/pending answers both. A
+ * draft in neither is recorded as "gone": it left the queue before receipts
+ * existed, or its receipt has expired, and either way it is not waiting.
+ *
+ * A card mid-`sending` is left alone — its own approval request owns it and
+ * will settle it — and so is one already settled.
+ *
+ * Returns the SAME array when nothing moved, the way `updateBatchCard` does: a
+ * fresh copy would be a state change React re-renders for on every poll.
+ */
+export function reconcileBatchCards(
+  cards: EmailBatchCardState[],
+  pendingIds: ReadonlySet<string>,
+  resolved: ReadonlyMap<string, EmailBatchOutcome>,
+): EmailBatchCardState[] {
+  let moved = false;
+  const next = cards.map((card) => {
+    if (card.status !== "waiting") return card;
+    const known = new Set(card.outcomes.map((o) => o.id));
+    const added: EmailBatchOutcome[] = [];
+    for (const draft of card.drafts) {
+      if (known.has(draft.id) || pendingIds.has(draft.id)) continue;
+      added.push(resolved.get(draft.id) ?? { id: draft.id, ok: false, kind: "gone" });
+      known.add(draft.id);
+    }
+    if (added.length === 0) return card;
+    moved = true;
+    const outcomes = [...card.outcomes, ...added];
+    // Settled only once EVERY draft on it has an ending. Until then the card
+    // is still a live control for the ones that are genuinely still waiting.
+    const everyOne = card.drafts.every((d) => known.has(d.id));
+    return {
+      ...card,
+      outcomes,
+      // A request error is an absolute claim — "nothing was sent", "they could
+      // not be deleted" — made when the answer never arrived. The store has now
+      // said what actually happened, and leaving the old sentence up would put
+      // "Nothing was sent" in red directly under "2 sent." in green.
+      requestError: "",
+      ...(everyOne ? { status: "settled" as const } : {}),
+    };
+  });
+  return moved ? next : cards;
+}
+
+/**
+ * Fold the answer to THIS card's own request into it.
+ *
+ * MERGE, NEVER REPLACE, and that is the whole point. A poll can have written
+ * outcomes into a waiting card for drafts decided elsewhere (`reconcileBatchCards`),
+ * and those drafts are deliberately not in the request the owner then made —
+ * they were already excluded from the ticked set. Overwriting `outcomes` with
+ * the response therefore erased them: the row lost its verdict line, its
+ * checkbox came back ticked, and the summary counted one message on a card
+ * showing two. The card is settled by then, so no later poll could repair it.
+ *
+ * The RESPONSE WINS for an id it does mention. A poll landing while the request
+ * was in flight can have recorded a premature "gone" for a draft the route was
+ * at that moment sending, and the route's own word is the later, better one.
+ *
+ * SETTLED ONLY WHEN EVERY DRAFT HAS AN ENDING — the same rule
+ * `reconcileBatchCards` uses. A card that settles with a draft still undecided
+ * is a card nothing can ever update again: the reconcile skips settled cards,
+ * and `batchFromPending` will not rebuild one for a draft already on screen.
+ *
+ * `settledByOwner` rides along because this settle IS the customer's own
+ * action, which is what licenses moving the caret to the result.
+ */
+export function settleCard(
+  cards: EmailBatchCardState[],
+  batchId: string,
+  answered: readonly EmailBatchOutcome[],
+): EmailBatchCardState[] {
+  const index = cards.findIndex((card) => card.batchId === batchId);
+  if (index === -1) return cards;
+  const card = cards[index];
+  const responded = new Set(answered.map((o) => o.id));
+  const outcomes = [...card.outcomes.filter((o) => !responded.has(o.id)), ...answered];
+  const decided = new Set(outcomes.map((o) => o.id));
+  const everyOne = card.drafts.every((d) => decided.has(d.id));
+  const next = cards.slice();
+  next[index] = {
+    ...card,
+    outcomes,
+    requestError: "",
+    status: everyOne ? "settled" : "waiting",
+    ...(everyOne ? { settledByOwner: true } : {}),
+  };
+  return next;
+}
+
 /** Replace one card by id, leaving the rest untouched. */
 export function updateBatchCard(
   cards: EmailBatchCardState[],
@@ -148,8 +301,12 @@ export interface EmailBatchCardProps {
   hermes: boolean;
   /** Send the ticked drafts. One call per gesture, whatever N is. */
   onApprove: (approval: EmailBatchApproval) => void | Promise<void>;
-  /** Send nothing. The drafts stay queued; Settings → Email still has them. */
-  onCancel: (batchId: string) => void;
+  /**
+   * Send none of them and DELETE them. Named the same way approving is, and
+   * for the mirrored reason: a draft queued while the owner was reading is not
+   * on this card and must not be swept away by a gesture aimed at what was.
+   */
+  onCancel: (approval: EmailBatchApproval) => void | Promise<void>;
 }
 
 export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatchCardProps) {
@@ -173,14 +330,27 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
     });
   }, []);
 
-  const included = useMemo(() => drafts.filter((d) => !dropped.has(d.id)), [drafts, dropped]);
   const outcomeById = useMemo(() => {
     const map = new Map<string, EmailBatchOutcome>();
     for (const outcome of outcomes) map.set(outcome.id, outcome);
     return map;
   }, [outcomes]);
+  /**
+   * What this send would cover — never a draft that already has an ending.
+   *
+   * The second clause is what keeps the count honest once a draft has been
+   * decided somewhere else: "Send all 2" over one waiting message and one
+   * already-sent one is the same lie as the button itself, in a smaller place.
+   */
+  const included = useMemo(
+    () => drafts.filter((d) => !dropped.has(d.id) && !outcomeById.has(d.id)),
+    [drafts, dropped, outcomeById],
+  );
 
   const sending = status === "sending";
+  const deleting = status === "deleting";
+  /** A request this card made is in flight; neither button may be pressed. */
+  const busy = sending || deleting;
   const settled = status === "settled";
 
   /**
@@ -193,24 +363,50 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
    * no idea whether eight emails just went out. So the one move made here is
    * the one the customer's own action forced.
    */
+  const settledByOwner = card.settledByOwner === true;
   useEffect(() => {
-    if (!settled) return;
+    if (!settled || !settledByOwner) return;
     outcomeRef.current?.focus();
-  }, [settled]);
+  }, [settled, settledByOwner]);
 
   const sentCount = outcomes.filter((o) => o.ok).length;
-  const failedCount = outcomes.length - sentCount;
+  /**
+   * Endings that are not failures.
+   *
+   * A draft the owner deleted, and one an identical message already covered,
+   * both leave the queue without being sent — and neither is anything gone
+   * wrong. Counting them as failures made "Delete without sending" answer with
+   * "0 sent, 2 not sent." in the colour that means something needs doing, which
+   * is a false alarm about the owner's own deliberate act.
+   */
+  const discardedCount = outcomes.filter(
+    (o) => !o.ok && (o.kind === "rejected" || o.kind === "duplicate"),
+  ).length;
+  // An unconfirmed send is not a failure to report as one: nobody knows what
+  // happened, and the row says exactly that.
+  const unconfirmedCount = outcomes.filter((o) => o.kind === "unconfirmed").length;
+  /**
+   * Decided somewhere else, and this card never learned which ending it had.
+   *
+   * Not a failure either: the draft is not waiting because Settings, another
+   * tab or the Telegram bot dealt with it — most often by SENDING it. A verdict
+   * calling that "not sent" is the false failure this card keeps having to be
+   * talked out of, and it is the one the owner acts on by sending again.
+   */
+  const elsewhereCount = outcomes.filter((o) => o.kind === "gone").length;
+  const failedCount = outcomes.length - sentCount - discardedCount - unconfirmedCount - elsewhereCount;
   /**
    * Settled, with nothing to show for it.
    *
-   * Reachable when the approval was cut short before a single draft was
-   * claimed: the route answers with an empty `results`, and a verdict computed
-   * from `failedCount` alone would find zero failures and render the all-sent
-   * line with a count of nought — "0 sent.", in the colour that means it went
-   * well. Nothing was attempted, and that is its own sentence.
+   * A card only settles once every draft on it has an ending, so this needs a
+   * card with no drafts at all — which `drafts.length === 0` returns null for
+   * below. It is kept as the belt on the braces: a verdict computed from
+   * `failedCount` alone would find zero failures and render the all-sent line
+   * with a count of nought, "0 sent." in the colour that means it went well,
+   * and that is the one sentence this card must never be able to produce.
    */
   const nothingAttempted = outcomes.length === 0;
-  const canSend = !sending && included.length > 0;
+  const canSend = !busy && included.length > 0;
 
   if (drafts.length === 0) return null;
 
@@ -275,8 +471,8 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
             draft={draft}
             index={index}
             idPrefix={idPrefix}
-            included={!dropped.has(draft.id)}
-            locked={sending || settled}
+            included={!dropped.has(draft.id) && !outcomeById.has(draft.id)}
+            locked={busy || settled || outcomeById.has(draft.id)}
             outcome={outcomeById.get(draft.id)}
             accentSolid={accent.solid}
             onToggle={toggle}
@@ -323,9 +519,22 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
           <button
             type="button"
             data-testid="chat-email-batch-cancel"
-            disabled={sending}
-            aria-disabled={sending}
-            onClick={() => onCancel(batchId)}
+            // Nothing ticked, nothing to delete — the same rule the send
+            // button follows, so neither control ever claims to act on an
+            // empty set.
+            disabled={!canSend}
+            aria-disabled={!canSend}
+            onClick={() =>
+              void onCancel({
+                batchId,
+                // The TICKED set, the same one the send button acts on. A
+                // checkbox this file documents as "how one draft is dropped
+                // from the batch" cannot mean "spare it" for one button and
+                // "delete it anyway" for the other — and of the two readings,
+                // the one that destroys less is the one to be wrong about.
+                entries: included.map((d) => ({ id: d.id, fingerprint: d.fingerprint })),
+              })
+            }
             style={{
               padding: "6px 12px",
               borderRadius: 8,
@@ -334,10 +543,15 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
               color: MUTED_FG,
               fontSize: 12.5,
               fontFamily: "inherit",
-              cursor: sending ? "default" : "pointer",
+              cursor: canSend ? "pointer" : "default",
+              opacity: canSend ? 1 : 0.55,
             }}
           >
-            {t("chat.emailBatch.cancel")}
+            {deleting
+              ? t("chat.emailBatch.deleting")
+              : included.length === 1 || included.length === 0
+                ? t("chat.emailBatch.cancelOne")
+                : t("chat.emailBatch.cancel", { count: String(included.length) })}
           </button>
           {included.length === 0 && (
             <span data-testid="chat-email-batch-none" style={{ color: MUTED_FG, fontSize: 11.5 }}>
@@ -361,13 +575,38 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
           // has finished being a control and must not add a stop to the tab
           // path through the transcript.
           tabIndex={-1}
-          style={{ color: failedCount > 0 || nothingAttempted ? ERROR_FG : OK_FG, fontSize: 12, outline: "none" }}
+          style={{
+            color:
+              failedCount > 0 || nothingAttempted
+                ? ERROR_FG
+                : unconfirmedCount > 0
+                  ? WARN_FG
+                  : sentCount > 0
+                    ? OK_FG
+                    : MUTED_FG,
+            fontSize: 12,
+            outline: "none",
+          }}
         >
+          {/* In order of what the owner needs to know: a real failure first,
+              then a send nobody could confirm — which outranks the good news
+              beside it, because it is the one line he has to act on — then
+              what went, then what he threw away, and last the case where this
+              card did none of it. */}
           {nothingAttempted
             ? t("chat.emailBatch.resultNone")
-            : failedCount === 0
-              ? t("chat.emailBatch.resultAllSent", { count: String(sentCount) })
-              : t("chat.emailBatch.resultPartial", { sent: String(sentCount), failed: String(failedCount) })}
+            : failedCount > 0
+              ? t("chat.emailBatch.resultPartial", { sent: String(sentCount), failed: String(failedCount) })
+              : unconfirmedCount > 0
+                ? t("chat.emailBatch.resultUnconfirmed", {
+                    sent: String(sentCount),
+                    unconfirmed: String(unconfirmedCount),
+                  })
+                : sentCount > 0
+                  ? t("chat.emailBatch.resultAllSent", { count: String(sentCount) })
+                  : discardedCount > 0
+                    ? t("chat.emailBatch.resultDiscarded", { count: String(discardedCount) })
+                    : t("chat.emailBatch.resultElsewhere")}
         </div>
       )}
 
@@ -383,6 +622,61 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
       )}
     </section>
   );
+}
+
+/**
+ * One line saying what became of one draft.
+ *
+ * Every ending gets its own sentence, because they are not interchangeable to
+ * the person reading them: "the mail server refused it" is a thing to act on,
+ * "you deleted it" is not, and "an identical copy was sent" is the difference
+ * between a bug and a duplicate that was handled. A single "not sent" over all
+ * three is the shape of unhelpfulness this card exists to avoid.
+ *
+ * The time is shown only when the card LEARNED the ending rather than caused
+ * it: after its own send there is nothing to place in time — the owner just
+ * pressed the button — while "sent at 11:34" is exactly what answers "did that
+ * go out before I left?".
+ */
+/**
+ * What colour one ending is written in.
+ *
+ * Only two of the six are news: a mail server's refusal, which needs doing
+ * something about, and a send nobody could confirm, which needs looking at. The
+ * rest are the record of something that already went as it should — including
+ * the owner's own deletion, which spent a release painted the same red as a
+ * failure and read as an error report about his own click.
+ */
+function outcomeColor(outcome: EmailBatchOutcome): string {
+  if (outcome.kind === "unconfirmed") return WARN_FG;
+  if (outcome.ok || outcome.kind === "sent") return OK_FG;
+  if (outcome.kind === "rejected" || outcome.kind === "duplicate" || outcome.kind === "gone") return MUTED_FG;
+  return ERROR_FG;
+}
+
+function outcomeLine(
+  outcome: EmailBatchOutcome,
+  t: (key: string, vars?: Record<string, string>) => string,
+): string {
+  switch (outcome.kind) {
+    case "rejected":
+      return t("chat.emailBatch.draftRemoved");
+    case "duplicate":
+      return t("chat.emailBatch.draftDuplicate");
+    case "gone":
+      return t("chat.emailBatch.draftGone");
+    case "unconfirmed":
+      // Not "not sent": the box handed the message over and never heard back,
+      // and telling the owner it failed is how they come to send it twice.
+      return t("chat.emailBatch.draftUnconfirmed");
+    default:
+      break;
+  }
+  if (!outcome.ok) return t("chat.emailBatch.draftFailed", { reason: outcome.error || "" });
+  if (outcome.at === undefined) return t("chat.emailBatch.draftSent");
+  return t("chat.emailBatch.draftSentAt", {
+    time: new Date(outcome.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }),
+  });
 }
 
 interface EmailBatchRowProps {
@@ -517,11 +811,10 @@ function EmailBatchRow({
       {outcome && (
         <div
           data-testid="chat-email-batch-outcome"
-          style={{ color: outcome.ok ? OK_FG : ERROR_FG, fontSize: 11.5, wordBreak: "break-word" }}
+          data-outcome-kind={outcome.kind ?? (outcome.ok ? "sent" : "failed")}
+          style={{ color: outcomeColor(outcome), fontSize: 11.5, wordBreak: "break-word" }}
         >
-          {outcome.ok
-            ? t("chat.emailBatch.draftSent")
-            : t("chat.emailBatch.draftFailed", { reason: outcome.error || "" })}
+          {outcomeLine(outcome, t)}
         </div>
       )}
     </li>

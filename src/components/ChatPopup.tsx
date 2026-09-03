@@ -19,6 +19,8 @@ import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardSt
 import {
   EmailBatchCard,
   batchFromPending,
+  reconcileBatchCards,
+  settleCard,
   shownDraftIds,
   updateBatchCard,
   type EmailBatchApproval,
@@ -594,6 +596,53 @@ export function isEmailSendTool(name: string): boolean {
   return /(?:^|[^A-Za-z0-9])email_send$/.test(name)
 }
 
+/**
+ * The five endings the store can record, validated off the wire.
+ *
+ * Every surface that reads an ending goes through this: the receipts in the
+ * queue's own answer, and the per-draft rows of an approve or a delete. A kind
+ * dropped here does not leave the card silent — the draft is then in neither
+ * list and the reconcile calls it "gone" — so a partial list of kinds is how a
+ * real ending quietly becomes "no idea".
+ */
+const EMAIL_ENDINGS = ['sent', 'rejected', 'failed', 'unconfirmed', 'duplicate'] as const
+type EmailEnding = (typeof EMAIL_ENDINGS)[number]
+
+function emailEnding(value: unknown): EmailEnding | undefined {
+  return EMAIL_ENDINGS.includes(value as EmailEnding) ? (value as EmailEnding) : undefined
+}
+
+/**
+ * One row of an approve or a delete answer, as the card should render it.
+ *
+ * `whenOk` is what this gesture DID — a send or a deletion — because the route
+ * says `ok: true` for its own success and the two are not the same news.
+ *
+ * A row the route could not act on carries the receipt's `ending` when there is
+ * one: the draft was sent, deleted or refused somewhere else while the card sat
+ * on screen, and the card settles on this answer, so "no longer waiting" over
+ * all of them would be a permanent shrug where the box knows the truth.
+ *
+ * `ok` follows the ENDING and not the route's field: a message that went out
+ * from another surface still went out, and a copy resolved as a duplicate did
+ * not. Only `changed` returns nothing at all — that draft is still waiting, and
+ * giving it an outcome would take its checkbox away for good.
+ */
+function emailRowOutcome(row: unknown, whenOk: 'sent' | 'rejected'): EmailBatchOutcome[] {
+  if (typeof row !== 'object' || row === null) return []
+  const r = row as Record<string, unknown>
+  if (typeof r.id !== 'string') return []
+  const at = typeof r.at === 'number' ? { at: r.at } : {}
+  const error = typeof r.error === 'string' ? { error: r.error } : {}
+  if (r.ok === true) return [{ id: r.id, ok: whenOk === 'sent', kind: whenOk, ...at }]
+  const ending = emailEnding(r.ending)
+  if (ending) return [{ id: r.id, ok: ending === 'sent', kind: ending, ...at, ...error }]
+  if (r.reason === 'duplicate') return [{ id: r.id, ok: false, kind: 'duplicate', ...error }]
+  if (r.reason === 'gone') return [{ id: r.id, ok: false, kind: 'gone', ...error }]
+  if (r.reason === 'changed') return []
+  return [{ id: r.id, ok: false, ...error }]
+}
+
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t } = useT()
   const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
@@ -777,8 +826,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // `clarifies` above: a clarify is a question the agent is PARKED on, so it
   // dies with the turn, while this card appears precisely BECAUSE the turn
   // finished and left mail waiting. Nothing here is lost if it goes anyway —
-  // every draft is on disk and Settings → Email lists all of them.
+  // a draft still waiting is on disk and Settings → Email lists it, and one
+  // that has been decided has a receipt there saying how.
   const [emailBatches, setEmailBatches] = useState<EmailBatchCardState[]>([])
+  /**
+   * Which read of the approval queue is the current one.
+   *
+   * The reads overlap: the turn-end collect and a focus or timer tick can be in
+   * flight together, and nothing makes two fetches of the same URL come back in
+   * the order they were sent. That was harmless while an old answer could only
+   * fail to ADD a card. It is not harmless now that an answer also decides what
+   * has LEFT the queue: an older read, arriving second, would find the draft a
+   * newer one had just reported as waiting missing from its own list and settle
+   * the card as "decided somewhere else" — over a draft that is still waiting,
+   * on a card the reconcile then skips for ever. So a superseded answer is
+   * dropped; the read that superseded it is already on its way.
+   */
+  const emailQueueReadSeq = useRef(0)
   // Did this turn ask to send mail? Set from the tool stream and read once the
   // turn is over, so the approval queue is only consulted when there is a
   // reason to think something landed in it — rather than on every turn the box
@@ -3088,6 +3152,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    * for the turn-end caller and `recoverEmailDrafts` for the scheduled one.
    */
   const collectEmailDrafts = useCallback(async () => {
+    const read = ++emailQueueReadSeq.current
     try {
       // `no-store`, and not because the route is slow to change: the route's
       // `dynamic = "force-dynamic"` governs Next's own render cache and does
@@ -3103,8 +3168,28 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // on a box with no mail account. Neither is worth a line in the
       // transcript: the customer did not ask for this, the agent did.
       if (!res.ok) return
-      const body = await res.json().catch(() => ({})) as { pending?: unknown }
+      const body = await res.json().catch(() => ({})) as { pending?: unknown; outcomes?: unknown }
       if (!Array.isArray(body.pending)) return
+      // What became of the drafts that have LEFT the queue, read in the same
+      // breath as the queue itself. Two requests could catch a draft in
+      // neither list and render the one state that is never true.
+      const resolved = new Map<string, EmailBatchOutcome>()
+      if (Array.isArray(body.outcomes)) {
+        for (const row of body.outcomes) {
+          if (typeof row !== 'object' || row === null) continue
+          const o = row as Record<string, unknown>
+          if (typeof o.id !== 'string') continue
+          const kind = emailEnding(o.kind)
+          if (!kind) continue
+          resolved.set(o.id, {
+            id: o.id,
+            ok: kind === 'sent',
+            kind,
+            ...(typeof o.at === 'number' ? { at: o.at } : {}),
+            ...(typeof o.error === 'string' ? { error: o.error } : {}),
+          })
+        }
+      }
       const drafts: EmailBatchDraft[] = body.pending.flatMap((row): EmailBatchDraft[] => {
         if (typeof row !== 'object' || row === null) return []
         const d = row as Record<string, unknown>
@@ -3123,10 +3208,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           fingerprint: d.fingerprint,
         }]
       })
-      if (drafts.length === 0) return
+      // Deliberately NOT `if (drafts.length === 0) return`, which is what it
+      // used to say. An empty queue is the most important answer this request
+      // can bring back: it means every card on screen is offering to send mail
+      // that has already been decided.
+      const pendingIds = new Set(drafts.map(d => d.id))
+      // A newer read has gone out since this one, so this answer is already
+      // history — and history applied on top of the present says a draft that
+      // is waiting is not. See `emailQueueReadSeq`.
+      if (read !== emailQueueReadSeq.current) return
       setEmailBatches(prev => {
-        const card = batchFromPending(drafts, shownDraftIds(prev))
-        return card ? [...prev, card] : prev
+        const settled = reconcileBatchCards(prev, pendingIds, resolved)
+        const card = batchFromPending(drafts, shownDraftIds(settled))
+        return card ? [...settled, card] : settled
       })
     } catch {
       // The queue could not be read. Nothing is waiting as far as this surface
@@ -3164,7 +3258,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    * draft in the queue. Four things can, and each one stranded mail on disk
    * with no way to approve it from the conversation:
    *
-   *   - the owner cancelled the card (the drafts stay queued, by design);
+   *   - a draft was left on a card the owner never answered, or unticked out
+   *     of one he did (cancelling DELETES the ticked ones, so those do not
+   *     come back — the unticked ones are still waiting and still his);
    *   - the page reloaded, and `emailBatches` is component state;
    *   - the turn was somebody else's — a cron run, an inbound-email
    *     auto-answer, Telegram, another session;
@@ -3218,13 +3314,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // way. Anything with no results at all is a failure of the REQUEST, and
       // is reported as one rather than as an empty success.
       if (!Array.isArray(body.results)) throw new Error(`batch approval refused with ${res.status}`)
-      const outcomes: EmailBatchOutcome[] = body.results.flatMap((row): EmailBatchOutcome[] => {
-        if (typeof row !== 'object' || row === null) return []
-        const r = row as Record<string, unknown>
-        if (typeof r.id !== 'string') return []
-        return [{ id: r.id, ok: r.ok === true, ...(typeof r.error === 'string' ? { error: r.error } : {}) }]
-      })
-      setEmailBatches(prev => updateBatchCard(prev, batchId, { status: 'settled', outcomes }))
+      const outcomes = body.results.flatMap(row => emailRowOutcome(row, 'sent'))
+      setEmailBatches(prev => settleCard(prev, batchId, outcomes))
     } catch {
       // Back to `waiting`, with the reason next to the button: the drafts were
       // either never claimed or are reported in a response we could not read,
@@ -3237,10 +3328,65 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [t])
 
-  /** Send nothing. The drafts stay queued — Settings → Email still lists them. */
-  const cancelEmailBatch = useCallback((batchId: string) => {
-    setEmailBatches(prev => prev.filter(card => card.batchId !== batchId))
-  }, [])
+  /**
+   * Send nothing — and mean it.
+   *
+   * This used to drop the card from THIS component's state and touch nothing
+   * else, on the reasoning that the drafts were safe in Settings → Email. What
+   * the owner actually got was a button that hid itself for fifteen seconds and
+   * then handed the same card back, because `recoverEmailDrafts` finds anything
+   * still queued: "when I click dismiss nothing happens; it returns after 20
+   * secs." The card was deciding what the queue holds instead of asking it —
+   * the same defect as a stale Approve button, seen from the other side.
+   *
+   * So the gesture goes to the store, naming the drafts the card is showing
+   * with the fingerprints they were shown with, exactly as approving does.
+   * Drafts that already carry an outcome are left out: they are decided, and
+   * this click is not about them.
+   *
+   * The card then STAYS, settled, as the record of what was thrown away. It
+   * cannot come back live, because `shownDraftIds` still covers its drafts and
+   * they are no longer in the queue anyway.
+   */
+  const cancelEmailBatch = useCallback(async (approval: EmailBatchApproval) => {
+    const { batchId, entries } = approval
+    // `deleting`, not `sending`: the primary button's label keys off the
+    // status, and a card that reads "Sending…" over the two messages the owner
+    // has just said must not be sent is the surface asserting the opposite of
+    // what it is doing.
+    setEmailBatches(prev => updateBatchCard(prev, batchId, { status: 'deleting', requestError: '' }))
+    try {
+      const res = await fetch('/setup-api/email/pending', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reject_batch', drafts: entries }),
+      })
+      const body = await res.json().catch(() => ({})) as { results?: unknown }
+      if (!Array.isArray(body.results)) throw new Error(`deletion refused with ${res.status}`)
+      // Every row that has an ending gets one, not only the ones that deleted:
+      // a row left without a verdict on a card that then settled could never be
+      // spoken about again — the reconcile skips settled cards and
+      // `batchFromPending` will not rebuild one for a draft already on screen.
+      // A draft the route refused because its text moved is the one exception,
+      // and it gets none precisely because it is STILL WAITING; `settleCard`
+      // then keeps the card open for it.
+      const outcomes = body.results.flatMap(row => emailRowOutcome(row, 'rejected'))
+      // Nothing at all came back that this card can show. Saying "removed"
+      // would be the false success this card exists to avoid, pointing at the
+      // owner's own mail, so it says the deletion did not get through and puts
+      // the button back.
+      if (outcomes.length === 0) throw new Error('nothing was deleted')
+      setEmailBatches(prev => settleCard(prev, batchId, outcomes))
+    } catch {
+      // Nothing was deleted, or we cannot say what was. Claiming "removed"
+      // here would be the false success this card exists to avoid, pointing at
+      // the owner's own mail.
+      setEmailBatches(prev => updateBatchCard(prev, batchId, {
+        status: 'waiting',
+        requestError: t('chat.emailBatch.cancelFailed'),
+      }))
+    }
+  }, [t])
 
   // ONE send path.
   //

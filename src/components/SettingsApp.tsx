@@ -92,6 +92,24 @@ interface PendingEmail {
 }
 
 /**
+ * A draft that is no longer waiting, and what became of it.
+ *
+ * The strip above used to just stop listing such a draft, which is honest about
+ * the queue and silent about the mail: an owner who approved on Telegram opened
+ * this panel to nothing at all and could not tell "it went out" from "it was
+ * deleted" from "this box never had it". The queue is where he comes to find
+ * out, so it is where the answer belongs.
+ */
+interface HandledEmail {
+  id: string;
+  kind: "sent" | "rejected" | "failed" | "unconfirmed" | "duplicate";
+  at: number;
+  to: string[];
+  subject: string;
+  error?: string;
+}
+
+/**
  * A draft that was approved, claimed out of the queue and then failed to send.
  * /setup-api/email/pending hands the whole message back for exactly this, so
  * the owner's approved mail is not lost to a transient SMTP error.
@@ -1696,6 +1714,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [emailAllowedSenders, setEmailAllowedSenders] = useState("");
   const [emailAskBeforeSend, setEmailAskBeforeSend] = useState(true);
   const [emailPending, setEmailPending] = useState<PendingEmail[]>([]);
+  const [emailHandled, setEmailHandled] = useState<HandledEmail[]>([]);
   const [emailPendingBusy, setEmailPendingBusy] = useState<string | null>(null);
   const [emailLostDraft, setEmailLostDraft] = useState<LostDraft | null>(null);
   const [emailSaving, setEmailSaving] = useState(false);
@@ -1760,6 +1779,31 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 subject: typeof p.subject === "string" ? p.subject : "",
                 preview: typeof p.preview === "string" ? p.preview : "",
                 createdAt: typeof p.createdAt === "number" ? p.createdAt : 0,
+              }))
+          : [],
+      );
+      // Read out of the SAME response as the queue, never a second request:
+      // two requests can catch a draft in neither answer, and the panel would
+      // then show the one state that is never true — no draft, and no word
+      // about where it went.
+      setEmailHandled(
+        Array.isArray(d?.outcomes)
+          ? d.outcomes
+              .filter((o: unknown): o is Record<string, unknown> => typeof o === "object" && o !== null)
+              .filter(
+                (o: Record<string, unknown>) =>
+                  typeof o.id === "string"
+                  && typeof o.at === "number"
+                  && (o.kind === "sent" || o.kind === "rejected" || o.kind === "failed"
+                    || o.kind === "unconfirmed" || o.kind === "duplicate"),
+              )
+              .map((o: Record<string, unknown>): HandledEmail => ({
+                id: String(o.id),
+                kind: o.kind as HandledEmail["kind"],
+                at: o.at as number,
+                to: Array.isArray(o.to) ? o.to.filter((x): x is string => typeof x === "string") : [],
+                subject: typeof o.subject === "string" ? o.subject : "",
+                ...(typeof o.error === "string" ? { error: o.error } : {}),
               }))
           : [],
       );
@@ -2013,6 +2057,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       setEmailReconfigure(false);
       setEmailMode("send");
       setEmailPending([]);
+      // The receipts go with the queue — the route clears them server-side for
+      // the same reason, and leaving them on screen would keep the disconnected
+      // account's recipients and subjects up until the next poll.
+      setEmailHandled([]);
+      // And the same for the one draft this panel keeps in full. It is rendered
+      // on its own condition, not on `configured`, so a failed send from the
+      // account just disconnected would sit there — recipients, subject and
+      // body — until another approval happened to fail.
+      setEmailLostDraft(null);
       setEmailMsg({ type: "success", message: t("settings.emailDisconnected") });
       refreshEmailStatus();
     } catch (err) {
@@ -4286,6 +4339,61 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         >
                           {t("settings.emailReject")}
                         </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* What became of the drafts that are no longer waiting.
+                Shown only when there is something to say — an empty
+                strip is not news — and it fades on its own, because
+                the receipts behind it expire after a day. Every
+                string here is agent-composed text and is rendered as
+                text, exactly like the queue above it. */}
+            {emailHandled.length > 0 && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-handled">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">history</span>
+                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailHandled")}</label>
+                </div>
+                <div className="space-y-3">
+                  {emailHandled.map((entry) => (
+                    <div
+                      key={entry.id}
+                      data-outcome-id={entry.id}
+                      data-outcome-kind={entry.kind}
+                      className="rounded-xl bg-white/[0.02] border border-white/[0.06] px-4 py-3"
+                    >
+                      <div className="text-xs text-[var(--text-muted)] truncate">
+                        {t("settings.emailPendingTo")}: {entry.to.join(", ")}
+                      </div>
+                      <div className="text-sm text-[var(--text-primary)] font-medium mt-1 break-words">{entry.subject}</div>
+                      <div
+                        className={`text-xs mt-1 break-words ${entry.kind === "sent" ? "text-emerald-300" : entry.kind === "failed" ? "text-red-300" : entry.kind === "unconfirmed" ? "text-amber-300" : "text-[var(--text-muted)]"}`}
+                      >
+                        {/* Each ending in its own words. "Not sent" over a
+                            deletion, a duplicate and a mail-server refusal
+                            alike would send the owner looking for a fault in
+                            two cases where there is none. */}
+                        {entry.kind === "sent"
+                          ? t("settings.emailHandledSent", {
+                              time: new Date(entry.at).toLocaleTimeString(undefined, {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              }),
+                            })
+                          : entry.kind === "rejected"
+                            ? t("settings.emailHandledDeleted")
+                            : entry.kind === "duplicate"
+                              ? t("settings.emailHandledDuplicate")
+                              : entry.kind === "unconfirmed"
+                                // Never "Not sent": the box handed the message
+                                // over and never heard back, and a confident
+                                // "not sent" is how a person sends it twice.
+                                ? t("settings.emailHandledUnconfirmed")
+                                : t("settings.emailHandledFailed", { reason: entry.error || "" })}
                       </div>
                     </div>
                   ))}
