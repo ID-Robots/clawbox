@@ -6,6 +6,7 @@ import {
   setYamlPath,
   unsetYamlPath,
   YamlEditUnsupported,
+  hasYamlPath,
 } from "@/lib/yaml-block-edit";
 
 /**
@@ -141,5 +142,30 @@ describe("formatYamlScalar", () => {
   it("round-trips a quoted value", () => {
     const out = setYamlPath("", ["providers", "clawlocal", "api_key"], "a#b c\"d");
     expect(getYamlPath(out, ["providers", "clawlocal", "api_key"])).toBe("a#b c\"d");
+  });
+});
+
+/**
+ * `getYamlPath` answers null both for "no such key" and for a key written with
+ * an empty value, and a reader that applies defaults has to tell those apart:
+ * YAML reads `foo:` as a null VALUE, so substituting a default there overrides
+ * something somebody actually wrote. That is a security bug on the one caller
+ * that has it (the Hermes shell-scan status), so the distinction is pinned.
+ */
+describe("hasYamlPath", () => {
+  const text = "security:\n  tirith_enabled:\n  tirith_path: \"tirith\"\n";
+
+  it("is true for a key written with no value, where getYamlPath answers null", () => {
+    expect(getYamlPath(text, ["security", "tirith_enabled"])).toBeNull();
+    expect(hasYamlPath(text, ["security", "tirith_enabled"])).toBe(true);
+  });
+
+  it("is false for a key that is genuinely absent", () => {
+    expect(hasYamlPath(text, ["security", "tirith_fail_open"])).toBe(false);
+    expect(hasYamlPath(text, ["nothing", "here"])).toBe(false);
+  });
+
+  it("is true for an ordinary key with a value", () => {
+    expect(hasYamlPath(text, ["security", "tirith_path"])).toBe(true);
   });
 });

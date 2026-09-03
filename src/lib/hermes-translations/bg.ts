@@ -709,4 +709,23 @@ export const bg: Record<string, string> = {
   "codingAgent.artBrowser": "Браузър",
   "codingAgent.resetConfirm": "Нулиране на всичко — докоснете отново",
   "codingAgent.resetFailed": "Кодиращият агент не можа да бъде нулиран.",
+
+  // Settings → System → Agent harness: the pre-exec shell scanning notice
+  // (HERMES-08). The box's only statement that a security control is off.
+  "shellScan.offTitle":
+    "Проверката на командите на обвивката е изключена",
+  "shellScan.blockedTitle":
+    "Командите на обвивката са блокирани",
+  "shellScan.unknownTitle":
+    "Проверка на командите на обвивката: неизвестно",
+  "shellScan.missingDetail":
+    "Скенерът за безопасност не е инсталиран. Агентът го изтегля при първото свързване на кутията с интернет; дотогава изпълнява командите на обвивката без проверка.",
+  "shellScan.blockedDetail":
+    "Скенерът за безопасност не е инсталиран, а агентът е настроен да отказва команди на обвивката без него. Свържете кутията с интернет, за да го изтегли.",
+  "shellScan.disabledDetail":
+    "Изключена е в настройките на агента (security.tirith_enabled). Командите се изпълняват без предварителна проверка за безопасност.",
+  "shellScan.unknownDetail":
+    "Настройките за сигурност на агента не могат да бъдат прочетени, затова кутията не може да потвърди, че командите на обвивката се проверяват, преди да бъдат изпълнени.",
+  "shellScan.retryAfter":
+    "Агентът няма да опита изтеглянето отново преди {time}.",
 };

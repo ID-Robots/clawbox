@@ -721,4 +721,23 @@ export const de: Record<string, string> = {
   "codingAgent.artBrowser": "Webbrowser",
   "codingAgent.resetConfirm": "Alles zurücksetzen — erneut tippen",
   "codingAgent.resetFailed": "Der Coding-Agent konnte nicht zurückgesetzt werden.",
+
+  // Settings → System → Agent harness: the pre-exec shell scanning notice
+  // (HERMES-08). The box's only statement that a security control is off.
+  "shellScan.offTitle":
+    "Die Prüfung von Shell-Befehlen ist ausgeschaltet",
+  "shellScan.blockedTitle":
+    "Shell-Befehle werden blockiert",
+  "shellScan.unknownTitle":
+    "Prüfung von Shell-Befehlen: unbekannt",
+  "shellScan.missingDetail":
+    "Der Sicherheitsscanner ist nicht installiert. Der Agent lädt ihn herunter, sobald die Box zum ersten Mal online ist; bis dahin führt er Shell-Befehle ungeprüft aus.",
+  "shellScan.blockedDetail":
+    "Der Sicherheitsscanner ist nicht installiert, und der Agent ist so eingestellt, dass er ohne ihn keine Shell-Befehle ausführt. Verbinden Sie die Box mit dem Internet, damit sie den Scanner herunterladen kann.",
+  "shellScan.disabledDetail":
+    "Sie wurde in den Einstellungen des Agenten ausgeschaltet (security.tirith_enabled). Befehle laufen ohne vorherige Sicherheitsprüfung.",
+  "shellScan.unknownDetail":
+    "Die Sicherheitseinstellungen des Agenten konnten nicht gelesen werden, daher kann diese Box nicht bestätigen, dass Shell-Befehle vor der Ausführung geprüft werden.",
+  "shellScan.retryAfter":
+    "Der Agent versucht den Download nicht vor {time} erneut.",
 };

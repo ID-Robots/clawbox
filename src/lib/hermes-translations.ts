@@ -5,6 +5,7 @@ import { skillsEn } from "./hermes-translations/en-skills";
 import { localModelsEn } from "./hermes-translations/en-local-models";
 import { systemProfileEn } from "./hermes-translations/en-system-profile";
 import { codingAgentEn } from "./hermes-translations/en-coding-agent";
+import { shellScanEn } from "./hermes-translations/en-shell-scan";
 import { bg } from "./hermes-translations/bg";
 import { de } from "./hermes-translations/de";
 import { es } from "./hermes-translations/es";
@@ -39,6 +40,7 @@ export const hermesEn: Record<string, string> = {
   ...localModelsEn,
   ...systemProfileEn,
   ...codingAgentEn,
+  ...shellScanEn,
 };
 
 const overrides: Record<Exclude<Locale, "en">, Record<string, string>> = {

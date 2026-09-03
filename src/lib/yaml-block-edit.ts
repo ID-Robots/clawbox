@@ -235,6 +235,21 @@ export function getYamlPath(text: string, path: string[]): string | null {
 }
 
 /**
+ * Is the key PRESENT, whatever its value?
+ *
+ * `getYamlPath` answers `null` both for "no such key" and for a key written with
+ * an empty value (`foo:`), and those are different facts: YAML reads the second
+ * as a null VALUE, which a reader has to tell apart from an absent key or it
+ * silently substitutes its own default for something somebody actually wrote.
+ * Only a caller that applies defaults needs this; the editing functions do not.
+ */
+export function hasYamlPath(text: string, path: string[]): boolean {
+  assertPath(path);
+  const { lines } = splitLines(text);
+  return descend(lines, path).matched.length === path.length;
+}
+
+/**
  * Set one dotted path to a scalar, creating any missing parents.
  *
  * Every other line of the file comes through untouched.

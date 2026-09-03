@@ -58,7 +58,10 @@ const DATA_KEEP: ReadonlyArray<{ rel: string; keep?: ReadonlySet<string> }> = [
 ];
 const DATA_KEEP_NAMES = new Set(DATA_KEEP.map((entry) => entry.rel));
 
-const HERMES_KEEP = new Set(["hermes-agent"]);
+// The two named exceptions to the ~/.hermes wipe. Neither is owner state and
+// neither can be re-fetched on a reset device — it reboots into AP mode with no
+// internet. Rationale for both is at the HOME_CONTENT_WIPE_KEEP entry below.
+const HERMES_KEEP = new Set(["hermes-agent", "bin"]);
 
 /** Delete all Ollama models so a factory reset starts with a clean slate. */
 async function deleteOllamaModels(): Promise<void> {
@@ -287,8 +290,15 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
     // on every box of this SKU.
     //
     // KNOWN RESIDUAL, accepted deliberately: a previous owner with a shell
-    // could plant a file inside this one preserved directory and it would
-    // survive the reset. The obvious guard — wipe the checkout unless `git
+    // could plant a file inside a preserved directory and it would survive the
+    // reset. For bin/tirith that residual is sharper than for the checkout —
+    // the agent EXECUTES that file before every shell command and its exit code
+    // decides whether the command runs — but it is not made worse by keeping
+    // the directory rather than the file: a planted `tirith` survives either
+    // way, and nothing on the device can tell a genuine release binary from a
+    // replacement without a trusted checksum it does not have offline. That is
+    // also why the dashboard's scan status reports "installed and enabled", not
+    // "your commands are being checked" (src/lib/hermes-shell-scan.ts). The obvious guard — wipe the checkout unless `git
     // status --porcelain` is empty — was tried and rejected. Both of its
     // outcomes are worse than the hole: wiping a "dirty" checkout recreates
     // this very brick on every box of the SKU at once the day upstream starts
@@ -300,6 +310,28 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
     // invisible to --porcelain. Re-provisioning the agent from upstream after
     // a reset is the real fix, and it needs network this device does not have
     // at reset time.
+    //
+    // The second exception is bin/, and it is the same category. It holds the
+    // upstream `tirith` binary the agent runs BEFORE every shell command
+    // (Hermes' own `security.tirith_*` keys configure it). tirith is not
+    // shipped with the box: the agent downloads it from a GitHub release into
+    // $HERMES_HOME/bin the first time it is needed, and upstream's default is
+    // fail-OPEN, so a box without it runs shell commands UNSCANNED. Wiping it
+    // therefore handed the next owner an agent with its pre-exec safety check
+    // silently off, for as long as the box stayed in AP mode — and a failed
+    // download then writes ~/.hermes/.tirith-install-failed, which suppresses
+    // the retry for another 24 h. That marker is NOT kept, so the reset clears
+    // it and the next download attempt is immediate.
+    //
+    // Kept whole rather than narrowed to bin/tirith, deliberately. Narrowing
+    // would mean wiping the directory entry-by-entry, and the only thing that
+    // buys is removing files beside tirith that nothing on the box executes —
+    // ~/.hermes/bin is not on the agent's PATH. What it costs is real: nothing
+    // here has an authoritative inventory of that directory (ClawKeep's
+    // archiver calls it a virtualenv, `clawkeep/clawkeep/hermes.py`), so a
+    // narrow keep would delete whatever else upstream puts there, on every box
+    // of the SKU at once, with no internet to restore it. Same argument the
+    // `git status --porcelain` guard was rejected on above.
     //
     // Re-provisioning of the removed state is automatic: the dashboard unit
     // runs scripts/setup-hermes-dashboard-auth.sh as an ExecStartPre, which

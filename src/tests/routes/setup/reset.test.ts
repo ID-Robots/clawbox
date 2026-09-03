@@ -501,6 +501,11 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
   // What a used Hermes box actually has under ~/.hermes.
   const HERMES_ENTRIES = [
     "hermes-agent",
+    "bin",
+    // Upstream's install-failure marker. It suppresses the tirith download for
+    // 24 h, so a reset that kept it would leave a box that IS online unable to
+    // re-fetch the scanner for another day.
+    ".tirith-install-failed",
     "config.yaml",
     "config.yaml.bak-20260813",
     ".env",
@@ -514,7 +519,15 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     "state.db",
     "projects.db",
   ];
-  const SECRET_ENTRIES = HERMES_ENTRIES.filter((e) => e !== "hermes-agent");
+  // What ~/.hermes/bin holds: the upstream tirith binary, plus a second entry
+  // so the assertion below pins the WHOLE directory rather than one name — a
+  // future narrowing that kept `tirith` and removed its neighbour would
+  // otherwise slip through.
+  const HERMES_BIN_ENTRIES = ["tirith", "future-helper"];
+  // The reset preserves the agent install and the bin/ the scanner lives in.
+  // Everything else under ~/.hermes is previous-owner state and must go.
+  const KEPT_ENTRIES = ["hermes-agent", "bin"];
+  const SECRET_ENTRIES = HERMES_ENTRIES.filter((e) => !KEPT_ENTRIES.includes(e));
 
   const rmTargets = () =>
     mockFs.rm.mock.calls.map(([p]) => p).filter((p): p is string => typeof p === "string");
@@ -531,6 +544,7 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
 
     mockFs.readdir.mockImplementation(((p: string) => {
       if (p === HERMES) return Promise.resolve(HERMES_ENTRIES);
+      if (p === `${HERMES}/bin`) return Promise.resolve(HERMES_BIN_ENTRIES);
       if (p === "/test/data") return Promise.resolve(["config.json", "network.env", "llamacpp", ".session-secret"]);
       // llama-server's runtime scratch sits beside the weights.
       if (p === "/test/data/llamacpp") return Promise.resolve(["models", "server.pid", "server.log"]);
@@ -572,6 +586,24 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     // And not by taking the whole directory out from under it — the exact
     // shape of the original defect.
     expect(targets).not.toContain(HERMES);
+  });
+
+  it("never removes ~/.hermes/bin, which holds the pre-exec shell scanner", async () => {
+    // tirith is the ~33 MB upstream binary the agent runs BEFORE every shell
+    // command. It is not owner state — it is an upstream release artefact —
+    // and the agent only re-downloads it from a GitHub release once the box
+    // has internet again. A reset box reboots into AP mode, so wiping it left
+    // the agent executing shell commands with pre-exec scanning off, and
+    // nothing said so.
+    await resetPost();
+    const targets = rmTargets();
+
+    expect(targets).not.toContain(`${HERMES}/bin`);
+    // And not by reaching into it either — the directory is kept whole, so
+    // nothing inside it is enumerated or removed.
+    for (const entry of HERMES_BIN_ENTRIES) {
+      expect(targets, `expected ~/.hermes/bin/${entry} to survive`).not.toContain(`${HERMES}/bin/${entry}`);
+    }
   });
 
   it("still removes every secret-bearing entry under ~/.hermes", async () => {

@@ -722,4 +722,23 @@ export const fr: Record<string, string> = {
   "codingAgent.artBrowser": "Navigateur",
   "codingAgent.resetConfirm": "Tout réinitialiser — appuyez à nouveau",
   "codingAgent.resetFailed": "L'agent de code n'a pas pu être réinitialisé.",
+
+  // Settings → System → Agent harness: the pre-exec shell scanning notice
+  // (HERMES-08). The box's only statement that a security control is off.
+  "shellScan.offTitle":
+    "L'analyse des commandes shell est désactivée",
+  "shellScan.blockedTitle":
+    "Les commandes shell sont bloquées",
+  "shellScan.unknownTitle":
+    "Analyse des commandes shell : inconnue",
+  "shellScan.missingDetail":
+    "L'analyseur de sécurité n'est pas installé. L'agent le télécharge dès que la box est connectée pour la première fois ; jusque-là, il exécute les commandes shell sans les vérifier.",
+  "shellScan.blockedDetail":
+    "L'analyseur de sécurité n'est pas installé, et l'agent est configuré pour refuser les commandes shell sans lui. Connectez la box à Internet pour qu'elle puisse le télécharger.",
+  "shellScan.disabledDetail":
+    "Elle a été désactivée dans les réglages de l'agent (security.tirith_enabled). Les commandes s'exécutent sans contrôle de sécurité préalable.",
+  "shellScan.unknownDetail":
+    "Les réglages de sécurité de l'agent n'ont pas pu être lus, donc cette box ne peut pas confirmer que les commandes shell sont vérifiées avant leur exécution.",
+  "shellScan.retryAfter":
+    "L'agent ne réessaiera pas le téléchargement avant {time}.",
 };

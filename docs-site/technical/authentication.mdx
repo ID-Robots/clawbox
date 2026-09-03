@@ -67,5 +67,6 @@ AI provider keys and OAuth sessions are separate from all of the above — see [
 - Web login is rate-limited with lockout; passwords are never logged; control characters are rejected.
 - Privileged operations run through an allowlisted systemd template (polkit + narrow sudoers), never arbitrary root exec from the web process.
 - Telegram DMs default to **pairing** mode — unknown senders are inert until the owner approves their 8-character code. Config that would open DMs to everyone (`dmPolicy:"open"` + `allowFrom:["*"]`) is actively stripped on boot.
+- On the **Hermes edition** the agent scans every shell command with `tirith` before running it. The scanner is not shipped — the agent downloads it the first time the box is online — and upstream's default is *fail-open*, so a box that has never had internet runs commands unscanned. Settings → System reports that state instead of leaving it silent, and `security.tirith_fail_open: false` in `~/.hermes/config.yaml` switches the agent to refusing commands it cannot scan.
 - Factory reset wipes credentials, SSH keys, histories, and browser profiles — see [Recovery](/support/recovery).
 - Vulnerability reports: see [SECURITY.md](https://github.com/ID-Robots/clawbox/blob/main/SECURITY.md).

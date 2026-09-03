@@ -722,4 +722,23 @@ export const nl: Record<string, string> = {
   "codingAgent.artBrowser": "Webbrowser",
   "codingAgent.resetConfirm": "Alles resetten — tik nogmaals",
   "codingAgent.resetFailed": "De codeagent kon niet worden gereset.",
+
+  // Settings → System → Agent harness: the pre-exec shell scanning notice
+  // (HERMES-08). The box's only statement that a security control is off.
+  "shellScan.offTitle":
+    "Controle van shell-opdrachten staat uit",
+  "shellScan.blockedTitle":
+    "Shell-opdrachten worden geblokkeerd",
+  "shellScan.unknownTitle":
+    "Controle van shell-opdrachten: onbekend",
+  "shellScan.missingDetail":
+    "De veiligheidsscanner is niet geïnstalleerd. De agent downloadt hem zodra de box voor het eerst online is; tot dan voert hij shell-opdrachten uit zonder ze te controleren.",
+  "shellScan.blockedDetail":
+    "De veiligheidsscanner is niet geïnstalleerd en de agent is ingesteld om shell-opdrachten zonder hem te weigeren. Verbind de box met internet zodat hij de scanner kan downloaden.",
+  "shellScan.disabledDetail":
+    "Hij is uitgezet in de instellingen van de agent (security.tirith_enabled). Opdrachten draaien zonder veiligheidscontrole vooraf.",
+  "shellScan.unknownDetail":
+    "De beveiligingsinstellingen van de agent konden niet worden gelezen, dus deze box kan niet bevestigen dat shell-opdrachten voor uitvoering worden gecontroleerd.",
+  "shellScan.retryAfter":
+    "De agent probeert de download niet opnieuw vóór {time}.",
 };

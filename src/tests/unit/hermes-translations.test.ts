@@ -7,6 +7,7 @@ import { skillsEn } from "@/lib/hermes-translations/en-skills";
 import { localModelsEn } from "@/lib/hermes-translations/en-local-models";
 import { systemProfileEn } from "@/lib/hermes-translations/en-system-profile";
 import { codingAgentEn } from "@/lib/hermes-translations/en-coding-agent";
+import { shellScanEn } from "@/lib/hermes-translations/en-shell-scan";
 import { bg } from "@/lib/hermes-translations/bg";
 import { de } from "@/lib/hermes-translations/de";
 import { es } from "@/lib/hermes-translations/es";
@@ -50,6 +51,9 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   { name: "Desktop & power card", matches: (k) => k.startsWith("systemProfile.") },
   // Coding agent card: the owner's switch for delegated Claude Code runs.
   { name: "Coding agent card", matches: (k) => k.startsWith("codingAgent.") },
+  // Pre-exec shell scanning notice (HERMES-08) — the box's only statement that
+  // a security control is off. An owner who cannot read it is not warned.
+  { name: "Shell scanning notice", matches: (k) => k.startsWith("shellScan.") },
 ];
 
 /**
@@ -100,6 +104,7 @@ describe("hermes-translations (TASK-458)", () => {
       ["localModelsEn", localModelsEn, (k) => k.startsWith("localModels.")],
       ["systemProfileEn", systemProfileEn, (k) => k.startsWith("systemProfile.")],
       ["codingAgentEn", codingAgentEn, (k) => k.startsWith("codingAgent.")],
+      ["shellScanEn", shellScanEn, (k) => k.startsWith("shellScan.")],
     ];
 
     for (const [name, table, prefixed] of surfaces) {

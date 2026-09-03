@@ -718,4 +718,23 @@ export const sv: Record<string, string> = {
   "codingAgent.artBrowser": "Webbläsare",
   "codingAgent.resetConfirm": "Återställ allt — tryck igen",
   "codingAgent.resetFailed": "Kodagenten kunde inte återställas.",
+
+  // Settings → System → Agent harness: the pre-exec shell scanning notice
+  // (HERMES-08). The box's only statement that a security control is off.
+  "shellScan.offTitle":
+    "Kontrollen av skalkommandon är avstängd",
+  "shellScan.blockedTitle":
+    "Skalkommandon blockeras",
+  "shellScan.unknownTitle":
+    "Kontroll av skalkommandon: okänt",
+  "shellScan.missingDetail":
+    "Säkerhetsskannern är inte installerad. Agenten laddar ner den första gången boxen är uppkopplad; fram till dess kör den skalkommandon utan att kontrollera dem.",
+  "shellScan.blockedDetail":
+    "Säkerhetsskannern är inte installerad, och agenten är inställd på att vägra skalkommandon utan den. Anslut boxen till internet så att den kan ladda ner skannern.",
+  "shellScan.disabledDetail":
+    "Den stängdes av i agentens inställningar (security.tirith_enabled). Kommandon körs utan säkerhetskontroll i förväg.",
+  "shellScan.unknownDetail":
+    "Agentens säkerhetsinställningar kunde inte läsas, så boxen kan inte bekräfta att skalkommandon kontrolleras innan de körs.",
+  "shellScan.retryAfter":
+    "Agenten försöker inte hämta den igen före {time}.",
 };
