@@ -406,8 +406,17 @@ async function readChannelRowResult(
 
   // The CLI exited fine but what came back is not a payload — the same class of
   // "could not read the gateway" as a spawn failure, not an answer about the
-  // channel.
-  if (!parsed || typeof parsed !== "object") return { answered: false, row: null };
+  // channel. `Array.isArray` is not redundant: `typeof [] === "object"`, so a
+  // JSON array would otherwise walk on, find no channel in it, and be filed as
+  // the gateway ANSWERING that this channel does not exist — for 15 s.
+  //
+  // The check stops here on purpose. Demanding a `channelAccounts` or
+  // `channels` key would be the same mistake inverted: a gateway with nothing
+  // configured is entitled to answer `{}`, and calling that a failed read would
+  // put exactly the box this change is for back on the 3 s window.
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { answered: false, row: null };
+  }
   const payload = parsed as {
     channelAccounts?: Record<string, unknown>;
     channels?: Record<string, unknown>;

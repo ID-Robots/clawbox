@@ -45,6 +45,8 @@ let statusStarts = 0;
 let accountRow: Record<string, unknown> | null;
 /** When true the mocked CLI fails, i.e. "the gateway could not be asked". */
 let cliFails = false;
+/** Raw stdout to answer with, for the shapes the payload builder cannot make. */
+let cliPayload: string | undefined;
 
 function row(over: Record<string, unknown> = {}) {
   return { configured: true, enabled: true, linked: false, connected: false, ...over };
@@ -61,6 +63,7 @@ beforeEach(async () => {
   statusStarts = 0;
   accountRow = row();
   cliFails = false;
+  cliPayload = undefined;
   // readChannelRow() logs a failed read; the failure case below is deliberate.
   vi.spyOn(console, "warn").mockImplementation(() => {});
   mockSpawn.mockImplementation(async (args: string[]) => {
@@ -68,6 +71,7 @@ beforeEach(async () => {
       statusStarts += 1;
       await new Promise((resolve) => setTimeout(resolve, CLI_MS));
       if (cliFails) throw new Error("gateway unreachable");
+      if (cliPayload !== undefined) return cliPayload;
       // `accountRow: null` is a valid payload with no WhatsApp entry at all —
       // the gateway ANSWERING that the channel was never set up.
       return JSON.stringify({
@@ -197,6 +201,21 @@ describe("GET /setup-api/whatsapp/status — the CLI is asked once per window", 
 
     vi.setSystemTime(Date.now() + 12_000);
     await GET();
+    expect(statusStarts).toBe(2);
+  });
+
+  it("treats a payload that is not a channel-status object as a failed read", async () => {
+    // `typeof [] === "object"`, so a JSON array clears the object guard, and
+    // nothing in it is a channel. That must not be filed as the gateway
+    // ANSWERING "no such channel" — it is a gateway we could not read, and it
+    // gets the short window so the next poll asks again.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    cliPayload = "[]";
+    expect((await (await GET()).json()).state).toBe("not_configured");
+
+    vi.setSystemTime(Date.now() + 5_000);
+    cliPayload = undefined;
+    expect((await (await GET()).json()).state).toBe("enabled_not_paired");
     expect(statusStarts).toBe(2);
   });
 });
