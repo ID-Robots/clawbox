@@ -114,6 +114,19 @@ export async function speakLocally(config: VoiceConfigView, requestedVoice: unkn
   }
 }
 
+/** `<base>/audio/speech`, or null when the base is not https or loopback http. */
+function speechEndpoint(baseUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return null;
+  }
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) return null;
+  return `${url.origin}${url.pathname.replace(/\/$/, "")}/audio/speech`;
+}
+
 export async function speakInCloud(config: VoiceConfigView, requestedVoice: unknown, text: string): Promise<Response> {
   const target = cloudSpeechTarget(config);
   if (!target) return refuse("The cloud voice is not set up on this box.", "cloud_not_set_up", 409);
@@ -125,9 +138,14 @@ export async function speakInCloud(config: VoiceConfigView, requestedVoice: unkn
     return refuse(`The cloud voice's model (${target.model ?? DEFAULT_CLOUD_MODEL}) does not have that voice.`, "unknown_voice", 400);
   }
   const voice = typeof requestedVoice === "string" ? requestedVoice : cloudVoiceFrom(config);
+  // The endpoint is the box's own configuration, but it is still checked
+  // before a credential goes to it: https, or plain http on the loopback
+  // only — the same rule the coding harness applies to its proxy URL.
+  const endpoint = speechEndpoint(target.baseUrl);
+  if (!endpoint) return refuse("The cloud voice's endpoint is not one this box will send its credential to.", "cloud_not_set_up", 409);
   let res: Response;
   try {
-    res = await fetch(`${target.baseUrl}/audio/speech`, {
+    res = await fetch(endpoint, {
       method: "POST",
       headers: { Authorization: `Bearer ${target.apiKey}`, "Content-Type": "application/json" },
       // WAV, the same format the on-device engine returns. An audition is one

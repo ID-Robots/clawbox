@@ -19,7 +19,8 @@ test("mobile Settings renders account and password confirmation overlays", async
   await expect(page.getByRole("dialog", { name: "Sign in to use Remote Control" })).toBeVisible();
   await page.getByRole("button", { name: "Maybe later" }).click();
 
-  await page.getByRole("button", { name: /System/ }).click();
+  // Exact: Settings has a "System Update" section beside "System" now.
+  await page.getByRole("button", { name: "System", exact: true }).click();
   await page.getByPlaceholder("Current password").fill("existing-password");
   await page.getByRole("button", { name: "Verify" }).click();
   await page.getByRole("textbox", { name: "New password", exact: true }).fill("new-password-123");

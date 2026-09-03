@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { speakThroughChain, withSpeechLock, withSpeechQueue } from "@/lib/voice-speak";
+import { speakInCloud, speakThroughChain, withSpeechLock, withSpeechQueue } from "@/lib/voice-speak";
 import type { VoiceConfigView, VoiceEngine } from "@/lib/voice-output";
 
 /**
@@ -97,5 +97,34 @@ describe("the speech queue", () => {
     await reply;
     const later = await withSpeechLock(async () => new Response("sample"));
     expect(later.status).toBe(200);
+  });
+});
+
+/**
+ * A credential goes only to an endpoint the box would trust with one: https,
+ * or plain http on the loopback. A provider entry pointing elsewhere is the
+ * box's own configuration, but it is refused rather than obeyed.
+ */
+describe("the cloud speech endpoint", () => {
+  const configWith = (baseUrl: string) => ({
+    tts: { provider: "openai", providers: { openai: { baseUrl, model: "gpt-4o-mini-tts", apiKey: "claw_x" } } },
+    models: { providers: { openai: { apiKey: "claw_x" } } },
+  } as unknown as VoiceConfigView);
+
+  it("refuses plain http off the box, and never sends the credential there", async () => {
+    const fetchMock = vi.fn(async () => new Response(new Uint8Array(4096), { status: 200, headers: { "Content-Type": "audio/wav" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const res = await speakInCloud(configWith("http://evil.example/api/ai"), null, "hi");
+      expect(res.status).toBe(409);
+      expect(fetchMock).not.toHaveBeenCalled();
+      const ok = await speakInCloud(configWith("https://clawbox.com/api/ai"), null, "hi");
+      expect(ok.status).toBe(200);
+      expect(String(fetchMock.mock.calls[0][0])).toBe("https://clawbox.com/api/ai/audio/speech");
+      const loop = await speakInCloud(configWith("http://127.0.0.1:8080/api/ai"), null, "hi");
+      expect(loop.status).toBe(200);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
