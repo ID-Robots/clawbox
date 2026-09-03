@@ -6,7 +6,8 @@ import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
 import { fetchHarness } from "@/lib/client-harness";
-import { I18nProvider } from "@/lib/i18n";
+import { apps } from "@/lib/desktop-apps";
+import { I18nProvider, useT } from "@/lib/i18n";
 import { handoffSettingsSection, STANDALONE_SETTINGS_SECTION_PARAM } from "@/lib/ui-events";
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
@@ -35,23 +36,31 @@ const MemoryShardApp = dynamic(() => import("@/components/MemoryShardApp"), { ss
 const OPENCLAW_ONLY_APP_IDS = ["store", "openclaw", "memory-shard"];
 const HERMES_ONLY_APP_IDS = ["hermes", "hermes-skills"];
 
+// This window is the same app the desktop shows, so its title comes from the
+// SAME registry rather than a second table of names — which is what it used to
+// be, in English, while the desktop translated. `setup` is the one id this
+// route hosts that the static registry does not carry: the desktop appends it
+// in `getAllApps()` (src/app/page.tsx) because it is not an icon you can pin.
 const APP_TITLES: Record<string, string> = {
-  settings: "Settings",
-  terminal: "Terminal",
-  coding: "Coding Agent",
-  files: "Files",
-  browser: "Browser",
-  vnc: "Remote Desktop",
-  store: "App Store",
-  openclaw: "OpenClaw",
-  "hermes-skills": "Hermes Skills",
-  "memory-shard": "Memory Shard",
-  clawbox: "Chat",
-  clawkeep: "ClawKeep",
-  system_update: "System Update",
-  setup: "Setup",
-  hermes: "Hermes",
+  ...Object.fromEntries(apps.map((a) => [a.id, a.name])),
+  setup: "app.setup",
 };
+
+/**
+ * The title bar renders INSIDE `I18nProvider`, because the provider is this
+ * page's own child: `useT()` in `StandaloneAppPage` would see no provider above
+ * it and echo the key back.
+ *
+ * Only a built-in's name is a translation key. An installed app's name is copy
+ * from the store catalogue and an unknown id is the raw URL segment — neither
+ * goes through `t()`, or a webapp the agent registered as `search` would be
+ * titled with the "Search..." button label.
+ */
+function StandaloneTitle({ nameKey, literal }: { nameKey?: string; literal?: string }) {
+  const { t } = useT();
+  const text = literal ?? (nameKey ? t(nameKey) || nameKey : "");
+  return <span className="text-xs font-medium text-white/70">{text}</span>;
+}
 
 export default function StandaloneAppPage() {
   const { id } = useParams<{ id: string }>();
@@ -253,9 +262,10 @@ export default function StandaloneAppPage() {
     }
   };
 
-  const title = installedId
+  const titleKey = installedId ? undefined : APP_TITLES[id ?? ""];
+  const titleLiteral = installedId
     ? (installedMeta?.[installedId]?.name ?? installedId)
-    : (APP_TITLES[id ?? ""] ?? id);
+    : (titleKey ? undefined : id);
 
   // Every app rendered here reads its copy through `t()`. Without a provider
   // `useT()` falls back to returning the KEY, so this route — the one behind
@@ -267,7 +277,7 @@ export default function StandaloneAppPage() {
         {/* Minimal title bar */}
         <div className="flex items-center gap-2 px-3 py-1.5 bg-[#111827] border-b border-white/10 shrink-0">
           <Image src="/clawbox-logo.png" alt="" width={20} height={20} className="w-5 h-5 rounded" />
-          <span className="text-xs font-medium text-white/70">{title}</span>
+          <StandaloneTitle nameKey={titleKey} literal={titleLiteral} />
           <Link href="/" className="ml-auto text-xs text-white/30 hover:text-white/60 no-underline">
             Back to Desktop
           </Link>
