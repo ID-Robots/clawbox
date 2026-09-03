@@ -1195,6 +1195,22 @@ export async function POST(request: Request) {
     //     (it is applied to one snapshot and validated as a whole), and
     //     announcing a change that did not happen would spend a ~3-minute
     //     `openclaw models list` on a Jetson for nothing.
+    //
+    //     `preloadedConfig` is the right snapshot even though it was read at
+    //     the top of the handler: the only write between there and here is the
+    //     auto-extend, which touches `models.providers.<p>.models` and no
+    //     plugin flag. Its `{}`-on-failure is not a blind spot either — an
+    //     unreadable config leaves `loadChatModelState` with no options, and
+    //     the pick is refused above long before this line.
+    //
+    //     One request CAN announce the same provider twice — the auto-extend
+    //     above, then this — which costs one superseded ~3-minute fork in the
+    //     narrow case where both fire. Deliberately not deferred into a single
+    //     flush at the end: this handler has several exits that leave a
+    //     completed write behind (the 502, the 409, the same-model return), and
+    //     a flush that misses one of them trades a bounded cost for six hours
+    //     of a catalogue that says `source: "live"` about a box that moved.
+    //     Each announcement therefore sits at the write it describes.
     const pluginSwitchedOn = providerPluginSwitchedOnBy([targetModel], preloadedConfig);
     if (pluginSwitchedOn) notifyProviderSetChanged(pluginSwitchedOn);
 

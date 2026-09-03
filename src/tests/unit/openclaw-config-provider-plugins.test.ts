@@ -128,10 +128,24 @@ describe("providerPluginSwitchedOnBy — which provider the batch actually switc
     // reference. Their presence is not a state change, and announcing one per
     // Claude pick would spend a ~3-minute `openclaw models list` on a Jetson.
     expect(providerPluginSwitchedOnBy(["anthropic/claude-sonnet-5"], ON)).toBeNull();
-    // An ABSENT flag is enabled: the plugin declares `enabledByDefault: true`.
+    // An ABSENT flag is enabled: the plugin declares `enabledByDefault: true`,
+    // so a config that WAS read and carries none is the ordinary box.
     expect(providerPluginSwitchedOnBy(["anthropic/claude-sonnet-5"], {})).toBeNull();
-    // And a config that could not be read must not be reported as a change.
-    expect(providerPluginSwitchedOnBy(["anthropic/claude-sonnet-5"], null)).toBeNull();
+  });
+
+  it("counts it when the pre-write config could not be read", () => {
+    // `null` is the caller saying "the strict read failed" — not the same
+    // claim as `{}`, which is a config that was read and has no flag. The
+    // costs are not symmetric: after a batch that succeeded the flag IS true,
+    // so announcing on an unknown pre-state costs at most one enumeration,
+    // while silence over a real switch-on leaves the catalogue serving a list
+    // stamped `source: "live"` that the box has stopped agreeing with, for six
+    // hours. This is the trap the OFF half documents and avoids by reading
+    // strictly.
+    expect(providerPluginSwitchedOnBy(["anthropic/claude-sonnet-5"], null)).toBe("anthropic");
+    expect(providerPluginSwitchedOnBy(["anthropic/claude-sonnet-5"], undefined)).toBe("anthropic");
+    // Still nothing when the batch names no gated provider at all.
+    expect(providerPluginSwitchedOnBy(["openai/gpt-5.5"], null)).toBeNull();
   });
 
   it("stays silent when the batch names no gated provider at all", () => {

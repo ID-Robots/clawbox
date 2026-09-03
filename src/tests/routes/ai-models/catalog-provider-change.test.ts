@@ -418,16 +418,22 @@ describe("catalog — the one entry point every server-side write counts through
     expect(published.source).toBe("live");
   });
 
-  it("counts the change against the catalogue's id for a provider, not openclaw's", async () => {
-    // openclaw calls ClawBox AI `deepseek` in its config, and the routes hand
-    // this the id they hold; the catalogue's row — and its cache file — is
-    // `clawai`. The mapping lives here so no call site has to remember it.
+  it("does not count a change against a catalogue no write on this box can alter", async () => {
+    // `openrouter` is fetched from openrouter.ai and `clawai` is a constant, so
+    // nothing written here can change what either lists. Counting one would
+    // discard the fetch in flight, redo it for the identical answer, and clear
+    // the failed-refresh backoff — a change announced for a provider that did
+    // not have one. `chat/model`'s compat auto-extend writes
+    // `models.providers.openrouter.models`, so it takes exactly this path.
+    // (`deepseek` is openclaw's id for ClawBox AI; the catalogue's is `clawai`,
+    // and the mapping lives in the seam so no call site has to remember it.)
+    notifyProviderSetChanged("openrouter");
     notifyProviderSetChanged("deepseek");
+    await settle();
 
-    await vi.waitFor(
-      () => expect(fs.existsSync(cacheFile("clawai"))).toBe(true),
-      { timeout: 4000, interval: 25 },
-    );
+    expect(vi.mocked(globalThis.fetch as unknown as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(fs.existsSync(cacheFile("openrouter"))).toBe(false);
+    expect(fs.existsSync(cacheFile("clawai"))).toBe(false);
     expect(fs.existsSync(cacheFile("deepseek"))).toBe(false);
   });
 
@@ -445,5 +451,48 @@ describe("catalog — the one entry point every server-side write counts through
 
     expect(spawnedProviders()).not.toContain("llamacpp");
     expect(fs.existsSync(cacheFile("llamacpp"))).toBe(false);
+  });
+});
+
+// The `models` field is typed as a list; what arrives is whatever the CLI
+// printed on stdout. A non-array used to reach the transform, whose `for...of`
+// threw INSIDE the chunk handler's partial-JSON `catch` — and by then `finish`
+// had already set `settled`, so the `close` handler bailed too. The promise
+// never settled, its `.finally` never ran, and `refreshing` kept the provider
+// for the process lifetime: every later refresh returned at the single-flight
+// guard, `warming` stayed true forever, and the picker polled a fork that no
+// longer existed.
+describe("catalog — a payload this route cannot transform", () => {
+  it("fails the refresh rather than wedging the provider", async () => {
+    let spawns = 0;
+    mockSpawn.mockImplementation((_bin, args) => {
+      const argv = args as string[];
+      const target = argv[argv.indexOf("--provider") + 1];
+      if (target !== "openai") {
+        return fakeChild({ count: 0, models: [] }) as unknown as ReturnType<typeof childProcess.spawn>;
+      }
+      spawns += 1;
+      const payload = spawns === 1
+        // Syntactically fine JSON, semantically not a list.
+        ? { count: 1, models: { "gpt-5.6-sol": { name: "GPT-5.6 Sol" } } }
+        : LINKED;
+      return fakeChild(payload) as unknown as ReturnType<typeof childProcess.spawn>;
+    });
+
+    refreshInBackground("openai");
+    await settle();
+    expect(spawns).toBe(1);
+    // Nothing was published: a payload that cannot be read is not an answer.
+    expect(fs.existsSync(cacheFile("openai"))).toBe(false);
+
+    // The guard was released, so the box can be asked again — and this is what
+    // was impossible before: the owner saves a key, which counts the change and
+    // clears the failed-refresh wait, and the good answer lands.
+    notifyProviderSetChanged("openai");
+    await vi.waitFor(() => expect(spawns).toBe(2), { timeout: 4000, interval: 25 });
+    await vi.waitFor(() => {
+      expect(readCache("openai").models.map((m) => m.id).sort())
+        .toEqual(["gpt-5.4", "gpt-5.5", "gpt-5.6-sol"]);
+    }, { timeout: 4000, interval: 25 });
   });
 });

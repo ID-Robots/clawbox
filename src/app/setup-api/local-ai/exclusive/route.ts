@@ -15,6 +15,7 @@ import {
   callGatewayRpc,
   gatewayIsAbsent,
   readConfig,
+  readConfigStrict,
   restartGateway,
   runOpenclawConfigSetBatch,
   type OpenclawConfigSetArgs,
@@ -489,10 +490,17 @@ export async function POST(request: Request) {
       const restoreFallbacks = Array.isArray(keptFallbacks) && keptFallbacks.length > 0 ? keptFallbacks : null;
       // Read BEFORE the write, because what the catalogue needs to know is the
       // transition: the enables below can switch a plugin back ON, and a
-      // provider whose plugin is off enumerates nothing. An unreadable config
-      // answers `{}` here and so reads as already-on — silence rather than a
-      // change that may not have happened.
-      const configBeforeRestore = await readConfig();
+      // provider whose plugin is off enumerates nothing.
+      //
+      // STRICT, and `null` when it fails, for the same reason the OFF half of
+      // this gate reads strictly (`setProviderPlugins`): the decision is about
+      // ABSENCE, and plain `readConfig` answers `{}` to an EACCES or a file
+      // caught half-written exactly as it does to a box that has no config at
+      // all. Those two need opposite answers — an absent flag IS enabled, so
+      // `{}` means no transition, while "could not read" means unknown, and
+      // silence there would cost six hours of a catalogue serving a list the
+      // box has stopped agreeing with.
+      const configBeforeRestore = await readConfigStrict().catch(() => null);
       const restoreOps: OpenclawConfigSetArgs[] = [
         ...enableProviderPluginOps([restorablePrimary, ...(restoreFallbacks ?? [])]),
         ...(restorablePrimary

@@ -197,11 +197,12 @@ const FAILED_REFRESH_BACKOFF_MS = 2 * 60_000;
  *    and the hook's next poll two seconds later saw `warming: false` with three
  *    minutes still to run, so a picker open across a connect settled on the
  *    pre-change rows.
- *  * ONLY A SERVER-SIDE WRITE COUNTS. `configure` step 8c, `providers/enabled`
- *    and the plugin re-gate inside `chat/model` (which `providers/default`
- *    delegates to) each call `notifyProviderSetChanged`; a client's
- *    `?refresh=1` is demoted to `serveCurrent`, which asks whether the current
- *    generation has an answer and never claims one happened.
+ *  * ONLY A SERVER-SIDE WRITE COUNTS, and every one of them goes through
+ *    `notifyProviderSetChanged` — whose docblock is the register of which
+ *    writes those are, kept in one place because nothing else enforces that a
+ *    new write remembers to call it. A client's `?refresh=1` is demoted to
+ *    `serveCurrent`, which asks whether the current generation has an answer
+ *    and never claims one happened.
  *
  *    That split is what removed the duplicate enumeration per connect —
  *    step 8c and the client's echo are the same change, and only the write
@@ -901,7 +902,17 @@ function toFetchResult(
   parsed: OpenclawListResponse,
   stderr: string,
 ): CatalogFetchResult {
-  const rows = parsed.models ?? [];
+  // `Array.isArray`, not `?? []`: the type says this is a list, the JSON on the
+  // other side is whatever the CLI printed, and a non-array here would be
+  // iterated by `transformOpenclawEntries` and then `.filter`ed below. That
+  // throw used to be swallowed by the chunk handler's partial-JSON `catch`
+  // AFTER it had set `settled`, so the promise never settled, the `.finally`
+  // never ran, and `refreshing` kept the provider for the process lifetime:
+  // every later refresh returned at the single-flight guard and `warming`
+  // stayed true, so the picker polled a fork that no longer existed. A
+  // malformed payload is an empty enumeration, which this route already knows
+  // how to report.
+  const rows = Array.isArray(parsed.models) ? parsed.models : [];
   const models = transformOpenclawEntries(provider, rows);
   const refusal = parsed.ok === false ? parsed.error?.message?.trim() : "";
   let diagnostic = refusal || stderr.trim();
@@ -946,13 +957,29 @@ function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
       // on each chunk so we resolve as soon as the JSON is syntactically
       // complete instead of waiting for `close`.
       if (settled || !stdout.includes("}")) return;
+      let parsed: OpenclawListResponse;
       try {
-        const parsed = JSON.parse(stdout) as OpenclawListResponse;
-        clearTimeout(timer);
-        finish(() => resolve(toFetchResult(provider, parsed, stderr)));
+        parsed = JSON.parse(stdout) as OpenclawListResponse;
       } catch {
-        // Partial JSON — keep accumulating.
+        // Partial JSON — keep accumulating. Only the PARSE is guarded here:
+        // this `catch` used to wrap the settle as well, so anything the
+        // transform threw was read as "not valid JSON yet" and swallowed —
+        // after `finish` had already set `settled`, which left the promise
+        // unsettled forever and the provider stuck in `refreshing`.
+        return;
       }
+      clearTimeout(timer);
+      finish(() => {
+        // A payload that parses but cannot be transformed is a refresh that
+        // FAILED, not one that never ended: rejecting records the backoff and
+        // releases the guard, the way the `close` handler already does for
+        // output that is not JSON at all.
+        try {
+          resolve(toFetchResult(provider, parsed, stderr));
+        } catch (err) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
     });
     child.stderr.on("data", (b: Buffer) => { stderr += b.toString("utf8"); });
     child.on("error", (e) => {
@@ -1006,11 +1033,14 @@ export function refreshInBackground(
      * failed-refresh backoff, because the condition that produced those
      * failures is the one that just changed.
      *
+     * Set by `notifyProviderSetChanged` and by nothing else — go there for the
+     * list of writes that count, which is the only place that list is kept. A
+     * client's `?refresh=1` deliberately cannot set it; it asks for
+     * `serveCurrent` instead.
+     *
      * The fork rate stays bounded without the backoff here: `refreshing` admits
-     * one enumeration per provider at a time, and the only two callers that set
-     * this are `configure`'s post-save refresh and a `?refresh=1` GET, which
-     * `useProviderCatalog` now sends once per provider-set signal and never on
-     * its warming polls.
+     * one enumeration per provider at a time, and every counting caller sits
+     * behind a write the owner had to make.
      */
     providerChanged?: boolean;
     /**
@@ -1041,10 +1071,10 @@ export function refreshInBackground(
   // the property that log line's own comment claims.
   const changeCouldMakeItEnumerable = !hasNoEnumerationOnThisCore(provider) && !cliMissing;
 
-  // A SERVER-SIDE WRITE changed the provider set. Every such write counts —
-  // `configure` step 8c, `providers/enabled`, and the plugin re-gate inside
-  // `chat/model` that `providers/default` delegates to — which is what makes
-  // the generation trustworthy enough for the client's nudge to be demoted.
+  // A SERVER-SIDE WRITE changed the provider set. Every such write counts, and
+  // they all arrive through `notifyProviderSetChanged` (see its docblock for
+  // which writes those are) — which is what makes the generation trustworthy
+  // enough for the client's nudge to be demoted.
   //
   // There is deliberately no "is this the same change twice" test here any
   // more. The predicate that used to do it read the SHAPE of the fork in
@@ -1226,20 +1256,38 @@ export function refreshInBackground(
  * "A server-side write just changed the provider set for `ocProvider`."
  *
  * The ONE entry point for every route that mutates the provider set, so the
- * openclaw-side id mapping and the catalogue-membership test exist once rather
- * than once per caller. `ocProvider` is the openclaw id (`anthropic`, `openai`,
- * `codex`, `google`, `deepseek`); the catalogue calls ClawBox AI `clawai`, and
- * a provider that is not in the catalogue at all (local-only, llamacpp) is not
- * something this route can enumerate.
+ * openclaw-side id mapping and the two "is this a change this route can act
+ * on?" tests exist once rather than once per caller. `ocProvider` is the
+ * openclaw id (`anthropic`, `openai`, `codex`, `google`, `deepseek`); the
+ * catalogue calls ClawBox AI `clawai`.
+ *
+ * Two kinds of provider are dropped here rather than at each call site:
+ *
+ *  * one that is not in the catalogue at all (local-only, llamacpp);
+ *  * one whose catalogue THIS BOX CANNOT CHANGE. `openrouter` is fetched from
+ *    openrouter.ai, `clawai` is a constant and `codex` has no enumeration, so
+ *    no write on the box can alter what any of them lists. Counting one would
+ *    discard whatever fetch is in flight, re-run it for the identical answer,
+ *    and clear the failed-refresh backoff — announcing a change that, for that
+ *    provider, did not happen. The compat auto-extend in `chat/model` writes
+ *    `models.providers.openrouter.models` on exactly this path.
  *
  * Counting the change server-side is what lets the client's `?refresh=1` be a
  * nudge instead of a claim — see `refreshInBackground`. A write that forgets to
  * call this leaves its change invisible to the catalogue until the 6h refresh.
+ *
+ * Its callers, which are every server-side write that can change what
+ * `openclaw models list` answers: `configure` step 8c (credential + plugin) and
+ * its `setProviderPlugins` result; `chat/model`'s compat auto-extend, its
+ * `setProviderPlugins` result and the ON half of the same gate; and the
+ * Local-only restore in `local-ai/exclusive`. `providers/default` inherits
+ * `chat/model`'s on OpenClaw.
  */
 export function notifyProviderSetChanged(ocProvider: string | null | undefined): void {
   if (!ocProvider) return;
   const catalogProvider = ocProvider === "deepseek" ? "clawai" : ocProvider;
   if (!isCatalogProvider(catalogProvider)) return;
+  if (NO_CLI_ENUMERATION_PROVIDERS.has(catalogProvider)) return;
   refreshInBackground(catalogProvider, { providerChanged: true });
 }
 

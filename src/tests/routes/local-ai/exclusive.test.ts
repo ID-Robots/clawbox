@@ -40,13 +40,16 @@ vi.mock("@/lib/openclaw-config", () => ({
   callGatewayRpc: vi.fn(),
   gatewayIsAbsent: vi.fn(() => false),
   readConfig: vi.fn(async () => ({})),
+  // Strict, because the ON half of the plugin gate decides from ABSENCE:
+  // `readConfig` cannot tell an unreadable config from one with no flag.
+  readConfigStrict: vi.fn(async () => ({})),
   restartGateway: vi.fn(async () => {}),
   runOpenclawConfigSet: vi.fn(async () => {}),
   runOpenclawConfigSetBatch: vi.fn(async () => {}),
 }));
 
 import { get, setMany } from "@/lib/config-store";
-import { readConfig, restartGateway, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { readConfigStrict, restartGateway, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 
 const UNKNOWN_MODEL =
@@ -147,7 +150,7 @@ describe("POST /setup-api/local-ai/exclusive — restoring the saved primary and
   // the six-hour interval, so without this the provider is not even re-asked
   // for six hours after the toggle that made it listable again.
   it("tells the catalogue when the restore switched the plugin back on", async () => {
-    vi.mocked(readConfig).mockResolvedValue({
+    vi.mocked(readConfigStrict).mockResolvedValue({
       plugins: { entries: { anthropic: { enabled: false } } },
     } as never);
 
@@ -157,19 +160,41 @@ describe("POST /setup-api/local-ai/exclusive — restoring the saved primary and
     expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("anthropic");
   });
 
-  it("says nothing when the flag was already on, or the restore named no gated provider", async () => {
+  it("counts it when the pre-restore snapshot could not be read at all", async () => {
+    // The strict read is what makes this case distinguishable: an EACCES or a
+    // config caught half-written throws, while a box that simply has no config
+    // answers `{}`. Unknown is NOT "already on" — the restore still landed, so
+    // silence here would leave the catalogue on the pre-enable enumeration for
+    // six hours, whereas a needless announcement costs one enumeration that on
+    // such a box fails fast anyway.
+    vi.mocked(readConfigStrict).mockRejectedValue(new Error("EACCES"));
+
+    const response = await turnOff();
+
+    expect(response.status).toBe(200);
+    expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("anthropic");
+  });
+
+  it("says nothing when the flag was already on, absent, or no gated provider was named", async () => {
     // The enable op rides in the batch whether or not the flag is already
     // true — it is what makes the core validate the reference — so its
     // presence is not a state change, and announcing one would spend a
     // ~3-minute `openclaw models list` on a Jetson for a box that did not
     // change.
-    vi.mocked(readConfig).mockResolvedValue({
+    vi.mocked(readConfigStrict).mockResolvedValue({
       plugins: { entries: { anthropic: { enabled: true } } },
     } as never);
     await turnOff();
     expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
 
-    vi.mocked(readConfig).mockResolvedValue({
+    // An ABSENT flag is enabled — the plugin declares `enabledByDefault: true`
+    // — so a config that was read and carries none is the ordinary box, not an
+    // unknown one.
+    vi.mocked(readConfigStrict).mockResolvedValue({} as never);
+    await turnOff();
+    expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
+
+    vi.mocked(readConfigStrict).mockResolvedValue({
       plugins: { entries: { anthropic: { enabled: false } } },
     } as never);
     store.local_only_saved_primary = "openai/gpt-5.5";

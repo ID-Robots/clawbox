@@ -237,8 +237,14 @@ describe("catalog — a fallback is never served as a live enumeration", () => {
     });
 
     refreshInBackground("google");
-    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled(), { timeout: 2000 });
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // The GOOGLE spawn, not any spawn: the boot warmup forks unrelated
+    // providers on real timers (which is why `spawnedProviders` exists at the
+    // top of this file), and waiting on the raw mock could be satisfied by one
+    // of those before this fork had started — after which the settle below
+    // could end before the empty enumeration was handled, and the assertion
+    // would pass on an absent cache file that nothing had tried to write yet.
+    await vi.waitFor(() => expect(spawnedProviders()).toContain("google"), { timeout: 2000 });
+    await settle();
 
     // Zero models is not an answer about what the box can run. Writing the
     // curated ids here is what made "[catalog] refreshed codex: 0 models" look

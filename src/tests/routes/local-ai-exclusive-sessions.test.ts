@@ -36,6 +36,9 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfig: vi.fn(async () => ({
     agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro", fallbacks: [] } } },
   })),
+  // Strict, because the ON half of the plugin gate decides from ABSENCE and
+  // `readConfig` cannot tell an unreadable config from one carrying no flag.
+  readConfigStrict: vi.fn(async () => ({})),
   restartGateway: vi.fn(async () => {}),
   runOpenclawConfigSet: configSetMock,
   // The primary and the fallbacks travel in one `config set --batch-json` now

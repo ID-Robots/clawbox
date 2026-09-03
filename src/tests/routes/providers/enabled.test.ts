@@ -48,6 +48,7 @@ let getModelOptions: Mock;
 let configSet: Mock;
 let setProviderEnabled: Mock;
 let notifyProviderSetChanged: Mock;
+let refreshInBackground: Mock;
 
 function ownerCookie(): string {
   return `clawbox_session=${createSessionCookie(3600, SESSION_SECRET)}`;
@@ -98,7 +99,7 @@ beforeEach(async () => {
     agents: { defaults: { model: { primary: "anthropic/claude-sonnet-4-6" } } },
   });
 
-  ({ notifyProviderSetChanged } = (await import("@/app/setup-api/ai-models/catalog/route")) as unknown as { notifyProviderSetChanged: Mock });
+  ({ notifyProviderSetChanged, refreshInBackground } = (await import("@/app/setup-api/ai-models/catalog/route")) as unknown as { notifyProviderSetChanged: Mock; refreshInBackground: Mock });
 
   ({ POST } = await import("@/app/setup-api/providers/enabled/route"));
 });
@@ -187,28 +188,23 @@ describe("the round trip", () => {
     expect(store.get("ai_disabled_providers")).toEqual([]);
   });
 
-  // A switch flip IS a provider-set change, and this route used to make one
-  // without telling the catalogue at all: the client's `?refresh=1` was its
-  // only signal, and a non-browser caller had none. Switching a provider off
-  // empties its `openclaw models list`; switching it back on is what makes it
-  // enumerable again. Only a server-side write can COUNT that — the client's
-  // nudge deliberately cannot — so the catalogue would otherwise sit on the
-  // pre-flip enumeration for the whole 6h refresh interval.
-  it("tells the catalogue the provider set changed, both ways", async () => {
+  // The flip writes ONE thing: ClawBox's own `ai_disabled_providers` key, in
+  // ClawBox's own store. `openclaw models list` has never heard of it, and the
+  // catalogue route never reads it — so this switch cannot change what the
+  // catalogue enumerates, and announcing it spent a full ~3-minute, ~2-core
+  // `openclaw models list` on a Jetson per click (twice for an off-and-on) to
+  // be told the same rows again, clearing the failed-refresh backoff each
+  // time. The enumeration DOES change later, when the next save or chat-model
+  // pick re-gates the anthropic plugin — and that write counts its own change.
+  it("does not spend an enumeration on a switch the catalogue cannot see", async () => {
     setProviderEnabled.mockResolvedValue({ ok: true, provider: "openrouter" });
 
     await asOwner({ provider: "openrouter", enabled: false });
-    expect(notifyProviderSetChanged).toHaveBeenCalledWith("openrouter");
-
-    notifyProviderSetChanged.mockClear();
     await asOwner({ provider: "openrouter", enabled: true });
-    expect(notifyProviderSetChanged).toHaveBeenCalledWith("openrouter");
-  });
-
-  it("does not tell the catalogue about a flip the rule refused", async () => {
-    // 409/404 return before the write; nothing changed, so nothing is counted.
     await asOwner({ provider: "anthropic", enabled: false });
+
     expect(notifyProviderSetChanged).not.toHaveBeenCalled();
+    expect(refreshInBackground).not.toHaveBeenCalled();
   });
 
   it("stores the canonical id whatever spelling the caller used", async () => {
