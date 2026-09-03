@@ -82,6 +82,57 @@ interface LoadedState {
   error: string | null;
 }
 
+/**
+ * True when the box handed back a PLACEHOLDER rather than its answer.
+ *
+ * `stale` means "this did not come from the live Hermes dashboard" — the reply
+ * was built from Hermes' on-disk manifest (which only ever carries `openrouter`
+ * and `nous`, and knows nothing about this device) or from the cold-start
+ * floor. For a provider the manifest has never heard of, that reply is `models:
+ * []` with HTTP 200: indistinguishable, to every consumer that does not read
+ * this flag, from "this provider serves nothing".
+ *
+ * `stale === false` is already the box's own readiness signal on this route:
+ * `SetupWizard.pollHermesReady` polls it to decide the Hermes dashboard has
+ * come up. This reads the same flag for the same fact — the chat header simply
+ * never adopted it.
+ *
+ * Only `stale` is consulted, never `source`: a reply that omits the field
+ * entirely is not evidence of degradation, and treating it as such would put
+ * every such caller into a retry loop.
+ */
+function isPlaceholder(scope: HermesModelScope | null | undefined): boolean {
+  return scope?.stale === true;
+}
+
+/**
+ * Go back for the real catalogue, with backoff, while the box is still
+ * answering with a placeholder.
+ *
+ * This is the OpenClaw picker's `warming` loop (`useProviderCatalog`), pointed
+ * at the fact the Hermes payload already publishes. Every reboot has a window
+ * of it: `clawbox-setup` logs "Ready in 0ms" and starts serving while
+ * `clawbox-hermes-dashboard` needs another 11-12 s, and a chat opened in that
+ * window used to keep the empty answer for the rest of the session — the model
+ * pill needs more than one id to render at all, so it simply never appeared.
+ *
+ * Bounded for the same reason that one is: a box whose dashboard is not coming
+ * back must not be polled forever, and while these retries run the surfaces
+ * read as LOADING — including the Settings panel's model select, which holds
+ * back its own "this list is stale" note until they settle. 1+2+4+8+8 spans
+ * ~23 s: twice the measured boot window, and short enough that a box whose
+ * dashboard is genuinely gone reaches the honest empty state promptly rather
+ * than sitting on a spinner.
+ */
+export const DEGRADED_RETRY_BASE_MS = 1_000;
+export const DEGRADED_RETRY_MAX_MS = 8_000;
+export const DEGRADED_RETRY_ATTEMPTS = 5;
+
+/** Delay before retry number `attempt` (0-based). */
+export function degradedRetryDelayMs(attempt: number): number {
+  return Math.min(DEGRADED_RETRY_BASE_MS * 2 ** attempt, DEGRADED_RETRY_MAX_MS);
+}
+
 export function useHermesModelOptions(provider: string | null): UseHermesModelOptions {
   // One state cell written only from async callbacks — `loading` is DERIVED
   // from "what we hold isn't for the provider we were asked about", so
@@ -133,28 +184,83 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
 
-    const explicitRefresh = pendingRefreshRef.current;
-    const url = `/setup-api/hermes/models?provider=${encodeURIComponent(provider)}${explicitRefresh ? "&refresh=1" : ""}`;
-    fetch(url, { cache: "no-store", signal: controller.signal })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((data: HermesModelScope) => {
-        if (controller.signal.aborted) return;
-        pendingRefreshRef.current = false;
-        // Guard against a stale/garbled payload naming a different provider.
-        setLoaded({
-          provider,
-          scope: data?.provider === provider ? data : emptyScope(provider),
-          error: null,
+    /** Ask again later, keeping what is on screen. True when one was booked. */
+    const retryLater = (): boolean => {
+      if (attempt >= DEGRADED_RETRY_ATTEMPTS) return false;
+      // ALWAYS a plain load, never the user's `refresh=1`. That flag busts
+      // Hermes' per-provider disk cache and re-enumerates every provider's live
+      // /v1/models, and this schedule (1+2+4+8+8 s) crosses the server's 10 s
+      // throttle twice — so carrying it would turn one Refresh click on a
+      // degraded box into three device-wide sweeps. It also could not help: a
+      // placeholder means the dashboard is unreachable, and `?refresh=true`
+      // goes to that same dashboard.
+      timer = setTimeout(() => load(false), degradedRetryDelayMs(attempt));
+      attempt += 1;
+      return true;
+    };
+
+    const load = (refresh: boolean) => {
+      const url = `/setup-api/hermes/models?provider=${encodeURIComponent(provider)}${refresh ? "&refresh=1" : ""}`;
+      fetch(url, { cache: "no-store", signal: controller.signal })
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then((data: HermesModelScope) => {
+          if (controller.signal.aborted) return;
+          // The request COMPLETED, which is the condition this flag is cleared
+          // on — a degraded body is still the server answering. Only an ABORT
+          // (fast provider switch, StrictMode double-mount) carries the intent
+          // over, because that request never got an answer at all.
+          pendingRefreshRef.current = false;
+          // Read the RESPONSE's own flag, not the substituted scope's:
+          // `emptyScope` is `stale: true` by construction, so gating on it would
+          // put the provider-mismatch guard below into the retry loop as well.
+          if (isPlaceholder(data) && retryLater()) {
+            // Deliberately NOT installed: `loaded` is what makes `loading` go
+            // false, and a placeholder is not something to settle on. Holding
+            // it keeps the model pill in its place with the loading label
+            // instead of collapsing the header, and keeps the send path saying
+            // "still loading this provider's models" (`modelsReady`) rather
+            // than "this provider has none".
+            return;
+          }
+          // Guard against a stale/garbled payload naming a different provider.
+          setLoaded({
+            provider,
+            scope: data?.provider === provider ? data : emptyScope(provider),
+            error: null,
+          });
+        })
+        .catch((err) => {
+          if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) return;
+          // Cleared here too, and BEFORE the retry: only an abort preserves the
+          // intent (see above). An HTTP error, a dropped connection and a
+          // failed parse all leave this branch with retries pending, and a
+          // provider switch inside that window would re-run the effect and send
+          // `refresh=1` for a provider the owner never clicked Refresh on — the
+          // same device-wide /v1/models sweep, through a third door.
+          pendingRefreshRef.current = false;
+          // A REJECTED request is the same news as a placeholder, and it is the
+          // shape the reported incident actually took: the box restarted three
+          // times inside four minutes, so the reads in that window were dropped
+          // connections and 502s, not tidy degraded 200s. Retrying only the
+          // polite failure would have left the observed case unfixed.
+          if (retryLater()) return;
+          setLoaded({ provider, scope: emptyScope(provider), error: "Couldn't load models" });
         });
-      })
-      .catch((err) => {
-        if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) return;
-        pendingRefreshRef.current = false;
-        setLoaded({ provider, scope: emptyScope(provider), error: "Couldn't load models" });
-      });
+    };
 
-    return () => controller.abort();
+    // Only the FIRST attempt carries the user's explicit refresh. A retry must
+    // not: `refresh=1` busts Hermes' per-provider disk cache and re-enumerates
+    // every provider's live /v1/models, which is a device-wide sweep to answer
+    // "is the dashboard up yet?".
+    load(pendingRefreshRef.current);
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      controller.abort();
+    };
   }, [provider, nonce]);
 
   const fresh = provider && loaded?.provider === provider ? loaded : null;

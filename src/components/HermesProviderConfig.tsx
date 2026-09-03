@@ -1391,7 +1391,14 @@ export default function HermesProviderConfig({
                 // this field exists to collect. A pending key is its own reason
                 // to enable it (the save path stores the key first, then lets
                 // the server pick that provider's own default model).
-                disabled={saving || loading || (!modelInScope && !hasPendingKey)}
+                //
+                // `loading` is now held for the whole catalogue retry while the
+                // box answers with a placeholder (the Hermes dashboard is down
+                // or still booting) — and pasting a key is the very gesture that
+                // recovers such a box, so it must not be greyed out waiting for
+                // a catalogue `saveModelProvider` does not need. The model
+                // <select> beside it still shows its spinner.
+                disabled={saving || (loading && !hasPendingKey) || (!modelInScope && !hasPendingKey)}
                 className="w-full rounded-xl bg-[var(--coral-bright)] text-white font-semibold py-3 hover:opacity-90 transition-opacity disabled:opacity-50"
               >
                 {saving ? t("hermesProvider.save.saving") : t("hermesProvider.save.button")}
