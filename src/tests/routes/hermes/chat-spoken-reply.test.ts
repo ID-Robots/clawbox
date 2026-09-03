@@ -311,3 +311,23 @@ describe("a Hermes box with no voice configured", () => {
     expect(assistant.audio).toBeUndefined();
   });
 });
+
+describe("a Hermes box whose voice script lost its execute bit", () => {
+  it("promises no player when the command the config names cannot be RUN", () => {
+    // "Is the file there" is not the question Hermes asks of this path — it
+    // EXECUTES it. A script that is present but not executable (a deploy that
+    // copied the tree without modes, an archive restored with the bits
+    // stripped) leaves the config, the Kokoro stamp and the unit all intact,
+    // so every other condition says yes: the chat promises a player and every
+    // turn produces nothing, which is the same false success the two
+    // conditions above this one exist to close.
+    fs.chmodSync(ttsScript, 0o644);
+    return post({ message: "what colour" }).then(async (res) => {
+      expect(res.status).toBe(200);
+      expect(speakCalls).toHaveLength(0);
+      const assistant = transcript().filter((m) => m.role === "assistant").pop();
+      expect(assistant.text).toBe("The lantern is green.");
+      expect(assistant.audio).toBeUndefined();
+    });
+  });
+});

@@ -314,7 +314,7 @@ export function cloudCredentialIsUnusable(config: VoiceConfigView, providerId: s
 export interface LocalVoiceProbe {
   /** `messages.tts.providers["tts-local-cli"]` names a command. */
   providerConfigured: boolean;
-  /** That command is really on disk. */
+  /** That command is really on disk AND executable — see `localTtsCommandRunnable`. */
   commandPresent: boolean;
   /** A TTS engine (Piper or Kokoro) is genuinely installed. */
   engineInstalled: boolean;

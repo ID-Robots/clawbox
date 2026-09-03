@@ -124,10 +124,14 @@ beforeEach(() => {
   // SELECTION writes — is what hid a deadlock: the cloud option was refused
   // until that key existed, and nothing could write it until the option was
   // accepted, so the whole cloud arm was unreachable on every real box.
+  // The `command` is the whole COMMAND LINE install.sh writes, placeholders
+  // included — not the bare path this fixture used to carry. That shortcut was
+  // the one shape no installer ever writes, and it hid the panel stat'ing the
+  // line whole; see the last describe in this file.
   hermesConfig = {
     "tts.provider": "clawbox-local",
     "tts.providers.clawbox-local.type": "command",
-    "tts.providers.clawbox-local.command": "/opt/clawbox-tts.sh",
+    "tts.providers.clawbox-local.command": "/opt/clawbox-tts.sh --text-file={input_path} -- {output_path}",
   };
 });
 
@@ -366,5 +370,53 @@ describe("an unlinked Hermes box", () => {
     expect(body.supportedOnEdition).not.toBe(false);
     const cloud = body.engines.find((e: { id: string }) => e.id === "cloud");
     expect(cloud.configured).toBe(false);
+  });
+});
+
+describe("the command line install.sh really registers", () => {
+  /**
+   * The provider's `command` is not a path on this edition.
+   *
+   * install.sh writes `<script> --text-file={input_path} -- {output_path}` for
+   * Hermes (a command LINE, because Hermes substitutes its own placeholders),
+   * where the OpenClaw arm writes a bare `command` plus a separate `args`
+   * array. The panel stat'ed the string whole, which is not a file on any box
+   * — so every correctly provisioned Hermes box read as "a voice is installed
+   * but the box is not wired to use it", and the fixture that hid it was a
+   * bare path no installer ever writes.
+   */
+  const SCRIPT = "/opt/clawbox-tts.sh";
+  const COMMAND_LINE = `${SCRIPT} --text-file={input_path} -- {output_path}`;
+
+  it("reads the on-device voice off the SCRIPT the command line names", async () => {
+    hermesConfig["tts.providers.clawbox-local.command"] = COMMAND_LINE;
+    // A filesystem that knows the script and nothing else, which is every
+    // provisioned box.
+    accessMock.mockImplementation((p: string) =>
+      p === SCRIPT ? Promise.resolve(undefined) : Promise.reject(new Error("ENOENT")),
+    );
+    const { GET } = await route();
+    const body = await (await GET()).json();
+
+    const local = body.engines.find((e: { id: string }) => e.id === "local");
+    expect(local.configured).toBe(true);
+    expect(local.detail).not.toMatch(/not wired/i);
+  });
+
+  it("still reports it unconfigured when that script cannot be run", async () => {
+    // The other half of the same fact, and the one the chat's capability is
+    // pinned on: present is not runnable. Both surfaces ask it through one
+    // helper so they cannot answer differently about one box.
+    hermesConfig["tts.providers.clawbox-local.command"] = COMMAND_LINE;
+    accessMock.mockImplementation((p: string, mode?: number) =>
+      p === SCRIPT && mode === undefined
+        ? Promise.resolve(undefined)
+        : Promise.reject(new Error("EACCES")),
+    );
+    const { GET } = await route();
+    const body = await (await GET()).json();
+
+    const local = body.engines.find((e: { id: string }) => e.id === "local");
+    expect(local.configured).toBe(false);
   });
 });

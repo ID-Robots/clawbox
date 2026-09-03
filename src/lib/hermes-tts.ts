@@ -460,12 +460,13 @@ export async function hermesSpeaksReplies(): Promise<boolean> {
       ]);
       const script = trimmed(command);
       if (trimmed(type) !== "command" || script === null || !installed) return false;
-      // The command FILE, not just the string that names it — the third of the
-      // panel's three conditions (`providerConfigured && commandPresent &&
-      // engineInstalled`). A box whose clawbox-tts.sh is gone while the Kokoro
-      // stamp and unit remain would otherwise have the chat promising a player
-      // while the Voice tab says the box is not wired to use its voice.
-      return await commandFileExists(script);
+      // The command FILE and its execute bit, not just the string that names it
+      // — the third of the panel's three conditions (`providerConfigured &&
+      // commandPresent && engineInstalled`). A box whose clawbox-tts.sh is gone,
+      // or is present with its mode stripped, while the Kokoro stamp and unit
+      // remain would otherwise have the chat promising a player while the Voice
+      // tab says the box is not wired to use its voice.
+      return await commandRunnable(script);
     }
     // The endpoint AND the credential: `writeHermesCloudTarget` writes them
     // separately and the first failure throws, so a box can hold one without
@@ -559,18 +560,18 @@ async function localTtsEngineInstalled(): Promise<boolean> {
 }
 
 /**
- * Is the command the provider names actually on disk?
+ * Is the command the provider names one this box can actually RUN?
  *
- * `localCommandPath`-shaped: the provider's command is a full command line, so
- * the executable is its first word. Fails CLOSED like its neighbours.
+ * Asked through the same helper the Voice tab's `commandPresent` asks it
+ * through, so neither surface can decide on its own what "the command is
+ * there" means — the divergence the conjunct above this one exists to close.
+ * Imported lazily for the reason `localTtsEngineInstalled` gives; it fails
+ * closed itself, and this catch covers the import.
  */
-async function commandFileExists(command: string): Promise<boolean> {
+async function commandRunnable(command: string): Promise<boolean> {
   try {
-    const bin = command.trim().split(/\s+/)[0];
-    if (!bin) return false;
-    const { promises: fs } = await import("fs");
-    await fs.access(bin);
-    return true;
+    const { localTtsCommandRunnable } = await import("@/lib/local-models");
+    return await localTtsCommandRunnable(command);
   } catch {
     return false;
   }

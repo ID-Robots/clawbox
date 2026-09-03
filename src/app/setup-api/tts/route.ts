@@ -16,6 +16,7 @@ import {
 import {
   buildTtsInventory,
   KOKORO_STAMP,
+  localTtsCommandRunnable,
   type LocalModelEntry,
 } from "@/lib/local-models";
 import {
@@ -112,11 +113,17 @@ async function readVoiceConfig(harness: Awaited<ReturnType<typeof getActiveHarne
 async function probeBox(harness: Awaited<ReturnType<typeof getActiveHarness>>) {
   const [config, models] = await Promise.all([readVoiceConfig(harness), buildTtsInventory()]);
   const command = localCommandPath(config);
-  // The provider entry names a script; if that script is gone the box cannot
-  // speak locally however healthy the voices look. Fall back to the installer's
-  // own artefacts when no command is configured at all.
+  // The provider entry names a script; if that script is gone — or is there but
+  // cannot be run — the box cannot speak locally however healthy the voices
+  // look. Through the shared helper, because the chat's spoken-reply capability
+  // asks the same question and because the two editions spell `command`
+  // differently: stat'ing Hermes' command LINE whole read every correctly
+  // provisioned box on that edition as "not wired to use its voice".
+  //
+  // Fall back to the installer's own artefacts when no command is configured at
+  // all — the stamp is a marker file, so its question is existence, not X_OK.
   const commandPresent = command
-    ? await exists(command)
+    ? await localTtsCommandRunnable(command)
     : await exists(KOKORO_STAMP);
   return { config, probe: localProbeFrom(config, models, commandPresent) };
 }
