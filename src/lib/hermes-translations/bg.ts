@@ -416,6 +416,7 @@ export const bg: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "Моделът не можа да бъде променен.",
   "localModels.error.unreachable": "Кутията не отговори, за да бъде променен моделът.",
+  "localModels.notice.voiceFallback": "Kokoro не можа да стане основен глас, затова остава гласът по подразбиране.",
 
   // === Desktop & power (TASK-455) ===
   "systemProfile.title": "Работен плот и захранване",

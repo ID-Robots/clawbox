@@ -424,6 +424,7 @@ export const es: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "No se pudo cambiar ese modelo.",
   "localModels.error.unreachable": "No se pudo contactar con la caja para cambiar ese modelo.",
+  "localModels.notice.voiceFallback": "Kokoro no pudo convertirse en la voz principal, así que se mantiene la voz predeterminada.",
 
   // === Desktop & power (TASK-455) ===
   "systemProfile.title": "Escritorio y energía",

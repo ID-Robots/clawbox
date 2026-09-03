@@ -432,3 +432,10 @@ export function onCodingRunStarted(listener: () => void): () => void {
   window.addEventListener(CODING_RUN_STARTED_EVENT, listener);
   return () => window.removeEventListener(CODING_RUN_STARTED_EVENT, listener);
 }
+
+/**
+ * Settings → Voice saved the spoken-replies switch: `{ autoReply: boolean }`.
+ * The open chat listens so its next voice turn honours the new position
+ * without a reopen.
+ */
+export const VOICE_SETTINGS_CHANGED_EVENT = "clawbox:voice-settings-changed";

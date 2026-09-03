@@ -425,6 +425,7 @@ export const sv: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "Det gick inte att ändra den modellen.",
   "localModels.error.unreachable": "Det gick inte att nå boxen för att ändra den modellen.",
+  "localModels.notice.voiceFallback": "Kokoro kunde inte bli huvudröst, så standardrösten behålls.",
 
   // === Desktop & power (TASK-455) ===
   "systemProfile.title": "Skrivbord och ström",

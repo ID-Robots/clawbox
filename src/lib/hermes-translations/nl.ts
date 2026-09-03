@@ -429,6 +429,7 @@ export const nl: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "Kan dat model niet wijzigen.",
   "localModels.error.unreachable": "Kan de box niet bereiken om dat model te wijzigen.",
+  "localModels.notice.voiceFallback": "Kokoro kon niet de hoofdstem worden, dus de standaardstem blijft.",
 
   // === Desktop & power (TASK-455) ===
   "systemProfile.title": "Bureaublad en energie",

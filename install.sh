@@ -2753,6 +2753,35 @@ tts_ensure_provider_registered() {
   as_clawbox "$OPENCLAW_BIN" plugins info tts-local-cli >/dev/null 2>&1
 }
 
+# Write the `tts-local-cli` provider DEFINITION — command, args, format and
+# the timeout the script derives from its own engine slices — into $1 (the
+# speech block's home: `tts` on OpenClaw 2, `messages.tts` before). Never
+# selects it: that is the caller's decision. src/lib/voice-local-wiring.ts
+# writes the same entry from the tts route; keep the two in step.
+#
+# timeoutMs bounds the WHOLE clawbox-tts.sh process, engine chain included.
+# It used to be a hardcoded 120000 while the script's own Kokoro timeout was
+# also 120s, so OpenClaw killed the process at the instant Kokoro gave up and
+# not even the reasons reached the gateway — a hung GPU was silence with no
+# diagnostic, which is the failure this whole feature exists to remove. Ask
+# the script for the number instead of keeping a second copy of it here: it
+# derives the value from its own engine slices, so re-tuning one of them
+# moves this with it.
+tts_write_local_provider_definition() {
+  local TTS_HOME="$1" TTS_SCRIPT="$2"
+  local TTS_TIMEOUT_MS
+  TTS_TIMEOUT_MS=$(bash "$TTS_SCRIPT" --provider-timeout-ms 2>/dev/null || echo "")
+  case "$TTS_TIMEOUT_MS" in
+    ''|*[!0-9]*)
+      echo "  ERROR: $TTS_SCRIPT did not report a usable provider timeout (got '${TTS_TIMEOUT_MS}')" >&2
+      return 1
+      ;;
+  esac
+  local TTS_PROVIDER_JSON
+  TTS_PROVIDER_JSON=$(node -e 'process.stdout.write(JSON.stringify({command:process.argv[1],args:["--","{{Text}}","{{OutputPath}}"],outputFormat:"wav",timeoutMs:Number(process.argv[2])}));' "$TTS_SCRIPT" "$TTS_TIMEOUT_MS")
+  oc_config_set "$TTS_HOME.providers.tts-local-cli" "$TTS_PROVIDER_JSON" --json
+}
+
 step_openclaw_tts() {
   is_hermes_edition && { echo "  [hermes edition] skipping on-device TTS"; return 0; }
   local TTS_SCRIPT="$PROJECT_DIR/scripts/openclaw/clawbox-tts.sh"
@@ -2976,6 +3005,17 @@ step_openclaw_tts() {
       return "$TTS_RC"
     fi
     echo "  TTS provider already set ($CURRENT_TTS) — preserving"
+    # Preserving the SELECTION is not the same as leaving the box's own voice
+    # undefined. This branch used to return here, so a box whose provider was
+    # the cloud voice (seeded by gateway-pre-start, or the owner's pick) never
+    # got a tts-local-cli entry at all — and with Kokoro installed, the Local
+    # AI tab's "Make primary" answered "not available on this box". Define the
+    # provider (never select it); the tts route repairs the same entry on
+    # demand, and this keeps an update from leaving it missing.
+    if [ -x "$TTS_SCRIPT" ]; then
+      tts_write_local_provider_definition "$TTS_HOME" "$TTS_SCRIPT" \
+        || echo "  Warning: could not define the on-device voice provider; Settings → Voice can repair it" >&2
+    fi
     return "$TTS_RC"
   fi
 
@@ -2987,30 +3027,11 @@ step_openclaw_tts() {
     return 1
   fi
 
-  # timeoutMs bounds the WHOLE clawbox-tts.sh process, engine chain included.
-  # It used to be a hardcoded 120000 while the script's own Kokoro timeout was
-  # also 120s, so OpenClaw killed the process at the instant Kokoro gave up and
-  # not even the reasons reached the gateway — a hung GPU was silence with no
-  # diagnostic, which is the failure this whole feature exists to remove. Ask
-  # the script for the number instead of keeping a second copy of it here: it
-  # derives the value from its own engine slices, so re-tuning one of them
-  # moves this with it.
-  local TTS_TIMEOUT_MS
-  TTS_TIMEOUT_MS=$(bash "$TTS_SCRIPT" --provider-timeout-ms 2>/dev/null || echo "")
-  case "$TTS_TIMEOUT_MS" in
-    ''|*[!0-9]*)
-      echo "  ERROR: $TTS_SCRIPT did not report a usable provider timeout (got '${TTS_TIMEOUT_MS}')" >&2
-      return 1
-      ;;
-  esac
-
-  local TTS_PROVIDER_JSON
-  TTS_PROVIDER_JSON=$(node -e 'process.stdout.write(JSON.stringify({command:process.argv[1],args:["--","{{Text}}","{{OutputPath}}"],outputFormat:"wav",timeoutMs:Number(process.argv[2])}));' "$TTS_SCRIPT" "$TTS_TIMEOUT_MS")
   # Order matters and so does the gate. oc_config_set retries three times and
   # then gives up; if the provider definition did not land, naming it as THE
   # provider leaves the box pointing at a provider that does not exist, and
   # every spoken reply fails — strictly worse than not having run at all.
-  if ! oc_config_set "$TTS_HOME.providers.tts-local-cli" "$TTS_PROVIDER_JSON" --json; then
+  if ! tts_write_local_provider_definition "$TTS_HOME" "$TTS_SCRIPT"; then
     echo "  ERROR: could not write the tts-local-cli provider — leaving messages.tts.provider unset" >&2
     return 1
   fi

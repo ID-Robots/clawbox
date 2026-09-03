@@ -40,6 +40,25 @@ vi.mock("@/lib/config-store", () => ({
   get: (...a: unknown[]) => preferenceMock(...a),
 }));
 
+const wireMock = vi.fn();
+vi.mock("@/lib/voice-local-wiring", () => ({
+  wireLocalVoice: (...a: unknown[]) => wireMock(...a),
+}));
+
+const autoReplyMock = vi.fn();
+const setAutoReplyMock = vi.fn();
+vi.mock("@/lib/voice-reply", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/voice-reply")>();
+  return {
+    ...actual,
+    getVoiceAutoReply: (...a: unknown[]) => autoReplyMock(...a),
+    setVoiceAutoReply: (...a: unknown[]) => setAutoReplyMock(...a),
+  };
+});
+
+const ownerMock = vi.fn();
+vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: (...a: unknown[]) => ownerMock(...a) }));
+
 vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>();
   return {
@@ -87,6 +106,47 @@ beforeEach(() => {
   readStateMock.mockReset().mockResolvedValue({ choice: "auto" });
   writeStateMock.mockReset().mockResolvedValue(undefined);
   preferenceMock.mockReset().mockResolvedValue(undefined);
+  wireMock.mockReset().mockResolvedValue({ ok: true, provider: {} });
+  autoReplyMock.mockReset().mockResolvedValue(true);
+  setAutoReplyMock.mockReset().mockResolvedValue(undefined);
+  ownerMock.mockReset().mockResolvedValue(true);
+});
+
+describe("spoken replies", () => {
+  it("reports the switch with the status, on by default", async () => {
+    const { GET } = await route();
+    expect((await (await GET()).json()).autoReply).toBe(true);
+  });
+
+  it("writes the gateway's inbound mode and the store when switched on, off when off", async () => {
+    const { POST } = await route();
+    let res = await POST(post({ action: "autoReply", enabled: false }));
+    expect(res.status).toBe(200);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.auto", "off"]);
+    expect(setAutoReplyMock).toHaveBeenCalledWith(false);
+    configSetMock.mockClear();
+    res = await POST(post({ action: "autoReply", enabled: true }));
+    expect(res.status).toBe(200);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.auto", "inbound"]);
+    expect(setAutoReplyMock).toHaveBeenCalledWith(true);
+  });
+
+  it("refuses the switch to the MCP bearer, and leaves the picker to anyone", async () => {
+    ownerMock.mockResolvedValue(false);
+    const { POST } = await route();
+    const res = await POST(post({ action: "autoReply", enabled: false }));
+    expect(res.status).toBe(403);
+    expect(setAutoReplyMock).not.toHaveBeenCalled();
+    expect((await POST(post({ action: "language", language: "de" }))).status).toBe(200);
+  });
+
+  it("keeps the store describing what the box does when the CLI write failed", async () => {
+    configSetMock.mockRejectedValue(new Error("ConfigMutationConflictError"));
+    const { POST } = await route();
+    const res = await POST(post({ action: "autoReply", enabled: false }));
+    expect(res.status).toBe(500);
+    expect(setAutoReplyMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("GET /setup-api/tts", () => {
@@ -146,6 +206,59 @@ describe("POST /setup-api/tts — select", () => {
     expect(configSetMock).toHaveBeenCalledWith(["tts.provider", LOCAL]);
     // The choice, and nothing the owner did not pick: no backfilled language.
     expect(writeStateMock.mock.calls[0][0]).toEqual({ choice: "local" });
+  });
+
+  it("wires an installed voice the config never named, then selects it", async () => {
+    // The shipped state: Kokoro installed (stamp, unit), the cloud voice
+    // selected, and NO tts-local-cli entry — install.sh preserved the
+    // selection and returned before defining the provider. The pick is the
+    // moment to write the entry, not a refusal to read.
+    const unwired = config({ tts: { provider: "openai", providers: { openai: { model: "gpt-4o-mini-tts" } } } });
+    const wired = config({ tts: { provider: "openai", providers: { openai: {}, [LOCAL]: { command: "/opt/clawbox-tts.sh" } } } });
+    readConfigMock
+      .mockResolvedValueOnce(unwired)   // the first probe
+      .mockResolvedValueOnce(unwired)   // ttsConfigHome() inside the repair
+      .mockResolvedValue(wired);        // the re-probe and the answer
+    const { POST } = await route();
+    const res = await POST(post({ action: "select", choice: "local" }));
+    expect(res.status).toBe(200);
+    expect(wireMock).toHaveBeenCalledWith("tts");
+    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", LOCAL]);
+    const body = await res.json();
+    expect(body.fallback).toBeUndefined();
+    expect(writeStateMock.mock.calls[0][0]).toEqual({ choice: "local" });
+  });
+
+  it("settles on the default, and says so, when the box has no voice of its own", async () => {
+    // No engine to install or wire from here: the pick cannot be honoured.
+    // The owner asked for the default to stay instead of a red error.
+    ttsInventoryMock.mockResolvedValue([]);
+    readConfigMock.mockResolvedValue(config({
+      tts: { provider: "openai", providers: { openai: { model: "gpt-4o-mini-tts" } } },
+      models: { providers: { openai: { apiKey: "sk-live-abc" } } },
+    }));
+    const { POST } = await route();
+    const res = await POST(post({ action: "select", choice: "local" }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.fallback).toEqual({ requested: "local", reason: "not_installed" });
+    expect(body.choice).toBe("auto");
+    expect(wireMock).not.toHaveBeenCalled();
+    // Already on the provider Auto resolves to: nothing to write but the choice.
+    expect(configSetMock).not.toHaveBeenCalled();
+    expect(writeStateMock.mock.calls[0][0]).toEqual({ choice: "auto" });
+  });
+
+  it("names the wiring as the reason when the entry could not be written", async () => {
+    wireMock.mockResolvedValue({ ok: false, reason: "write_failed" });
+    readConfigMock.mockResolvedValue(config({
+      tts: { provider: "openai", providers: { openai: { model: "gpt-4o-mini-tts" } } },
+      models: { providers: { openai: { apiKey: "sk-live-abc" } } },
+    }));
+    const { POST } = await route();
+    const res = await POST(post({ action: "select", choice: "local" }));
+    expect(res.status).toBe(200);
+    expect((await res.json()).fallback).toEqual({ requested: "local", reason: "not_wired" });
   });
 
   it("refuses a cloud voice the box cannot use, and changes nothing", async () => {

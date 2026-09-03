@@ -440,6 +440,7 @@ export const it: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "Non è stato possibile modificare quel modello.",
   "localModels.error.unreachable": "Non è stato possibile raggiungere il box per modificare quel modello.",
+  "localModels.notice.voiceFallback": "Kokoro non è potuta diventare la voce principale, quindi resta la voce predefinita.",
 
   // === Desktop & power (TASK-455) ===
   "systemProfile.title": "Desktop e alimentazione",

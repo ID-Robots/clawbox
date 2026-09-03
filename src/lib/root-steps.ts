@@ -47,6 +47,7 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   "openclaw_install",
   "openclaw_patch",
   "openclaw_setup",
+  "openclaw_tts",
   "performance_mode",
   "post_update",
   "rebuild_reboot",
@@ -78,6 +79,10 @@ export const UI_ROOT_STEPS: readonly string[] = [
   "openclaw_setup",
   "openclaw_patch",
   "openclaw_config",
+  // The on-device voice: Settings → Local AI → Kokoro → Install. Installs
+  // the CUDA Kokoro stack and wires the provider — the same step an update
+  // runs; nothing it does reboots, rewires networking or wipes state.
+  "openclaw_tts",
   "clawkeep_install",
 ];
 

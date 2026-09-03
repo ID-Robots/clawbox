@@ -431,6 +431,7 @@ export const ja: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "そのモデルを変更できませんでした。",
   "localModels.error.unreachable": "本体に接続できなかったため、そのモデルを変更できませんでした。",
+  "localModels.notice.voiceFallback": "Kokoro をメインの声にできなかったため、既定の声のままです。",
 
   // === Desktop & power (TASK-455) ===
   "systemProfile.title": "デスクトップと電力",

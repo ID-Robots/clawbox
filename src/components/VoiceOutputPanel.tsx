@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
+import { VOICE_SETTINGS_CHANGED_EVENT } from "@/lib/ui-events";
 import type {
   VoiceChoice,
   VoiceEngine,
@@ -51,10 +52,16 @@ function isDisclosure(value: unknown): boolean {
  * Settings window down (TASK-398); a panel that cannot read the box keeps its
  * last good reading instead.
  */
-export function isVoiceStatus(value: unknown): value is VoiceOutputStatus {
+/** The tts route's answer: the status, plus the owner's switch for spoken replies. */
+export type VoiceStatusAnswer = VoiceOutputStatus & { autoReply?: boolean };
+
+export function isVoiceStatus(value: unknown): value is VoiceStatusAnswer {
   if (!value || typeof value !== "object") return false;
   const s = value as Record<string, unknown>;
   if (!["auto", "local", "cloud"].includes(s.choice as string)) return false;
+  // Optional: a status from before the switch existed still renders, with
+  // the switch shown in its default position (on).
+  if (s.autoReply != null && typeof s.autoReply !== "boolean") return false;
   if (!Array.isArray(s.engines) || !s.engines.every(isEngine)) return false;
   if (typeof s.drifted !== "boolean") return false;
   if (s.warning !== null && typeof s.warning !== "string") return false;
@@ -109,9 +116,13 @@ const MUTED = "text-xs text-[var(--text-muted)]";
 
 export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const { t } = useT();
-  const [status, setStatus] = useState<VoiceOutputStatus | null>(null);
+  const [status, setStatus] = useState<VoiceStatusAnswer | null>(null);
   const [unsupported, setUnsupported] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The box settled on the default instead of the pick, and said so (the
+  // tts route's `fallback`). Amber, not red: nothing is broken, the owner's
+  // pick just could not be honoured, and the line says which voice speaks.
+  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<"post" | "play" | null>(null);
   // What the write in flight is for, so the wait can be named: "Saving…" for
   // the owner's own change, and a different line for the one the panel
@@ -218,6 +229,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     setBusy("post");
     setWriting(reason);
     setError(null);
+    setNotice(null);
     try {
       const res = await fetch("/setup-api/tts", {
         method: "POST",
@@ -229,7 +241,17 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
         setError(refusalText(data, t("settings.voice.error.changeFailed")));
         return;
       }
-      if (isVoiceStatus(data)) setStatus(data);
+      if (isVoiceStatus(data)) {
+        setStatus(data);
+        // The open chat decides per reply whether to speak; tell it now
+        // rather than on its next open.
+        if (body.action === "autoReply") {
+          window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: data.autoReply !== false } }));
+        }
+      }
+      if (data && typeof data === "object" && (data as { fallback?: unknown }).fallback) {
+        setNotice(t("settings.voice.fallback"));
+      }
     } catch {
       setError(t("settings.voice.error.unreachable"));
     } finally {
@@ -352,6 +374,11 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
           {error}
         </div>
       )}
+      {notice && (
+        <div role="status" data-testid="voice-fallback-notice" className="rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200">
+          {notice}
+        </div>
+      )}
 
       <div className={`${CARD} space-y-4`}>
         <div className={ROW}>
@@ -472,6 +499,31 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
             )}
           </div>
         )}
+      </div>
+
+      {/* Spoken replies: a voice message — a Telegram voice note, the chat's
+          microphone — is answered with a voice. On by default. The gateway
+          answers the channels (`tts.auto: "inbound"`); the desktop chat
+          asks the box to speak the reply itself. */}
+      <div className={`${CARD} ${ROW}`}>
+        <div className="min-w-0">
+          <label htmlFor="voice-auto-reply" className={LABEL}>{t("settings.voice.autoReply")}</label>
+          <p className={`${MUTED} mt-0.5`}>{t("settings.voice.autoReplyHint")}</p>
+        </div>
+        <button
+          id="voice-auto-reply"
+          type="button"
+          role="switch"
+          aria-checked={status.autoReply !== false}
+          disabled={disabled}
+          onClick={() => void post({ action: "autoReply", enabled: status.autoReply === false })}
+          data-testid="voice-auto-reply"
+          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 shrink-0 ${
+            status.autoReply !== false ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+          }`}
+        >
+          <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${status.autoReply !== false ? "translate-x-6" : "translate-x-1"}`} />
+        </button>
       </div>
     </div>
   );

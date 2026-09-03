@@ -76,4 +76,15 @@ describe("repairOpenclawConfig", () => {
     expect(error).toHaveBeenCalledWith(expect.stringContaining("restart"), "systemctl failed");
     error.mockRestore();
   });
+  it("runs the spoken-replies seed third, after both file writers before it", async () => {
+    const order: string[] = [];
+    await repairOpenclawConfig({
+      ensureLocalAiProxyUrls: async () => { order.push("urls"); return false; },
+      ensureMicrosoftTtsExcluded: async () => { order.push("microsoft"); return false; },
+      ensureVoiceAutoReplyMode: async () => { order.push("autoReply"); return true; },
+      restartGateway: async () => { order.push("restart"); },
+    });
+    expect(order).toEqual(["urls", "microsoft", "autoReply", "restart"]);
+  });
+
 });

@@ -440,6 +440,7 @@ export const zh: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "无法更改该模型。",
   "localModels.error.unreachable": "无法连接到这台 ClawBox，因此无法更改该模型。",
+  "localModels.notice.voiceFallback": "无法将 Kokoro 设为主要声音，因此仍使用默认声音。",
 
   // === Desktop & power (TASK-455) ===
   "systemProfile.title": "桌面与电源",

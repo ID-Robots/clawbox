@@ -429,6 +429,7 @@ export const fr: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "Impossible de modifier ce modèle.",
   "localModels.error.unreachable": "Impossible de joindre la box pour modifier ce modèle.",
+  "localModels.notice.voiceFallback": "Kokoro n'a pas pu devenir la voix principale ; la voix par défaut est conservée.",
 
   // === Desktop & power (TASK-455) ===
   "systemProfile.title": "Bureau et alimentation",

@@ -718,6 +718,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.error.notAvailable": "That voice is not available on this box.",
     "settings.voice.error.noVoice": "This box has no voice it can use.",
     "settings.voice.error.cannotChange": "Could not change the voice on this box.",
+    "settings.voice.fallback": "The voice on this box could not be selected, so the default voice stays. Settings → Local AI shows what the box has.",
+    "settings.voice.autoReply": "Reply with voice to voice messages",
+    "settings.voice.autoReplyHint": "A voice message, in Telegram, another channel or the chat here, gets a spoken reply that plays on its own. Typed messages are still answered in text.",
   },
 
   bg: {
@@ -1406,6 +1409,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.error.notAvailable": "Този глас не е наличен на това устройство.",
     "settings.voice.error.noVoice": "Това устройство няма глас, който може да използва.",
     "settings.voice.error.cannotChange": "Гласът на това устройство не можа да бъде променен.",
+    "settings.voice.fallback": "Гласът на това устройство не можа да бъде избран, затова остава гласът по подразбиране. В Настройки → Локален AI се вижда какво има устройството.",
+    "settings.voice.autoReply": "Отговаряй с глас на гласови съобщения",
+    "settings.voice.autoReplyHint": "Гласово съобщение в Telegram, друг канал или в чата тук получава изговорен отговор, който се пуска сам. На писмените съобщения се отговаря с текст.",
   },
 
   de: {
@@ -2094,6 +2100,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.error.notAvailable": "Diese Stimme ist auf dieser Box nicht verfügbar.",
     "settings.voice.error.noVoice": "Diese Box hat keine Stimme, die sie verwenden kann.",
     "settings.voice.error.cannotChange": "Die Stimme auf dieser Box konnte nicht geändert werden.",
+    "settings.voice.fallback": "Die Stimme auf dieser Box konnte nicht ausgewählt werden, daher bleibt die Standardstimme. Einstellungen → Lokale KI zeigt, was die Box hat.",
+    "settings.voice.autoReply": "Auf Sprachnachrichten mit Stimme antworten",
+    "settings.voice.autoReplyHint": "Eine Sprachnachricht in Telegram, einem anderen Kanal oder im Chat hier bekommt eine gesprochene Antwort, die von selbst abspielt. Getippte Nachrichten werden weiter als Text beantwortet.",
   },
 
   es: {
@@ -2782,6 +2791,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.error.notAvailable": "Esa voz no está disponible en este dispositivo.",
     "settings.voice.error.noVoice": "Este dispositivo no tiene ninguna voz que pueda usar.",
     "settings.voice.error.cannotChange": "No se pudo cambiar la voz en este dispositivo.",
+    "settings.voice.fallback": "No se pudo seleccionar la voz de este dispositivo, así que se mantiene la voz predeterminada. Ajustes → IA local muestra lo que tiene el dispositivo.",
+    "settings.voice.autoReply": "Responder con voz a los mensajes de voz",
+    "settings.voice.autoReplyHint": "Un mensaje de voz en Telegram, otro canal o el chat de aquí recibe una respuesta hablada que se reproduce sola. Los mensajes escritos se siguen respondiendo en texto.",
   },
 
   fr: {
@@ -3470,6 +3482,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.error.notAvailable": "Cette voix n'est pas disponible sur cette box.",
     "settings.voice.error.noVoice": "Cette box n'a aucune voix utilisable.",
     "settings.voice.error.cannotChange": "Impossible de changer la voix sur cette box.",
+    "settings.voice.fallback": "La voix de cette box n'a pas pu être sélectionnée ; la voix par défaut est conservée. Réglages → IA locale montre ce que la box possède.",
+    "settings.voice.autoReply": "Répondre par la voix aux messages vocaux",
+    "settings.voice.autoReplyHint": "Un message vocal sur Telegram, un autre canal ou le chat ici reçoit une réponse parlée qui se lance toute seule. Les messages écrits reçoivent toujours une réponse en texte.",
   },
 
   it: {
@@ -4158,6 +4173,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.error.notAvailable": "Quella voce non è disponibile su questo dispositivo.",
     "settings.voice.error.noVoice": "Questo dispositivo non ha nessuna voce utilizzabile.",
     "settings.voice.error.cannotChange": "Impossibile cambiare la voce su questo dispositivo.",
+    "settings.voice.fallback": "La voce di questo dispositivo non è stata selezionabile, quindi resta la voce predefinita. Impostazioni → IA locale mostra cosa ha il dispositivo.",
+    "settings.voice.autoReply": "Rispondere con la voce ai messaggi vocali",
+    "settings.voice.autoReplyHint": "Un messaggio vocale su Telegram, un altro canale o la chat qui riceve una risposta parlata che parte da sola. I messaggi scritti ricevono ancora una risposta in testo.",
   },
 
   ja: {
@@ -4846,6 +4864,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.error.notAvailable": "その声はこの本体では利用できません。",
     "settings.voice.error.noVoice": "この本体には使える音声がありません。",
     "settings.voice.error.cannotChange": "この本体の声を変更できませんでした。",
+    "settings.voice.fallback": "この本体の声を選択できなかったため、既定の声のままです。設定 → ローカル AI で本体の状態を確認できます。",
+    "settings.voice.autoReply": "音声メッセージには音声で返答",
+    "settings.voice.autoReplyHint": "Telegram や他のチャンネル、ここでのチャットの音声メッセージには、自動で再生される音声の返答が届きます。文字のメッセージには引き続き文字で返答します。",
   },
 
   nl: {
@@ -5534,6 +5555,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.error.notAvailable": "Die stem is niet beschikbaar op deze box.",
     "settings.voice.error.noVoice": "Deze box heeft geen stem die hij kan gebruiken.",
     "settings.voice.error.cannotChange": "De stem op deze box kon niet worden gewijzigd.",
+    "settings.voice.fallback": "De stem op deze box kon niet worden gekozen, dus de standaardstem blijft. Instellingen → Lokale AI laat zien wat de box heeft.",
+    "settings.voice.autoReply": "Spraakberichten met spraak beantwoorden",
+    "settings.voice.autoReplyHint": "Een spraakbericht in Telegram, een ander kanaal of de chat hier krijgt een gesproken antwoord dat vanzelf afspeelt. Getypte berichten worden nog steeds in tekst beantwoord.",
   },
 
   sv: {
@@ -6222,6 +6246,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.error.notAvailable": "Den rösten är inte tillgänglig på den här boxen.",
     "settings.voice.error.noVoice": "Den här boxen har ingen röst den kan använda.",
     "settings.voice.error.cannotChange": "Rösten på den här boxen kunde inte ändras.",
+    "settings.voice.fallback": "Rösten på den här boxen kunde inte väljas, så standardrösten behålls. Inställningar → Lokal AI visar vad boxen har.",
+    "settings.voice.autoReply": "Svara med röst på röstmeddelanden",
+    "settings.voice.autoReplyHint": "Ett röstmeddelande i Telegram, en annan kanal eller chatten här får ett talat svar som spelas upp av sig självt. Skrivna meddelanden besvaras fortfarande i text.",
   },
 
   zh: {
@@ -6910,6 +6937,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.error.notAvailable": "本机无法使用该声音。",
     "settings.voice.error.noVoice": "本机没有可用的语音。",
     "settings.voice.error.cannotChange": "无法更改本机的声音。",
+    "settings.voice.fallback": "无法选择本机的声音，因此仍使用默认声音。在“设置 → 本地 AI”中可查看本机的情况。",
+    "settings.voice.autoReply": "用语音回复语音消息",
+    "settings.voice.autoReplyHint": "在 Telegram、其他渠道或此处聊天中发来的语音消息，会收到自动播放的语音回复。文字消息仍以文字回复。",
   },
 };
 
