@@ -79,8 +79,13 @@ export async function GET() {
       // could report itself active while the gateway dropped every message it
       // received with "Unauthorized user".
       receiving: status.state === "paired" && gateway.running && status.authorized,
-      // The Hermes reader works off config plus `hermes gateway status`; if it
-      // had not answered we would be in the catch below, not here.
+      // `verified` is about THE CHANNEL'S CONFIGURED STATE, not the gateway's
+      // liveness. On Hermes that state comes from ~/.hermes/.env plus the
+      // pairing files (`readHermesWhatsappStatus`) and never from the gateway
+      // probe, so it is genuinely known here whatever the gateway is doing —
+      // and if those reads had failed we would be in the catch below, not here.
+      // A gateway that could not be probed shows up as `receiving: false`,
+      // which is the claim that actually depends on it.
       verified: true,
     });
   } catch (err) {
