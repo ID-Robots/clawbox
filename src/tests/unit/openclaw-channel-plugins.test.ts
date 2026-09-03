@@ -226,6 +226,41 @@ describe("ensureChannelPlugin", () => {
     });
   });
 
+  it("settles a plugins enable killed at its deadline by the config, not by the kill", async () => {
+    // D-12's shape, one CLI verb over. `plugins enable` writes
+    // `plugins.entries.<id>.enabled` and then spends seconds loading the
+    // gateway SDK, so on a Jetson the entry lands inside the 45 s window we
+    // kill in — and the owner was told the channel plugin could not be
+    // installed while it was enabled on disk and live after the next restart.
+    mockReadConfig
+      .mockResolvedValueOnce(configWithEnabled()) // the precondition: not on yet
+      .mockResolvedValueOnce(configWithEnabled("discord")); // the read-back after the kill
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "discord" }]))
+      .mockRejectedValueOnce(
+        new OpenclawSpawnTimeoutError("/usr/bin/openclaw plugins enable discord timed out after 45000ms"),
+      );
+
+    expect(await lib.ensureChannelPlugin("discord")).toEqual({ ok: true, installed: false });
+  });
+
+  it("still fails a killed plugins enable whose entry never reached the config", async () => {
+    // The other half: forgiving a kill the config does not corroborate would
+    // swap this module's false failure for a false success, and the owner would
+    // be shown a channel that the gateway never loads.
+    mockReadConfig.mockResolvedValue(configWithEnabled());
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "discord" }]))
+      .mockRejectedValueOnce(
+        new OpenclawSpawnTimeoutError("/usr/bin/openclaw plugins enable discord timed out after 45000ms"),
+      );
+
+    expect(await lib.ensureChannelPlugin("discord")).toEqual({
+      ok: false,
+      reason: "install_failed",
+    });
+  });
+
   it("refuses a channel it has no official plugin for", async () => {
     expect(await lib.ensureChannelPlugin("carrier-pigeon")).toEqual({
       ok: false,
