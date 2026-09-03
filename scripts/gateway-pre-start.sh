@@ -37,7 +37,12 @@ OPENCLAW_PIN_FILE="${OPENCLAW_PIN_FILE:-$CLAWBOX_ROOT/config/openclaw-target.txt
 if [ -n "${OPENCLAW_PIN_VERSION:-}" ]; then
   OPENCLAW_TARGET="${OPENCLAW_PIN_VERSION}"
 elif [ -f "$OPENCLAW_PIN_FILE" ]; then
-  OPENCLAW_TARGET=$(head -1 "$OPENCLAW_PIN_FILE" | awk '{print $1}')
+  # `|| true`: the file exists, but a read can still fail (permissions, a
+  # truncated mount), and under `set -euo pipefail` a failed pipeline in an
+  # assignment aborts this ExecStartPre — which means no gateway at all. An
+  # empty target is already a defined state here (see above); an aborted boot
+  # is not. TASK-657.
+  OPENCLAW_TARGET=$(head -1 "$OPENCLAW_PIN_FILE" | awk '{print $1}' || true)
 fi
 
 if [ ! -x "$OPENCLAW_BIN" ]; then
@@ -60,8 +65,20 @@ fi
 # from the pin there would write v2 keys a v1 gateway refuses AND delete the
 # controlUi auth switches v1 still needs. The pin only fills in when the
 # binary cannot be asked.
-CLAWBOX_OPENCLAW_EFFECTIVE="$("$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1)"
+#
+# `|| true` and an explicit empty result. This pipeline FAILS whenever the CLI
+# cannot answer -- `grep -oE` exits 1 on no match, a crashed binary or a node
+# engine mismatch exits non-zero, and `pipefail` carries either into the
+# assignment, which under `set -e` aborted the WHOLE pre-start. This script is
+# the gateway unit's ExecStartPre, so such a box got no gateway and no chat at
+# all, with the only trace in the unit's failure -- while the paragraph above
+# was already written as though the empty result it now really produces was
+# what happened. A missing binary is handled a few lines up (exit 0). TASK-657.
+CLAWBOX_OPENCLAW_EFFECTIVE="$("$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)"
 if [ -z "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
+  # Said out loud: the fallback changes which config dialect this script writes,
+  # and a box guessing its own core's generation is worth a line in the journal.
+  echo "  WARN: $OPENCLAW_BIN did not print a version — assuming the pinned target ${OPENCLAW_TARGET:-<unknown>}" >&2
   CLAWBOX_OPENCLAW_EFFECTIVE="${OPENCLAW_TARGET}"
 fi
 # An explicit CLAWBOX_OPENCLAW_V2 in the environment wins — the unit tests
@@ -79,7 +96,11 @@ export CLAWBOX_OPENCLAW_V2
 CONFIGURED_HOSTNAME="clawbox"
 if [ -f "$HOSTNAME_ENV" ]; then
   # Parse HOSTNAME=... without executing the file (avoid arbitrary code execution).
-  _h=$(sed -n 's/^[[:space:]]*HOSTNAME[[:space:]]*=[[:space:]]*//p' "$HOSTNAME_ENV" | head -n1)
+  # `|| true` for the same reason as the pin read above: `sed` exits non-zero on
+  # a file it cannot open, and an unreadable hostname file must cost this box its
+  # configured mDNS name, never its gateway. The regex below already rejects the
+  # empty result and keeps the "clawbox" default. TASK-657.
+  _h=$(sed -n 's/^[[:space:]]*HOSTNAME[[:space:]]*=[[:space:]]*//p' "$HOSTNAME_ENV" | head -n1 || true)
   _h="${_h%\"}"; _h="${_h#\"}"
   _h="${_h%\'}"; _h="${_h#\'}"
   if [[ "$_h" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
