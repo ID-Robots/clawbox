@@ -404,7 +404,16 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
         if (llamaCppChild === child) {
           llamaCppChild = null
         }
-        await llamaCpp.clearLlamaCppPid(spec.pidPath)
+        // Only if the file still records THIS child. There is a single shared
+        // pid path (LLAMACPP_PID_PATH — it is not per-alias), so a child that
+        // took its time dying would otherwise unlink the record of the
+        // replacement that had already started, leaving a running server that
+        // nothing can identify or stop by pid. The generation check below does
+        // not cover this on its own: a plain `ensureLocalAiReady` can start the
+        // replacement with no stop in between.
+        if (await llamaCpp.readLlamaCppPid(spec.pidPath) === child.pid) {
+          await llamaCpp.clearLlamaCppPid(spec.pidPath)
+        }
         // The generation, not just the flag: that `await` above is long enough
         // for a stop to arrive AND a fresh start to clear `llamaCppStopping`
         // again, and this handler would then arm a retry for the child that was

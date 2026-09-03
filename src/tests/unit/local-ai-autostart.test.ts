@@ -313,10 +313,10 @@ describe("llama.cpp child supervision", () => {
     const mod = await loadModule();
     expect(await mod.startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
 
-    // Freeze childA's exit handler mid-cleanup.
+    // Freeze childA's exit handler mid-cleanup, on its first await.
     let releaseCleanup!: () => void;
-    const pendingCleanup = new Promise<void>((resolve) => { releaseCleanup = () => resolve(); });
-    llamaCppMocks.clearLlamaCppPid.mockImplementationOnce(() => pendingCleanup);
+    const pendingCleanup = new Promise<number | null>((resolve) => { releaseCleanup = () => resolve(4242); });
+    llamaCppMocks.readLlamaCppPid.mockImplementationOnce(() => pendingCleanup);
     childA.emit("exit", 143);
     await vi.advanceTimersByTimeAsync(0);
 
@@ -331,5 +331,32 @@ describe("llama.cpp child supervision", () => {
     await vi.advanceTimersByTimeAsync(CHILD_RESTART_CEILING_MS);
 
     expect(spawnMock, "the stopped child armed a chain of its own").toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * The pid path is one shared file, not one per alias, so "clear it on exit"
+   * is only safe while it still records the child that is exiting. A child that
+   * takes its time dying would otherwise unlink the record of the replacement
+   * that had already started.
+   */
+  it("does not clear a pid file that now records a different child", async () => {
+    vi.useFakeTimers();
+    const childA = emittingChild(4242);
+    spawnMock.mockReturnValue(childA);
+
+    const mod = await loadModule();
+    expect(await mod.startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
+
+    // A replacement has since started and written its own pid to that file.
+    llamaCppMocks.readLlamaCppPid.mockResolvedValue(4243);
+    llamaCppMocks.clearLlamaCppPid.mockClear();
+
+    childA.emit("exit", 143);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(
+      llamaCppMocks.clearLlamaCppPid,
+      "the dying child unlinked the replacement's pid record",
+    ).not.toHaveBeenCalled();
   });
 });
