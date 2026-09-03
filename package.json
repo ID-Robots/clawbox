@@ -7,7 +7,7 @@
     "mcp": "bun run mcp/clawbox-mcp.ts",
     "typecheck:mcp": "tsc -p mcp/tsconfig.json",
     "check:mcp-tools": "bun run mcp/check-tools.ts",
-    "terminal-server": "bun run scripts/terminal-server.ts",
+    "terminal-server": "node scripts/terminal-server.mjs",
     "dev": "next dev --port ${PORT:-3000} --hostname 0.0.0.0",
     "dev:privileged": "next dev --port 80 --hostname 0.0.0.0",
     "prebuild": "rm -rf .next/standalone/.next/cache/images 2>/dev/null || true",

@@ -1,10 +1,19 @@
-#!/usr/bin/env npx tsx
+// @ts-check
 /**
  * Standalone WebSocket Terminal Server
- * Runs on port 3006, spawns a PTY (zsh) per connection and bridges it over WebSocket.
+ * Runs on port 3006, spawns a login PTY (/bin/bash) per connection and bridges
+ * it over WebSocket.
+ *
+ * Plain ESM JavaScript on purpose, NOT TypeScript. The boot hook
+ * (src/instrumentation-node.ts) starts this with the Node that is already
+ * running the web server, so the Terminal app needs nothing fetched, resolved
+ * or transpiled at boot. It used to be started with `npx tsx`, and `tsx` is not
+ * a dependency of this project: it only ever resolved because the box had once
+ * been online and npm had left a copy in ~/.npm/_npx. On a freshly flashed box
+ * whose first boot is AP mode with no internet there is no copy to find.
  *
  * Usage:
- *   bun run scripts/terminal-server.ts
+ *   node scripts/terminal-server.mjs
  *
  * Protocol:
  *   Client → Server:
@@ -15,10 +24,10 @@
  *     { type: "exit", code: number }        — PTY exited
  */
 
-import * as http from "http";
+import * as http from "node:http";
+import * as os from "node:os";
 import { WebSocketServer, WebSocket } from "ws";
 import * as pty from "node-pty";
-import * as os from "os";
 
 const PORT = parseInt(process.env.TERMINAL_WS_PORT || "3006", 10);
 
@@ -29,7 +38,7 @@ const server = http.createServer((_req, res) => {
 
 const wss = new WebSocketServer({ server });
 
-wss.on("connection", (ws: WebSocket, req) => {
+wss.on("connection", (ws, req) => {
   const remote = req.socket.remoteAddress;
   console.log(`[terminal-server] New connection from ${remote}`);
 
@@ -39,7 +48,7 @@ wss.on("connection", (ws: WebSocket, req) => {
   const targetUser = process.env.USER || process.env.LOGNAME || os.userInfo().username || "clawbox";
   const targetHome = process.env.HOME || os.homedir() || `/home/${targetUser}`;
   const shell = "/bin/bash";
-  const cleanEnv: Record<string, string> = {
+  const cleanEnv = {
     HOME: targetHome,
     USER: targetUser,
     LOGNAME: targetUser,
@@ -56,7 +65,8 @@ wss.on("connection", (ws: WebSocket, req) => {
   // the 'connection' handler and crashes the whole :3006 server, dropping
   // every other live terminal session. Contain the failure to this one socket:
   // tell the client and close, leaving the server up.
-  let term: ReturnType<typeof pty.spawn>;
+  /** @type {import("node-pty").IPty} */
+  let term;
   try {
     term = pty.spawn(shell, ["-l"], {
       name: "xterm-256color",
@@ -69,13 +79,13 @@ wss.on("connection", (ws: WebSocket, req) => {
     console.log(`[terminal-server] Spawned PTY pid=${term.pid} shell=${shell}`);
 
     // PTY → WebSocket
-    term.onData((data: string) => {
+    term.onData((data) => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "output", data }));
       }
     });
 
-    term.onExit(({ exitCode }: { exitCode: number }) => {
+    term.onExit(({ exitCode }) => {
       console.log(`[terminal-server] PTY exited pid=${term.pid} code=${exitCode}`);
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "exit", code: exitCode }));
@@ -98,7 +108,7 @@ wss.on("connection", (ws: WebSocket, req) => {
   }
 
   // WebSocket → PTY
-  ws.on("message", (raw: Buffer | string) => {
+  ws.on("message", (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
       if (msg.type === "input" && typeof msg.data === "string") {
