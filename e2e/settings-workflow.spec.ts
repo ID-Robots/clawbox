@@ -209,7 +209,8 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   await settingsWindow.getByRole("button", { name: /English/ }).first().click();
 
   // ── System
-  await section(/System/).click();
+  // "System" and not "System Update": the name also carries the icon glyph and a subtitle.
+  await section(/\bSystem\b(?! Update)/).click();
   await expect(settingsWindow.getByText("clawbox", { exact: true })).toBeVisible();
   await expect(settingsWindow.getByText("Ubuntu 24.04")).toBeVisible();
 

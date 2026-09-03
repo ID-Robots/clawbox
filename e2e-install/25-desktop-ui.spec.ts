@@ -103,7 +103,8 @@ test.describe("desktop UI happy path", () => {
         .click();
       const appWindow = page.getByTestId(`chrome-window-${app.id}`);
       await expect(appWindow).toBeVisible({ timeout: 10_000 });
-      await appWindow.getByRole("button", { name: "Close" }).click();
+      // Exact: the Terminal window also carries a "Close tab" button on its tab strip.
+      await appWindow.getByRole("button", { name: "Close", exact: true }).click();
       await expect(appWindow).toHaveCount(0);
     }
   });
