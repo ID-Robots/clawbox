@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PROBE_GRACE_MS } from "@/lib/hermes-model-options";
 import { checkingRetryBudgetMs, CHECKING_RETRY_ATTEMPTS } from "@/hooks/useProviderStatus";
-import { degradedRetryDelayMs } from "@/hooks/useHermesModelOptions";
+import { degradedRetryDelayMs } from "@/lib/degraded-retry";
 
 /**
  * TASK-663 — the one relationship between the client and the server that two

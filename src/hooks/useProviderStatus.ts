@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import { forgetHermesProviderPreference } from "@/lib/hermes-chat-prefs";
-import { degradedRetryDelayMs } from "@/hooks/useHermesModelOptions";
+import { degradedRetryDelayMs } from "@/lib/degraded-retry";
 import type { ProviderStatusSummary } from "@/lib/provider-status";
 
 /**

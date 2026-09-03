@@ -6,6 +6,12 @@ import {
   notifyHermesModelState,
   onProvidersChanged,
 } from "@/lib/ui-events";
+import {
+  DEGRADED_RETRY_BASE_MS,
+  DEGRADED_RETRY_MAX_MS,
+  DEGRADED_RETRY_ATTEMPTS,
+  degradedRetryDelayMs,
+} from "@/lib/degraded-retry";
 
 // Client view of ONE provider's model list.
 //
@@ -119,19 +125,19 @@ function isPlaceholder(scope: HermesModelScope | null | undefined): boolean {
  * Bounded for the same reason that one is: a box whose dashboard is not coming
  * back must not be polled forever, and while these retries run the surfaces
  * read as LOADING — including the Settings panel's model select, which holds
- * back its own "this list is stale" note until they settle. 1+2+4+8+8 spans
- * ~23 s: twice the measured boot window, and short enough that a box whose
- * dashboard is genuinely gone reaches the honest empty state promptly rather
- * than sitting on a spinner.
+ * back its own "this list is stale" note until they settle. The schedule and
+ * that reasoning now live in `@/lib/degraded-retry`, shared with the two other
+ * surfaces that wait out the same boot window.
  */
-export const DEGRADED_RETRY_BASE_MS = 1_000;
-export const DEGRADED_RETRY_MAX_MS = 8_000;
-export const DEGRADED_RETRY_ATTEMPTS = 5;
-
-/** Delay before retry number `attempt` (0-based). */
-export function degradedRetryDelayMs(attempt: number): number {
-  return Math.min(DEGRADED_RETRY_BASE_MS * 2 ** attempt, DEGRADED_RETRY_MAX_MS);
-}
+// Re-exported so the callers that already import the schedule from this hook
+// keep working; the schedule itself lives in `@/lib/degraded-retry`, which has
+// no React and no imports, so a surface that is not a hook can share it.
+export {
+  DEGRADED_RETRY_BASE_MS,
+  DEGRADED_RETRY_MAX_MS,
+  DEGRADED_RETRY_ATTEMPTS,
+  degradedRetryDelayMs,
+};
 
 export function useHermesModelOptions(provider: string | null): UseHermesModelOptions {
   // One state cell written only from async callbacks — `loading` is DERIVED
