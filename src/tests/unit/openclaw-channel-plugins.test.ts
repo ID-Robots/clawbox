@@ -31,7 +31,7 @@ vi.mock("@/lib/openclaw-config", async () => {
   };
 });
 
-import { readConfig, spawnOpenclawCli } from "@/lib/openclaw-config";
+import { OpenclawSpawnTimeoutError, readConfig, spawnOpenclawCli } from "@/lib/openclaw-config";
 
 const mockSpawn = vi.mocked(spawnOpenclawCli);
 const mockReadConfig = vi.mocked(readConfig);
@@ -208,9 +208,17 @@ describe("ensureChannelPlugin", () => {
   });
 
   it("reports install_timeout distinctly — a slow network is not a broken box", async () => {
+    // The TYPE, not the sentence: `spawnOpenclaw` rejects
+    // OpenclawSpawnTimeoutError when it kills a child at its deadline, and a
+    // plain Error carrying the same words is any other failure. Matching the
+    // message let a reworded timeout downgrade the owner's remediation to
+    // "install failed" — and a message that merely mentioned a timeout upgrade
+    // it the other way.
     mockSpawn
       .mockResolvedValueOnce(pluginsListJson([]))
-      .mockRejectedValueOnce(new Error("/usr/bin/openclaw plugins install timed out after 180000ms"));
+      .mockRejectedValueOnce(
+        new OpenclawSpawnTimeoutError("/usr/bin/openclaw plugins install timed out after 180000ms"),
+      );
 
     expect(await lib.ensureChannelPlugin("discord")).toEqual({
       ok: false,

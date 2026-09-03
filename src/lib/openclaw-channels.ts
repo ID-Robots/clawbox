@@ -32,6 +32,7 @@
 
 import {
   type SpawnOpenclawOptions,
+  OpenclawSpawnTimeoutError,
   openclawIsAbsent,
   readConfig,
   spawnOpenclawCli,
@@ -147,9 +148,9 @@ async function pluginEnabledInConfig(pluginId: string): Promise<boolean> {
   }
 }
 
-/** A timeout from spawnOpenclawCli names itself; nothing else does. */
+/** A spawn killed at its deadline, by type — the message is not the contract. */
 function isTimeout(err: unknown): boolean {
-  return err instanceof Error && /timed out after \d+ms/.test(err.message);
+  return err instanceof OpenclawSpawnTimeoutError;
 }
 
 /**

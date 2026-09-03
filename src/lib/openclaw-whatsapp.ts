@@ -33,7 +33,7 @@
 // device credentials in the plugin's auth dir, not a bot token, so there is no
 // env-backed credential here and nothing for envSecretRef() to mint.
 
-import { spawnOpenclawCli } from "@/lib/openclaw-config";
+import { runOpenclawConfigSet, spawnOpenclawCli } from "@/lib/openclaw-config";
 import { invalidateChannelStatus, readCachedChannelRowResult } from "@/lib/openclaw-channels";
 
 /** OpenClaw's id for this channel — the plugin's, the config key's, the CLI's. */
@@ -476,9 +476,17 @@ export async function readOpenclawWhatsappStatus(): Promise<OpenclawWhatsappStat
   };
 }
 
-/** Turn `channels.whatsapp` on or off, leaving every other key alone. */
+/**
+ * Turn `channels.whatsapp` on or off, leaving every other key alone.
+ *
+ * Through `runOpenclawConfigSet`, not a bare spawn: this is a config WRITE, so
+ * it owes the same conflict retry and the same read-back after a kill as every
+ * other one. On its own spawn the CLI could be SIGKILLed at 45 s having already
+ * written the key, and the owner was told the save failed over a channel that
+ * is now enabled.
+ */
 export async function setOpenclawWhatsappEnabled(enabled: boolean): Promise<void> {
-  await spawnOpenclawCli(["config", "set", "channels.whatsapp.enabled", String(enabled), "--json"], {
+  await runOpenclawConfigSet(["channels.whatsapp.enabled", String(enabled), "--json"], {
     timeoutMs: 45_000,
   });
   // `enabled` is half of what the status reads, so a remembered row is now a

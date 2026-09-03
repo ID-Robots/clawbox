@@ -6,7 +6,7 @@ import fsSync from "fs";
 import path from "path";
 import { execFile, spawn } from "child_process";
 import { randomUUID } from "crypto";
-import { promisify } from "util";
+import { isDeepStrictEqual, promisify } from "util";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 import { readEdition } from "@/lib/edition-source";
@@ -31,6 +31,24 @@ export class OpenclawUnavailableError extends Error {
   constructor(message = "The OpenClaw CLI is not available on this edition.") {
     super(message);
     this.name = "OpenclawUnavailableError";
+  }
+}
+
+/**
+ * The CLI was still running at its deadline and was SIGKILLed.
+ *
+ * A distinct type because it says something the other spawn failures do not:
+ * NOTHING was observed. An exit code is the CLI's own answer — 0 wrote, 1
+ * refused — but a kill leaves the question open, and `openclaw config set`
+ * writes the config early and then spends seconds validating catalogs, so on a
+ * Jetson the value routinely lands inside the window we kill in. Callers that
+ * know what they asked for read the config back rather than guessing (see
+ * {@link runOpenclawConfigSet}).
+ */
+export class OpenclawSpawnTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OpenclawSpawnTimeoutError";
   }
 }
 
@@ -90,15 +108,25 @@ export interface OpenclawConfigSetOptions {
  * This helper retries *only* on that specific error (other failures bubble
  * up immediately) with a short linear backoff, so callers don't need to
  * handle the race individually.
+ *
+ * ONE failure is not simply rethrown: a spawn killed at its deadline. The CLI
+ * writes the config early and then spends seconds validating catalogs, so on a
+ * Jetson the value lands inside the window we kill in — and a SIGKILL carries
+ * no exit code to read. The assignments are looked for in the config on disk,
+ * and only a write this process can SEE there is reported as success; every
+ * other failure, including an unreadable config, still throws. See
+ * {@link configSetLanded}.
  */
 export async function runOpenclawConfigSet(
   args: string[],
   options: OpenclawConfigSetOptions = {},
 ): Promise<void> {
-  await withConfigMutationRetry(
-    (timeoutMs) => spawnOpenclawConfigSet(args, { ...options, timeoutMs }),
-    options,
-    "runOpenclawConfigSet",
+  await runConfigSetVerified([args], () =>
+    withConfigMutationRetry(
+      (timeoutMs) => spawnOpenclawConfigSet(args, { ...options, timeoutMs }),
+      options,
+      "runOpenclawConfigSet",
+    ),
   );
 }
 
@@ -109,6 +137,10 @@ export async function runOpenclawConfigSet(
  * so both forms of the write survive the same race. Any other failure is
  * rethrown on the first try — a schema rejection does not become valid by
  * being repeated.
+ *
+ * Retrying is all this does. A rethrown timeout is then settled by the config
+ * on disk, one level up in {@link runConfigSetVerified}, because a SIGKILL is
+ * the only failure that carries no answer about whether the write happened.
  */
 async function withConfigMutationRetry(
   attemptFn: (timeoutMs: number) => Promise<void>,
@@ -216,11 +248,25 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
     }
 
     const timer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        child.kill("SIGKILL");
-        reject(new Error(`${label} timed out after ${timeoutMs}ms`));
-      }
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      // `kill(2)` returns when the signal is QUEUED, not when the process is
+      // gone, and a `config set` sitting in its final rename can still land the
+      // write. The caller reads the config back to decide whether a killed
+      // write landed, so answering before the child is reaped would read the
+      // file on the wrong side of that rename. Bounded: a process that will not
+      // die must not hold the request open either.
+      const error = new OpenclawSpawnTimeoutError(`${label} timed out after ${timeoutMs}ms`);
+      let answered = false;
+      const answer = () => {
+        if (answered) return;
+        answered = true;
+        clearTimeout(reapTimer);
+        reject(error);
+      };
+      const reapTimer = setTimeout(answer, KILL_REAP_WAIT_MS);
+      child.once("close", answer);
     }, timeoutMs);
 
     child.on("error", (err) => {
@@ -261,6 +307,9 @@ export function spawnOpenclawCli(
 /** Bound on the gateway round trip itself; the spawn budget adds the CLI's own start-up on top. */
 const GATEWAY_RPC_TIMEOUT_MS = 20_000;
 const GATEWAY_RPC_SPAWN_ALLOWANCE_MS = 30_000;
+
+/** How long a SIGKILLed child is given to actually exit before we answer anyway. */
+const KILL_REAP_WAIT_MS = 1_000;
 
 /**
  * One gateway RPC through the CLI: `openclaw gateway call <method> --params
@@ -386,6 +435,149 @@ export function parseConfigSetArgs(args: OpenclawConfigSetArgs): { path: string;
 }
 
 /**
+ * Split a `config set` path into the segments the CLI addresses, or null when
+ * this code cannot say for certain what they are.
+ *
+ * `.` separates, and a bracket-quoted segment is ONE key however many dots it
+ * contains — `agents.defaults.models["openai/gpt-5.5"].agentRuntime.id`, the
+ * Codex runtime arm, is the path that made this necessary. Null for anything
+ * else (an unterminated bracket, an unquoted index, an empty segment), because
+ * the only caller uses this to decide that a write it did not see finish
+ * actually landed, and a path it cannot read must not become that claim.
+ */
+function configPathSegments(configPath: string): string[] | null {
+  const segments: string[] = [];
+  let i = 0;
+  while (i < configPath.length) {
+    if (configPath[i] === "[") {
+      const quote = configPath[i + 1];
+      if (quote !== '"' && quote !== "'") return null;
+      const end = configPath.indexOf(`${quote}]`, i + 2);
+      if (end < 0) return null;
+      const segment = configPath.slice(i + 2, end);
+      // The CLI builds these with JSON.stringify, so a quoted segment can carry
+      // escapes; this reader does not unescape, and a segment it would match
+      // against the wrong key must be a null rather than a guess.
+      if (segment.includes("\\")) return null;
+      segments.push(segment);
+      i = end + 2;
+    } else {
+      const rest = configPath.slice(i);
+      const dot = rest.indexOf(".");
+      const bracket = rest.indexOf("[");
+      const stops = [dot, bracket].filter((n) => n >= 0);
+      const end = i + (stops.length ? Math.min(...stops) : rest.length);
+      if (end === i) return null;
+      segments.push(configPath.slice(i, end));
+      i = end;
+    }
+    if (configPath[i] === ".") {
+      i += 1;
+      if (i === configPath.length) return null; // trailing separator
+    } else if (i < configPath.length && configPath[i] !== "[") {
+      return null;
+    }
+  }
+  return segments.length > 0 ? segments : null;
+}
+
+/** The value at a dotted config path, or `undefined` when the path is absent. */
+function valueAtConfigPath(config: unknown, segments: readonly string[]): unknown {
+  let current: unknown = config;
+  for (const segment of segments) {
+    if (!isPlainObject(current)) return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+/**
+ * Did the assignments of a killed `config set` actually reach the file?
+ *
+ * Measured on the OpenClaw box (TASK-654): `POST /setup-api/chat/model`
+ * answered 500 with `openclaw config set agents.defaults.model.primary
+ * <redacted> timed out after 30000ms` — and `agents.defaults.model.primary`
+ * was the new model. The owner was told the switch failed over a switch that
+ * had happened.
+ *
+ * The read is STRICT and every failure answers false: an EACCES or a file
+ * caught half-written proves nothing, and `readConfig`'s `{}` for those would
+ * be indistinguishable from a config that genuinely lacks the value. False
+ * here means the caller's original timeout is rethrown, which is the safe
+ * direction — a real failure stays a failure, and only a write this process
+ * can SEE on disk is forgiven.
+ */
+async function configSetLanded(batch: readonly OpenclawConfigSetArgs[]): Promise<boolean> {
+  let config: OpenClawConfig;
+  try {
+    config = await readConfigStrict();
+  } catch {
+    return false;
+  }
+  for (const args of batch) {
+    let entry: { path: string; value: unknown };
+    try {
+      entry = parseConfigSetArgs(args);
+    } catch {
+      return false;
+    }
+    const segments = configPathSegments(entry.path);
+    if (!segments) return false;
+    if (!isDeepStrictEqual(valueAtConfigPath(config, segments), entry.value)) return false;
+  }
+  return true;
+}
+
+/**
+ * Run a `config set` and, if it is killed at its deadline, let the config on
+ * disk settle whether it landed.
+ *
+ * A SIGKILL is the one failure that carries no answer, and this is the only
+ * place that can ask the question cheaply: the CLI has already been paid for,
+ * and `readConfigStrict` is a file read. Every other failure — an exit code, a
+ * spawn error, `OpenclawUnavailableError` — is the CLI's own verdict and is
+ * rethrown untouched.
+ */
+async function runConfigSetVerified(
+  batch: readonly OpenclawConfigSetArgs[],
+  attempt: () => Promise<void>,
+): Promise<void> {
+  try {
+    await attempt();
+  } catch (err) {
+    if (!(err instanceof OpenclawSpawnTimeoutError)) throw err;
+    if (!(await configSetLanded(batch))) throw err;
+    console.warn(
+      `[openclaw-config] ${err.message}; every assignment is on disk, so the write landed — reporting success`,
+    );
+  }
+}
+
+/**
+ * The unset half of {@link configSetLanded}: is the path gone from the file?
+ *
+ * Same deadline, same kill, same false failure — a removal reported as a
+ * failure sends the caller to repair what is already repaired (the configure
+ * route answers 502 and tells the owner to run the command by hand). An
+ * unreadable config still answers false, for the reason given there.
+ */
+async function configUnsetLanded(configPath: string): Promise<boolean> {
+  const segments = configPathSegments(configPath);
+  if (!segments) return false;
+  // An ABSENT config answers `{}` from readConfigStrict, and "the path is not
+  // in `{}`" is not evidence of a removal — it is the one shape where the
+  // "every failure answers false" rule would otherwise fail OPEN. The callers
+  // only unset a path they have just seen, so a file that is now missing is a
+  // state to report, not to bless.
+  if (!fsSync.existsSync(CONFIG_PATH)) return false;
+  try {
+    return valueAtConfigPath(await readConfigStrict(), segments) === undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Argv for a batched `config set`, with every *value* elided, for use in a log
  * line — the batch counterpart of {@link configSetLabelArgs}.
  *
@@ -435,18 +627,20 @@ export async function runOpenclawConfigSetBatch(
     return;
   }
   const payload = JSON.stringify(batch.map(parseConfigSetArgs));
-  await withConfigMutationRetry(
-    (timeoutMs) =>
-      spawnOpenclaw(["config", "set", "--batch-json", payload], {
-        labelArgs: configSetBatchLabelArgs(batch),
-        timeoutMs,
-        uid: options.uid,
-        gid: options.gid,
-        cwd: options.cwd,
-        env: options.env,
-      }).then(() => undefined),
-    options,
-    "runOpenclawConfigSetBatch",
+  await runConfigSetVerified(batch, () =>
+    withConfigMutationRetry(
+      (timeoutMs) =>
+        spawnOpenclaw(["config", "set", "--batch-json", payload], {
+          labelArgs: configSetBatchLabelArgs(batch),
+          timeoutMs,
+          uid: options.uid,
+          gid: options.gid,
+          cwd: options.cwd,
+          env: options.env,
+        }).then(() => undefined),
+      options,
+      "runOpenclawConfigSetBatch",
+    ),
   );
 }
 
@@ -464,23 +658,36 @@ export async function runOpenclawConfigSetBatch(
  * CLI exits 1 with "Config path not found: <path>. Nothing was changed." when
  * the path is absent. Callers must check the config first and only unset a path
  * that is actually there, so a real removal failure stays loud.
+ *
+ * Like {@link runOpenclawConfigSet}, a spawn killed at its deadline is settled
+ * by the file rather than assumed failed: the removal is reported as done only
+ * when the path is provably gone from a config this process could read. See
+ * {@link configUnsetLanded}.
  */
 export async function runOpenclawConfigUnset(
   configPath: string,
   options: OpenclawConfigSetOptions = {},
 ): Promise<void> {
-  await withConfigMutationRetry(
-    (timeoutMs) =>
-      spawnOpenclaw(["config", "unset", configPath], {
-        timeoutMs,
-        uid: options.uid,
-        gid: options.gid,
-        cwd: options.cwd,
-        env: options.env,
-      }).then(() => undefined),
-    options,
-    "runOpenclawConfigUnset",
-  );
+  try {
+    await withConfigMutationRetry(
+      (timeoutMs) =>
+        spawnOpenclaw(["config", "unset", configPath], {
+          timeoutMs,
+          uid: options.uid,
+          gid: options.gid,
+          cwd: options.cwd,
+          env: options.env,
+        }).then(() => undefined),
+      options,
+      "runOpenclawConfigUnset",
+    );
+  } catch (err) {
+    if (!(err instanceof OpenclawSpawnTimeoutError)) throw err;
+    if (!(await configUnsetLanded(configPath))) throw err;
+    console.warn(
+      `[openclaw-config] ${err.message}; the path is gone from the config, so the removal landed — reporting success`,
+    );
+  }
 }
 
 export const OPENCLAW_HOME = process.env.CLAWBOX_OPENCLAW_HOME
