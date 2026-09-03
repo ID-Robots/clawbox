@@ -234,13 +234,19 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
         })
         .catch((err) => {
           if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) return;
+          // Cleared here too, and BEFORE the retry: only an abort preserves the
+          // intent (see above). An HTTP error, a dropped connection and a
+          // failed parse all leave this branch with retries pending, and a
+          // provider switch inside that window would re-run the effect and send
+          // `refresh=1` for a provider the owner never clicked Refresh on — the
+          // same device-wide /v1/models sweep, through a third door.
+          pendingRefreshRef.current = false;
           // A REJECTED request is the same news as a placeholder, and it is the
           // shape the reported incident actually took: the box restarted three
           // times inside four minutes, so the reads in that window were dropped
           // connections and 502s, not tidy degraded 200s. Retrying only the
           // polite failure would have left the observed case unfixed.
           if (retryLater()) return;
-          pendingRefreshRef.current = false;
           setLoaded({ provider, scope: emptyScope(provider), error: "Couldn't load models" });
         });
     };
