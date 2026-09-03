@@ -15,7 +15,8 @@ import { describe, expect, it } from "vitest";
  * restart cancelled it (`operator_approval_cancelled_gateway_restart`), and
  * the owner was told the restart was waiting for an approval they had nowhere
  * to give. Until that card exists (follow-up under TASK-604), the guide has to
- * name the owner's real path — Settings -> System — and forbid the queue.
+ * forbid the queue and name the owner's real path — the power menu in the
+ * desktop tray, NOT Settings -> System, which carries no power control at all.
  *
  * Asserted against the section, not the whole file, so a failure prints the
  * paragraph that is wrong rather than the entire guide.
@@ -50,7 +51,7 @@ describe("the ClawBox workspace guide (CLAWBOX.md)", () => {
     expect(section).toContain("system_power");
   });
 
-  it("names controls that exist: the tray power menu, and Settings -> System for what is there", () => {
+  it("gives the owner's control as the tray power menu, and Settings -> System only for what is on it", () => {
     const section = systemActionsSection();
     // Settings -> System carries the harness picker, the performance mode, the
     // read-only stats and the password — no power control (SettingsApp.tsx).
@@ -59,6 +60,42 @@ describe("the ClawBox workspace guide (CLAWBOX.md)", () => {
     expect(section).toMatch(/Settings\s*→\s*System/);
     // And it must tell the agent to SAY where the control is, not just decline.
     expect(section).toMatch(/say that|answer with|tell (?:the owner|them)|point (?:the owner|them)/i);
+  });
+
+  it("names the screen each control is actually on, not the one next to it", () => {
+    const section = systemActionsSection();
+    // Measured in src/components/SettingsApp.tsx at this head:
+    //
+    //   - the EDITABLE device name is the "Local URL (mDNS hostname)" card at
+    //     :3425, inside `activeSection === "wifi"` (:3241-3631). That nav entry
+    //     is `{ id: "wifi", ..., labelKey: "settings.network" }` (:255) and
+    //     "settings.network" is "Network" (src/lib/translations.ts:302). Saving
+    //     it POSTs /setup-api/system/power (:1090) — hence "reboots".
+    //   - Settings -> About (`activeSection === "about"`, :5638) holds the
+    //     version card, the docs/support links, the Beta toggle, the System
+    //     Update tile and Factory reset. Grepping :5638-5800 for
+    //     hostname|rename|deviceName returns nothing.
+    //
+    // Sending the owner to About to rename the box is the identical
+    // wrong-screen failure this section was written to remove, one clause later.
+    expect(section).toMatch(/Settings\s*→\s*Network/);
+    const deviceNameClauses = section
+      .split(/(?<=[.;])\s+/)
+      .filter((clause) => /device name|hostname|Local URL/i.test(clause));
+    expect(deviceNameClauses.length).toBeGreaterThan(0);
+    for (const clause of deviceNameClauses) {
+      expect(clause).toMatch(/Settings\s*→\s*Network/);
+      expect(clause).not.toMatch(/Settings\s*→\s*About/);
+    }
+  });
+
+  it("names the restart-on-save tabs by their labels", () => {
+    const section = systemActionsSection();
+    // There is no tab labelled "AI": nav id "ai" carries labelKey
+    // "settings.providers" (SettingsApp.tsx:245) = "Providers"
+    // (src/lib/desktop-translations.ts:411). Voice and Channels are correct.
+    expect(section).toMatch(/Settings\s*→\s*Providers/);
+    expect(section).not.toMatch(/Settings\s*→\s*AI\b/);
   });
 
   it("forbids queueing an operator-approval proposal, and names the way to answer a parked one", () => {

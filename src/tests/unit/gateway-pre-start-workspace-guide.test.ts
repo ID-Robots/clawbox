@@ -54,12 +54,18 @@ let guide: string;
  * `template` overrides the guide the block copies from, for the case where the
  * template no longer carries the section the marker names.
  */
-function run(template = path.join(process.cwd(), "config/clawbox-workspace-guide.md")): { stdout: string; stderr: string } {
+function runRaw(template = TEMPLATE): { status: number | null; stdout: string; stderr: string } {
   const root = mkdtempSync(path.join(dir, "root-"));
   mkdirSync(path.join(root, "config"), { recursive: true });
   writeFileSync(path.join(root, "config/clawbox-workspace-guide.md"), readFileSync(template, "utf-8"));
   const script = `set -euo pipefail\nCLAWBOX_ROOT=${JSON.stringify(root)}\nCLAWBOX_WORKSPACE=${JSON.stringify(workspace)}\n${seedingBlock()}`;
   const res = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+  return { status: res.status, stdout: res.stdout, stderr: res.stderr };
+}
+
+/** The same run, asserting the exit code the systemd unit demands. */
+function run(template = TEMPLATE): { stdout: string; stderr: string } {
+  const res = runRaw(template);
   if (res.status !== 0) {
     throw new Error(`pre-start block exited ${res.status}\n${res.stdout}\n${res.stderr}`);
   }
@@ -72,7 +78,16 @@ beforeEach(() => {
   mkdirSync(workspace, { recursive: true });
   guide = path.join(workspace, "CLAWBOX.md");
 });
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
+afterEach(() => {
+  // A test that made the workspace unwritable has to hand it back, or the
+  // recursive remove below fails and every later test inherits the leftovers.
+  try {
+    chmodSync(workspace, 0o755);
+  } catch {
+    /* the test may have removed it */
+  }
+  rmSync(dir, { recursive: true, force: true });
+});
 
 describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
   it("seeds the whole template when the workspace has no guide", () => {
@@ -80,6 +95,41 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
 
     expect(stdout).toContain("Seeded CLAWBOX.md");
     expect(readFileSync(guide, "utf-8")).toBe(readFileSync(TEMPLATE, "utf-8"));
+  });
+
+  // The seed is the FIRST-BOOT and post-factory-reset path, and its write was
+  // the one left bare in the block. `config/clawbox-gateway.service:20` is
+  // `ExecStartPre=...gateway-pre-start.sh` with no leading `-`, so a non-zero
+  // exit here fails the unit; with Restart=always, RestartSec=5 and
+  // StartLimitBurst=20 / StartLimitIntervalSec=3600 it burns twenty starts in
+  // ~100 s and then sits failed for the rest of the hour. The gateway is down —
+  // over an advisory text file.
+  it.skipIf(process.getuid?.() === 0)("warns and lets the gateway start when the workspace cannot be seeded", () => {
+    // A full rootfs (ENOSPC on a Jetson eMMC), a filesystem remounted read-only
+    // after errors, or the documented "delete CLAWBOX.md to re-seed" path on
+    // such a box all arrive here: no guide yet, and the write fails.
+    chmodSync(workspace, 0o555);
+
+    const res = runRaw();
+
+    expect(res.status).toBe(0);
+    expect(res.stdout).not.toContain("Seeded CLAWBOX.md");
+    expect(res.stderr).toContain("could not seed CLAWBOX.md");
+  });
+
+  it("starts no statement in the seeding block with a bare copy, whatever the uid", () => {
+    // The case above needs a `skipIf`: root bypasses directory mode bits, and no
+    // permission trick is uid-independent here — GNU `install` unlinks and
+    // recreates its destination, so a read-only or dangling destination does not
+    // fail either. This one is structural, so it still holds in a root container:
+    // a write that opens a statement runs with `set -e` armed, and its failure is
+    // the whole unit's failure. Inside an `if`, `set -e` is suspended.
+    const bareWrites = seedingBlock()
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /^(install|cp|mv|tee)\b/.test(line));
+
+    expect(bareWrites).toEqual([]);
   });
 
   it("appends the system-actions section to a guide written before it existed", () => {
@@ -125,6 +175,10 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     // The template's next heading must not have been dragged along.
     expect(appended).not.toContain("## Coding agent");
     expect(appended).not.toContain("## Remember the user's name");
+    // Nor the `---` rule that closes the section in the template: the append
+    // supplies its own leading separator, so carrying that one too ends the
+    // topped-up guide on a dangling horizontal rule.
+    expect(appended.trimEnd().endsWith("---")).toBe(false);
   });
 
   it("warns instead of appending an empty section when the template loses the heading", () => {
@@ -267,6 +321,27 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     expect(after).toContain("CLAWBOX.md");
     expect(after).toMatch(/system actions are the owner/i);
     expect(after).toContain(RULE);
+  });
+
+  it("appends the pointer even when the rule already put the literal CLAWBOX.md in the file", () => {
+    // The rule's own body ends "`CLAWBOX.md` has the long form", so a pointer
+    // guarded on that bare literal is satisfied by the rule text. Both blocks
+    // land today only because the pointer happens to be written first in the
+    // script: any reorder, or moving the rule into a helper that runs earlier,
+    // silently costs a fresh box its `## ClawBox integration` pointer forever —
+    // both markers "satisfied", no warning, suite still green. The guard is on
+    // the pointer's own heading instead, which nothing else writes.
+    const ruleAlreadyThere = `# AGENTS\n\nBe helpful.\n\n${RULE}\n\nNever queue an \`operator_approval\` proposal. \`CLAWBOX.md\` has the long form.\n`;
+    writeFileSync(agents, ruleAlreadyThere);
+
+    const { stdout } = run();
+
+    expect(stdout).toContain("Appended CLAWBOX.md reference to AGENTS.md");
+    const after = readFileSync(agents, "utf-8");
+    expect(after.startsWith(ruleAlreadyThere)).toBe(true);
+    expect(after).toContain("## ClawBox integration");
+    // ...and the rule itself is not appended a second time.
+    expect(after.split(RULE)).toHaveLength(2);
   });
 
   it.skipIf(process.getuid?.() === 0)("does not stop the gateway when AGENTS.md cannot be written", () => {
