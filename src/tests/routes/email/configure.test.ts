@@ -257,7 +257,7 @@ describe("POST /setup-api/email/configure — Hermes", () => {
 
 describe("DELETE /setup-api/email/configure", () => {
   it("clears the stored credentials", async () => {
-    const res = await DELETE(new Request("http://localhost/setup-api/email/configure", { method: "DELETE" }));
+    const res = await DELETE();
     expect(res.status).toBe(200);
     expect(mockSetMany).toHaveBeenCalledTimes(1);
     const cleared = mockSetMany.mock.calls[0][0];
@@ -268,13 +268,13 @@ describe("DELETE /setup-api/email/configure", () => {
 
   it("also tears down the Hermes adapter", async () => {
     mockHarness.mockResolvedValue("hermes");
-    await DELETE(new Request("http://localhost/setup-api/email/configure", { method: "DELETE" }));
+    await DELETE();
     expect(vi.mocked(clearHermesEmail)).toHaveBeenCalledTimes(1);
   });
 
   it("restarts a running gateway on disconnect without installing one", async () => {
     mockHarness.mockResolvedValue("hermes");
-    await DELETE(new Request("http://localhost/setup-api/email/configure", { method: "DELETE" }));
+    await DELETE();
     expect(mockStopPolling).toHaveBeenCalledTimes(1);
     expect(mockRestart).not.toHaveBeenCalled();
   });
@@ -399,13 +399,13 @@ describe("email/configure — MCP tool refresh", () => {
 
   it("reloads on disconnect, so tools that can only 409 stop being offered", async () => {
     storedAccount("read");
-    const res = await DELETE(new Request("http://localhost/setup-api/email/configure", { method: "DELETE" }));
+    const res = await DELETE();
     expect(res.status).toBe(200);
     expect(mockDashboardRpc).toHaveBeenCalledWith("reload.mcp", { confirm: true });
   });
 
   it("does NOT reload when disconnecting a box that had no account", async () => {
-    const res = await DELETE(new Request("http://localhost/setup-api/email/configure", { method: "DELETE" }));
+    const res = await DELETE();
     expect(res.status).toBe(200);
     expect(mockDashboardRpc).not.toHaveBeenCalled();
   });
