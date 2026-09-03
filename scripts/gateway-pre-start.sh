@@ -57,29 +57,59 @@ fi
 # v2 also REFUSES a config carrying the legacy keys once its own loader
 # migration has produced the new ones, so writing the old names against a
 # v2 gateway does not degrade politely — it kept this gateway from ever
-# reporting ready. Decided from the pinned target (the fleet's source of
-# truth), falling back to the installed binary when the pin is unknown.
-# The INSTALLED binary is the authority: it is the process that will parse
-# what this script writes. A partially failed update (repo synced, npm
-# install not yet done) leaves pin=2026.8.1 with a 2026.7 binary — deciding
-# from the pin there would write v2 keys a v1 gateway refuses AND delete the
-# controlUi auth switches v1 still needs. The pin only fills in when the
-# binary cannot be asked.
+# reporting ready. The INSTALLED core is the authority and the ONLY source:
+# it is the process that will parse what this script writes. The pinned
+# target is deliberately NOT a fallback — a partially failed update (repo
+# synced, npm install not yet done) leaves pin=2026.8.1 with a 2026.7 core,
+# and that is exactly the state in which the core cannot be read, so a pin
+# fallback would fire precisely when it is wrong: v2 keys a v1 gateway
+# refuses, and the controlUi auth switches v1 still needs deleted.
 #
-# `|| true` and an explicit empty result. This pipeline FAILS whenever the CLI
-# cannot answer -- `grep -oE` exits 1 on no match, a crashed binary or a node
-# engine mismatch exits non-zero, and `pipefail` carries either into the
-# assignment, which under `set -e` aborted the WHOLE pre-start. This script is
-# the gateway unit's ExecStartPre, so such a box got no gateway and no chat at
-# all, with the only trace in the unit's failure -- while the paragraph above
-# was already written as though the empty result it now really produces was
-# what happened. A missing binary is handled a few lines up (exit 0). TASK-657.
-CLAWBOX_OPENCLAW_EFFECTIVE="$("$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)"
+# Read from the core's own package.json -- the file the binary IS -- rather than
+# by RUNNING it. Two reasons, and the second is TASK-657:
+#
+#   1. `openclaw --version` costs ~10 s on a Jetson (measured on a shipped Orin:
+#      7904 ms and 8044 ms; the package.json read is 53 ms) and this is a
+#      BLOCKING ExecStartPre. Both siblings that ask this same question already
+#      refuse the CLI for exactly that reason and say so in writing --
+#      scripts/ensure-local-embeddings.sh and src/lib/memory-shard.ts.
+#   2. The old pipeline FAILED whenever the CLI could not answer: `grep -oE`
+#      exits 1 on no match, a crashed binary or a node engine mismatch exits
+#      non-zero, and `pipefail` carried either into the assignment, which under
+#      `set -e` aborted the WHOLE pre-start. That box got no gateway and no chat
+#      at all, with the only trace in the unit's failure -- while the paragraph
+#      above was already written as though an empty result was what happened.
+CLAWBOX_OPENCLAW_PKG="$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/package.json"
+CLAWBOX_OPENCLAW_EFFECTIVE="$(python3 - "$CLAWBOX_OPENCLAW_PKG" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    v = json.load(open(sys.argv[1])).get("version")
+except Exception:
+    v = None
+print(v if isinstance(v, str) else "")
+PY
+)"
+# Second source, and time-boxed. `|| true` only rescues a CLI that RETURNS: a
+# wedged `--version` (an import that never resolves, an fs stall, a SQLite lock)
+# would hold ExecStartPre until TimeoutStartSec killed the unit, and
+# Restart=always would then spend StartLimitBurst on a box that never comes up.
 if [ -z "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
-  # Said out loud: the fallback changes which config dialect this script writes,
-  # and a box guessing its own core's generation is worth a line in the journal.
-  echo "  WARN: $OPENCLAW_BIN did not print a version — assuming the pinned target ${OPENCLAW_TARGET:-<unknown>}" >&2
-  CLAWBOX_OPENCLAW_EFFECTIVE="${OPENCLAW_TARGET}"
+  CLAWBOX_OPENCLAW_EFFECTIVE="$(timeout 20 "$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)"
+fi
+# And if the installed core cannot be identified at all, WRITE NOTHING. The pin
+# is deliberately not a fallback here: a partially failed update (repo synced,
+# npm install unfinished) is precisely the state in which the core cannot answer,
+# and it is also the state in which the pin is ahead of the binary -- so guessing
+# from it would write v2 keys a v1 gateway refuses AND permanently delete
+# commands.ownerDisplay, gateway.tailscale.resetOnExit and
+# agents.defaults.compaction.reserveTokensFloor, which nothing on the boot path
+# re-adds. The config on disk booted this box before; leaving it alone is the
+# only option here that cannot make a working box stop working. A box with no
+# core at all already exited 0 a few lines above.
+if [ -z "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
+  echo "  WARN: cannot tell which OpenClaw generation is installed ($CLAWBOX_OPENCLAW_PKG unreadable and $OPENCLAW_BIN did not answer)." >&2
+  echo "  WARN: leaving openclaw.json exactly as it is and starting the gateway on it." >&2
+  exit 0
 fi
 # An explicit CLAWBOX_OPENCLAW_V2 in the environment wins — the unit tests
 # pin BOTH generations of this script against fixture configs, and they must
@@ -105,6 +135,12 @@ if [ -f "$HOSTNAME_ENV" ]; then
   _h="${_h%\'}"; _h="${_h#\'}"
   if [[ "$_h" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
     CONFIGURED_HOSTNAME="$_h"
+  else
+    # Not silent: this name feeds gateway.controlUi.allowedOrigins below, so a
+    # boot that falls back here rebuilds that list around "clawbox.local" and
+    # drops the configured one — which is the "origin not allowed" failure the
+    # comment further down exists to prevent.
+    echo "  WARN: no usable HOSTNAME in $HOSTNAME_ENV — using the default mDNS name \"clawbox\"" >&2
   fi
 fi
 
@@ -2156,18 +2192,27 @@ fi
 # if it comes up before clawbox-setup on a fresh boot.
 MCP_TOKEN_FILE="$CLAWBOX_ROOT/data/.mcp-token"
 if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$(wc -c < "$MCP_TOKEN_FILE" 2>/dev/null || echo 0)" -lt 32 ]; then
-  mkdir -p "$(dirname "$MCP_TOKEN_FILE")"
+  # Every write here is guarded so a full or read-only filesystem cannot abort
+  # the boot. Nothing is lost by falling through: the token's readability and
+  # length are checked below, and that check is the deliberate hard failure.
+  mkdir -p "$(dirname "$MCP_TOKEN_FILE")" 2>/dev/null || true
   if command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex 32 > "$MCP_TOKEN_FILE"
+    openssl rand -hex 32 > "$MCP_TOKEN_FILE" || true
   else
-    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MCP_TOKEN_FILE"
+    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MCP_TOKEN_FILE" || true
   fi
 fi
 # Re-harden mode unconditionally: chmod only ran on the regeneration
 # path before, so a file with drifted permissions (manual edit, upgrade
 # from a pre-0600 build) would keep being trusted as-is. The bearer
 # is the sole /setup-api/* credential.
-chmod 600 "$MCP_TOKEN_FILE"
+# Guarded: this runs on EVERY boot, and the file is also seeded by
+# production-server.js. One created under another uid (a root update step, a
+# manual repair) makes chmod return EPERM, and an unguarded failure here cost
+# the box its gateway on every boot from then on. The token's own state is
+# checked below, which is where a real problem is reported. TASK-657.
+chmod 600 "$MCP_TOKEN_FILE" 2>/dev/null \
+  || echo "  WARN: could not re-harden $MCP_TOKEN_FILE to 0600" >&2
 
 # Always reconcile the MCP server registration in openclaw.json with
 # the current token. Done in Python so the atomic-rename pattern used

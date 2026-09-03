@@ -6,25 +6,40 @@ import path from "node:path";
 
 /**
  * `scripts/gateway-pre-start.sh` runs under `set -euo pipefail` as the
- * gateway unit's `ExecStartPre`. Its generation probe is
+ * gateway unit's `ExecStartPre`. Its generation probe was
  *
  *     CLAWBOX_OPENCLAW_EFFECTIVE="$("$OPENCLAW_BIN" --version 2>/dev/null \
  *       | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1)"
  *
- * and the comment beneath it assumes an empty result when the CLI cannot
- * answer ("The pin only fills in when the binary cannot be asked"). It does not
- * get one. `grep -oE` exits 1 when it matches nothing, `pipefail` carries that
- * to the pipeline, and an assignment whose command substitution failed aborts
- * the script under `set -e`. A box whose `openclaw` binary exists but cannot
- * print its version — a crash, a node engine mismatch, a hang the CLI answers
- * with a non-zero status, a banner the regex does not match — therefore gets
- * NO gateway and no chat at all, with the only trace in the unit's
- * ExecStartPre failure (TASK-657). A missing binary is already handled: the
- * script exits 0 a few lines above.
+ * and the comment beneath it assumed an empty result when the CLI cannot
+ * answer. It did not get one. `grep -oE` exits 1 when it matches nothing,
+ * `pipefail` carries that to the pipeline, and an assignment whose command
+ * substitution failed aborts the script under `set -e`. A box whose `openclaw`
+ * binary exists but cannot print its version — a crash, a node engine
+ * mismatch, a banner the regex does not match — therefore got NO gateway and
+ * no chat at all, with the only trace in the unit's ExecStartPre failure
+ * (TASK-657). A missing binary is already handled: the script exits 0 a few
+ * lines above.
+ *
+ * The generation now comes from the installed core's own `package.json` — the
+ * file the binary IS — with a time-boxed `--version` behind it. That is the
+ * source `scripts/ensure-local-embeddings.sh` and `src/lib/memory-shard.ts`
+ * already use, in both cases with a written "never `openclaw --version`, it
+ * costs ~10 s on a Jetson" rationale; measured on a shipped Orin, the CLI takes
+ * 7.9 s and the manifest 53 ms, inside a BLOCKING ExecStartPre.
+ *
+ * And when the core cannot be identified at all, the script writes NOTHING and
+ * boots on the config already on disk. The pin is deliberately not a fallback:
+ * a partially failed update is exactly the state where the core cannot answer
+ * AND the pin is ahead of it, so a pin fallback would fire precisely when it is
+ * wrong — writing v2 keys a v1 gateway refuses and permanently deleting
+ * `commands.ownerDisplay`, `gateway.tailscale.resetOnExit` and
+ * `agents.defaults.compaction.reserveTokensFloor`, which nothing on the boot
+ * path re-adds.
  *
  * These tests EXECUTE the shipped blocks under `set -euo pipefail` against
- * stubs. The rule they pin is the one the boot path needs: every probe here
- * warns and carries on with its stated fallback, and none of them can take the
+ * stubs. The rule they pin is the one the boot path needs: every read here
+ * either resolves, or says so and carries on, and none of them can take the
  * gateway down.
  */
 
@@ -81,10 +96,24 @@ interface Probe {
  * `cli` is the stub's body. `pin` is the contents of the pin file, or null for
  * no pin file at all; `pinUnreadable` makes the file exist but deny reads.
  */
-function probe(opts: { cli: string; pin?: string | null; pinUnreadable?: boolean }): Probe {
-  const bin = path.join(root, "openclaw");
+function probe(opts: {
+  cli: string;
+  pin?: string | null;
+  pinUnreadable?: boolean;
+  /** The version in the installed core's package.json, or null for no manifest. */
+  pkg?: string | null;
+}): Probe {
+  // The binary and its manifest, laid out the way npm does it: <prefix>/bin/openclaw
+  // beside <prefix>/lib/node_modules/openclaw/package.json.
+  const bin = path.join(root, "bin", "openclaw");
+  mkdirSync(path.dirname(bin), { recursive: true });
   writeFileSync(bin, `#!/usr/bin/env bash\n${opts.cli}\n`);
   chmodSync(bin, 0o755);
+  if (opts.pkg !== null && opts.pkg !== undefined) {
+    const pkgDir = path.join(root, "lib", "node_modules", "openclaw");
+    mkdirSync(pkgDir, { recursive: true });
+    writeFileSync(path.join(pkgDir, "package.json"), JSON.stringify({ version: opts.pkg }));
+  }
   const pinFile = path.join(root, "pin.txt");
   if (opts.pin !== null) {
     writeFileSync(pinFile, opts.pin ?? "2026.8.1\n");
@@ -98,6 +127,7 @@ function probe(opts: { cli: string; pin?: string | null; pinUnreadable?: boolean
       block('OPENCLAW_TARGET=""', "export CLAWBOX_OPENCLAW_V2"),
       'echo "EFFECTIVE=${CLAWBOX_OPENCLAW_EFFECTIVE}"',
       'echo "V2=${CLAWBOX_OPENCLAW_V2}"',
+      'echo "REACHED_END=1"',
     ].join("\n"),
   );
   return {
@@ -109,17 +139,32 @@ function probe(opts: { cli: string; pin?: string | null; pinUnreadable?: boolean
 }
 
 describe.runIf(canRun)("gateway-pre-start's OpenClaw generation probe", () => {
-  it("reads the version the installed binary prints", () => {
-    const r = probe({ cli: 'echo "openclaw 2026.8.1"' });
+  it("reads the installed core's own manifest, without running it", () => {
+    // ~10 s on a Jetson vs 53 ms for the manifest, in a BLOCKING ExecStartPre.
+    const r = probe({ cli: 'echo "openclaw 2026.9.9"; echo RAN >&2', pkg: "2026.8.1" });
+    expect(r.status).toBe(0);
+    expect(r.effective).toBe("2026.8.1");
+    expect(r.v2).toBe("1");
+    expect(r.out, "the CLI was run even though the manifest answered").not.toContain("RAN");
+  });
+
+  it("asks the binary when there is no manifest to read", () => {
+    const r = probe({ cli: 'echo "openclaw 2026.8.1"', pkg: null });
     expect(r.status).toBe(0);
     expect(r.effective).toBe("2026.8.1");
     expect(r.v2).toBe("1");
   });
 
-  it("still calls a v1 binary v1, whatever the pin says", () => {
-    // The comment's whole point: the INSTALLED binary is the authority, because
-    // it is the process that parses what this script writes.
-    const r = probe({ cli: 'echo "openclaw 2026.7.4"', pin: "2026.8.1\n" });
+  it("time-boxes that call, so a wedged CLI cannot hold the boot", () => {
+    expect(block('OPENCLAW_TARGET=""', "export CLAWBOX_OPENCLAW_V2")).toMatch(
+      /timeout \d+ "\$OPENCLAW_BIN" --version/,
+    );
+  });
+
+  it("still calls a v1 core v1, whatever the pin says", () => {
+    // The INSTALLED core is the authority, because it is the process that
+    // parses what this script writes.
+    const r = probe({ cli: "exit 1", pkg: "2026.7.4", pin: "2026.8.1\n" });
     expect(r.status).toBe(0);
     expect(r.effective).toBe("2026.7.4");
     expect(r.v2).toBe("0");
@@ -131,32 +176,34 @@ describe.runIf(canRun)("gateway-pre-start's OpenClaw generation probe", () => {
     ["prints a banner the regex does not match", 'echo "openclaw (development build)"'],
     ["prints nothing at all and succeeds", "exit 0"],
   ] as const) {
-    it(`falls back to the pin when the CLI ${name}, instead of taking the gateway down`, () => {
-      // Today: the pipeline fails, `set -e` aborts the whole pre-start, and the
-      // unit never starts the gateway.
-      const r = probe({ cli, pin: "2026.8.1\n" });
+    it(`reads the manifest when the CLI ${name}, instead of taking the gateway down`, () => {
+      // Before TASK-657: the pipeline failed, `set -e` aborted the whole
+      // pre-start, and the unit never started the gateway.
+      const r = probe({ cli, pkg: "2026.8.1", pin: "2026.7.0\n" });
       expect(r.status, `the pre-start aborted:\n${r.out}`).toBe(0);
       expect(r.effective).toBe("2026.8.1");
       expect(r.v2).toBe("1");
-      // Silence is what made this invisible for a release: the box booted with
-      // no gateway and nothing said why.
-      expect(r.out).toMatch(/WARN/);
+      expect(r.out).toContain("REACHED_END=1");
     });
   }
 
-  it("carries on with no version at all when there is no pin either", () => {
-    // Nothing can be inferred here, and the legacy names are the safe default —
-    // but the gateway must still start.
-    const r = probe({ cli: "exit 1", pin: null });
-    expect(r.status).toBe(0);
-    expect(r.effective).toBe("");
-    expect(r.v2).toBe("0");
+  it("writes NOTHING when the installed core cannot be identified at all", () => {
+    // The pin is deliberately not a fallback: a partially failed update is
+    // exactly the state where the core cannot answer AND the pin is ahead of
+    // it, so guessing from it would write v2 keys a v1 gateway refuses and
+    // permanently delete keys nothing on the boot path re-adds. Boot on the
+    // config that already worked.
+    const r = probe({ cli: "exit 1", pkg: null, pin: "2026.8.1\n" });
+    expect(r.status, `the pre-start aborted:\n${r.out}`).toBe(0);
+    expect(r.out, "it decided a generation it could not know").not.toContain("REACHED_END=1");
+    expect(r.out).toMatch(/cannot tell which OpenClaw generation/);
+    expect(r.out).toMatch(/leaving openclaw.json exactly as it is/);
   });
 
   it("carries on when the pin file exists but cannot be read", () => {
     // Same class, same script, one screen up: `head` on an unreadable file
     // exits non-zero and pipefail carries it into the assignment.
-    const r = probe({ cli: 'echo "openclaw 2026.8.1"', pin: "2026.8.1\n", pinUnreadable: true });
+    const r = probe({ cli: "exit 1", pkg: "2026.8.1", pin: "2026.8.1\n", pinUnreadable: true });
     expect(r.status, `the pre-start aborted:\n${r.out}`).toBe(0);
     expect(r.effective).toBe("2026.8.1");
   });
@@ -170,7 +217,7 @@ describe.runIf(canRun)("gateway-pre-start's mDNS hostname read", () => {
     const r = run(
       [
         `HOSTNAME_ENV=${JSON.stringify(env)}`,
-        block('CONFIGURED_HOSTNAME="clawbox"', "\nfi"),
+        block('CONFIGURED_HOSTNAME="clawbox"', "\n# Build the dynamic part of the allowedOrigins list"),
         'echo "NAME=${CONFIGURED_HOSTNAME}"',
       ].join("\n"),
     );
@@ -189,5 +236,9 @@ describe.runIf(canRun)("gateway-pre-start's mDNS hostname read", () => {
     const r = hostname({ unreadable: true });
     expect(r.status, `the pre-start aborted:\n${r.out}`).toBe(0);
     expect(r.name).toBe("clawbox");
+    // Not silent: this name rebuilds gateway.controlUi.allowedOrigins, so a
+    // fallback drops the configured origin and the Control UI stops being
+    // reachable by the name the owner uses.
+    expect(r.out).toMatch(/WARN/);
   });
 });

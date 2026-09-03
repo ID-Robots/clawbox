@@ -2237,7 +2237,12 @@ step_openclaw_install() {
     # would concat tokens on a hypothetical multi-field line — keeping the
     # two parsers identical avoids subtle UI ↔ install.sh desync if the file
     # format ever grows.
-    PINNED=$(head -1 "$PIN_FILE" | awk '{print $1}')
+    # `|| true`: this step is dispatched with errexit deliberately ON, so an
+    # unreadable pin file (permissions, a truncated mount) would abort the
+    # installer here. The `else` branch below already reports an unknown pin and
+    # falls back to the hardcoded version — that is the defined answer, and an
+    # aborted update is not. TASK-657, same shape as gateway-pre-start.sh:45.
+    PINNED=$(head -1 "$PIN_FILE" | awk '{print $1}' || true)
     echo "  Pinned OpenClaw target from $PIN_FILE: $PINNED"
   else
     echo "  WARN: $PIN_FILE not found — falling back to hardcoded $OPENCLAW_VERSION" >&2
