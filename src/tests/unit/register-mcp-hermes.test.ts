@@ -352,7 +352,7 @@ d("register-mcp.sh — the clarify window this appliance ships with", () => {
     return (readConfig().agent as Record<string, unknown>) ?? {};
   }
 
-  it("pins agent.clarify_timeout to 300 on a config that never set it", () => {
+  it("seeds agent.clarify_timeout at 300 on a config that never set it", () => {
     fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
     const r = run();
     expect(r.status).toBe(0);
@@ -385,10 +385,14 @@ d("register-mcp.sh — the clarify window this appliance ships with", () => {
     expect(agentBlock().clarify_timeout).toBe(300);
   });
 
-  it("is part of the idempotence contract: a second run rewrites nothing", () => {
+  it("writes nothing on a second run, with the key already seeded", () => {
+    // The idempotence contract, exercised through the branch this block adds:
+    // the first run creates the `agent` block, and the second must find its own
+    // value there and leave the file byte-identical.
     fs.writeFileSync(configPath, "model:\n  default: x\n");
     run();
     const first = fs.readFileSync(configPath, "utf-8");
+    expect(first).toContain("clarify_timeout");
     const second = run();
     expect(second.stdout).toContain("already current");
     expect(fs.readFileSync(configPath, "utf-8")).toBe(first);

@@ -278,10 +278,11 @@ export type TurnEvent =
    *
    * `requestId` is the identity, not the position: the same prompt is REPLAYED
    * on a reconnect, so a surface must de-duplicate on it or draw the card
-   * twice. A replay of a partly answered batch carries `answered` — the qids
-   * already locked in, so the card comes back with those questions collapsed
-   * instead of inviting a second answer the gateway would accept and confuse
-   * the agent with.
+   * twice. `answered` carries the qids already locked in, so those questions
+   * come back collapsed instead of inviting a second answer the gateway would
+   * accept and confuse the agent with — on a replayed batch, and on a question
+   * the customer's own next message answered (TASK-610), where a
+   * single-question prompt appears under its empty qid.
    */
   | { kind: "clarify"; requestId: string; questions: ClarifyQuestion[]; answered?: Record<string, string> }
   /**

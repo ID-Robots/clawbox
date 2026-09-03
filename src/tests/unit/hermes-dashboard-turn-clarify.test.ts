@@ -390,9 +390,17 @@ describe("the idle watchdog while a person is being waited on", () => {
     // The same rule on the replay path, which arms before the turn's first
     // frame and would otherwise hold the request open for an hour on a
     // question that was never rendered.
+    //
+    // The replayed prompt here is one this turn CANNOT answer for the customer
+    // — every question is already locked — so it takes the announce path
+    // rather than the forwarding one, which is the branch this rule lives on.
     vi.useFakeTimers();
     const { turn } = await connect({
-      pending_clarify: { question: "Which mailbox?", choices: ["work", "home"], request_id: "wd005566" },
+      pending_clarify: {
+        questions: [{ qid: "q1", question: "Which mailbox?", choices: ["work", "home"] }],
+        answers: { q1: "work" },
+        request_id: "wd005566",
+      },
     });
     let outcome: unknown = null;
     const running = turn!.run(() => {});
@@ -536,7 +544,8 @@ describe("a question that was already waiting when we reconnected", () => {
     );
     await settle();
     // q2 is the one still outstanding, so this turn's message goes there and
-    // the two locked answers ride along beside it.
+    // the two locked answers ride along beside it. q2 is multi-select, so the
+    // message is locked in as the JSON array that shape is read in.
     socket.deliver({
       jsonrpc: "2.0",
       id: socket.method("clarify.respond")?.id,
@@ -545,7 +554,7 @@ describe("a question that was already waiting when we reconnected", () => {
     await settle();
     const [clarify] = clarifiesOnly(seen);
     expect(clarify.questions).toHaveLength(3);
-    expect(clarify.answered).toEqual({ q1: "beta", q3: "", q2: "Hey" });
+    expect(clarify.answered).toEqual({ q1: "beta", q3: "", q2: '["Hey"]' });
     socket.event("message.complete", { text: "ok", status: "complete" });
     await running;
   });
@@ -721,6 +730,89 @@ describe("a new message while the agent is parked on a question", () => {
     // Still parked on q3, so the message must not have been submitted as a
     // prompt behind the customer's back either.
     expect(socket.method("prompt.submit")).toBeUndefined();
+    socket.event("message.complete", { text: "ok", status: "complete" });
+    await running;
+  });
+
+  it("wraps the message for a MULTI-SELECT question, so a comma is not two answers", async () => {
+    // The decoder upstream reads a multi-select answer with tries JSON first
+    // and otherwise splits on commas (tools/clarify_tool.py:162), without ever
+    // checking the choices it offered. Sent as prose, "the second one, I think"
+    // would reach the agent as two selections nobody offered.
+    const { turn, socket } = await connect({
+      pending_clarify: {
+        question: "Which of these should I install?",
+        choices: ["Alpha", "Beta"],
+        multi_select: true,
+        request_id: "fw778899",
+      },
+    });
+    const running = turn!.run(
+      () => {},
+      () => {},
+    );
+    await settle();
+    expect(socket.method("clarify.respond")?.params).toEqual({
+      request_id: "fw778899",
+      answer: '["Hey"]',
+    });
+    socket.deliver({ jsonrpc: "2.0", id: socket.method("clarify.respond")?.id, result: { status: "ok" } });
+    await settle();
+    socket.event("message.complete", { text: "ok", status: "complete" });
+    await running;
+  });
+
+  it("enqueues the message rather than interrupting a turn that is running again", async () => {
+    // `expired` is the one acknowledgement that says the worker has LEFT
+    // `ev.wait()` — `_pending` no longer holds the id — so the agent is running
+    // by construction. A plain submit here takes the busy path and, on this
+    // box's default mode, interrupts it; `queued: true` overrides that mode
+    // outright (server.py:8255) and puts the message behind the live turn.
+    const { turn, socket } = await connect({
+      pending_clarify: { question: "Which file?", choices: ["a.ts"], request_id: "fw889900" },
+    });
+    const running = turn!.run(
+      () => {},
+      () => {},
+    );
+    await settle();
+    socket.deliver({
+      jsonrpc: "2.0",
+      id: socket.method("clarify.respond")?.id,
+      result: { status: "expired" },
+    });
+    await settle();
+    expect(socket.method("prompt.submit")?.params).toEqual({
+      session_id: "e0719549",
+      text: "Hey",
+      queued: true,
+    });
+    socket.event("message.complete", { text: "ok", status: "complete" });
+    await running;
+  });
+
+  it("forwards nothing when every question is already answered, and asks as it always did", async () => {
+    // There is no question left to deliver the message to, and "no question_id"
+    // is not a spare slot to put it in: against a batch that is upstream's
+    // cancel-all, which would throw away every answer already locked. So the
+    // prompt goes out as the customer's own turn and the card is shown.
+    const { turn, socket } = await connect({
+      pending_clarify: {
+        questions: [{ qid: "q1", question: "Which branch?", choices: ["beta"] }],
+        answers: { q1: "beta" },
+        request_id: "fw667788",
+      },
+    });
+    const seen: DashboardActivity[] = [];
+    const running = turn!.run(
+      () => {},
+      (activity) => seen.push(activity),
+    );
+    await settle();
+    expect(socket.method("clarify.respond")).toBeUndefined();
+    expect(socket.method("prompt.submit")?.params).toMatchObject({ text: "Hey" });
+    expect(clarifiesOnly(seen)).toHaveLength(1);
+    expect(clarifiesOnly(seen)[0].answered).toEqual({ q1: "beta" });
     socket.event("message.complete", { text: "ok", status: "complete" });
     await running;
   });
