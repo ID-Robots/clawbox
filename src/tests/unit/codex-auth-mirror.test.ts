@@ -115,8 +115,13 @@ function readSharedStore(): { profiles: Record<string, { access?: string; refres
 }
 
 function run(): string {
+  // Pinned, not inherited: the script honours OPENCLAW_STATE_DIR when resolving
+  // the shared store, and CODEX_AUTH_MIRROR_QUIET suppresses the log lines
+  // other tests assert on. Either one exported on a dev machine or a CI job
+  // would silently point the child at another database.
   return execFileSync("node", [SCRIPT, openclawHome, homeAuthPath], {
     encoding: "utf-8",
+    env: { ...process.env, OPENCLAW_STATE_DIR: "", CODEX_AUTH_MIRROR_QUIET: "" },
   });
 }
 
@@ -767,6 +772,78 @@ describe("codex-auth-mirror.js", () => {
     const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
     expect(parsed.tokens.refresh_token).toBe("refresh-live");
     expect(parsed.tokens.account_id).toBe("acct-live");
+  });
+
+  it("writes a rotation back only into the agent it read the credential from", () => {
+    // A profile id is a key inside ONE agent's store, not a fleet-wide
+    // identity. A second agent can hold the same id for a different account,
+    // and grafting this rotation onto it replaces a refresh token that belongs
+    // to someone else — its next refresh then fails with refresh_token_reused.
+    const second = path.join(openclawHome, "agents", "support", "agent");
+    mkdirSync(second, { recursive: true });
+    writeFileSync(
+      path.join(second, "auth-profiles.json"),
+      JSON.stringify({
+        profiles: {
+          "codex:default": {
+            access: accessToken("acct-support"),
+            refresh: "refresh-support-account",
+            id: "id-token",
+          },
+        },
+      }),
+    );
+    seedProfile(accessToken("acct-main"), "refresh-spent");
+    mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
+    writeFileSync(
+      codexHomeAuthPath,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: accessToken("acct-main", "rotated"),
+          refresh_token: "refresh-rotated-by-appserver",
+          account_id: "acct-main",
+        },
+      }),
+    );
+
+    run();
+
+    const supportStore = JSON.parse(
+      readFileSync(path.join(second, "auth-profiles.json"), "utf-8"),
+    );
+    expect(supportStore.profiles["codex:default"].refresh).toBe("refresh-support-account");
+    const mainStore = JSON.parse(
+      readFileSync(path.join(agentDir, "auth-profiles.json"), "utf-8"),
+    );
+    expect(mainStore.profiles["codex:default"].refresh).toBe("refresh-rotated-by-appserver");
+  });
+
+  it("leaves a SECOND diverged app-server home alone after adopting the first rotation", () => {
+    // Two agents run two app-servers, each rotating its own CODEX_HOME. Core
+    // can record only one of those rotations, so writing the adopted token over
+    // the other file discards a live refresh token — exactly the burn the
+    // could-not-record branch already prevents.
+    const second = path.join(openclawHome, "agents", "support", "agent");
+    mkdirSync(path.join(second, "codex-home"), { recursive: true });
+    const secondAuthPath = path.join(second, "codex-home", "auth.json");
+    const mirror = (marker: string, refresh: string) => JSON.stringify({
+      OPENAI_API_KEY: null,
+      tokens: {
+        access_token: accessToken("acct-1", marker),
+        refresh_token: refresh,
+        account_id: "acct-1",
+      },
+    });
+    mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
+    writeFileSync(codexHomeAuthPath, mirror("main-rotated", "refresh-rotated-by-main"));
+    writeFileSync(secondAuthPath, mirror("support-rotated", "refresh-rotated-by-support"));
+    seedProfile(accessToken("acct-1"), "refresh-spent");
+
+    run();
+
+    expect(JSON.parse(readFileSync(secondAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-rotated-by-support");
   });
 
   it("tightens an existing world-readable mirror to 0600, not only a freshly created one", () => {

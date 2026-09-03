@@ -438,6 +438,12 @@ function dedupePaths(files) {
  * When a rotation cannot be recorded, `main()` leaves the app-server home that
  * carries it alone rather than guessing — per destination, never the whole
  * pass, and never the plugin's own file.
+ *
+ * ONLY the agent the credential was resolved from. A profile id is a key
+ * within one agent's store, not a fleet-wide identity: a second agent may hold
+ * the same id for a different account, and writing this rotation into it would
+ * replace a refresh token that belongs to someone else and break its next
+ * refresh.
  */
 function writeBackToCore(agentDirs, tokens, profileId) {
   if (!tokens || !tokens.refresh_token || !profileId) return false;
@@ -512,9 +518,13 @@ function main() {
     Number(b.includes(`${path.sep}main${path.sep}`)) -
     Number(a.includes(`${path.sep}main${path.sep}`));
   let credential = null;
+  let credentialAgentDir = null;
   for (const dir of [...agentDirs].sort(mainFirst)) {
     credential = credentialFromProfiles(dir);
-    if (credential) break;
+    if (credential) {
+      credentialAgentDir = dir;
+      break;
+    }
   }
 
   if (!credential) {
@@ -585,7 +595,16 @@ function main() {
 
   if (rotated) {
     const tokens = rotated.data.tokens;
-    if (writeBackToCore(agentDirs, tokens, credential.profileId)) {
+    // Every OTHER diverged app-server home owns a rotation of its own: two
+    // agents run two app-servers, each rotating its own CODEX_HOME, and core
+    // can record only one of them. Writing the adopted token over the rest
+    // discards their live refresh tokens — the same burn the failure branch
+    // below exists to prevent. (The plugin's own file is still never skipped;
+    // see isPluginOwnFile.)
+    for (const { dest } of diverged) {
+      if (dest !== rotated.dest && isAppServerHome(dest) && !isPluginOwnFile(dest)) skip.add(dest);
+    }
+    if (writeBackToCore([credentialAgentDir], tokens, credential.profileId)) {
       log(`Codex auth.json: adopted app-server rotation from ${rotated.dest}`);
       credential = {
         profileId: credential.profileId,
