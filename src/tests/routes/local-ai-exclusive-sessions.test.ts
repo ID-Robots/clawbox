@@ -47,6 +47,13 @@ vi.mock("@/lib/openclaw-config", () => ({
   }),
 }));
 
+// The catalogue is told out-of-band when a provider plugin is switched back
+// on; the real module forks `openclaw models list`.
+vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
+  notifyProviderSetChanged: vi.fn(),
+  refreshInBackground: vi.fn(),
+}));
+
 vi.mock("@/lib/openclaw-session-store", () => ({
   listAgentIds: vi.fn(() => ["main", "legacy"]),
   // `main` is migrated (has a store); `legacy` is still on sessions.json.

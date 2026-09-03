@@ -14,9 +14,18 @@ vi.mock("fs", () => ({
 
 const { configSetMock } = vi.hoisted(() => ({ configSetMock: vi.fn() }));
 
+// The catalogue is told out-of-band when the plugin gate changes the provider
+// set; the real module forks `openclaw models list`.
+vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
+  notifyProviderSetChanged: vi.fn(),
+  refreshInBackground: vi.fn(),
+}));
 vi.mock("@/lib/openclaw-config", () => ({
   inferConfiguredLocalModel: vi.fn(),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
+  // Strict: the ON half of the plugin gate decides from ABSENCE, and plain
+  // `readConfig` cannot tell an unreadable config from one carrying no flag.
+  readConfigStrict: vi.fn(async () => ({})),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
   runOpenclawConfigSet: configSetMock,

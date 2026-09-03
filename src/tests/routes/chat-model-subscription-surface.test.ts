@@ -14,9 +14,18 @@ vi.mock("fs", () => ({
 
 const { configSetMock } = vi.hoisted(() => ({ configSetMock: vi.fn() }));
 
+// The catalogue is told out-of-band when the plugin gate changes the provider
+// set; the real module forks `openclaw models list`.
+vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
+  notifyProviderSetChanged: vi.fn(),
+  refreshInBackground: vi.fn(),
+}));
 vi.mock("@/lib/openclaw-config", () => ({
   inferConfiguredLocalModel: vi.fn(),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
+  // Strict: the ON half of the plugin gate decides from ABSENCE, and plain
+  // `readConfig` cannot tell an unreadable config from one carrying no flag.
+  readConfigStrict: vi.fn(async () => ({})),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
   runOpenclawConfigSet: configSetMock,
@@ -314,11 +323,15 @@ describe("/setup-api/chat/model and the Claude subscription surface", () => {
   });
 
   it("judges an EMPTY cached surface by the curated catalogue, like the picker", async () => {
-    // Not unknown. The catalog route serves this same file through
-    // `augmentWithStaticCatalog`, so the picker on this box offered the
-    // curated rows and nothing else — an id in none of them is one the picker
-    // never showed, and letting it through would write the very id this guard
-    // exists to refuse.
+    // Not unknown. Nothing unions the curated list into a SERVED catalogue any
+    // more: on this file the route answers `models: []` and starts a refresh.
+    // The curated rows still reach the customer, one layer up —
+    // `fetchProviderCatalog` renders the curated catalogue whenever the payload
+    // is empty — so the picker on this box offered exactly those rows and
+    // nothing else. The guard unions the same ids for the same reason, which is
+    // what keeps it asking the question the picker answered: an id in neither
+    // list is one the picker never showed, and letting it through would write
+    // the very id this guard exists to refuse.
     vi.mocked(fsp.readFile).mockResolvedValue(surfaceCache([]) as never);
     const response = await postModel(POST, `anthropic/${OFF_CATALOGUE_ID}`);
 

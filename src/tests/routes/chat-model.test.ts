@@ -16,9 +16,18 @@ vi.mock("@/lib/config-store", () => ({
 
 const { configSetMock } = vi.hoisted(() => ({ configSetMock: vi.fn() }));
 
+// The catalogue is told out-of-band when the plugin gate changes the provider
+// set; the real module forks `openclaw models list`.
+vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
+  notifyProviderSetChanged: vi.fn(),
+  refreshInBackground: vi.fn(),
+}));
 vi.mock("@/lib/openclaw-config", () => ({
   inferConfiguredLocalModel: vi.fn(),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
+  // Strict: the ON half of the plugin gate decides from ABSENCE, and plain
+  // `readConfig` cannot tell an unreadable config from one carrying no flag.
+  readConfigStrict: vi.fn(async () => ({})),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
   runOpenclawConfigSet: configSetMock,
@@ -48,8 +57,9 @@ vi.mock("@/lib/sqlite-store", () => ({
 }));
 
 import { getAll } from "@/lib/config-store";
-import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
+import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { promisify } from "util";
 
 describe("/setup-api/chat/model", () => {
@@ -838,6 +848,69 @@ describe("/setup-api/chat/model", () => {
   // ahead of it: the core applies a batch to one snapshot and validates the
   // references afterwards, so one spawn does both, and a refused batch leaves
   // the flag as it was.
+  // A compat provider's configured entry REPLACES the plugin's catalogue —
+  // "configured providers in openclaw.json override the plugin's modelCatalog
+  // entirely" (ai-models/configure) — so `openclaw models list --provider
+  // google` answers exactly this array. Appending a row to it is therefore the
+  // provider's enumeration changing, made by a server-side write, and nothing
+  // was counting it: the plugin gate below answers only about the anthropic
+  // flag, which this write does not touch.
+  describe("registering a compat model the provider did not list", () => {
+    const googleBox = (models: { id: string; name: string }[]) => ({
+      auth: { profiles: { "google:default": { provider: "google", mode: "api_key" } } },
+      models: {
+        mode: "merge",
+        providers: {
+          google: {
+            apiKey: "k",
+            baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+            api: "openai-completions",
+            models,
+          },
+        },
+      },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+    });
+
+    const pick = (model: string) => POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    }));
+
+    it("counts the change when a row is actually appended", async () => {
+      vi.mocked(readConfig).mockResolvedValue(
+        googleBox([{ id: "gemini-3-flash", name: "gemini-3-flash" }]) as never,
+      );
+
+      const response = await pick("google/gemini-3-pro");
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+        "models.providers.google.models",
+        JSON.stringify([
+          { id: "gemini-3-flash", name: "gemini-3-flash" },
+          { id: "gemini-3-pro", name: "gemini-3-pro" },
+        ]),
+        "--json",
+      ]);
+      expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("google");
+    });
+
+    it("says nothing when the model was already listed", async () => {
+      // Nothing was written, so nothing changed — announcing here would spend
+      // an enumeration on every repeat pick.
+      vi.mocked(readConfig).mockResolvedValue(
+        googleBox([{ id: "gemini-3-pro", name: "gemini-3-pro" }]) as never,
+      );
+
+      const response = await pick("google/gemini-3-pro");
+
+      expect(response.status).toBe(200);
+      expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
+    });
+  });
+
   describe("the anthropic plugin around the primary write", () => {
     const UNKNOWN_MODEL =
       'Cannot set model reference "anthropic/claude-sonnet-5" at agents.defaults.model.primary: '
@@ -919,6 +992,101 @@ describe("/setup-api/chat/model", () => {
       expect(runOpenclawConfigSet).not.toHaveBeenCalledWith(expect.arrayContaining([ENABLE_OP[0]]));
       expect(setProviderPlugins).not.toHaveBeenCalled();
       expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    // A plugin that is off enumerates NOTHING, so switching it back on is the
+    // same provider-set change as switching it off — in the other direction,
+    // in this same file, and the catalogue was told about neither. It is also
+    // the change nothing could see: the enable rides in the batch, so by the
+    // time the OFF half re-reads the config the flag is already true and it
+    // correctly reports no flip. Unanswered it is not a one-off staleness
+    // either — an empty enumeration is recorded as a failed refresh whose wait
+    // DOUBLES up to the six-hour interval, so a provider whose plugin has been
+    // off for a while is not re-asked for six hours after the pick that made
+    // it listable.
+    describe("counting the ON half for the catalogue", () => {
+      // The handler's state comes from `readConfig`; the ON half reads the flag
+      // again, STRICTLY, at the last moment before the batch — so both are set
+      // here, and the strict one is what decides the announcement.
+      const pluginOff = (enabled: boolean) => {
+        const config = {
+          auth: {
+            profiles: {
+              "deepseek:default": { provider: "deepseek", mode: "api_key" },
+              "anthropic:default": { provider: "anthropic", mode: "api_key" },
+            },
+          },
+          agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+          plugins: { entries: { anthropic: { enabled } } },
+        };
+        vi.mocked(readConfig).mockResolvedValue(config as never);
+        vi.mocked(readConfigStrict).mockResolvedValue(config as never);
+      };
+
+      it("counts the change when the batch switched the plugin on", async () => {
+        pluginOff(false);
+
+        const response = await POST(new Request("http://localhost/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+        }));
+
+        expect(response.status).toBe(200);
+        expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("anthropic");
+      });
+
+      it("says nothing when the plugin was already on", async () => {
+        // The enable op is emitted either way — it is what makes the core
+        // validate the reference — so its presence is not a state change.
+        // Announcing one per Claude pick would spend a ~3-minute `openclaw
+        // models list` on a Jetson for a box that did not change.
+        pluginOff(true);
+
+        const response = await POST(new Request("http://localhost/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+        }));
+
+        expect(response.status).toBe(200);
+        expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
+      });
+
+      it("counts it when the flag could not be read at all", async () => {
+        // The strict read throws on an EACCES or a config caught half-written,
+        // and the batch still lands. Unknown is not "already on": silence would
+        // leave the catalogue on the pre-enable enumeration, whose failed-
+        // refresh wait doubles toward six hours.
+        pluginOff(true);
+        vi.mocked(readConfigStrict).mockRejectedValue(new Error("EACCES"));
+
+        const response = await POST(new Request("http://localhost/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+        }));
+
+        expect(response.status).toBe(200);
+        expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("anthropic");
+      });
+
+      it("says nothing when the batch was refused", async () => {
+        // Atomic: a refused batch is applied to one snapshot and validated as
+        // a whole, so the flag is exactly where it was. Counting here would be
+        // this route's own false success.
+        pluginOff(false);
+        vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(new Error(UNKNOWN_MODEL));
+
+        const response = await POST(new Request("http://localhost/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+        }));
+
+        expect(response.status).toBe(409);
+        expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
+      });
     });
 
     it("carries the plugin enable inside the try that answers the 409", async () => {

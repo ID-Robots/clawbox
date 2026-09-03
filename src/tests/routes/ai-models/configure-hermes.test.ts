@@ -109,7 +109,10 @@ vi.mock("@/lib/local-ai-token", () => ({
 vi.mock("@/lib/clawkeep", () => ({ unpairLocal: vi.fn() }));
 vi.mock("@/lib/gateway-proxy", () => ({ getOrGenerateGatewayToken: vi.fn().mockResolvedValue("tok") }));
 vi.mock("@/lib/codex-model-probe", () => ({ resolveEntitledCodexModel: vi.fn().mockResolvedValue(null) }));
-vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({ refreshInBackground: vi.fn() }));
+vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
+  refreshInBackground: vi.fn(),
+  notifyProviderSetChanged: vi.fn(),
+}));
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 

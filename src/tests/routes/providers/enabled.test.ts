@@ -16,6 +16,11 @@ vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({ readConfig: vi.fn() }));
 vi.mock("@/lib/hermes-model-options", () => ({ getModelOptions: vi.fn() }));
+// The catalogue is told out-of-band; the real one forks `openclaw models list`.
+vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
+  notifyProviderSetChanged: vi.fn(),
+  refreshInBackground: vi.fn(),
+}));
 // An in-memory store behind the real module's constants, so the round trip is
 // what a device would see: the write the route makes is the read the next
 // status makes. (The cookie verifier reads `DATA_DIR` at import.)
@@ -42,6 +47,8 @@ let readConfig: Mock;
 let getModelOptions: Mock;
 let configSet: Mock;
 let setProviderEnabled: Mock;
+let notifyProviderSetChanged: Mock;
+let refreshInBackground: Mock;
 
 function ownerCookie(): string {
   return `clawbox_session=${createSessionCookie(3600, SESSION_SECRET)}`;
@@ -91,6 +98,8 @@ beforeEach(async () => {
     models: { providers: { openrouter: { apiKey: "sk-or-secret" } } },
     agents: { defaults: { model: { primary: "anthropic/claude-sonnet-4-6" } } },
   });
+
+  ({ notifyProviderSetChanged, refreshInBackground } = (await import("@/app/setup-api/ai-models/catalog/route")) as unknown as { notifyProviderSetChanged: Mock; refreshInBackground: Mock });
 
   ({ POST } = await import("@/app/setup-api/providers/enabled/route"));
 });
@@ -177,6 +186,25 @@ describe("the round trip", () => {
     expect(on.status).toBe(200);
     expect(rowFor(await on.json(), "openrouter")!.enabled).toBe(true);
     expect(store.get("ai_disabled_providers")).toEqual([]);
+  });
+
+  // The flip writes ONE thing: ClawBox's own `ai_disabled_providers` key, in
+  // ClawBox's own store. `openclaw models list` has never heard of it, and the
+  // catalogue route never reads it — so this switch cannot change what the
+  // catalogue enumerates, and announcing it spent a full ~3-minute, ~2-core
+  // `openclaw models list` on a Jetson per click (twice for an off-and-on) to
+  // be told the same rows again, clearing the failed-refresh backoff each
+  // time. The enumeration DOES change later, when the next save or chat-model
+  // pick re-gates the anthropic plugin — and that write counts its own change.
+  it("does not spend an enumeration on a switch the catalogue cannot see", async () => {
+    setProviderEnabled.mockResolvedValue({ ok: true, provider: "openrouter" });
+
+    await asOwner({ provider: "openrouter", enabled: false });
+    await asOwner({ provider: "openrouter", enabled: true });
+    await asOwner({ provider: "anthropic", enabled: false });
+
+    expect(notifyProviderSetChanged).not.toHaveBeenCalled();
+    expect(refreshInBackground).not.toHaveBeenCalled();
   });
 
   it("stores the canonical id whatever spelling the caller used", async () => {

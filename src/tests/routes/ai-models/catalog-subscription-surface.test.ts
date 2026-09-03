@@ -139,14 +139,24 @@ describe("catalog refresh — subscription surface", () => {
     },
   );
 
-  it("stamps the curated rows too, so a thin enumeration does not grey them", async () => {
+  it("publishes the rows the DEVICE enumerated, and no curated ones", async () => {
     const byId = await stampedCatalogue();
 
-    // claude-haiku-4-5 is in ANTHROPIC_MODELS but not in the live list above,
-    // so augmentWithStaticCatalog appends it. It was stamped FALSE before —
-    // the third model the owner reported — because `claude-cli` did not carry
-    // it. The native route does.
-    expect(byId["claude-haiku-4-5"]).toBe(true);
+    // claude-haiku-4-5 is in ANTHROPIC_MODELS and not in the live list above.
+    // It used to be appended here and stamped along with the rest; M-05
+    // stopped that, because a payload that mixes the two is written to
+    // catalog-cache and read back — by the picker and by the server-side
+    // surface guard — as a device answer. A box whose plugin was disabled at
+    // boot then showed three hard-coded Claude models all day.
+    //
+    // Every row this file publishes is stamped; the point here is WHICH rows
+    // there are.
+    expect(byId["claude-haiku-4-5"]).toBeUndefined();
+    expect(Object.keys(byId).sort()).toEqual([
+      "claude-fable-5",
+      "claude-mythos-5",
+      "claude-sonnet-4-6",
+    ]);
   });
 
   it("does not go looking for a second surface for a provider that has none", async () => {

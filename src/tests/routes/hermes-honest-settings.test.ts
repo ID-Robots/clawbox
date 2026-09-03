@@ -16,6 +16,13 @@ vi.mock("@/lib/edition-source", () => ({ readEdition: () => readEdition() }));
 
 // The real module, except for the edition it resolves — everything else
 // (gatewayIsAbsent, readConfig's ENOENT behaviour) is exercised as shipped.
+// The catalogue is told out-of-band when a provider plugin is switched back
+// on; the real module forks `openclaw models list`.
+vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
+  notifyProviderSetChanged: vi.fn(),
+  refreshInBackground: vi.fn(),
+}));
+
 vi.mock("@/lib/config-store", () => ({
   get: vi.fn(async () => undefined),
   set: vi.fn(async () => {}),

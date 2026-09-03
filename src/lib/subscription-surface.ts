@@ -38,14 +38,20 @@ interface CachedSurface {
  * Null means UNKNOWN and every caller must treat it as "do not refuse" — the
  * same rule `isModelUsableOnSubscription` applies in the pickers. A missing
  * cache is unknown: treating it as authoritative would refuse the entire
- * catalogue on a box whose enumeration simply has not run yet. A cache that
- * EXISTS but enumerated nothing is judged by the curated catalogue alone —
- * that is exactly what the catalog route serves for the same file, so the
- * picker on that box offers the curated rows and nothing else. Answering
- * UNKNOWN there would let a typed id the picker never offered through the
- * very write this guard exists to refuse. Only when neither list has an id
- * (a NARROWER named surface with no curated catalogue, enumerated empty) is
- * there nothing to judge against.
+ * catalogue on a box whose enumeration simply has not run yet.
+ *
+ * A MISSING cache is now the state a thin or failed enumeration leaves behind
+ * (M-05: the route stopped persisting a payload it did not get from a device),
+ * where it used to leave a file holding the curated ids. That moves such a box
+ * from "refuse anything outside the curated three" to UNKNOWN, and that is the
+ * right direction, not a gap: the curated three are not what the device can
+ * run, so refusing against them refused models the box routes perfectly well —
+ * the false-failure this file's own rule above forbids. The guard still
+ * refuses against a REAL enumeration, which is the case it was built for.
+ *
+ * A cache that exists but lists nothing can no longer occur; if a downgrade
+ * leaves one behind it is judged by the curated catalogue alone, which is what
+ * the picker shows for that same file.
  *
  * No age check and no memo. Both are deliberate:
  *
@@ -78,22 +84,26 @@ export async function readSubscriptionSurfaceIds(
     const ids = parsed.models
       .map((m) => m?.id)
       .filter((id): id is string => typeof id === "string" && id.length > 0);
-    // Union the CURATED catalogue for the surface provider, because the
-    // catalog route serves its cached payload through `buildPayload` ->
-    // `augmentWithStaticCatalog`, which appends exactly these ids to whatever
-    // the live enumeration returned. Reading the raw file without them asks a
-    // different question than the picker answered: a ClawBox release that adds
-    // a model to PROVIDER_CATALOGS ships a picker offering it on day one,
-    // while the on-disk cache keeps the previous list for up to the route's
-    // 6h refresh interval — and in that window this guard refused the very row
-    // the customer had just been shown. `augmentWithStaticCatalog` is a no-op
-    // for a provider with no curated catalogue (a NARROWER named surface such
-    // as claude-cli), and so is this, which is what keeps a narrowed surface
-    // narrow.
+    // Union the CURATED catalogue for the surface provider, because that is
+    // what the picker renders whenever the catalog route has no live
+    // enumeration to serve: a cold start, or a box whose provider is not
+    // listable yet, gets the curated rows marked `fallback`. Reading the raw
+    // file without them asks a different question than the picker answered,
+    // and this guard would refuse the very row the customer had just been
+    // shown. It is a no-op for a provider with no curated catalogue (a
+    // NARROWER named surface such as claude-cli), which is what keeps a
+    // narrowed surface narrow.
     //
-    // The curated ids count BEFORE the empty check, for the same reason: a
-    // file holding `models: []` is served to the picker through that same
-    // augmentation, so the customer was shown the curated list, not nothing.
+    // The union is the PERMISSIVE direction, deliberately. Since M-05 the
+    // route no longer merges the curated list into a live enumeration or
+    // persists it, so a cache file is either a device answer or absent — this
+    // is the one place the two lists still meet, and it meets them by allowing
+    // a curated id rather than refusing a live one.
+    //
+    // The curated ids count BEFORE the empty check for the same reason: the
+    // route serves a file holding `models: []` as an empty payload, and
+    // `fetchProviderCatalog` renders the curated catalogue for an empty one, so
+    // the customer was shown that list, not nothing.
     const curated = getProviderCatalog(surfaceProvider)?.models ?? [];
     if (ids.length === 0 && curated.length === 0) return null;
     for (const model of curated) {

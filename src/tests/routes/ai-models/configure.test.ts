@@ -58,6 +58,7 @@ vi.mock("@/lib/provider-enablement", () => ({
 // asserts on the refresh; it is out-of-band work by design.
 vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
   refreshInBackground: vi.fn(),
+  notifyProviderSetChanged: vi.fn(),
 }));
 
 // Hoisted so the vi.mock factories below (which are themselves hoisted by
@@ -157,6 +158,7 @@ import { configSetCalls, configSetCommands, failConfigSetsMatching, findConfigSe
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
 import { getLocalAiToken } from "@/lib/local-ai-token";
+import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockGetAll = vi.mocked(getAll);
@@ -256,7 +258,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     vi.mocked(runOpenclawConfigUnset).mockResolvedValue(undefined);
     mockUnpairLocal.mockResolvedValue(undefined);
     vi.mocked(setPrimaryModelWithoutCatalogValidation).mockResolvedValue(undefined);
-    vi.mocked(setProviderPlugins).mockResolvedValue(undefined);
+    vi.mocked(setProviderPlugins).mockResolvedValue(null);
 
     // Re-apply implementations cleared by vi.clearAllMocks above. Factory
     // defaults set in `vi.mock(...)` hold across vi.resetModules but are
@@ -343,6 +345,19 @@ describe("POST /setup-api/ai-models/configure", () => {
         ai_model_provider: "anthropic",
       })
     );
+  });
+
+  // The one thing this file DOES assert about the out-of-band refresh (see the
+  // mock's note above): that step 8c COUNTS the change server-side. It runs one
+  // statement after the plugin is switched on and the credential written, i.e.
+  // at the moment a provider that could not enumerate starts being able to, and
+  // it is the only thing that can count it — a client's `?refresh=1` is a nudge
+  // and deliberately bumps nothing. A write that forgets this call leaves its
+  // change invisible to the catalogue until the 6h refresh.
+  it("counts the provider-set change server-side", async () => {
+    await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test-key" }));
+
+    expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("anthropic");
   });
 
   it("configures openai provider", async () => {

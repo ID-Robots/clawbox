@@ -2139,7 +2139,7 @@ function configReferencesAnthropic(config: OpenClawConfig): boolean {
  * provider segment of `agents.defaults.model.primary`. Idempotent and
  * non-fatal.
  */
-export async function setProviderPlugins(activeProvider: string): Promise<void> {
+export async function setProviderPlugins(activeProvider: string): Promise<string | null> {
   // Strict, because the decision below is about ABSENCE: `readConfig` answers
   // `{}` to an unreadable file, and that would read as "no Anthropic
   // credential" and switch the plugin off on a box that has one — the very
@@ -2153,7 +2153,7 @@ export async function setProviderPlugins(activeProvider: string): Promise<void> 
       "[openclaw-config] Leaving the anthropic plugin as it is — could not read the config:",
       err instanceof Error ? err.message : err,
     );
-    return;
+    return null;
   }
   const disabled = parseDisabledProviders(await getConfigStoreValue(DISABLED_PROVIDERS_KEY).catch(() => undefined));
   const wanted = activeProvider === "anthropic"
@@ -2163,9 +2163,16 @@ export async function setProviderPlugins(activeProvider: string): Promise<void> 
   // so a fresh box needs no write to be on.
   const current = (config.plugins as { entries?: Record<string, { enabled?: boolean }> } | undefined)
     ?.entries?.anthropic?.enabled ?? true;
-  if (current === wanted) return;
+  if (current === wanted) return null;
   try {
     await runOpenclawConfigSet([ANTHROPIC_PLUGIN_ENABLED_KEY, wanted ? "true" : "false", "--json"]);
+    // WHICH provider's catalogue just changed, for the caller to pass on. This
+    // gate governs exactly one plugin, and switching it off is what empties
+    // `openclaw models list --provider anthropic`; returning the id keeps that
+    // fact here rather than hand-copied into every call site, and returning
+    // `null` on the no-op paths means a caller cannot announce a change that
+    // did not happen.
+    return "anthropic";
   } catch (err) {
     // Non-fatal: a gate left wrong costs prep seconds or one catalog refresh,
     // never correctness, and the next switch or save re-applies it.
@@ -2174,6 +2181,7 @@ export async function setProviderPlugins(activeProvider: string): Promise<void> 
       err instanceof Error ? err.message : err,
     );
   }
+  return null;
 }
 
 /**

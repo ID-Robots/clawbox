@@ -61,6 +61,24 @@ export async function POST(request: Request) {
   // spelling of it: one line per flip, whatever the body carried.
   console.error(`[providers] ${logSafe(provider)} switched ${fields.enabled ? "on" : "off"} by the owner`);
 
+  // DELIBERATELY no catalogue signal here, and the reason is worth writing
+  // down because it looks like one is missing. This flip writes exactly one
+  // thing: ClawBox's own `ai_disabled_providers` key in ClawBox's own config
+  // store (`provider-enablement.ts`). It does not touch `~/.openclaw`, it does
+  // not re-gate a plugin, and `openclaw models list` has never heard of that
+  // key — so what the catalogue enumerates for this provider is byte-for-byte
+  // what it was a moment ago, and the catalogue route never reads the disabled
+  // list either (the strip's greying comes from `readProviderStatus`, below).
+  //
+  // The switch DOES eventually change an enumeration, but not here: switching
+  // anthropic off makes `hasUsableAnthropicCredential` false, so the NEXT save
+  // or chat-model pick re-gates the plugin — and that write counts its own
+  // change (`setProviderPlugins` returns the id it flipped, and the ON half is
+  // answered by `providerPluginSwitchedOnBy`). Counting the flip here as well
+  // spent a full ~3-minute, ~2-core `openclaw models list` on a Jetson per
+  // click, twice for an off-and-on, and cleared the failed-refresh backoff
+  // each time, to be told the same rows again.
+
   const summary = await readProviderStatus();
   return NextResponse.json(summary, { headers: { "Cache-Control": "no-store" } });
 }

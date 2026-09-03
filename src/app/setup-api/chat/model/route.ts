@@ -3,6 +3,7 @@ import { getAll } from "@/lib/config-store";
 import {
   inferConfiguredLocalModel,
   readConfig,
+  readConfigStrict,
   restartGateway,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
@@ -12,7 +13,8 @@ import {
   setProviderPlugins,
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
-import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
+import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
+import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import {
   CLAWBOX_AI_MODEL_BY_TIER,
@@ -1006,6 +1008,15 @@ export async function POST(request: Request) {
                   { status: 502 },
                 );
               }
+              // A row added to this array IS the provider's catalogue changing:
+              // "configured providers in openclaw.json override the plugin's
+              // modelCatalog entirely" (ai-models/configure), so what
+              // `openclaw models list --provider <p>` answers for a compat
+              // provider is exactly this list. Counted here rather than beside
+              // the write above, because only the branch that actually
+              // appended reaches this line — a pick already in the list writes
+              // nothing and must announce nothing.
+              notifyProviderSetChanged(providerId);
             }
           }
         }
@@ -1153,6 +1164,19 @@ export async function POST(request: Request) {
     const armOps = chatgptRouted && !chatgptRuntimeArmed(preloadedConfig, targetModel)
       ? [chatgptRuntimeArmOp(targetModel)]
       : [];
+    // The plugin flag as it stands at the last moment before the batch, for the
+    // ON half below. Not `preloadedConfig`: that was read at the top of the
+    // handler, and the auto-extend between here and there is its own ~10 s CLI
+    // spawn on a Jetson — a provider save landing in that window switches the
+    // flag off through its own gate, and a stale "it was already on" reading
+    // would swallow the switch-on this batch then performs. A file read, not a
+    // spawn, next to writes that cost seconds.
+    //
+    // STRICT and `null` on failure, for the reason the OFF half reads strictly:
+    // the decision is about ABSENCE, and plain `readConfig` answers `{}` to an
+    // EACCES exactly as it does to a box with no config at all. An absent flag
+    // IS enabled, so `{}` must stay silent; "could not read" must not.
+    const configBeforeBatch = await readConfigStrict().catch(() => null);
     try {
       await runOpenclawConfigSetBatch([
         ...enableProviderPluginOps([targetModel]),
@@ -1169,6 +1193,33 @@ export async function POST(request: Request) {
       if (unresolvable) return unresolvable;
       throw err;
     }
+
+    // 1b. The ON half of the plugin gate, counted. The batch above is the only
+    //     thing that switches a plugin back on, and a provider whose plugin is
+    //     off enumerates NOTHING — so this is the same provider-set change as
+    //     the OFF half below, in the other direction, and the catalogue was
+    //     told about neither. Worse than a one-off staleness: an enumeration
+    //     that comes back empty is recorded as a failed refresh, and that wait
+    //     DOUBLES up to the six-hour refresh interval, so a provider whose
+    //     plugin has been off for a while is not even re-asked for six hours
+    //     after the pick that made it listable. Counting the change is what
+    //     drops that wait back to the floor.
+    //
+    //     After the batch, never before it: a refused batch changed no flag
+    //     (it is applied to one snapshot and validated as a whole), and
+    //     announcing a change that did not happen would spend a ~3-minute
+    //     `openclaw models list` on a Jetson for nothing.
+    //
+    //     One request CAN announce the same provider twice — the auto-extend
+    //     above, then this — which costs one superseded ~3-minute fork in the
+    //     narrow case where both fire. Deliberately not deferred into a single
+    //     flush at the end: this handler has several exits that leave a
+    //     completed write behind (the 502, the 409, the same-model return), and
+    //     a flush that misses one of them trades a bounded cost for six hours
+    //     of a catalogue that says `source: "live"` about a box that moved.
+    //     Each announcement therefore sits at the write it describes.
+    const pluginSwitchedOn = providerPluginSwitchedOnBy([targetModel], configBeforeBatch);
+    if (pluginSwitchedOn) notifyProviderSetChanged(pluginSwitchedOn);
 
     // 1c. The other side of the arm: a pick that is NOT the subscription's, on
     //     a reference an earlier ChatGPT pick armed, has to clear it — a
@@ -1204,7 +1255,17 @@ export async function POST(request: Request) {
       //    when nothing on the box could use it — the primary is elsewhere
       //    AND no usable Anthropic credential remains (see setProviderPlugins).
       //    Other plugins stay where they are.
-      await setProviderPlugins(parsed.provider);
+      const flippedProvider = await setProviderPlugins(parsed.provider);
+      // A flipped plugin IS a provider-set change: switching anthropic off is
+      // precisely what empties `openclaw models list --provider anthropic`.
+      // Neither this route nor ChatPopup emitted anything for it, and the
+      // catalogue hook deliberately ignores the model-SELECTION event, so the
+      // enumeration taken while the plugin was on stood as `source: "live"` for
+      // six hours. `setProviderPlugins` returns the id it changed, or null when
+      // it changed nothing, so this cannot announce a change that did not
+      // happen. It is also the path `POST /setup-api/providers/default`
+      // delegates to on OpenClaw, so counting it here covers that route too.
+      if (flippedProvider) notifyProviderSetChanged(flippedProvider);
     }
 
     await restartGateway();

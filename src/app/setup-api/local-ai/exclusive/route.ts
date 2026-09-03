@@ -19,7 +19,8 @@ import {
   runOpenclawConfigSetBatch,
   type OpenclawConfigSetArgs,
 } from "@/lib/openclaw-config";
-import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
+import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
+import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
 
 const SAVED_PRIMARY_KEY = "local_only_saved_primary";
@@ -497,6 +498,31 @@ export async function POST(request: Request) {
       ];
       if (restoreOps.length > 0) {
         await setConfigBatch(restoreOps);
+        // The third site that switches a provider plugin on, and the third that
+        // has to count it: this restore is what makes that provider listable
+        // again, and nothing else will tell the catalogue. After the batch,
+        // because a refused one leaves the flag exactly as it was —
+        // `setConfigBatch` throws rather than swallowing, so reaching this line
+        // means the write landed.
+        //
+        // `null` for the pre-write state on purpose: it is the honest answer
+        // here, not a shortcut. Any snapshot this route could read would be
+        // read BEFORE a `config set --batch-json` that takes ~10 s on a Jetson,
+        // and a provider save landing in that window (which switches the plugin
+        // off through its own gate) would leave a stale "it was already on"
+        // reading and swallow the switch-on this batch then performs. Nothing
+        // available here makes the read atomic with the write. So this site
+        // says "I cannot know", which counts the change: this path runs once
+        // per Local-only exit and only when the saved primary or a fallback
+        // names the gated provider, it already restarts the gateway and
+        // re-patches every session, so at worst it spends one enumeration —
+        // against a silent miss that would leave the catalogue behind until a
+        // doubling backoff expired.
+        const pluginSwitchedOn = providerPluginSwitchedOnBy(
+          [restorablePrimary, ...(restoreFallbacks ?? [])],
+          null,
+        );
+        if (pluginSwitchedOn) notifyProviderSetChanged(pluginSwitchedOn);
       }
       const restore = savedSessionOverrides
         ? await restoreSessionOverrides(savedSessionOverrides)

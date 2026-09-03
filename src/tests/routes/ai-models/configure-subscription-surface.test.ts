@@ -59,6 +59,7 @@ vi.mock("@/lib/provider-models", async () => {
 // after the test that triggered it has finished.
 vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
   refreshInBackground: vi.fn(),
+  notifyProviderSetChanged: vi.fn(),
 }));
 
 const { parseFullyQualifiedModelImpl } = vi.hoisted(() => ({
@@ -247,7 +248,7 @@ async function primeConfigureRoute(): Promise<(request: Request) => Promise<Resp
   vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
   vi.mocked(runOpenclawConfigSetBatch).mockResolvedValue(undefined);
   vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 0 });
-  vi.mocked(setProviderPlugins).mockResolvedValue(undefined);
+  vi.mocked(setProviderPlugins).mockResolvedValue(null);
   vi.mocked(unpairLocal).mockResolvedValue(undefined);
   mockSpawn.mockImplementation(() => successfulChild());
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network disabled in tests")));
@@ -323,8 +324,8 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
   });
 
   it("does not refuse the shipped default over a cache that predates it", async () => {
-    // The regression this pins: the catalog route SERVES its cached payload
-    // through `augmentWithStaticCatalog`, so a release that adds a model to
+    // The regression this pins: the picker falls back to the curated list
+    // whenever the route has no live enumeration, so a release that adds a model to
     // PROVIDER_CATALOGS offers it in the picker on day one — while the on-disk
     // cache keeps the previous enumeration for up to that route's 6h refresh
     // interval. Judging the raw cache asked a different question than the
@@ -402,10 +403,12 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
   });
 
   it("refuses a typed id an EMPTY cached surface plus the curated catalogue lacks", async () => {
-    // A file holding `models: []` is served to the picker through
-    // `augmentWithStaticCatalog`, so the customer was shown the curated rows —
-    // the guard judges by the same list rather than answering UNKNOWN. Only a
-    // MISSING cache (the test above) is unknown.
+    // A file holding `models: []` is served as an empty payload, and
+    // `fetchProviderCatalog` renders the curated catalogue for an empty one, so
+    // the customer was shown the curated rows — the guard judges by the same
+    // list rather than answering UNKNOWN. What IS unknown is a cache the guard
+    // cannot read at all — missing, unreadable, or half-written; the test above
+    // covers the missing one.
     mockSurfaceRead.mockResolvedValue(surfaceCache([]) as never);
 
     const res = await configurePost(subscribe({ model: OFF_CATALOGUE_ID }));

@@ -10,11 +10,77 @@
 // (e.g. `anthropic/claude-haiku-4-5`) since OpenRouter's catalog uses
 // `<org>/<model>` slugs.
 
+import { lastModelSegment } from "./chat-header-pills";
 import {
   OPENROUTER_CURATED_MODELS,
   OPENROUTER_DEFAULT_MODEL_ID,
   isValidOpenRouterModelId,
 } from "./openrouter-models";
+
+// Model families that are not CHAT models, whatever provider lists them —
+// image, audio/speech, transcription, video, embeddings, moderation, and the
+// pre-chat completion engines.
+//
+// It lives HERE, not in the catalog route, because it is a fact about model
+// ids rather than about one HTTP handler, and this module already owns the
+// catalogue vocabulary and is import-safe from both client and server. The
+// second catalogue surface (src/lib/hermes-model-options.ts) cannot import a
+// route without dragging `spawn`/`fs` in, so a rule parked there would simply
+// be copied.
+//
+// It is a GUESS, and only for catalogues that leave us no alternative.
+// `openclaw models list` enumerates a provider's whole catalogue and offers no
+// capability filter to ask for the chat ones (`--all`, `--local`, `--provider`
+// and nothing else on 2026.8.1), and its rows carry no capability field: an
+// image SKU comes back shaped exactly like a chat model —
+// `openai/gpt-image-1-mini` beside `openai/gpt-5.6-sol`, `input` reported as
+// "-" for both on a stock host. That gap is worth reporting upstream.
+//
+// Where a catalogue DOES publish the capability this list is not consulted at
+// all: OpenRouter's `architecture.output_modalities` is read directly by the
+// catalog route (`outputIsRenderableChat`), and `MODALITY_REPORTING_PROVIDERS`
+// keeps this pattern off that provider so a guess can never disagree with an
+// answer. An earlier revision of this comment claimed the field was already
+// read while nothing in the tree referenced it; the measurement below is what
+// closed that gap.
+//
+// A MODALITY exclusion, deliberately not a generation allowlist: it can only
+// hide SKUs a chat picker has no way to talk to, never a chat model the box has
+// learned about. That distinction is the point — the generation allowlist it
+// replaces (`/^gpt-5\.[45](-pro|-mini)?$/`) hid the whole gpt-5.6 generation,
+// which is the defect this change exists to fix. Older chat generations the box
+// lists are shown: the device's own catalogue decides, and an older model the
+// box can route is not a dead button.
+//
+// The families are measured, not guessed at twice: run against the 423 rows of
+// the live OpenRouter catalogue (2026-09-02), which is the only catalogue that
+// states the truth alongside the name, this pattern drops 13 of the 15 rows
+// whose output is not text-only — the `-image` family (`gpt-5-image`,
+// `gemini-2.5-flash-image`, `gpt-5.4-image-2`), `imagen-*`, `veo-*`, `lyria-*`,
+// `gpt-audio` — and produces ZERO false failures: no text-output row matches
+// it. The two it misses are `openrouter/auto` and `openrouter/auto-beta`, which
+// the field-based rule deliberately keeps too. `vision` is NOT a family here
+// for the same measured reason: `deepseek/deepseek-v4-flash-vision-exp` is a
+// text-output chat model.
+const NON_CHAT_MODEL_RE = new RegExp([
+  "^(?:gpt-image|dall-e|whisper|tts-|text-embedding|omni-moderation|sora",
+  "|davinci|babbage|codex-mini|imagen|veo|lyria)",
+  // Suffix families: gpt-4o-audio-preview, gpt-4o-realtime-preview,
+  // gpt-4o-transcribe, gpt-4o-mini-tts, gemini-2.5-flash-image,
+  // gpt-5.4-image-2.
+  "|(?:-audio|-realtime|-transcribe|-tts|-image)(?:-|$)",
+].join(""));
+
+/**
+ * Is this id a SKU a chat picker has no way to talk to?
+ *
+ * Tested against the last path segment, because OpenRouter ids keep their
+ * `<org>/<model>` slug (`openai/gpt-image-1`) and an anchored pattern matched
+ * against the whole id is silently inert for the largest catalogue we serve.
+ */
+export function isNonChatModelId(id: string): boolean {
+  return NON_CHAT_MODEL_RE.test(lastModelSegment(id));
+}
 
 export interface ProviderModelOption {
   id: string;
@@ -60,16 +126,26 @@ export interface ProviderCatalog {
 // stable entries per provider) and let the live catalog fill in the
 // rest. If you find yourself adding the latest model here, stop —
 // that's the catalog route's job.
+//
+// They are DISPLAY ONLY, and they can never hide a live row: the route no
+// longer merges them into an enumeration, and never persists them. Whatever
+// renders them is holding a catalogue marked `fallback: true` and is expected
+// to ask again — see `ResolvedProviderCatalog` and `useProviderCatalog`. The
+// one thing they still contribute to a live row is a `hint`, which no
+// enumeration returns.
 export const ANTHROPIC_MODELS: readonly ProviderModelOption[] = [
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest, near-frontier." },
   { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Default. Speed + intelligence." },
   { id: "claude-opus-5", label: "Claude Opus 5", hint: "Most capable." },
 ] as const;
 
-// OpenAI API key models. Curated to the 5.4 + 5.5 generations only —
-// older gens (4.1, 5.0, 5.1, 5.2, 5.3) are filtered out at the catalog
-// route via ALLOWED_MODEL_RE_BY_PROVIDER. Power users can still hit
-// older models via the "custom" toggle.
+// OpenAI API key models — cold-start display only, like every list here.
+// There is no longer a generation allowlist at the catalog route for openai:
+// it matched none of the gpt-5.6 generation, so on a 2026.8.1 box it hid the
+// live catalogue behind these five ids instead of supplementing them. What a
+// box shows now is what `openclaw models list --provider openai --all --json`
+// returns, minus the non-chat SKUs. Power users can still type any id via the
+// "custom" toggle.
 export const OPENAI_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.5-pro", label: "GPT-5.5 Pro", hint: "Latest, max reasoning." },
   { id: "gpt-5.5", label: "GPT-5.5", hint: "Latest flagship." },
@@ -348,7 +424,39 @@ interface CatalogApiResponse {
   /** True when the route fell back to a stale cached payload because the
    * upstream catalog query just failed; UI may want to show a warning. */
   stale?: boolean;
+  /**
+   * `"live"` when a device enumeration produced this payload. Any other value,
+   * including absent, means it did not — that is the whole test. ONE field
+   * rather than a second derived boolean beside it, so the two cannot
+   * disagree; `CatalogResponse` in the catalog route persists this one.
+   */
+  source?: string;
+  /** True when an enumeration is in flight right now, so asking again will
+   * eventually get a different answer. */
+  warming?: boolean;
 }
+
+/**
+ * A catalogue as a component actually receives it: the shape above plus the
+ * two things the picker has to know about the ANSWER rather than the models —
+ * whether it is old, and whether a device produced it at all.
+ */
+export type ResolvedProviderCatalog = ProviderCatalog & {
+  stale?: boolean;
+  /**
+   * True when these rows are the curated cold-start list rather than a device
+   * enumeration — a placeholder for an answer, not the answer. A consumer may
+   * render them, but must not treat them as facts about the box.
+   */
+  fallback?: boolean;
+  /**
+   * True when the box is enumerating RIGHT NOW, so a later ask gets a better
+   * answer. This, not `fallback`, is what a consumer polls on: a provider that
+   * cannot enumerate at all serves a fallback forever, and polling it would be
+   * a request loop with no destination. The route holds the matching backoff.
+   */
+  warming?: boolean;
+};
 
 /**
  * Fetch the live model catalog for `provider` from the catalog route.
@@ -365,19 +473,37 @@ interface CatalogApiResponse {
  */
 export async function fetchProviderCatalog(
   provider: string,
-  opts: { signal?: AbortSignal } = {},
-): Promise<ProviderCatalog & { stale?: boolean }> {
+  opts: { signal?: AbortSignal; refresh?: boolean } = {},
+): Promise<ResolvedProviderCatalog> {
   const fallback = getProviderCatalog(provider);
   try {
-    const url = `/setup-api/ai-models/catalog?provider=${encodeURIComponent(provider)}`;
+    // `?refresh=1` asks the route to re-enumerate NOW rather than wait out its
+    // 6h interval. It still answers from cache immediately — the refresh runs
+    // detached — so this costs the caller nothing and is what makes "connect a
+    // provider, see its models" work without a reload.
+    const url = `/setup-api/ai-models/catalog?provider=${encodeURIComponent(provider)}`
+      + (opts.refresh ? "&refresh=1" : "");
     const res = await fetch(url, { signal: opts.signal, cache: "no-store" });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
     const body = (await res.json()) as CatalogApiResponse;
     if (!body.models || body.models.length === 0) {
-      // Empty catalog — keep the fallback so the picker isn't blank.
-      if (fallback) return { ...fallback, stale: true };
+      // Empty catalog — keep the curated rows so the picker isn't blank, and
+      // carry `warming` through unchanged. It is the route saying an
+      // enumeration is in flight, and it is the ONLY thing `useProviderCatalog`
+      // polls on; dropped here, a box whose cached rows the sanitiser filtered
+      // away entirely (an upgraded box holding an older build's ids) would sit
+      // on the curated list until the next provider event, while the real
+      // answer landed seconds later with nobody left asking for it.
+      if (fallback) {
+        return {
+          ...fallback,
+          stale: true,
+          fallback: true,
+          warming: body.warming === true ? true : undefined,
+        };
+      }
       throw new Error("empty catalog");
     }
     return {
@@ -396,6 +522,12 @@ export async function fetchProviderCatalog(
         || "",
       allowCustom: body.allowCustom !== false,
       stale: body.stale,
+      warming: body.warming === true ? true : undefined,
+      // Derived from the route's one marker, never inferred from the rows: the
+      // client cannot tell a curated list from a device's by looking at it —
+      // that is precisely how three hard-coded model names passed for the
+      // box's own catalogue for a day.
+      fallback: body.source === "live" ? undefined : true,
     };
   } catch (err) {
     // AbortError isn't a real failure — the consumer cancelled because
@@ -411,7 +543,7 @@ export async function fetchProviderCatalog(
         `[provider-models] catalog fetch failed for ${provider}, using fallback:`,
         err instanceof Error ? err.message : err,
       );
-      return { ...fallback, stale: true };
+      return { ...fallback, stale: true, fallback: true };
     }
     throw err;
   }

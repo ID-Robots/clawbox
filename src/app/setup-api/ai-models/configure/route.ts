@@ -79,7 +79,6 @@ import {
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import {
   isValidModelId,
-  isCatalogProvider,
   GOOGLE_MODELS,
   ANTHROPIC_MODELS,
   extractProviderModelId,
@@ -87,7 +86,7 @@ import {
 } from "@/lib/provider-models";
 import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
 import { setProviderEnabled } from "@/lib/provider-enablement";
-import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
+import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import {
   isClaudeSubscriptionOnly,
   offSurfaceClaudeModelMessage,
@@ -2758,7 +2757,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //     behind the rule.
     if (!isLocalScope || shouldPromoteLocalToPrimary) {
       const primaryProvider = config.defaultModel.split("/", 1)[0];
-      await setProviderPlugins(primaryProvider);
+      // Same gate, same rule: it returns the provider whose plugin it flipped,
+      // which is a catalogue change for THAT provider — not for the one this
+      // save is about, which step 8c counts below.
+      const flippedProvider = await setProviderPlugins(primaryProvider);
+      if (flippedProvider) notifyProviderSetChanged(flippedProvider);
     }
 
     // 8c. Kick off a catalog refresh for the just-configured provider so
@@ -2771,14 +2774,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //     flight guarded inside refreshInBackground, so concurrent configure
     //     calls collapse to one openclaw fork.
     //
-    //     `ocProvider` is the openclaw-side provider id (e.g. "anthropic",
-    //     "openai", "codex", "google", "deepseek"). The catalog uses
-    //     "clawai" for ClawBox AI rather than "deepseek", so map that case.
-    //     Skip providers that aren't part of the catalog (local-only, llamacpp).
-    const catalogProvider = ocProvider === "deepseek" ? "clawai" : ocProvider;
-    if (isCatalogProvider(catalogProvider)) {
-      refreshCatalogInBackground(catalogProvider);
-    }
+    //     `notifyProviderSetChanged` owns the openclaw-id mapping and the
+    //     catalogue-membership test, so this call site does not repeat them.
+    //     It COUNTS the change — the plugin was switched on and the credential
+    //     written one step above, so any earlier pre-auth enumeration and any
+    //     backoff it recorded describe a box that no longer exists. A client's
+    //     `?refresh=1` cannot count it; only a write can.
+    notifyProviderSetChanged(ocProvider);
 
     // Codex 2026.6.x reads its ChatGPT session from the Codex CLI's own
     // ~/.codex/auth.json, which gateway-pre-start.sh synthesizes from this

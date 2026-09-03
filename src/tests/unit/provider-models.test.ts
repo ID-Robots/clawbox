@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   PROVIDER_CATALOGS,
+  fetchProviderCatalog,
   getProviderCatalog,
+  isNonChatModelId,
   isValidModelId,
   parseModelSlug,
 } from "@/lib/provider-models";
@@ -55,6 +57,94 @@ describe("provider-models", () => {
       expect(isValidModelId("openai", "openai/gpt-5")).toBe(false);
       expect(isValidModelId("openrouter", "anthropic/claude-haiku-4.5")).toBe(true);
       expect(isValidModelId("openrouter", "anthropic/claude/")).toBe(false);
+    });
+  });
+
+  describe("isNonChatModelId", () => {
+    // Moved here from the catalog route so the second catalogue surface can
+    // share it. The OpenRouter case is the one that was broken: the pattern is
+    // anchored, and OpenRouter ids keep their `<org>/<model>` slug, so matching
+    // it against the whole id made the exclusion silently inert for the largest
+    // catalogue we serve.
+    it("matches an image SKU behind an OpenRouter org slug", () => {
+      expect(isNonChatModelId("openai/gpt-image-1-mini")).toBe(true);
+      expect(isNonChatModelId("gpt-image-1-mini")).toBe(true);
+    });
+
+    it("matches the suffix families, wherever the suffix ends", () => {
+      expect(isNonChatModelId("gpt-4o-audio-preview")).toBe(true);
+      expect(isNonChatModelId("gpt-4o-transcribe")).toBe(true);
+      expect(isNonChatModelId("gpt-4o-mini-tts")).toBe(true);
+    });
+
+    it("keeps every chat model, including generations we have never seen", () => {
+      expect(isNonChatModelId("openai/gpt-5.6-sol")).toBe(false);
+      expect(isNonChatModelId("anthropic/claude-opus-5")).toBe(false);
+      // A modality exclusion must never become a generation allowlist: an id
+      // this list does not recognise is a chat model until proven otherwise.
+      expect(isNonChatModelId("openai/gpt-7-hypothetical")).toBe(false);
+    });
+  });
+
+  describe("fetchProviderCatalog", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    /** Answer every catalog GET with `body`. */
+    function mockRoute(body: unknown): void {
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true,
+        json: async () => body,
+      })));
+    }
+
+    it("carries `warming` through an empty catalogue, so the picker keeps asking", async () => {
+      // Reachable on an upgraded box: the route serves a cached payload whose
+      // rows its current sanitiser filters away entirely, with `warming: true`
+      // because the re-enumeration it just started is genuinely in flight.
+      mockRoute({ provider: "anthropic", models: [], warming: true });
+
+      const resolved = await fetchProviderCatalog("anthropic");
+
+      // The curated rows are rendered — a blank picker helps nobody — and they
+      // say what they are.
+      expect(resolved.fallback).toBe(true);
+      expect(resolved.models.length).toBeGreaterThan(0);
+      // And `warming` survives, because it is the only field
+      // `useProviderCatalog` polls on. Dropping it stopped the retry loop on
+      // exactly the box that was seconds away from a real answer.
+      expect(resolved.warming).toBe(true);
+    });
+
+    it("does not invent `warming` for an empty catalogue nobody is enumerating", async () => {
+      // A provider under the route's failed-refresh backoff: no fork is out
+      // there, so polling it would be a request loop with no destination.
+      mockRoute({ provider: "anthropic", models: [] });
+
+      const resolved = await fetchProviderCatalog("anthropic");
+
+      expect(resolved.fallback).toBe(true);
+      expect(resolved.warming).toBeUndefined();
+    });
+
+    it("marks a payload the route did not stamp `source: \"live\"` as a fallback", async () => {
+      mockRoute({
+        provider: "anthropic",
+        models: [{ id: "claude-opus-5", label: "Claude Opus 5", contextWindow: 1_000_000 }],
+        defaultModelId: "claude-opus-5",
+      });
+
+      expect((await fetchProviderCatalog("anthropic")).fallback).toBe(true);
+
+      mockRoute({
+        provider: "anthropic",
+        models: [{ id: "claude-opus-5", label: "Claude Opus 5", contextWindow: 1_000_000 }],
+        defaultModelId: "claude-opus-5",
+        source: "live",
+      });
+
+      expect((await fetchProviderCatalog("anthropic")).fallback).toBeUndefined();
     });
   });
 });

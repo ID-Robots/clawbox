@@ -23,6 +23,13 @@ vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(async () => {}),
 }));
 
+// The catalogue is told out-of-band when a restore switches a provider plugin
+// back on; the real module forks `openclaw models list`.
+vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
+  notifyProviderSetChanged: vi.fn(),
+  refreshInBackground: vi.fn(),
+}));
+
 vi.mock("@/lib/openclaw-session-store", () => ({
   listAgentIds: vi.fn(() => []),
   sessionStorePath: vi.fn(() => null),
@@ -40,6 +47,7 @@ vi.mock("@/lib/openclaw-config", () => ({
 
 import { get, setMany } from "@/lib/config-store";
 import { restartGateway, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 
 const UNKNOWN_MODEL =
   'Cannot set model reference "anthropic/claude-sonnet-5" at agents.defaults.model.primary: '
@@ -128,6 +136,48 @@ describe("POST /setup-api/local-ai/exclusive — restoring the saved primary and
       ["agents.defaults.model.primary", JSON.stringify("openai/gpt-5.5"), "--json"],
       ["agents.defaults.model.fallbacks", JSON.stringify(["anthropic/claude-sonnet-5"]), "--json"],
     ]);
+  });
+
+  // A plugin that is off enumerates NOTHING, and the comment above these
+  // enables says why this route is where it can be off: "a provider save made
+  // while Local-only was on may have switched that plugin off". So this
+  // restore is a provider-set change, it is the only write on this route that
+  // makes one, and nothing else can tell the catalogue — an enumeration that
+  // came back empty is recorded as a failed refresh whose wait doubles up to
+  // the six-hour interval, so without this the provider is not even re-asked
+  // for six hours after the toggle that made it listable again.
+  it("tells the catalogue that the restore can switch the plugin back on", async () => {
+    // No pre-state is consulted, and that is the honest answer here rather than
+    // a shortcut: any snapshot this route could read would be read before a
+    // `config set --batch-json` that takes ~10 s on a Jetson, and a provider
+    // save landing in that window switches the plugin off through its own gate
+    // — leaving a stale "it was already on" reading that would swallow the
+    // switch-on this batch then performs. So the change is counted whenever the
+    // restore names the gated provider: this path runs once per Local-only
+    // exit, already restarts the gateway and re-patches every session, and at
+    // worst spends one enumeration — against a silent miss that leaves the
+    // catalogue behind until a doubling backoff expires.
+    const response = await turnOff();
+
+    expect(response.status).toBe(200);
+    expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("anthropic");
+  });
+
+  it("counts it for an Anthropic FALLBACK too, not only the primary", async () => {
+    store.local_only_saved_primary = "openai/gpt-5.5";
+    store.local_only_saved_fallbacks = ["anthropic/claude-sonnet-5"];
+
+    await turnOff();
+
+    expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("anthropic");
+  });
+
+  it("says nothing when the restore names no gated provider", async () => {
+    store.local_only_saved_primary = "openai/gpt-5.5";
+
+    await turnOff();
+
+    expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
   });
 
   it("does not restore a saved primary that is the ClawBox AI image entry", async () => {

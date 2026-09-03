@@ -1309,9 +1309,16 @@ export default function AIModelsStep({
    * of this. (`useProviderCatalog` always falls back to the curated arrays in
    * provider-models.ts, so today this is unreachable — the condition is here
    * to keep it unreachable for the right reason.)
+   *
+   * A `fallback` catalogue is excluded for the same reason an empty one is: the
+   * curated cold-start rows are not this box's catalogue, so "this credential
+   * can run none of them" is a verdict about a list the device never confirmed.
    */
   const noUsableCatalogModel = Boolean(
-    activeCatalog && activeCatalog.models.length > 0 && !usableDefaultModelId,
+    activeCatalog
+    && !activeCatalog.fallback
+    && activeCatalog.models.length > 0
+    && !usableDefaultModelId,
   );
 
   const getRequestedCatalogModelId = useCallback((fallbackToDefault = false) => {
