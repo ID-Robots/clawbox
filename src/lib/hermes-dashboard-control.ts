@@ -233,32 +233,48 @@ async function waitForReplacement(previousPid: number | null, deadline: number):
 }
 
 /**
- * Stop the dashboard, wait for systemd to bring it back, or answer false.
+ * What a bounce ended as.
  *
- * NEVER THROWS. True means the dashboard is SERVING again — not merely that it
- * was stopped. `Restart=always` is a promise that systemd will start it, not
- * that it came back, and both callers act on the answer: a ClawKeep restore
- * reports the restored state.db is being served, and the image refresh reports
- * the box can draw. Neither was true while the dashboard was still down, and
- * the old `true` was issued the moment the stop returned.
+ * `"failed"` and `"pending"` are both "not serving yet", and they were one
+ * answer until TASK-608 — which is how a ClawKeep restore came to tell the
+ * owner a dashboard that is mid-restart could not be restarted, and to run
+ * `systemctl restart` over it by hand. They are opposite instructions:
+ *
+ * - `"failed"` — the restart was NOT taken. Nothing is coming back on its own
+ *   and the owner has to act.
+ * - `"pending"` — the stop took and `Restart=always` owns the unit, it has just
+ *   not finished inside the budget. Nothing to do; acting makes it worse.
+ */
+export type HermesBounceOutcome = "restarted" | "pending" | "failed";
+
+/**
+ * Stop the dashboard, wait for systemd to bring it back, and say which of the
+ * three things happened.
+ *
+ * NEVER THROWS. `"restarted"` means the dashboard is SERVING again — not merely
+ * that it was stopped. `Restart=always` is a promise that systemd will start
+ * it, not that it came back, and both callers act on the answer: a ClawKeep
+ * restore reports the restored state.db is being served, and the image refresh
+ * reports the box can draw. Neither was true while the dashboard was still
+ * down, and the old `true` was issued the moment the stop returned.
  *
  * Two questions, in order, because they answer different things: systemd says a
  * DIFFERENT process is now the unit's main one, and the socket says that
  * process is serving. Neither alone is the bounce.
- *
- * False now covers three cases the callers phrase for the owner: nothing
- * promised to restart it, the stop did not take, or it did not come back inside
- * the budget above.
  */
-export async function bounceHermesDashboard(): Promise<boolean> {
-  if (!(await restartsItself())) return false;
+export async function bounceHermesDashboard(): Promise<HermesBounceOutcome> {
+  if (!(await restartsItself())) return "failed";
   // Read BEFORE the stop: this is the process the answer is measured against.
   const outgoing = await mainPid();
   const result = await runHermesCli(["dashboard", "--stop"], { timeoutMs: STOP_TIMEOUT_MS }).catch(
     () => null,
   );
-  if (result?.code !== 0) return false;
+  if (result?.code !== 0) return "failed";
 
+  // Past this line the restart HAS been taken: the stop exited 0 over a unit
+  // that restarts itself. Everything below is the clock running out, not a
+  // refusal — so it is "pending", whatever the owner is told about it.
+  //
   // ONE deadline across both halves — the doc block above budgets them together
   // because they are the same restart, and spending it twice would put the
   // ceiling at 90 s inside a request cloudflared cuts at 100 s.
@@ -267,11 +283,13 @@ export async function bounceHermesDashboard(): Promise<boolean> {
   const deadline = Date.now() + respawnWaitMs();
   if (!(await waitForReplacement(outgoing, deadline))) {
     console.error(`[hermes] ${HERMES_DASHBOARD_UNIT} did not come back after its stop`);
-    return false;
+    return "pending";
   }
-  if (await waitForPortOpen(DASHBOARD_PORT, DASHBOARD_HOST, { timeoutMs: deadline - Date.now() })) return true;
+  if (await waitForPortOpen(DASHBOARD_PORT, DASHBOARD_HOST, { timeoutMs: deadline - Date.now() })) {
+    return "restarted";
+  }
   console.error(
     `[hermes] ${HERMES_DASHBOARD_UNIT} restarted but is not listening on ${DASHBOARD_HOST}:${DASHBOARD_PORT} again`,
   );
-  return false;
+  return "pending";
 }

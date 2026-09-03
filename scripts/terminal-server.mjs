@@ -29,7 +29,23 @@ import * as os from "node:os";
 import { WebSocketServer, WebSocket } from "ws";
 import * as pty from "node-pty";
 
-const PORT = parseInt(process.env.TERMINAL_WS_PORT || "3006", 10);
+// Same rule as envPort() in src/lib/port-probe.ts, written out because this
+// script is standalone ESM and cannot import the TypeScript helper: an integer
+// in 1-65535, or the default. `parseInt` alone yields NaN on a typo, and
+// `listen(NaN)` binds a RANDOM free port — while production-server.js still
+// proxies /terminal-ws to 3006, so the two ends disagree with nothing logged.
+// src/tests/unit/port-probe.test.ts runs the same table against every copy.
+/**
+ * @param {string | undefined} value
+ * @param {number} fallback
+ * @returns {number}
+ */
+function envPort(value, fallback) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : fallback;
+}
+
+const PORT = envPort(process.env.TERMINAL_WS_PORT, 3006);
 
 const server = http.createServer((_req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });

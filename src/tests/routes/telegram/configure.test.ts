@@ -6,13 +6,23 @@ vi.mock("@/lib/config-store", () => ({
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
+  // A REAL class, not a stub: the route narrows on
+  // `err instanceof GatewayNotReadyError` to tell a gateway that is still
+  // binding apart from one that refused the restart, and `instanceof undefined`
+  // throws a TypeError the first time a test makes the restart reject.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
   setTelegramToken: vi.fn(),
   restartGateway: vi.fn(),
   clearTelegramPairingState: vi.fn(),
 }));
 
 import { get, set } from "@/lib/config-store";
-import { setTelegramToken, restartGateway, clearTelegramPairingState } from "@/lib/openclaw-config";
+import { GatewayNotReadyError, setTelegramToken, restartGateway, clearTelegramPairingState } from "@/lib/openclaw-config";
 
 const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
@@ -201,6 +211,25 @@ describe("POST /setup-api/telegram/configure", () => {
     expect(typeof body.warning).toBe("string");
     // The raw exec error must never be surfaced.
     expect(JSON.stringify(body)).not.toContain("Restart failed");
+  });
+
+  it("answers 200 with a soft warning when the gateway is still coming back", async () => {
+    // TASK-608 widened this catch: before it, only a REFUSED `systemctl
+    // restart` arrived here; now a restart that exited 0 and has not finished
+    // binding :18789 does too, and on a cold box that is the ordinary case.
+    // Both used to answer the same 502 and the same sentence — "will apply on
+    // next gateway restart" — over a restart that has already been taken. The
+    // same false failure this task removed from /local-ai/exclusive.
+    mockRestartGateway.mockRejectedValue(new GatewayNotReadyError("gateway did not come back"));
+
+    const res = await telegramConfigurePost(jsonRequest({ botToken: "123:abc" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.warning).toContain("has not finished restarting");
+    // The sentence for a restart nobody took must not be reused here.
+    expect(body.warning).not.toContain("next gateway restart");
   });
 
   it("returns generic error for non-Error throws", async () => {

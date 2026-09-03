@@ -28,6 +28,19 @@ vi.mock("child_process", () => ({
   spawn: vi.fn(),
 }));
 
+// PARTIAL mock — only the setup-gate read is replaceable, and it is pinned
+// rather than left to the filesystem. Without it `readSetupGateFacts()` runs
+// for real, reads `${CLAWBOX_ROOT}/data/config.json` under the hermetic floor
+// vitest.config.ts sets, gets ENOENT and answers `setupComplete: false` — so
+// every case in this file silently exercised the FIRST-RUN WIZARD branch
+// (`awaitReady: false`), which is not the box these Settings-side cases
+// describe. Deterministic, but named by accident; the first assertion on
+// restartGateway's argument added here would have pinned the wrong one.
+vi.mock("@/lib/route-auth", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/route-auth")>("@/lib/route-auth");
+  return { ...actual, readSetupGateFacts: () => ({ setupComplete: true, passwordConfigured: true }) };
+});
+
 vi.mock("fs/promises", () => ({
   default: {
     readFile: vi.fn(),
@@ -254,6 +267,15 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
     expect(res.status).toBe(200);
     return res;
   }
+
+  it("runs on a configured box, so the restart waits for the gateway", async () => {
+    // The branch this file's cases actually describe, said out loud. It used
+    // to be chosen by a filesystem miss (no config.json under the test root →
+    // `setupComplete: false` → the first-run wizard's `awaitReady: false`),
+    // which is the opposite of what a Settings-side vision case exercises.
+    await connectClawai();
+    expect(restartGateway).toHaveBeenCalledWith({ awaitReady: true });
+  });
 
   it("registers a vision entry that advertises image input", async () => {
     await connectClawai();

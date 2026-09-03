@@ -27,7 +27,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   edition: "openclaw" as string,
-  bounce: true,
+  bounce: "restarted" as "restarted" | "pending" | "failed",
   bounceCalls: 0,
   execCalls: [] as { file: string; args: string[] }[],
   execFailure: null as string | null,
@@ -93,7 +93,7 @@ const post = () =>
 
 beforeEach(() => {
   h.edition = "openclaw";
-  h.bounce = true;
+  h.bounce = "restarted";
   h.bounceCalls = 0;
   h.execCalls.length = 0;
   h.execFailure = null;
@@ -105,6 +105,7 @@ describe("POST /setup-api/clawkeep/restore — bringing the state holder back", 
     const body = await (await post()).json();
     expect(body.ok).toBe(true);
     expect(body.restartErrors).toEqual([]);
+    expect(body.restartPending).toEqual([]);
     expect(h.execCalls).toEqual([
       {
         file: "/usr/bin/sudo",
@@ -123,6 +124,7 @@ describe("POST /setup-api/clawkeep/restore — bringing the state holder back", 
     expect(body.restartErrors).toHaveLength(1);
     expect(body.restartErrors[0]).toMatch(/^clawbox-gateway\.service: /);
     expect(body.restartErrors[0]).toContain("a password is required");
+    expect(body.restartPending).toEqual([]);
   });
 
   it("does not call the OpenClaw restore done until the gateway is serving again", async () => {
@@ -133,8 +135,22 @@ describe("POST /setup-api/clawkeep/restore — bringing the state holder back", 
     h.gatewayUp = false;
     const body = await (await post()).json();
     expect(body.ok).toBe(true);
-    expect(body.restartErrors).toHaveLength(1);
-    expect(body.restartErrors[0].startsWith("clawbox-gateway.service: ")).toBe(true);
+    expect(body.restartPending).toHaveLength(1);
+    expect(body.restartPending[0].startsWith("clawbox-gateway.service: ")).toBe(true);
+  });
+
+  it("does not call a gateway that is still binding a FAILED restart", async () => {
+    // The restart happened — `systemctl restart` exited 0 — and the gateway is
+    // re-reading the state files the restore just replaced, which is the
+    // slowest start this box performs. `restartErrors` is the array the result
+    // card turns into "Could not auto-restart 1 service(s). Run
+    // `sudo systemctl restart clawbox-gateway.service` manually", so putting a
+    // still-binding gateway in it tells the owner to kill a service mid-boot
+    // and, on a couple of repeats, to trip StartLimitBurst. A pending restart
+    // travels in its own field precisely so it cannot be rendered as a failure.
+    h.gatewayUp = false;
+    const body = await (await post()).json();
+    expect(body.restartErrors).toEqual([]);
   });
 
   // THE REGRESSION. This used to be a sudo call that could not succeed.
@@ -144,6 +160,7 @@ describe("POST /setup-api/clawkeep/restore — bringing the state holder back", 
     expect(body.ok).toBe(true);
     expect(h.bounceCalls).toBe(1);
     expect(body.restartErrors).toEqual([]);
+    expect(body.restartPending).toEqual([]);
     // Not "did not call sudo on the dashboard" — did not call sudo AT ALL.
     // A Hermes box has no clawbox-gateway either, so any exec here is wrong.
     expect(h.execCalls).toEqual([]);
@@ -151,7 +168,7 @@ describe("POST /setup-api/clawkeep/restore — bringing the state holder back", 
 
   it("still tells the owner when the Hermes bounce did not take", async () => {
     h.edition = "hermes";
-    h.bounce = false;
+    h.bounce = "failed";
     const body = await (await post()).json();
     expect(body.ok).toBe(true);
     expect(h.execCalls).toEqual([]);
@@ -159,6 +176,23 @@ describe("POST /setup-api/clawkeep/restore — bringing the state holder back", 
     // The result card parses the unit off the front of this string to print
     // `sudo systemctl restart <unit>`, so the prefix has to stay a unit name.
     expect(body.restartErrors[0].startsWith(`${HERMES_DASHBOARD_UNIT}: `)).toBe(true);
+    expect(body.restartPending).toEqual([]);
+  });
+
+  it("does not call a Hermes dashboard that is still coming back a failed bounce", async () => {
+    // `bounceHermesDashboard()` answers "pending" when the stop TOOK and
+    // `Restart=always` has not finished bringing the dashboard back inside the
+    // budget. Nothing is wrong there and there is nothing for the owner to do
+    // — and the manual command the card prints for a failure is `systemctl
+    // restart` over a unit systemd is already restarting.
+    h.edition = "hermes";
+    h.bounce = "pending";
+    const body = await (await post()).json();
+    expect(body.ok).toBe(true);
+    expect(h.execCalls).toEqual([]);
+    expect(body.restartErrors).toEqual([]);
+    expect(body.restartPending).toHaveLength(1);
+    expect(body.restartPending[0].startsWith(`${HERMES_DASHBOARD_UNIT}: `)).toBe(true);
   });
 
   it("never restarts the OpenClaw gateway on a Hermes box", async () => {

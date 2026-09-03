@@ -11,6 +11,17 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 vi.mock("@/lib/config-store", () => ({ get: vi.fn(), set: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({
+  // A REAL class: the route narrows on `err instanceof GatewayNotReadyError`
+  // to tell a gateway that is still binding apart from one that refused the
+  // restart, and `instanceof undefined` throws a TypeError. Unreachable on the
+  // Hermes path this file covers — `ensureHermesGateway()` never raises it —
+  // but the module is replaced wholesale, so the export has to exist.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
   setTelegramToken: vi.fn(),
   restartGateway: vi.fn(),
   clearTelegramPairingState: vi.fn(),

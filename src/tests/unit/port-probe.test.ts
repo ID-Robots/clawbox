@@ -1,4 +1,6 @@
+import fs from "node:fs";
 import net from "net";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { envPort, isPortOpen, waitForPortOpen } from "@/lib/port-probe";
 
@@ -161,6 +163,46 @@ describe("envPort", () => {
     for (const bad of [-1, 1.5, 70000]) {
       await expect(isPortOpen(bad, HOST, 50)).rejects.toThrow();
       expect(envPort(String(bad), 9119)).toBe(9119);
+    }
+  });
+
+  /**
+   * Three standalone entry points cannot import this module — two CommonJS,
+   * one ESM under scripts/ — so each carries the rule written out, with a
+   * comment saying why. That is the right call and it stays; what was missing
+   * is anything that would catch the next divergence. There has already been
+   * one: a `parseInt`/`Number` split between two copies, which behaved
+   * differently on "9119abc" and was found by reading, not by a test.
+   *
+   * The copies are extracted from the files as SOURCE and run against the same
+   * table as the real one — so a change to any body is a change this test sees.
+   */
+  describe("the hand-written copies in the standalone entry points", () => {
+    const ROOT = path.resolve(__dirname, "..", "..", "..");
+    const COPIES = [
+      "production-server.js",
+      "scripts/hermes-dashboard-proxy.js",
+      "scripts/terminal-server.mjs",
+    ];
+
+    for (const rel of COPIES) {
+      it(`${rel} answers exactly what @/lib/port-probe answers`, () => {
+        const source = fs.readFileSync(path.join(ROOT, rel), "utf8");
+        const declaration = source.match(
+          /function envPort\(value, fallback\) \{[\s\S]*?\n\}/,
+        );
+        // A miss is the finding, not a reason to skip: the copy was renamed,
+        // reshaped or deleted, and nothing else here would notice.
+        expect(declaration, `no envPort() found in ${rel}`).not.toBeNull();
+        const copy = new Function(`${declaration![0]}\nreturn envPort;`)() as typeof envPort;
+
+        for (const value of [
+          undefined, "", "  ", "oops", "9119abc", "0", "-1", "1.5", "65536",
+          "70000", "NaN", "Infinity", "1", "80", "9119", "65535",
+        ]) {
+          expect(copy(value, 9119), `${rel} on ${JSON.stringify(value)}`).toBe(envPort(value, 9119));
+        }
+      });
     }
   });
 });

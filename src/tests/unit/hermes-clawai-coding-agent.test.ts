@@ -91,7 +91,7 @@ beforeEach(() => {
     verified: true,
     reason: "proxy-allows",
   });
-  bounceMock.mockResolvedValue(true);
+  bounceMock.mockResolvedValue("restarted");
   // The running agent answers every probe happily, so nothing below is a bounce.
   rpcMock.mockImplementation(async (method: string) =>
     method === "image.generate" ? { available: true } : { status: "ok" },

@@ -2924,8 +2924,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     }
 
     // Configuration fully applied — now consume the OAuth handoff file (if any).
-    // Deferring the unlink to here means a transient failure above returned
-    // early with the file intact, so the client can retry within the TTL.
+    // Deferring the unlink to here means a failure that returned EARLY left the
+    // file intact, so the client can retry within the TTL. A gateway that has
+    // not finished restarting is not one of those: it falls through to here and
+    // consumes the file, which is right — the configure landed, and a retry
+    // would redo a completed save.
     if (pendingHandoffTokensPath) {
       await fs.unlink(pendingHandoffTokensPath).catch(() => {});
     }

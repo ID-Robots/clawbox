@@ -51,7 +51,7 @@ beforeEach(() => {
   rpcMock.mockReset();
   bounceMock.mockReset();
   reloadMcpMock.mockReset();
-  bounceMock.mockResolvedValue(true);
+  bounceMock.mockResolvedValue("restarted");
   reloadMcpMock.mockResolvedValue(true);
   agentSaysItCanDraw(true);
   errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -171,7 +171,7 @@ describe("refreshHermesImageTools", () => {
     // file. The dashboard is deliberately left up, and the owner is told what
     // to do about it rather than left with a silently broken feature.
     agentSaysItCanDraw(false);
-    bounceMock.mockResolvedValue(false);
+    bounceMock.mockResolvedValue("failed");
 
     await refreshHermesImageTools(false, true);
 
@@ -182,16 +182,29 @@ describe("refreshHermesImageTools", () => {
     // An OpenClaw box has no dashboard; a Hermes box can have one that is down.
     // Neither may turn a successful link into an error.
     rpcMock.mockResolvedValue(null);
-    bounceMock.mockResolvedValue(false);
+    bounceMock.mockResolvedValue("failed");
 
     // …and the answer is an honest "nothing was respawned", which is what keeps
     // the coding-agent family on the same path from skipping its own reload.
     await expect(refreshHermesImageTools(false, true)).resolves.toBe(false);
   });
 
+  it("treats a dashboard that is still coming back as no respawn HERE", async () => {
+    // The third answer the bounce now gives. For ClawKeep's restore card the
+    // distinction is the whole point — a pending unit must not be reported as
+    // a failed restart. Here it is not a distinction worth making: this caller
+    // only asks "can I skip the next family's reload.mcp?", and it cannot skip
+    // it on a dashboard it did not see come back. A redundant respawn, never a
+    // message to the owner.
+    agentSaysItCanDraw(false);
+    bounceMock.mockResolvedValue("pending");
+
+    await expect(refreshHermesImageTools(false, true)).resolves.toBe(false);
+  });
+
   it("does not throw when the RPC helper itself rejects", async () => {
     rpcMock.mockRejectedValue(new Error("socket exploded"));
-    bounceMock.mockResolvedValue(false);
+    bounceMock.mockResolvedValue("failed");
 
     await expect(refreshHermesImageTools(false, true)).resolves.toBe(false);
     await expect(refreshHermesImageTools(true, false)).resolves.toBe(true);
@@ -207,7 +220,7 @@ describe("refreshHermesImageTools", () => {
     // brings them back.
     reloadMcpMock.mockResolvedValue(false);
     agentSaysItCanDraw(false);
-    bounceMock.mockResolvedValue(true);
+    bounceMock.mockResolvedValue("restarted");
     await expect(refreshHermesImageTools(false, true)).resolves.toBe(true);
   });
 

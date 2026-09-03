@@ -2025,16 +2025,17 @@ export default function AIModelsStep({
       // continue control, so HOLDING here would strand a first-run owner
       // behind a link labelled "Skip — use local only".
       //
-      // What is being traded, stated plainly rather than wished away: since
-      // TASK-608 the configure route also warns when the gateway has not
-      // finished restarting, and a cold first boot is the MOST likely place
-      // for that — so this is now the one screen that produces the warning and
-      // the one that discards it. The trade is deliberate: a slow gateway must
-      // not stop a first-run wizard, and the box recovers on its own within
-      // seconds. A gateway that never comes back is not silent either — it
-      // surfaces at the chat step, which cannot open a session without one.
-      // (The older ChatGPT-order warning is a Settings-only state and really
-      // does reappear there.)
+      // What is being traded, stated plainly rather than wished away: the
+      // wizard branch discards whatever `saveWarning` holds. Since TASK-608
+      // that is the ChatGPT-order warning and nothing else — the configure
+      // route passes `awaitReady: false` when setup is not complete, so
+      // `GatewayNotReadyError` is unreachable here and the gateway warning is
+      // never produced on this screen in the first place. That is deliberate
+      // for the same reason: a slow gateway must not stop a first-run wizard,
+      // and the box recovers on its own within seconds. A gateway that never
+      // comes back is not silent either — it surfaces at the chat the wizard
+      // hands off to, which cannot open a session without one. (The ChatGPT-
+      // order warning is a Settings-only state and really does reappear there.)
       if (saveWarning) console.warn("[ai-models] configure warning:", saveWarning);
       onNext();
     } else {

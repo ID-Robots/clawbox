@@ -71,7 +71,7 @@ beforeEach(() => {
 
 describe("bounceHermesDashboard", () => {
   it("stops the dashboard when systemd promises to start it again", async () => {
-    await expect(bounceHermesDashboard()).resolves.toBe(true);
+    await expect(bounceHermesDashboard()).resolves.toBe("restarted");
     expect(cliMock).toHaveBeenCalledWith(["dashboard", "--stop"], expect.anything());
   });
 
@@ -95,7 +95,9 @@ describe("bounceHermesDashboard", () => {
     // stop would leave the owner with no chat at all, which is far worse than
     // whatever staleness the caller was trying to clear.
     systemdRestartPolicy("no");
-    await expect(bounceHermesDashboard()).resolves.toBe(false);
+    // "failed", not "pending": nothing has been asked to restart, so nothing is
+    // coming back on its own and the caller's owner DOES have to act.
+    await expect(bounceHermesDashboard()).resolves.toBe("failed");
     expect(cliMock).not.toHaveBeenCalled();
   });
 
@@ -105,18 +107,18 @@ describe("bounceHermesDashboard", () => {
     execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: unknown) => {
       (cb as (e: Error) => void)(new Error("no such unit"));
     });
-    await expect(bounceHermesDashboard()).resolves.toBe(false);
+    await expect(bounceHermesDashboard()).resolves.toBe("failed");
     expect(cliMock).not.toHaveBeenCalled();
   });
 
-  it("reports false when the stop itself did not take", async () => {
+  it("reports a failure when the stop itself did not take", async () => {
     cliMock.mockResolvedValue({ code: 1, stdout: "", stderr: "unkillable" });
-    await expect(bounceHermesDashboard()).resolves.toBe(false);
+    await expect(bounceHermesDashboard()).resolves.toBe("failed");
   });
 
   it("does not throw when the CLI is missing entirely", async () => {
     cliMock.mockRejectedValue(new Error("ENOENT"));
-    await expect(bounceHermesDashboard()).resolves.toBe(false);
+    await expect(bounceHermesDashboard()).resolves.toBe("failed");
   });
 
   /**
@@ -126,10 +128,15 @@ describe("bounceHermesDashboard", () => {
    * served, and the image refresh reports the box can draw. Both were true
    * only once the dashboard was listening again.
    */
-  it("answers true only once the dashboard is listening again", async () => {
+  it("answers restarted only once the dashboard is listening again", async () => {
     waitForPortOpenMock.mockResolvedValue(false);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    await expect(bounceHermesDashboard()).resolves.toBe(false);
+    // "pending", not "failed". The stop exited 0 over a Restart=always unit, so
+    // the restart HAS been taken and systemd owns what happens next; the socket
+    // simply has not opened inside the budget. ClawKeep's restore card renders
+    // the two differently, and prescribing `systemctl restart` for this one
+    // kills a dashboard mid-start.
+    await expect(bounceHermesDashboard()).resolves.toBe("pending");
     errorSpy.mockRestore();
   });
 
@@ -153,7 +160,7 @@ describe("bounceHermesDashboard", () => {
     // skip the cleanup and leak a 40 ms dashboard budget into every later test
     // in this worker, turning one red into a cascade nowhere near its cause.
     try {
-      await expect(bounceHermesDashboard()).resolves.toBe(false);
+      await expect(bounceHermesDashboard()).resolves.toBe("pending");
       expect(waitForPortOpenMock).not.toHaveBeenCalled();
     } finally {
       errorSpy.mockRestore();
@@ -216,7 +223,7 @@ describe("bounceHermesDashboard", () => {
         return { code: 0, stdout: "", stderr: "" };
       });
 
-      await expect(bounceHermesDashboard()).resolves.toBe(true);
+      await expect(bounceHermesDashboard()).resolves.toBe("restarted");
 
       const [, , options] = waitForPortOpenMock.mock.calls[0] as [number, string, { timeoutMs: number }];
       // The budget the socket half was handed, plus what the PID half already
@@ -241,7 +248,7 @@ describe("bounceHermesDashboard", () => {
     process.env.HERMES_DASHBOARD_WAIT_MS = "soon";
     try {
       systemd({ pids: ["4242", "5353"] });
-      await expect(bounceHermesDashboard()).resolves.toBe(true);
+      await expect(bounceHermesDashboard()).resolves.toBe("restarted");
       const [, , options] = waitForPortOpenMock.mock.calls[0] as [number, string, { timeoutMs: number }];
       expect(Number.isFinite(options.timeoutMs)).toBe(true);
     } finally {
@@ -253,7 +260,7 @@ describe("bounceHermesDashboard", () => {
     // A dashboard already down (crashed, mid-RestartSec) shows MainPID 0. The
     // replacement is still a real respawn, and `null !== 6464` says so.
     systemd({ pids: ["0", "6464"] });
-    await expect(bounceHermesDashboard()).resolves.toBe(true);
+    await expect(bounceHermesDashboard()).resolves.toBe("restarted");
   });
 });
 

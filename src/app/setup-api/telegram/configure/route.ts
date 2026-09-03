@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 import { get, set } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
-import { setTelegramToken, restartGateway, clearTelegramPairingState } from "@/lib/openclaw-config";
+import {
+  clearTelegramPairingState,
+  GatewayNotReadyError,
+  restartGateway,
+  setTelegramToken,
+} from "@/lib/openclaw-config";
 import {
   clearHermesTelegramPairingState,
   ensureHermesGateway,
@@ -13,31 +18,42 @@ export const dynamic = "force-dynamic";
 /**
  * Saved, but nobody is serving it yet — the one answer both editions give.
  *
- * 502, not 200: the token IS stored, so this is not a failed save and the body
- * keeps `success: true`, but the bot does not answer until the gateway is up,
- * and a 200 was read as an unqualified success (the panel said "configured
- * successfully" over a bot nothing was serving). Same status and same body
- * shape as /telegram/streaming, which has always answered this way for exactly
- * this condition. `SettingsApp` and `TelegramStep` both read a 502 carrying
- * `success` as "saved, not live yet" rather than a failure.
+ * The token IS stored, so this is not a failed save and the body keeps
+ * `success: true`; what differs is whether anything is coming back, and that
+ * decides both halves of the answer.
  *
- * Shared by both editions on purpose. OpenClaw reaches it when the readiness
- * wait times out; Hermes when `ensureHermesGateway()` reports the restart was
- * refused or nothing is running. Hermes' answer is the weaker of the two — it
- * is systemd's service verdict, read right after the restart command, not a
- * socket probe — so a Hermes `restarted: true` proves the unit was restarted,
- * not that the bot is receiving. That gap is the harness's: this repo carries
- * no listen port for Hermes' messaging gateway to probe.
+ * `pending` — the restart exited 0 and the gateway has not finished binding.
+ * 200, and a sentence that says so. Before TASK-608 this branch could only mean
+ * the restart itself failed, so it borrowed that branch's wording: "will apply
+ * on next gateway restart", over a restart that had already been taken. The
+ * readiness wait widened the branch and left the sentence, which is the same
+ * false failure this task removed from /local-ai/exclusive, /stt and
+ * /telegram/streaming.
+ *
+ * Refused — nothing is coming back on its own. 502, exactly as
+ * /telegram/streaming answers for the same condition; `SettingsApp` and
+ * `TelegramStep` both read a 502 carrying `success` as "saved, not live yet"
+ * rather than a failed save, and the configuring overlay adjudicates either way
+ * by polling gateway health on its own deadline.
+ *
+ * Shared by both editions on purpose. OpenClaw reaches `pending` when the
+ * readiness wait times out; Hermes never does — `ensureHermesGateway()` reports
+ * systemd's service verdict, read right after the restart command, not a socket
+ * probe, so a Hermes answer here is always the refused one. That gap is the
+ * harness's: this repo carries no listen port for Hermes' messaging gateway to
+ * probe.
  */
-function notServingYet(reset: boolean): NextResponse {
+function notServingYet(reset: boolean, pending = false): NextResponse {
   return NextResponse.json(
     {
       success: true,
       reset,
       restarted: false,
-      warning: "Saved — will apply on next gateway restart",
+      warning: pending
+        ? "Saved, but the gateway has not finished restarting — the bot answers once it is serving again."
+        : "Saved — will apply on next gateway restart",
     },
-    { status: 502 },
+    { status: pending ? 200 : 502 },
   );
 }
 
@@ -153,7 +169,7 @@ export async function POST(request: Request) {
       await restartGateway();
     } catch (restartErr) {
       console.error("[telegram/configure] Gateway restart failed:", restartErr);
-      return notServingYet(tokenChanged);
+      return notServingYet(tokenChanged, restartErr instanceof GatewayNotReadyError);
     }
 
     return NextResponse.json({ success: true, reset: tokenChanged, restarted: true });
