@@ -846,6 +846,45 @@ describe("codex-auth-mirror.js", () => {
       .toBe("refresh-rotated-by-support");
   });
 
+  it("mirrors the owner's ChatGPT sign-in, not the older Codex CLI login beside it", () => {
+    // The reported box's shared store, measured read-only: an `openai:default`
+    // api_key holding a ClawBox proxy key, a `codex:default` OAuth login from a
+    // Codex CLI sign-in eight days earlier, and the owner's own `openai:chatgpt`
+    // OAuth sign-in — with the per-agent table emptied by `doctor --fix`. Both
+    // mirror files were frozen on the codex:default credential and the script
+    // logged "no codex OAuth profile yet, skipping" on every boot.
+    //
+    // The api_key entry must not be a candidate at all (it is not an OAuth
+    // sign-in), and between the two OAuth entries the one issued most recently
+    // — the owner's — is the credential to mirror.
+    seedAgentStore({});
+    seedSharedStore({
+      "openai:default": { type: "api_key", provider: "openai", key: "proxy-key-not-an-oauth-signin" },
+      "codex:default": {
+        type: "oauth",
+        provider: "codex",
+        access: accessToken("acct-codex-cli"),
+        refresh: "refresh-codex-cli",
+        expires: Date.now() + 3 * 24 * 3_600_000,
+      },
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-owner-signin"),
+        refresh: "refresh-owner-signin",
+        expires: Date.now() + 9 * 24 * 3_600_000,
+      },
+    });
+
+    run();
+
+    for (const dest of [homeAuthPath, codexHomeAuthPath]) {
+      const parsed = JSON.parse(readFileSync(dest, "utf-8"));
+      expect(parsed.tokens.account_id).toBe("acct-owner-signin");
+      expect(parsed.tokens.refresh_token).toBe("refresh-owner-signin");
+    }
+  });
+
   it("tightens an existing world-readable mirror to 0600, not only a freshly created one", () => {
     // `writeFileSync(..., { mode })` applies the mode on CREATION only, so a
     // file left 0644 by an earlier tool stayed 0644 through every rewrite while
