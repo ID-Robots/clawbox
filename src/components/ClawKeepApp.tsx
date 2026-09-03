@@ -565,6 +565,7 @@ export default function ClawKeepApp() {
               <span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full ${status.paired ? "bg-emerald-400" : "bg-[var(--text-muted)]"}`} />
               {status.paired ? t("clawkeep.state.paired") : t("clawkeep.state.unpaired")}
             </span>
+            <BackupContentsInfo status={status} />
           </div>
           {status.paired && !pairChallenge && (
             <div className="flex items-center gap-2 shrink-0">
@@ -638,8 +639,6 @@ export default function ClawKeepApp() {
           ) : (
             <PairCard onPair={onPair} busy={busy === "pair"} />
           )}
-
-          <BackupContentsCard status={status} />
 
           {(!archiverReady(status) || !status.daemonInstalled) && <SystemCard status={status} />}
 
@@ -1245,39 +1244,80 @@ function DashboardCard({
 /**
  * What travels in a snapshot from THIS box, and the warning that goes with it.
  *
- * Rendered rather than left implicit because the archive holds the box's
- * provider keys: the customer is entitled to know that before they schedule a
- * nightly upload, and to know it again before they hand a restore file to
- * anyone. The list is per-edition and comes from `backupSourceFor`, whose
- * Hermes half is pinned by test to the archiver's own asset list — so this can
- * never drift into describing a backup we do not actually make.
+ * Behind a question mark beside the title rather than a card of its own: the
+ * owner asked for the list to stay out of the way until asked for. It is
+ * still rendered rather than left implicit because the archive holds the
+ * box's provider keys: the customer is entitled to know that before they
+ * schedule a nightly upload, and to know it again before they hand a restore
+ * file to anyone. The list is per-edition and comes from `backupSourceFor`,
+ * whose Hermes half is pinned by test to the archiver's own asset list — so
+ * this can never drift into describing a backup we do not actually make.
  */
-function BackupContentsCard({ status }: { status: ClawKeepStatus }) {
+function BackupContentsInfo({ status }: { status: ClawKeepStatus }) {
   const { t } = useT();
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const source = backupSourceFor(status.agent === "hermes" ? "hermes" : "openclaw");
+
+  // A click anywhere else, or Escape, closes it — the same manners as the
+  // desktop's own menus.
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (e: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
   return (
-    <div className={`${CARD} space-y-2`}>
-      <div className="flex items-center gap-2">
-        <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
-          inventory_2
-        </span>
-        <h2 className="text-sm font-semibold text-[var(--text-primary)]">
-          {t("clawkeep.contents.title")}
-        </h2>
-      </div>
-      <ul className="text-sm text-[var(--text-secondary)] space-y-1 list-disc list-inside">
-        {source.includesKeys.map((key) => <li key={key}>{t(key)}</li>)}
-      </ul>
-      {source.excludesKeys.length > 0 && (
-        <p className="text-xs text-[var(--text-muted)] leading-relaxed">
-          {t("clawkeep.contents.excludes")}{" "}
-          {source.excludesKeys.map((key) => t(key)).join("; ")}.
-        </p>
-      )}
-      {status.backupContainsCredentials !== false && (
-        <p className="text-xs text-amber-200/90 leading-relaxed">
-          🔒 {t("clawkeep.contents.credentialWarning")}
-        </p>
+    <div ref={rootRef} className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-label={t("clawkeep.contents.show")}
+        title={t("clawkeep.contents.show")}
+        data-testid="clawkeep-contents-toggle"
+        className={`inline-flex h-6 w-6 items-center justify-center rounded-full border text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors cursor-pointer ${open ? "border-white/25 bg-white/[0.06]" : "border-white/15"}`}
+      >
+        <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">question_mark</span>
+      </button>
+      {open && (
+        <div
+          role="dialog"
+          aria-label={t("clawkeep.contents.title")}
+          data-testid="clawkeep-contents-popover"
+          className="absolute left-0 top-8 z-30 w-[min(22rem,calc(100vw-3rem))] rounded-xl border border-white/10 bg-[var(--bg-elevated)] p-4 shadow-2xl space-y-2"
+        >
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
+              inventory_2
+            </span>
+            <h2 className="text-sm font-semibold text-[var(--text-primary)]">
+              {t("clawkeep.contents.title")}
+            </h2>
+          </div>
+          <ul className="text-sm text-[var(--text-secondary)] space-y-1 list-disc list-inside">
+            {source.includesKeys.map((key) => <li key={key}>{t(key)}</li>)}
+          </ul>
+          {source.excludesKeys.length > 0 && (
+            <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+              {t("clawkeep.contents.excludes")}{" "}
+              {source.excludesKeys.map((key) => t(key)).join("; ")}.
+            </p>
+          )}
+          {status.backupContainsCredentials !== false && (
+            <p className="text-xs text-amber-200/90 leading-relaxed">
+              🔒 {t("clawkeep.contents.credentialWarning")}
+            </p>
+          )}
+        </div>
       )}
     </div>
   );

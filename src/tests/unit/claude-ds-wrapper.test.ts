@@ -372,7 +372,8 @@ describe("failing in a way the owner can act on", () => {
 });
 
 /**
- * The trust dialog, and why it is pre-answered for exactly one directory.
+ * The trust dialog, and why it is pre-answered for the folder the harness
+ * starts in.
  *
  * Found on a real box: the Coding Agent asked "is this a project you created
  * or one you trust?" on EVERY launch, because Claude Code never persists
@@ -381,9 +382,12 @@ describe("failing in a way the owner can act on", () => {
  * prompt whose only other option is "exit", shown every single time, trains
  * the owner to click through prompts instead of reading them.
  *
- * The line these tests hold is the SCOPE. Pre-answering the box's own home is
- * defensible; pre-answering whatever directory the owner happens to be in is
- * not, because a cloned repository is the case the dialog exists for.
+ * It used to be seeded for the home directory alone; the owner asked for
+ * every folder a terminal opens on to be trusted — a run's project folder,
+ * a code project, a clone — because on this appliance every one of them is
+ * the owner's own, behind the device login. The line these tests hold is
+ * that ONLY the starting folder is answered: nothing else in the config is
+ * touched, and a folder the harness never started in is never pre-answered.
  */
 describe("the trust dialog", () => {
   const claudeConfig = () => path.join(home, ".claude-ds", ".claude.json");
@@ -400,13 +404,13 @@ describe("the trust dialog", () => {
     expect(trustFor(home)).toBe(true);
   });
 
-  it("is NOT pre-answered for a folder the owner happened to be standing in", () => {
-    // A cloned repository is exactly what the dialog is for. Seeding the cwd
-    // would silently disarm it.
+  it("is pre-answered for the folder the harness starts in, and only that folder", () => {
+    // A terminal the desktop opens on a project folder must land in Claude
+    // Code, not in a question whose only real answer is "yes".
     const repoDir = path.join(home, "someones-repo");
     mkdirSync(repoDir, { recursive: true });
     expect(runWrapper({}, [], repoDir).status).toBe(0);
-    expect(trustFor(repoDir)).toBeUndefined();
+    expect(trustFor(repoDir)).toBe(true);
     expect(trustFor(home)).toBeUndefined();
   });
 
@@ -503,8 +507,8 @@ describe("the first-run onboarding", () => {
     const cfg = readConfig();
     expect(cfg.hasCompletedOnboarding).toBe(true);
     expect(cfg.theme).toBe("dark");
-    // The trust answer keeps its scope: none for a folder that is not the home.
-    expect(cfg.projects).toBeUndefined();
+    // The trust answer keeps its scope: the folder it started in, no other.
+    expect(cfg.projects).toEqual({ [repoDir]: { hasTrustDialogAccepted: true } });
   });
 
   it("keeps a theme the owner chose", () => {
@@ -526,9 +530,14 @@ describe("the first-run onboarding", () => {
   });
 
   it("does not rewrite a config that already has the answers", () => {
-    // Bytes, not mtime, for the reason the trust test gives.
+    // Bytes, not mtime, for the reason the trust test gives. The starting
+    // folder's trust answer is one of the answers, so it is already there.
     mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
-    const pretty = JSON.stringify({ hasCompletedOnboarding: true, theme: "light" }, null, 4);
+    const pretty = JSON.stringify({
+      hasCompletedOnboarding: true,
+      theme: "light",
+      projects: { [REPO]: { hasTrustDialogAccepted: true } },
+    }, null, 4);
     writeFileSync(claudeConfig(), pretty, "utf-8");
     expect(runWrapper().status).toBe(0);
     expect(readFileSync(claudeConfig(), "utf-8")).toBe(pretty);

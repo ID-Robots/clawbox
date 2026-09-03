@@ -224,7 +224,7 @@ chmod 700 "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
 # onboarding is global, not per project. The theme is filled in only when
 # there is none, so a choice the owner made in the CLI is kept.
 #
-# THE TRUST QUESTION, for the box's own home and nothing else.
+# THE TRUST QUESTION, for the folder the harness is starting in.
 #
 # Claude Code asks "is this a project you created or one you trust?" before it
 # will read a folder, and never remembers the answer for $HOME: the flag it
@@ -232,15 +232,17 @@ chmod 700 "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
 # clean exits that do record lastCost and lastSessionId. So the Coding Agent
 # app — which always opens in the owner's home — asked it on EVERY launch.
 #
-# On this appliance that question has no second answer. The folder is the
-# box's own home, behind the device login, and the dialog's other option is
-# "exit". A security prompt whose only real answer is "yes", shown every single
-# time, does not protect anybody; it teaches the owner to click through
-# prompts without reading them, which is worse than not asking.
-#
-# It is pre-answered ONLY when the harness is starting in that home directory.
-# Somebody who clones a repo and runs `claude-ds` inside it is asked, exactly
-# as before — that is the case the dialog is actually for.
+# On this appliance that question has no second answer, in ANY folder. Every
+# folder the harness can be started in is on the box's own disk, behind the
+# device login, and is either the owner's home, a project the owner created
+# there or one the owner cloned on purpose; the dialog's other option is
+# "exit". A security prompt whose only real answer is "yes", shown every
+# time a terminal opens on a project, does not protect anybody; it teaches the
+# owner to click through prompts without reading them, which is worse than not
+# asking. So the answer is seeded for the directory the harness is starting
+# in, whichever it is — the owner asked for every folder to be trusted when
+# the desktop opens a terminal on it (a run's project folder, a code project,
+# the home).
 #
 # Claude Code documents this key as the supported alternative to answering
 # interactively ("accept the trust dialog here once interactively, or set
@@ -254,10 +256,10 @@ chmod 700 "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
 # are already `true` is left alone, byte for byte — and every write goes
 # through a temp file plus rename.
 seed_harness_config() {
-  python3 - "$CLAUDE_CONFIG_DIR/.claude.json" "$HOME" "$1" <<'PYEOF' || true
+  python3 - "$CLAUDE_CONFIG_DIR/.claude.json" "$1" <<'PYEOF' || true
 import json, os, sys, tempfile
 
-cfg_path, home, seed_trust = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+cfg_path, trusted_dir = sys.argv[1], sys.argv[2]
 try:
     with open(cfg_path) as fh:
         cfg = json.load(fh)
@@ -279,12 +281,11 @@ if "theme" not in cfg:
     cfg["theme"] = "dark"
     changed = True
 
-if seed_trust:
-    projects = cfg.setdefault("projects", {})
-    entry = projects.setdefault(home, {}) if isinstance(projects, dict) else None
-    if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is not True:
-        entry["hasTrustDialogAccepted"] = True
-        changed = True
+projects = cfg.setdefault("projects", {})
+entry = projects.setdefault(trusted_dir, {}) if isinstance(projects, dict) else None
+if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is not True:
+    entry["hasTrustDialogAccepted"] = True
+    changed = True
 
 if not changed:
     raise SystemExit(0)          # already answered; leave the file alone
@@ -306,11 +307,9 @@ except Exception:
 PYEOF
 }
 
-if [ "$PWD" = "$HOME" ]; then
-  seed_harness_config 1
-else
-  seed_harness_config 0
-fi
+# The folder the harness starts in is the folder the owner is about to work
+# in, so that is the one whose question is answered.
+seed_harness_config "$PWD"
 
 # Say which model is actually about to answer. "Chosen vs actually used" is the
 # question this banner exists to close: the plan, not the wrapper, picks it.

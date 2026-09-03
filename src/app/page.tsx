@@ -8,6 +8,7 @@ import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, notifyCodingRunStarted, CODING_LIVE_PREVIEW_EVENT, handoffCodingRun, type CodingLivePreviewRequest } from "@/lib/ui-events";
+import { useAutoHide } from "@/lib/use-auto-hide";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
 import ChromeLauncher from "@/components/ChromeLauncher";
@@ -22,7 +23,7 @@ import MemoryShardApp from "@/components/MemoryShardApp";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
 import type { StoreApp } from "@/components/AppStore";
-import TerminalApp from "@/components/TerminalApp";
+import TerminalTabs from "@/components/TerminalTabs";
 import CodingAgentApp from "@/components/CodingAgentApp";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
@@ -30,7 +31,6 @@ import VNCApp from "@/components/VNCApp";
 import ChatPopup, { CHAT_PANEL_GAP } from "@/components/ChatPopup";
 
 /** How long a coding run's finish card stays on the desktop before it hides itself. */
-const CODING_NOTICE_MS = 30_000;
 import ToastHost from "@/components/ToastHost";
 import CodingRunLivePreview, { livePreviewCommand } from "@/components/CodingRunLivePreview";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
@@ -241,14 +241,9 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
   }
 
   if (id === "coding") {
-    return (
-      <svg className={size} viewBox="0 0 120 120" fill="none">
-        <path d="M48 36 L26 60 L48 84" stroke="#f97316" strokeWidth="11" strokeLinecap="round" strokeLinejoin="round" />
-        <path d="M72 36 L94 60 L72 84" stroke="#f97316" strokeWidth="11" strokeLinecap="round" strokeLinejoin="round" />
-        <path d="M70 32 L50 88" stroke="#f97316" strokeWidth="11" strokeLinecap="round" />
-        <path d="M94 14 C95.5 22 100 26.5 108 28 C100 29.5 95.5 34 94 42 C92.5 34 88 29.5 80 28 C88 26.5 92.5 22 94 14 Z" fill="#ffffff" />
-      </svg>
-    );
+    // The same glyph the finish card's Open button and the run page use for
+    // the agent, so the icon on the desktop is the icon in the app.
+    return <MIcon name="smart_toy" className="text-white" size={px} />;
   }
 
   const iconMap: Record<string, string> = {
@@ -319,6 +314,10 @@ function ChromeDesktopInner() {
     if (clawboxLogin.loading) return;
     setShowClawAiOfferNotification(!clawboxLogin.loggedIn);
   }, [setupRequired, clawboxLogin.loading, clawboxLogin.loggedIn]);
+
+  const offerNoticeKeys = useMemo(() => (showClawAiOfferNotification ? ["offer"] : []), [showClawAiOfferNotification]);
+  const hideOfferNotice = useCallback(() => setShowClawAiOfferNotification(false), []);
+  useAutoHide(offerNoticeKeys, hideOfferNotice);
 
   // One-shot cleanup of stale chat localStorage from older builds.
   useEffect(() => { purgeLegacyChatCaches() }, []);
@@ -1348,33 +1347,15 @@ function ChromeDesktopInner() {
 
   /** Finished coding runs waiting to be seen, newest first. */
   const [codingNotices, setCodingNotices] = useState<{ runId: string; status: string; projectId: string | null; message: string }[]>([]);
-  // A finish card leaves on its own after a while — the owner asked for the
-  // cards to "hide after some time" — and the run is always one click away in
-  // the app. Keyed by run id so a card re-shown by a ring replay gets a fresh
-  // clock and never two.
-  const codingNoticeTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  // A finish card leaves on its own after a while — the owner asked for every
+  // top-right card to "hide after some time" — and the run is always one
+  // click away in the app. Keyed by run id so a card re-shown by a ring
+  // replay keeps its clock and never gets two.
   const dismissCodingNotice = useCallback((runId: string) => {
-    const timer = codingNoticeTimers.current.get(runId);
-    if (timer) { clearTimeout(timer); codingNoticeTimers.current.delete(runId); }
     setCodingNotices(prev => prev.filter(n => n.runId !== runId));
   }, []);
-  useEffect(() => {
-    const timers = codingNoticeTimers.current;
-    for (const notice of codingNotices) {
-      if (timers.has(notice.runId)) continue;
-      timers.set(notice.runId, setTimeout(() => {
-        timers.delete(notice.runId);
-        setCodingNotices(prev => prev.filter(n => n.runId !== notice.runId));
-      }, CODING_NOTICE_MS));
-    }
-    for (const [runId, timer] of timers) {
-      if (!codingNotices.some(n => n.runId === runId)) { clearTimeout(timer); timers.delete(runId); }
-    }
-  }, [codingNotices]);
-  useEffect(() => {
-    const timers = codingNoticeTimers.current;
-    return () => { for (const timer of timers.values()) clearTimeout(timer); timers.clear(); };
-  }, []);
+  const codingNoticeKeys = useMemo(() => codingNotices.map(n => n.runId), [codingNotices]);
+  useAutoHide(codingNoticeKeys, dismissCodingNotice);
 
   // The floating live terminal of a coding run — see CodingRunLivePreview.
   // One for the desktop: a request for another run replaces it.
@@ -1507,6 +1488,10 @@ function ChromeDesktopInner() {
     openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
   } | null>(null);
   const lastVersionFingerprintRef = useRef<string | null>(null);
+  // Gone for THIS session once its clock runs out — never recorded as a
+  // dismissal, so the card is back after a reload and in the next session,
+  // and Settings → System Update shows the same fact meanwhile.
+  const [updateNoticeHidden, setUpdateNoticeHidden] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -1536,12 +1521,18 @@ function ChromeDesktopInner() {
         }
         const dismissalFingerprint = `${data.clawbox?.target ?? ""}|${data.openclaw?.target ?? ""}`;
         setUpdateAvailable(dismissed === dismissalFingerprint ? null : data);
+        // A different pair of versions is a different notice.
+        setUpdateNoticeHidden(false);
       } catch { /* network blip — try again next interval */ }
     };
     checkVersions();
     const id = setInterval(checkVersions, 30 * 60 * 1000);
     return () => { active = false; clearInterval(id); };
   }, []);
+
+  const updateNoticeKeys = useMemo(() => (updateAvailable && !updateNoticeHidden ? ["update"] : []), [updateAvailable, updateNoticeHidden]);
+  const hideUpdateNotice = useCallback(() => setUpdateNoticeHidden(true), []);
+  useAutoHide(updateNoticeKeys, hideUpdateNotice);
 
   const dismissUpdateNotification = useCallback(() => {
     setUpdateAvailable((current) => {
@@ -1600,6 +1591,10 @@ function ChromeDesktopInner() {
   >([]);
   const [approvingPairCode, setApprovingPairCode] = useState<string | null>(null);
 
+  // Requests whose card has timed out in this session. Not the persisted
+  // dismissal list: that is the owner's "no", this is only "not on screen".
+  const expiredPairCodesRef = useRef(new Set<string>());
+
   const loadDismissedPairCodes = useCallback((): Set<string> => {
     try { return new Set(JSON.parse(localStorage.getItem("clawbox:telegram-pairing-dismissed") || "[]")); }
     catch { return new Set(); }
@@ -1617,8 +1612,9 @@ function ChromeDesktopInner() {
           const data = await res.json();
           if (data.configured && Array.isArray(data.pending)) {
             const dismissed = loadDismissedPairCodes();
+            const expired = expiredPairCodesRef.current;
             setPairingRequests(
-              data.pending.filter((r: { code?: string }) => r.code && !dismissed.has(r.code)),
+              data.pending.filter((r: { code?: string }) => r.code && !dismissed.has(r.code) && !expired.has(r.code)),
             );
           } else {
             setPairingRequests([]);
@@ -1655,6 +1651,16 @@ function ChromeDesktopInner() {
       setApprovingPairCode(null);
     }
   }, []);
+
+  const pairingNoticeKeys = useMemo(
+    () => pairingRequests.map((r) => r.code).filter((code): code is string => Boolean(code)),
+    [pairingRequests],
+  );
+  const expirePairingNotice = useCallback((code: string) => {
+    expiredPairCodesRef.current.add(code);
+    setPairingRequests((prev) => prev.filter((r) => r.code !== code));
+  }, []);
+  useAutoHide(pairingNoticeKeys, expirePairingNotice);
 
   const dismissPairingRequest = useCallback((code: string) => {
     const dismissed = loadDismissedPairCodes();
@@ -1775,7 +1781,7 @@ function ChromeDesktopInner() {
           </div>
         );
       case "terminal":
-        return <TerminalApp initialCommand={terminalCommand ?? undefined} />;
+        return <TerminalTabs initialCommand={terminalCommand ?? undefined} />;
       case "coding":
         return <CodingAgentApp />;
       case "store":
@@ -2030,10 +2036,10 @@ function ChromeDesktopInner() {
           onClose={() => setLivePreview(null)}
         />
       )}
-      {(updateAvailable || showClawAiOfferNotification || pairingRequests.length > 0 || codingNotices.length > 0) && (
+      {((updateAvailable && !updateNoticeHidden) || showClawAiOfferNotification || pairingRequests.length > 0 || codingNotices.length > 0) && (
         <div className="pointer-events-none fixed top-4 right-4 z-[99998] flex w-[320px] flex-col gap-3">
           {/* New version available notification */}
-          {updateAvailable && (() => {
+          {updateAvailable && !updateNoticeHidden && (() => {
             const cb = updateAvailable.clawbox;
             const oc = updateAvailable.openclaw;
             const cbNeeds = cb?.updateAvailable ?? (!!cb?.target && cb.target !== cb.current);

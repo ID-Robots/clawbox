@@ -226,6 +226,7 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.system.setupNeeded": "Setup needed",
     // === What a backup contains (per edition) ===
     "clawkeep.contents.title": "What's in a backup",
+    "clawkeep.contents.show": "What's in a backup?",
     "clawkeep.contents.excludes": "Not included:",
     "clawkeep.contents.credentialWarning": "A snapshot contains this device's provider keys and platform tokens. It is encrypted with your passphrase before it leaves the device — keep the passphrase safe, and never share a decrypted backup file.",
     "clawkeep.contents.hermes.config": "Agent configuration (config.yaml)",
@@ -519,6 +520,7 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.system.setupNeeded": "Нужна е настройка",
     // === What a backup contains (per edition) ===
     "clawkeep.contents.title": "Какво съдържа архивът",
+    "clawkeep.contents.show": "Какво съдържа архивът?",
     "clawkeep.contents.excludes": "Не се включва:",
     "clawkeep.contents.credentialWarning": "Архивът съдържа ключовете за доставчиците и токените на това устройство. Той се шифрова с вашата парола, преди да напусне устройството — пазете паролата и никога не споделяйте дешифриран архив.",
     "clawkeep.contents.hermes.config": "Конфигурация на агента (config.yaml)",
@@ -804,6 +806,7 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.system.setupNeeded": "Einrichtung erforderlich",
     // === What a backup contains (per edition) ===
     "clawkeep.contents.title": "Was in einer Sicherung steckt",
+    "clawkeep.contents.show": "Was steckt in einem Backup?",
     "clawkeep.contents.excludes": "Nicht enthalten:",
     "clawkeep.contents.credentialWarning": "Eine Sicherung enthält die Anbieterschlüssel und Plattform-Token dieses Geräts. Sie wird mit Ihrer Passphrase verschlüsselt, bevor sie das Gerät verlässt — bewahren Sie die Passphrase sicher auf und geben Sie eine entschlüsselte Sicherung niemals weiter.",
     "clawkeep.contents.hermes.config": "Agent-Konfiguration (config.yaml)",
@@ -1089,6 +1092,7 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.system.setupNeeded": "Se requiere configuración",
     // === What a backup contains (per edition) ===
     "clawkeep.contents.title": "Qué contiene una copia de seguridad",
+    "clawkeep.contents.show": "¿Qué contiene una copia?",
     "clawkeep.contents.excludes": "No se incluye:",
     "clawkeep.contents.credentialWarning": "Una copia contiene las claves de proveedor y los tokens de plataforma de este dispositivo. Se cifra con tu contraseña antes de salir del dispositivo — guarda bien la contraseña y nunca compartas una copia descifrada.",
     "clawkeep.contents.hermes.config": "Configuración del agente (config.yaml)",
@@ -1374,6 +1378,7 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.system.setupNeeded": "Configuration requise",
     // === What a backup contains (per edition) ===
     "clawkeep.contents.title": "Ce que contient une sauvegarde",
+    "clawkeep.contents.show": "Que contient une sauvegarde ?",
     "clawkeep.contents.excludes": "Non inclus :",
     "clawkeep.contents.credentialWarning": "Une sauvegarde contient les clés de fournisseur et les jetons de plateforme de cet appareil. Elle est chiffrée avec votre phrase secrète avant de quitter l'appareil — conservez-la précieusement et ne partagez jamais une sauvegarde déchiffrée.",
     "clawkeep.contents.hermes.config": "Configuration de l'agent (config.yaml)",
@@ -1659,6 +1664,7 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.system.setupNeeded": "Configurazione necessaria",
     // === What a backup contains (per edition) ===
     "clawkeep.contents.title": "Cosa contiene un backup",
+    "clawkeep.contents.show": "Cosa contiene un backup?",
     "clawkeep.contents.excludes": "Non incluso:",
     "clawkeep.contents.credentialWarning": "Un backup contiene le chiavi dei provider e i token delle piattaforme di questo dispositivo. Viene cifrato con la tua passphrase prima di lasciare il dispositivo — custodisci la passphrase e non condividere mai un backup decifrato.",
     "clawkeep.contents.hermes.config": "Configurazione dell'agente (config.yaml)",
@@ -1944,6 +1950,7 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.system.setupNeeded": "セットアップが必要",
     // === What a backup contains (per edition) ===
     "clawkeep.contents.title": "バックアップの内容",
+    "clawkeep.contents.show": "バックアップの内容は？",
     "clawkeep.contents.excludes": "含まれないもの:",
     "clawkeep.contents.credentialWarning": "バックアップにはこのデバイスのプロバイダーキーとプラットフォームトークンが含まれます。デバイスを離れる前にパスフレーズで暗号化されます — パスフレーズは安全に保管し、復号済みのバックアップは決して共有しないでください。",
     "clawkeep.contents.hermes.config": "エージェントの設定 (config.yaml)",
@@ -2229,6 +2236,7 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.system.setupNeeded": "Configuratie nodig",
     // === What a backup contains (per edition) ===
     "clawkeep.contents.title": "Wat er in een back-up zit",
+    "clawkeep.contents.show": "Wat zit er in een back-up?",
     "clawkeep.contents.excludes": "Niet inbegrepen:",
     "clawkeep.contents.credentialWarning": "Een back-up bevat de providersleutels en platformtokens van dit apparaat. Hij wordt versleuteld met uw wachtwoordzin voordat hij het apparaat verlaat — bewaar de wachtwoordzin goed en deel nooit een ontsleutelde back-up.",
     "clawkeep.contents.hermes.config": "Agentconfiguratie (config.yaml)",
@@ -2514,6 +2522,7 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.system.setupNeeded": "Inställning krävs",
     // === What a backup contains (per edition) ===
     "clawkeep.contents.title": "Vad en säkerhetskopia innehåller",
+    "clawkeep.contents.show": "Vad finns i en säkerhetskopia?",
     "clawkeep.contents.excludes": "Ingår inte:",
     "clawkeep.contents.credentialWarning": "En säkerhetskopia innehåller enhetens leverantörsnycklar och plattformstoken. Den krypteras med din lösenfras innan den lämnar enheten — förvara lösenfrasen säkert och dela aldrig en dekrypterad säkerhetskopia.",
     "clawkeep.contents.hermes.config": "Agentens konfiguration (config.yaml)",
@@ -2799,6 +2808,7 @@ export const clawkeepTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.system.setupNeeded": "需要设置",
     // === What a backup contains (per edition) ===
     "clawkeep.contents.title": "备份包含什么",
+    "clawkeep.contents.show": "备份包含什么？",
     "clawkeep.contents.excludes": "不包含：",
     "clawkeep.contents.credentialWarning": "备份包含本设备的服务商密钥和平台令牌。它在离开设备前会用您的口令加密 — 请妥善保管口令，切勿分享已解密的备份文件。",
     "clawkeep.contents.hermes.config": "代理配置 (config.yaml)",
