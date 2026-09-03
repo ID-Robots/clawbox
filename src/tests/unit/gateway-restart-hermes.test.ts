@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * config — so the correct behaviour is to do nothing at all.
  */
 const execFileMock = vi.hoisted(() => vi.fn());
+const waitForPortOpenMock = vi.hoisted(() => vi.fn());
 type ExecCallback = (
   error: Error | null,
   result?: { stdout: string; stderr: string },
@@ -20,11 +21,19 @@ vi.mock("child_process", async (orig) => ({
   ...(await orig<typeof import("child_process")>()),
   execFile: execFileMock,
 }));
+// A restart is not finished until the port is open (see
+// gateway-restart-readiness.test.ts). Answer "listening" so these cases stay
+// about which unit is touched, not about the wait.
+vi.mock("@/lib/port-probe", async (orig) => ({
+  ...(await orig<typeof import("@/lib/port-probe")>()),
+  waitForPortOpen: waitForPortOpenMock,
+}));
 
 describe("restartGateway across editions", () => {
   beforeEach(() => {
     vi.resetModules();
     execFileMock.mockReset();
+    waitForPortOpenMock.mockReset().mockResolvedValue(true);
     // promisify(execFile) resolves through the node-style callback.
     execFileMock.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: ExecCallback) => {
       cb(null, { stdout: "", stderr: "" });

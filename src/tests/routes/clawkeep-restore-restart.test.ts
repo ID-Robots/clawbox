@@ -31,6 +31,7 @@ const h = vi.hoisted(() => ({
   bounceCalls: 0,
   execCalls: [] as { file: string; args: string[] }[],
   execFailure: null as string | null,
+  gatewayUp: true,
 }));
 
 vi.mock("node:child_process", () => ({
@@ -47,6 +48,12 @@ vi.mock("node:child_process", () => ({
 }));
 
 vi.mock("@/lib/harness", () => ({ getEdition: () => h.edition }));
+
+// The gateway's readiness after the restart, as a single answer.
+vi.mock("@/lib/port-probe", async (orig) => ({
+  ...(await orig<typeof import("@/lib/port-probe")>()),
+  waitForPortOpen: async () => h.gatewayUp,
+}));
 
 vi.mock("@/lib/hermes-dashboard-control", () => ({
   bounceHermesDashboard: async () => {
@@ -90,6 +97,7 @@ beforeEach(() => {
   h.bounceCalls = 0;
   h.execCalls.length = 0;
   h.execFailure = null;
+  h.gatewayUp = true;
 });
 
 describe("POST /setup-api/clawkeep/restore — bringing the state holder back", () => {
@@ -115,6 +123,18 @@ describe("POST /setup-api/clawkeep/restore — bringing the state holder back", 
     expect(body.restartErrors).toHaveLength(1);
     expect(body.restartErrors[0]).toMatch(/^clawbox-gateway\.service: /);
     expect(body.restartErrors[0]).toContain("a password is required");
+  });
+
+  it("does not call the OpenClaw restore done until the gateway is serving again", async () => {
+    // `systemctl restart` on a Type=simple unit returns when the process is
+    // forked. Reporting no restart errors there told the owner the restored
+    // state was being served while the gateway was still starting — and the
+    // Hermes half of this same function no longer does that.
+    h.gatewayUp = false;
+    const body = await (await post()).json();
+    expect(body.ok).toBe(true);
+    expect(body.restartErrors).toHaveLength(1);
+    expect(body.restartErrors[0].startsWith("clawbox-gateway.service: ")).toBe(true);
   });
 
   // THE REGRESSION. This used to be a sudo call that could not succeed.

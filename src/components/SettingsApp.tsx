@@ -977,8 +977,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ hostname: name }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
+      // 502 WITH `success` = renamed, but the gateway has not come back with the
+      // new allowed-origins list. The reboot below is what completes the rename
+      // and starts the gateway clean, so it must still happen — treating that as
+      // a failed save would strand the box mid-rename and report a change that
+      // in fact went through. `success` is required, not just the status, so a
+      // 502 from anywhere else stays the error it is.
+      const data = await res.json().catch(() => ({} as { error?: string; success?: boolean }));
+      if (!res.ok && !(res.status === 502 && data.success)) {
         setHostnameStatus({ type: "error", message: data.error || t("settings.hostnameSaveFailed") });
         setHostnameSaving(false);
         setHostnameConfirm(false);
@@ -1534,7 +1540,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         configureReject(new Error("aborted"));
         return;
       }
-      if (!res.ok) {
+      // 502 = the token was saved but the gateway is not serving it yet. The
+      // body carries `success: true` and the warning that says so, and it must
+      // not be reported as a failed save — the same split /telegram/streaming
+      // makes for the same condition.
+      if (!res.ok && res.status !== 502) {
         const data = await res.json().catch(() => ({}));
         configureReject(new Error(data.error || "configure failed"));
         setTgConfiguring(false);
@@ -1548,7 +1558,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       }
       if (data.success) {
         configureResolve();
-        setTgStatus({ type: "success", message: t("settings.telegramConfigured") });
+        // On a warning the token is stored but nothing is serving it YET, and
+        // this is not the component that gets to decide how that ends:
+        // TelegramConfiguringOverlay is still mounted and still polling gateway
+        // health on its own deadline. It calls onDone when the gateway comes up
+        // (often seconds after this 502) and onTimeout, which sets the failure
+        // message, when it does not. Writing a verdict here would leave a red
+        // "will apply on next restart" sitting under a card that has since
+        // flipped to configured. One adjudicator, and it is the overlay.
+        if (!data.warning) {
+          setTgStatus({ type: "success", message: t("settings.telegramConfigured") });
+        }
         setTgConfigured(true);
         setTgReconfigure(false);
         setTgToken("");

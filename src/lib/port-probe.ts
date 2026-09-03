@@ -28,3 +28,50 @@ export function isPortOpen(
     socket.connect(port, host);
   });
 }
+
+/** How {@link waitForPortOpen} polls. Defaults are the updater's long-standing values. */
+export interface PortWaitOptions {
+  /** Whole-wait budget in ms. */
+  timeoutMs: number;
+  /** Gap between probes. */
+  intervalMs?: number;
+  /** Per-probe connect timeout. */
+  probeTimeoutMs?: number;
+}
+
+const DEFAULT_WAIT_INTERVAL_MS = 1_500;
+const DEFAULT_PROBE_TIMEOUT_MS = 1_000;
+
+/**
+ * Poll until something is listening on `host:port`, or the budget runs out.
+ *
+ * THE ONE PLACE that answers "is this service serving yet?". `systemctl restart`
+ * on a `Type=simple` unit returns when the main process is FORKED, so every
+ * caller that read it as "the service is back" was reporting a success it had
+ * not observed. A TCP connect is the probe because the kernel completes the
+ * handshake without the target's event loop, so it answers correctly even while
+ * the process is blocked on long synchronous work — and because it is the probe
+ * OpenClaw itself uses for this question (`waitForGatewayPortReady`).
+ *
+ * Deliberately only the open direction. "Nothing is listening" cannot be proven
+ * this way: `isPortOpen` reports a connect TIMEOUT and a refusal alike, so a
+ * wedged process whose backlog is full would read as gone.
+ */
+export async function waitForPortOpen(
+  port: number,
+  host = "127.0.0.1",
+  { timeoutMs, intervalMs = DEFAULT_WAIT_INTERVAL_MS, probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS }: PortWaitOptions,
+): Promise<boolean> {
+  // A malformed budget must not become an unbounded hot spin: every caller's
+  // timeout comes from `Number(process.env…)`, and `Date.now() + NaN` makes
+  // every later comparison false. Zero means "one probe, then give up".
+  const budgetMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 0;
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    if (await isPortOpen(port, host, probeTimeoutMs)) return true;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remaining)));
+  }
+}
+

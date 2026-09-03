@@ -15,6 +15,7 @@ import { get as getConfigStoreValue } from "@/lib/config-store";
 import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-status";
 import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
 import { isSafeDiscordToken } from "@/lib/discord-api";
+import { waitForPortOpen } from "@/lib/port-probe";
 
 const exec = promisify(execFile);
 
@@ -2505,7 +2506,97 @@ export async function runOpenclawDoctorFix(): Promise<void> {
   await spawnOpenclaw(["doctor", "--fix", "--non-interactive"], { timeoutMs: 180_000 });
 }
 
-export async function restartGateway(): Promise<void> {
+/**
+ * Thrown when the gateway was restarted but never started listening again.
+ *
+ * A distinct type because it is not a failed restart: the config write landed,
+ * `systemctl restart` succeeded, and the box may still recover on its own. What
+ * it is NOT is a finished save — callers answer 502 rather than `{success:true}`.
+ */
+export class GatewayNotReadyError extends Error {
+  constructor(message = "gateway did not come back") {
+    super(message);
+    this.name = "GatewayNotReadyError";
+  }
+}
+
+/**
+ * How long a restarted gateway has to bind its port before the restart is
+ * called a failure.
+ *
+ * 30 s is the repo's own normal-path figure: `GATEWAY_HEALTH_WAIT_MS` in
+ * updater.ts waits exactly that for a gateway to come up, install.sh's
+ * post-restart recovery check settles for `sleep 8`, and the updater keeps its
+ * longer 45 s (`GATEWAY_RECOVERY_WAIT_MS`) for the harder case of a restart
+ * that follows a repair. It is also triple what OpenClaw itself allows a
+ * respawned gateway (`UPDATE_RESPAWN_HEALTH_TIMEOUT_MS`, 10 s) — deliberately,
+ * because that budget is written for a desktop and this one for a cold Jetson.
+ * Erring long is the point: a slow but healthy restart reported as a failure
+ * would be the exact inverse of the bug this wait exists to fix.
+ *
+ * The wait begins AFTER `systemctl restart` returns, so it covers only the new
+ * process's startup — not the drain (`TimeoutStopSec=30`) and not the pre-start
+ * (`TimeoutStartSec=600`, already bounded by this call's own 60 s exec budget).
+ *
+ * Read per call rather than frozen at import, so a box that needs longer can be
+ * given it without a rebuild. Nothing in the repo sets `GATEWAY_READY_WAIT_MS`
+ * today; it is an operator escape hatch, not a test seam (the tests mock the
+ * wait itself).
+ */
+export function gatewayReadyWaitMs(): number {
+  return Number(process.env.GATEWAY_READY_WAIT_MS || "30000");
+}
+
+export const GATEWAY_PORT = Number(process.env.GATEWAY_PORT || "18789");
+
+export interface RestartGatewayOptions {
+  /**
+   * Wait for the gateway to listen again before resolving. Default true.
+   *
+   * Only a caller that runs its own readiness wait afterwards may turn this
+   * off, and the updater is the one that does: it waits 45 s itself and reads
+   * the unit's journal when that fails, so a throw from here would skip the
+   * legacy-state recovery it exists to perform.
+   */
+  awaitReady?: boolean;
+}
+
+/**
+ * Block until the gateway is listening again, or say it never came back.
+ *
+ * One TCP connect to :18789, polled — which is OpenClaw's OWN answer to this
+ * question, not a ClawBox invention: upstream's `waitForHealthyGatewayChild`
+ * polls `waitForGatewayPortReady`, a bare `net.createConnection` to the gateway
+ * port, to decide whether a respawned gateway is serving. It is also already
+ * this repo's answer, in `updater.ts` `waitForGateway` and
+ * `/setup-api/gateway/health`, which is why this reuses their loop rather than
+ * writing a second one.
+ *
+ * The CLI verbs that answer the same question — `openclaw gateway status
+ * --require-rpc`, `openclaw gateway probe`, `openclaw health` — are not usable
+ * as a poll: each is a full CLI cold start (10-12 s on a Jetson, measured; see
+ * runOpenclawConfigSet) plus a WebSocket handshake, so one poll would outlast
+ * the whole wait and would inherit the gateway's own event-loop stalls. The
+ * kernel completes a TCP handshake without the target process's event loop,
+ * which is the reason /setup-api/gateway/health probes the port too.
+ *
+ * Nothing is remembered between calls: a readiness answer describes one moment
+ * of one process, and a cached one is how the next probe-once bug starts.
+ */
+async function awaitGatewayReady(options: RestartGatewayOptions): Promise<void> {
+  if (options.awaitReady === false) return;
+  const budgetMs = gatewayReadyWaitMs();
+  // 250 ms, not the updater's 1 500 ms: a person is waiting on this one, and
+  // OpenClaw polls the same port at 200 ms for the same question. A loopback
+  // connect that is refused costs nothing.
+  if (await waitForPortOpen(GATEWAY_PORT, "127.0.0.1", { timeoutMs: budgetMs, intervalMs: 250 })) return;
+  console.error(
+    `[openclaw-config] Gateway restarted but nothing is listening on ${GATEWAY_PORT} after ${budgetMs}ms`,
+  );
+  throw new GatewayNotReadyError();
+}
+
+export async function restartGateway(options: RestartGatewayOptions = {}): Promise<void> {
   if (gatewayIsAbsent()) return;
   // Best effort, before the restart: a unit that crash-looped through its
   // StartLimitBurst (20/hour — one bad config during an update is enough)
@@ -2523,7 +2614,10 @@ export async function restartGateway(): Promise<void> {
     await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], {
       timeout: 60000,
     });
+    await awaitGatewayReady(options);
+    return;
   } catch (err) {
+    if (err instanceof GatewayNotReadyError) throw err;
     const message = err instanceof Error ? err.message : String(err);
     // Fall back only when this installation genuinely has no ClawBox system
     // unit. A runtime mask is an update/factory-reset lock: starting the legacy
@@ -2542,8 +2636,13 @@ export async function restartGateway(): Promise<void> {
             XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 1000}`,
           },
         });
+        // The legacy user unit serves the same port, so it owes the same proof.
+        await awaitGatewayReady(options);
         return;
       } catch (fallbackErr) {
+        // A gateway that was restarted but never came back must not be reported
+        // as the missing-unit error that sent us down this branch.
+        if (fallbackErr instanceof GatewayNotReadyError) throw fallbackErr;
         console.error(
           "[openclaw-config] Failed to restart fallback OpenClaw user gateway:",
           fallbackErr instanceof Error ? fallbackErr.message : fallbackErr

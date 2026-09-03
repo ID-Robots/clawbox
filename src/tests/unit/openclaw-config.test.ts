@@ -7,6 +7,14 @@ vi.mock("child_process", () => ({
   execFile: vi.fn(),
 }));
 
+// `restartGateway()` is not finished until :18789 is listening again. These
+// cases are about which unit it touches, so the readiness wait answers yes;
+// gateway-restart-readiness.test.ts is where the wait itself is pinned.
+vi.mock("@/lib/port-probe", async (orig) => ({
+  ...(await orig<typeof import("@/lib/port-probe")>()),
+  waitForPortOpen: vi.fn(async () => true),
+}));
+
 vi.mock("fs/promises", () => ({
   default: {
     readFile: vi.fn(),

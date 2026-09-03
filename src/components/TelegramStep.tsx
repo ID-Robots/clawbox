@@ -137,7 +137,9 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         configureReject(new Error("aborted"));
         return;
       }
-      if (!res.ok) {
+      // 502 = the token was saved but the gateway is not serving it yet; the
+      // body says `success: true` and carries the warning. Not a failed save.
+      if (!res.ok && res.status !== 502) {
         const data = await res.json().catch(() => ({}));
         configureReject(new Error(data.error || "configure failed"));
         setConfiguring(false);

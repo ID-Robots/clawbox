@@ -12,6 +12,8 @@ import {
 import { getEdition } from "@/lib/harness";
 import { HERMES_DASHBOARD_UNIT } from "@/lib/hermes-dashboard-auth";
 import { bounceHermesDashboard } from "@/lib/hermes-dashboard-control";
+import { GATEWAY_PORT, gatewayReadyWaitMs } from "@/lib/openclaw-config";
+import { waitForPortOpen } from "@/lib/port-probe";
 
 export const dynamic = "force-dynamic";
 
@@ -67,7 +69,7 @@ async function restartStateHolder(edition: string): Promise<string[]> {
     // "this box was left exactly as it was". Say which of its two reasons the
     // owner can act on rather than inventing a detail we do not have.
     const detail =
-      "could not be bounced from here — the unit is not Restart=always, or the stop did not take";
+      "could not be bounced from here — the unit is not Restart=always, the stop did not take, or it did not start serving again";
     console.warn(`[clawkeep/restore] ${HERMES_DASHBOARD_UNIT} ${detail}`);
     return [`${HERMES_DASHBOARD_UNIT}: ${detail}`];
   }
@@ -78,7 +80,14 @@ async function restartStateHolder(edition: string): Promise<string[]> {
     await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", OPENCLAW_RESTART_UNIT], {
       timeout: 30_000,
     });
-    return [];
+    // The unit is Type=simple: `restart` returns when the process is forked,
+    // seconds before it re-opens :18789 with the restored state. Answering `[]`
+    // there reported the restore as served by a gateway that was still starting
+    // — the same false success the Hermes half above no longer reports.
+    if (await waitForPortOpen(GATEWAY_PORT, "127.0.0.1", { timeoutMs: gatewayReadyWaitMs() })) return [];
+    const detail = "was restarted but is not serving the restored state yet";
+    console.warn(`[clawkeep/restore] ${OPENCLAW_RESTART_UNIT} ${detail}`);
+    return [`${OPENCLAW_RESTART_UNIT}: ${detail}`];
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
     // Visible in journalctl this way even if the user dismisses the result

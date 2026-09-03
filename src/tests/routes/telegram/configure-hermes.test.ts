@@ -158,12 +158,17 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
 
     // The token is already persisted by then, so a gateway that won't come up
     // is a warning about delivery, not a failed save.
-    it("still reports the save when the gateway cannot be started", async () => {
+    it("still reports the save when the gateway cannot be started, at 502", async () => {
       mockEnsureGateway.mockRejectedValue(new Error("systemd said no"));
       const res = await POST(req({ botToken: TOKEN }));
       const body = await res.json();
 
-      expect(res.status).toBe(200);
+      // Both editions answer the same status for the same fact: the token is
+      // stored (`success: true`) and nothing is serving it yet. A 200 here made
+      // the panel say "configured successfully" over a bot that was not
+      // receiving — the OpenClaw leg of this route no longer does that, and
+      // this SKU must not be the one left saying it.
+      expect(res.status).toBe(502);
       expect(body.success).toBe(true);
       expect(body.restarted).toBe(false);
       expect(body.warning).toBeTruthy();
@@ -180,18 +185,18 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
         scope: "system",
         applied: false,
       });
-      const body = await (await POST(req({ botToken: TOKEN }))).json();
+      const res = await POST(req({ botToken: TOKEN }));
 
-      expect(body).toMatchObject({ success: true, restarted: false });
-      expect(body.warning).toBeTruthy();
+      expect(res.status).toBe(502);
+      expect(await res.json()).toMatchObject({ success: true, restarted: false });
     });
 
     it("warns when the gateway install returned but nothing is running", async () => {
       mockEnsureGateway.mockResolvedValue({ installed: true, running: false, scope: "system", applied: false });
-      const body = await (await POST(req({ botToken: TOKEN }))).json();
+      const res = await POST(req({ botToken: TOKEN }));
 
-      expect(body).toMatchObject({ success: true, restarted: false });
-      expect(body.warning).toBeTruthy();
+      expect(res.status).toBe(502);
+      expect(await res.json()).toMatchObject({ success: true, restarted: false });
     });
 
     it("fails the save when Hermes rejects the token", async () => {

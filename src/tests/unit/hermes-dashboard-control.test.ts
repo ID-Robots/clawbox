@@ -15,9 +15,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const cliMock = vi.hoisted(() => vi.fn());
 const execFileMock = vi.hoisted(() => vi.fn());
+const waitForPortOpenMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("child_process", () => ({ execFile: execFileMock }));
+vi.mock("@/lib/port-probe", async (orig) => ({
+  ...(await orig<typeof import("@/lib/port-probe")>()),
+  waitForPortOpen: waitForPortOpenMock,
+}));
 
 import {
   bounceHermesDashboard,
@@ -25,14 +30,29 @@ import {
   hermesDashboardUnitState,
 } from "@/lib/hermes-dashboard-control";
 
+/**
+ * Answer every `systemctl show` this module makes — the restart policy and the
+ * unit's main PID — in systemd's own `Key=Value` form, which is what `showUnit`
+ * parses. `pids` is consumed in order, so a case can say "this process before
+ * the stop, that one after".
+ */
+function systemd({ restart = "always", pids = ["4242", "5353"] }: { restart?: string; pids?: string[] } = {}): void {
+  const remaining = [...pids];
+  execFileMock.mockImplementation((_bin: string, args: string[], _opts: unknown, cb: unknown) => {
+    const done = cb as (e: Error | null, out: { stdout: string; stderr: string }) => void;
+    const property = (args as string[]).find((a) => a.startsWith("--property=")) ?? "";
+    if (property === "--property=MainPID") {
+      const pid = (remaining.length > 1 ? remaining.shift() : remaining[0]) ?? "0";
+      done(null, { stdout: `MainPID=${pid}\n`, stderr: "" });
+      return;
+    }
+    done(null, { stdout: `Restart=${restart}\n`, stderr: "" });
+  });
+}
+
 /** `systemctl show … --property=Restart` prints `Restart=value`. */
 function systemdRestartPolicy(value: string): void {
-  execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: unknown) => {
-    (cb as (e: Error | null, out: { stdout: string; stderr: string }) => void)(null, {
-      stdout: `Restart=${value}\n`,
-      stderr: "",
-    });
-  });
+  systemd({ restart: value });
 }
 
 /** The argv of the `systemctl` read, so the query itself can be asserted. */
@@ -44,6 +64,7 @@ function systemctlCall(): [string, string[]] {
 beforeEach(() => {
   cliMock.mockReset();
   execFileMock.mockReset();
+  waitForPortOpenMock.mockReset().mockResolvedValue(true);
   cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
   systemdRestartPolicy("always");
 });
@@ -96,6 +117,59 @@ describe("bounceHermesDashboard", () => {
   it("does not throw when the CLI is missing entirely", async () => {
     cliMock.mockRejectedValue(new Error("ENOENT"));
     await expect(bounceHermesDashboard()).resolves.toBe(false);
+  });
+
+  /**
+   * A stop is not a bounce. `Restart=always` promises systemd will start the
+   * dashboard again — it does not promise it came back, and the callers act on
+   * the answer: a ClawKeep restore reports the restored state.db is being
+   * served, and the image refresh reports the box can draw. Both were true
+   * only once the dashboard was listening again.
+   */
+  it("answers true only once the dashboard is listening again", async () => {
+    waitForPortOpenMock.mockResolvedValue(false);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(bounceHermesDashboard()).resolves.toBe(false);
+    errorSpy.mockRestore();
+  });
+
+  it("probes the dashboard's own socket", async () => {
+    await bounceHermesDashboard();
+    const [port, host] = waitForPortOpenMock.mock.calls[0];
+    // 127.0.0.2:9119 — config/clawbox-hermes-dashboard.service's ExecStart.
+    expect(port).toBe(9119);
+    expect(host).toBe("127.0.0.2");
+  });
+
+  it("requires a DIFFERENT process, not merely an open port", async () => {
+    // The port cannot tell the outgoing dashboard from the incoming one, and
+    // between our stop and the unit's RestartSec=5 there is no instant where it
+    // could: a probe that lands early finds the process we just killed. systemd
+    // knows which process is the unit's, so it is asked.
+    systemd({ pids: ["4242", "4242"] });
+    process.env.HERMES_DASHBOARD_WAIT_MS = "40";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(bounceHermesDashboard()).resolves.toBe(false);
+    expect(waitForPortOpenMock).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+    delete process.env.HERMES_DASHBOARD_WAIT_MS;
+  });
+
+  it("reads the outgoing PID before it stops anything", async () => {
+    await bounceHermesDashboard();
+    const mainPidQueries = execFileMock.mock.calls.filter(([, args]) =>
+      (args as string[]).includes("--property=MainPID"),
+    );
+    // One before the stop to name the outgoing process, at least one after.
+    expect(mainPidQueries.length).toBeGreaterThanOrEqual(2);
+    expect(mainPidQueries[0][1]).toContain("clawbox-hermes-dashboard.service");
+  });
+
+  it("counts a respawn even when the unit had no running process to begin with", async () => {
+    // A dashboard already down (crashed, mid-RestartSec) shows MainPID 0. The
+    // replacement is still a real respawn, and `null !== 6464` says so.
+    systemd({ pids: ["0", "6464"] });
+    await expect(bounceHermesDashboard()).resolves.toBe(true);
   });
 });
 

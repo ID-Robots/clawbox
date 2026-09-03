@@ -1,7 +1,8 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { runHermesCli } from "@/lib/hermes-cli";
-import { HERMES_DASHBOARD_UNIT } from "@/lib/hermes-dashboard-auth";
+import { DASHBOARD_HOST, DASHBOARD_PORT, HERMES_DASHBOARD_UNIT } from "@/lib/hermes-dashboard-auth";
+import { waitForPortOpen } from "@/lib/port-probe";
 
 const execFileAsync = promisify(execFile);
 
@@ -32,6 +33,34 @@ const execFileAsync = promisify(execFile);
 /** How long the systemd query and the stop may take. Both are local. */
 const SYSTEMCTL_TIMEOUT_MS = 5_000;
 const STOP_TIMEOUT_MS = 15_000;
+
+/**
+ * How long the replacement dashboard has to appear, and then to start serving.
+ * One budget for both halves — they are the same restart.
+ *
+ * Covers `RestartSec=5` plus the unit's two ExecStartPre steps (a `hermes
+ * dashboard --stop` CLI cold start and the auth provisioning) plus the process
+ * binding its socket. The unit allows itself `TimeoutStartSec=300` because
+ * `hermes dashboard` builds its web dist on a FIRST run; a bounce is always a
+ * warm start, so 45 s is several times what one needs while leaving room under
+ * the ceiling. Erring long in one direction only: the callers report a `false`
+ * to the owner, and a healthy-but-slow dashboard called unrecovered would be
+ * the same lie the other way round. Not longer than this, though —
+ * `hermes-clawai` bounces inside a request that can reach the owner through
+ * cloudflared, whose edge cuts a response at 100 s.
+ */
+const DASHBOARD_RESPAWN_WAIT_MS = 45_000;
+/** Gap between systemd queries while waiting for the replacement process. */
+const RESPAWN_POLL_MS = 500;
+
+/**
+ * Read per call so a box that needs longer — or a test that cannot spend 45 s
+ * proving a dashboard never came back — can say so without a rebuild. Same
+ * shape as the gateway's `gatewayReadyWaitMs()`.
+ */
+function respawnWaitMs(): number {
+  return Number(process.env.HERMES_DASHBOARD_WAIT_MS || DASHBOARD_RESPAWN_WAIT_MS);
+}
 
 /**
  * One `systemctl show`, parsed BY NAME.
@@ -170,17 +199,66 @@ export function classifyUnitState(unit: {
 }
 
 /**
- * Stop the dashboard so systemd starts it again, or answer false without
- * touching it.
+ * The PID systemd currently considers the unit's main process, or null.
  *
- * NEVER THROWS. False means "this box was left exactly as it was" — either
- * because nothing promised to restart it, or because the stop did not take —
- * and every caller so far is in a position to say so and carry on.
+ * THE IDENTITY OF THE PROCESS, which a socket cannot give. `Type=simple` means
+ * :9119 says only "something is listening", and between our stop and
+ * `RestartSec=5` there is no instant at which that distinguishes the dashboard
+ * going away from the one coming back: probe early and the process we just
+ * killed answers, wait for the port to close first and a fast respawn beats the
+ * first probe. `MainPID` changes exactly once, when systemd starts the
+ * replacement. Read through the same by-name `systemctl show` as every other
+ * property here, and 0 (no running main process) reads as null.
+ */
+async function mainPid(): Promise<number | null> {
+  const value = Number((await showUnit(["MainPID"])).MainPID);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+async function waitForReplacement(previousPid: number | null, deadline: number): Promise<boolean> {
+  for (;;) {
+    const pid = await mainPid();
+    if (pid !== null && pid !== previousPid) return true;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(RESPAWN_POLL_MS, remaining)));
+  }
+}
+
+/**
+ * Stop the dashboard, wait for systemd to bring it back, or answer false.
+ *
+ * NEVER THROWS. True means the dashboard is SERVING again — not merely that it
+ * was stopped. `Restart=always` is a promise that systemd will start it, not
+ * that it came back, and both callers act on the answer: a ClawKeep restore
+ * reports the restored state.db is being served, and the image refresh reports
+ * the box can draw. Neither was true while the dashboard was still down, and
+ * the old `true` was issued the moment the stop returned.
+ *
+ * Two questions, in order, because they answer different things: systemd says a
+ * DIFFERENT process is now the unit's main one, and the socket says that
+ * process is serving. Neither alone is the bounce.
+ *
+ * False now covers three cases the callers phrase for the owner: nothing
+ * promised to restart it, the stop did not take, or it did not come back inside
+ * the budget above.
  */
 export async function bounceHermesDashboard(): Promise<boolean> {
   if (!(await restartsItself())) return false;
+  // Read BEFORE the stop: this is the process the answer is measured against.
+  const outgoing = await mainPid();
   const result = await runHermesCli(["dashboard", "--stop"], { timeoutMs: STOP_TIMEOUT_MS }).catch(
     () => null,
   );
-  return result?.code === 0;
+  if (result?.code !== 0) return false;
+
+  if (!(await waitForReplacement(outgoing, Date.now() + respawnWaitMs()))) {
+    console.error(`[hermes] ${HERMES_DASHBOARD_UNIT} did not come back after its stop`);
+    return false;
+  }
+  if (await waitForPortOpen(DASHBOARD_PORT, DASHBOARD_HOST, { timeoutMs: respawnWaitMs() })) return true;
+  console.error(
+    `[hermes] ${HERMES_DASHBOARD_UNIT} restarted but is not listening on ${DASHBOARD_HOST}:${DASHBOARD_PORT} again`,
+  );
+  return false;
 }

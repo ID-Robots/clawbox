@@ -183,16 +183,19 @@ describe("POST /setup-api/telegram/configure", () => {
     expect(body.error).toBe("Gateway unreachable");
   });
 
-  it("saves with a soft warning when restartGateway fails", async () => {
+  it("answers 502 with a soft warning when the gateway does not come back", async () => {
     // The token is already persisted before the restart, so a restart failure
     // must not fail the whole save — it's reported as a soft warning that
-    // applies on the next gateway restart.
+    // applies on the next gateway restart. But it is NOT a success either: the
+    // bot does not answer until the gateway is serving, so the status code says
+    // "the upstream did not come back", exactly as /telegram/streaming does for
+    // the same condition (the route this one's own comment says it mirrors).
     mockRestartGateway.mockRejectedValue(new Error("Restart failed"));
 
     const res = await telegramConfigurePost(jsonRequest({ botToken: "123:abc" }));
     const body = await res.json();
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(502);
     expect(body.success).toBe(true);
     expect(body.restarted).toBe(false);
     expect(typeof body.warning).toBe("string");
