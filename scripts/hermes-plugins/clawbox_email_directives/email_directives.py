@@ -32,8 +32,25 @@ from typing import List, Tuple
 
 __all__ = ["strip_email_directives", "split_email_refs"]
 
+#: The characters JavaScript's ``String.prototype.trim()`` and ``\s`` remove.
+#:
+#: SPELLED OUT RATHER THAN INHERITED, because Python's idea of whitespace is not
+#: JavaScript's and the two disagree in BOTH directions. A byte-order mark
+#: (U+FEFF) is whitespace to JavaScript and not to Python, so ``\ufeffEMAIL:4471``
+#: is a card in the chat window and would have stayed a visible id on Telegram;
+#: U+001C-U+001F are whitespace to Python and not to JavaScript, so a line the
+#: chat keeps as text would have been deleted from a channel reply instead.
+#: Either direction is the drift the parity fixture exists to catch, and this is
+#: the definition that makes the three copies agree.
+_JS_WHITESPACE = (
+    "\t\n\x0b\x0c\r \u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+_JS_WS_CLASS = "[" + re.escape(_JS_WHITESPACE) + "]"
+
 #: A directive line: ``EMAIL:`` at the very start of the (stripped) line.
-_EMAIL_LINE_RE = re.compile(r"^email:\s*(.*)$", re.IGNORECASE)
+_EMAIL_LINE_RE = re.compile(r"^email:" + _JS_WS_CLASS + r"*(.*)$", re.IGNORECASE)
 
 #: Opening or closing marker of a fenced code block.
 _FENCE_RE = re.compile(r"^(?:```|~~~)")
@@ -78,7 +95,7 @@ def split_email_refs(raw: str) -> Tuple[str, List[int]]:
     in_fence = False
 
     for line in raw.split("\n"):
-        trimmed = line.strip()
+        trimmed = line.strip(_JS_WHITESPACE)
         if _FENCE_RE.match(trimmed):
             in_fence = not in_fence
             kept.append(line)
@@ -104,13 +121,13 @@ def split_email_refs(raw: str) -> Tuple[str, List[int]]:
 
     # Removing a line from the middle of a reply leaves a hole; collapse the run
     # of blank lines behind it so the prose keeps its shape.
-    text = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip(_JS_WHITESPACE)
     return (text, uids)
 
 
 def _parse_uid(payload: str):
     """A UID, or ``None`` when the payload is not one."""
-    value = _unwrap_quoted(payload.strip())
+    value = _unwrap_quoted(payload.strip(_JS_WHITESPACE))
     if not _UID_RE.fullmatch(value):
         return None
     uid = int(value)
@@ -121,8 +138,8 @@ def _parse_uid(payload: str):
 
 def _unwrap_quoted(value: str) -> str:
     """Strips one layer of the quoting a model tends to wrap a value in."""
-    text = value.strip()
+    text = value.strip(_JS_WHITESPACE)
     for quote in _QUOTES:
         if len(text) >= 2 and text.startswith(quote) and text.endswith(quote):
-            return text[1:-1].strip()
+            return text[1:-1].strip(_JS_WHITESPACE)
     return text

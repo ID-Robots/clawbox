@@ -53,7 +53,18 @@ logger = logging.getLogger(__name__)
 #: "[Response transformed after streaming]" above the whole answer
 #: (``cli.py:3502-3518``) — a banner ClawBox's route would capture as part of
 #: the reply. Keeping ``cli`` means this plugin never fires there.
-KEEP_PLATFORMS = frozenset({"", "cli", "tui", "acp", "desktop", "clawbox-chat"})
+#:
+#: ``subagent`` and ``curator`` are here for a different reason: they are not
+#: SURFACES at all. A delegated turn's answer is consumed by the PARENT AGENT
+#: (``tools/delegate_tool.py:1955``, ``agent/curator.py:1949``), so a strip there
+#: deletes something the parent still needs rather than something a person
+#: cannot use — the owner asks the chat to read their mail, the mailbox work is
+#: delegated, and the parent comes back with a summary whose ids are already
+#: gone and no cards to render. ``cron`` and ``api_server`` are deliberately NOT
+#: here: their output does end up in front of somebody.
+KEEP_PLATFORMS = frozenset(
+    {"", "cli", "tui", "acp", "desktop", "clawbox-chat", "subagent", "curator"}
+)
 
 #: What a reply that was NOTHING BUT directives becomes.
 #:
@@ -64,6 +75,13 @@ KEEP_PLATFORMS = frozenset({"", "cli", "tui", "acp", "desktop", "clawbox-chat"})
 #: something that carries none. This is the second. It cannot be mistaken for
 #: an answer, it is the same in every language, and it is unreachable unless the
 #: model both ignored the tool instruction AND wrote no prose at all.
+#:
+#: THE OPENCLAW TWIN ANSWERS THIS DIFFERENTLY, and deliberately: there the hook
+#: returns an empty text and the core suppresses the message outright
+#: (`empty_after_reply_payload_sending_hook`), which is the better outcome and
+#: is simply not available here. The divergence is the harnesses', not a
+#: decision taken twice — see
+#: `scripts/openclaw-plugins/clawbox-email-directives/index.mjs`.
 EMPTY_REPLY_PLACEHOLDER = "…"
 
 

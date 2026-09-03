@@ -68,8 +68,10 @@ const NOT_READABLE_NEXT =
  * with a bare "EMAIL:4471" under the summary: an internal id the person cannot
  * use and did not ask for. TASK-697 built the second half below, so a line that
  * survives this instruction is now taken out on the way to the channel. The
- * instruction still matters: the strip can only delete, so a reply written as
- * nothing but ids leaves the owner nothing to read.
+ * instruction still matters, and not only as a belt: the strip can only DELETE,
+ * so a reply written as nothing but ids leaves the owner nothing to read — and
+ * three paths run ahead of the hook and are not covered by it at all (named
+ * under WHAT THE STRIP DOES NOT REACH, below).
  *
  * TWO MORE CHATS SHOW IT, ONE PER EDITION, AND ClawBox SERVES BOTH. On OpenClaw
  * it is the gateway's own Control UI at /chat, behind the pinned OpenClaw icon
@@ -111,6 +113,24 @@ const NOT_READABLE_NEXT =
  * compatibility". Both plugins live in scripts/, are installed and enabled by
  * the boot reconciles (scripts/register-mcp.sh, scripts/gateway-pre-start.sh),
  * and KEEP the line on the surfaces that make the card.
+ *
+ * WHAT THE STRIP DOES NOT REACH. A hook fires once, after the turn, on the text
+ * being delivered — so anything that already left, or that never passes through
+ * it, is still this instruction's alone. Read against the two harnesses on the
+ * boxes (2026-09-03), three such paths:
+ *
+ *   1. Hermes, a reply long enough to be SPLIT across several messages. A
+ *      transform edits only the last streamed chunk (gateway/run.py:29804);
+ *      earlier chunks are already sealed and keep the text the model wrote.
+ *      The sibling stale-finalize branch guards exactly this and the
+ *      transformed branch does not — an upstream gap, not ours to close here.
+ *   2. Hermes streaming TTS, which speaks sentences DURING the stream and makes
+ *      the gateway skip the post-transform voice reply
+ *      (gateway/run.py:20744-20747). clawbox-tts.sh is the only guard there.
+ *   3. OpenClaw channel preview streaming. The core suppresses provider preview
+ *      while an outbound hook exists, but only for Discord
+ *      (message-handler.process:1005) — it is the one such guard in the whole
+ *      dist.
  *
  * WHICH WAY IT LEANS. Emitting is the default and the channels are a closed
  * exception, and the instruction states the positive case too, because ClawBox's

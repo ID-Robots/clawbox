@@ -291,9 +291,11 @@ evaluates about itself, so it rests on the model being told which platform it is
 on. Both editions do tell it: Hermes writes a per-platform hint from a central
 dict, and OpenClaw states the channel three ways per turn (a trusted
 `### Message Context` block, `channel=<id>` in the `## Runtime` line, and the
-`[<Channel> …]` envelope on the body). ClawBox's own chat is `webchat` there and
-a CLI or TUI on Hermes, which is why the instruction names all of those as
-surfaces to make the card on. Half two is native and now BUILT (TASK-697):
+`[<Channel> …]` envelope on the body). ClawBox's own chat is `webchat` there and,
+on Hermes, `clawbox-chat` — the session `source` ClawBox itself sends, which
+Hermes carries through to `agent.platform`; `cli` is only its spawn fallback,
+and a standalone `tui` looks the same from inside the agent. That is why the
+instruction names all of those as surfaces to make the card on. Half two is native and now BUILT (TASK-697):
 Hermes' `transform_llm_output` plugin hook, handed the final text and the
 `platform` and free to replace it, and on OpenClaw `reply_payload_sending` —
 which gets the whole outbound payload and is keyed on `channelId` — chosen over
@@ -302,7 +304,15 @@ retained for low-level SDK compatibility". Both plugins ship in `scripts/`
 (`scripts/hermes-plugins/clawbox_email_directives/`,
 `scripts/openclaw-plugins/clawbox-email-directives/`), are installed and enabled
 by the boot reconciles (`scripts/register-mcp.sh`, `scripts/gateway-pre-start.sh`),
-and KEEP the line on the surfaces that render the card.
+and KEEP the line on the surfaces that render the card. Three paths run ahead of
+a hook and are still half one's alone: a Hermes reply split across several
+messages (only the last chunk is edited, `gateway/run.py:29804`), Hermes
+streaming TTS (sentences are spoken before the transform, `:20744-20747`), and
+OpenClaw channel preview streaming (suppressed while a hook exists, but only for
+Discord). The spoken reply is covered at its own entry point,
+`scripts/openclaw/clawbox-tts.sh`, because on OpenClaw the core synthesises audio
+before any outbound hook runs — a cloud voice there is out of reach of both
+halves.
 
 Every claim in the paragraph above about the harness's own internals —
 `transform_llm_output`, `PLATFORM_HINTS`, `reply_payload_sending`,

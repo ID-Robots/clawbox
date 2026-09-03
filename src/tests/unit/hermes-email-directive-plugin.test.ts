@@ -98,6 +98,20 @@ d("Hermes transform_llm_output plugin — EMAIL: directives", () => {
     expect(answers).toEqual([null, null, null, null, null]);
   });
 
+  it("KEEPS them on an agent-to-agent turn, which is not a surface at all", () => {
+    // A delegated turn's answer is read by the PARENT agent, not by a person.
+    // Stripping there deletes ids the parent still has to relay: the owner asks
+    // the chat to read their mail, the mailbox work is delegated, and the chat
+    // gets a summary with no cards.
+    const answers = transform(["subagent", "curator"].map((platform) => ({ text: REPLY, platform })));
+    expect(answers).toEqual([null, null]);
+  });
+
+  it("still strips on cron and the API server, whose output a person does read", () => {
+    const answers = transform(["cron", "api_server"].map((platform) => ({ text: REPLY, platform })));
+    expect(answers).toEqual([STRIPPED, STRIPPED]);
+  });
+
   it("is case- and padding-insensitive about the platform name", () => {
     expect(transform([{ text: REPLY, platform: " Clawbox-Chat " }])).toEqual([null]);
   });

@@ -94,6 +94,32 @@ export const EMAIL_DIRECTIVE_CASES: EmailDirectiveCase[] = [
     stripped: "Done.\nEMAIL:٤٤٧١",
   },
   {
+    name: "a byte-order mark before the directive is still a directive",
+    // JavaScript's trim() and \s remove U+FEFF; Python's str.strip() does not.
+    // Left to each language's default, the Hermes plugin kept this line and the
+    // owner got `EMAIL:4471` on Telegram — the exact bug this task closes.
+    input: "Done.\n\uFEFFEMAIL:4471",
+    stripped: "Done.",
+  },
+  {
+    name: "a file separator is not whitespace to JavaScript, so the line stays text",
+    // The other direction: U+001C-U+001F are whitespace to Python and not to
+    // JavaScript, so the Python copy would have DELETED a line the chat window
+    // keeps — and mis-tracked the fence state on the way past.
+    input: "Done.\n\u001cEMAIL:4471",
+    stripped: "Done.\n\u001cEMAIL:4471",
+  },
+  {
+    name: "an ideographic space is whitespace to both",
+    input: "Done.\n\u3000EMAIL:\u30004471\u3000",
+    stripped: "Done.",
+  },
+  {
+    name: "a non-breaking space around the payload trims",
+    input: "Done.\nEMAIL:\u00a04471\u00a0",
+    stripped: "Done.",
+  },
+  {
     name: "a reply EXPLAINING the syntax keeps it, because a fence is not a directive",
     input: "Write it like this:\n```\nEMAIL:4471\n```\nand the chat makes a card.",
     stripped: "Write it like this:\n```\nEMAIL:4471\n```\nand the chat makes a card.",

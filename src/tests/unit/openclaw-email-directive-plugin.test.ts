@@ -65,12 +65,29 @@ describe("OpenClaw reply_payload_sending plugin — EMAIL: directives", () => {
     expect(onReplyPayloadSending({ payload: { text: REPLY }, kind: "final" }, {})).toBeUndefined();
   });
 
-  it("prefers ctx.channelId, which is the one the core guarantees", () => {
-    // `event.channel` is the surface and is optional; `ctx.channelId` is a
-    // required string. A webchat session routed to a channel carries the real
-    // channel id in ctx, and that is the one that must decide.
-    const result = onReplyPayloadSending(event({ text: REPLY }, "webchat"), ctx("telegram"));
-    expect(result).toEqual({ payload: { text: STRIPPED } });
+  it("keys on the delivery SURFACE, not the channel the session came from", () => {
+    // `event.channel` is where this reply is going (`Surface ?? Provider`);
+    // `ctx.channelId` is `OriginatingChannel ?? Surface ?? Provider`, so on a
+    // webchat delivery for a session that started on Telegram the two disagree.
+    // Keying on ctx would strip the directive out of a reply being handed to a
+    // browser — the card never renders and the owner cannot open the mail.
+    expect(onReplyPayloadSending(event({ text: REPLY }, "webchat"), ctx("telegram"))).toBeUndefined();
+    // And the mirror: a channel delivery on a session that began in the chat.
+    expect(onReplyPayloadSending(event({ text: REPLY }, "telegram"), ctx("webchat"))).toEqual({
+      payload: { text: STRIPPED },
+    });
+  });
+
+  it("falls back to ctx.channelId only when the event names no surface", () => {
+    // `channelId` is a required string the core sets to "" when it knows
+    // nothing, so this is first-non-EMPTY, not first-non-nullish.
+    expect(onReplyPayloadSending({ payload: { text: REPLY }, kind: "final" }, ctx("telegram"))).toEqual({
+      payload: { text: STRIPPED },
+    });
+    expect(onReplyPayloadSending(event({ text: REPLY }, ""), ctx("telegram"))).toEqual({
+      payload: { text: STRIPPED },
+    });
+    expect(onReplyPayloadSending(event({ text: REPLY }, ""), ctx("webchat"))).toBeUndefined();
   });
 
   it("returns undefined when there was no directive to remove", () => {

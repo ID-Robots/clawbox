@@ -157,9 +157,12 @@ chmod 600 "$MCP_TOKEN_FILE" 2>/dev/null || true
 # will happily import a `.pyc` whose source no longer exists.
 EMAIL_HOOK_PLUGIN="clawbox_email_directives"
 EMAIL_HOOK_SRC="$PROJECT_DIR/scripts/hermes-plugins/$EMAIL_HOOK_PLUGIN"
-# Derived from the config this script is already writing, so a test can move the
-# whole Hermes home with one variable and the two stay in step.
-HERMES_PLUGINS_DIR="${HERMES_PLUGINS_DIR:-$(dirname "$HERMES_CONFIG")/plugins}"
+# `HERMES_HOME` first, exactly like Hermes' own `get_hermes_home()` and like
+# `hermesHome()` in src/lib/hermes-env.ts — NOT `dirname $HERMES_CONFIG`. With
+# HERMES_HOME set and HERMES_CONFIG left at its default the two disagree, the
+# copy lands where Hermes will never look, and the box logs a "did not register
+# its hook" warning on every boot with the plugin sitting right there.
+HERMES_PLUGINS_DIR="${HERMES_PLUGINS_DIR:-${HERMES_HOME:-$HOME_DIR/.hermes}/plugins}"
 EMAIL_HOOK_DST="$HERMES_PLUGINS_DIR/$EMAIL_HOOK_PLUGIN"
 EMAIL_HOOK_INSTALLED=0
 
@@ -204,7 +207,7 @@ export CLAWBOX_EMAIL_HOOK_PLUGIN=""
 [ "$EMAIL_HOOK_INSTALLED" = "1" ] && export CLAWBOX_EMAIL_HOOK_PLUGIN="$EMAIL_HOOK_PLUGIN"
 
 python3 - <<'PY'
-import ast, os, sys, tempfile
+import ast, json, os, sys, tempfile
 
 try:
     import yaml
@@ -413,15 +416,33 @@ if hook_plugin:
         raw_enabled = plugins_cfg.get("enabled")
         if isinstance(raw_enabled, str):
             text = raw_enabled.strip()
-            parsed = None
             if text.startswith("["):
+                # `hermes config set` stores a list as a JSON string, and
+                # src/lib/hermes-clawai.ts writes this very key that way with
+                # JSON.stringify — so JSON first, and the Python literal form
+                # only as a fallback for anything hand-written.
+                parsed = None
                 try:
-                    parsed = ast.literal_eval(text)
-                except (ValueError, SyntaxError):
-                    parsed = None
-            names = [str(item) for item in parsed] if isinstance(parsed, list) else (
-                [raw_enabled] if raw_enabled else []
-            )
+                    parsed = json.loads(text)
+                except ValueError:
+                    try:
+                        parsed = ast.literal_eval(text)
+                    except (ValueError, SyntaxError):
+                        parsed = None
+                if isinstance(parsed, list):
+                    names = [str(item) for item in parsed]
+                else:
+                    # A list we cannot read is left ALONE. Falling back to
+                    # "the whole string is one plugin name" would write
+                    # `['["clawai", …', 'clawbox_email_directives']` and the
+                    # customer's image backend would stop loading on the next
+                    # boot — the exact failure the merge above exists to
+                    # prevent, caused by the code preventing it.
+                    names = None
+                    print("[register-mcp] WARNING: plugins.enabled is a list this script cannot parse; "
+                          "leaving it untouched and the EMAIL: directive hook disabled.", file=sys.stderr)
+            else:
+                names = [raw_enabled] if raw_enabled else []
         elif isinstance(raw_enabled, (list, tuple)):
             names = [str(item) for item in raw_enabled]
         elif raw_enabled is None:
@@ -532,16 +553,29 @@ fi
 # log that says which of the two states the box is actually in.
 if [ "$EMAIL_HOOK_INSTALLED" = "1" ]; then
   EMAIL_HOOK_DOCTOR="$("$HERMES_BIN" plugins doctor "$EMAIL_HOOK_PLUGIN" 2>&1 || true)"
+  # The doctor's own words, trimmed to one line: "no register() function",
+  # "No __init__.py in ...", an import traceback's last line. Naming the plugin
+  # without naming the reason is what sends an operator to the wrong file.
+  EMAIL_HOOK_DETAIL="$(printf '%s' "$EMAIL_HOOK_DOCTOR" | tr '\n' ' ' | cut -c1-300)"
   case "$EMAIL_HOOK_DOCTOR" in
     *"1 hook(s)"*)
       log "$EMAIL_HOOK_PLUGIN loaded and registered its outbound hook"
       ;;
+    *"hook(s)"*|*"Plugin Doctor"*|*"registration failed"*)
+      # The doctor RAN and did not report our hook: it imported and registered a
+      # count that is not one, or it refused to import at all. That IS the
+      # defect, and it is the one nothing else on the box reports — `plugins
+      # list` reads "enabled" straight back out of the config it was written
+      # into (hermes_cli/plugins_cmd.py:1931).
+      log "WARNING: $EMAIL_HOOK_PLUGIN did not register its hook — EMAIL: directives will still reach channels. hermes plugins doctor said: $EMAIL_HOOK_DETAIL"
+      ;;
     *)
-      # The doctor's own words, trimmed to one line: "no register() function",
-      # "No __init__.py in ...", an import traceback's last line. Naming the
-      # plugin without naming the reason is what sends an operator to the wrong
-      # file.
-      log "WARNING: $EMAIL_HOOK_PLUGIN did not register its hook — EMAIL: directives will still reach channels. hermes plugins doctor said: $(printf '%s' "$EMAIL_HOOK_DOCTOR" | tr '\n' ' ' | cut -c1-300)"
+      # The doctor could not answer at all — a `hermes` too old for the
+      # subcommand, or a wedged one. Reported as UNKNOWN rather than as a
+      # defect: saying "directives will still reach channels" about a box where
+      # the hook is registered and working is a false failure, and an operator
+      # who sees it every boot stops reading the line that matters.
+      log "NOTE: could not verify $EMAIL_HOOK_PLUGIN with 'hermes plugins doctor' — the plugin is installed and enabled, but whether its hook registered is unknown here. hermes said: $EMAIL_HOOK_DETAIL"
       ;;
   esac
 fi

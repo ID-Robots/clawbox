@@ -11,7 +11,10 @@
 // change made to one and not the others fails a test rather than shipping.
 //
 // Plain `.mjs` with no imports and no dependencies, because it is COPIED into
-// `~/.openclaw/plugins/` and loaded by whatever Node the gateway runs.
+// `~/.openclaw/extensions/<id>/` — the core's global plugin root, where there is
+// no `node_modules` of its own — and loaded by whatever Node the gateway runs.
+// A bare specifier resolves under the loader's alias map and NOT under plain
+// node, so importing nothing is the only shape that works in both.
 
 /** A directive line: `EMAIL:` at the very start of the (trimmed) line. */
 const EMAIL_LINE_RE = /^email:\s*(.*)$/i;

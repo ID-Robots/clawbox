@@ -60,6 +60,47 @@ describe("EMAIL: directive grammar — one rule, three implementations", () => {
     expect(answers).toEqual(EMAIL_DIRECTIVE_CASES.map((c) => c.stripped));
   });
 
+  // The table above pins cases a person thought of. This pins the whole axis
+  // the three languages actually disagree on: what counts as whitespace. It is
+  // where the drift was found — JavaScript trims U+FEFF and Python does not,
+  // Python strips U+001C-U+001F and JavaScript does not — so every character
+  // anywhere near the boundary is put through all three and they must AGREE.
+  // No expected value is written down here on purpose: agreement is the
+  // property, and hardcoding an answer would just be a fourth opinion.
+  const BOUNDARY_CODE_POINTS = [
+    // C0 controls, which is where Python's str.strip() is broader.
+    ...Array.from({ length: 0x20 }, (_, i) => i),
+    0x7f,
+    // Everything JavaScript calls WhiteSpace or a LineTerminator.
+    0x20, 0xa0, 0x1680, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
+    ...Array.from({ length: 11 }, (_, i) => 0x2000 + i),
+    // Near neighbours that are NOT whitespace in either language.
+    0x200b, 0x200c, 0x200d, 0x2060, 0x180e,
+  ];
+
+  (hasPython3 ? it : it.skip)("the three agree on every whitespace-boundary character", () => {
+    const inputs: string[] = [];
+    for (const cp of BOUNDARY_CODE_POINTS) {
+      const c = String.fromCodePoint(cp);
+      // Before the directive, inside it, around the payload, and against the
+      // fence — the four places a trim decision changes the answer.
+      inputs.push(`Done.\n${c}EMAIL:4471`);
+      inputs.push(`Done.\nEMAIL:${c}4471${c}`);
+      inputs.push(`Done.\nEMAIL:4471${c}`);
+      inputs.push(`${c}\`\`\`\nEMAIL:1\n\`\`\``);
+    }
+    const ts = inputs.map((raw) => splitEmailRefs(raw).text);
+    const js = inputs.map((raw) => stripEmailDirectives(raw));
+    const py = pythonAnswers(inputs);
+    // Reported as a list of disagreements rather than a first-mismatch throw, so
+    // a drift shows every character it affects in one run.
+    const disagreements = inputs
+      .map((raw, i) => ({ raw, ts: ts[i], js: js[i], py: py[i] }))
+      .filter((row) => row.ts !== row.js || row.ts !== row.py)
+      .map((row) => JSON.stringify(row));
+    expect(disagreements).toEqual([]);
+  });
+
   it("a non-string is not a crash in either plugin — a hook must never break delivery", () => {
     // The gateway hands the hook whatever the payload carried; `undefined` for
     // an attachment-only reply is the realistic one. Throwing here would be a

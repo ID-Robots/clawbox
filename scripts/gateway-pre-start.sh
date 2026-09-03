@@ -2274,7 +2274,12 @@ fi
 # no other reason to be constructed) — the two together are the documented
 # startup intent.
 if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ]; then
-  CLAWBOX_HOOK_PLUGIN_ID="$CLAWBOX_HOOK_PLUGIN_ID" python3 - "$OPENCLAW_CONFIG" <<'PY'
+  # `if !` rather than a bare call: this script is an ExecStartPre with no
+  # leading `-`, under `set -euo pipefail`, so an unwritable ~/.openclaw (a full
+  # disk, a partition remounted read-only after an unclean shutdown) would
+  # otherwise re-raise out of the write below, fail the unit, and leave the box
+  # with no agent at all — over a strip this very block calls optional.
+  if ! CLAWBOX_HOOK_PLUGIN_ID="$CLAWBOX_HOOK_PLUGIN_ID" python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile
 
 cfg_path = sys.argv[1]
@@ -2318,8 +2323,11 @@ except Exception:
     raise
 print("  Enabled the EMAIL: directive hook plugin")
 PY
+  then
+    echo "  WARNING: could not enable the $CLAWBOX_HOOK_PLUGIN_ID plugin in $OPENCLAW_CONFIG — EMAIL: directives will still reach channels" >&2
+  fi
 
-  # PROVE IT LOADS, EVERY BOOT — not once at install.
+  # PROVE IT LOADS — whenever the answer could have changed.
   #
   # `plugins list` is a cold inventory: it reads the config and the manifests,
   # so it would call this plugin "enabled" while its module throws on import or
@@ -2327,18 +2335,51 @@ PY
   # reports what registered, and the hook names live in the TOP-LEVEL
   # `typedHooks[]` — `plugin.hookNames` is empty even when `hookCount` is not.
   #
+  # BUT IT IS NOT FREE, AND THIS SCRIPT EXISTS TO BE FREE. The header of this
+  # file records why: seven `openclaw config set` calls at ~10 s of CLI cold
+  # start each put ~70 s between systemd "starting" and the gateway listening,
+  # and the desktop's OpenClaw iframe renders "Reload gateway" through all of
+  # it. `inspect --runtime` is heavier than any of them — a registry snapshot
+  # plus a module load of every enabled plugin — and a gateway restart happens
+  # on a skill install, a Telegram reconfigure, a provider change, a chat model
+  # switch and every crash. Paying it on all of those would put the delay back.
+  #
+  # So it is gated on a STAMP of the two things that can change the answer: the
+  # bytes of the plugin we just copied, and the pinned core they run against. A
+  # normal restart matches the stamp and spends nothing. An update, a factory
+  # reset (which takes `~/.openclaw` and the stamp with it) or an edited plugin
+  # does not match, and pays once.
+  #
+  # THE STAMP IS ONLY EVER WRITTEN ON SUCCESS. A box where the hook did not
+  # register re-checks on every boot until it does, which is the property a
+  # plain marker file would have thrown away — and the stamp lives inside
+  # `~/.openclaw`, beside the thing it describes, so it cannot outlive it.
+  #
   # Advisory, and time-boxed: this is an ExecStartPre, and a plugin that failed
   # to load must cost the box its directive strip, never its gateway.
-  # The `|| true` is load-bearing: this script runs under `set -o pipefail` and
-  # `set -e`, where a command substitution that exits non-zero aborts the
-  # assignment — i.e. a missing or wedged `openclaw` would stop the gateway from
-  # starting because a DIAGNOSTIC could not run.
-  #
-  # The answer travels in the environment rather than down a pipe, because the
-  # reader's own program arrives on stdin (`python3 -` plus a heredoc), and a
-  # heredoc replaces the pipe rather than queueing behind it.
-  CLAWBOX_HOOK_JSON="$(timeout 45 "$OPENCLAW_BIN" plugins inspect "$CLAWBOX_HOOK_PLUGIN_ID" --runtime --json 2>/dev/null || true)"
-  CLAWBOX_HOOK_VERDICT="$(CLAWBOX_HOOK_JSON="$CLAWBOX_HOOK_JSON" python3 - <<'PY'
+  CLAWBOX_HOOK_STAMP_FILE="$OPENCLAW_HOME_DIR/extensions/.$CLAWBOX_HOOK_PLUGIN_ID-verified"
+  CLAWBOX_HOOK_STAMP="$( { (cd "$CLAWBOX_HOOK_PLUGIN_SRC" && cat $CLAWBOX_HOOK_PLUGIN_FILES) \
+    && printf 'core=%s\n' "${OPENCLAW_TARGET:-unpinned}"; } 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}' || true)"
+  CLAWBOX_HOOK_NEEDS_VERIFY=1
+  # An empty stamp means we could not compute one (no sha256sum): verify every
+  # boot rather than skip on a comparison that cannot fail.
+  if [ -n "$CLAWBOX_HOOK_STAMP" ] \
+    && [ "$(cat "$CLAWBOX_HOOK_STAMP_FILE" 2>/dev/null || true)" = "$CLAWBOX_HOOK_STAMP" ]; then
+    CLAWBOX_HOOK_NEEDS_VERIFY=0
+  fi
+  if [ "$CLAWBOX_HOOK_NEEDS_VERIFY" = "0" ]; then
+    echo "  EMAIL: directive hook plugin unchanged since it was last verified, skipping the runtime check"
+  else
+    # The `|| true` is load-bearing: this script runs under `set -o pipefail`
+    # and `set -e`, where a command substitution that exits non-zero aborts the
+    # assignment — i.e. a missing or wedged `openclaw` would stop the gateway
+    # from starting because a DIAGNOSTIC could not run.
+    #
+    # The answer travels in the environment rather than down a pipe, because the
+    # reader's own program arrives on stdin (`python3 -` plus a heredoc), and a
+    # heredoc replaces the pipe rather than queueing behind it.
+    CLAWBOX_HOOK_JSON="$(timeout 45 "$OPENCLAW_BIN" plugins inspect "$CLAWBOX_HOOK_PLUGIN_ID" --runtime --json 2>/dev/null || true)"
+    CLAWBOX_HOOK_VERDICT="$(CLAWBOX_HOOK_JSON="$CLAWBOX_HOOK_JSON" python3 - <<'PY'
 import json, os
 
 try:
@@ -2362,11 +2403,25 @@ else:
     detail = "; ".join(str(d)[:120] for d in diagnostics[:2])
     print("status={} hooks={} {}".format(plugin.get("status"), names or "none", detail).strip())
 PY
-  )" || CLAWBOX_HOOK_VERDICT="no runtime inspection"
-  if [ "$CLAWBOX_HOOK_VERDICT" = "ok" ]; then
-    echo "  EMAIL: directive hook plugin loaded (reply_payload_sending registered)"
-  else
-    echo "  WARNING: the $CLAWBOX_HOOK_PLUGIN_ID plugin did not register reply_payload_sending — EMAIL: directives will still reach channels ($CLAWBOX_HOOK_VERDICT)" >&2
+    )" || CLAWBOX_HOOK_VERDICT="no runtime inspection"
+    case "$CLAWBOX_HOOK_VERDICT" in
+      ok)
+        echo "  EMAIL: directive hook plugin loaded (reply_payload_sending registered)"
+        # Only now, so a box that is broken re-checks every boot until it is not.
+        printf '%s\n' "$CLAWBOX_HOOK_STAMP" > "$CLAWBOX_HOOK_STAMP_FILE" 2>/dev/null || true
+        ;;
+      "no runtime inspection")
+      # The CLI could not answer at all — missing, wedged, or past the 45 s
+      # ceiling. Reported as UNKNOWN, not as a defect: telling an operator
+      # "directives will still reach channels" about a box where the hook is
+      # registered and working is a false failure, and one they see every boot
+      # is one they stop reading.
+        echo "  NOTE: could not verify the $CLAWBOX_HOOK_PLUGIN_ID plugin with 'openclaw plugins inspect --runtime' — it is installed and enabled, but whether its hook registered is unknown here" >&2
+        ;;
+      *)
+        echo "  WARNING: the $CLAWBOX_HOOK_PLUGIN_ID plugin did not register reply_payload_sending — EMAIL: directives will still reach channels ($CLAWBOX_HOOK_VERDICT)" >&2
+        ;;
+    esac
   fi
 fi
 

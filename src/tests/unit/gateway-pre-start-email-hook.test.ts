@@ -68,13 +68,14 @@ function loadedInspection(hookNames: string[]) {
   })}\nJSON`;
 }
 
-function run(root = REPO) {
+function run(root = REPO, coreTarget = "2026.8.1") {
   const program = [
     "set -euo pipefail",
     `CLAWBOX_ROOT=${JSON.stringify(root)}`,
     `OPENCLAW_CONFIG=${JSON.stringify(configPath)}`,
     `OPENCLAW_HOME_DIR=${JSON.stringify(openclawHome)}`,
     `OPENCLAW_BIN=${JSON.stringify(path.join(binDir, "openclaw"))}`,
+    `OPENCLAW_TARGET=${JSON.stringify(coreTarget)}`,
     block(),
   ].join("\n");
   const r = spawnSync("bash", ["-c", program], {
@@ -155,12 +156,68 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     expect(readFileSync(configPath, "utf-8")).toBe(before);
   });
 
-  it("checks that the plugin LOADED on every boot, not once at install", () => {
-    run();
-    writeFileSync(path.join(dir, "calls.log"), "");
+  it("verifies the plugin LOADED the first time it is installed", () => {
     const r = run();
     expect(calls()).toContain(`plugins inspect ${PLUGIN_ID} --runtime --json`);
     expect(r.stdout).toContain("reply_payload_sending registered");
+  });
+
+  it("does NOT pay for the runtime check on an ordinary gateway restart", () => {
+    // This file exists to keep the gateway's ExecStartPre cheap — its header
+    // records the ~70 s of "Reload gateway" that CLI calls here used to cost,
+    // and a restart happens on a skill install, a Telegram reconfigure, a
+    // provider change, a model switch and every crash. `inspect --runtime` is
+    // heavier than any of the calls that were removed.
+    run();
+    writeFileSync(path.join(dir, "calls.log"), "");
+    const r = run();
+    expect(calls()).not.toContain("plugins inspect");
+    expect(r.stdout).toContain("unchanged since it was last verified");
+  });
+
+  it("re-verifies when the pinned core moves under an unchanged plugin", () => {
+    run();
+    writeFileSync(path.join(dir, "calls.log"), "");
+    run(REPO, "2026.9.9");
+    expect(calls()).toContain(`plugins inspect ${PLUGIN_ID} --runtime --json`);
+  });
+
+  it("re-verifies when the plugin's own bytes change", () => {
+    run();
+    // A checkout whose plugin differs by one byte — what an update delivers.
+    const alt = mkdtempSync(path.join(tmpdir(), "oc-alt-root-"));
+    try {
+      const dst = path.join(alt, "scripts", "openclaw-plugins", PLUGIN_ID);
+      mkdirSync(dst, { recursive: true });
+      const src = path.join(REPO, "scripts/openclaw-plugins", PLUGIN_ID);
+      for (const f of readdirSync(src)) {
+        writeFileSync(path.join(dst, f), readFileSync(path.join(src, f), "utf-8"));
+      }
+      writeFileSync(path.join(dst, "index.mjs"), `${readFileSync(path.join(dst, "index.mjs"), "utf-8")}\n// v2\n`);
+      writeFileSync(path.join(dir, "calls.log"), "");
+      run(alt);
+      expect(calls()).toContain(`plugins inspect ${PLUGIN_ID} --runtime --json`);
+    } finally {
+      rmSync(alt, { recursive: true, force: true });
+    }
+  });
+
+  it("re-verifies for ever while the hook is NOT registered", () => {
+    // The stamp is written only on success, so a broken box never stops asking.
+    stubOpenclaw(loadedInspection(["gateway_start"]));
+    run();
+    writeFileSync(path.join(dir, "calls.log"), "");
+    const r = run();
+    expect(calls()).toContain("plugins inspect");
+    expect(r.stderr).toMatch(/WARNING.*did not register reply_payload_sending/);
+  });
+
+  it("re-verifies after a factory reset takes the extensions tree with it", () => {
+    run();
+    rmSync(path.join(openclawHome, "extensions"), { recursive: true, force: true });
+    writeFileSync(path.join(dir, "calls.log"), "");
+    run();
+    expect(calls()).toContain("plugins inspect");
   });
 
   it("warns when the plugin loaded but registered no outbound hook", () => {
@@ -209,14 +266,45 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     const r = run();
     expect(r.status).toBe(0);
     expect(readConfig().plugins?.entries?.[PLUGIN_ID]).toEqual({ enabled: true });
-    expect(r.stderr).toMatch(/WARNING.*did not register reply_payload_sending/);
+    expect(r.stderr).toMatch(/NOTE: could not verify/);
   });
 
-  it("survives an openclaw that fails or prints nonsense", () => {
+  it("does not fail the gateway when the config cannot be written", () => {
+    // ExecStartPre with no leading `-`, under `set -euo pipefail`: an
+    // unwritable ~/.openclaw would otherwise fail the unit and leave the box
+    // with no agent at all — over an optional directive strip.
+    // Install once so `extensions/<id>/` exists and stays writable, then take
+    // write permission off the config's own directory: the copy still lands and
+    // only the atomic config write (mkstemp beside openclaw.json) fails.
+    run();
+    writeFileSync(configPath, JSON.stringify({ plugins: { entries: { deepseek: { enabled: true } } } }));
+    chmodSync(openclawHome, 0o555);
+    try {
+      const r = run();
+      expect(r.status).toBe(0);
+      expect(r.stderr).toMatch(/WARNING: could not enable/);
+    } finally {
+      chmodSync(openclawHome, 0o755);
+    }
+  });
+
+  it("calls an unanswerable CLI unknown, not a defect", () => {
+    // "directives will still reach channels" said every boot about a box where
+    // the hook is registered and working is a false failure, and one the
+    // operator learns to scroll past.
     stubOpenclaw('echo "not json at all"; exit 3');
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stderr).toContain("no runtime inspection");
+    expect(r.stderr).toMatch(/NOTE: could not verify/);
+    expect(r.stderr).not.toMatch(/WARNING/);
+  });
+
+  it("does not stamp a plugin it could not verify", () => {
+    stubOpenclaw('echo "not json at all"; exit 3');
+    run();
+    writeFileSync(path.join(dir, "calls.log"), "");
+    run();
+    expect(calls()).toContain("plugins inspect");
   });
 
   it("does not enable a plugin whose files are not in the checkout", () => {

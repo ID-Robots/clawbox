@@ -80,6 +80,12 @@ function strippedPayload(payload) {
     // visible content left as `empty_after_reply_payload_sending_hook` and
     // suppresses the message, which is the right outcome for a reply that was
     // nothing but directives — and it still sends the media when there is any.
+    //
+    // The Hermes twin cannot do this: `transform_llm_output` accepts a
+    // replacement only when it is a non-empty string, so an all-directive reply
+    // becomes an ellipsis there. Same input, two answers, because the two
+    // harnesses offer different powers — see
+    // `scripts/hermes-plugins/clawbox_email_directives/__init__.py`.
     next.text = text;
     changed = true;
   }
@@ -114,13 +120,39 @@ function strippedPayload(payload) {
 }
 
 /**
+ * WHERE THIS REPLY IS BEING DELIVERED — which is not always where the
+ * conversation came from.
+ *
+ * `event.channel` is the delivery surface: the core fills it from
+ * `finalized.Surface ?? finalized.Provider`. `ctx.channelId` answers a
+ * different question — it is `OriginatingChannel ?? Surface ?? Provider`, so it
+ * prefers the channel the SESSION started on. On a webchat delivery for a
+ * session that originated on Telegram those two disagree, and keying on
+ * `channelId` would strip the directive out of a reply being handed to a
+ * browser: the card never renders and the owner is left with a summary and no
+ * way to open the mail. That is the worst outcome available here, so the
+ * surface wins and the originating channel is only the fallback.
+ *
+ * Empty is not the same as absent — `channelId` is a required string the core
+ * sets to `""` when it knows nothing — so this takes the first NON-EMPTY of the
+ * two rather than the first non-nullish.
+ */
+function deliverySurface(event, ctx) {
+  for (const candidate of [event?.channel, ctx?.channelId]) {
+    if (typeof candidate !== "string") continue;
+    const surface = candidate.trim().toLowerCase();
+    if (surface) return surface;
+  }
+  return "";
+}
+
+/**
  * The hook. `undefined` on every "nothing to do" path — the dispatcher reads a
  * falsy result as "this handler had no opinion" and moves on without cloning or
  * re-accepting the payload.
  */
 export function onReplyPayloadSending(event, ctx) {
-  const channel = String(ctx?.channelId ?? event?.channel ?? "").trim().toLowerCase();
-  if (KEEP_CHANNELS.has(channel)) return undefined;
+  if (KEEP_CHANNELS.has(deliverySurface(event, ctx))) return undefined;
   const payload = event?.payload;
   if (!payload || typeof payload !== "object") return undefined;
   const next = strippedPayload(payload);

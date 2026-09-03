@@ -226,16 +226,41 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(r.stdout).toContain("No __init__.py");
   });
 
-  it("does not fail the boot when the doctor itself is broken", () => {
+  it("calls a doctor that could not run UNKNOWN, not a defect", () => {
     // A hermes too old for `plugins doctor`, or one that is wedged. The box
-    // still gets its MCP registration and its plugin; only the proof is
-    // missing, and the log says which.
+    // still gets its MCP registration and its plugin. Saying "directives will
+    // still reach channels" here would be a false failure on a box where the
+    // hook is registered and working — and one the operator sees every boot is
+    // one they stop reading.
     fs.writeFileSync(hermesBin, "#!/usr/bin/env bash\nexit 1\n");
     fs.chmodSync(hermesBin, 0o755);
     const r = run();
     expect(r.status).toBe(0);
     expect(enabledPlugins()).toEqual([PLUGIN]);
-    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
+    expect(r.stdout).toMatch(/NOTE: could not verify/);
+    expect(r.stdout).not.toMatch(/WARNING/);
+  });
+
+  it("leaves an unreadable plugins.enabled ALONE rather than making it one name", () => {
+    // `hermes config set` stores this list as a JSON string. A JSON list that
+    // is not also a Python literal (a `true`, a truncated write) used to fall
+    // back to "the whole string is one plugin name", which would have written
+    // `['["clawai", true]', 'clawbox_email_directives']` — and the customer's
+    // image backend, gated by this same list, would stop loading on the next
+    // boot as a side effect of a directive strip.
+    fs.writeFileSync(configPath, `plugins:\n  enabled: '["clawai", true'\n`);
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(enabledPlugins()).toBe('["clawai", true');
+    expect(r.stderr).toMatch(/cannot parse/);
+    // And the device tools still get registered.
+    expect((readConfig().mcp_servers as Record<string, unknown>).clawbox).toBeTruthy();
+  });
+
+  it("reads the JSON forms `hermes config set` actually writes", () => {
+    fs.writeFileSync(configPath, `plugins:\n  enabled: '["clawai", "other"]'\n`);
+    run();
+    expect(enabledPlugins()).toEqual(["clawai", "other", PLUGIN]);
   });
 
   it("does nothing at all on an OpenClaw box", () => {
