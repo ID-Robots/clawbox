@@ -168,8 +168,25 @@ describe("AiProviderList", () => {
     // ...and it says WHICH wait this is. The window can run to the unit's own
     // TimeoutStartSec, and three unlabelled grey bars for that long are
     // indistinguishable from a page that has hung.
-    expect(screen.getByTestId("ai-provider-list-checking"))
-      .toHaveTextContent(translations.en["settings.checking"]);
+    const live = screen.getByTestId("ai-provider-list-checking");
+    expect(live).toHaveTextContent(translations.en["settings.checking"]);
+    expect(live).toHaveAttribute("role", "status");
+    expect(live).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("keeps the checking announcement MOUNTED once the rows settle, and empties it", async () => {
+    // A live region that appears together with its text announces a node
+    // insertion, which assistive tech may drop entirely; one that is already
+    // mounted announces a text change, which it will not. Conditional mounting
+    // is therefore the bug, and it is invisible to a test that only ever looks
+    // while the text is there — so this looks while it is NOT.
+    stubFetch(ROWS);
+    renderList();
+    await screen.findByTestId("ai-provider-openai");
+
+    const live = screen.getByTestId("ai-provider-list-checking");
+    expect(live).toBeInTheDocument();
+    expect(live).toHaveTextContent("");
   });
 
   // The other half of TASK-663, and the reason `checking` cannot be a state

@@ -97,18 +97,29 @@ export default function AiProviderList() {
         </div>
       )}
 
+      {/* Three grey bars are indistinguishable from a hung page, and the wait
+          they stand for is the unit's own start window — up to
+          `TimeoutStartSec` on a box whose ExecStartPre is grinding. Say which
+          of the two it is, in the owner's language, with the word the rows
+          below already use.
+
+          MOUNTED IN EVERY STATE, empty when there is nothing to say: a live
+          region that appears along with its text announces a node insertion,
+          which assistive tech may drop entirely. A region that is already there
+          announces a text CHANGE, which it will not — and the same applies on
+          the way out, where the emptying is what says the wait is over. Outside
+          the branch below for the same reason: that branch unmounts. */}
+      <p
+        role="status"
+        aria-live="polite"
+        data-testid="ai-provider-list-checking"
+        className={`text-[11px] text-[var(--text-muted)] ${awaitingProbe ? "mb-2" : ""}`}
+      >
+        {awaitingProbe ? t("settings.checking") : ""}
+      </p>
+
       {loading || awaitingProbe ? (
         <div className="space-y-2" data-testid="ai-provider-list-loading">
-          {/* Three grey bars are indistinguishable from a hung page, and the
-              wait they stand for is the unit's own start window — up to
-              `TimeoutStartSec` on a box whose ExecStartPre is grinding. Say
-              which of the two it is, in the owner's language, with the word the
-              rows below already use. */}
-          {awaitingProbe && (
-            <p className="text-[11px] text-[var(--text-muted)]" data-testid="ai-provider-list-checking">
-              {t("settings.checking")}
-            </p>
-          )}
           {[0, 1, 2].map((i) => (
             <div key={i} className="h-12 rounded-xl bg-white/[0.04] motion-safe:animate-pulse" />
           ))}
