@@ -196,6 +196,58 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(fs.existsSync(cache)).toBe(false);
   });
 
+  it("removes a partial copy rather than leaving Hermes to import it", () => {
+    // `cp -f` truncates each target before it writes it, so a write that dies
+    // part-way leaves a mixture of new, truncated and stale files — while
+    // `plugins.enabled` still names the plugin from the boot before, because
+    // the enable step only gates the write of a NEW entry, not the removal of
+    // one already there. Hermes would then import a half-written module. One
+    // state — no plugin, no strip, and a line that says so — beats that.
+    // Provoked the way the OpenClaw twin's test does it: make one of the three
+    // targets a directory, which `cp -f` cannot overwrite.
+    run();
+    expect(enabledPlugins()).toEqual([PLUGIN]);
+    const third = path.join(pluginsDir, PLUGIN, "email_directives.py");
+    fs.rmSync(third);
+    fs.mkdirSync(third);
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/WARNING: could not install/);
+    expect(r.stdout).toContain("a partial copy has been removed");
+    expect(installedFiles()).toEqual([]);
+    // And the config still names it — which is exactly why the files must go.
+    expect(enabledPlugins()).toEqual([PLUGIN]);
+  });
+
+  it("leaves the installed plugin ALONE when it is the SOURCES that cannot be read", () => {
+    // The other side of the same branch. `cp` opens its source first and never
+    // touches the destination when that open fails, so a source-side problem —
+    // a checkout still being written by the updater, a permission slip — leaves
+    // the last good plugin exactly where it is. Removing it there would turn
+    // "the box keeps stripping with what it already had" into "no plugin, and a
+    // config that names one".
+    run();
+    expect(installedFiles()).toEqual(["__init__.py", "email_directives.py", "plugin.yaml"]);
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-unreadable-src-"));
+    try {
+      fs.mkdirSync(path.join(bare, "mcp"), { recursive: true });
+      fs.writeFileSync(path.join(bare, "mcp", "clawbox-mcp.ts"), "// stand-in\n");
+      const src = path.join(bare, "scripts", "hermes-plugins", PLUGIN);
+      fs.mkdirSync(src, { recursive: true });
+      for (const f of ["__init__.py", "plugin.yaml", "email_directives.py"]) {
+        fs.writeFileSync(path.join(src, f), "x");
+        fs.chmodSync(path.join(src, f), 0o000);
+      }
+      const r = run({}, bare);
+      expect(r.status).toBe(0);
+      expect(r.stdout).toMatch(/WARNING: could not read/);
+      expect(r.stdout).toContain("leaving whatever is already installed in place");
+      expect(installedFiles()).toEqual(["__init__.py", "email_directives.py", "plugin.yaml"]);
+    } finally {
+      fs.rmSync(bare, { recursive: true, force: true });
+    }
+  });
+
   it("verifies the plugin LOADED on every boot, not once at install", () => {
     run();
     const calls = fs.readFileSync(path.join(home, "calls.log"), "utf-8");
@@ -238,6 +290,60 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(r.status).toBe(0);
     expect(enabledPlugins()).toEqual([PLUGIN]);
     expect(r.stdout).toMatch(/NOTE: could not verify/);
+    expect(r.stdout).not.toMatch(/WARNING/);
+  });
+
+  it("bounds the doctor with a timeout, so a wedged CLI cannot hold the boot", () => {
+    // `production-server.js` launches this script, so an unbounded CLI call is
+    // a helper (and its child) left running for as long as the box is up. The
+    // OpenClaw twin gives its `plugins inspect` 45 s; this is the same budget,
+    // asserted from the command line the script actually runs.
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-fake-bin-"));
+    try {
+      fs.writeFileSync(
+        path.join(binDir, "timeout"),
+        [
+          "#!/usr/bin/env bash",
+          'printf "%s\\n" "timeout $*" >> "$HERMES_CALLS"',
+          "shift",
+          'exec "$@"',
+        ].join("\n"),
+      );
+      fs.chmodSync(path.join(binDir, "timeout"), 0o755);
+      run({ PATH: `${binDir}:${process.env.PATH ?? ""}` });
+      const calls = fs.readFileSync(path.join(home, "calls.log"), "utf-8");
+      expect(calls).toMatch(new RegExp(`timeout 45 .*plugins doctor ${PLUGIN}`));
+      // The sibling call site in the same script, which the same reasoning
+      // covers: leaving one of the two unbounded fixes nothing.
+      expect(calls).toMatch(/timeout 45 .*tools disable browser/);
+    } finally {
+      fs.rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it("calls a doctor the timeout KILLED unknown, not a defect", () => {
+    // 124 is `timeout` stopping it at 45 s — and by then the doctor has already
+    // printed its banner. Read on the text alone that banner IS the "the doctor
+    // ran and refused" branch, so a wedged CLI would print a hard WARNING about
+    // a hook that is very probably registered and working, on every boot. The
+    // exit status is what tells the two apart, so it has to survive.
+    fs.writeFileSync(
+      hermesBin,
+      [
+        "#!/usr/bin/env bash",
+        'printf "%s\\n" "$*" >> "$HERMES_CALLS"',
+        'if [ "$1" = "plugins" ] && [ "$2" = "doctor" ]; then',
+        `  echo "Plugin Doctor: ${PLUGIN}"`,
+        "  exit 124",
+        "fi",
+        "exit 0",
+      ].join("\n"),
+    );
+    fs.chmodSync(hermesBin, 0o755);
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(enabledPlugins()).toEqual([PLUGIN]);
+    expect(r.stdout).toMatch(/NOTE: .*did not answer within 45s/);
     expect(r.stdout).not.toMatch(/WARNING/);
   });
 

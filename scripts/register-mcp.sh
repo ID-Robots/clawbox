@@ -44,6 +44,12 @@ MCP_ENTRY="$PROJECT_DIR/mcp/clawbox-mcp.ts"
 MCP_TOKEN_FILE="$PROJECT_DIR/data/.mcp-token"
 EDITION_FILE="${CLAWBOX_EDITION_FILE:-/etc/clawbox/edition.env}"
 API_BASE="${CLAWBOX_API_BASE:-http://127.0.0.1:80}"
+# The ceiling on every `hermes` call this script makes. `production-server.js`
+# launches this script, so an unbounded CLI is a helper and its child left
+# running for as long as the box is up. 45 s is the budget the OpenClaw twin
+# gives its own `plugins inspect` (gateway-pre-start.sh) — well past a loaded
+# Jetson's CLI start, well short of forever.
+HERMES_CLI_TIMEOUT=45
 # Shared with setup-hermes-dashboard-auth.sh: BOTH scripts read-modify-write
 # ~/.hermes/config.yaml, and at install time they run seconds apart
 # (production-server.js fire-and-forgets this script on the clawbox-setup
@@ -168,7 +174,19 @@ EMAIL_HOOK_INSTALLED=0
 
 if [ -f "$EMAIL_HOOK_SRC/__init__.py" ] && [ -f "$EMAIL_HOOK_SRC/plugin.yaml" ] \
   && [ -f "$EMAIL_HOOK_SRC/email_directives.py" ]; then
-  if mkdir -p "$EMAIL_HOOK_DST" 2>/dev/null \
+  # THE SOURCES ARE READ BEFORE ANYTHING ON DISK IS TOUCHED, exactly as the
+  # OpenClaw twin does it (gateway-pre-start.sh). `cp` opens its source first
+  # and leaves the destination alone when that open fails, so a source-side
+  # problem — a checkout still being written by the updater, a permission slip —
+  # must NOT be treated the same as a copy that died half-way. Answering that
+  # question here is what lets the failure branch below know which state the box
+  # is in.
+  if ! cat "$EMAIL_HOOK_SRC/__init__.py" "$EMAIL_HOOK_SRC/plugin.yaml" \
+           "$EMAIL_HOOK_SRC/email_directives.py" >/dev/null 2>&1; then
+    # The installed copy, if there is one, is untouched and still the last one
+    # that worked. Leaving it alone is strictly better than removing it.
+    log "WARNING: could not read the $EMAIL_HOOK_PLUGIN plugin sources in $EMAIL_HOOK_SRC — leaving whatever is already installed in place"
+  elif mkdir -p "$EMAIL_HOOK_DST" 2>/dev/null \
     && cp -f "$EMAIL_HOOK_SRC/__init__.py" "$EMAIL_HOOK_SRC/plugin.yaml" \
              "$EMAIL_HOOK_SRC/email_directives.py" "$EMAIL_HOOK_DST/" 2>/dev/null; then
     rm -rf "$EMAIL_HOOK_DST/__pycache__" 2>/dev/null || true
@@ -177,7 +195,20 @@ if [ -f "$EMAIL_HOOK_SRC/__init__.py" ] && [ -f "$EMAIL_HOOK_SRC/plugin.yaml" ] 
     # Never fatal. A box with its device tools registered but this plugin not
     # copied still works; it only shows the directive on a channel, which is
     # exactly where it stood before this existed.
-    log "WARNING: could not install the $EMAIL_HOOK_PLUGIN plugin into $EMAIL_HOOK_DST"
+    #
+    # BUT THE HALF-WRITTEN COPY GOES. The sources read cleanly a moment ago, so
+    # a failure here is on the WRITE side — ENOSPC, an I/O error, a target that
+    # is not a file any more — and `cp -f` truncates each target before it
+    # writes it. What is in the destination now is a mixture of new, truncated
+    # and stale files, while `plugins.enabled` can still name the plugin from an
+    # earlier boot (the enable below only gates the write of a NEW entry, not
+    # the removal of one already there), so Hermes would import it. Removing it
+    # leaves ONE state — no plugin, no strip, and a line that says so — instead
+    # of a module that may raise half-way through parsing. Where the removal
+    # cannot work either (a read-only filesystem) the copy could not have
+    # truncated anything, so the destination is intact and `|| true` is right.
+    rm -rf "$EMAIL_HOOK_DST" 2>/dev/null || true
+    log "WARNING: could not install the $EMAIL_HOOK_PLUGIN plugin into $EMAIL_HOOK_DST — a partial copy has been removed rather than left for Hermes to import, so EMAIL: directives will reach channels until the next boot repairs it"
   fi
 else
   log "WARNING: $EMAIL_HOOK_SRC is not a complete plugin — skipping the EMAIL: directive hook"
@@ -524,8 +555,13 @@ PY
 # of a file.
 #
 # Never fatal: a device with its device tools registered but this step failed is
-# strictly better than a boot that aborted here.
-if "$HERMES_BIN" tools disable browser >/dev/null 2>&1; then
+# strictly better than a boot that aborted here — and never unbounded, the same
+# reason the doctor below is bounded: this is the OTHER CLI call in a script
+# `production-server.js` launches, so a `hermes` that wedges here would leave
+# the helper and its child running for as long as the box is up. A timeout
+# lands in the branch that already exists for a refusal, which is the honest
+# answer for both.
+if timeout "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools disable browser >/dev/null 2>&1; then
   log "built-in browser toolset off; browsing goes through the ClawBox browser_* tools"
 else
   log "could not disable the built-in browser toolset — continuing"
@@ -551,31 +587,49 @@ fi
 #
 # Advisory: it must never hold up the web server. What it buys is a line in the
 # log that says which of the two states the box is actually in.
+#
+# BOUNDED like every other `hermes` call here, and its exit status KEPT. The
+# `|| EMAIL_HOOK_DOCTOR_RC=$?` is load-bearing under `set -e`, where a command
+# substitution that exits non-zero aborts the assignment — i.e. a missing or
+# refusing `hermes` would stop the boot here, over a DIAGNOSTIC.
 if [ "$EMAIL_HOOK_INSTALLED" = "1" ]; then
-  EMAIL_HOOK_DOCTOR="$("$HERMES_BIN" plugins doctor "$EMAIL_HOOK_PLUGIN" 2>&1 || true)"
+  EMAIL_HOOK_DOCTOR_RC=0
+  EMAIL_HOOK_DOCTOR="$(timeout "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" plugins doctor "$EMAIL_HOOK_PLUGIN" 2>&1)" \
+    || EMAIL_HOOK_DOCTOR_RC=$?
   # The doctor's own words, trimmed to one line: "no register() function",
   # "No __init__.py in ...", an import traceback's last line. Naming the plugin
   # without naming the reason is what sends an operator to the wrong file.
   EMAIL_HOOK_DETAIL="$(printf '%s' "$EMAIL_HOOK_DOCTOR" | tr '\n' ' ' | cut -c1-300)"
-  case "$EMAIL_HOOK_DOCTOR" in
-    *"1 hook(s)"*)
-      log "$EMAIL_HOOK_PLUGIN loaded and registered its outbound hook"
-      ;;
-    *"hook(s)"*|*"Plugin Doctor"*|*"registration failed"*)
-      # The doctor RAN and did not report our hook: it imported and registered a
-      # count that is not one, or it refused to import at all. That IS the
-      # defect, and it is the one nothing else on the box reports — `plugins
-      # list` reads "enabled" straight back out of the config it was written
-      # into (hermes_cli/plugins_cmd.py:1931).
-      log "WARNING: $EMAIL_HOOK_PLUGIN did not register its hook — EMAIL: directives will still reach channels. hermes plugins doctor said: $EMAIL_HOOK_DETAIL"
-      ;;
-    *)
-      # The doctor could not answer at all — a `hermes` too old for the
-      # subcommand, or a wedged one. Reported as UNKNOWN rather than as a
-      # defect: saying "directives will still reach channels" about a box where
-      # the hook is registered and working is a false failure, and an operator
-      # who sees it every boot stops reading the line that matters.
-      log "NOTE: could not verify $EMAIL_HOOK_PLUGIN with 'hermes plugins doctor' — the plugin is installed and enabled, but whether its hook registered is unknown here. hermes said: $EMAIL_HOOK_DETAIL"
-      ;;
-  esac
+  # 124 is `timeout` killing it, and it is read BEFORE the words. By then the
+  # doctor has usually printed its banner, and on the text alone that banner IS
+  # the "ran and refused" branch below — so a wedged CLI would print a hard
+  # WARNING about a hook that is very probably registered and working, on every
+  # boot. Like the other unknowns this is a NOTE, and it names the budget so an
+  # operator can tell a slow box from a broken plugin.
+  if [ "$EMAIL_HOOK_DOCTOR_RC" = "124" ]; then
+    log "NOTE: 'hermes plugins doctor' did not answer within ${HERMES_CLI_TIMEOUT}s and was stopped — $EMAIL_HOOK_PLUGIN is installed and enabled, but whether its hook registered is unknown here. hermes had printed: $EMAIL_HOOK_DETAIL"
+  else
+    case "$EMAIL_HOOK_DOCTOR" in
+      *"1 hook(s)"*)
+        log "$EMAIL_HOOK_PLUGIN loaded and registered its outbound hook"
+        ;;
+      *"hook(s)"*|*"Plugin Doctor"*|*"registration failed"*)
+        # The doctor RAN and did not report our hook: it imported and registered
+        # a count that is not one, or it refused to import at all. That IS the
+        # defect, and it is the one nothing else on the box reports — `plugins
+        # list` reads "enabled" straight back out of the config it was written
+        # into (hermes_cli/plugins_cmd.py:1931).
+        log "WARNING: $EMAIL_HOOK_PLUGIN did not register its hook — EMAIL: directives will still reach channels. hermes plugins doctor said: $EMAIL_HOOK_DETAIL"
+        ;;
+      *)
+        # The doctor could not answer at all — a `hermes` too old for the
+        # subcommand, one that is not there (127) or not executable (126).
+        # Reported as UNKNOWN rather than as a defect: saying "directives will
+        # still reach channels" about a box where the hook is registered and
+        # working is a false failure, and an operator who sees it every boot
+        # stops reading the line that matters.
+        log "NOTE: could not verify $EMAIL_HOOK_PLUGIN with 'hermes plugins doctor' — the plugin is installed and enabled, but whether its hook registered is unknown here. hermes said: $EMAIL_HOOK_DETAIL"
+        ;;
+    esac
+  fi
 fi
