@@ -20,6 +20,10 @@ import VoiceOutputPanel from "./VoiceOutputPanel";
 import SystemProfilePanel from "./SystemProfilePanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { copyToClipboard } from "@/lib/clipboard";
+// The ending vocabulary and the gesture table, from the module that owns the
+// outcome shape — never a second copy of either. Both are plain functions on a
+// const list; the card component beside them is not pulled in by naming these.
+import { emailEnding, endingAsAsked } from "@/lib/chat-email-batch";
 import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
 import { installPendingRefresh } from "@/lib/email-pending-refresh";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
@@ -1979,11 +1983,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
          * ending of `failed` or `unconfirmed`, and a 404 with no ending at all,
          * stay red — all three are something to look at.
          */
-        const ending = typeof data?.ending === "string" ? data.ending : "";
-        const asAsked =
-          action === "approve"
-            ? ending === "sent" || ending === "duplicate"
-            : ending === "rejected" || ending === "duplicate";
+        const ending = emailEnding(data?.ending);
+        // THE SHARED TABLE, not a second copy of it. The chat card weighs an
+        // ending against a gesture with the same two lines, and the one time
+        // these two surfaces each kept their own reading of a single message is
+        // the defect this whole change exists to remove. `reject` is this
+        // panel's word for the gesture the card calls `delete`; the endings and
+        // the verdict are identical.
+        const asAsked = ending !== undefined && endingAsAsked(ending, action === "approve" ? "approve" : "delete");
         /**
          * Neither a success nor a failure, and it needs its own tone.
          *
@@ -2023,7 +2030,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
          * server spoke carry their own kinds and stay red, because those really
          * are this click failing.
          */
-        const endingUnknown = data?.kind === "gone" && ending === "";
+        const endingUnknown = data?.kind === "gone" && ending === undefined;
         setEmailMsg({
           type: unconfirmed || sentAnyway || endingUnknown ? "info" : asAsked ? "success" : "error",
           message: unconfirmed

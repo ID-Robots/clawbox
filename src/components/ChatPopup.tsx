@@ -18,8 +18,9 @@ import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
 import {
   EmailBatchCard,
-  EMAIL_ENDINGS,
+  OWN_ENDING,
   batchFromPending,
+  emailEnding,
   endingAsAsked,
   reconcileBatchCards,
   settleCard,
@@ -29,7 +30,6 @@ import {
   type EmailBatchCardState,
   type EmailBatchDraft,
   type EmailBatchOutcome,
-  type EmailEnding,
   type EmailGesture,
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
@@ -599,19 +599,6 @@ const MIN_CHAT_WIDTH = 340
 export function isEmailSendTool(name: string): boolean {
   return /(?:^|[^A-Za-z0-9])email_send$/.test(name)
 }
-
-/**
- * One ending off the wire, validated against the store's own list.
- *
- * Every surface that reads an ending goes through this: the receipts in the
- * queue's own answer, and the per-draft rows of an approve or a delete.
- */
-function emailEnding(value: unknown): EmailEnding | undefined {
-  return EMAIL_ENDINGS.includes(value as EmailEnding) ? (value as EmailEnding) : undefined
-}
-
-/** What this card's OWN request achieved, when it achieved it. */
-const OWN_ENDING: Record<EmailGesture, 'sent' | 'rejected'> = { approve: 'sent', delete: 'rejected' }
 
 /**
  * One row of an approve or a delete answer, as the card should render it.

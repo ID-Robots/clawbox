@@ -733,7 +733,7 @@ describe("reconciling live cards against the store", () => {
       card({
         status: "settled",
         settledByOwner: true,
-        settledBy: "delete",
+        lastGesture: "delete",
         drafts: [draft(1)],
         outcomes: [{ id: "draft-1", ok: false, kind: "gone" }],
       }),
@@ -758,7 +758,7 @@ describe("reconciling live cards against the store", () => {
       card({
         status: "settled",
         settledByOwner: true,
-        settledBy: "approve",
+        lastGesture: "approve",
         drafts: [draft(1)],
         outcomes: [{ id: "draft-1", ok: false, kind: "gone" }],
       }),
@@ -843,7 +843,7 @@ describe("a verdict that does not cry wolf", () => {
       card({
         status: "settled",
         settledByOwner: true,
-        settledBy: "approve",
+        lastGesture: "approve",
         drafts: [draft(1)],
         outcomes: [{ id: "draft-1", ok: true, kind: "duplicate" }],
       }),
@@ -857,6 +857,48 @@ describe("a verdict that does not cry wolf", () => {
     );
   });
 
+  it("does not answer a DELETE over a duplicate with 'Nothing was sent.'", async () => {
+    // The other half of the same contradiction, and the one that costs the
+    // owner. He deleted a draft an identical message had already covered: the
+    // words DID reach the recipient, and "Nothing was sent." sat directly under
+    // a row saying so. That is the sentence that gets a message sent twice.
+    await mount(
+      card({
+        status: "settled",
+        settledByOwner: true,
+        lastGesture: "delete",
+        drafts: [draft(1)],
+        outcomes: [{ id: "draft-1", ok: true, kind: "duplicate" }],
+      }),
+    );
+    const result = await screen.findByTestId("chat-email-batch-result");
+    expect(result.textContent).not.toContain("Nothing was sent");
+    expect(result.textContent).not.toContain("deleted");
+    expect(screen.getByTestId("chat-email-batch-outcome")).toHaveTextContent(
+      "Already sent as an identical message",
+    );
+  });
+
+  it("still tells an APPROVE that nothing went out", async () => {
+    // Reserving "{n} deleted." for a delete must not cost the owner the half of
+    // that sentence which was true. He pressed *Approve & send*; the drafts had
+    // been deleted somewhere else, so nothing went out — and "did my send
+    // happen?" is the only question that click was asking.
+    await mount(
+      card({
+        status: "settled",
+        settledByOwner: true,
+        lastGesture: "approve",
+        drafts: [draft(1)],
+        outcomes: [{ id: "draft-1", ok: false, kind: "rejected" }],
+      }),
+    );
+    const result = await screen.findByTestId("chat-email-batch-result");
+    expect(result).toHaveTextContent("Nothing was sent");
+    // But it does not claim THIS card deleted anything.
+    expect(result.textContent).not.toContain("deleted");
+  });
+
   it("still says what a DELETE threw away", async () => {
     // The guard on the rule above: over a deletion "1 deleted." is the honest
     // sentence, and so it is on a card no gesture settled — a poll that found
@@ -865,7 +907,7 @@ describe("a verdict that does not cry wolf", () => {
       card({
         status: "settled",
         settledByOwner: true,
-        settledBy: "delete",
+        lastGesture: "delete",
         drafts: [draft(1)],
         outcomes: [{ id: "draft-1", ok: true, kind: "rejected" }],
       }),
@@ -1090,7 +1132,7 @@ describe("settling a card against its own request", () => {
     expect(after[0].outcomes[0]).toBe(kept);
   });
 
-  it("records WHICH gesture settled the card", async () => {
+  it("records WHICH gesture the owner made", async () => {
     // Not decoration: a poll that corrects one of these rows later has no
     // gesture of its own, and reads a send as good news. This is the only place
     // the card can learn that the click was a deletion.
@@ -1099,21 +1141,56 @@ describe("settling a card against its own request", () => {
     expect(settleCard(before, "batch-1", [{ id: "draft-1", ok: true, kind: "rejected" }], "delete")[0]).toMatchObject({
       status: "settled",
       settledByOwner: true,
-      settledBy: "delete",
+      lastGesture: "delete",
     });
     expect(settleCard(before, "batch-1", [{ id: "draft-1", ok: true }], "approve")[0]).toMatchObject({
-      settledBy: "approve",
+      lastGesture: "approve",
     });
   });
 
-  it("does not claim a gesture on a card that has not settled yet", async () => {
-    // Half an answer settles nothing, and a `settledBy` written here would tell
-    // a later poll that a click it never saw had already decided the card.
+  it("keeps the gesture on a card the click only PARTLY answered", async () => {
+    // The half a settle-gated field forgets, and the one that matters most. A
+    // click that answers only some of the drafts — the owner unticked one, or
+    // the route refused one whose text had moved — leaves the card waiting for
+    // the poll to finish it, and the poll has no gesture of its own to write.
+    // Recorded only on the settle, such a card reached the correction carrying
+    // a deletion it could not see, and went green anyway.
     const { settleCard } = await import("@/lib/chat-email-batch");
     const before = [card({ drafts: [draft(1), draft(2)] })];
-    const after = settleCard(before, "batch-1", [{ id: "draft-1", ok: true }], "approve");
+    const after = settleCard(before, "batch-1", [{ id: "draft-1", ok: true, kind: "rejected" }], "delete");
     expect(after[0].status).toBe("waiting");
-    expect(after[0].settledBy).toBeUndefined();
+    expect(after[0].lastGesture).toBe("delete");
+    // The caret licence is a different question and stays gated on the settle:
+    // the card has not finished being a control.
+    expect(after[0].settledByOwner).toBeUndefined();
+  });
+
+  it("weighs a later correction against a PARTIAL delete", async () => {
+    // The two halves together, which is the shape the field exists for: a
+    // partial delete, then the poll finishes the card, then the receipt behind
+    // the guessed "gone" lands.
+    const { reconcileBatchCards, settleCard } = await import("@/lib/chat-email-batch");
+    // Only draft-1 is answered — draft-2 was unticked, so it is not in the
+    // request at all and the card is handed back LIVE.
+    const clicked = settleCard(
+      [card({ drafts: [draft(1), draft(2)] })],
+      "batch-1",
+      [{ id: "draft-1", ok: true, kind: "rejected" }],
+      "delete",
+    );
+    expect(clicked[0].status).toBe("waiting");
+    // The poll finishes the card, with no gesture of its own: draft-2 left the
+    // queue while another surface was mid-send, so it is only guessed at.
+    const settled = reconcileBatchCards(clicked, new Set<string>(), new Map());
+    expect(settled[0].status).toBe("settled");
+    expect(settled[0].outcomes.find((o) => o.id === "draft-2")).toMatchObject({ kind: "gone" });
+    const corrected = reconcileBatchCards(
+      settled,
+      new Set<string>(),
+      new Map([["draft-2", { id: "draft-2", ok: true, kind: "sent" as const }]]),
+    );
+    // The words are the receipt's; the verdict is the deletion he asked for.
+    expect(corrected[0].outcomes.find((o) => o.id === "draft-2")).toMatchObject({ kind: "sent", ok: false });
   });
 
   it("reads a deletion recorded elsewhere as what a DELETE asked for", async () => {

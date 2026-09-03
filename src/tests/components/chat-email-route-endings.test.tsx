@@ -390,6 +390,64 @@ describe("a delete answered 'gone' whose receipt lands a second later", () => {
     expect(outcomeRow(only)?.style.color).not.toBe(OK_FG);
   });
 
+  it("keeps the gesture when the delete only PARTLY answered the card", async () => {
+    // The settle-gated version of this field forgot the gesture on exactly the
+    // card that still needed it. The owner unticks one draft, so his *Delete*
+    // answers only the other two: the card stays live, the poll finishes it
+    // later with no gesture of its own, and every correction after that was
+    // weighed against "approve".
+    const doomed = queue("The one he deleted");
+    const caught = queue("The one caught mid-send");
+    const spared = queue("The one he unticked");
+
+    const box = installBoxWithLiveQueue();
+    await mountHermesChat(box);
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-cancel")).toBeTruthy());
+
+    const release = holdOneSend();
+    const elsewhere = POST(
+      new Request("http://localhost/setup-api/email/pending", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", cookie },
+        body: JSON.stringify({ action: "approve", id: caught }),
+      }),
+    );
+    await waitFor(() => expect(store.listPending()).toHaveLength(2));
+
+    // He unticks the third draft, so the delete cannot finish the card.
+    const boxes = screen.getAllByTestId("chat-email-batch-include");
+    const sparedBox = boxes.find((b) => b.closest(`[data-draft-id="${spared}"]`));
+    fireEvent.click(sparedBox as HTMLElement);
+    fireEvent.click(screen.getByTestId("chat-email-batch-cancel"));
+
+    await waitFor(() => expect(endingFor(doomed)).toBe("rejected"));
+    // Still a live control, for the draft he spared.
+    expect(screen.getByTestId("chat-email-batch-cancel")).toBeTruthy();
+
+    // The spared draft goes elsewhere, the poll settles the card, and only then
+    // does the held receipt land.
+    const swept = await POST(
+      new Request("http://localhost/setup-api/email/pending", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", cookie },
+        body: JSON.stringify({ action: "reject", id: spared }),
+      }),
+    );
+    expect(swept.status).toBe(200);
+    fireEvent.focus(window);
+    await waitFor(() => expect(screen.getByTestId("chat-email-batch-result")).toBeTruthy());
+
+    release();
+    expect((await elsewhere).status).toBe(200);
+    await waitFor(() => expect(outcomes.getOutcome(caught)).toMatchObject({ kind: "sent" }));
+    fireEvent.focus(window);
+    await waitFor(() => expect(endingFor(caught)).toBe("sent"));
+
+    expect(outcomeRow(caught)?.style.color).not.toBe(OK_FG);
+    expect(verdict()).toMatchObject({ color: WARN_FG });
+    expect(verdict().text).not.toBe("chat.emailBatch.resultAllSent");
+  });
+
   it("does not drop the deletion out of the sentence when the receipt lands", async () => {
     // Two drafts: one he genuinely deleted, one caught mid-send. Once the
     // receipt corrects the second, `sentCount > 0` outranks `discardedCount`
