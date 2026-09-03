@@ -15,6 +15,7 @@ import { get as getConfigStoreValue } from "@/lib/config-store";
 import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-status";
 import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
 import { isSafeDiscordToken } from "@/lib/discord-api";
+import { logSafe } from "@/lib/log-safe";
 
 const exec = promisify(execFile);
 
@@ -547,8 +548,14 @@ async function runConfigSetVerified(
   } catch (err) {
     if (!(err instanceof OpenclawSpawnTimeoutError)) throw err;
     if (!(await configSetLanded(batch))) throw err;
+    // logSafe, not the raw message: a config PATH can be built from request
+    // input (`chatgptRuntimeEntryPath(modelRef)`, `models.providers.<provider>`)
+    // and rides into `err.message` through the spawn label. Unbounded and
+    // un-escaped, that would let a caller decide how many journal records one
+    // API call produces (CWE-117). The VALUES are already elided by
+    // configSetLabelArgs / configSetBatchLabelArgs.
     console.warn(
-      `[openclaw-config] ${err.message}; every assignment is on disk, so the write landed — reporting success`,
+      `[openclaw-config] ${logSafe(err.message)}; every assignment is on disk, so the write landed — reporting success`,
     );
   }
 }
@@ -685,7 +692,7 @@ export async function runOpenclawConfigUnset(
     if (!(err instanceof OpenclawSpawnTimeoutError)) throw err;
     if (!(await configUnsetLanded(configPath))) throw err;
     console.warn(
-      `[openclaw-config] ${err.message}; the path is gone from the config, so the removal landed — reporting success`,
+      `[openclaw-config] ${logSafe(err.message)}; the path is gone from the config, so the removal landed — reporting success`,
     );
   }
 }

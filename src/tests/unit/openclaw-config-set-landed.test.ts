@@ -58,12 +58,21 @@ const mockFs = vi.mocked(fs);
 
 let openclawConfig: typeof import("@/lib/openclaw-config");
 
-/** A child that never exits, so the caller's timeout is what settles the call. */
+/**
+ * A child that runs until it is killed — the caller's deadline is what settles
+ * the call, and the SIGKILL is then reaped like a real one. Emitting `close`
+ * from `kill` matters twice: the reap wait settles at once instead of paying
+ * its full second in every test, and the reaped path is the one a real box
+ * takes.
+ */
 function hangingChild(): ChildProcess {
   const child = new EventEmitter() as ChildProcess;
   child.stdout = new EventEmitter() as unknown as ChildProcess["stdout"];
   child.stderr = new EventEmitter() as unknown as ChildProcess["stderr"];
-  child.kill = vi.fn() as unknown as ChildProcess["kill"];
+  child.kill = vi.fn(() => {
+    queueMicrotask(() => child.emit("close", null, "SIGKILL"));
+    return true;
+  }) as unknown as ChildProcess["kill"];
   return child;
 }
 
@@ -245,6 +254,23 @@ describe("a config set killed at its timeout is verified, not assumed failed", (
   it("still fails an unset whose path is still there", async () => {
     mockSpawn.mockImplementation(() => hangingChild());
     configOnDisk({ models: { providers: { openai: { apiKey: "claw_still_here" } } } });
+
+    const err = await settle(
+      openclawConfig.runOpenclawConfigUnset("models.providers.openai.apiKey", { timeoutMs: 1 }),
+    );
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err!.message).toContain("timed out");
+  });
+
+  it("still fails an unset when openclaw.json is missing", async () => {
+    // The one shape that would otherwise fail OPEN: readConfigStrict answers
+    // `{}` for an absent file, and every path reads as removed in `{}`. Without
+    // this the guard could be deleted and nothing here would notice.
+    mockSpawn.mockImplementation(() => hangingChild());
+    const fsSync = vi.mocked((await import("fs")).default);
+    fsSync.existsSync.mockReturnValue(false);
+    configOnDisk({});
 
     const err = await settle(
       openclawConfig.runOpenclawConfigUnset("models.providers.openai.apiKey", { timeoutMs: 1 }),
