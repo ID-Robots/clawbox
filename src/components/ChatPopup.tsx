@@ -28,7 +28,7 @@ import {
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
-import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext } from '@/lib/ui-events'
+import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun, dispatchCodingLivePreview } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
@@ -746,7 +746,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         },
       }}
       openLabel={t("codingAgent.chatOpenApp")}
-      onOpen={() => dispatchOpenApp("coding")}
+      onOpen={() => dispatchOpenCodingRun(run.id)}
+      // The floating live terminal, owned by the desktop: one for the whole
+      // screen, folded and unfolded with a click on its bar.
+      liveViewLabel={t("codingAgent.liveView")}
+      onLiveView={() => dispatchCodingLivePreview({
+        runId: run.id,
+        transcriptPath: run.transcriptPath,
+        sessionId: run.sessionId,
+        directory: run.directory,
+      })}
       // A run's screenshot opens in the SAME full-size preview the generated
       // and attached images use (the portal at the end of this component),
       // not a second lightbox of the card's own.

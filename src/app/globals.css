@@ -472,6 +472,31 @@ h6 {
   .ms-art-shard { animation: ms-art-shard 2.4s ease-in-out infinite; }
 }
 
+/* ClawKeep's setup diagram (ClawKeepArt): the dashes flow toward the cloud, one
+ * packet travels the whole lane from the box through the shield to the cloud,
+ * and the shield pulses as it seals it. Guarded exactly like ms-art-*. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes ck-art-flow {
+    to { stroke-dashoffset: -22; }
+  }
+  @keyframes ck-art-packet {
+    0%   { opacity: 0; transform: translateX(0); }
+    12%  { opacity: 1; }
+    88%  { opacity: 1; }
+    100% { opacity: 0; transform: translateX(180px); }
+  }
+  @keyframes ck-art-shield {
+    0%, 100% { opacity: 0.85; }
+    50%      { opacity: 1; }
+  }
+  .ck-art-flow { animation: ck-art-flow 1.8s linear infinite; }
+  .ck-art-packet {
+    transform-box: fill-box;
+    animation: ck-art-packet 3.6s ease-in-out infinite;
+  }
+  .ck-art-shield { animation: ck-art-shield 2.4s ease-in-out infinite; }
+}
+
 /* Native <select> popups.
  *
  * The closed control is styled per component, but the OPEN list is drawn by the

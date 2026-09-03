@@ -198,7 +198,7 @@ function StepChip({ step, label, detail, onClick, title }: {
 }
 
 export default function CodingAgentActivityPill(
-  { run, labels, openLabel, onOpen, onPreview }: {
+  { run, labels, openLabel, onOpen, onPreview, liveViewLabel, onLiveView }: {
     run: CodingAgentActivity;
     /**
      * One per status, plus the owner-started variant of "running", plus the
@@ -213,6 +213,13 @@ export default function CodingAgentActivityPill(
      * second lightbox. `alt` is the picture's accessible name.
      */
     onPreview?: (src: string, alt: string) => void;
+    /**
+     * Pop the floating live terminal on this run (CodingRunLivePreview). The
+     * button is drawn only while the run is in flight — a finished run's
+     * transcript is history, and the Coding Agent app has it.
+     */
+    liveViewLabel?: string;
+    onLiveView?: () => void;
   },
 ) {
   const live = run.status === "running";
@@ -382,6 +389,30 @@ export default function CodingAgentActivityPill(
             {expanded ? "expand_less" : "expand_more"}
           </span>
         </div>
+        {onLiveView && run.status === "running" ? (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onLiveView(); }}
+            title={liveViewLabel ?? "live"}
+            aria-label={liveViewLabel ?? "live"}
+            data-testid="coding-agent-activity-live-view"
+            style={{
+              background: "rgba(52,211,153,0.12)",
+              border: "1px solid rgba(52,211,153,0.35)",
+              borderRadius: 6,
+              color: "#a7f3d0",
+              cursor: "pointer",
+              font: "inherit",
+              fontSize: 11,
+              fontWeight: 600,
+              padding: "1px 7px",
+              flexShrink: 0,
+              marginRight: 6,
+            }}
+          >
+            {liveViewLabel ?? "live"}
+          </button>
+        ) : null}
         {onOpen ? (
           <button
             type="button"

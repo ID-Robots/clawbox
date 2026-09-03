@@ -7,8 +7,7 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
-import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT,
-  NEW_APP_EVENT, notifyCodingRunStarted } from "@/lib/ui-events";
+import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, notifyCodingRunStarted, CODING_LIVE_PREVIEW_EVENT, handoffCodingRun, type CodingLivePreviewRequest } from "@/lib/ui-events";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
 import ChromeLauncher from "@/components/ChromeLauncher";
@@ -29,7 +28,11 @@ import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
 import ChatPopup, { CHAT_PANEL_GAP } from "@/components/ChatPopup";
+
+/** How long a coding run's finish card stays on the desktop before it hides itself. */
+const CODING_NOTICE_MS = 30_000;
 import ToastHost from "@/components/ToastHost";
+import CodingRunLivePreview, { livePreviewCommand } from "@/components/CodingRunLivePreview";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
@@ -1345,6 +1348,51 @@ function ChromeDesktopInner() {
 
   /** Finished coding runs waiting to be seen, newest first. */
   const [codingNotices, setCodingNotices] = useState<{ runId: string; status: string; projectId: string | null; message: string }[]>([]);
+  // A finish card leaves on its own after a while — the owner asked for the
+  // cards to "hide after some time" — and the run is always one click away in
+  // the app. Keyed by run id so a card re-shown by a ring replay gets a fresh
+  // clock and never two.
+  const codingNoticeTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const dismissCodingNotice = useCallback((runId: string) => {
+    const timer = codingNoticeTimers.current.get(runId);
+    if (timer) { clearTimeout(timer); codingNoticeTimers.current.delete(runId); }
+    setCodingNotices(prev => prev.filter(n => n.runId !== runId));
+  }, []);
+  useEffect(() => {
+    const timers = codingNoticeTimers.current;
+    for (const notice of codingNotices) {
+      if (timers.has(notice.runId)) continue;
+      timers.set(notice.runId, setTimeout(() => {
+        timers.delete(notice.runId);
+        setCodingNotices(prev => prev.filter(n => n.runId !== notice.runId));
+      }, CODING_NOTICE_MS));
+    }
+    for (const [runId, timer] of timers) {
+      if (!codingNotices.some(n => n.runId === runId)) { clearTimeout(timer); timers.delete(runId); }
+    }
+  }, [codingNotices]);
+  useEffect(() => {
+    const timers = codingNoticeTimers.current;
+    return () => { for (const timer of timers.values()) clearTimeout(timer); timers.clear(); };
+  }, []);
+
+  // The floating live terminal of a coding run — see CodingRunLivePreview.
+  // One for the desktop: a request for another run replaces it.
+  const [livePreview, setLivePreview] = useState<CodingLivePreviewRequest | null>(null);
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<CodingLivePreviewRequest>).detail;
+      if (!detail || typeof detail.runId !== "string") return;
+      setLivePreview({
+        runId: detail.runId,
+        transcriptPath: typeof detail.transcriptPath === "string" ? detail.transcriptPath : null,
+        sessionId: typeof detail.sessionId === "string" ? detail.sessionId : null,
+        directory: typeof detail.directory === "string" ? detail.directory : null,
+      });
+    };
+    window.addEventListener(CODING_LIVE_PREVIEW_EVENT, handler);
+    return () => window.removeEventListener(CODING_LIVE_PREVIEW_EVENT, handler);
+  }, []);
 
   // The owner-notice ring: `ui:pending-actions` holds an array of
   // { id, ts, ...action }, newest last, written through pushPendingAction()
@@ -1509,16 +1557,18 @@ function ChromeDesktopInner() {
     });
   }, []);
 
-  const openUpdateSettings = useCallback(() => {
-    openAppRef.current("system_update");
-    dismissUpdateNotification();
-  }, [dismissUpdateNotification]);
-
-  const openSettingsSection = useCallback((section: "ai" | "localAi" | "system") => {
+  const openSettingsSection = useCallback((section: "ai" | "localAi" | "system" | "update") => {
     (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = section;
     window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section } }));
     openApp("settings");
   }, [openApp]);
+
+  // The system update lives in Settings → System Update now; the notice's
+  // button lands there rather than on the old standalone window.
+  const openUpdateSettings = useCallback(() => {
+    openSettingsSection("update");
+    dismissUpdateNotification();
+  }, [openSettingsSection, dismissUpdateNotification]);
 
   const openClawAiProviderSettings = useCallback(() => {
     const w = window as Window & {
@@ -1967,6 +2017,19 @@ function ChromeDesktopInner() {
           the pairing flow dispatch. Without it ui_notify, `clawbox notify`
           and every server-side owner notice were fired and never shown. */}
       <ToastHost />
+      {livePreview && (
+        <CodingRunLivePreview
+          key={livePreview.runId}
+          runId={livePreview.runId}
+          command={livePreviewCommand({
+            transcriptPath: livePreview.transcriptPath,
+            sessionId: livePreview.sessionId,
+            directory: livePreview.directory,
+            live: true,
+          })}
+          onClose={() => setLivePreview(null)}
+        />
+      )}
       {(updateAvailable || showClawAiOfferNotification || pairingRequests.length > 0 || codingNotices.length > 0) && (
         <div className="pointer-events-none fixed top-4 right-4 z-[99998] flex w-[320px] flex-col gap-3">
           {/* New version available notification */}
@@ -2113,7 +2176,7 @@ function ChromeDesktopInner() {
                   </div>
                   <button
                     type="button"
-                    onClick={() => setCodingNotices(prev => prev.filter(n => n.runId !== notice.runId))}
+                    onClick={() => dismissCodingNotice(notice.runId)}
                     className="pointer-events-auto w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
                     aria-label={t("codingAgent.noticeDismiss")}
                   >
@@ -2121,13 +2184,16 @@ function ChromeDesktopInner() {
                   </button>
                 </div>
                 <div className="pointer-events-auto flex items-center gap-2 px-4 pb-3">
+                  {/* Straight to the run's own page, not the app's home:
+                      the handoff names the run, then the app opens on it. */}
                   <button
                     type="button"
-                    onClick={() => { openApp("coding"); setCodingNotices(prev => prev.filter(n => n.runId !== notice.runId)); }}
+                    onClick={() => { handoffCodingRun(notice.runId); openApp("coding"); dismissCodingNotice(notice.runId); }}
+                    data-testid="coding-agent-notice-open"
                     className="flex-1 px-3 py-1.5 rounded-md bg-white/10 hover:bg-white/15 text-white text-xs font-semibold transition-colors cursor-pointer border-none inline-flex items-center justify-center gap-1.5"
                   >
                     <span className="material-symbols-rounded" style={{ fontSize: 14 }}>smart_toy</span>
-                    {t("codingAgent.noticeOpen")}
+                    {t("codingAgent.noticeOpenRun")}
                   </button>
                 </div>
               </div>

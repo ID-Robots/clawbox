@@ -11,7 +11,7 @@ import CodingAgentSettingsPanel from "./CodingAgentSettingsPanel";
 import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
 import CodingAgentSetupWizard from "./CodingAgentSetupWizard";
-import { BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, CARD, SECTION_LABEL } from "./coding-agent-ui";
+import { BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD, SECTION_LABEL } from "./coding-agent-ui";
 import { startHarnessTest } from "@/lib/coding-agent-harness-test";
 import { openNewAppCard } from "@/lib/ui-events";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
@@ -22,10 +22,13 @@ import { formatBytes } from "@/lib/format-bytes";
 import { renderText } from "@/lib/chat-markdown";
 import { artifactUrl } from "@/lib/use-coding-agent-activity";
 import {
+  OPEN_CODING_RUN_EVENT,
+  dispatchCodingLivePreview,
   dispatchOpenApp,
   notifyCodingRunStarted,
   onCodingAgentChanged,
   onStandaloneAppPage,
+  takePendingCodingRun,
 } from "@/lib/ui-events";
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -67,7 +70,8 @@ interface Run {
   summary: string | null;
   error: string | null;
   numTurns: number;
-  todos?: { status?: string }[];
+  /** The run's plan, as it last wrote it with TodoWrite. */
+  todos?: { content?: string; status?: string; activeForm?: string }[];
   filesTouched: string[];
   permissionDenials: number;
   /** What was refused, in the owner's words. */
@@ -229,13 +233,19 @@ function useProjectGit(project: Project | null, version: number): GitInfo | null
   return git && git.dir === dir ? git.info : null;
 }
 
-/** The rendered row of one run in the list, if it is on the page. Matched
- *  by attribute value rather than a selector string, so a run id never has
- *  to be escaped into one. */
-function rowFor(list: HTMLUListElement | null, id: string): HTMLElement | null {
-  return Array.from(list?.querySelectorAll<HTMLElement>("[data-run-id]") ?? [])
-    .find((el) => el.dataset.runId === id) ?? null;
+/** One cell of the run page's figures grid. */
+function StatTile({ label, value, hint, testId }: { label: string; value: string; hint?: string; testId?: string }) {
+  return (
+    <div className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2 min-w-0" data-testid={testId}>
+      <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] truncate">{label}</div>
+      <div className="mt-0.5 text-sm font-semibold text-[var(--text-primary)] truncate" title={hint ?? value}>{value}</div>
+      {hint && <div className="text-[10px] text-[var(--text-muted)] truncate">{hint}</div>}
+    </div>
+  );
 }
+
+/** How many of a run's progress lines the run page's activity log shows. */
+const ACTIVITY_SHOWN = 40;
 
 /** Every run button's shape; the action's own colour is added per row. */
 const RUN_BUTTON = "text-xs px-2.5 py-1 rounded-lg border disabled:opacity-50";
@@ -259,7 +269,8 @@ export default function CodingAgentApp() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState<string | null>(null);
+  /** The run whose own page is open — a page now, not a row that unfolds. */
+  const [openRunId, setOpenRunId] = useState<string | null>(null);
   /** The markdown artifact open in the preview dialog, if any. */
   const [report, setReport] = useState<{ runId: string; name: string } | null>(null);
   // Runs are behind a button: the answer to "is this on and does it work" is
@@ -499,20 +510,22 @@ export default function CodingAgentApp() {
     }
   }, [runs]);
 
-  /** The row a review chip pointed at, once it is rendered: it may have been
-   *  beyond the page until the click widened it, so the scroll waits for the
-   *  render that brings it in — same shape as `pendingLiveOpen`. */
-  const runsList = useRef<HTMLUListElement>(null);
-  const pendingJump = useRef<string | null>(null);
+  /**
+   * A run handed to this window from outside — the desktop's finish card, the
+   * chat's run card — opens on its own page. Two handoffs, like Settings'
+   * section: the window property survives a cold open (this effect mounts
+   * after the card fired), the event reaches a window already up.
+   */
   useEffect(() => {
-    const id = pendingJump.current;
-    if (!id) return;
-    const row = rowFor(runsList.current, id);
-    if (!row) return;
-    pendingJump.current = null;
-    // jsdom has no scrollIntoView; every browser does.
-    row.scrollIntoView?.({ block: "nearest" });
-  }, [runsShown, expanded]);
+    const pending = takePendingCodingRun();
+    if (pending) { setOpenRunId(pending); setPage("home"); }
+    const handler = (e: Event) => {
+      const id = (e as CustomEvent<{ runId?: unknown }>).detail?.runId;
+      if (typeof id === "string" && id) { setOpenRunId(id); setPage("home"); }
+    };
+    window.addEventListener(OPEN_CODING_RUN_EVENT, handler);
+    return () => window.removeEventListener(OPEN_CODING_RUN_EVENT, handler);
+  }, []);
 
   /** Push a run's folder to GitHub, private, creating the repo if needed. */
   const backup = async (target: { projectId: string | null; directory: string }, key: string) => {
@@ -550,7 +563,7 @@ export default function CodingAgentApp() {
     try {
       const res = await fetch("/setup-api/coding-agent/runs", { method: "DELETE" });
       if (!res.ok) throw new Error(await readError(res, t("codingAgent.clearFailed")));
-      setExpanded(null);
+      setOpenRunId(null);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.clearFailed"));
@@ -613,6 +626,12 @@ export default function CodingAgentApp() {
     [projects, openProjectDir],
   );
   const git = useProjectGit(openProject, gitVersion);
+  /** The run whose page is open, once the list has it. A run that was cleared
+   *  meanwhile simply has no page — the window falls back to where it was. */
+  const openRun = useMemo(
+    () => (openRunId ? runs.find((r) => r.id === openRunId) ?? null : null),
+    [runs, openRunId],
+  );
   /** The runs a face lists: the open project's own, or — on home — only
    *  those that match no listed project. */
   const visibleRuns = useMemo(() => (
@@ -633,9 +652,11 @@ export default function CodingAgentApp() {
     // Settings still wins over it — that is the way back out.
     : status && !status.setupComplete
       ? { face: "wizard" as const }
-      : openProject
-        ? { face: "project" as const, project: openProject }
-        : { face: "home" as const };
+      : openRun
+        ? { face: "run" as const, run: openRun }
+        : openProject
+          ? { face: "project" as const, project: openProject }
+          : { face: "home" as const };
 
   // A window, not a card: keep the app's own background on screen while the
   // first fetch lands, rather than flashing whatever is behind it.
@@ -654,26 +675,306 @@ export default function CodingAgentApp() {
 
   const statusLabel = (s: Run["status"]) => t(`codingAgent.status${s.charAt(0).toUpperCase()}${s.slice(1)}`);
 
-  /** Open and scroll to another run on this page — the one a review chip
-   *  names. Widens the page first when the row is beyond it. */
-  const jumpToRun = (id: string) => {
-    const index = visibleRuns.findIndex((r) => r.id === id);
-    if (index < 0) return;
-    setExpanded(id);
-    if (index >= runsShown) setRunsShown(index + 1);
-    const row = rowFor(runsList.current, id);
-    if (row) row.scrollIntoView?.({ block: "nearest" });
-    else pendingJump.current = id;
+  /** Open a run's page — from its row, a review chip, or the desktop. */
+  const showRun = (id: string) => {
+    setOpenRunId(id);
+    setPage("home");
   };
 
-  /** A chip naming another run: a button when that run is on this page, plain
-   *  text when it was cleared or is filed elsewhere. */
+  /** A chip naming another run: a button when that run is on the box, plain
+   *  text when it was cleared. */
   const runChip = (id: string, label: string, testId: string) => {
     const className = "text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40";
-    return visibleRuns.some((r) => r.id === id)
-      ? <button type="button" onClick={() => jumpToRun(id)} data-testid={testId} className={`${className} hover:bg-violet-400/10`}>{label}</button>
+    return runs.some((r) => r.id === id)
+      ? <button type="button" onClick={() => showRun(id)} data-testid={testId} className={`${className} hover:bg-violet-400/10`}>{label}</button>
       : <span data-testid={testId} className={className}>{label}</span>;
   };
+
+  /** The pull request as one chip: its phase, and while checks run, how many
+   *  have answered. A link once GitHub has given us one. */
+  const prChip = (run: Run) => run.pr && run.pr.phase !== "failed" ? (
+    <a
+      href={run.pr.url ?? undefined}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      data-testid={`coding-agent-pr-${run.id}`}
+      title={run.pr.detail ?? undefined}
+      className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 no-underline inline-flex items-center gap-1 ${
+        run.pr.phase === "merged"
+          ? "text-emerald-400 border-emerald-400/40"
+          : run.pr.phase === "blocked"
+            ? "text-amber-400 border-amber-400/40"
+            : "text-sky-300 border-sky-400/40"
+      } ${run.pr.url ? "hover:bg-white/5" : "pointer-events-none"}`}
+    >
+      {run.pr.phase === "waiting" && (
+        <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-sky-300 motion-safe:animate-pulse" />
+      )}
+      {run.pr.phase === "waiting"
+        ? t("codingAgent.prWaiting", { done: run.pr.checks.passed + run.pr.checks.failed, total: run.pr.checks.total })
+        : run.pr.phase === "merged"
+          ? t("codingAgent.prMerged")
+          : run.pr.phase === "blocked"
+            ? t("codingAgent.prBlocked")
+            : t("codingAgent.prOpening")}
+    </a>
+  ) : null;
+
+  /** The row's and the page's run controls: the held run's first action and
+   *  the way out of it, the terminal, the backup. */
+  const runControls = (run: Run, where: "row" | "page") => {
+    const action = RUN_ACTION[run.status];
+    const canOpenTerminal = Boolean(run.sessionId || (run.status === "running" && run.transcriptPath));
+    const terminalLabel = run.status === "running" ? t("codingAgent.openLive") : t("codingAgent.openResume");
+    const small = where === "row" && action;
+    const secondary = small ? `${RUN_BUTTON} border-white/10 text-[var(--text-primary)] hover:bg-white/5` : BTN_SECONDARY;
+    return (
+      <>
+        {action && (
+          <button
+            type="button"
+            onClick={() => runAction(run.id, action.route, t(action.failed))}
+            disabled={busy === run.id}
+            data-testid={`coding-agent-${action.route}-${run.id}`}
+            className={small ? `${RUN_BUTTON} ${action.className}` : `${BTN_BASE} border ${action.className}`}
+          >
+            {t(action.label)}
+          </button>
+        )}
+        {action && (run.status === "draft" ? (
+          <button
+            type="button"
+            onClick={() => runAction(run.id, "draft", t("codingAgent.discardFailed"), { method: "DELETE" })}
+            disabled={busy === run.id}
+            data-testid={`coding-agent-discard-${run.id}`}
+            className={small ? `${RUN_BUTTON} border-white/10 text-[var(--text-muted)] hover:bg-white/5` : BTN_SECONDARY}
+          >
+            {t("codingAgent.discardDraft")}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => runAction(run.id, "stop", t("codingAgent.stopFailed"))}
+            disabled={busy === run.id}
+            data-testid={`coding-agent-stop-${run.id}`}
+            className={secondary}
+          >
+            {t("codingAgent.stop")}
+          </button>
+        ))}
+        {canOpenTerminal && (
+          <button
+            type="button"
+            onClick={() => openInTerminal(run)}
+            data-testid={`coding-agent-terminal-${run.id}`}
+            title={terminalLabel}
+            className={secondary}
+          >
+            {terminalLabel}
+          </button>
+        )}
+        {where === "page" && run.status === "running" && run.transcriptPath && (
+          <button
+            type="button"
+            onClick={() => dispatchCodingLivePreview({ runId: run.id, transcriptPath: run.transcriptPath ?? null, sessionId: run.sessionId ?? null, directory: run.directory })}
+            data-testid={`coding-agent-live-${run.id}`}
+            className={`${BTN_BASE} border border-emerald-400/40 bg-emerald-400/[0.07] text-emerald-400 hover:bg-emerald-400/[0.14]`}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">terminal</span>
+            {t("codingAgent.liveView")}
+          </button>
+        )}
+        {github?.connected && run.commit && (
+          <button
+            type="button"
+            onClick={() => void backup({ projectId: run.projectId, directory: run.directory }, run.id)}
+            disabled={busy === `backup-${run.id}`}
+            data-testid={`coding-agent-backup-${run.id}`}
+            className={BTN_SECONDARY}
+          >
+            {busy === `backup-${run.id}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
+          </button>
+        )}
+      </>
+    );
+  };
+
+
+  /**
+   * The runs a face lists, as one section: the toggle, the paged rows, the
+   * More button. On a project's page they are its own; on home, the ones
+   * filed under no project — those used to be computed and never drawn, so a
+   * run in a folder the projects list does not know was invisible.
+   */
+  const runsSection = (
+    <div className="mt-4">
+      <button
+        type="button"
+        onClick={() => { setShowRuns((v) => !v); setRunsShown(RUNS_PAGE); }}
+        aria-expanded={showRuns}
+        data-testid="coding-agent-runs-toggle"
+        className="w-full flex items-center justify-between gap-2 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors"
+      >
+        <span className="flex items-center gap-2">
+          <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">history</span>
+          {openProject ? t("codingAgent.projectRuns") : t("codingAgent.homeRuns")}
+          {visibleRuns.length > 0 && <span className="text-[var(--text-muted)]">({visibleRuns.length})</span>}
+          {anyRunning && (
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-400 border border-amber-400/40 rounded-full px-2 py-0.5">
+              {t("codingAgent.statusRunning")}
+            </span>
+          )}
+        </span>
+        <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
+          {showRuns ? "expand_less" : "expand_more"}
+        </span>
+      </button>
+
+      {showRuns && (
+        visibleRuns.length === 0 ? (
+          <p className="text-xs text-[var(--text-muted)] mt-2 px-1">{t("codingAgent.noRuns")}</p>
+        ) : (
+          <ul className="space-y-1.5 mt-2" data-testid="coding-agent-runs">
+            {visibleRuns.slice(0, runsShown).map((run) => {
+              const tone = RUN_TONE[run.status];
+              // A draft has not run: its startedAt is when it was drafted
+              // (the runner overwrites it at start), so a duration would be
+              // time-since-drafting, which the "updated" line already says —
+              // and the effort it will run with is read at start.
+              const started = run.status !== "draft";
+              const reviewedBy = runs.find((r) => r.reviewOf === run.id);
+              return (
+                <li key={run.id} data-run-id={run.id} className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${tone.chip}`}>
+                          {statusLabel(run.status)}
+                        </span>
+                        {/* A run at high effort can be silent for minutes on
+                            its first turn. Show that it is thinking, so quiet
+                            never reads as stuck. */}
+                        {run.status === "running" && (run.thinkingTokens ?? 0) > 0 && (
+                          <span
+                            data-testid="coding-agent-thinking"
+                            className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40"
+                          >
+                            {t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 })}
+                          </span>
+                        )}
+                        {/* One green dot per sub-agent, so the fan-out is
+                            visible at a glance. Filled while working, hollow
+                            once done. */}
+                        {(run.subagentsTotal ?? 0) > 0 && (
+                          <span
+                            className="flex items-center gap-1"
+                            data-testid="coding-agent-subagent-dots"
+                            title={Object.entries(run.subagentsByType ?? {}).map(([k, n]) => `${n}× ${k}`).join(", ")}
+                          >
+                            {Array.from({ length: Math.min(run.subagentsTotal ?? 0, 12) }).map((_, i) => (
+                              <span
+                                key={i}
+                                className={`inline-block h-2 w-2 rounded-full ${
+                                  i < (run.subagentsActive ?? 0) ? "bg-emerald-400 animate-pulse" : "bg-emerald-400/35"
+                                }`}
+                              />
+                            ))}
+                            <span className="text-[10px] font-semibold text-emerald-400 ml-0.5">{run.subagentsTotal}</span>
+                          </span>
+                        )}
+                        {prChip(run)}
+                        {/* A review pass names the run it reviewed, and that
+                            run names its reviewer. */}
+                        {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
+                        {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
+                        {run.projectId && <span className="text-[11px] text-[var(--text-muted)]">{run.projectId}</span>}
+                        <span className="text-[11px] font-mono text-[var(--text-muted)] opacity-60">{run.id}</span>
+                      </div>
+                      <p className="text-xs text-[var(--text-primary)] mt-1 break-words">
+                        {run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 80)}
+                      </p>
+                      <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
+                        {started && t("codingAgent.runMeta", { turns: run.numTurns, files: run.filesTouched.length, duration: duration(run) })}
+                        {started && " · "}
+                        {run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}
+                        {started && run.effort && ` · ${t(`codingAgent.effort.${run.effort}`)}`}
+                        {(run.tokensUsed ?? 0) > 0 && ` · ${tokens(run.tokensUsed ?? 0)} ${t("codingAgent.tokensWord")}`}
+                        {(run.subagentsTotal ?? 0) > 0
+                          && ` · ${Object.entries(run.subagentsByType ?? {}).map(([k, n]) => `${n}× ${k}`).join(", ")}`}
+                        {run.permissionDenials > 0 && (
+                          <span className="text-amber-400"> · {t("codingAgent.denials", { n: run.permissionDenials })}</span>
+                        )}
+                      </p>
+                      {isLive(run.status) && (
+                        <RunProgressBar
+                          estimate={estimateRunProgress(run, now)}
+                          color={tone.color}
+                          timeLeft={t("codingAgent.timeLeft")}
+                          testId={`coding-agent-progress-${run.id}`}
+                          className="mt-1"
+                        />
+                      )}
+                      {/* Which models did the work, and how fresh this is. */}
+                      {((run.modelsUsed?.length ?? 0) > 0 || run.lastActivityAt) && (
+                        <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-0.5" data-testid="coding-agent-run-stats">
+                          {(run.modelsUsed?.length ?? 0) > 0 && run.modelsUsed?.join(" + ")}
+                          {(run.modelsUsed?.length ?? 0) > 0 && run.lastActivityAt ? " · " : ""}
+                          {run.lastActivityAt && `${t("codingAgent.updated")} ${timeAgo(run.lastActivityAt, t)}`}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex flex-col items-end gap-1 shrink-0">
+                      {RUN_ACTION[run.status] ? (
+                        <div className="flex gap-1">{runControls(run, "row")}</div>
+                      ) : (
+                        runControls(run, "row")
+                      )}
+                      {/* The run's own page: its figures, its summary, its
+                          evidence. A row used to unfold in place instead. */}
+                      <button
+                        type="button"
+                        onClick={() => showRun(run.id)}
+                        data-testid={`coding-agent-details-${run.id}`}
+                        className="text-xs px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 inline-flex items-center gap-1"
+                      >
+                        {t("codingAgent.showDetails")}
+                        <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">chevron_right</span>
+                      </button>
+                    </div>
+                  </div>
+                  {/* Which helpers are out and what each is doing — a count
+                      alone does not say whether the run is stuck on one
+                      search or fanned across three files. */}
+                  {(run.activeSubagents?.length ?? 0) > 0 && (
+                    <ul className="mt-2 space-y-1" data-testid="coding-agent-active-subagents">
+                      {run.activeSubagents?.map((a, i) => (
+                        <li key={i} className="flex items-start gap-2 text-[11px]">
+                          <span className="material-symbols-rounded text-sky-400 animate-pulse shrink-0" style={{ fontSize: 13 }} aria-hidden="true">sync</span>
+                          <span className="text-sky-300 font-medium shrink-0">{a.type}</span>
+                          <span className="text-[var(--text-muted)] break-words min-w-0">{a.description}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )
+      )}
+      {showRuns && visibleRuns.length > runsShown && (
+        <button
+          type="button"
+          onClick={() => setRunsShown((n) => n + RUNS_PAGE)}
+          data-testid="coding-agent-runs-more"
+          className={`${BTN_SECONDARY} w-full mt-2`}
+        >
+          {t("codingAgent.more")} ({visibleRuns.length - runsShown})
+        </button>
+      )}
+    </div>
+  );
 
   return (
     // @container so the panel sizes to its WINDOW, not the viewport — this is
@@ -970,7 +1271,320 @@ export default function CodingAgentApp() {
             </ul>
           )}
         </div>
+        {/* Runs the projects list cannot file — a folder the list does not
+            know, a cleared project. Only when there are any: a box with
+            everything filed has nothing to say here. */}
+        {visibleRuns.length > 0 && runsSection}
         </>)}
+
+        {/* One run, on its own page. */}
+        {view.face === "run" && (() => {
+          const run = view.run;
+          const tone = RUN_TONE[run.status];
+          const started = run.status !== "draft";
+          const project = projects.find((pr) => runBelongsTo(run, pr)) ?? null;
+          const reviewedBy = runs.find((r) => r.reviewOf === run.id);
+          const artifacts = run.artifacts ?? [];
+          const images = artifacts.filter((a) => a.kind === "image");
+          const files = artifacts.filter((a) => a.kind !== "image");
+          const reportFile = files.find((a) => a.kind === "markdown" && a.name === "report.md") ?? files.find((a) => a.kind === "markdown");
+          const helpers = Object.entries(run.subagentsByType ?? {});
+          const todos = run.todos ?? [];
+          const todosDone = todos.filter((x) => x.status === "completed").length;
+          const activity = run.progress.slice(-ACTIVITY_SHOWN);
+          const title = run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 160);
+          const fullTask = !run.reviewOf && run.task.trim() !== firstLine(run.task, 160) ? run.task : null;
+          return (
+            <div className="mt-4" data-testid="coding-agent-run-page" data-run-id={run.id}>
+              <button
+                type="button"
+                onClick={() => setOpenRunId(null)}
+                data-testid="coding-agent-run-back"
+                className="mb-2 flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-muted)] hover:bg-white/5"
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">arrow_back</span>
+                {openProject ? openProject.name : t("codingAgent.back")}
+              </button>
+
+              {/* The header: what this run is, how it stands, and everything
+                  you can do to it. */}
+              <div className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${tone.chip}`}>
+                    {statusLabel(run.status)}
+                  </span>
+                  {run.status === "running" && (run.thinkingTokens ?? 0) > 0 && (
+                    <span data-testid="coding-agent-thinking" className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40">
+                      {t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 })}
+                    </span>
+                  )}
+                  {prChip(run)}
+                  {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
+                  {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
+                  {project && (
+                    <button
+                      type="button"
+                      onClick={() => { setOpenRunId(null); setOpenProjectDir(project.directory); }}
+                      data-testid="coding-agent-run-project"
+                      className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-sky-300 border-sky-400/40 hover:bg-sky-400/10 inline-flex items-center gap-1"
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">folder</span>
+                      {project.name}
+                    </button>
+                  )}
+                </div>
+                <h2 className="mt-2 text-sm font-semibold text-[var(--text-primary)] break-words" data-testid="coding-agent-run-title">{title}</h2>
+                {fullTask && (
+                  <details className="mt-1">
+                    <summary className="text-[11px] text-[var(--text-muted)] cursor-pointer">{t("codingAgent.fullTask")}</summary>
+                    <p className="mt-1 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words max-h-48 overflow-y-auto">{run.task}</p>
+                  </details>
+                )}
+                <p className="text-[11px] text-[var(--text-muted)] mt-1.5 flex items-center gap-1 flex-wrap">
+                  <span>{run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}</span>
+                  <span>· {t("codingAgent.startedAgo", { when: timeAgo(run.startedAt, t) })}</span>
+                  {started && run.effort && <span>· {t(`codingAgent.effort.${run.effort}`)}</span>}
+                  {run.lastActivityAt && <span>· {t("codingAgent.updated")} {timeAgo(run.lastActivityAt, t)}</span>}
+                  {(run.modelsUsed?.length ?? 0) > 0 && <span>· {run.modelsUsed?.join(" + ")}</span>}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void copyFolder(run.id)}
+                  title={t("codingAgent.copyId")}
+                  aria-label={t("codingAgent.copyId")}
+                  data-testid="coding-agent-run-copy-id"
+                  className="mt-1 flex items-center gap-1 text-[11px] font-mono text-[var(--text-muted)] opacity-70 hover:opacity-100 hover:text-white"
+                >
+                  {run.id}
+                  <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">
+                    {copiedFolder === run.id ? "check" : "content_copy"}
+                  </span>
+                  {copiedFolder === run.id && <span className="font-sans">{t("codingAgent.copied")}</span>}
+                </button>
+                {isLive(run.status) && (
+                  <RunProgressBar
+                    estimate={estimateRunProgress(run, now)}
+                    color={tone.color}
+                    timeLeft={t("codingAgent.timeLeft")}
+                    testId={`coding-agent-progress-${run.id}`}
+                    className="mt-2"
+                  />
+                )}
+                <div className="mt-3 flex flex-wrap items-center gap-1.5" data-testid="coding-agent-run-actions">
+                  {runControls(run, "page")}
+                  {reportFile && (
+                    <button
+                      type="button"
+                      onClick={() => setReport({ runId: run.id, name: reportFile.name })}
+                      data-testid="coding-agent-run-report"
+                      className={BTN_SECONDARY}
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">description</span>
+                      {t("codingAgent.openReport")}
+                    </button>
+                  )}
+                  {project?.onDesktop && (
+                    <button
+                      type="button"
+                      onClick={() => dispatchOpenApp(installedAppId(project.folder))}
+                      className={BTN_SECONDARY}
+                    >
+                      {t("codingAgent.open")}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* The figures. */}
+              <div className="mt-3 grid grid-cols-2 @md:grid-cols-4 gap-2" data-testid="coding-agent-run-figures">
+                <StatTile label={t("codingAgent.statSteps")} value={started ? String(run.numTurns) : "—"} />
+                <StatTile label={t("codingAgent.statFiles")} value={String(run.filesTouched.length)} />
+                <StatTile label={t("codingAgent.statDuration")} value={started ? duration(run) : "—"} />
+                <StatTile
+                  label={t("codingAgent.statTokens")}
+                  value={(run.tokensUsed ?? 0) > 0 ? tokens(run.tokensUsed ?? 0) : "—"}
+                  hint={(run.thinkingTokens ?? 0) > 0 ? t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 }) : undefined}
+                />
+                <StatTile
+                  label={t("codingAgent.statHelpers")}
+                  value={String(run.subagentsTotal ?? 0)}
+                  hint={helpers.length > 0 ? helpers.map(([k, n]) => `${n}× ${k}`).join(", ") : undefined}
+                />
+                <StatTile label={t("codingAgent.statCommit")} value={run.commit ?? "—"} />
+                <StatTile
+                  label={t("codingAgent.deniedTitle")}
+                  value={String(run.permissionDenials)}
+                />
+                <StatTile label={t("codingAgent.statModels")} value={run.modelsUsed?.length ? run.modelsUsed.join(" + ") : "—"} />
+              </div>
+
+              {/* Which helpers are out right now. */}
+              {(run.activeSubagents?.length ?? 0) > 0 && (
+                <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3">
+                  <p className={SECTION_LABEL}>{t("codingAgent.helpersTitle")}</p>
+                  <ul className="mt-2 space-y-1" data-testid="coding-agent-active-subagents">
+                    {run.activeSubagents?.map((a, i) => (
+                      <li key={i} className="flex items-start gap-2 text-[11px]">
+                        <span className="material-symbols-rounded text-sky-400 animate-pulse shrink-0" style={{ fontSize: 13 }} aria-hidden="true">sync</span>
+                        <span className="text-sky-300 font-medium shrink-0">{a.type}</span>
+                        <span className="text-[var(--text-muted)] break-words min-w-0">{a.description}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* The plan, as the run last wrote it. */}
+              {todos.length > 0 && (
+                <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3" data-testid="coding-agent-run-plan">
+                  <p className={SECTION_LABEL}>
+                    {t("codingAgent.planTitle")}
+                    <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{todosDone}/{todos.length}</span>
+                  </p>
+                  <ul className="mt-2 space-y-1">
+                    {todos.map((item, i) => (
+                      <li key={i} className="flex items-start gap-2 text-xs">
+                        <span
+                          className={`material-symbols-rounded shrink-0 ${
+                            item.status === "completed" ? "text-emerald-400" : item.status === "in_progress" ? "text-amber-400 animate-pulse" : "text-[var(--text-muted)]"
+                          }`}
+                          style={{ fontSize: 15 }}
+                          aria-hidden="true"
+                        >
+                          {item.status === "completed" ? "check_circle" : item.status === "in_progress" ? "radio_button_checked" : "radio_button_unchecked"}
+                        </span>
+                        <span className={item.status === "completed" ? "text-[var(--text-muted)] line-through decoration-white/20" : "text-[var(--text-primary)]"}>
+                          {item.status === "in_progress" && item.activeForm ? item.activeForm : (item.content ?? "")}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {run.error && (
+                <div className="mt-3 rounded-xl bg-red-500/[0.06] border border-red-500/30 px-4 py-3" data-testid="coding-agent-run-error">
+                  <p className="text-[11px] font-medium text-red-300">{t("codingAgent.errorTitle")}</p>
+                  <pre className="mt-1 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words font-sans leading-relaxed">{run.error}</pre>
+                </div>
+              )}
+
+              {/* The summary is the run's closing message, and that is
+                  markdown. Drawn through the chat's renderer, which builds
+                  elements from the text and never injects HTML — what lets
+                  agent-written words on to the owner's screen at all. */}
+              <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3">
+                <p className={SECTION_LABEL}>{t("codingAgent.summaryTitle")}</p>
+                {run.summary ? (
+                  <div
+                    data-testid="coding-agent-summary"
+                    className="mt-2 text-xs text-[var(--text-secondary)] leading-relaxed min-w-0 break-words [&_img]:max-w-full"
+                  >
+                    {renderText(run.summary, t("chat.table"))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs text-[var(--text-muted)]">
+                    {isLive(run.status) ? t("codingAgent.noSummaryYet") : t("codingAgent.noSummary")}
+                  </p>
+                )}
+              </div>
+
+              {run.filesTouched.length > 0 && (
+                <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3" data-testid="coding-agent-run-files">
+                  <p className={SECTION_LABEL}>
+                    {t("codingAgent.filesTitle")}
+                    <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{run.filesTouched.length}</span>
+                  </p>
+                  <ul className="mt-2 flex flex-wrap gap-1.5">
+                    {run.filesTouched.map((f) => (
+                      <li key={f} className="text-[11px] font-mono text-[var(--text-secondary)] bg-black/20 border border-[var(--border-subtle)] rounded-md px-2 py-0.5 break-all">{f}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* The run's evidence: screenshots it took while verifying its
+                  work, its report.md, and whatever test output it saved. */}
+              {artifacts.length > 0 && (
+                <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3" data-testid="coding-agent-artifacts">
+                  <p className={SECTION_LABEL}>{t("codingAgent.artifactsTitle")}</p>
+                  {images.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {images.map((a) => (
+                        <a
+                          key={a.name}
+                          href={artifactUrl(run.id, a.name)}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={[a.name, formatBytes(a.bytes)].filter(Boolean).join(" · ")}
+                          className="block rounded-lg border border-white/10 overflow-hidden hover:border-white/25"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element -- device-served bytes, no next/image loader on the box */}
+                          <img src={artifactUrl(run.id, a.name)} alt={a.name} loading="lazy" className="h-24 w-auto max-w-[12rem] object-cover" />
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                  {files.length > 0 && (
+                    <ul className="mt-2 space-y-0.5">
+                      {files.map((a) => (
+                        <li key={a.name} className="text-[11px]">
+                          {a.kind === "markdown" ? (
+                            <button
+                              type="button"
+                              onClick={() => setReport({ runId: run.id, name: a.name })}
+                              className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all text-left"
+                            >
+                              {a.name}
+                            </button>
+                          ) : (
+                            <a
+                              href={artifactUrl(run.id, a.name)}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all"
+                            >
+                              {a.name}
+                            </a>
+                          )}
+                          {formatBytes(a.bytes) && <span className="text-[var(--text-muted)]"> · {formatBytes(a.bytes)}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              {/* What was refused, spelled out. */}
+              {(run.deniedActions?.length ?? 0) > 0 && (
+                <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-3" data-testid="coding-agent-denied">
+                  <p className="text-[11px] font-medium text-amber-400">{t("codingAgent.deniedTitle")}</p>
+                  <ul className="mt-1 space-y-0.5">
+                    {run.deniedActions?.map((d, i) => (
+                      <li key={i} className="text-[11px] font-mono text-[var(--text-muted)] break-all">{d}</li>
+                    ))}
+                  </ul>
+                  <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">{t("codingAgent.deniedHelp")}</p>
+                </div>
+              )}
+
+              {/* The newest steps, as the runner recorded them. */}
+              {activity.length > 0 && (
+                <details className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3" data-testid="coding-agent-run-activity" open={isLive(run.status)}>
+                  <summary className={`${SECTION_LABEL} cursor-pointer list-none`}>
+                    {t("codingAgent.activityTitle")}
+                    <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{activity.length}</span>
+                  </summary>
+                  <ol className="mt-2 space-y-0.5 font-mono text-[11px] text-[var(--text-muted)] max-h-72 overflow-y-auto">
+                    {activity.map((line, i) => (
+                      <li key={i} className="break-words whitespace-pre-wrap">{line}</li>
+                    ))}
+                  </ol>
+                </details>
+              )}
+            </div>
+          );
+        })()}
 
         {/* One project, expanded: its data, its git state, its runs. */}
         {view.face === "project" && (<>
@@ -1057,404 +1671,7 @@ export default function CodingAgentApp() {
             </div>
           </div>
 
-        {/* The runs: on the project's own page — home stays a clean list of
-            projects, as the owner asked. */}
-        <div className="mt-4">
-          <button
-            type="button"
-            onClick={() => { setShowRuns((v) => !v); setRunsShown(RUNS_PAGE); }}
-            aria-expanded={showRuns}
-            data-testid="coding-agent-runs-toggle"
-            className="w-full flex items-center justify-between gap-2 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors"
-          >
-            <span className="flex items-center gap-2">
-              <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">history</span>
-              {t("codingAgent.projectRuns")}
-              {visibleRuns.length > 0 && <span className="text-[var(--text-muted)]">({visibleRuns.length})</span>}
-              {anyRunning && (
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-400 border border-amber-400/40 rounded-full px-2 py-0.5">
-                  {t("codingAgent.statusRunning")}
-                </span>
-              )}
-            </span>
-            <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
-              {showRuns ? "expand_less" : "expand_more"}
-            </span>
-          </button>
-
-          {showRuns && (
-            visibleRuns.length === 0 ? (
-              <p className="text-xs text-[var(--text-muted)] mt-2 px-1">{t("codingAgent.noRuns")}</p>
-            ) : (
-              <ul className="space-y-1.5 mt-2" data-testid="coding-agent-runs" ref={runsList}>
-                {visibleRuns.slice(0, runsShown).map((run) => {
-                  const details = [run.error, run.summary].filter(Boolean).join("\n\n");
-                  const artifacts = run.artifacts ?? [];
-                  const open = expanded === run.id;
-                  const tone = RUN_TONE[run.status];
-                  const action = RUN_ACTION[run.status];
-                  // Only once there is something to open — see openInTerminal:
-                  // a live tail needs only the transcript (which lands before
-                  // the session id on a fresh run), --resume needs the session.
-                  const canOpenTerminal = Boolean(
-                    run.sessionId || (run.status === "running" && run.transcriptPath),
-                  );
-                  const terminalLabel = run.status === "running"
-                    ? t("codingAgent.openLive")
-                    : t("codingAgent.openResume");
-                  // Watching a run is a RUN control, so it sits in the same row
-                  // as Pause and Stop rather than under them: the owner clicks a
-                  // working run to see what it is doing, and hunting for that
-                  // button a line below the two that stop it read as unrelated.
-                  const terminalButton = canOpenTerminal ? (
-                    <button
-                      type="button"
-                      onClick={() => openInTerminal(run)}
-                      data-testid={`coding-agent-terminal-${run.id}`}
-                      title={terminalLabel}
-                      className={action
-                        ? `${RUN_BUTTON} border-white/10 text-[var(--text-primary)] hover:bg-white/5`
-                        : BTN_SECONDARY}
-                    >
-                      {terminalLabel}
-                    </button>
-                  ) : null;
-                  // A draft has not run: its startedAt is when it was drafted
-                  // (the runner overwrites it at start), so a duration would
-                  // be time-since-drafting, which the "updated" line already
-                  // says — and the effort it will run with is read at start.
-                  const started = run.status !== "draft";
-                  const reviewedBy = runs.find((r) => r.reviewOf === run.id);
-                  return (
-                    <li key={run.id} data-run-id={run.id} className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${tone.chip}`}>
-                              {statusLabel(run.status)}
-                            </span>
-                            {/* Only while they are actually out: a count that
-                                lingers at 0 is noise on every finished run. */}
-                            {/* A run at high effort can be silent for minutes
-                                on its first turn. Show that it is thinking, so
-                                quiet never reads as stuck. */}
-                            {run.status === "running" && (run.thinkingTokens ?? 0) > 0 && (
-                              <span
-                                data-testid="coding-agent-thinking"
-                                className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40"
-                              >
-                                {t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 })}
-                              </span>
-                            )}
-                            {/* One green dot per sub-agent, so the fan-out is
-                                visible at a glance rather than read as a
-                                number. Filled while working, hollow once done. */}
-                            {(run.subagentsTotal ?? 0) > 0 && (
-                              <span
-                                className="flex items-center gap-1"
-                                data-testid="coding-agent-subagent-dots"
-                                title={Object.entries(run.subagentsByType ?? {}).map(([k, n]) => `${n}× ${k}`).join(", ")}
-                              >
-                                {Array.from({ length: Math.min(run.subagentsTotal ?? 0, 12) }).map((_, i) => (
-                                  <span
-                                    key={i}
-                                    className={`inline-block h-2 w-2 rounded-full ${
-                                      i < (run.subagentsActive ?? 0)
-                                        ? "bg-emerald-400 animate-pulse"
-                                        : "bg-emerald-400/35"
-                                    }`}
-                                  />
-                                ))}
-                                <span className="text-[10px] font-semibold text-emerald-400 ml-0.5">
-                                  {run.subagentsTotal}
-                                </span>
-                              </span>
-                            )}
-                            {/* A review pass names the run it reviewed, and
-                                that run names its reviewer: the fixed review
-                                task reads like any other run otherwise, and
-                                with several runs on a page the pair could
-                                not be told apart. */}
-                            {run.pr && run.pr.phase !== "failed" && (
-                              // The pull request as one chip: its phase, and
-                              // while checks run, how many have answered. A
-                              // link once GitHub has given us one.
-                              <a
-                                href={run.pr.url ?? undefined}
-                                target="_blank"
-                                rel="noreferrer"
-                                onClick={(e) => e.stopPropagation()}
-                                data-testid={`coding-agent-pr-${run.id}`}
-                                title={run.pr.detail ?? undefined}
-                                className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 no-underline inline-flex items-center gap-1 ${
-                                  run.pr.phase === "merged"
-                                    ? "text-emerald-400 border-emerald-400/40"
-                                    : run.pr.phase === "blocked"
-                                      ? "text-amber-400 border-amber-400/40"
-                                      : "text-sky-300 border-sky-400/40"
-                                } ${run.pr.url ? "hover:bg-white/5" : "pointer-events-none"}`}
-                              >
-                                {run.pr.phase === "waiting" && (
-                                  <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-sky-300 motion-safe:animate-pulse" />
-                                )}
-                                {run.pr.phase === "waiting"
-                                  ? t("codingAgent.prWaiting", { done: run.pr.checks.passed + run.pr.checks.failed, total: run.pr.checks.total })
-                                  : run.pr.phase === "merged"
-                                    ? t("codingAgent.prMerged")
-                                    : run.pr.phase === "blocked"
-                                      ? t("codingAgent.prBlocked")
-                                      : t("codingAgent.prOpening")}
-                              </a>
-                            )}
-                            {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
-                            {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
-                            {run.projectId && <span className="text-[11px] text-[var(--text-muted)]">{run.projectId}</span>}
-                            <span className="text-[11px] font-mono text-[var(--text-muted)] opacity-60">{run.id}</span>
-                          </div>
-                          <p className="text-xs text-[var(--text-primary)] mt-1 break-words">
-                            {run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 80)}
-                          </p>
-                          <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
-                            {started && t("codingAgent.runMeta", { turns: run.numTurns, files: run.filesTouched.length, duration: duration(run) })}
-                            {started && " · "}
-                            {run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}
-                            {started && run.effort && ` · ${t(`codingAgent.effort.${run.effort}`)}`}
-                            {(run.tokensUsed ?? 0) > 0 && ` · ${tokens(run.tokensUsed ?? 0)} ${t("codingAgent.tokensWord")}`}
-                            {(run.subagentsTotal ?? 0) > 0
-                              && ` · ${Object.entries(run.subagentsByType ?? {}).map(([k, n]) => `${n}× ${k}`).join(", ")}`}
-                            {run.permissionDenials > 0 && (
-                              <span className="text-amber-400"> · {t("codingAgent.denials", { n: run.permissionDenials })}</span>
-                            )}
-                          </p>
-                          {isLive(run.status) && (
-                            <RunProgressBar
-                              estimate={estimateRunProgress(run, now)}
-                              color={tone.color}
-                              timeLeft={t("codingAgent.timeLeft")}
-                              testId={`coding-agent-progress-${run.id}`}
-                              className="mt-1"
-                            />
-                          )}
-                          {/* Which models did the work, and how fresh this is. */}
-                          {((run.modelsUsed?.length ?? 0) > 0 || run.lastActivityAt) && (
-                            <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-0.5" data-testid="coding-agent-run-stats">
-                              {(run.modelsUsed?.length ?? 0) > 0 && run.modelsUsed?.join(" + ")}
-                              {(run.modelsUsed?.length ?? 0) > 0 && run.lastActivityAt ? " · " : ""}
-                              {run.lastActivityAt && `${t("codingAgent.updated")} ${timeAgo(run.lastActivityAt, t)}`}
-                            </p>
-                          )}
-                        </div>
-                        <div className="flex flex-col items-end gap-1 shrink-0">
-                          {/* A held run: its first action, then the way out
-                              of it — a draft is discarded, anything with a
-                              process or a session behind it is stopped. */}
-                          {action && (
-                            <div className="flex gap-1">
-                              <button
-                                type="button"
-                                onClick={() => runAction(run.id, action.route, t(action.failed))}
-                                disabled={busy === run.id}
-                                data-testid={`coding-agent-${action.route}-${run.id}`}
-                                className={`${RUN_BUTTON} ${action.className}`}
-                              >
-                                {t(action.label)}
-                              </button>
-                              {run.status === "draft" ? (
-                                <button
-                                  type="button"
-                                  onClick={() => runAction(run.id, "draft", t("codingAgent.discardFailed"), { method: "DELETE" })}
-                                  disabled={busy === run.id}
-                                  data-testid={`coding-agent-discard-${run.id}`}
-                                  className={`${RUN_BUTTON} border-white/10 text-[var(--text-muted)] hover:bg-white/5`}
-                                >
-                                  {t("codingAgent.discardDraft")}
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  onClick={() => runAction(run.id, "stop", t("codingAgent.stopFailed"))}
-                                  disabled={busy === run.id}
-                                  className={`${RUN_BUTTON} border-white/10 text-[var(--text-primary)] hover:bg-white/5`}
-                                >
-                                  {t("codingAgent.stop")}
-                                </button>
-                              )}
-                              {terminalButton}
-                            </div>
-                          )}
-                          {/* Straight into the session: a live tail while it
-                              works, or --resume once it has finished. */}
-                          {github?.connected && run.commit && (
-                            <button
-                              type="button"
-                              onClick={() => void backup({ projectId: run.projectId, directory: run.directory }, run.id)}
-                              disabled={busy === `backup-${run.id}`}
-                              data-testid={`coding-agent-backup-${run.id}`}
-                              className={BTN_SECONDARY}
-                            >
-                              {busy === `backup-${run.id}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
-                            </button>
-                          )}
-                          {/* A settled run has no Pause/Stop row to sit in,
-                              so its Resume button stands on its own here. */}
-                          {!action && terminalButton}
-                          {(details || artifacts.length > 0) && (
-                            <button
-                              type="button"
-                              onClick={() => setExpanded(open ? null : run.id)}
-                              aria-expanded={open}
-                              className="text-xs px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
-                            >
-                              {open ? t("codingAgent.hideDetails") : t("codingAgent.showDetails")}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                      {/* Which helpers are out and what each is doing — a
-                          count alone does not say whether the run is stuck on
-                          one search or fanned across three files. */}
-                      {(run.activeSubagents?.length ?? 0) > 0 && (
-                        <ul className="mt-2 space-y-1" data-testid="coding-agent-active-subagents">
-                          {run.activeSubagents?.map((a, i) => (
-                            <li key={i} className="flex items-start gap-2 text-[11px]">
-                              <span className="material-symbols-rounded text-sky-400 animate-pulse shrink-0" style={{ fontSize: 13 }} aria-hidden="true">
-                                sync
-                              </span>
-                              <span className="text-sky-300 font-medium shrink-0">{a.type}</span>
-                              <span className="text-[var(--text-muted)] break-words min-w-0">{a.description}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-
-                      {/* What was refused, spelled out. The count alone said
-                          "1 action was not allowed" and left the owner to
-                          guess which — and the answer is usually a command
-                          shape worth knowing about. */}
-                      {open && (run.deniedActions?.length ?? 0) > 0 && (
-                        <div className="mt-2" data-testid="coding-agent-denied">
-                          <p className="text-[11px] font-medium text-amber-400">
-                            {t("codingAgent.deniedTitle")}
-                          </p>
-                          <ul className="mt-1 space-y-0.5">
-                            {run.deniedActions?.map((d, i) => (
-                              <li key={i} className="text-[11px] font-mono text-[var(--text-muted)] break-all">{d}</li>
-                            ))}
-                          </ul>
-                          <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
-                            {t("codingAgent.deniedHelp")}
-                          </p>
-                        </div>
-                      )}
-
-                      {/* The run's evidence: screenshots it took while
-                          verifying its work, its report.md, and whatever test
-                          output it saved. Images render as thumbnails; a
-                          markdown file opens rendered in the app's own
-                          dialog; every other file opens in a new tab as the
-                          plain text the route serves it as. */}
-                      {open && artifacts.length > 0 && (() => {
-                        const images = artifacts.filter((a) => a.kind === "image");
-                        const files = artifacts.filter((a) => a.kind !== "image");
-                        return (
-                          <div className="mt-2" data-testid="coding-agent-artifacts">
-                            <p className="text-[11px] font-medium text-sky-300">
-                              {t("codingAgent.artifactsTitle")}
-                            </p>
-                            {images.length > 0 && (
-                              <div className="mt-1.5 flex flex-wrap gap-2">
-                                {images.map((a) => (
-                                  <a
-                                    key={a.name}
-                                    href={artifactUrl(run.id, a.name)}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    title={[a.name, formatBytes(a.bytes)].filter(Boolean).join(" · ")}
-                                    className="block rounded-lg border border-white/10 overflow-hidden hover:border-white/25"
-                                  >
-                                    {/* eslint-disable-next-line @next/next/no-img-element -- device-served bytes, no next/image loader on the box */}
-                                    <img
-                                      src={artifactUrl(run.id, a.name)}
-                                      alt={a.name}
-                                      loading="lazy"
-                                      className="h-20 w-auto max-w-[10rem] object-cover"
-                                    />
-                                  </a>
-                                ))}
-                              </div>
-                            )}
-                            {files.length > 0 && (
-                              <ul className="mt-1.5 space-y-0.5">
-                                {files.map((a) => (
-                                  <li key={a.name} className="text-[11px]">
-                                    {a.kind === "markdown" ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => setReport({ runId: run.id, name: a.name })}
-                                        className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all text-left"
-                                      >
-                                        {a.name}
-                                      </button>
-                                    ) : (
-                                      <a
-                                        href={artifactUrl(run.id, a.name)}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all"
-                                      >
-                                        {a.name}
-                                      </a>
-                                    )}
-                                    {formatBytes(a.bytes) && <span className="text-[var(--text-muted)]"> · {formatBytes(a.bytes)}</span>}
-                                  </li>
-                                ))}
-                              </ul>
-                            )}
-                          </div>
-                        );
-                      })()}
-
-                      {open && run.error && (
-                        <pre className="mt-2 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words font-sans leading-relaxed">
-                          {run.error}
-                        </pre>
-                      )}
-                      {/* The summary is the run's closing message, and that is
-                          markdown — "## What I built", a table of files. Drawn
-                          through the chat's renderer, the same one the
-                          assistant's replies use, so it reads like the chat
-                          instead of like a wall of hashes and pipes. The
-                          renderer builds elements from the text and never
-                          injects HTML, which is what lets agent-written words
-                          on to the owner's screen at all. The renderer's own
-                          tables and code blocks scroll sideways inside
-                          themselves; min-w-0 keeps a long token from widening
-                          the row past the window. */}
-                      {open && run.summary && (
-                        <div
-                          data-testid="coding-agent-summary"
-                          className="mt-2 text-xs text-[var(--text-secondary)] leading-relaxed max-h-64 overflow-y-auto min-w-0 break-words [&_img]:max-w-full"
-                        >
-                          {renderText(run.summary, t("chat.table"))}
-                        </div>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            )
-          )}
-          {showRuns && visibleRuns.length > runsShown && (
-            <button
-              type="button"
-              onClick={() => setRunsShown((n) => n + RUNS_PAGE)}
-              data-testid="coding-agent-runs-more"
-              className={`${BTN_SECONDARY} w-full mt-2`}
-            >
-              {t("codingAgent.more")} ({visibleRuns.length - runsShown})
-            </button>
-          )}
-        </div>
+        {runsSection}
         </>)}
 
         {error && <div className="mt-3"><StatusMessage type="error" message={error} /></div>}

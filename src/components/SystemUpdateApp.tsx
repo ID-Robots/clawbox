@@ -75,7 +75,13 @@ function StepIcon({ status }: { status: StepStatus }) {
   </span>;
 }
 
-export default function SystemUpdateApp() {
+/**
+ * `embedded`: drawn inside another pane — Settings → System Update — which
+ * brings its own padding and width, so the app skips its window chrome (the
+ * full-height centring) and just lays its cards out. The desktop window and
+ * the standalone page keep the default.
+ */
+export default function SystemUpdateApp({ embedded = false }: { embedded?: boolean } = {}) {
   const { t } = useT();
   const [versions, setVersions] = useState<VersionInfo | null>(null);
   const [versionsError, setVersionsError] = useState<string | null>(null);
@@ -374,8 +380,8 @@ export default function SystemUpdateApp() {
   const clawboxAvail = (!!versions && componentNeedsUpdate(versions.clawbox)) || driftDetected;
 
   return (
-    <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
-      <div className="min-h-full w-full flex items-start justify-center p-6 pt-10 bg-[var(--bg-deep)]">
+    <div className={embedded ? "relative w-full text-gray-200" : "relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200"} data-testid="system-update-app">
+      <div className={embedded ? "w-full" : "min-h-full w-full flex items-start justify-center p-6 pt-10 bg-[var(--bg-deep)]"}>
         <div className="w-full max-w-2xl space-y-4">
           {/* HERO */}
           <div className={`${CARD} relative overflow-hidden flex flex-col items-center text-center px-6 pt-10 pb-8 bg-gradient-to-br ${heroBgClass} to-transparent`}>

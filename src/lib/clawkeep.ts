@@ -24,6 +24,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { findOpenclawBin } from "@/lib/openclaw-config";
+import { get as configGet, set as configSet } from "@/lib/config-store";
 import { getEdition } from "@/lib/harness";
 import { backupSourceFor } from "@/lib/harness/backup-source";
 import type { HarnessId } from "@/lib/harness/transport";
@@ -108,6 +109,10 @@ export const DEFAULT_SCHEDULE: ClawKeepSchedule = {
 
 export interface ClawKeepStatus {
   paired: boolean;
+  /** Has the owner been through the ClawKeep setup wizard? The app shows the
+   *  wizard instead of the dashboard until this is true — or until the box
+   *  is paired, which is the wizard's whole point. */
+  setupComplete: boolean;
   configured: boolean;
   server: string;
   lastBackupAtMs: number;
@@ -697,9 +702,26 @@ export async function clearPassphrase(): Promise<{ removed: boolean }> {
   return { removed: resp.removed ?? false };
 }
 
+/**
+ * The setup wizard's completion flag, in the config store like the coding
+ * agent's and Memory Shard's. Cleared by nothing but a factory reset: a
+ * backup failing, or an unpair, must not send the owner back to the front
+ * door of a feature they already set up.
+ */
+export const CLAWKEEP_SETUP_CONFIG_KEY = "clawkeep_setup_complete";
+
+export async function getClawKeepSetupComplete(): Promise<boolean> {
+  return (await configGet(CLAWKEEP_SETUP_CONFIG_KEY)) === true;
+}
+
+export async function setClawKeepSetupComplete(done: boolean): Promise<boolean> {
+  await configSet(CLAWKEEP_SETUP_CONFIG_KEY, done);
+  return done;
+}
+
 export async function getStatus(): Promise<ClawKeepStatus> {
   await ensureDataDir();
-  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, schedule, encryptionConfigured] = await Promise.all([
+  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, schedule, encryptionConfigured, setupComplete] = await Promise.all([
     readToken(),
     readConfigToml(),
     readStateFile(),
@@ -708,6 +730,7 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     isRestoring(),
     readSchedule(),
     isEncryptionConfigured(),
+    getClawKeepSetupComplete(),
   ]);
 
   const server = readServer(configToml);
@@ -719,6 +742,7 @@ export async function getStatus(): Promise<ClawKeepStatus> {
   const source = backupSourceFor(agent);
   return {
     paired: !!token,
+    setupComplete,
     // openclaw decides what's in the archive — we no longer ask the user
     // to declare paths, so any paired device with a valid config is
     // "configured" enough to run.

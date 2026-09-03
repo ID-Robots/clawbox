@@ -390,6 +390,7 @@ describe("the badge", () => {
       completedAt: null, status: "running" as const, source: "agent" as const,
       subagentsTotal: 0, subagentsActive: 0, subagentsByType: {}, tokensUsed: 0, thinkingTokens: 0,
       filesTouched: 0, numTurns: 0, progress: [], screenshots: [], todos: [],
+      transcriptPath: null, sessionId: null, directory: null,
     };
     const { rerender } = render(
       <CodingAgentActivityPill run={run} labels={LABELS} openLabel={OPEN} onOpen={onOpen} />,
@@ -408,6 +409,31 @@ describe("the badge", () => {
  * mcp__clawbox__browser_screenshot with good looking ui element that we can
  * also click and open the screenshot."
  */
+describe("the card's Live view", () => {
+  const base = {
+    id: "run-live001", projectId: "timer", task: "x",
+    startedAt: NOW - 30_000, completedAt: null as number | null,
+    source: "agent" as const,
+    subagentsTotal: 0, subagentsActive: 0, subagentsByType: {},
+    tokensUsed: 0, thinkingTokens: 0, filesTouched: 0, numTurns: 0,
+    progress: [], screenshots: [], todos: [],
+    transcriptPath: "/home/clawbox/.claude-ds/projects/x/s.jsonl", sessionId: null, directory: "/home/clawbox/Projects/timer",
+  };
+
+  it("offers the live terminal only while the run works, and asks the desktop for it", () => {
+    const onLiveView = vi.fn();
+    const { rerender } = render(
+      <CodingAgentActivityPill run={{ ...base, status: "running" }} labels={LABELS} openLabel={OPEN} liveViewLabel="Live view" onLiveView={onLiveView} />,
+    );
+    fireEvent.click(screen.getByTestId("coding-agent-activity-live-view"));
+    expect(onLiveView).toHaveBeenCalledTimes(1);
+    rerender(
+      <CodingAgentActivityPill run={{ ...base, status: "completed", completedAt: NOW }} labels={LABELS} openLabel={OPEN} liveViewLabel="Live view" onLiveView={onLiveView} />,
+    );
+    expect(screen.queryByTestId("coding-agent-activity-live-view")).toBeNull();
+  });
+});
+
 describe("the card, expanded", () => {
   const SHOT_URL = artifactUrl("run-k3x9q2ab", "after.png");
   const card = (over: Record<string, unknown> = {}, onPreview?: (src: string, alt: string) => void) => {
@@ -418,6 +444,7 @@ describe("the card, expanded", () => {
           startedAt: NOW - 30_000, completedAt: null,
           status: "running", source: "agent",
           subagentsTotal: 0, subagentsActive: 0, subagentsByType: {},
+          transcriptPath: null, sessionId: null, directory: null,
           tokensUsed: 46_000, thinkingTokens: 0, filesTouched: 3, numTurns: 0,
           progress: ["Write style.css", "Now the JavaScript:", "$ node --check /home/clawbox/clawbox/data/app.js", "mcp__clawbox__browser_screenshot"],
           screenshots: ["before.png", "after.png"],
@@ -588,6 +615,7 @@ describe("the plan and the signs of life", () => {
           startedAt: NOW - 30_000, completedAt: null,
           status: "running", source: "agent",
           subagentsTotal: 0, subagentsActive: 0, subagentsByType: {},
+          transcriptPath: null, sessionId: null, directory: null,
           tokensUsed: 0, thinkingTokens: 0, filesTouched: 0, numTurns: 0,
           progress: ["Read app.js", "Plan: 3 tasks, 1 done"],
           screenshots: [],

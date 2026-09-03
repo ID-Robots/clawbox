@@ -33,6 +33,60 @@ export function openNewAppCard(): void {
 export const OPEN_SETTINGS_SECTION_EVENT = "clawbox:open-settings-section";
 
 /**
+ * "Open the Coding Agent app on this run's page."
+ *
+ * Two handoffs, like the settings section: the `window` property survives a
+ * COLD open (the app's listener mounts after this fires), the event reaches
+ * an app already on screen. The finish card's Open button ends here rather
+ * than at a bare `openApp("coding")`, which dropped the owner on the home
+ * page and left them to find the run.
+ */
+export const OPEN_CODING_RUN_EVENT = "clawbox:open-coding-run";
+
+/** The two handoffs WITHOUT opening the app — for a desktop that opens it itself. */
+export function handoffCodingRun(runId: string): void {
+  if (typeof window === "undefined") return;
+  (window as Window & { __clawboxPendingCodingRun?: string }).__clawboxPendingCodingRun = runId;
+  window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId } }));
+}
+
+export function dispatchOpenCodingRun(runId: string): void {
+  if (typeof window === "undefined") return;
+  handoffCodingRun(runId);
+  dispatchOpenApp("coding");
+}
+
+/** The run handed off before the app mounted, taken exactly once. */
+export function takePendingCodingRun(): string | null {
+  if (typeof window === "undefined") return null;
+  const w = window as Window & { __clawboxPendingCodingRun?: unknown };
+  const id = typeof w.__clawboxPendingCodingRun === "string" ? w.__clawboxPendingCodingRun : null;
+  delete w.__clawboxPendingCodingRun;
+  return id;
+}
+
+/**
+ * "Pop the live terminal preview of this run" — the chat's run card asks the
+ * desktop, which owns the one floating preview (CodingRunLivePreview), so a
+ * second click on the same run raises it rather than opening a second one.
+ */
+export const CODING_LIVE_PREVIEW_EVENT = "clawbox:coding-live-preview";
+
+export interface CodingLivePreviewRequest {
+  runId: string;
+  /** Where Claude Code keeps the run's transcript — the live tail. */
+  transcriptPath: string | null;
+  /** The session to `--resume` once the run has finished. */
+  sessionId: string | null;
+  directory: string | null;
+}
+
+export function dispatchCodingLivePreview(detail: CodingLivePreviewRequest): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(CODING_LIVE_PREVIEW_EVENT, { detail }));
+}
+
+/**
  * "The chat's model or provider selection changed."
  *
  * The OpenClaw-side counterpart to `HERMES_MODEL_STATE_EVENT`, and a signal
