@@ -33,7 +33,7 @@ let posts: { url: string; body: unknown }[] = [];
 
 type PostAnswer = (url: string) => Promise<Response> | Response | undefined;
 
-function stubFetch(over: { llmDefault?: boolean; ttsChoice?: string; sttPrimary?: string; post?: PostAnswer } = {}) {
+function stubFetch(over: { llmDefault?: boolean; ttsChoice?: string; sttPrimary?: string; post?: PostAnswer; models?: unknown[] } = {}) {
   posts = [];
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -45,7 +45,7 @@ function stubFetch(over: { llmDefault?: boolean; ttsChoice?: string; sttPrimary?
       // default is a plain success.
       return (await over.post?.(url)) ?? json({ ok: true });
     }
-    if (url.startsWith("/setup-api/local-models")) return json({ models: MODELS, unavailable: [] });
+    if (url.startsWith("/setup-api/local-models")) return json({ models: over.models ?? MODELS, unavailable: [] });
     if (url.startsWith("/setup-api/providers/status")) {
       return json({ harness: "openclaw", degraded: false, defaultProvider: over.llmDefault ? "llamacpp" : "clawai", providers: [
         { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: !over.llmDefault, section: "ai", enabled: true },
@@ -427,4 +427,27 @@ describe("LocalAiPanel", () => {
     expect(assign).toHaveBeenCalledWith("/app/memory-shard");
     expect(opened).toEqual([]);
   });
+  it("offers to install an absent Kokoro through the voice install route", async () => {
+    const absent = MODELS.map((m) => (m.id === "kokoro" ? { ...m, installed: false, enabled: null, running: "not-installed", control: "none", detail: "Not installed." } : m));
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/x-ndjson" } });
+    stubFetch({ models: absent, post: (url) => (url === "/setup-api/tts/install" ? json({ success: true, status: "The voice on this box is installed." }) : undefined) });
+    renderPanel();
+    await screen.findByTestId("local-model-kokoro");
+    fireEvent.click(screen.getByTestId("local-model-menu-kokoro"));
+    fireEvent.click(await screen.findByTestId("local-model-action-kokoro-install"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts/install", body: {} }));
+  });
+
+  it("says, in amber, when a voice pick settled on the default instead", async () => {
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    stubFetch({ post: (url) => (url === "/setup-api/tts" ? json({ choice: "auto", fallback: { requested: "local", reason: "not_wired" } }) : undefined) });
+    renderPanel();
+    await screen.findByTestId("local-model-kokoro");
+    fireEvent.click(screen.getByTestId("local-model-menu-kokoro"));
+    fireEvent.click(await screen.findByTestId("local-model-action-kokoro-primary"));
+    const notice = await screen.findByTestId("local-ai-notice");
+    expect(notice).toHaveTextContent(/default voice/i);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
 });

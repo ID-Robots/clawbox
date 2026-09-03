@@ -270,6 +270,29 @@ describe("where a run may work", () => {
     await expect(lib.resolveWorkingDirectory({ directory: path.join(home, "nope") })).rejects.toMatchObject({ kind: "not_found" });
   });
 
+  it("confines a run to a folder INSIDE the project folder once one is set", async () => {
+    // The owner's rule: every run's folder is a project the owner can find
+    // again, and the project folder is the shelf they all sit on.
+    const projectsDir = path.join(home, "Projects");
+    fs.mkdirSync(path.join(projectsDir, "shop"), { recursive: true });
+    fs.mkdirSync(path.join(home, "elsewhere"), { recursive: true });
+    writeConfig({ coding_agent_default_directory: projectsDir });
+    await expect(lib.resolveWorkingDirectory({ directory: path.join(projectsDir, "shop") })).resolves.toMatchObject({ directory: fs.realpathSync(path.join(projectsDir, "shop")) });
+    await expect(lib.resolveWorkingDirectory({ directory: "shop" })).resolves.toMatchObject({ directory: fs.realpathSync(path.join(projectsDir, "shop")) });
+    await expect(lib.resolveWorkingDirectory({ directory: path.join(home, "elsewhere") })).rejects.toMatchObject({ kind: "invalid", message: expect.stringContaining("inside your project folder") });
+    // The project folder itself is not a run's folder either.
+    await expect(lib.resolveWorkingDirectory({ directory: projectsDir })).rejects.toMatchObject({ kind: "invalid" });
+    // And nothing at all is not "the project folder": it asks for a folder in it.
+    await expect(lib.resolveWorkingDirectory({})).rejects.toMatchObject({ kind: "invalid", message: expect.stringContaining(projectsDir) });
+    // A code project stays fine wherever it lives.
+    fs.mkdirSync(path.join(root, "data", "code-projects", "site"), { recursive: true });
+    await expect(lib.resolveWorkingDirectory({ projectId: "site" })).resolves.toMatchObject({ projectId: "site" });
+    // Moving the project folder itself is still allowed: the setting is
+    // validated as a default, not as a run's folder.
+    fs.mkdirSync(path.join(home, "Work"), { recursive: true });
+    await expect(lib.setDefaultDirectory(path.join(home, "Work"))).resolves.toBe(fs.realpathSync(path.join(home, "Work")));
+  });
+
   it("refuses the home directory itself — acceptEdits would auto-approve edits to ~/.bashrc", async () => {
     await expect(lib.resolveWorkingDirectory({ directory: home })).rejects.toMatchObject({ kind: "invalid" });
   });
@@ -346,8 +369,14 @@ describe("a run", () => {
     expect(joined).toContain(`--max-turns ${lib.DEFAULT_MAX_TURNS}`);
     // Full command access is permanent now, so the allow-list is Bash(*) and
     // the command deny-list is gone. The FILE rules below still ship.
-    expect(joined).toContain(`--tools ${lib.toolsFor(true)}`);
+    expect(joined).toContain(`--tools ${lib.toolsFor(true, run.effort)}`);
     expect(argv[argv.indexOf("--allowedTools") + 1]).toBe("Bash(*)");
+    // The default effort is ultracode, and ultracode's orchestration tool is
+    // listed AND pre-approved — listed alone it is refused headlessly.
+    expect(run.effort).toBe(lib.ULTRACODE_EFFORT);
+    expect(argv[argv.indexOf("--tools") + 1].split(",")).toContain(lib.WORKFLOW_TOOL);
+    expect(argv[argv.indexOf("--allowedTools") + 2]).toBe(lib.WORKFLOW_TOOL);
+    expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain("Ultracode is on");
     for (const rule of lib.BASH_DENYLIST) expect(argv).not.toContain(rule);
     expect(argv).toContain("--disallowedTools");
     expect(argv).toContain("--agents");
@@ -1291,6 +1320,248 @@ describe("counting sub-agents", () => {
     expect(run.effort).toBe("low");
     // And it actually reached the wrapper's environment.
     expect(fs.readFileSync(envFile(), "utf-8")).toContain("CLAUDE_DS_EFFORT=low");
+    // A fixed level is no opt-in to orchestration: no Workflow tool, no
+    // pre-approval for it, none of the ultracode brief.
+    const argv = fs.readFileSync(argvFile(), "utf-8").split("\n").filter(Boolean);
+    expect(argv[argv.indexOf("--tools") + 1].split(",")).not.toContain(lib.WORKFLOW_TOOL);
+    expect(argv).not.toContain(lib.WORKFLOW_TOOL);
+    expect(argv[argv.indexOf("--append-system-prompt") + 1]).not.toContain("Ultracode is on");
+  });
+
+  it("keeps a background helper out until its task_notification, and bills a workflow from it", async () => {
+    // Claude Code ≥ 2.1 answers the Agent call with a launch receipt and the
+    // helper keeps working; the same for a Workflow. Read as completions, the
+    // receipts had every helper "finished" the moment it started.
+    const AGENT = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "call_a", name: "Agent", input: { subagent_type: "explorer", description: "map the router" } }] },
+    });
+    const AGENT_RECEIPT = JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "call_a", content: [{ type: "text", text: "Async agent launched successfully. (This tool result is internal metadata)\nagentId: abc" }] }] },
+    });
+    const WORKFLOW = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "call_w", name: "Workflow", input: { script: "export const meta = { name: \"sweep\", description: \"review every page\" }\nreturn 1" } }] },
+    });
+    const WORKFLOW_RECEIPT = JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "call_w", content: "Workflow launched in background. Task ID: t1\nSummary: review every page" }] },
+    });
+    const AGENT_DONE = JSON.stringify({ type: "system", subtype: "task_notification", task_id: "t0", tool_use_id: "call_a", status: "completed", usage: { total_tokens: 500 } });
+    const WORKFLOW_DONE = JSON.stringify({ type: "system", subtype: "task_notification", task_id: "t1", tool_use_id: "call_w", status: "completed", usage: { total_tokens: 2368 } });
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${AGENT}'`,
+      `echo '${AGENT_RECEIPT}'`,
+      `echo '${WORKFLOW}'`,
+      `echo '${WORKFLOW_RECEIPT}'`,
+      "sleep 20",
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const started = await lib.startRun({ task: "wide job", projectId: "site", source: "agent" });
+    let live = lib.getRun(started.id)!;
+    for (let i = 0; i < 60 && live.subagentsTotal < 2; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      live = lib.getRun(started.id)!;
+    }
+    // Both receipts arrived; both helpers are still out.
+    expect(live.subagentsTotal).toBe(2);
+    expect(live.subagentsByType).toEqual({ explorer: 1, workflow: 1 });
+    expect(live.activeSubagents.map((a) => a.type)).toEqual(["explorer", "workflow"]);
+    expect(live.activeSubagents[1].description).toBe("review every page");
+    expect(live.progress.join("\n")).toContain("Workflow started: review every page");
+    expect(live.progress.join("\n")).not.toContain("finished");
+    lib.stopRun(started.id);
+    await finished(started.id);
+
+    // And the notifications close them — the workflow's spend counted once,
+    // the explorer's not (its own turns are on the stream and billed there).
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${AGENT}'`,
+      `echo '${AGENT_RECEIPT}'`,
+      `echo '${WORKFLOW}'`,
+      `echo '${WORKFLOW_RECEIPT}'`,
+      `echo '${WORKFLOW_DONE}'`,
+      `echo '${AGENT_DONE}'`,
+      `echo '${WORKFLOW_DONE}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":4,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    const run = await finished((await lib.startRun({ task: "wide job", projectId: "site", source: "agent" })).id);
+    expect(run.status).toBe("completed");
+    expect(run.subagentsTotal).toBe(2);
+    expect(run.subagentsActive).toBe(0);
+    expect(run.tokensUsed).toBe(2368);
+    const progress = run.progress.join("\n");
+    expect(progress.match(/Workflow finished/g) ?? []).toHaveLength(1);
+    expect(progress.match(/Sub-agent finished \(explorer\)/g) ?? []).toHaveLength(1);
+  });
+
+  it("bills a workflow as it runs, from its task_progress totals, and stops at the ceiling", async () => {
+    // The CLI reports a workflow's cumulative spend on every task_progress
+    // (0 → 2368 → 2368 in the probe); the ceiling must hold while the
+    // fan-out runs, not after it.
+    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_token_limit: 10_000 });
+    const WORKFLOW = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "call_w", name: "Workflow", input: { script: "export const meta = { name: \"sweep\", description: \"check\" }" } }] },
+    });
+    const RECEIPT = JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "call_w", content: "Workflow launched in background. Task ID: t1" }] } });
+    const progressAt = (n: number) => JSON.stringify({ type: "system", subtype: "task_progress", task_id: "t1", tool_use_id: "call_w", usage: { total_tokens: n } });
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${WORKFLOW}'`,
+      `echo '${RECEIPT}'`,
+      `echo '${progressAt(0)}'`,
+      `echo '${progressAt(4_000)}'`,
+      `echo '${progressAt(4_000)}'`,
+      `echo '${progressAt(12_000)}'`,
+      "sleep 20",
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "sweep", projectId: "site", source: "agent" })).id);
+    expect(run.status).toBe("stopped");
+    expect(run.resumable).toBe(true);
+    // Deltas, never the running total twice: 0 + 4000 + 0 + 8000.
+    expect(run.tokensUsed).toBe(12_000);
+    expect(run.error).toMatch(/Stopped at the token limit \(12,000 of 10,000\)/);
+    expect(run.progress.join("\n")).toContain("Token limit reached");
+  });
+
+  it("takes a refused launch back out of the counts", async () => {
+    // Listed without approval, the Workflow tool answers an is_error result
+    // ("Review dynamic workflow before running"): a helper that never ran.
+    const WORKFLOW = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "call_w", name: "Workflow", input: { script: "export const meta = { name: \"x\", description: \"probe\" }" } }] },
+    });
+    const REFUSED = JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "call_w", is_error: true, content: "Review dynamic workflow before running" }] } });
+    const AGENT = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "call_a", name: "Agent", input: { subagent_type: "explorer", description: "map it" } }] },
+    });
+    const AGENT_DONE_SYNC = JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "call_a", content: "found it in a.js" }] } });
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${WORKFLOW}'`,
+      `echo '${REFUSED}'`,
+      `echo '${AGENT}'`,
+      `echo '${AGENT_DONE_SYNC}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":3,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "probe", projectId: "site", source: "agent" })).id);
+    expect(run.subagentsTotal).toBe(1);
+    expect(run.subagentsByType).toEqual({ explorer: 1 });
+    const progress = run.progress.join("\n");
+    expect(progress).toContain("Workflow refused");
+    expect(progress).not.toContain("Workflow finished");
+    // An older CLI's synchronous answer still closes the helper as finished.
+    expect(progress).toContain("Sub-agent finished (explorer)");
+  });
+
+  it("adds up the CLI's continuations: two results, one run", async () => {
+    // A -p run restarted by a background helper emits a second init and a
+    // second result whose num_turns and permission_denials are per segment
+    // (the probe: 4 turns then 1; two denials then none).
+    const DENIED = JSON.stringify({
+      type: "result", subtype: "success", num_turns: 4, result: "waiting on the helper",
+      permission_denials: [{ tool_name: "Workflow", tool_input: { script: "x" } }, { tool_name: "Workflow", tool_input: { script: "y" } }],
+    });
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${DENIED}'`,
+      `echo '${INIT}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"all done","permission_denials":[]}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "two segments", projectId: "site", source: "agent" })).id);
+    expect(run.status).toBe("completed");
+    expect(run.numTurns).toBe(5);
+    expect(run.permissionDenials).toBe(2);
+    expect(run.deniedActions).toHaveLength(2);
+    expect(run.summary).toBe("all done");
+    const progress = run.progress.join("\n");
+    expect(progress.match(/Started with/g) ?? []).toHaveLength(1);
+    expect(progress).toContain("Continuing after a background helper finished");
+  });
+
+  it("bills an API message once, however many content blocks the CLI streams it as", async () => {
+    // 2.1.259 sends one assistant event per content block, each with the
+    // message's whole usage: thinking, then tool_use. Billed per event a turn
+    // cost double and the owner's ceiling tripped at half its number.
+    const usage = { input_tokens: 1_000, output_tokens: 100, cache_read_input_tokens: 5_000 };
+    const THINK = JSON.stringify({ type: "assistant", message: { id: "msg_1", usage, content: [{ type: "thinking", thinking: "…" }] } });
+    const ACT = JSON.stringify({ type: "assistant", message: { id: "msg_1", usage, content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } }] } });
+    const NEXT = JSON.stringify({ type: "assistant", message: { id: "msg_2", usage, content: [{ type: "text", text: "done" }] } });
+    // A helper's own turn: billed, but not the run's command.
+    const HELPER = JSON.stringify({ type: "assistant", parent_tool_use_id: "call_a", message: { id: "msg_h", usage, content: [{ type: "tool_use", id: "h1", name: "Bash", input: { command: "npm test" } }, { type: "text", text: "helper says hi" }] } });
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${THINK}'`,
+      `echo '${ACT}'`,
+      `echo '${NEXT}'`,
+      `echo '${HELPER}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":2,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "count", projectId: "site", source: "agent" })).id);
+    expect(run.tokensUsed).toBe(3 * 6_100);
+    expect(run.commandsRun).toBe(1);
+    expect(run.progress.join("\n")).not.toContain("helper says hi");
+    expect(run.progress.join("\n")).not.toContain("npm test");
+  });
+
+  it("dedupes interleaved helpers' messages, and bills the segment's output from the result", async () => {
+    // Two helpers at once interleave their events (A-thinking, B-thinking,
+    // A-text, B-text); and through the proxy every assistant event says
+    // output_tokens 0 — the segment's result carries the real number.
+    const ev = (id: string, parent: string, block: Record<string, unknown>) => JSON.stringify({
+      type: "assistant", parent_tool_use_id: parent,
+      message: { id, usage: { input_tokens: 5_000, output_tokens: 0 }, content: [block] },
+    });
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${ev("msg_a", "call_a", { type: "thinking", thinking: "…" })}'`,
+      `echo '${ev("msg_b", "call_b", { type: "thinking", thinking: "…" })}'`,
+      `echo '${ev("msg_a", "call_a", { type: "text", text: "a" })}'`,
+      `echo '${ev("msg_b", "call_b", { type: "text", text: "b" })}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"waiting","usage":{"input_tokens":10000,"output_tokens":700}}'`,
+      `echo '${INIT}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"done","usage":{"input_tokens":10000,"output_tokens":9}}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "count", projectId: "site", source: "agent" })).id);
+    // 5,000 twice (one message each), then 700 + 9 of output the events never carried.
+    expect(run.tokensUsed).toBe(10_000 + 700 + 9);
+  });
+
+  it("raises the bill to the CLI's own modelUsage total at the end, never lowers it", async () => {
+    // A workflow's task_progress totals leave out its agents' cache reads;
+    // the result event's modelUsage is the whole process's bill.
+    const A = JSON.stringify({ type: "assistant", message: { id: "m1", usage: { input_tokens: 1_000, output_tokens: 0 }, content: [{ type: "text", text: "hi" }] } });
+    const RESULT_HIGH = JSON.stringify({
+      type: "result", subtype: "success", num_turns: 1, result: "done",
+      modelUsage: { "deepseek-v4-pro[1m]": { inputTokens: 1_000, outputTokens: 50, cacheReadInputTokens: 20_000 }, "deepseek-v4-flash": { inputTokens: 3_000, outputTokens: 200, cacheReadInputTokens: 9_000 } },
+    });
+    installFakeWrapper([`echo '${INIT}'`, `echo '${A}'`, `echo '${RESULT_HIGH}'`, "exit 0"].join("\n"));
+    makeProject("site");
+    let run = await finished((await lib.startRun({ task: "bill", projectId: "site", source: "agent" })).id);
+    expect(run.tokensUsed).toBe(33_250);
+    expect(run.modelsUsed).toEqual(["deepseek-v4-flash", "deepseek-v4-pro[1m]"]);
+
+    const RESULT_LOW = JSON.stringify({ type: "result", subtype: "success", num_turns: 1, result: "done", modelUsage: { "deepseek-v4-pro[1m]": { inputTokens: 10 } } });
+    installFakeWrapper([`echo '${INIT}'`, `echo '${A}'`, `echo '${RESULT_LOW}'`, "exit 0"].join("\n"));
+    run = await finished((await lib.startRun({ task: "bill", projectId: "site", source: "agent" })).id);
+    expect(run.tokensUsed).toBe(1_000);
   });
 });
 

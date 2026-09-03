@@ -99,6 +99,7 @@ function runStep(env: Record<string, string> = {}) {
     "record_provision_failure() { :; }",
     extractShellFn(INSTALL_SH, "oc_config_set"),
     extractShellFn(INSTALL_SH, "tts_ensure_provider_registered"),
+    extractShellFn(INSTALL_SH, "tts_write_local_provider_definition"),
     extractShellFn(INSTALL_SH, "step_openclaw_tts"),
     "step_openclaw_tts",
   ].join("\n");

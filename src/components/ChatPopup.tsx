@@ -34,7 +34,8 @@ import {
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
-import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext } from '@/lib/ui-events'
+import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
+import { speechTextFor } from '@/lib/speech-text'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
@@ -80,6 +81,16 @@ import {
 
 const MAX_RETRIES = 8
 const MAX_QUEUED_SENDS = 20
+
+/** How many spoken replies' audio the chat keeps alive at once; older ones lose their player. */
+const SPOKEN_REPLIES_KEPT = 12
+/** The most one ask for a spoken reply may take, queue and cold start included. */
+const SPEAK_REPLY_TIMEOUT_MS = 150_000
+/** The longest one spoken reply holds the queue while playing (a capped reply is ~100 s of speech). */
+const PLAYBACK_MAX_MS = 150_000
+
+/** A turn waiting its go: what to send, and whether it was SPOKEN (then the reply is spoken back). */
+type QueuedSend = { id: string; text: string; attachments: ChatAttachment[]; voice?: boolean }
 // The server gives its upstream two minutes. Leave enough room for the upload
 // and response body, while still guaranteeing that a browser-side stall ends
 // in the existing retry UI instead of spinning forever.
@@ -680,6 +691,24 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [messages, setMessages] = useState<ChatMessage[]>([])
   // Read when a wait begins, to know what "a new picture" means.
   const messagesRef = useRef<ChatMessage[]>([])
+  // The spoken reply currently playing, and the object URLs handed to bubbles
+  // — declared up here because clearTranscript (below) releases them.
+  const replyPlayerRef = useRef<HTMLAudioElement | null>(null)
+  const spokenUrlsRef = useRef<string[]>([])
+  // Speak a reply that is already on screen (the guarded path is
+  // maybeSpeakReply, below): the ack-only refetch and a tab switch reach it.
+  const speakReplyRef = useRef<(text: string, audio: string[]) => Promise<void>>(async () => {})
+  // Bumped whenever the spoken replies are released (the transcript cleared,
+  // the panel gone): a synthesis still in flight then belongs to a
+  // conversation that no longer exists, and must create nothing.
+  const speechGenerationRef = useRef(0)
+  const releaseSpokenReplies = useCallback(() => {
+    speechGenerationRef.current += 1
+    replyPlayerRef.current?.pause()
+    replyPlayerRef.current = null
+    for (const url of spokenUrlsRef.current) { try { URL.revokeObjectURL(url) } catch { /* jsdom */ } }
+    spokenUrlsRef.current = []
+  }, [])
   // Debounce for the pushed-append reconcile, and a stable handle on it — the
   // socket handler is built once and must not close over a stale callback.
   const transcriptReconcileTimerRef = useRef<number | null>(null)
@@ -735,7 +764,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
   // Queued while a run is in flight; drained one at a time on `final`.
-  const [queuedSends, setQueuedSends] = useState<{ id: string; text: string; attachments: ChatAttachment[] }[]>([])
+  const [queuedSends, setQueuedSends] = useState<QueuedSend[]>([])
   // Synchronous mirrors of `sending` and the queue. A send handler can run in
   // the window between the commit that rendered `sending === false` and the
   // commit after the drain effect started the next queued run; deciding from
@@ -744,7 +773,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // (TASK-517). The refs are written at the moment the fact changes, so a
   // stale closure cannot start a run it has no right to start.
   const sendingRef = useRef(false)
-  const queuedSendsRef = useRef<{ id: string; text: string; attachments: ChatAttachment[] }[]>([])
+  const queuedSendsRef = useRef<QueuedSend[]>([])
   useEffect(() => { queuedSendsRef.current = queuedSends }, [queuedSends])
   // The status line under the thread while a turn runs: a ticking clock, and
   // whatever the harness last said it was doing ({kind:'status'} events — a
@@ -821,8 +850,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           plan: t("codingAgent.chatPlan"),
         },
       }}
-      openLabel={t("codingAgent.chatOpenApp")}
-      onOpen={() => dispatchOpenApp("coding")}
+      // View: the run's own page in the Coding Agent app, with the whole
+      // desktop for it — the live terminal is embedded there while it runs.
+      openLabel={t("codingAgent.liveView")}
+      onOpen={() => dispatchOpenCodingRun(run.id, { maximize: true })}
       // A run's screenshot opens in the SAME full-size preview the generated
       // and attached images use (the portal at the end of this component),
       // not a second lightbox of the card's own.
@@ -1356,7 +1387,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // The composer a tab was left with: its draft and the turns queued behind
   // its running one. Restored when the tab is shown again, so text typed for
   // one conversation is never sent into another.
-  const tabStashRef = useRef<Map<string, { input: string; queuedSends: { id: string; text: string; attachments: ChatAttachment[] }[]; attachments: ChatAttachment[]; runId: string | null }>>(new Map())
+  const tabStashRef = useRef<Map<string, { input: string; queuedSends: QueuedSend[]; attachments: ChatAttachment[]; runId: string | null; voiceTurnKey: string | null }>>(new Map())
   // A run that died in a background tab leaves NOTHING in the transcript to
   // explain itself — the error line is client-side only. It is kept here when
   // the terminal event goes by and handed over when the tab is next shown.
@@ -2129,7 +2160,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               // The picture reached us over the socket after all — nothing
               // left to wait for, so take the banner down.
               if (images.length > 0) endImageWait()
+              // Spoken back when a spoken question started this run.
+              void maybeSpeakReplyRef.current(runIdRef.current, text, audio)
             }
+            // The run this final closes, for the ack-only branch below (the
+            // ref is cleared two lines down).
+            const finishedRun = runIdRef.current
             setStreaming('')
             clearToolCalls()
             runIdRef.current = null
@@ -2145,12 +2181,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // replies arrive via delta+final and don't need the extra
             // round-trip every turn.
             if (isAckOnly) {
+              // The real reply arrives through the history refetch below, as
+              // a stored message rather than a live final. A spoken question
+              // is still owed a spoken answer: the mark is taken now and the
+              // restored reply spoken once the refetch has painted it.
+              const speakRestored = finishedRun !== null && voiceTurnKeyRef.current === finishedRun
+              if (speakRestored) voiceTurnKeyRef.current = null
               if (ackOnlyHistoryTimerRef.current !== null) {
                 window.clearTimeout(ackOnlyHistoryTimerRef.current)
               }
               ackOnlyHistoryTimerRef.current = window.setTimeout(() => {
                 ackOnlyHistoryTimerRef.current = null
-                void loadHistory()
+                // What loadHistory ANSWERS, not messagesRef: the ref follows
+                // the state a render later, so right here it may still be
+                // the transcript from before the read.
+                void loadHistory().then((loaded) => {
+                  if (!speakRestored || sessionKeyRef.current !== sk) return
+                  const restored = [...(loaded ?? [])].reverse().find(m => m.role === 'assistant')
+                  if (restored) void speakReplyRef.current(restored.text, restored.audio ?? [])
+                })
               }, 3_000)
             }
           } else if (state === 'aborted' || state === 'error') {
@@ -2399,6 +2448,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const clearTranscript = useCallback(() => {
     setMessages([])
     setStreaming('')
+    // The bubbles holding spoken replies are gone for good (a returned-to tab
+    // repaints from the box's history, which cannot carry a browser-local
+    // blob URL), so the blobs go with them. This panel never unmounts while
+    // the desktop is open, so this — not the unmount cleanup — is where a
+    // day of voice use is kept from retaining every reply ever spoken.
+    releaseSpokenReplies()
     // The pills render from their own state, outside the transcript map, and
     // the socket only clears them on `final`/`aborted`/`error`. New chat during
     // a live turn beats all three, which left the previous turn's pills sitting
@@ -2468,7 +2523,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // whether the frame belongs to the run this popup is showing, and a tab
     // returned to with the id dropped would take its own reply as a stranger's
     // and stop painting it.
-    if (oldKey) tabStashRef.current.set(oldKey, { input, queuedSends, attachments, runId: runIdRef.current })
+    if (oldKey) tabStashRef.current.set(oldKey, { input, queuedSends, attachments, runId: runIdRef.current, voiceTurnKey: voiceTurnKeyRef.current })
+    voiceTurnKeyRef.current = null
     if (sendingRef.current && oldKey) {
       busyKeysRef.current.add(oldKey)
       setBusyKeys(new Set(busyKeysRef.current))
@@ -2515,11 +2571,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setAttachmentError(null)
     // Its run is still going: Stop stays available and the composer queues,
     // exactly as if the owner had never left.
-    if (busyKeysRef.current.has(key)) {
+    const stillRunning = busyKeysRef.current.has(key)
+    if (stillRunning) {
       sendingRef.current = true
       setSending(true)
       runIdRef.current = stash?.runId ?? null
+      voiceTurnKeyRef.current = stash?.voiceTurnKey ?? null
     }
+    // A spoken question whose run finished while the owner was elsewhere:
+    // the reply is in the history about to load, and it is still owed aloud.
+    const speakOnReturn = !stillRunning && Boolean(stash?.voiceTurnKey)
     setUnreadKeys(prev => {
       if (!prev.has(key)) return prev
       const next = new Set(prev)
@@ -2532,6 +2593,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // would hand its error to whichever conversation is on screen now — and
     // lose it, because the entry is taken out of the map as it is read.
     if (sessionKeyRef.current !== key) return
+    if (speakOnReturn) {
+      const restored = [...(loaded ?? [])].reverse().find(m => m.role === 'assistant')
+      if (restored) void speakReplyRef.current(restored.text, restored.audio ?? [])
+    }
     const storedError = tabErrorsRef.current.get(key)
     if (storedError) {
       tabErrorsRef.current.delete(key)
@@ -2849,6 +2914,150 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const captureGenerationRef = useRef(0)
   const sendVoiceTranscriptRef = useRef<(text: string) => void>(() => {})
   const transcribeAbortRef = useRef<AbortController | null>(null)
+
+  // ── Spoken replies ────────────────────────────────────────────────────
+  //
+  // A voice message gets a voice back (Settings → Voice, on by default). The
+  // gateway cannot do this half itself: the recording is transcribed on the
+  // box and sent as text, so its own `tts.auto: "inbound"` never sees a
+  // voice message here. So the chat remembers which run a spoken question
+  // started, and when that run's reply lands it either plays the audio the
+  // harness already attached, or asks /setup-api/tts/speak for it and plays
+  // that — through the same player every spoken reply already renders in.
+  const [voiceAutoReply, setVoiceAutoReply] = useState(true)
+  const voiceAutoReplyRef = useRef(true)
+  useEffect(() => { voiceAutoReplyRef.current = voiceAutoReply }, [voiceAutoReply])
+  // The run started by a spoken question, until its reply has been spoken.
+  const voiceTurnKeyRef = useRef<string | null>(null)
+  // Spoken replies are asked for one after another: the box speaks one at a
+  // time, and two replies landing seconds apart must both be heard.
+  const speakChainRef = useRef<Promise<void>>(Promise.resolve())
+  useEffect(() => () => releaseSpokenReplies(), [releaseSpokenReplies])
+  useEffect(() => {
+    if (!isOpen) return
+    let active = true
+    // The switch, read when the panel opens. A box with no voice at all (the
+    // Hermes edition) reads as off: there is nothing to ask for the audio.
+    fetch('/setup-api/tts', { cache: 'no-store' })
+      .then(res => res.json())
+      .then((data: { supportedOnEdition?: unknown; autoReply?: unknown } | null) => {
+        if (!active) return
+        setVoiceAutoReply(data?.supportedOnEdition !== false && data?.autoReply !== false)
+      })
+      .catch(() => { /* keep the last reading */ })
+    const onChanged = (e: Event) => {
+      const detail = (e as CustomEvent<{ autoReply?: unknown }>).detail
+      if (typeof detail?.autoReply === 'boolean') setVoiceAutoReply(detail.autoReply)
+    }
+    window.addEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged)
+    return () => { active = false; window.removeEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged) }
+  }, [isOpen])
+  /**
+   * Play a reply, and settle once it has been heard — `ended`, an `error`,
+   * a refusal to start, or a release — so the next spoken reply waits for
+   * this one instead of talking over it. Bounded, so a player that never
+   * reports either cannot hold the queue forever.
+   */
+  const playReply = useCallback((src: string): Promise<void> => new Promise<void>((resolve) => {
+    let settled = false
+    const done = () => { if (!settled) { settled = true; resolve() } }
+    try {
+      replyPlayerRef.current?.pause()
+      const player = new Audio(src)
+      replyPlayerRef.current = player
+      player.addEventListener('ended', done, { once: true })
+      player.addEventListener('error', done, { once: true })
+      // Paused from outside (a release, a newer reply): heard enough.
+      player.addEventListener('pause', done, { once: true })
+      const started = player.play()
+      // A browser that wants the gesture and the sound in the same tick
+      // refuses; the bubble's own player is there for exactly that case.
+      if (started && typeof started.catch === 'function') started.catch(done)
+      window.setTimeout(done, PLAYBACK_MAX_MS)
+    } catch { done() /* no Audio here (jsdom) — the bubble's player remains */ }
+  }), [])
+  /**
+   * The reply that closes the run a spoken question started: speak it.
+   * `audio` is what the harness attached itself (a channel-style spoken
+   * reply); when there is none, the box is asked for it.
+   */
+  /**
+   * Speak a reply: the audio the harness attached, or the box's own
+   * synthesis of the words, in the chat's one queue (see playReply).
+   */
+  const speakReply = useCallback(async (text: string, audio: string[]) => {
+    if (!voiceAutoReplyRef.current) return
+    const words = audio.length > 0 ? '' : speechTextFor(text)
+    if (audio.length === 0 && !words) return
+    // One at a time, in order, PLAYBACK INCLUDED — chained on the previous
+    // reply, whatever became of it, so a second answer never talks over the
+    // first. The box queues syntheses too; a 429 here means that queue is
+    // full, which a short wait usually clears.
+    const generation = speechGenerationRef.current
+    const previous = speakChainRef.current
+    let release: () => void = () => {}
+    speakChainRef.current = new Promise<void>((resolve) => { release = resolve })
+    try {
+      await previous
+      if (speechGenerationRef.current !== generation) return
+      if (audio.length > 0) { await playReply(audio[0]); return }
+      let res: Response | null = null
+      for (let attempt = 0; attempt < 3; attempt++) {
+        res = await fetch('/setup-api/tts/speak', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: words }),
+          // A deadline, so a stalled synthesis cannot hold the chain of
+          // spoken replies forever: the box's own budget is a cold Kokoro
+          // (up to 40 s) behind up to three queued replies.
+          signal: AbortSignal.timeout(SPEAK_REPLY_TIMEOUT_MS),
+        })
+        if (res.status !== 429) break
+        await new Promise((resolve) => setTimeout(resolve, 3000 * (attempt + 1)))
+      }
+      if (!res || !res.ok) return
+      const blob = await res.blob()
+      // The transcript this reply belonged to may have gone while the box
+      // was speaking: then nothing is created, stored or played.
+      if (speechGenerationRef.current !== generation) return
+      const url = URL.createObjectURL(blob)
+      spokenUrlsRef.current.push(url)
+      // A bounded ring: the oldest spoken replies are released once a dozen
+      // are held, even before the transcript is cleared.
+      // …but never one a bubble still plays: a URL still on a message stays
+      // until the transcript is cleared, whatever the count.
+      const referenced = (candidate: string) => messagesRef.current.some(m => m.audio?.includes(candidate))
+      while (spokenUrlsRef.current.length > SPOKEN_REPLIES_KEPT) {
+        const idx = spokenUrlsRef.current.findIndex(candidate => !referenced(candidate))
+        if (idx < 0) break
+        const [stale] = spokenUrlsRef.current.splice(idx, 1)
+        try { URL.revokeObjectURL(stale) } catch { /* jsdom */ }
+      }
+      // Onto the bubble it answers — the newest assistant bubble with this
+      // text and no audio yet — so it can be played again from the transcript.
+      setMessages(prev => {
+        for (let i = prev.length - 1; i >= 0; i--) {
+          const m = prev[i]
+          if (m.role === 'assistant' && m.text === text && !(m.audio?.length)) {
+            const next = [...prev]
+            next[i] = { ...m, audio: [url] }
+            return next
+          }
+        }
+        return prev
+      })
+      await playReply(url)
+    } catch { /* the reply is on screen; the voice was a bonus */ }
+    finally { release() }
+  }, [playReply])
+  const maybeSpeakReply = useCallback(async (runKey: string | null, text: string, audio: string[]) => {
+    if (!runKey || voiceTurnKeyRef.current !== runKey) return
+    voiceTurnKeyRef.current = null
+    await speakReply(text, audio)
+  }, [speakReply])
+  useEffect(() => { speakReplyRef.current = speakReply }, [speakReply])
+  const maybeSpeakReplyRef = useRef(maybeSpeakReply)
+  useEffect(() => { maybeSpeakReplyRef.current = maybeSpeakReply }, [maybeSpeakReply])
 
   /**
    * Release the microphone.
@@ -3596,6 +3805,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       ...(result.model ? { model: result.model } : {}),
       ...(result.provider ? { provider: result.provider } : {}),
     }])
+    // Spoken back when a spoken question started this run.
+    void maybeSpeakReplyRef.current(idempotencyKey, result.text || '', boundedAudio([...(result.audio ?? [])]))
     // Pair the synchronous guard with the state on EVERY completion path, not
     // just the failing one: the drain effect and both send handlers decide from
     // `sendingRef`, so a reply that lands whole and forgets to clear it leaves
@@ -3618,7 +3829,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts, settleRun])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
-  const startRun = useCallback((text: string, sendAttachments: ChatAttachment[]) => {
+  const startRun = useCallback((text: string, sendAttachments: ChatAttachment[], voice = false) => {
     // Pictures render in the bubble; everything else keeps its 📎 line, because
     // a document has nothing to show and a caption alone would refer to nothing.
     //
@@ -3642,6 +3853,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setSending(true)
     setStreaming('')
     runIdRef.current = idempotencyKey
+    // A spoken question is answered aloud: remember which run it is, so the
+    // reply that closes THIS run is the one spoken (see maybeSpeakReply).
+    voiceTurnKeyRef.current = voice ? idempotencyKey : null
     // Queue only where there is a connection that can be down. A harness with
     // no socket is never "not connected yet", so parking its turns would hold
     // them forever waiting for a status change that has already happened.
@@ -3657,7 +3871,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // answering, and starting a second turn on top of a live one makes the chat
   // report the first as finished while it is still running, so they take the
   // same queue a typed message would.
-  const enqueueRun = useCallback((text: string) => {
+  const enqueueRun = useCallback((text: string, voice = false) => {
     const trimmed = text.trim()
     if (!trimmed) return
     // Decide from the refs, not the render-time `sending`: this can run in the
@@ -3667,15 +3881,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // queue also forces enqueueing, or this send would jump the line.
     if (sending || sendingRef.current || queuedSendsRef.current.length > 0) {
       setQueuedSends(prev => {
-        const next = [...prev, { id: uuid(), text: trimmed, attachments: [] }]
+        const next = [...prev, { id: uuid(), text: trimmed, attachments: [], voice }]
         return next.length > MAX_QUEUED_SENDS ? next.slice(next.length - MAX_QUEUED_SENDS) : next
       })
       return
     }
-    startRun(trimmed, [])
+    startRun(trimmed, [], voice)
   }, [sending, startRun])
 
-  const sendVoiceTranscript = enqueueRun
+  const sendVoiceTranscript = useCallback((text: string) => enqueueRun(text, true), [enqueueRun])
   useEffect(() => {
     sendVoiceTranscriptRef.current = sendVoiceTranscript
   }, [sendVoiceTranscript])
@@ -3789,7 +4003,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (sending || sendingRef.current || queuedSends.length === 0) return
     const [next, ...rest] = queuedSends
     setQueuedSends(rest)
-    startRun(next.text, next.attachments)
+    startRun(next.text, next.attachments, next.voice === true)
   }, [sending, queuedSends, startRun])
 
   const cancelQueuedSend = useCallback((id: string) => {

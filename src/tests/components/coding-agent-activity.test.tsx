@@ -70,7 +70,7 @@ const LABELS = {
     plan: en["codingAgent.chatPlan"],
   },
 };
-const OPEN = en["codingAgent.chatOpenApp"];
+const OPEN = en["codingAgent.liveView"];
 
 /** A run's plan as TodoWrite last wrote it: one done, one on, one to go. */
 const TODOS = [
@@ -390,6 +390,7 @@ describe("the badge", () => {
       completedAt: null, status: "running" as const, source: "agent" as const,
       subagentsTotal: 0, subagentsActive: 0, subagentsByType: {}, tokensUsed: 0, thinkingTokens: 0,
       filesTouched: 0, numTurns: 0, progress: [], screenshots: [], todos: [],
+      transcriptPath: null, sessionId: null, directory: null,
     };
     const { rerender } = render(
       <CodingAgentActivityPill run={run} labels={LABELS} openLabel={OPEN} onOpen={onOpen} />,
@@ -403,11 +404,37 @@ describe("the badge", () => {
 });
 
 /**
- * The owner's two asks, in their words: "We can click on the Coding Agent
- * pill to expand and see live work, also replace the
- * mcp__clawbox__browser_screenshot with good looking ui element that we can
- * also click and open the screenshot."
+ * View: the run's own page in the app, full-screen. The pill used to carry an
+ * underlined "open" link and a separate "Live view" that popped a floating
+ * terminal; the owner asked for one button, and the live terminal lives on
+ * the run's page now.
  */
+describe("the card's View button", () => {
+  it("is the one way into the app, whatever the run's state", () => {
+    const onOpen = vi.fn();
+    const base = {
+      id: "run-live001", projectId: "timer", task: "x",
+      startedAt: NOW - 30_000, completedAt: null as number | null,
+      source: "agent" as const,
+      subagentsTotal: 0, subagentsActive: 0, subagentsByType: {},
+      tokensUsed: 0, thinkingTokens: 0, filesTouched: 0, numTurns: 0,
+      progress: [], screenshots: [], todos: [],
+      transcriptPath: "/home/clawbox/.claude-ds/projects/x/s.jsonl", sessionId: null, directory: "/home/clawbox/Projects/timer",
+    };
+    const { rerender } = render(
+      <CodingAgentActivityPill run={{ ...base, status: "running" }} labels={LABELS} openLabel={OPEN} onOpen={onOpen} />,
+    );
+    fireEvent.click(screen.getByTestId("coding-agent-activity-view"));
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("coding-agent-activity-live-view")).toBeNull();
+    rerender(
+      <CodingAgentActivityPill run={{ ...base, status: "completed", completedAt: NOW }} labels={LABELS} openLabel={OPEN} onOpen={onOpen} />,
+    );
+    fireEvent.click(screen.getByTestId("coding-agent-activity-view"));
+    expect(onOpen).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("the card, expanded", () => {
   const SHOT_URL = artifactUrl("run-k3x9q2ab", "after.png");
   const card = (over: Record<string, unknown> = {}, onPreview?: (src: string, alt: string) => void) => {
@@ -418,6 +445,7 @@ describe("the card, expanded", () => {
           startedAt: NOW - 30_000, completedAt: null,
           status: "running", source: "agent",
           subagentsTotal: 0, subagentsActive: 0, subagentsByType: {},
+          transcriptPath: null, sessionId: null, directory: null,
           tokensUsed: 46_000, thinkingTokens: 0, filesTouched: 3, numTurns: 0,
           progress: ["Write style.css", "Now the JavaScript:", "$ node --check /home/clawbox/clawbox/data/app.js", "mcp__clawbox__browser_screenshot"],
           screenshots: ["before.png", "after.png"],
@@ -588,6 +616,7 @@ describe("the plan and the signs of life", () => {
           startedAt: NOW - 30_000, completedAt: null,
           status: "running", source: "agent",
           subagentsTotal: 0, subagentsActive: 0, subagentsByType: {},
+          transcriptPath: null, sessionId: null, directory: null,
           tokensUsed: 0, thinkingTokens: 0, filesTouched: 0, numTurns: 0,
           progress: ["Read app.js", "Plan: 3 tasks, 1 done"],
           screenshots: [],

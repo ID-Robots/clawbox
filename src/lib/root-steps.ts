@@ -47,6 +47,7 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   "openclaw_install",
   "openclaw_patch",
   "openclaw_setup",
+  "openclaw_tts",
   "performance_mode",
   "post_update",
   "rebuild_reboot",
@@ -78,6 +79,11 @@ export const UI_ROOT_STEPS: readonly string[] = [
   "openclaw_setup",
   "openclaw_patch",
   "openclaw_config",
+  // NOT openclaw_tts. The on-device voice install (Settings → Local AI →
+  // Kokoro → Install) is on WEB_ROOT_STEPS because the web server starts it,
+  // but only through /setup-api/tts/install, which refuses the MCP bearer:
+  // a root install is the person's decision. Listing it here would offer it
+  // to install/run-step as well, which the agent's bearer can reach.
   "clawkeep_install",
 ];
 

@@ -1,11 +1,12 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
-import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { backupSourceFor } from "@/lib/harness/backup-source";
 import { deriveProtection, isBackupRunning, type ProtectionState } from "@/lib/clawkeep-protection";
 import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, FIELD } from "./coding-agent-ui";
+import ClawKeepWizard from "./ClawKeepWizard";
+import { PairChallengeCard, type PairStartResponse } from "./ClawKeepPairChallengeCard";
 import {
   CARD,
   ConfirmDialog,
@@ -41,6 +42,9 @@ interface ClawKeepSchedule {
 }
 interface ClawKeepStatus {
   paired: boolean;
+  /** False until the owner has been through the setup wizard. Optional so a
+   *  status from an older server still renders the dashboard. */
+  setupComplete?: boolean;
   configured: boolean;
   server: string;
   lastBackupAtMs: number;
@@ -113,12 +117,6 @@ interface RestoreResponse {
   skippedMembers?: string[];
 }
 
-interface PairStartResponse {
-  user_code: string;
-  verification_url: string;
-  interval: number;
-  code_length: number;
-}
 
 interface PairPollResponse {
   status: "pending" | "configuring" | "complete" | "error";
@@ -526,6 +524,28 @@ export default function ClawKeepApp() {
     );
   }
 
+  // The front door: a box whose owner has not been through setup and is not
+  // paired shows the wizard instead of a dashboard of things that cannot
+  // happen yet. A paired box skips it whatever the flag says — pairing is the
+  // wizard's point, and an owner who paired before the wizard existed must
+  // not be sent back through it.
+  if (status.setupComplete === false && !status.paired) {
+    return (
+      <AgentLabelContext.Provider value={agent}>
+        <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-deep)] text-gray-200 @container" data-testid="clawkeep-panel">
+          <div className="mx-auto w-full max-w-2xl px-5 py-4 min-h-full flex flex-col">
+            <ClawKeepWizard
+              status={status}
+              agent={agent}
+              onStatusChanged={refresh}
+              onDone={() => { void refresh(); }}
+            />
+          </div>
+        </div>
+      </AgentLabelContext.Provider>
+    );
+  }
+
   return (
     <AgentLabelContext.Provider value={agent}>
     {/* The Coding Agent's frame: top-anchored, one header row that says what
@@ -535,7 +555,10 @@ export default function ClawKeepApp() {
         full-width buttons between the cards. */}
     <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-deep)] text-gray-200 @container" data-testid="clawkeep-panel">
       <div className="mx-auto w-full max-w-2xl px-5 py-4">
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pb-3 mb-4 border-b border-white/[0.06]">
+        {/* `relative`: the backup-contents popover hangs from this row, the
+            full content width, so it cannot run off a phone's screen the way
+            a popover anchored to the ? button 200 px in did. */}
+        <div className="relative flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pb-3 mb-4 border-b border-white/[0.06]">
           <div className="flex items-center gap-2 min-w-0">
             <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20, fontVariationSettings: "'FILL' 1" }} aria-hidden="true">shield_lock</span>
             <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">ClawKeep</h1>
@@ -548,6 +571,7 @@ export default function ClawKeepApp() {
               <span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full ${status.paired ? "bg-emerald-400" : "bg-[var(--text-muted)]"}`} />
               {status.paired ? t("clawkeep.state.paired") : t("clawkeep.state.unpaired")}
             </span>
+            <BackupContentsInfo status={status} />
           </div>
           {status.paired && !pairChallenge && (
             <div className="flex items-center gap-2 shrink-0">
@@ -635,8 +659,6 @@ export default function ClawKeepApp() {
           ) : (
             <PairCard onPair={onPair} busy={busy === "pair"} />
           )}
-
-          <BackupContentsCard status={status} />
 
           {(!archiverReady(status) || !status.daemonInstalled) && <SystemCard status={status} />}
 
@@ -911,130 +933,6 @@ function PairCard({ onPair, busy }: { onPair: () => void; busy: boolean }) {
       <button type="button" onClick={onPair} disabled={busy} className={`${BTN_PRIMARY} mt-5`}>
         {busy ? t("clawkeep.pair.connecting") : t("clawkeep.pair.button")}
       </button>
-    </div>
-  );
-}
-
-function PairChallengeCard({
-  challenge,
-  phase,
-  onCancel,
-  onGetNewCode,
-  busy,
-}: {
-  challenge: PairStartResponse;
-  phase: "" | "pending" | "configuring";
-  onCancel: () => void;
-  onGetNewCode: () => void;
-  busy: boolean;
-}) {
-  const { t } = useT();
-  const code = challenge.user_code;
-  const [copied, setCopied] = useState(false);
-  const copyTimerRef = useRef<number | null>(null);
-
-  const flashCopied = useCallback(() => {
-    setCopied(true);
-    if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
-    copyTimerRef.current = window.setTimeout(() => setCopied(false), 1500);
-  }, []);
-
-  // Auto-copy when a fresh code lands. Mirrors what the user just told the
-  // portal to expect — they can paste straight into the portal field
-  // without re-typing. Re-runs only when the code itself changes so a
-  // re-render (e.g. phase transition) doesn't keep stomping the clipboard.
-  useEffect(() => {
-    if (!code) return;
-    let cancelled = false;
-    void copyToClipboard(code).then((ok) => {
-      if (!cancelled && ok) flashCopied();
-    });
-    return () => {
-      cancelled = true;
-      if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
-    };
-  }, [code, flashCopied]);
-
-  const onCopyClick = useCallback(async () => {
-    const ok = await copyToClipboard(code);
-    if (ok) flashCopied();
-  }, [code, flashCopied]);
-
-  return (
-    <div className={`${CARD} space-y-3`}>
-      <p className="text-xs text-[var(--text-muted)] leading-relaxed">
-        {t("clawkeep.pair.intro")}
-      </p>
-      <div className="p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg text-center">
-        <a
-          href={challenge.verification_url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center justify-center gap-2 w-full px-4 py-3 bg-[var(--coral-bright)] hover:bg-orange-500 text-white font-medium rounded-lg transition-colors text-sm no-underline"
-        >
-          {t("ai.openAuthPage")}
-          <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 16 }}>
-            open_in_new
-          </span>
-        </a>
-        <p className="text-xs text-[var(--text-secondary)] mt-4 mb-2">
-          {t("clawkeep.pair.thenEnterCode")}
-        </p>
-        <div className="px-4 py-3 bg-[var(--bg-surface)] rounded-lg inline-flex items-center gap-2">
-          <span
-            className="text-2xl font-mono font-bold text-gray-100 tracking-widest select-all"
-            aria-label={t("clawkeep.pair.codeAriaLabel")}
-          >
-            {code}
-          </span>
-          <button
-            type="button"
-            onClick={onCopyClick}
-            aria-label={copied ? t("clawkeep.pair.codeCopied") : t("clawkeep.pair.copyCode")}
-            className="ml-1 px-2 py-1 text-xs font-medium text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded hover:bg-[var(--bg-surface)] cursor-pointer transition-colors"
-          >
-            {copied ? t("clawkeep.pair.copied") : t("clawkeep.pair.copy")}
-          </button>
-        </div>
-        <p className="mt-2 text-xs text-[var(--text-muted)]">
-          {t("clawkeep.pair.codeExpires")}
-        </p>
-      </div>
-
-      {phase && (
-        <div
-          className="flex items-center gap-2 text-xs text-[var(--text-secondary)]"
-          role="status"
-          aria-live="polite"
-        >
-          <span
-            aria-hidden="true"
-            className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin"
-          />
-          {phase === "configuring"
-            ? t("clawkeep.pair.savingToken")
-            : t("clawkeep.pair.waitingAuthorization")}
-        </div>
-      )}
-
-      <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={onGetNewCode}
-          disabled={busy}
-          className="bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {t("clawkeep.pair.getNewCode")}
-        </button>
-        <span className="text-xs text-[var(--text-muted)]">·</span>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="bg-transparent border-none text-xs text-[var(--text-muted)] hover:text-gray-200 cursor-pointer p-0"
-        >
-          {t("clawkeep.cancel")}
-        </button>
-      </div>
     </div>
   );
 }
@@ -1389,39 +1287,80 @@ function DashboardCard({
 /**
  * What travels in a snapshot from THIS box, and the warning that goes with it.
  *
- * Rendered rather than left implicit because the archive holds the box's
- * provider keys: the customer is entitled to know that before they schedule a
- * nightly upload, and to know it again before they hand a restore file to
- * anyone. The list is per-edition and comes from `backupSourceFor`, whose
- * Hermes half is pinned by test to the archiver's own asset list — so this can
- * never drift into describing a backup we do not actually make.
+ * Behind a question mark beside the title rather than a card of its own: the
+ * owner asked for the list to stay out of the way until asked for. It is
+ * still rendered rather than left implicit because the archive holds the
+ * box's provider keys: the customer is entitled to know that before they
+ * schedule a nightly upload, and to know it again before they hand a restore
+ * file to anyone. The list is per-edition and comes from `backupSourceFor`,
+ * whose Hermes half is pinned by test to the archiver's own asset list — so
+ * this can never drift into describing a backup we do not actually make.
  */
-function BackupContentsCard({ status }: { status: ClawKeepStatus }) {
+function BackupContentsInfo({ status }: { status: ClawKeepStatus }) {
   const { t } = useT();
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const source = backupSourceFor(status.agent === "hermes" ? "hermes" : "openclaw");
+
+  // A click anywhere else, or Escape, closes it — the same manners as the
+  // desktop's own menus.
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (e: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
   return (
-    <div className={`${CARD} space-y-2`}>
-      <div className="flex items-center gap-2">
-        <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
-          inventory_2
-        </span>
-        <h2 className="text-sm font-semibold text-[var(--text-primary)]">
-          {t("clawkeep.contents.title")}
-        </h2>
-      </div>
-      <ul className="text-sm text-[var(--text-secondary)] space-y-1 list-disc list-inside">
-        {source.includesKeys.map((key) => <li key={key}>{t(key)}</li>)}
-      </ul>
-      {source.excludesKeys.length > 0 && (
-        <p className="text-xs text-[var(--text-muted)] leading-relaxed">
-          {t("clawkeep.contents.excludes")}{" "}
-          {source.excludesKeys.map((key) => t(key)).join("; ")}.
-        </p>
-      )}
-      {status.backupContainsCredentials !== false && (
-        <p className="text-xs text-amber-200/90 leading-relaxed">
-          🔒 {t("clawkeep.contents.credentialWarning")}
-        </p>
+    <div ref={rootRef} className="shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-label={t("clawkeep.contents.show")}
+        title={t("clawkeep.contents.show")}
+        data-testid="clawkeep-contents-toggle"
+        className={`inline-flex h-6 w-6 items-center justify-center rounded-full border text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors cursor-pointer ${open ? "border-white/25 bg-white/[0.06]" : "border-white/15"}`}
+      >
+        <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">question_mark</span>
+      </button>
+      {open && (
+        <div
+          role="dialog"
+          aria-label={t("clawkeep.contents.title")}
+          data-testid="clawkeep-contents-popover"
+          className="absolute left-0 top-full z-30 mt-2 w-full max-w-[22rem] rounded-xl border border-white/10 bg-[var(--bg-elevated)] p-4 shadow-2xl space-y-2"
+        >
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
+              inventory_2
+            </span>
+            <h2 className="text-sm font-semibold text-[var(--text-primary)]">
+              {t("clawkeep.contents.title")}
+            </h2>
+          </div>
+          <ul className="text-sm text-[var(--text-secondary)] space-y-1 list-disc list-inside">
+            {source.includesKeys.map((key) => <li key={key}>{t(key)}</li>)}
+          </ul>
+          {source.excludesKeys.length > 0 && (
+            <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+              {t("clawkeep.contents.excludes")}{" "}
+              {source.excludesKeys.map((key) => t(key)).join("; ")}.
+            </p>
+          )}
+          {status.backupContainsCredentials !== false && (
+            <p className="text-xs text-amber-200/90 leading-relaxed">
+              🔒 {t("clawkeep.contents.credentialWarning")}
+            </p>
+          )}
+        </div>
       )}
     </div>
   );

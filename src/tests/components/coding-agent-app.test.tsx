@@ -9,11 +9,11 @@
  * app only links there.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingAgentApp, { installedAppId, NEW_APP_NAME_MAX } from "@/components/CodingAgentApp";
 import { MAX_PROJECT_NAME_LENGTH } from "@/lib/code-projects";
-import { CHAT_MESSAGE_EVENT, CODING_AGENT_CHANGED_EVENT, CODING_RUN_STARTED_EVENT, NEW_APP_EVENT } from "@/lib/ui-events";
+import { CHAT_MESSAGE_EVENT, CODING_AGENT_CHANGED_EVENT, CODING_RUN_STARTED_EVENT, NEW_APP_EVENT, OPEN_CODING_RUN_EVENT } from "@/lib/ui-events";
 
 // One stable `t`, as the real hook provides (it is memoised on the locale
 // table) — a fresh function per render would be a different contract.
@@ -22,6 +22,11 @@ const t = (key: string, params?: Record<string, string | number>) => {
   if (params) for (const [k, v] of Object.entries(params)) str = str.replaceAll(`{${k}}`, String(v));
   return str;
 };
+// xterm never renders in jsdom; the run page only needs to know it embedded one.
+vi.mock("@/components/TerminalApp", () => ({
+  default: ({ initialCommand }: { initialCommand?: string }) => <div data-testid="terminal-mock" data-command={initialCommand ?? ""} />,
+}));
+
 vi.mock("@/lib/i18n", () => ({
   useT: () => ({ locale: "en", t }),
 }));
@@ -376,8 +381,12 @@ describe("CodingAgentApp", () => {
     stubFetch({ enabled: true, readiness: READY }, [inRun, outRun], { projects: [project], git });
     render(<CodingAgentApp />);
 
-    // Home lists projects only — no runs at all (the owner asked them off).
+    // Home lists the projects and nothing else: every run works in a folder
+    // inside the project folder, and the projects route lists that folder,
+    // so a run always has a project page. No runs list on home, not even for
+    // a stranger.
     await screen.findByTestId("coding-agent-project-site");
+    expect(screen.queryByTestId("coding-agent-runs-toggle")).toBeNull();
     expect(screen.queryByText("somewhere else")).toBeNull();
     expect(screen.queryByText("inside the project")).toBeNull();
 
@@ -398,6 +407,14 @@ describe("CodingAgentApp", () => {
     fireEvent.click(screen.getByTestId("coding-agent-project-back"));
     expect(screen.queryByTestId("coding-agent-project-page")).toBeNull();
     expect(screen.queryByText("inside the project")).toBeNull();
+    expect(screen.queryByText("somewhere else")).toBeNull();
+  });
+
+  it("shows nothing about runs on home when every run is filed under a project", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await screen.findByTestId("coding-agent-project-site");
+    expect(screen.queryByTestId("coding-agent-runs-toggle")).toBeNull();
   });
 
   it("re-reads the device when Settings says it saved something", async () => {
@@ -633,13 +650,14 @@ describe("CodingAgentApp", () => {
         // The session-less row offered a button that only ran `cd`.
         expect(screen.queryByTestId("coding-agent-terminal-run-paused01")).not.toBeInTheDocument();
         fireEvent.click(terminal);
-        expect(opened).toEqual([`cd '${RUN.directory}' && claude-ds --resume ${session}`]);
+        // The id is quoted like the paths: run metadata typed into a shell.
+        expect(opened).toEqual([`cd '${RUN.directory}' && claude-ds --resume '${session}'`]);
       } finally {
         window.removeEventListener("clawbox:open-terminal", onTerminal);
       }
     });
 
-    it("labels a review pass with the run it reviewed, and a tap jumps there", async () => {
+    it("labels a review pass with the run it reviewed, and a tap opens that run's page", async () => {
       // The record carries reviewOf but the row used to read as an ordinary
       // run whose task was a wall of the fixed review text.
       const reviewed = { ...RUN, id: "run-reviewed1" };
@@ -648,29 +666,26 @@ describe("CodingAgentApp", () => {
         task: "Automatic review pass. Adversarially review the work you just delivered in this folder: read the diff of your last commit",
       };
       stubFetch({ enabled: true, readiness: READY }, [review, reviewed], { projects: [SITE_PROJECT] });
-      // jsdom has no scrollIntoView; record which row the app asked for.
-      const scrolled: string[] = [];
-      const proto = Element.prototype as { scrollIntoView?: unknown };
-      const original = proto.scrollIntoView;
-      proto.scrollIntoView = function (this: HTMLElement) { scrolled.push(this.dataset.runId ?? ""); };
-      try {
-        render(<CodingAgentApp />);
-        await openRuns();
-        const chip = await screen.findByTestId("coding-agent-review-of");
-        expect(chip.textContent).toBe(t("codingAgent.reviewOf", { id: "run-reviewed1" }));
-        expect(chip.tagName).toBe("BUTTON");
-        expect(screen.getByText(t("codingAgent.reviewPassTitle", { id: "run-reviewed1" }))).toBeInTheDocument();
-        expect(screen.queryByText(/Adversarially review/)).not.toBeInTheDocument();
-        // The reviewed run says who reviewed it.
-        expect(screen.getByTestId("coding-agent-reviewed-by").textContent).toBe(t("codingAgent.reviewedBy", { id: "run-review001" }));
+      render(<CodingAgentApp />);
+      await openRuns();
+      const chip = await screen.findByTestId("coding-agent-review-of");
+      expect(chip.textContent).toBe(t("codingAgent.reviewOf", { id: "run-reviewed1" }));
+      expect(chip.tagName).toBe("BUTTON");
+      expect(screen.getByText(t("codingAgent.reviewPassTitle", { id: "run-reviewed1" }))).toBeInTheDocument();
+      expect(screen.queryByText(/Adversarially review/)).not.toBeInTheDocument();
+      // The reviewed run says who reviewed it.
+      expect(screen.getByTestId("coding-agent-reviewed-by").textContent).toBe(t("codingAgent.reviewedBy", { id: "run-review001" }));
 
-        expect(screen.queryByText(/Added the toggle/)).not.toBeInTheDocument();
-        fireEvent.click(chip);
-        expect(await screen.findByText(/Added the toggle/)).toBeInTheDocument();
-        expect(scrolled).toEqual(["run-reviewed1"]);
-      } finally {
-        proto.scrollIntoView = original;
-      }
+      expect(screen.queryByText(/Added the toggle/)).not.toBeInTheDocument();
+      fireEvent.click(chip);
+      // The reviewed run's own page, its summary on it — and its reviewer
+      // one tap away again.
+      const page = await screen.findByTestId("coding-agent-run-page");
+      expect(page).toHaveAttribute("data-run-id", "run-reviewed1");
+      expect(await screen.findByText(/Added the toggle/)).toBeInTheDocument();
+      fireEvent.click(within(page).getByTestId("coding-agent-reviewed-by"));
+      expect((await screen.findByTestId("coding-agent-run-page"))).toHaveAttribute("data-run-id", "run-review001");
+      expect(await screen.findByText(/Nothing real was found/)).toBeInTheDocument();
     });
 
     it("tells the desktop when it starts a drafted run, so an open chat looks for it", async () => {
@@ -688,6 +703,107 @@ describe("CodingAgentApp", () => {
       } finally {
         window.removeEventListener(CODING_RUN_STARTED_EVENT, onStarted);
       }
+    });
+
+    it("shows the sidebar in a wide window — projects and recent runs that open their pages", async () => {
+      // A window wide enough for the rail: the observer answers at once.
+      const RO = class {
+        private cb: ResizeObserverCallback;
+        constructor(cb: ResizeObserverCallback) { this.cb = cb; }
+        observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
+        unobserve() {}
+        disconnect() {}
+      };
+      vi.stubGlobal("ResizeObserver", RO);
+      try {
+        stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+        render(<CodingAgentApp />);
+        const sidebar = await screen.findByTestId("coding-agent-sidebar");
+        expect(within(sidebar).getByTestId("coding-agent-sidebar-home")).toHaveAttribute("aria-current", "page");
+        // A project entry opens the project's page…
+        fireEvent.click(within(await within(sidebar).findByTestId("coding-agent-sidebar-projects")).getByText(SITE_PROJECT.name));
+        await screen.findByTestId("coding-agent-project-page");
+        // …and a run entry the run's page.
+        fireEvent.click(within(within(sidebar).getByTestId("coding-agent-sidebar-runs")).getByRole("button"));
+        expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", RUN.id);
+        // The run's data sits in the rail beside its story.
+        expect(within(screen.getByTestId("coding-agent-run-rail")).getByTestId("coding-agent-run-figures")).toBeInTheDocument();
+        // Home brings the front page back.
+        fireEvent.click(within(sidebar).getByTestId("coding-agent-sidebar-home"));
+        expect(screen.queryByTestId("coding-agent-run-page")).toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("embeds the live terminal on a running run's page in place of the activity log, and keeps the log once it settled", async () => {
+      const live = { ...RUN, status: "running", completedAt: null, summary: null, transcriptPath: "/home/clawbox/.claude-ds/projects/x/s.jsonl", progress: ["$ npm test"] };
+      stubFetch({ enabled: true, readiness: READY }, [live], { projects: [SITE_PROJECT] });
+      const { unmount } = render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+      await screen.findByTestId("coding-agent-run-page");
+      const terminal = await screen.findByTestId("coding-agent-run-terminal");
+      expect(within(terminal).getByTestId("terminal-mock")).toHaveAttribute("data-command", expect.stringContaining("coding-run-preview"));
+      expect(screen.queryByTestId("coding-agent-run-activity")).toBeNull();
+      // The floating "Live view" is gone from the page's controls.
+      expect(screen.queryByTestId("coding-agent-live-run-k3x9q2ab")).toBeNull();
+      unmount();
+
+      stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, progress: ["$ npm test"] }], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+      await screen.findByTestId("coding-agent-run-page");
+      expect(screen.queryByTestId("coding-agent-run-terminal")).toBeNull();
+      expect(await screen.findByTestId("coding-agent-run-activity")).toBeInTheDocument();
+    });
+
+    it("opens a run's own page from its row: figures, summary, files and evidence, and Back returns", async () => {
+      const run = {
+        ...RUN,
+        tokensUsed: 1_317_787, thinkingTokens: 658, subagentsTotal: 3, subagentsByType: { explorer: 2, reviewer: 1 },
+        modelsUsed: ["deepseek-v4-pro[1m]", "deepseek-v4-flash"], commit: "caea00d",
+        deniedActions: ["Bash: curl http://example"],
+        todos: [{ content: "Wire the toggle", status: "completed" }, { content: "Test it", status: "in_progress", activeForm: "Testing it" }],
+        artifacts: [{ name: "after.png", bytes: 100, kind: "image" }, { name: "report.md", bytes: 20, kind: "markdown" }],
+      };
+      stubFetch({ enabled: true, readiness: READY }, [run], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+      const page = await screen.findByTestId("coding-agent-run-page");
+      expect(page).toHaveAttribute("data-run-id", "run-k3x9q2ab");
+      expect(screen.getByTestId("coding-agent-run-title").textContent).toBe("Add a dark mode toggle");
+      const figures = screen.getByTestId("coding-agent-run-figures").textContent ?? "";
+      expect(figures).toContain("1.3M");
+      expect(figures).toContain("caea00d");
+      expect(figures).toContain("2× explorer, 1× reviewer");
+      expect(figures).toContain("deepseek-v4-pro[1m] + deepseek-v4-flash");
+      expect(screen.getByTestId("coding-agent-summary").textContent).toContain("Added the toggle");
+      expect(screen.getByTestId("coding-agent-run-files").textContent).toContain("index.html");
+      expect(screen.getByTestId("coding-agent-run-plan").textContent).toContain("Testing it");
+      expect(screen.getByTestId("coding-agent-denied").textContent).toContain("curl http://example");
+      expect(screen.getByRole("link", { name: "after.png" })).toHaveAttribute("href", expect.stringContaining("file=after.png"));
+      expect(screen.getByTestId("coding-agent-run-report")).toBeInTheDocument();
+      // The project it belongs to is one tap away, and Back is the way out.
+      expect(screen.getByTestId("coding-agent-run-project").textContent).toContain(SITE_PROJECT.name);
+      fireEvent.click(screen.getByTestId("coding-agent-run-back"));
+      expect(screen.queryByTestId("coding-agent-run-page")).toBeNull();
+      expect(await screen.findByTestId("coding-agent-project-page")).toBeInTheDocument();
+    });
+
+    it("opens on the run the desktop handed it — the finish card's button — cold and while already open", async () => {
+      const other = { ...RUN, id: "run-other001", task: "Something else entirely" };
+      stubFetch({ enabled: true, readiness: READY }, [RUN, other], { projects: [SITE_PROJECT] });
+      // Cold: the card fired before this window mounted.
+      (window as Window & { __clawboxPendingCodingRun?: string }).__clawboxPendingCodingRun = "run-other001";
+      render(<CodingAgentApp />);
+      expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", "run-other001");
+      expect(screen.getByTestId("coding-agent-run-title").textContent).toBe("Something else entirely");
+      // Already open: the event alone re-points it.
+      act(() => { window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId: "run-k3x9q2ab" } })); });
+      expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", "run-k3x9q2ab");
     });
 
     it("says when there is nothing to show yet", async () => {

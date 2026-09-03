@@ -237,11 +237,11 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_agent_run",
-    "Hand a coding task to the coding agent on this ClawBox: a separate Claude Code session that works in the background inside one folder, edits files, runs builds and tests, and reports back. Use it for work that spans several files or needs a build to prove it worked; for a one-line change use your own file tools. Give a project_id from code_project_list, or a folder name from coding_agent_status as `directory`; with neither, the owner's default folder is used. Prefer a folder the owner already has to scaffolding a new one. The task must be self-contained: the run cannot ask questions. Returns a run id AT ONCE; the work continues in the background. Tell the user it is running, then STOP — do not wait, poll, or call coding_agent_status straight after. Blocking makes you deaf to the user until you return, and the device already shows live progress and tells them when it finishes. Stay available for other questions; check only when they ask. Do not start a second run for the same task.",
+    "Hand a coding task to the coding agent on this ClawBox: a separate Claude Code session that works in the background inside one folder, edits files, runs builds and tests, and reports back. Use it for work that spans several files or needs a build to prove it worked; for a one-line change use your own file tools. Give a project_id from code_project_list, or a folder inside the owner's project folder as `directory` (a name from coding_agent_status); nowhere else. Prefer a folder the owner already has to scaffolding a new one. The task must be self-contained: the run cannot ask questions. Returns a run id AT ONCE; the work continues in the background. Tell the user it is running, then STOP — do not wait, poll, or call coding_agent_status straight after. Blocking makes you deaf to the user until you return, and the device already shows live progress and tells them when it finishes. Stay available for other questions; check only when they ask. Do not start a second run for the same task.",
     {
       task: zText(MAX_TASK_CHARS, "What to build or change, with enough detail to work unattended. Name the files or features involved."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
-      directory: zOptText(512, "An absolute folder inside the ClawBox home to work in, when it is not a code project."),
+      directory: zOptText(512, "A folder inside the owner's project folder to work in (its name, or its absolute path), when it is not a code project."),
       resume_run_id: zOptText(40, "A finished run's id, e.g. \"run-k3x9q2ab\", to continue that session with this task."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
@@ -288,7 +288,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       return text(
         `Started coding run "${run.id}" in ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}. `
         + "It works in the background on the ClawBox and may take several minutes. "
-        + `Tell the user it is running, then call coding_agent_status with run_id "${run.id}" (wait_seconds up to ${MAX_WAIT_SECONDS} lets you block instead of polling) and relay its summary when it finishes.`,
+        + `Tell the user it is running and stop — the device shows its progress and tells them when it finishes. Check on it with coding_agent_status (run_id "${run.id}") only when the user asks.`,
       );
     },
   );

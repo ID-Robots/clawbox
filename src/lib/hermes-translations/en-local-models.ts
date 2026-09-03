@@ -83,4 +83,5 @@ export const localModelsEn: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "Could not change that model.",
   "localModels.error.unreachable": "Could not reach the box to change that model.",
+  "localModels.notice.voiceFallback": "Kokoro could not be made the primary voice, so the default voice stays.",
 };

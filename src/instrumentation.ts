@@ -27,12 +27,15 @@ export async function onRequestError() {
 export async function repairOpenclawConfig(repairs: {
   ensureLocalAiProxyUrls: () => Promise<boolean>
   ensureMicrosoftTtsExcluded: () => Promise<boolean>
+  /** Seeds `tts.auto` for the spoken-replies switch on a box that predates it. */
+  ensureVoiceAutoReplyMode?: () => Promise<boolean>
   restartGateway: () => Promise<void>
 }): Promise<void> {
   const steps: Array<[label: string, run: () => Promise<boolean>]> = [
     ['migrate Local AI proxy URLs', repairs.ensureLocalAiProxyUrls],
     ['exclude Microsoft TTS', repairs.ensureMicrosoftTtsExcluded],
   ]
+  if (repairs.ensureVoiceAutoReplyMode) steps.push(['seed the spoken-replies mode', repairs.ensureVoiceAutoReplyMode])
   let changed = false
   for (const [label, run] of steps) {
     try {
@@ -140,11 +143,13 @@ export async function register() {
   const { startTerminalServer } = require('./instrumentation-node')
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, restartGateway } = require('./lib/openclaw-config')
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { ensureVoiceAutoReplyMode } = require('./lib/voice-reply')
   startTerminalServer()
   // One-time repairs of openclaw.json, in sequence — see repairOpenclawConfig
   // for why they must not run together. Never awaited: boot goes on. Never
   // rejects: every step inside catches for itself.
-  const configRepaired = repairOpenclawConfig({ ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, restartGateway })
+  const configRepaired = repairOpenclawConfig({ ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, ensureVoiceAutoReplyMode, restartGateway })
   try {
     // An update that rebooted the box still has its second half to run. Ask
     // here, so it starts whether or not anyone opens the Update page — see

@@ -287,6 +287,7 @@ function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: str
     `record_provision_failure() { printf '%s\\n' "$1" >> "${provisionLog}"; }`,
     extractShellFn(INSTALL_SH, "oc_config_set"),
     extractShellFn(INSTALL_SH, "tts_ensure_provider_registered"),
+    extractShellFn(INSTALL_SH, "tts_write_local_provider_definition"),
     // The real knob, not a stub: the test is about what the step does with it.
     extractShellFn(INSTALL_SH, "harness_has_no_gpu"),
     extractShellFn(INSTALL_SH, "step_openclaw_tts"),
@@ -487,6 +488,18 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
     expect(res.stdout, "the preserve branch was never reached").toContain("preserved");
     expect(res.status).toBe(code);
     expect(res.provisionFailures).toContain("openclaw_tts");
+  });
+
+  it("defines the on-device provider even when another provider is preserved", () => {
+    // A box whose speech provider is the cloud voice used to return before
+    // the tts-local-cli entry was ever written, so an installed Kokoro was
+    // "not available" to the Local AI tab. The selection is still preserved;
+    // only the DEFINITION is written, so the box can be switched later.
+    const res = runStep(0, "openai");
+    expect(res.stdout).toContain("preserving");
+    expect(res.openclaw.some((c) => c.startsWith("config set messages.tts.providers.tts-local-cli "))).toBe(true);
+    expect(res.openclaw).not.toContain("config set messages.tts.provider tts-local-cli");
+    expect(res.openclaw.some((c) => c.startsWith("config set messages.tts.provider "))).toBe(false);
   });
 
   it("hands install-voice.sh the verdict path so both halves cannot drift", () => {

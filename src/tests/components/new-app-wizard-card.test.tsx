@@ -7,9 +7,10 @@
  * there anything that opens over your work is expected to close when you click
  * away. One prop separates them, so neither host has to re-implement it.
  */
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@/tests/helpers/test-utils";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import NewAppWizardCard from "@/components/NewAppWizardCard";
+import { buildResumeProjectPrompt, CHAT_MESSAGE_EVENT } from "@/lib/ui-events";
 
 describe("NewAppWizardCard", () => {
   it("ignores an outside click by default — the page host must not lose typed text", () => {
@@ -56,5 +57,64 @@ describe("NewAppWizardCard", () => {
     unmount();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The card's second mode: an existing project and what its next run should
+ * do, composed as a message that tells the assistant how to RESUME it.
+ */
+describe("NewAppWizardCard — an existing project", () => {
+  const PROJECTS = [
+    { folder: "shop", directory: "/home/clawbox/Projects/shop", kind: "folder", name: "shop", lastCommit: null, onDesktop: false,
+      latestRun: { id: "run-1", status: "completed", task: "Build the customer list\nwith search", startedAt: 1, completedAt: 2 } },
+    { folder: "invoices", directory: "/home/clawbox/clawbox/data/code-projects/invoices", kind: "codeProject", name: "Invoices", lastCommit: null, onDesktop: true, latestRun: null },
+  ];
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("lists the owner's projects, and hands the chat a message that resumes the chosen one", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(PROJECTS), { status: 200, headers: { "content-type": "application/json" } })));
+    const heard: string[] = [];
+    const onChatMessage = (e: Event) => heard.push(String((e as CustomEvent<{ text?: string }>).detail?.text ?? ""));
+    window.addEventListener(CHAT_MESSAGE_EVENT, onChatMessage);
+    const onClose = vi.fn();
+    try {
+      render(<NewAppWizardCard onClose={onClose} />);
+      fireEvent.click(screen.getByTestId("coding-agent-new-mode-existing"));
+      const select = await screen.findByTestId("coding-agent-new-project");
+      await waitFor(() => expect(select).not.toBeDisabled());
+      fireEvent.change(select, { target: { value: "/home/clawbox/clawbox/data/code-projects/invoices" } });
+      fireEvent.change(screen.getByTestId("coding-agent-new-next"), { target: { value: "Add a PDF export." } });
+      fireEvent.click(screen.getByTestId("coding-agent-new-create"));
+      expect(heard).toEqual([buildResumeProjectPrompt({
+        name: "Invoices", directory: "/home/clawbox/clawbox/data/code-projects/invoices", kind: "codeProject", folder: "invoices",
+        instructions: "Add a PDF export.", latestRun: null,
+      })]);
+      expect(heard[0]).toContain("coding_agent_run");
+      expect(heard[0]).toContain("code_project_build");
+      expect(heard[0]).not.toContain("Create a new ClawBox app");
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener(CHAT_MESSAGE_EVENT, onChatMessage);
+    }
+  });
+
+  it("shows the chosen project's last run, and refuses to continue without a project or an instruction", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ projects: PROJECTS }), { status: 200, headers: { "content-type": "application/json" } })));
+    render(<NewAppWizardCard onClose={() => {}} />);
+    fireEvent.click(screen.getByTestId("coding-agent-new-mode-existing"));
+    const select = await screen.findByTestId("coding-agent-new-project");
+    await waitFor(() => expect(select).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("coding-agent-new-create"));
+    expect(screen.getByTestId("coding-agent-new-error")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-agent-new-last-run")).not.toBeInTheDocument();
+    fireEvent.change(select, { target: { value: "/home/clawbox/Projects/shop" } });
+    // The line exists only once a project with a run is chosen; the words
+    // come through the i18n provider, absent in this render.
+    expect(screen.getByTestId("coding-agent-new-last-run")).toBeInTheDocument();
+    expect((select as HTMLSelectElement).value).toBe("/home/clawbox/Projects/shop");
+    fireEvent.click(screen.getByTestId("coding-agent-new-create"));
+    expect(screen.getByTestId("coding-agent-new-error")).toBeInTheDocument();
   });
 });

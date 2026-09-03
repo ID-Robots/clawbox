@@ -351,4 +351,32 @@ describe("status validation", () => {
     expect(isVoiceStatus({ ...s, disclosure: null })).toBe(true);
     expect(isVoiceStatus({ ...s, disclosure: { kind: "maybe", providers: [] } })).toBe(false);
   });
+  it("says, in amber, when the box settled on the default instead of the pick", async () => {
+    mockFetch(status(), { answer: { ...status(), fallback: { requested: "local", reason: "not_installed" } } });
+    render(<VoiceOutputPanel active />);
+    const source = await screen.findByTestId("voice-source");
+    fireEvent.change(source, { target: { value: "local" } });
+    const notice = await screen.findByTestId("voice-fallback-notice");
+    expect(notice).toHaveTextContent(/default voice/i);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("offers the spoken-replies switch, on by default, and posts a flip", async () => {
+    mockFetch(status(), { answer: { ...status(), autoReply: false } });
+    const heard: unknown[] = [];
+    const listener = (e: Event) => heard.push((e as CustomEvent).detail);
+    window.addEventListener("clawbox:voice-settings-changed", listener);
+    try {
+      render(<VoiceOutputPanel active />);
+      const toggle = await screen.findByTestId("voice-auto-reply");
+      expect(toggle).toHaveAttribute("aria-checked", "true");
+      fireEvent.click(toggle);
+      await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "autoReply", enabled: false } }));
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
+      expect(heard).toEqual([{ autoReply: false }]);
+    } finally {
+      window.removeEventListener("clawbox:voice-settings-changed", listener);
+    }
+  });
+
 });

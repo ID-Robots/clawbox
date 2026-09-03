@@ -108,7 +108,10 @@ async function main() {
 
   // The switch and the run settings are enable-time config, not per-run: the
   // record snapshots them at startRun. Set them once, up front, as the owner.
-  const settings = { enabled: true };
+  // Every run must work in a folder INSIDE the owner's project folder, so
+  // the suite's work root is made the project folder for the session.
+  const workroot = args.workroot ?? path.join(os.homedir(), "bench-work");
+  const settings = { enabled: true, defaultDirectory: workroot };
   if (args.effort) settings.effort = args.effort;
   if (Number.isFinite(args.maxTurns)) settings.maxTurns = args.maxTurns;
   if (Number.isFinite(args.tokenLimit)) settings.tokenLimit = args.tokenLimit;
@@ -119,7 +122,6 @@ async function main() {
     process.exit(1);
   }
 
-  const workroot = args.workroot ?? path.join(os.homedir(), "bench-work");
   const summary = [];
   for (const { task, rep } of plan) {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);

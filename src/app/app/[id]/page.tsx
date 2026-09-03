@@ -15,7 +15,7 @@ import type { InstalledMeta } from "@/lib/store-categories";
 import type { StoreApp } from "@/components/AppStore";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 
-const TerminalApp = dynamic(() => import("@/components/TerminalApp"), { ssr: false });
+const TerminalTabs = dynamic(() => import("@/components/TerminalTabs"), { ssr: false });
 const ChatApp = dynamic(() => import("@/components/ChatApp"), { ssr: false });
 const ClawKeepApp = dynamic(() => import("@/components/ClawKeepApp"), { ssr: false });
 const SystemUpdateApp = dynamic(() => import("@/components/SystemUpdateApp"), { ssr: false });
@@ -206,7 +206,7 @@ export default function StandaloneAppPage() {
       case "hermes":
         return loading;
       case "terminal":
-        return <TerminalApp />;
+        return <TerminalTabs />;
       case "coding":
         return <CodingAgentApp />;
       case "files":

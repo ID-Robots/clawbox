@@ -156,8 +156,18 @@ const nextConfig: NextConfig = {
               // by URL safety check") while the request itself succeeded.
               "media-src 'self' blob: data:",
               `connect-src 'self' ws: wss: ${LOCAL_LAN_SOURCES}`,
-              // Allow code-server iframe and webapp iframes (same origin)
-              `frame-src 'self' blob:`,
+              // Frames: code-server and the sandboxed webapp iframes are
+              // same-origin, but an app the coding agent builds with its own
+              // server (a Next.js app on :4199, a game with pointer lock) is
+              // reached on the box's OWN HOST at that port — and that host is
+              // whatever the owner typed: a LAN IP, clawbox.local, 10.42.0.1,
+              // the tunnel. A static header cannot name it, and `'self'`
+              // excludes every other port, so the desktop window showed
+              // "This content is blocked" over a running app. The scheme
+              // sources let those frames load; what protects the desktop is
+              // the iframe sandbox (an opaque origin, no allow-same-origin —
+              // src/lib/webapp-sandbox.ts), not this list.
+              `frame-src 'self' blob: http: https:`,
               `frame-ancestors ${frameAncestors}`,
             ].join("; "),
           },

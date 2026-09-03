@@ -18,15 +18,80 @@ import React, {
   useState,
 } from "react";
 import dynamic from "next/dynamic";
+import { useT } from "@/lib/i18n";
 import "@xterm/xterm/css/xterm.css";
+
+/** What a keyboard shortcut in the terminal asks the tab strip around it to do. */
+export type TerminalTabAction = "newTab" | "closeTab" | "nextTab" | "prevTab";
 
 export interface TerminalAppProps {
   /** Command typed into the shell once, per connection, after it first speaks. */
   initialCommand?: string;
+  /**
+   * Whether this terminal is the one on screen. A tab strip keeps every
+   * terminal mounted so its shell survives a switch; the one that just became
+   * visible takes the keyboard. Absent means "always".
+   */
+  active?: boolean;
+  /**
+   * Tab shortcuts — Alt+Shift+T, Alt+Shift+W, Alt+Shift+PageDown/PageUp —
+   * handed to whoever owns the tabs. Without a handler the keys reach the
+   * shell as they always did.
+   */
+  onTabAction?: (action: TerminalTabAction) => void;
 }
 
-function TerminalInner({ initialCommand }: TerminalAppProps) {
+/**
+ * Copy to the clipboard, over plain HTTP too: `navigator.clipboard` exists
+ * only on a secure origin, and every LAN ClawBox is http://, so the
+ * `execCommand` fallback is the path most boxes take.
+ */
+function copyText(text: string) {
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+  } else {
+    fallbackCopy(text);
+  }
+}
+function fallbackCopy(text: string) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  try {
+    ta.focus();
+    ta.setSelectionRange(0, ta.value.length);
+    document.execCommand("copy");
+  } finally {
+    document.body.removeChild(ta);
+  }
+}
+
+interface ContextMenuState {
+  x: number;
+  y: number;
+  hasSelection: boolean;
+}
+
+/** The menu's width and height, for keeping it inside the viewport. */
+const MENU_W = 200;
+const MENU_H = 160;
+
+function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalAppProps) {
+  const { t } = useT();
   const containerRef = useRef<HTMLDivElement>(null);
+  // The right-click menu: where it is and whether Copy has anything to copy.
+  const [menu, setMenu] = useState<ContextMenuState | null>(null);
+  // Whether the clipboard can be READ from script — a secure origin only.
+  // Paste is offered when it can, and named as a key combination when not.
+  const [canReadClipboard] = useState(() => typeof navigator !== "undefined" && typeof navigator.clipboard?.readText === "function");
+  const onTabActionRef = useRef(onTabAction);
+  useEffect(() => { onTabActionRef.current = onTabAction; }, [onTabAction]);
+  // Read by the key handler xterm calls before it forwards a key to the
+  // shell, so an Escape meant for the menu never reaches the PTY.
+  const menuOpenRef = useRef(false);
+  useEffect(() => { menuOpenRef.current = menu !== null; }, [menu]);
   const termRef = useRef<import("@xterm/xterm").Terminal | null>(null);
   const fitAddonRef = useRef<import("@xterm/addon-fit").FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -124,34 +189,14 @@ function TerminalInner({ initialCommand }: TerminalAppProps) {
         // palette (xterm's default) recoloured its text instead of weighting it.
         drawBoldTextInBrightColors: false,
         macOptionIsMeta: true,
+        // A right click on a word selects it, so "right click, Copy" works
+        // on a word without dragging first.
+        rightClickSelectsWord: true,
       });
 
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.loadAddon(new WebLinksAddon());
-
-      // Clipboard helper: works over plain HTTP (navigator.clipboard needs HTTPS)
-      function copyText(text: string) {
-        if (navigator.clipboard?.writeText) {
-          navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
-        } else {
-          fallbackCopy(text);
-        }
-      }
-      function fallbackCopy(text: string) {
-        const ta = document.createElement("textarea");
-        ta.value = text;
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
-        document.body.appendChild(ta);
-        try {
-          ta.focus();
-          ta.setSelectionRange(0, ta.value.length);
-          document.execCommand("copy");
-        } finally {
-          document.body.removeChild(ta);
-        }
-      }
 
       // Clipboard key handler at xterm level.
       // - Ctrl+Shift+C: copy selection
@@ -159,10 +204,36 @@ function TerminalInner({ initialCommand }: TerminalAppProps) {
       //   so it fires a native "paste" event on xterm's hidden textarea (the
       //   only way to read the clipboard over plain HTTP).
       term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
+        // An Escape while the right-click menu is open is for the menu. xterm
+        // sees the key before the document does, so without this the menu
+        // closed AND the shell got \x1b — which aborts a running claude-ds
+        // turn, or leaves insert mode in vim.
+        if (menuOpenRef.current && ev.key === "Escape") {
+          if (ev.type === "keydown") setMenu(null);
+          return false;
+        }
         if (ev.ctrlKey && ev.shiftKey && ev.key === "C" && ev.type === "keydown") {
           const sel = term.getSelection();
           if (sel) copyText(sel);
           return false;
+        }
+        // Tab shortcuts, only when somebody owns the tabs. Alt+Shift, not
+        // Ctrl+Shift: Ctrl+Shift+T/W and Ctrl+PageUp/PageDown are the
+        // browser's own accelerators (reopen tab, CLOSE THE WINDOW, switch
+        // tab), handled before the page ever sees the key — preventDefault
+        // cannot claim them. Alt+Shift+letter is bound by no browser.
+        const tabs = onTabActionRef.current;
+        if (tabs && ev.type === "keydown" && ev.altKey && ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
+          let action: TerminalTabAction | null = null;
+          if (ev.key === "T" || ev.key === "t") action = "newTab";
+          else if (ev.key === "W" || ev.key === "w") action = "closeTab";
+          else if (ev.key === "PageDown") action = "nextTab";
+          else if (ev.key === "PageUp") action = "prevTab";
+          if (action) {
+            ev.preventDefault();
+            tabs(action);
+            return false;
+          }
         }
         // Let Ctrl+Shift+V AND Ctrl+V bubble to the browser natively
         if (ev.ctrlKey && (ev.key === "v" || ev.key === "V") && ev.type === "keydown") {
@@ -302,9 +373,20 @@ function TerminalInner({ initialCommand }: TerminalAppProps) {
     termRef.current?.focus();
   }, []);
 
+  // The tab that just came on screen takes the keyboard. Its container was
+  // display:none a moment ago, so the fit is redone too — the ResizeObserver
+  // sees the size change as well, but a focus into a stale-sized terminal
+  // would put the cursor in the wrong place for a frame.
+  useEffect(() => {
+    if (!active) return;
+    try { fitAddonRef.current?.fit(); } catch {}
+    termRef.current?.focus();
+  }, [active]);
+
   // Re-focus terminal when the window becomes visible/active
   useEffect(() => {
     const refocus = () => {
+      if (!active) return;
       if (termRef.current && statusRef.current === "connected") {
         termRef.current.focus();
       }
@@ -317,7 +399,85 @@ function TerminalInner({ initialCommand }: TerminalAppProps) {
       document.removeEventListener("visibilitychange", refocus);
       window.removeEventListener("focus", refocus);
     };
+  }, [active]);
+
+  // ── Right-click menu ──────────────────────────────────────────────────
+  //
+  // The browser's own menu has nothing useful for a terminal — no Copy over
+  // plain HTTP, no Paste that reaches the shell — so it is replaced with the
+  // four things a terminal is actually asked for.
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const term = termRef.current;
+    const x = Math.min(e.clientX, Math.max(0, window.innerWidth - MENU_W));
+    const y = Math.min(e.clientY, Math.max(0, window.innerHeight - MENU_H));
+    setMenu({ x, y, hasSelection: Boolean(term?.getSelection()) });
   }, []);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const closeMenu = useCallback(() => {
+    setMenu(null);
+    termRef.current?.focus();
+  }, []);
+  // A role="menu" must be enterable: the first item that can be used takes
+  // focus when the menu opens (Shift+F10 and the Menu key open it too).
+  useEffect(() => {
+    if (!menu) return;
+    menuRef.current?.querySelector<HTMLButtonElement>('button[role="menuitem"]:not([disabled])')?.focus();
+  }, [menu]);
+  const onMenuKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "Tab") { e.preventDefault(); closeMenu(); return; }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+    e.preventDefault();
+    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]:not([disabled])') ?? []);
+    if (items.length === 0) return;
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = e.key === "Home" ? 0
+      : e.key === "End" ? items.length - 1
+      : e.key === "ArrowDown" ? (current + 1) % items.length
+      : (current - 1 + items.length) % items.length;
+    items[next].focus();
+  }, [closeMenu]);
+  useEffect(() => {
+    if (!menu) return;
+    const onKey = (ev: KeyboardEvent) => { if (ev.key === "Escape") closeMenu(); };
+    const onPointer = (ev: PointerEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (!target?.closest("[data-terminal-menu]")) closeMenu();
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("pointerdown", onPointer);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("pointerdown", onPointer);
+    };
+  }, [menu, closeMenu]);
+  const menuCopy = useCallback(() => {
+    const sel = termRef.current?.getSelection();
+    if (sel) copyText(sel);
+    closeMenu();
+    termRef.current?.focus();
+  }, [closeMenu]);
+  const menuPaste = useCallback(() => {
+    closeMenu();
+    const term = termRef.current;
+    if (!term || !navigator.clipboard?.readText) return;
+    navigator.clipboard.readText().then((text) => {
+      // Through xterm's own paste so bracketed-paste mode is honoured: a
+      // multi-line paste into a shell that asked for it arrives as one
+      // paste, not as lines run one by one.
+      if (text) term.paste(text);
+      term.focus();
+    }).catch(() => { term.focus(); });
+  }, [closeMenu]);
+  const menuSelectAll = useCallback(() => {
+    termRef.current?.selectAll();
+    closeMenu();
+  }, [closeMenu]);
+  const menuClear = useCallback(() => {
+    termRef.current?.clear();
+    closeMenu();
+    termRef.current?.focus();
+  }, [closeMenu]);
 
   // Fallback keyboard handler — copy/paste is handled at the xterm level
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -418,10 +578,45 @@ function TerminalInner({ initialCommand }: TerminalAppProps) {
         }}
         onClick={handleContainerClick}
         onFocus={handleContainerClick}
+        onContextMenu={handleContextMenu}
       />
+
+      {menu && (
+        <div
+          ref={menuRef}
+          role="menu"
+          data-terminal-menu
+          data-testid="terminal-context-menu"
+          className="fixed z-[99999] min-w-[200px] py-1 bg-[#1c1c30] rounded-lg shadow-2xl border border-white/10 text-sm text-white/90"
+          style={{ left: menu.x, top: menu.y }}
+          onKeyDown={onMenuKeyDown}
+        >
+          <button type="button" role="menuitem" data-testid="terminal-menu-copy" disabled={!menu.hasSelection} onClick={menuCopy} className={MENU_ITEM}>
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">content_copy</span>
+            {t("terminal.copy")}
+            <span className="ml-auto text-[11px] text-white/40 font-mono">Ctrl+Shift+C</span>
+          </button>
+          <button type="button" role="menuitem" data-testid="terminal-menu-paste" disabled={!canReadClipboard} onClick={menuPaste} className={MENU_ITEM} title={canReadClipboard ? undefined : t("terminal.pasteHint")}>
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">content_paste</span>
+            {t("terminal.paste")}
+            <span className="ml-auto text-[11px] text-white/40 font-mono">Ctrl+Shift+V</span>
+          </button>
+          <div role="separator" className="my-1 border-t border-white/10" />
+          <button type="button" role="menuitem" data-testid="terminal-menu-select-all" onClick={menuSelectAll} className={MENU_ITEM}>
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">select_all</span>
+            {t("terminal.selectAll")}
+          </button>
+          <button type="button" role="menuitem" data-testid="terminal-menu-clear" onClick={menuClear} className={MENU_ITEM}>
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">cleaning_services</span>
+            {t("terminal.clear")}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
+
+const MENU_ITEM = "w-full px-3 py-1.5 text-left hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent flex items-center gap-2 bg-transparent border-none cursor-pointer disabled:cursor-default text-inherit";
 
 const TerminalApp = dynamic(
   () => Promise.resolve(TerminalInner),

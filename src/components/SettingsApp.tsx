@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import SystemUpdateApp, { componentNeedsUpdate } from "@/components/SystemUpdateApp";
 import Image from "next/image";
 import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
@@ -11,7 +12,7 @@ import HarnessPicker from "./HarnessPicker";
 import PetPicker from "./PetPicker";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
-import { dispatchOpenApp, CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
+import { CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
@@ -32,8 +33,6 @@ import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
 import { cachedEdition, fetchHarness } from "@/lib/client-harness";
 import { isPairingToken, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
 import { QRCodeSVG } from "qrcode.react";
-import type { UpdateState } from "@/lib/updater";
-import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
 import { BuildIdentityRows, useBuildIdentity } from "./BuildIdentityPanel";
 import { useReconnect } from "@/hooks/useReconnect";
@@ -196,7 +195,7 @@ interface SystemStats {
 
 // codingAgent is gone from this list on purpose: its settings moved into the
 // Coding Agent app itself (the owner asked for them back there).
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "about"] as const;
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
 
 /**
  * The channels that live behind the single "Messaging Channels" entry — the same idea
@@ -299,6 +298,9 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   { id: "wifi", icon: "wifi", labelKey: "settings.network" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
+  // The whole system update — versions, the run, beta channel, branch pin,
+  // force — is a Settings page now; the About tile only points here.
+  { id: "update", icon: "system_update", labelKey: "settings.systemUpdate" },
   { id: "about", icon: "info", labelKey: "settings.about" },
 ];
 
@@ -569,11 +571,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     return () => clearInterval(iv);
   }, [section]);
 
-  /* ── System update ── */
-  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
-  const [updateStarted, setUpdateStarted] = useState(false);
-  const [updateError, setUpdateError] = useState<string | null>(null);
-  const [updateConfirm, setUpdateConfirm] = useState(false);
+  /* ── Versions, for About's rows and the sidebar subtitles. The update
+     itself — its run, the beta channel, the branch pin, the force — is the
+     System Update page (SystemUpdateApp, embedded), not state of this
+     component any more. ── */
   const [versionInfo, setVersionInfo] = useState<{
     clawbox: { current: string; target: string | null; updateAvailable?: boolean };
     openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
@@ -582,74 +583,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     hermes?: { current: string | null; target: string | null; updateAvailable?: boolean };
     edition?: "openclaw" | "hermes" | "dual";
   } | null>(null);
-  const [versionLoading, setVersionLoading] = useState(false);
-  const [updateBranch, setUpdateBranch] = useState<string | null>(null);
-  const [branchInput, setBranchInput] = useState("");
-  const [branchSaving, setBranchSaving] = useState(false);
-  const [branchError, setBranchError] = useState<string | null>(null);
-  const [betaEnabled, setBetaEnabled] = useState(false);
-  const [betaConfirm, setBetaConfirm] = useState(false);
-  const [betaSaving, setBetaSaving] = useState(false);
-  const updatePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const updatePollControllerRef = useRef<AbortController | null>(null);
 
-  const stopUpdatePolling = useCallback(() => {
-    if (updatePollRef.current) { clearInterval(updatePollRef.current); updatePollRef.current = null; }
-    updatePollControllerRef.current?.abort();
-    updatePollControllerRef.current = null;
-  }, []);
-
-  const startUpdatePolling = useCallback(() => {
-    if (updatePollRef.current) return;
-    const controller = new AbortController();
-    updatePollControllerRef.current = controller;
-    let failureCount = 0;
-    let serverWentDown = false;
-    updatePollRef.current = setInterval(async () => {
-      try {
-        const res = await fetch("/setup-api/update/status", { signal: controller.signal });
-        if (controller.signal.aborted) return;
-        if (!res.ok) { failureCount++; if (failureCount >= 3) serverWentDown = true; return; }
-        if (serverWentDown) { window.location.reload(); return; }
-        failureCount = 0;
-        const data: UpdateState = await res.json();
-        if (controller.signal.aborted) return;
-        setUpdateState(data);
-        if (data.phase !== "running") stopUpdatePolling();
-      } catch {
-        if (controller.signal.aborted) return;
-        failureCount++;
-        if (failureCount >= 3) serverWentDown = true;
-      }
-    }, 2000);
-  }, [stopUpdatePolling]);
-
-  useEffect(() => () => stopUpdatePolling(), [stopUpdatePolling]);
-
-  // Auto-dismiss the update overlay once the update finishes. Full updates
-  // (with a `restart` step) get a longer grace window and a hard navigation
-  // to `/` so the browser picks up any freshly built client bundle; scoped
-  // updates just clear the overlay in place.
-  useEffect(() => {
-    if (updateState?.phase !== "completed") return;
-    const isFullUpdate = updateState.steps.some(s => s.id === RESTART_STEP_ID);
-    const timer = setTimeout(() => {
-      if (isFullUpdate) {
-        stopUpdatePolling();
-        // replace() instead of assigning href so Back doesn't land on the
-        // stale Settings URL whose in-memory state is already gone.
-        window.location.replace("/");
-        return;
-      }
-      setUpdateStarted(false);
-      setUpdateError(null);
-      setUpdateState(null);
-      stopUpdatePolling();
-    }, isFullUpdate ? 5000 : 3000);
-    return () => clearTimeout(timer);
-  }, [updateState?.phase, updateState?.steps, stopUpdatePolling]);
-
-  // Load version info and beta status on mount
+  // Load version info on mount
   useEffect(() => {
     // /update/status only returns versions when phase=idle and not completed.
     // Use the dedicated /update/versions endpoint which always reports them.
@@ -657,82 +592,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data?.clawbox || data?.openclaw) setVersionInfo(data); })
       .catch(() => {});
-    fetch("/setup-api/system/update-branch")
-      .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data?.branch === "beta") setBetaEnabled(true); })
-      .catch(() => {});
   }, []);
-
-
-
-  const saveUpdateBranch = async (branch: string) => {
-    setBranchSaving(true);
-    setBranchError(null);
-    try {
-      const res = await fetch("/setup-api/system/update-branch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ branch: branch || null }) });
-      const data = await res.json();
-      if (res.ok) { setUpdateBranch(data.branch ?? null); } else { setBranchError(data.error || t("settings.failedSetBranch")); }
-    } catch (err) { setBranchError(err instanceof Error ? err.message : t("settings.failedSetBranch")); } finally { setBranchSaving(false); }
-  };
-
-  const toggleBeta = async (enable: boolean) => {
-    if (enable) {
-      setBetaConfirm(true);
-      return;
-    }
-    setBetaSaving(true);
-    try {
-      const res = await fetch("/setup-api/system/update-branch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ branch: null }),
-      });
-      if (res.ok) {
-        setBetaEnabled(false);
-        setUpdateBranch(null);
-        setBranchInput("");
-      }
-    } catch {} finally { setBetaSaving(false); }
-  };
-
-  const confirmBeta = async () => {
-    setBetaConfirm(false);
-    setBetaSaving(true);
-    try {
-      const res = await fetch("/setup-api/system/update-branch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ branch: "beta" }),
-      });
-      if (res.ok) {
-        setBetaEnabled(true);
-        setUpdateBranch("beta");
-        setBranchInput("beta");
-      }
-    } catch {} finally { setBetaSaving(false); }
-  };
-
-  const triggerUpdate = async () => {
-    setUpdateStarted(true);
-    setUpdateError(null);
-    setUpdateState(null);
-    try {
-      const res = await fetch("/setup-api/update/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force: true }) });
-      if (!res.ok) { const data = await res.json().catch(() => ({})); setUpdateError(typeof data.error === "string" ? data.error : t("settings.failedStartUpdate")); return; }
-      startUpdatePolling();
-    } catch (err) { setUpdateError(err instanceof Error ? err.message : t("settings.failedStartUpdate")); }
-  };
-
-  const triggerOpenclawUpdate = async () => {
-    setUpdateStarted(true);
-    setUpdateError(null);
-    setUpdateState(null);
-    try {
-      const res = await fetch("/setup-api/update/openclaw", { method: "POST" });
-      if (!res.ok) { const data = await res.json().catch(() => ({})); setUpdateError(typeof data.error === "string" ? data.error : t("settings.failedStartUpdate")); return; }
-      startUpdatePolling();
-    } catch (err) { setUpdateError(err instanceof Error ? err.message : t("settings.failedStartUpdate")); }
-  };
 
   /* ── WiFi ── */
   const [ssid, setSsid] = useState("");
@@ -5884,6 +5744,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {activeSection === "remote" && renderRemoteSection()}
 
         {/* ─── About ─── */}
+        {activeSection === "update" && (
+          <div className="max-w-2xl" data-testid="settings-update-section">
+            <SystemUpdateApp embedded />
+          </div>
+        )}
+
         {activeSection === "about" && (<>
           <div className="max-w-xl space-y-6">
             <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">{t("settings.aboutClawBox")}</h2>
@@ -5966,32 +5832,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <span className="material-symbols-rounded ml-auto" style={{ fontSize: 16 }}>open_in_new</span>
             </a>
 
-            {/* Beta toggle */}
-            <div className="bg-white/5 rounded-xl px-4 py-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 20 }}>science</span>
-                  <div>
-                    <span className="text-sm text-[var(--text-primary)]">{t("settings.betaChannel")}</span>
-                    <p className="text-xs text-[var(--text-muted)] mt-0.5">{t("settings.betaDesc")}</p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => toggleBeta(!betaEnabled)}
-                  disabled={betaSaving}
-                  className={`relative inline-flex items-center w-10 h-5 rounded-full transition-colors cursor-pointer border-none shrink-0 ${betaEnabled ? "bg-amber-500" : "bg-white/15"} ${betaSaving ? "opacity-50" : ""}`}
-                >
-                  <span
-                    className="absolute w-4 h-4 rounded-full bg-white shadow-md transition-transform duration-200"
-                    style={{ left: 2, transform: betaEnabled ? "translateX(18px)" : "translateX(0)" }}
-                  />
-                </button>
-              </div>
-              {betaEnabled && (
-                <p className="text-xs text-amber-400/60 mt-2">{t("settings.betaInstallNote")}</p>
-              )}
-            </div>
-
             {/* Only the ClawBox System Update tile is exposed. OpenClaw is
                 pinned by ClawBox (config/openclaw-target.txt) and travels
                 with the full release, so a standalone "OpenClaw Update"
@@ -6000,7 +5840,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 in the version-info section above. */}
             <div className="flex gap-2">
               <button
-                onClick={() => dispatchOpenApp("system_update")}
+                onClick={() => { setSection("update"); setMobileSection("update"); }}
+                data-testid="settings-about-open-update"
                 className="flex items-center gap-3 flex-1 bg-green-500/10 rounded-xl px-4 py-3 text-sm text-green-400/80 hover:text-green-400 border border-green-500/20 hover:bg-green-500/15 transition-colors cursor-pointer text-left"
               >
                 <span className="material-symbols-rounded shrink-0" style={{ fontSize: 20 }}>system_update</span>
@@ -6025,41 +5866,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             </button>
           </div>
 
-          {/* Beta confirmation dialog */}
-          {betaConfirm && (
-            <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-              <div className="bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-2xl p-6 max-w-sm mx-4 shadow-2xl">
-                <div className="flex items-center gap-3 mb-4">
-                  <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 28 }}>warning</span>
-                  <h3 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.enableBeta")}</h3>
-                </div>
-                <div className="space-y-3 mb-6">
-                  <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
-                    {t("settings.betaWarning")}
-                  </p>
-                  <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
-                    <p className="text-xs text-red-400 leading-relaxed">
-                      {t("settings.betaDisclaimer")}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setBetaConfirm(false)}
-                    className="flex-1 px-4 py-2.5 bg-white/10 hover:bg-white/15 text-[var(--text-secondary)] rounded-lg text-sm font-medium cursor-pointer transition-colors"
-                  >
-                    {t("cancel")}
-                  </button>
-                  <button
-                    onClick={confirmBeta}
-                    className="flex-1 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-sm font-medium cursor-pointer transition-colors"
-                  >
-                    {t("settings.enableBetaBtn")}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
         </>)}
     </>
   );
@@ -6188,6 +5994,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         return { subtitle: null };
       case "system":
         return { subtitle: hostname ? `${hostname}.local` : null };
+      case "update": {
+        const cb = versionInfo?.clawbox;
+        if (!cb) return { subtitle: null };
+        // The same predicate the update page decides with, so the sidebar
+        // never offers an update the page then denies (a `v` prefix, a
+        // target older than current).
+        const needs = componentNeedsUpdate(cb);
+        return { subtitle: needs && cb.target ? `${cleanVersion(cb.current) ?? cb.current} → ${cleanVersion(cb.target) ?? cb.target}` : t("settings.upToDate") };
+      }
       case "about":
         return { subtitle: versionInfo?.clawbox?.current ? cleanVersion(versionInfo.clawbox.current) : null };
       default:
@@ -6250,87 +6065,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </>
         )}
 
-        {/* Update confirmation modal */}
-      {updateConfirm && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded-2xl shadow-2xl p-6 max-w-sm w-full">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.systemUpdate")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-4 leading-relaxed">
-              {t("settings.updateDesc")}
-            </p>
-            {versionLoading ? (
-              <div className="mb-4 text-xs text-[var(--text-muted)] opacity-60">{t("settings.checkingVersions")}</div>
-            ) : versionInfo && (
-              <div className="mb-4 space-y-2 text-xs">
-                <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
-                  <span className="text-[var(--text-muted)] font-medium">ClawBox</span>
-                  <span className="text-[var(--text-primary)]">
-                    {versionInfo.clawbox.current}
-                    {versionInfo.clawbox.target ? (
-                      <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.clawbox.target}</span></span>
-                    ) : (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
-                    )}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
-                  <span className="text-[var(--text-muted)] font-medium">OpenClaw</span>
-                  <span className="text-[var(--text-primary)]">
-                    {versionInfo.openclaw.current ?? t("settings.notInstalled")}
-                    {versionInfo.openclaw.target ? (
-                      <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.openclaw.target}</span></span>
-                    ) : versionInfo.openclaw.current ? (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
-                    ) : null}
-                  </span>
-                </div>
-              </div>
-            )}
-            {/* Branch selector */}
-            {!versionLoading && (updateBranch || /^v\d+\.\d+\.\d+-.+/.test(versionInfo?.clawbox.current ?? "")) && (
-              <div className="mb-4">
-                <label htmlFor="settings-update-branch" className="text-xs text-[var(--text-muted)] opacity-60 mb-1 block">Update branch</label>
-                <div className="flex gap-2">
-                  <input
-                    id="settings-update-branch"
-                    type="text"
-                    value={branchInput}
-                    onChange={(e) => { setBranchInput(e.target.value); setBranchError(null); }}
-                    placeholder={t("settings.main")}
-                    className="flex-1 bg-white/[0.04] border border-[var(--border-subtle)] rounded-lg px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] opacity-40 outline-none focus:border-[var(--coral-bright)]"
-                  />
-                  <button
-                    type="button"
-                    disabled={branchSaving || branchInput === (updateBranch ?? "")}
-                    onClick={() => saveUpdateBranch(branchInput)}
-                    className="px-3 py-1.5 text-xs font-semibold text-white bg-orange-500 rounded-lg cursor-pointer disabled:opacity-40"
-                  >
-                    {branchSaving ? "..." : "Set"}
-                  </button>
-                </div>
-                {branchError && <p className="mt-1 text-xs text-red-400">{branchError}</p>}
-                {updateBranch && (
-                  <div className="mt-1 flex items-center gap-2">
-                    <span className="text-xs text-emerald-400">{t("settings.pinnedBranch", { branch: updateBranch ?? "" })}</span>
-                    <button type="button" onClick={() => { setBranchInput(""); saveUpdateBranch(""); }} className="text-xs text-red-400 hover:text-red-300 cursor-pointer">{t("settings.clearBranch")}</button>
-                  </div>
-                )}
-                {!updateBranch && !branchError && (
-                  <p className="mt-1 text-xs text-[var(--text-muted)] opacity-40">{t("settings.branchHint")}</p>
-                )}
-              </div>
-            )}
-            <div className="flex items-center gap-3 justify-end">
-              <button type="button" onClick={() => setUpdateConfirm(false)} className="px-5 py-2.5 bg-white/10 text-[var(--text-primary)] border border-[var(--border-subtle)] rounded-lg text-sm font-semibold cursor-pointer hover:bg-white/15 transition-colors">
-                {t("cancel")}
-              </button>
-              <button type="button" disabled={branchSaving} onClick={() => { setUpdateConfirm(false); triggerUpdate(); }} className="px-5 py-2.5 bg-orange-500 text-white rounded-lg text-sm font-semibold cursor-pointer hover:bg-orange-600 hover:scale-105 transition-all disabled:opacity-40 disabled:hover:scale-100">
-                {t("settings.update")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Factory Reset confirmation modal */}
       {factoryResetDialog}
@@ -6436,86 +6170,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         onClose={() => setLoginModal((m) => ({ ...m, open: false }))}
       />
 
-      {/* Update confirmation modal */}
-      {updateConfirm && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded-2xl shadow-2xl p-6 max-w-sm w-full">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.systemUpdate")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-4 leading-relaxed">
-              {t("settings.updateDesc")}
-            </p>
-            {versionLoading ? (
-              <div className="mb-4 text-xs text-[var(--text-muted)] opacity-60">{t("settings.checkingVersions")}</div>
-            ) : versionInfo && (
-              <div className="mb-4 space-y-2 text-xs">
-                <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
-                  <span className="text-[var(--text-muted)] font-medium">ClawBox</span>
-                  <span className="text-[var(--text-primary)]">
-                    {versionInfo.clawbox.current}
-                    {versionInfo.clawbox.target ? (
-                      <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.clawbox.target}</span></span>
-                    ) : (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
-                    )}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
-                  <span className="text-[var(--text-muted)] font-medium">OpenClaw</span>
-                  <span className="text-[var(--text-primary)]">
-                    {versionInfo.openclaw.current ?? t("settings.notInstalled")}
-                    {versionInfo.openclaw.target ? (
-                      <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.openclaw.target}</span></span>
-                    ) : versionInfo.openclaw.current ? (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
-                    ) : null}
-                  </span>
-                </div>
-              </div>
-            )}
-            {!versionLoading && (updateBranch || /^v\d+\.\d+\.\d+-.+/.test(versionInfo?.clawbox.current ?? "")) && (
-              <div className="mb-4">
-                <label htmlFor="settings-update-branch-d" className="text-xs text-[var(--text-muted)] opacity-60 mb-1 block">Update branch</label>
-                <div className="flex gap-2">
-                  <input
-                    id="settings-update-branch-d"
-                    type="text"
-                    value={branchInput}
-                    onChange={(e) => { setBranchInput(e.target.value); setBranchError(null); }}
-                    placeholder={t("settings.main")}
-                    className="flex-1 bg-white/[0.04] border border-[var(--border-subtle)] rounded-lg px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] opacity-40 outline-none focus:border-[var(--coral-bright)]"
-                  />
-                  <button
-                    type="button"
-                    disabled={branchSaving || branchInput === (updateBranch ?? "")}
-                    onClick={() => saveUpdateBranch(branchInput)}
-                    className="px-3 py-1.5 text-xs font-semibold text-white bg-orange-500 rounded-lg cursor-pointer disabled:opacity-40"
-                  >
-                    {branchSaving ? "..." : "Set"}
-                  </button>
-                </div>
-                {branchError && <p className="mt-1 text-xs text-red-400">{branchError}</p>}
-                {updateBranch && (
-                  <div className="mt-1 flex items-center gap-2">
-                    <span className="text-xs text-emerald-400">{t("settings.pinnedBranch", { branch: updateBranch ?? "" })}</span>
-                    <button type="button" onClick={() => { setBranchInput(""); saveUpdateBranch(""); }} className="text-xs text-red-400 hover:text-red-300 cursor-pointer">{t("settings.clearBranch")}</button>
-                  </div>
-                )}
-                {!updateBranch && !branchError && (
-                  <p className="mt-1 text-xs text-[var(--text-muted)] opacity-40">{t("settings.branchHint")}</p>
-                )}
-              </div>
-            )}
-            <div className="flex items-center gap-3 justify-end">
-              <button type="button" onClick={() => setUpdateConfirm(false)} className="px-5 py-2.5 bg-white/10 text-[var(--text-primary)] border border-[var(--border-subtle)] rounded-lg text-sm font-semibold cursor-pointer hover:bg-white/15 transition-colors">
-                {t("cancel")}
-              </button>
-              <button type="button" disabled={branchSaving} onClick={() => { setUpdateConfirm(false); triggerUpdate(); }} className="px-5 py-2.5 bg-orange-500 text-white rounded-lg text-sm font-semibold cursor-pointer hover:bg-orange-600 hover:scale-105 transition-all disabled:opacity-40 disabled:hover:scale-100">
-                {t("settings.update")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Factory Reset confirmation modal */}
       {factoryResetDialog}
@@ -6593,115 +6247,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         document.body,
       )}
 
-      {updateStarted && typeof document !== "undefined" && createPortal(
-        <div className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(10, 15, 26, 1)" }}>
-          <style>{`
-            @keyframes update-pulse { 0%, 100% { opacity: 0.3; transform: scale(1); } 50% { opacity: 0.15; transform: scale(1.3); } }
-            @keyframes update-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
-          `}</style>
-          <div className="flex flex-col items-center gap-8 max-w-md w-full text-center px-6">
-            {/* Mascot with animated ring */}
-            <div className="relative w-28 h-28 flex items-center justify-center">
-              {/* Pulse rings */}
-              {!(updateError || updateState?.phase === "failed") && updateState?.phase !== "completed" && (
-                <>
-                  <div className="absolute inset-0 rounded-full border-2 border-[#f97316]/20" style={{ animation: "update-pulse 2.5s ease-in-out infinite" }} />
-                  <div className="absolute inset-3 rounded-full border border-[#f97316]/10" style={{ animation: "update-pulse 2.5s ease-in-out infinite 0.5s" }} />
-                </>
-              )}
-              {/* Completed ring */}
-              {updateState?.phase === "completed" && (
-                <div className="absolute inset-0 rounded-full border-2 border-emerald-500/30" />
-              )}
-              {/* Error ring */}
-              {(updateError || updateState?.phase === "failed") && (
-                <div className="absolute inset-0 rounded-full border-2 border-red-500/30" />
-              )}
-              {/* Logo — matches the welcome screen in the setup wizard */}
-              <img
-                src="/clawbox-crab.png"
-                alt="ClawBox"
-                className="w-[50px] h-[50px] object-contain relative z-10"
-                style={updateState?.phase === "completed" || updateError || updateState?.phase === "failed" ? {} : { animation: "update-float 3s ease-in-out infinite" }}
-              />
-            </div>
-
-            <div>
-              <h2 className="text-2xl font-bold text-white mb-2">
-                {updateState?.phase === "completed" ? t("settings.updateComplete") : updateError || updateState?.phase === "failed" ? t("settings.updateFailed") : t("settings.updating")}
-              </h2>
-              <p className="text-sm text-white/40">
-                {updateState?.phase === "completed"
-                  ? (updateState.steps.some(s => s.id === RESTART_STEP_ID) ? t("settings.restartingDevice") : t("settings.updateDone"))
-                  : updateError || updateState?.phase === "failed" ? "" : "Please don\u2019t turn off your device"}
-              </p>
-            </div>
-
-            {updateState && updateState.steps.length > 0 && (
-              <div className="w-full max-w-xs space-y-3 text-left bg-white/[0.03] rounded-2xl p-4 border border-white/[0.06]">
-                {updateState.steps.map((step) => (
-                  <div key={step.id} className="flex items-center gap-3 text-sm">
-                    {step.status === "completed" ? (
-                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M5 12l5 5L19 7" /></svg>
-                      </span>
-                    ) : step.status === "running" ? (
-                      <span className="flex items-center justify-center w-5 h-5 shrink-0">
-                        <span className="w-4 h-4 rounded-full border-2 border-[#f97316] border-t-transparent animate-spin" />
-                      </span>
-                    ) : step.status === "failed" ? (
-                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-red-500/20 text-red-400 shrink-0">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
-                      </span>
-                    ) : (
-                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white/[0.04] shrink-0">
-                        <span className="w-1.5 h-1.5 rounded-full bg-white/20" />
-                      </span>
-                    )}
-                    <span className={step.status === "running" ? "text-white font-medium" : step.status === "completed" ? "text-emerald-400/70" : step.status === "failed" ? "text-red-400" : "text-white/25"}>
-                      {step.label}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {!updateState && !updateError && (
-              <div className="flex items-center gap-2 text-sm text-white/40">
-                <span className="w-4 h-4 rounded-full border-2 border-[#f97316] border-t-transparent animate-spin" />
-                Connecting...
-              </div>
-            )}
-            {(updateError || updateState?.phase === "failed") && (
-              <div className="space-y-4">
-                <p className="text-sm text-red-400/80">{updateError || updateState?.error || "An error occurred during update"}</p>
-                {updateState?.steps.some((step) => step.status === "failed") && (
-                  <div className="w-full max-w-xs space-y-2 text-left">
-                    {updateState.steps
-                      .filter((step) => step.status === "failed")
-                      .map((step) => (
-                        <div
-                          key={`${step.id}-error`}
-                          className="rounded-xl border border-red-500/20 bg-red-500/8 px-3 py-2 text-xs text-red-300/90"
-                        >
-                          <span className="font-semibold text-red-300">{step.label}:</span>{" "}
-                          {step.error || t("unknownError")}
-                        </div>
-                      ))}
-                  </div>
-                )}
-                <button
-                  onClick={() => { setUpdateStarted(false); setUpdateError(null); setUpdateState(null); stopUpdatePolling(); }}
-                  className="px-6 py-2.5 bg-white/10 text-white rounded-xl text-sm font-medium cursor-pointer hover:bg-white/15 transition-colors border-none"
-                >
-                  Dismiss
-                </button>
-              </div>
-            )}
-          </div>
-        </div>,
-        document.body
-      )}
 
       {resetOverlay}
     </div>

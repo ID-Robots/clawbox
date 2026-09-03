@@ -383,20 +383,26 @@ export default function CodingAgentActivityPill(
           </span>
         </div>
         {onOpen ? (
+          // View: the run's own page in the Coding Agent app, full-screen.
+          // (The pill used to carry an underlined "open" link and a "Live
+          // view" that popped a floating terminal; both are this one button
+          // now, and the live terminal lives on the run's page.)
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onOpen(); }}
             title={openLabel}
             aria-label={openLabel}
+            data-testid="coding-agent-activity-view"
             style={{
-              background: "transparent",
-              border: 0,
-              color: "rgba(255,255,255,0.55)",
+              background: "rgba(52,211,153,0.12)",
+              border: "1px solid rgba(52,211,153,0.35)",
+              borderRadius: 6,
+              color: "#a7f3d0",
               cursor: "pointer",
               font: "inherit",
-              fontSize: 11.5,
-              padding: 0,
-              textDecoration: "underline",
+              fontSize: 11,
+              fontWeight: 600,
+              padding: "1px 7px",
               flexShrink: 0,
             }}
           >

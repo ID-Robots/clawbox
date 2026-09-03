@@ -199,6 +199,7 @@ function runStep(edition: string, opts: StepOpts = {}) {
     `record_provision_failure() { printf '%s\\n' "$1" >> "${provisionLog}"; }`,
     extractShellFn(INSTALL_SH, "oc_config_set"),
     extractShellFn(INSTALL_SH, "tts_ensure_provider_registered"),
+    extractShellFn(INSTALL_SH, "tts_write_local_provider_definition"),
     extractShellFn(INSTALL_SH, "harness_has_no_gpu"),
     extractShellFn(INSTALL_SH, "step_openclaw_tts"),
     "step_openclaw_tts",

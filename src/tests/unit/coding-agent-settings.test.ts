@@ -346,7 +346,18 @@ describe("sub-agent definitions", () => {
     const i = args.indexOf("--agents");
     expect(i).toBeGreaterThan(-1);
     const defs = JSON.parse(args[i + 1]);
-    expect(Object.keys(defs).sort()).toEqual(["explorer", "reviewer", "tester"]);
+    expect(Object.keys(defs).sort()).toEqual(["explorer", "reviewer", "tester", "workflow-subagent"]);
+  });
+
+  it("shadows the workflow's default agent with a flash reader", async () => {
+    // Claude Code's own workflow-subagent is a full writer on the session's
+    // model; the first ultracode bench run ignored the brief and ran four of
+    // them on the tier model. A definition of the same name wins.
+    const lib = await import("@/lib/coding-agent");
+    const def = lib.SUBAGENT_DEFINITIONS["workflow-subagent"];
+    expect(def.model).toBe("deepseek-v4-flash");
+    expect(def.tools).not.toContain("Write");
+    expect(def.tools).not.toContain("Edit");
   });
 
   it("says 'Use proactively' in every description — that is what triggers a hand-off", async () => {
@@ -396,7 +407,25 @@ describe("what every run now gets, permanently", () => {
     const args = lib.buildRunArgs({ resumeSessionId: null });
     expect(args[args.indexOf("--tools") + 1].split(",")).toContain("Agent");
     const defs = JSON.parse(args[args.indexOf("--agents") + 1]);
-    expect(Object.keys(defs).sort()).toEqual(["explorer", "reviewer", "tester"]);
+    expect(Object.keys(defs).sort()).toEqual(["explorer", "reviewer", "tester", "workflow-subagent"]);
+  });
+
+  it("offers and pre-approves the Workflow tool under ultracode, and only there", async () => {
+    // Ultracode IS the opt-in to orchestration; listed without the approval
+    // the tool answers "Review dynamic workflow before running" to nobody.
+    const lib = await import("@/lib/coding-agent");
+    const ultra = lib.buildRunArgs({ resumeSessionId: null, effort: "ultracode" });
+    expect(ultra[ultra.indexOf("--tools") + 1].split(",")).toContain("Workflow");
+    expect(ultra.slice(ultra.indexOf("--allowedTools") + 1, ultra.indexOf("--allowedTools") + 3)).toEqual(["Bash(*)", "Workflow"]);
+    expect(ultra[ultra.indexOf("--append-system-prompt") + 1]).toContain(lib.ULTRACODE_BRIEF);
+    for (const effort of ["low", "xhigh", "max"] as const) {
+      const fixed = lib.buildRunArgs({ resumeSessionId: null, effort });
+      expect(fixed[fixed.indexOf("--tools") + 1].split(",")).not.toContain("Workflow");
+      expect(fixed).not.toContain("Workflow");
+      expect(fixed[fixed.indexOf("--append-system-prompt") + 1]).toBe(lib.HEADLESS_BRIEF);
+    }
+    expect(lib.toolsFor(true)).not.toContain("Workflow");
+    expect(lib.toolsFor(true, "ultracode")).toContain("Workflow");
   });
 
   it("keeps acceptEdits and the capability drop", async () => {
@@ -491,7 +520,7 @@ describe("what every run now gets, permanently", () => {
     const args = lib.buildRunArgs({ resumeSessionId: null });
     expect(args[args.indexOf("--tools") + 1].split(",")).toContain("Agent");
     const defs = JSON.parse(args[args.indexOf("--agents") + 1]);
-    expect(Object.keys(defs).sort()).toEqual(["explorer", "reviewer", "tester"]);
+    expect(Object.keys(defs).sort()).toEqual(["explorer", "reviewer", "tester", "workflow-subagent"]);
   });
 
   it("keeps acceptEdits and the capability drop", async () => {

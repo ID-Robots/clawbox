@@ -187,6 +187,10 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   const [roles, setRoles] = useState<Roles>({});
   const [localOnly, setLocalOnly] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Not an error: the box did something other than what was asked and said
+  // so — a voice pick that settled on the default (see the tts route's
+  // `fallback`). Amber, and cleared by the next action.
+  const [notice, setNotice] = useState<string | null>(null);
   // Only the FIRST read has nothing to fall back on; a later failed poll keeps
   // the last good reading. So this is only ever true while there is no snapshot.
   const [loadFailed, setLoadFailed] = useState(false);
@@ -369,6 +373,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     pendingRef.current.add(entry.id);
     setPending((p) => new Set(p).add(entry.id));
     setError(null);
+    setNotice(null);
     try {
       const res = await action.run();
       if (!res.ok) {
@@ -383,6 +388,9 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       }
       const data = await res.json().catch(() => ({}));
       if (isSnapshot(data)) applySnapshot(data);
+      if (data && typeof data === "object" && "fallback" in data && data.fallback) {
+        setNotice(t("localModels.notice.voiceFallback"));
+      }
     } catch {
       setError(t("localModels.error.unreachable"));
     } finally {
@@ -466,6 +474,11 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       } else {
         actions.push({ id: "primary", labelKey: "localModels.menu.makePrimary", run: () => post("/setup-api/tts", { action: "select", choice: "local" }) });
       }
+    } else if (entry.kind === "tts" && edition !== "hermes") {
+      // The voice on the box is installed by install.sh's own step, started
+      // as root and followed line by line — the same stream shape the Gemma
+      // install answers with. OpenClaw only: the step is the gateway's.
+      actions.push({ id: "install", labelKey: "localModels.menu.install", streams: true, run: () => post("/setup-api/tts/install", {}) });
     }
     if (entry.kind === "stt" && entry.installed) {
       if (roles.stt === "primary") {
@@ -510,6 +523,11 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       {error && (
         <div role="alert" className="rounded-xl border border-red-500/20 bg-red-500/[0.06] px-4 py-3 text-sm text-red-300">
           {error}
+        </div>
+      )}
+      {notice && (
+        <div role="status" className="rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200" data-testid="local-ai-notice">
+          {notice}
         </div>
       )}
       {snapshot.unavailable.length > 0 && (

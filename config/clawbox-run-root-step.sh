@@ -41,7 +41,7 @@ WEB_ROOT_STEPS="
 ai_tools_install apt_update bootstrap_updater chpasswd chromium_install
 clawkeep_install cloudflared_install ffmpeg_install fix_git_perms gateway_setup
 hermes_edition llamacpp_install nvidia_jetpack ollama_install openclaw_config
-openclaw_install openclaw_patch openclaw_setup performance_mode post_update
+openclaw_install openclaw_patch openclaw_setup openclaw_tts performance_mode post_update
 rebuild_reboot restart_ap set_hostname vnc_install vnc_refresh
 "
 

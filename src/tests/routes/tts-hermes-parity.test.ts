@@ -75,7 +75,11 @@ vi.mock("@/lib/voice-output-store", () => ({
 
 /** `pref:ui_language` and `clawai_tier`; the box is on the plan that has a voice. */
 let storeValues: Record<string, unknown> = {};
-vi.mock("@/lib/config-store", () => ({
+// Partial: the route now reaches the store through the owner gate (auth.ts
+// reads DATA_DIR at import) and the spoken-replies switch; only the reads
+// this suite scripts are overridden.
+vi.mock("@/lib/config-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/config-store")>()),
   get: async (key: string) => storeValues[key] ?? null,
 }));
 

@@ -33,6 +33,45 @@ export function openNewAppCard(): void {
 export const OPEN_SETTINGS_SECTION_EVENT = "clawbox:open-settings-section";
 
 /**
+ * "Open the Coding Agent app on this run's page."
+ *
+ * Two handoffs, like the settings section: the `window` property survives a
+ * COLD open (the app's listener mounts after this fires), the event reaches
+ * an app already on screen. The finish card's Open button ends here rather
+ * than at a bare `openApp("coding")`, which dropped the owner on the home
+ * page and left them to find the run.
+ */
+export const OPEN_CODING_RUN_EVENT = "clawbox:open-coding-run";
+
+/** The two handoffs WITHOUT opening the app — for a desktop that opens it itself. */
+export function handoffCodingRun(runId: string): void {
+  if (typeof window === "undefined") return;
+  (window as Window & { __clawboxPendingCodingRun?: string }).__clawboxPendingCodingRun = runId;
+  window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId } }));
+}
+
+/**
+ * Open the Coding Agent app on a run. `maximize` opens (or brings) the window
+ * full-screen: the chat's View button lands the owner on the run's page with
+ * the whole desktop for it.
+ */
+export function dispatchOpenCodingRun(runId: string, opts: { maximize?: boolean } = {}): void {
+  if (typeof window === "undefined") return;
+  handoffCodingRun(runId);
+  dispatchOpenApp("coding", opts);
+}
+
+/** The run handed off before the app mounted, taken exactly once. */
+export function takePendingCodingRun(): string | null {
+  if (typeof window === "undefined") return null;
+  const w = window as Window & { __clawboxPendingCodingRun?: unknown };
+  const id = typeof w.__clawboxPendingCodingRun === "string" ? w.__clawboxPendingCodingRun : null;
+  delete w.__clawboxPendingCodingRun;
+  return id;
+}
+
+
+/**
  * "The chat's model or provider selection changed."
  *
  * The OpenClaw-side counterpart to `HERMES_MODEL_STATE_EVENT`, and a signal
@@ -43,9 +82,16 @@ export const OPEN_SETTINGS_SECTION_EVENT = "clawbox:open-settings-section";
  */
 export const CHAT_MODEL_STATE_EVENT = "clawbox:chat-model-state-changed";
 
-export function dispatchOpenApp(appId: string): void {
+/** What the desktop is asked for: which app, and whether its window should be maximized. */
+export interface OpenAppDetail {
+  appId: string;
+  maximize?: boolean;
+}
+
+export function dispatchOpenApp(appId: string, opts: { maximize?: boolean } = {}): void {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent(OPEN_APP_EVENT, { detail: { appId } }));
+  const detail: OpenAppDetail = { appId, ...(opts.maximize ? { maximize: true } : {}) };
+  window.dispatchEvent(new CustomEvent<OpenAppDetail>(OPEN_APP_EVENT, { detail }));
 }
 
 /**
@@ -174,6 +220,46 @@ export function buildNewAppPrompt(req: NewAppRequest): string {
     `Create a new ClawBox app called "${name}": ${what}.`,
     SCAFFOLD_SENTENCE[req.template],
   ].join("\n");
+}
+
+/** An existing project the wizard can point the next run at — the projects route's row, trimmed. */
+export interface ResumeProjectRequest {
+  name: string;
+  directory: string;
+  kind: "folder" | "codeProject";
+  /** For a code project: its id under data/code-projects, what code_project_build takes. */
+  folder: string;
+  /** What the next run should do, in the owner's words. */
+  instructions: string;
+  /** The newest run that worked in this folder, if any has. */
+  latestRun?: { id: string; status: string; task: string } | null;
+}
+
+/**
+ * The one message the wizard hands to the chat for an EXISTING project.
+ *
+ * English, addressed to the assistant like buildNewAppPrompt, and it names
+ * the steps that make a second run pick up where the first left off: the
+ * folder (never a fresh scaffold), the last run's summary and the commits
+ * before any change, the verification and commit after, and — for a code
+ * project — the rebuild that puts the result back on the desktop.
+ */
+export function buildResumeProjectPrompt(req: ResumeProjectRequest): string {
+  const what = req.instructions.trim().replace(/[.\s]+$/u, "");
+  const last = req.latestRun;
+  const lastTask = last ? last.task.trim().split(/\r?\n/)[0].slice(0, 160) : "";
+  const lines = [
+    `Continue the existing ClawBox project "${req.name.trim()}" in ${req.directory}: ${what}.`,
+    `Start a coding agent run in that folder (coding_agent_run with directory "${req.directory}") — do not scaffold a new project.`,
+    last
+      ? `Its last run (${last.id}, ${last.status}) was: "${lastTask}". Read that run's summary and the project's recent commits before changing anything, so this run picks up where it left off.`
+      : "Read the project's recent commits and its files before changing anything, so this run picks up where the last work left off.",
+    req.kind === "codeProject"
+      ? `This is a code project (id "${req.folder}"): when the run is done, rebuild it with code_project_build so the desktop app shows the change.`
+      : "When the run is done, tell me what changed, what was verified, and what is left for the next run.",
+  ];
+  if (req.kind === "codeProject") lines.push("Then tell me what changed, what was verified, and what is left for the next run.");
+  return lines.join("\n");
 }
 
 export function buildFixErrorPrompt(ctx: FixErrorContext): string {
@@ -378,3 +464,10 @@ export function onCodingRunStarted(listener: () => void): () => void {
   window.addEventListener(CODING_RUN_STARTED_EVENT, listener);
   return () => window.removeEventListener(CODING_RUN_STARTED_EVENT, listener);
 }
+
+/**
+ * Settings → Voice saved the spoken-replies switch: `{ autoReply: boolean }`.
+ * The open chat listens so its next voice turn honours the new position
+ * without a reopen.
+ */
+export const VOICE_SETTINGS_CHANGED_EVENT = "clawbox:voice-settings-changed";

@@ -14,6 +14,14 @@ import {
 
 /** Flat fallback for the CSS `calc()` that maximizes a window. */
 const SHELF_HEIGHT = 56;
+/**
+ * The margin a MAXIMIZED window keeps on every side — the same breathing
+ * room the docked chat floats in, so a full-screen window sits in the
+ * desktop like the chat does rather than against its edges. Beside a docked
+ * chat the right-hand margin is the chat's own gap, already inside
+ * `rightInset`.
+ */
+export const DOCK_GAP = 10;
 
 interface ChromeWindowProps {
   title: string;
@@ -32,6 +40,8 @@ interface ChromeWindowProps {
   onGeometryChange?: (geo: { x: number; y: number; width: number; height: number }) => void;
   minimized?: boolean;
   rightInset?: number;
+  /** Bumped by the desktop when something asks for this window maximized; each new value maximizes. */
+  maximizeSignal?: number;
 }
 
 function getSavedSize(appId: string | undefined, defaultWidth: number, defaultHeight: number) {
@@ -68,6 +78,7 @@ export default function ChromeWindow({
   onGeometryChange,
   minimized = false,
   rightInset = 0,
+  maximizeSignal,
 }: ChromeWindowProps) {
   const { t } = useT();
   const [size, setSize] = useState(() => initialSize || getSavedSize(appId, defaultWidth, defaultHeight));
@@ -351,6 +362,23 @@ export default function ChromeWindow({
     }
   }, [maximized, snapped, size.width, size.height, position.x, position.y]);
 
+  // Asked for maximized from outside (the chat's View lands on a run's page
+  // with the whole desktop for it): each new signal value maximizes once, a
+  // window already maximized stays as it is.
+  const lastMaximizeSignal = useRef(0);
+  useEffect(() => {
+    if (!maximizeSignal || maximizeSignal === lastMaximizeSignal.current) return;
+    lastMaximizeSignal.current = maximizeSignal;
+    if (maximized) return;
+    if (!snapped) {
+      prevSizeRef.current = { width: size.width, height: size.height, x: position.x, y: position.y };
+    }
+    // A request from outside is external state the window synchronises to.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSnapped(null);
+    setMaximized(true);
+  }, [maximizeSignal, maximized, snapped, size.width, size.height, position.x, position.y]);
+
   const handleMinimize = useCallback(() => {
     setMinimizing(true);
     setTimeout(() => {
@@ -361,9 +389,17 @@ export default function ChromeWindow({
 
   if (minimized && !restoring) return null;
 
+  // Maximized: DOCK_GAP on every side (the docked chat's own gap serves as
+  // the right-hand one), corners kept — a full-screen window sits in the
+  // desktop the way the chat does.
   const windowStyle = maximized
-    ? { left: 0, top: 0, width: `calc(100% - ${rightInset}px)`, height: `calc(100vh - ${SHELF_HEIGHT}px - env(safe-area-inset-bottom, 0px))` }
-    : { left: position.x, top: position.y, width: size.width, height: size.height };
+    ? {
+      left: DOCK_GAP,
+      top: DOCK_GAP,
+      width: `calc(100% - ${DOCK_GAP + (rightInset > 0 ? rightInset : DOCK_GAP)}px)`,
+      height: `calc(100vh - ${SHELF_HEIGHT}px - env(safe-area-inset-bottom, 0px) - ${DOCK_GAP * 2}px)`,
+    }
+      : { left: position.x, top: position.y, width: size.width, height: size.height };
 
   return (
     <div
@@ -377,7 +413,7 @@ export default function ChromeWindow({
       style={{
         ...windowStyle,
         zIndex,
-        borderRadius: maximized || snapped ? 0 : 8,
+        borderRadius: snapped ? 0 : 8,
         boxShadow: isActive
           ? "0 12px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08)"
           : "0 4px 20px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.04)",
@@ -396,7 +432,7 @@ export default function ChromeWindow({
             ? "linear-gradient(180deg, #292d36 0%, #242830 100%)"
             : "#1f2228",
           borderBottom: "1px solid rgba(255, 255, 255, 0.06)",
-          borderRadius: maximized || snapped ? 0 : "8px 8px 0 0",
+          borderRadius: snapped ? 0 : "8px 8px 0 0",
         }}
         onMouseDown={handleDragStart}
         onTouchStart={handleDragStart}

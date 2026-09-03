@@ -100,6 +100,14 @@ export interface CodingAgentActivity {
    * draw.
    */
   todos: CodingTodo[];
+  /**
+   * What the chat's Live view needs to tail or resume the run: the transcript
+   * Claude Code writes, the session to `--resume`, and the folder it works in.
+   * Null until the runner has them (the transcript lands seconds after spawn).
+   */
+  transcriptPath: string | null;
+  sessionId: string | null;
+  directory: string | null;
 }
 
 interface RunPayload {
@@ -123,6 +131,9 @@ interface RunPayload {
   progress?: string[];
   todos?: unknown;
   artifacts?: { name?: unknown; kind?: unknown }[];
+  transcriptPath?: unknown;
+  sessionId?: unknown;
+  directory?: unknown;
 }
 
 const TODO_STATUSES: readonly CodingTodoStatus[] = ["pending", "in_progress", "completed"];
@@ -197,6 +208,9 @@ function toActivity(r: RunPayload): CodingAgentActivity {
         .slice(-SCREENSHOTS_SHOWN)
       : [],
     todos: toTodos(r.todos),
+    transcriptPath: typeof r.transcriptPath === "string" && r.transcriptPath ? r.transcriptPath : null,
+    sessionId: typeof r.sessionId === "string" && r.sessionId ? r.sessionId : null,
+    directory: typeof r.directory === "string" && r.directory ? r.directory : null,
   };
 }
 

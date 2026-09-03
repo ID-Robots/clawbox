@@ -127,6 +127,30 @@ describe("GET projects", () => {
     expect(scratch.onDesktop).toBe(false);
   });
 
+  it("lists a folder a run has worked in even before it has a history of its own", async () => {
+    // Every run happens in a folder inside the project folder, and the owner
+    // asked for every such folder to be listed — the run is how they get
+    // back to it. A folder a run named but that is gone is not listed.
+    const base = fs.realpathSync(projectsDir);
+    fs.mkdirSync(path.join(projectsDir, "scratch-app"));
+    fs.writeFileSync(
+      path.join(root, "data", "coding-agent-runs.json"),
+      JSON.stringify([
+        { id: "run-scratch01", status: "completed", startedAt: 5, completedAt: 6, task: "make it", directory: path.join(base, "scratch-app"), source: "agent" },
+        { id: "run-gone00001", status: "completed", startedAt: 3, completedAt: 4, task: "gone", directory: path.join(base, "deleted-app"), source: "agent" },
+      ]),
+    );
+    vi.resetModules();
+    GET = (await import("@/app/setup-api/coding-agent/projects/route")).GET;
+    const { projects } = await body();
+    const names = projects.map((p: Record<string, unknown>) => p.folder);
+    expect(names).toContain("scratch-app");
+    expect(names).not.toContain("deleted-app");
+    const scratch = projects.find((p: Record<string, unknown>) => p.folder === "scratch-app") as Record<string, unknown>;
+    expect(scratch).toMatchObject({ kind: "folder", name: "scratch-app", lastCommit: null });
+    expect(scratch.latestRun).toMatchObject({ id: "run-scratch01" });
+  });
+
   it("attaches the newest run that worked in the folder", async () => {
     const dir = makeRepo("site", { commit: "first" });
     const real = fs.realpathSync(dir);
