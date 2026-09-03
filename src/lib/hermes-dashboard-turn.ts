@@ -703,9 +703,11 @@ function normaliseClarify(raw: unknown): ClarifyActivity | null {
  * one of those would be refused.
  *
  * Null when every question already has an answer. Falling back to "no
- * question_id" there would not be a harmless default: against a batch that is
- * upstream's cancel-all, so a message arriving on a fully-answered prompt would
- * throw the whole thing away.
+ * question_id" there would not be a harmless default: `_respond` takes the
+ * batch branch only when a question_id is present (server.py:11911), so an
+ * answer without one sets the Event immediately and `_block` returns the raw
+ * string (server.py:3524), discarding every answer locked so far — silently,
+ * under a `{"status":"ok"}`.
  */
 function answerableQid(clarify: ClarifyActivity): string | null {
   const answered = clarify.answered ?? {};
@@ -1180,18 +1182,32 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
           // ── A message arriving on a session parked on a question ─────────
           //
           // That message IS the answer, and forwarding it is the whole of
-          // TASK-610. Before this, a fresh prompt went in while the agent's
-          // worker thread was still parked on `Event.wait(agent.clarify_timeout)`
-          // — so the customer had their own question replayed at them, their
-          // message did nothing, and the session stayed unusable for the rest
-          // of that window. Measured on the box: answering the pending clarify
-          // gets BOTH the parked turn and the new message dealt with, so
-          // nothing is lost by treating the message as the answer.
+          // TASK-610. What used to happen instead, read out of hermes 0.20.5
+          // on the box: `prompt.submit` for a session whose worker is parked
+          // takes the BUSY path (methods_prompt.py:346 → `_handle_busy_submit`
+          // server.py:8233), which queues the text and fires
+          // `agent.interrupt()` at a thread sitting in `ev.wait()`. Nothing on
+          // that path touches the clarify registry — the only thing that
+          // releases the Event is `_clear_pending` (server.py:3693), reached
+          // only from `session.interrupt`. So the customer got their own
+          // question replayed at them, their message sat in `queued_prompt`,
+          // and the session stayed unusable for the rest of the window.
           //
-          // `clarify.respond` is hermes' own door for this and needs no
-          // session id — `_respond` resolves the session from a global pending
-          // registry keyed by request id — which is why the dashboard SPA, a
-          // second browser and this turn can all answer the same prompt.
+          // `clarify.respond` is hermes' own door for this (dispatch
+          // methods_prompt.py:1413 → `_respond` server.py:11900) and needs no
+          // session id: `_pending` is a flat request_id → (sid, Event) map
+          // (server.py:3496), which is why the dashboard SPA, a second browser
+          // and this turn can all answer the same prompt.
+          //
+          // It is also what hermes' OWN channel adapters do. An inbound
+          // Telegram/WhatsApp/Discord/Slack message is checked against the
+          // pending clarify before it is dispatched as a turn
+          // (gateway/run.py:16824 the text intercept, gateway/platforms/base.py:6171
+          // the busy-bypass that gets it there at all — its comment: "leaving
+          // the agent blocked and discarding the user's answer"). Those run on
+          // hermes' second, session-indexed registry (tools/clarify_gateway.py:71),
+          // which this transport cannot reach; this is the same behaviour on
+          // the surface that has none of it, through the RPC that surface owns.
           //
           // Deliberately NOT capped at the HTTP route's MAX_ANSWER_CHARS: that
           // cap exists because that route takes a body from any client against

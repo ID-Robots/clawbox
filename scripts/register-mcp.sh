@@ -291,28 +291,44 @@ else:
 
 # ── The clarify window this appliance ships with. ──────────────────────────
 # When the agent stops to ask the customer a question it parks its own worker
-# thread on `Event.wait(agent.clarify_timeout)`. Hermes' default is 3600
-# seconds, and a value of <= 0 is passed through as None — Python's word for
-# FOREVER. On an appliance that is an hour in which the session cannot be used
-# for anything else because one question went unanswered, and a customer who
-# has walked away from the chat has no idea it is holding.
+# thread on `Event.wait(...)` (tui_gateway/server.py:3513) for the number of
+# seconds hermes resolves from config. Verified read-only on the Hermes box
+# (hermes-agent 0.20.5): tools/clarify_gateway.py:531 `resolve_clarify_timeout`
+# takes the legacy `clarify.timeout` first, then `agent.clarify_timeout`, then
+# 3600; it is coerced with `int()` (:549), and <= 0 is passed through as
+# unlimited — `ev.wait(None)`, which is Python's word for FOREVER. The key is
+# hermes' own, shipped in its defaults table under the `agent:` block
+# (hermes_cli/config_defaults.py:278), and is ABSENT from a ClawBox config.yaml,
+# so a box runs on the 3600 default today.
 #
-# Five minutes is the window a person actually answers a chat question inside.
-# It is a backstop rather than the fix: a message arriving on a parked session
-# is now delivered as the ANSWER (hermes-dashboard-turn.ts), so the timeout
-# only decides how long a session that hears nothing at all stays parked.
+# On an appliance that hour is a session nobody can use for anything else
+# because one question went unanswered — a message typed meanwhile is QUEUED
+# behind the parked worker (server.py:8233 `_handle_busy_submit`) and nothing
+# there releases the Event. Five minutes is the window a person actually
+# answers a chat question inside, and it is hermes' own emergency fallback for
+# this same number (server.py:3578).
 #
-# SEEDED, NOT PINNED: written only when the key is absent, so an owner who has
-# chosen their own window keeps it. Written here, with the rest of this
-# device's rendered Hermes config, because `hermes config set` stores a scalar
-# as a STRING ("storing as string" on stderr) while this is a number upstream
-# reads as one — the same reason the MCP entry above is written in PyYAML.
+# A BACKSTOP, not the fix: a message arriving on a parked session is now
+# delivered as the ANSWER (src/lib/hermes-dashboard-turn.ts), so this only
+# decides how long a session that hears nothing at all stays parked.
+#
+# SEEDED, NOT PINNED: written only when the owner has set neither key, so a
+# window they chose — under either name — is left exactly as it is. Written
+# here, with the rest of this device's rendered Hermes config, because `hermes
+# config set` stores a scalar as a STRING ("storing as string" on stderr) and
+# this is a number; the same reason the MCP entry above is written in PyYAML.
 CLARIFY_TIMEOUT_SECONDS = 300
+legacy_clarify = cfg.get("clarify")
+legacy_timeout_set = isinstance(legacy_clarify, dict) and legacy_clarify.get("timeout") is not None
 agent_cfg = cfg.get("agent")
-if agent_cfg is None:
+if agent_cfg is None and not legacy_timeout_set:
     agent_cfg = {}
     cfg["agent"] = agent_cfg
-if isinstance(agent_cfg, dict):
+if legacy_timeout_set:
+    # The legacy key WINS in hermes' own resolver, so writing ours beside it
+    # would leave the file saying 300 while the box waits the owner's window.
+    print("[register-mcp] clarify.timeout is set; leaving the clarify window to it")
+elif isinstance(agent_cfg, dict):
     if "clarify_timeout" not in agent_cfg:
         agent_cfg["clarify_timeout"] = CLARIFY_TIMEOUT_SECONDS
         changed = True

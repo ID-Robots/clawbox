@@ -367,6 +367,17 @@ d("register-mcp.sh — the clarify window this appliance ships with", () => {
     expect(agentBlock().clarify_timeout).toBe(900);
   });
 
+  it("defers to the legacy clarify.timeout, which wins in hermes' own resolver", () => {
+    // resolve_clarify_timeout reads `clarify.timeout` BEFORE
+    // `agent.clarify_timeout`, so writing ours beside it would leave the file
+    // claiming 300 while the box waited the owner's window.
+    fs.writeFileSync(configPath, "clarify:\n  timeout: 1800\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(readConfig().agent).toBeUndefined();
+    expect(clawboxEntry().enabled).toBe(true);
+  });
+
   it("keeps the rest of the agent block untouched", () => {
     fs.writeFileSync(configPath, "agent:\n  reasoning_effort: medium\n");
     run();
