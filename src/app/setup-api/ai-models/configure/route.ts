@@ -1683,6 +1683,30 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         { status: 400 }
       );
     }
+    // A `claw_…` key authenticates to the ClawBox AI proxy and to nothing else.
+    // Stored as another provider's api_key profile it becomes that provider's
+    // credential and 401s on every turn: measured on a box, `openai:default`
+    // held one and turns on `openai/gpt-5.5` came back from api.openai.com with
+    // `Incorrect API key provided: claw_***`. Worse, an eligible api_key profile
+    // is a candidate ahead of nothing — it is tried, spends the request, and the
+    // gateway then falls back to another model — so the owner sees a provider
+    // that saved cleanly and answers as something else. Refuse the save rather
+    // than store a credential that cannot work. The prefix is a build-time
+    // constant and the message echoes no user input.
+    //
+    // This is about the AUTH PROFILE only. The image setup deliberately puts
+    // the same token in `models.providers.openai.apiKey`, which is a different
+    // slot with its own ownership rules (`canOwnOpenAiImageApiKey`) and its own
+    // measured consequences — see the note above that function.
+    // Not the local providers: for ollama / llamacpp this field carries a MODEL
+    // ID, not a credential (see the branch below), so a model whose name began
+    // with the prefix would be refused as if it were a key.
+    if (!isClawAI && !isOllama && !isLlamaCpp && normalizedApiKey.startsWith(CLAWBOX_AI_TOKEN_PREFIX)) {
+      return NextResponse.json(
+        { error: "That is a ClawBox AI key. Select ClawBox AI as the provider, or paste this provider's own key." },
+        { status: 400 }
+      );
+    }
     if (isLocalScope && !isOllama && !isLlamaCpp) {
       return NextResponse.json(
         { error: "Local AI scope is only supported for Ollama and llama.cpp" },

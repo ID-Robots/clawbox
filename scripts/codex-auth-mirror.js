@@ -56,27 +56,110 @@ function readJson(file) {
 }
 
 /**
- * Auth profiles moved from agents/<id>/agent/auth-profiles.json into the
- * auth_profile_store table of openclaw-agent.sqlite on core 2026.7.x. Read
- * both so the mirror keeps working across a core downgrade.
+ * A store whose `profiles` map is EMPTY is not an answer.
+ *
+ * That is the shape a migrated box leaves behind, and treating it as one is
+ * what made this script skip on every 2026.8 box: the per-agent row survives
+ * `doctor --fix` with zero profiles, so `{}` shadowed the shared store that
+ * actually holds the login. Core inherits past exactly this state.
  */
-function readProfiles(agentDir) {
-  const fromJson = readJson(path.join(agentDir, "auth-profiles.json"));
-  if (fromJson && fromJson.profiles) return fromJson.profiles;
+function hasProfiles(store) {
+  return Boolean(store && store.profiles && Object.keys(store.profiles).length > 0);
+}
+
+/** The agent-local credential table, core 2026.7.x's home for the profiles. */
+function readAgentProfiles(agentDir) {
   try {
     const { DatabaseSync } = require("node:sqlite");
     const db = new DatabaseSync(path.join(agentDir, "openclaw-agent.sqlite"), {
       readOnly: true,
     });
-    const row = db
-      .prepare("SELECT store_json FROM auth_profile_store WHERE store_key = ?")
-      .get("primary");
-    db.close();
+    db.exec("PRAGMA busy_timeout = 5000");
+    let row;
+    try {
+      row = db
+        .prepare("SELECT store_json FROM auth_profile_store WHERE store_key = ?")
+        .get("primary");
+    } finally {
+      db.close();
+    }
     const parsed = row && row.store_json ? JSON.parse(row.store_json) : null;
-    return (parsed && parsed.profiles) || null;
+    return hasProfiles(parsed) ? parsed.profiles : null;
   } catch {
     return null; // no node:sqlite, no table, or locked — non-fatal
   }
+}
+
+/**
+ * The state directory OpenClaw resolves the gateway-wide store from: an
+ * `OPENCLAW_STATE_DIR` override is trimmed, a leading `~` is the user's home
+ * and a relative path is taken from the cwd; without one it is the OpenClaw
+ * home. Same rule as src/lib/openclaw-state-store.ts, so this reads the file
+ * the gateway actually writes.
+ */
+function stateDbPath() {
+  const override = (process.env.OPENCLAW_STATE_DIR || "").trim();
+  const dir = override
+    ? path.resolve(override.replace(/^~(?=$|[\\/])/, () => process.env.HOME || os.homedir()))
+    : openclawHome;
+  return path.join(dir, "state", "openclaw.sqlite");
+}
+
+const SHARED_STORE_KEY = "authProfiles.store";
+
+/**
+ * The gateway-wide store, where core keeps the profiles on 2026.8:
+ * `<stateDir>/state/openclaw.sqlite`, table `config_machine_state`, row
+ * `authProfiles.store`. `openclaw doctor --fix` performs the relocation once
+ * and every agent then resolves through it — read-through inheritance, core's
+ * own `docs/auth-credential-semantics.md`. The box records the move as
+ * `auth.sharedStore = {"location":"state-db"}` in the same table.
+ */
+function readSharedProfiles() {
+  const dbPath = stateDbPath();
+  if (!fs.existsSync(dbPath)) return null;
+  try {
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    // The gateway's hot state database — channel pairing writes, node host
+    // config — not the quiet per-agent table the old reader touched. A
+    // SQLITE_BUSY here is swallowed to null and surfaces as "no codex OAuth
+    // profile yet", which is the message that hid this bug in the first place.
+    db.exec("PRAGMA busy_timeout = 5000");
+    let row;
+    try {
+      row = db
+        .prepare("SELECT value_json FROM config_machine_state WHERE state_key = ?")
+        .get(SHARED_STORE_KEY);
+    } finally {
+      db.close();
+    }
+    const parsed = row && row.value_json ? JSON.parse(row.value_json) : null;
+    return hasProfiles(parsed) ? parsed.profiles : null;
+  } catch {
+    return null; // no node:sqlite, no table, or locked — non-fatal
+  }
+}
+
+/**
+ * The profiles core would resolve for this agent.
+ *
+ * Three stores, because the credential moved twice: legacy
+ * agents/<id>/agent/auth-profiles.json, then the per-agent
+ * `auth_profile_store` table on 2026.7.x, then the shared state store on
+ * 2026.8. The legacy file is still first so a core downgrade keeps working;
+ * the two sqlite stores are then combined the way core combines them — the
+ * shared store as the read-through base with the agent's own profiles on top,
+ * never one shadowing the other, because an agent that has a local profile of
+ * its own still inherits the rest.
+ */
+function readProfiles(agentDir) {
+  const fromJson = readJson(path.join(agentDir, "auth-profiles.json"));
+  if (hasProfiles(fromJson)) return fromJson.profiles;
+  const local = readAgentProfiles(agentDir);
+  const shared = readSharedProfiles();
+  if (!local && !shared) return null;
+  return { ...(shared || {}), ...(local || {}) };
 }
 
 /** chatgpt_account_id lives in the access token's claims, not the profile. */
@@ -138,7 +221,7 @@ function profileKeyIn(profiles) {
   // subscription entitlement while THIS script found no credential, never
   // synthesized ~/.codex/auth.json and never wrote a rotation back.
   const keys = [
-    ...PROFILE_KEYS.filter((key) => profiles[key]),
+    ...PROFILE_KEYS.filter((key) => isChatgptProfile(key, profiles[key])),
     ...Object.keys(profiles).filter(
       (key) => !PROFILE_KEYS.includes(key) && isChatgptProfile(key, profiles[key]),
     ).sort(),
@@ -152,6 +235,13 @@ function credentialFromProfiles(agentDir) {
   const profile = key && profiles[key] && profiles[key].access ? profiles[key] : null;
   if (!profile) return null;
   return {
+    // The id this credential was READ from. A rotation is written back into
+    // this exact entry and no other: the profiles are merged across the shared
+    // and per-agent stores, so "some ChatGPT-shaped key in the local table" can
+    // be a different entry entirely — grafting an OAuth bundle onto it leaves
+    // the entry core actually resolves holding a spent refresh token, which is
+    // the split PROFILE_KEYS' own comment exists to prevent.
+    profileId: key,
     accessToken: profile.access,
     refreshToken: profile.refresh,
     idToken: profile.id || profile.access,
@@ -223,15 +313,18 @@ function writeMirror(dest, credential) {
  * is sometimes a symlink to ~/.codex; without this the same file gets written
  * twice, and a previous version deleted the real credential through the link.
  */
+function fileKey(file) {
+  try {
+    return path.join(fs.realpathSync.native(path.dirname(file)), path.basename(file));
+  } catch {
+    return file; // Directory doesn't exist yet — the raw path is unique enough.
+  }
+}
+
 function dedupePaths(files) {
   const seen = new Map();
   for (const file of files) {
-    let key = file;
-    try {
-      key = path.join(fs.realpathSync.native(path.dirname(file)), path.basename(file));
-    } catch {
-      // Directory doesn't exist yet — the raw path is unique enough.
-    }
+    const key = fileKey(file);
     if (!seen.has(key)) seen.set(key, file);
   }
   return [...seen.values()];
@@ -240,9 +333,18 @@ function dedupePaths(files) {
 /**
  * Write an app-server rotation back into core's auth profile store, so core
  * stops handing out a refresh token that has already been spent.
+ *
+ * Reaches the legacy JSON file and the per-agent table only. The shared state
+ * store 2026.8 relocates the profiles into is deliberately READ-ONLY here: core
+ * refreshes an `oauth` profile itself and serialises every refresh through
+ * `<stateDir>/locks/oauth-refresh/lock-<digest>` precisely to stop a
+ * `refresh_token_reused` storm, so an unlocked read-modify-write of that
+ * gateway-wide row from a timer could overwrite a live token with a spent one
+ * for every agent at once. `main()` therefore leaves the mirrors alone rather
+ * than guessing when it cannot write a rotation back.
  */
-function writeBackToCore(agentDirs, tokens) {
-  if (!tokens || !tokens.refresh_token) return false;
+function writeBackToCore(agentDirs, tokens, profileId) {
+  if (!tokens || !tokens.refresh_token || !profileId) return false;
   let wrote = false;
 
   // Legacy JSON store, still the source on some boxes.
@@ -250,9 +352,8 @@ function writeBackToCore(agentDirs, tokens) {
     const jsonPath = path.join(agentDir, "auth-profiles.json");
     const data = readJson(jsonPath);
     const profiles = data && data.profiles;
-    if (!profiles) continue;
-    const id = profileKeyIn(profiles);
-    if (!id) continue;
+    if (!profiles || !profiles[profileId]) continue;
+    const id = profileId;
     profiles[id].access = tokens.access_token || profiles[id].access;
     profiles[id].refresh = tokens.refresh_token;
     if (tokens.id_token) profiles[id].id = tokens.id_token;
@@ -277,8 +378,8 @@ function writeBackToCore(agentDirs, tokens) {
         if (!row || !row.store_json) continue;
         const store = JSON.parse(row.store_json);
         const profiles = store.profiles || {};
-        const id = profileKeyIn(profiles);
-        if (!id) continue;
+        if (!profiles[profileId]) continue;
+        const id = profileId;
         profiles[id].access = tokens.access_token || profiles[id].access;
         profiles[id].refresh = tokens.refresh_token;
         if (tokens.id_token) profiles[id].id = tokens.id_token;
@@ -293,6 +394,7 @@ function writeBackToCore(agentDirs, tokens) {
       // Locked or unavailable — the next timer tick retries.
     }
   }
+
   return wrote;
 }
 
@@ -333,13 +435,29 @@ function main() {
     ...agentDirs.map((dir) => path.join(dir, "codex-home", "auth.json")),
   ]);
 
+  /**
+   * Only a file the Codex app-server owns can be AHEAD of core.
+   *
+   * The app-server rotates whatever sits in its CODEX_HOME; nothing rotates
+   * `~/.codex/auth.json` — the codex plugin reads it and never writes it, and
+   * no process runs with CODEX_HOME=~/.codex (see buildAuthFile's note). So a
+   * divergence there is by definition a STALE copy and must be repaired, while
+   * a divergence in a codex-home file may be a live rotation. Compared by
+   * resolved path, because <agentDir>/codex-home is sometimes a symlink to
+   * ~/.codex — on such a box that one file IS an app-server home.
+   */
+  const appServerHomes = new Set(
+    agentDirs.map((dir) => fileKey(path.join(dir, "codex-home", "auth.json"))),
+  );
+  const isAppServerHome = (dest) => appServerHomes.has(fileKey(dest));
+
   // The app-server rotates its own CODEX_HOME credential. Refresh tokens are
   // single-use, so if it has already rotated, core's stored copy is the DEAD
   // one -- overwriting the file with it would burn the family on next use.
   // Core follows the app-server, never the other way round.
-  const rotated = destinations
+  const diverged = destinations
     .map((dest) => ({ dest, data: readJson(dest) }))
-    .find(({ data }) => {
+    .filter(({ data }) => {
       const tokens = (data && data.tokens) || {};
       return (
         typeof tokens.refresh_token === "string" &&
@@ -347,29 +465,56 @@ function main() {
         tokens.refresh_token !== credential.refreshToken
       );
     });
+  const rotated = diverged.find(({ dest }) => isAppServerHome(dest));
+
+  // Destinations this pass must not touch. Only ever app-server homes whose
+  // rotation could not be recorded in core: overwriting one could burn the
+  // family (#278). NEVER the plugin's own file — abandoning that is how a box
+  // ends up with no ~/.codex/auth.json at all, which is the `401 Missing
+  // bearer` this script exists to prevent, and the ChatGPT sign-in route
+  // deletes that file on every re-login so it has to be recreated here.
+  const skip = new Set();
 
   if (rotated) {
     const tokens = rotated.data.tokens;
-    if (writeBackToCore(agentDirs, tokens)) {
+    if (writeBackToCore(agentDirs, tokens, credential.profileId)) {
       log(`Codex auth.json: adopted app-server rotation from ${rotated.dest}`);
       credential = {
+        profileId: credential.profileId,
         accessToken: tokens.access_token || credential.accessToken,
         refreshToken: tokens.refresh_token,
         idToken: tokens.id_token || credential.idToken,
         accountId: tokens.account_id || credential.accountId,
       };
+    } else {
+      // Per destination, never the whole pass: core's own refresh moves the
+      // store ahead of every mirror, and treating that as "the file is ahead"
+      // would stop the mirror on a box where the files are simply old. Each
+      // app-server home that still disagrees is left as it is; everything else
+      // is written.
+      for (const { dest } of diverged) {
+        if (isAppServerHome(dest)) skip.add(dest);
+      }
+      // console.error, not log(): the timer unit runs with
+      // CODEX_AUTH_MIRROR_QUIET=1, and this is the one state that is not
+      // "normal and idempotent" — a box stuck here needs a person.
+      console.error(
+        `  Codex auth.json: ${rotated.dest} holds a refresh token core does not have and core's store could not be updated; leaving that file alone. `
+        + "If Codex turns keep failing, delete it and sign in to ChatGPT again.",
+      );
     }
   }
 
   let synced = 0;
   for (const dest of destinations) {
+    if (skip.has(dest)) continue;
     const reason = writeMirror(dest, credential);
     if (reason) {
       synced += 1;
       log(`Codex auth.json ${reason}: ${dest}`);
     }
   }
-  if (synced === 0) log("Codex auth.json: credential already current");
+  if (synced === 0 && skip.size === 0) log("Codex auth.json: credential already current");
 }
 
 try {

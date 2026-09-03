@@ -795,6 +795,20 @@ describe("POST /setup-api/ai-models/configure", () => {
     );
   });
 
+  it("refuses a ClawBox AI key offered as another provider's API key", async () => {
+    // A `claw_…` key authenticates to the ClawBox AI proxy and nowhere else.
+    // Registered as the OpenAI api_key profile it becomes that provider's
+    // bearer: measured on a box, `openai:default` held one and every turn on
+    // `openai/gpt-5.5` went to https://api.openai.com/v1/responses and came
+    // back `401 … Incorrect API key provided: claw_***`. Worse, an eligible
+    // api_key profile shadows the owner's working ChatGPT sign-in on the same
+    // provider, so the box answers on a silent fallback instead.
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "claw_token_abc" }));
+
+    expect(res.status).toBe(400);
+    expect(pasteCallFor("openai:default")).toBeUndefined();
+  });
+
   it("leaves the order alone for a provider that is not OpenAI", async () => {
     await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant" }));
 

@@ -1,8 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, symlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
+
+// vite cannot bundle the builtin; a test file is never bundled, so reaching it
+// lazily here is safe (same rule as openclaw-session-store.test.ts).
+const requireNodeSqlite = createRequire(import.meta.url);
+const { DatabaseSync } = requireNodeSqlite("node:sqlite");
 
 // scripts/codex-auth-mirror.js copies the ChatGPT/Codex credential out of
 // core's auth profile store into the Codex CLI-style auth.json files the Codex
@@ -45,6 +51,58 @@ function seedProfile(access: string, refresh: string = "refresh-secret", profile
       },
     }),
   );
+}
+
+/** The per-agent credential table, the only source before the 2026.8 relocation. */
+function seedAgentStore(profiles: Record<string, unknown>): void {
+  const db = new DatabaseSync(path.join(agentDir, "openclaw-agent.sqlite"));
+  db.exec(
+    "CREATE TABLE IF NOT EXISTS auth_profile_store (store_key TEXT PRIMARY KEY, store_json TEXT, updated_at INTEGER)",
+  );
+  db.prepare(
+    "INSERT OR REPLACE INTO auth_profile_store (store_key, store_json, updated_at) VALUES (?, ?, ?)",
+  ).run("primary", JSON.stringify({ version: 1, profiles }), Date.now());
+  db.close();
+}
+
+/**
+ * The gateway-wide store `openclaw doctor --fix` relocates the profiles into:
+ * `<stateDir>/state/openclaw.sqlite`, table `config_machine_state`, row
+ * `authProfiles.store`. Column names are the shipped ones (the core's own
+ * downgrade SQL selects `value_json, updated_at_ms` from this table).
+ */
+function sharedStorePath(): string {
+  return path.join(openclawHome, "state", "openclaw.sqlite");
+}
+
+function seedSharedStore(profiles: Record<string, unknown>): void {
+  mkdirSync(path.dirname(sharedStorePath()), { recursive: true });
+  const db = new DatabaseSync(sharedStorePath());
+  db.exec(
+    "CREATE TABLE IF NOT EXISTS config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)",
+  );
+  db.prepare(
+    "INSERT OR REPLACE INTO config_machine_state (state_key, value_json, updated_at_ms) VALUES (?, ?, ?)",
+  ).run("authProfiles.store", JSON.stringify({ version: 1, profiles }), Date.now());
+  db.close();
+}
+
+function readAgentStore(): { profiles: Record<string, { access?: string; refresh?: string; key?: string }> } {
+  const db = new DatabaseSync(path.join(agentDir, "openclaw-agent.sqlite"), { readOnly: true });
+  const row = db
+    .prepare("SELECT store_json FROM auth_profile_store WHERE store_key = ?")
+    .get("primary") as { store_json: string };
+  db.close();
+  return JSON.parse(row.store_json);
+}
+
+function readSharedStore(): { profiles: Record<string, { access?: string; refresh?: string }> } {
+  const db = new DatabaseSync(sharedStorePath(), { readOnly: true });
+  const row = db
+    .prepare("SELECT value_json FROM config_machine_state WHERE state_key = ?")
+    .get("authProfiles.store") as { value_json: string };
+  db.close();
+  return JSON.parse(row.value_json);
 }
 
 function run(): string {
@@ -367,6 +425,186 @@ describe("codex-auth-mirror.js", () => {
     expect(parsed.tokens.access_token).toBe(accessToken("acct-sqlite"));
     expect(parsed.tokens.account_id).toBe("acct-sqlite");
     expect(parsed.tokens.refresh_token).toBe("refresh-secret");
+  });
+
+  it("reads the shared state-db store when the per-agent table is empty", () => {
+    // Measured on the pinned core (OpenClaw 2026.8.1) on the OpenClaw box: the
+    // per-agent `auth_profile_store` row exists with ZERO profiles while
+    // `openclaw models auth list` reports eight, because `doctor --fix`
+    // relocated the store to `state/openclaw.sqlite`
+    // (`config_machine_state['authProfiles.store']`; the box records
+    // `auth.sharedStore = {"location":"state-db"}`). Core resolves an agent
+    // that has no local profile through that shared store — read-through
+    // inheritance, docs/auth-credential-semantics.md in the installed package.
+    //
+    // The mirror read only the per-agent table, found an empty map, logged
+    // "no codex OAuth profile yet, skipping" and left ~/.codex/auth.json
+    // stale, so the owner's real ChatGPT sign-in never reached the Codex
+    // runtime and every turn went out on the API-key profile and 401ed.
+    seedAgentStore({});
+    seedSharedStore({
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-shared"),
+        refresh: "refresh-shared",
+        expires: Date.now() + 3_600_000,
+      },
+    });
+
+    run();
+
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
+    expect(parsed.tokens.access_token).toBe(accessToken("acct-shared"));
+    expect(parsed.tokens.refresh_token).toBe("refresh-shared");
+    expect(parsed.tokens.account_id).toBe("acct-shared");
+  });
+
+  it("still writes the plugin's own file when a codex-home rotation cannot be recorded", () => {
+    // The skip is PER DESTINATION. `~/.codex/auth.json` is not a CODEX_HOME for
+    // anything — the codex plugin reads it and never writes it — so a
+    // divergence there is a stale copy and must be repaired. Only the
+    // app-server's own file is left alone, and only because overwriting a live
+    // rotation with core's spent copy is what burnt the family in #278.
+    //
+    // Abandoning the whole pass instead is worse than the bug: the ChatGPT
+    // sign-in route DELETES ~/.codex/auth.json so this script recreates it, so
+    // a box would come out of a re-login with no credential for the plugin at
+    // all and every turn dying on `401 Missing bearer`.
+    mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
+    writeFileSync(
+      codexHomeAuthPath,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: accessToken("acct-shared", "rotated"),
+          refresh_token: "refresh-rotated-by-appserver",
+          account_id: "acct-shared",
+        },
+      }),
+    );
+    seedAgentStore({});
+    seedSharedStore({
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-shared", "core"),
+        refresh: "refresh-core",
+        expires: Date.now() + 3_600_000,
+      },
+    });
+
+    run();
+
+    // The app-server's file is untouched...
+    expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-rotated-by-appserver");
+    // ...core's gateway-wide row is not rewritten from a timer...
+    expect(readSharedStore().profiles["openai:chatgpt"].refresh).toBe("refresh-core");
+    // ...and the plugin still gets a credential.
+    expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.refresh_token).toBe("refresh-core");
+  });
+
+  it("realigns a stale ~/.codex/auth.json — the state the reported box was in", () => {
+    // The box in the report had a `~/.codex/auth.json` from Aug 27, predating
+    // the sign-in. A fix that only creates the file when it is absent would
+    // have left that box exactly where it was.
+    mkdirSync(path.dirname(homeAuthPath), { recursive: true });
+    writeFileSync(
+      homeAuthPath,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: accessToken("acct-old", "stale"),
+          refresh_token: "refresh-from-a-previous-account",
+          account_id: "acct-old",
+        },
+      }),
+    );
+    seedAgentStore({});
+    seedSharedStore({
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-shared"),
+        refresh: "refresh-shared",
+        expires: Date.now() + 3_600_000,
+      },
+    });
+
+    run();
+
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
+    expect(parsed.tokens.refresh_token).toBe("refresh-shared");
+    expect(parsed.tokens.account_id).toBe("acct-shared");
+  });
+
+  it("prefers an agent's own profile over the shared one under the same id", () => {
+    // Core's inheritance is a shallow per-id override with the agent's own
+    // entry on top (mergeProfileRecordsWithOverridePrecedence). Merging the
+    // other way round would hand the Codex runtime a credential core does not
+    // resolve — and the direction is the load-bearing half of the merge.
+    seedAgentStore({
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-local"),
+        refresh: "refresh-local",
+        expires: Date.now() + 3_600_000,
+      },
+    });
+    seedSharedStore({
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: accessToken("acct-shared"),
+        refresh: "refresh-shared",
+        expires: Date.now() + 3_600_000,
+      },
+    });
+
+    run();
+
+    const parsed = JSON.parse(readFileSync(homeAuthPath, "utf-8"));
+    expect(parsed.tokens.account_id).toBe("acct-local");
+    expect(parsed.tokens.refresh_token).toBe("refresh-local");
+  });
+
+  it("writes a rotation back into the id it READ, not another the local table happens to carry", () => {
+    // The merge made the read set wider than any one store, so "some
+    // ChatGPT-shaped key in the local table" can be a different entry entirely.
+    // Grafting an OAuth bundle onto an API key the owner pasted produces a
+    // credential core cannot classify, and leaves the entry core DOES resolve
+    // holding a refresh token the app-server has already spent.
+    mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
+    writeFileSync(
+      codexHomeAuthPath,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: accessToken("acct-shared", "rotated"),
+          refresh_token: "refresh-rotated-by-appserver",
+          account_id: "acct-shared",
+        },
+      }),
+    );
+    seedAgentStore({ "openai:chatgpt": { type: "api_key", provider: "openai", key: "sk-owner-key" } });
+    seedSharedStore({
+      "codex:default": {
+        type: "oauth",
+        provider: "codex",
+        access: accessToken("acct-shared", "core"),
+        refresh: "refresh-core",
+        expires: Date.now() + 3_600_000,
+      },
+    });
+
+    run();
+
+    // The owner's API key is not turned into half an OAuth profile.
+    const local = readAgentStore().profiles["openai:chatgpt"];
+    expect(local.refresh).toBeUndefined();
+    expect(local.key).toBe("sk-owner-key");
   });
 
   it("mirrors into every agent, not just main", () => {
