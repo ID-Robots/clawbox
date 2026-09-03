@@ -42,7 +42,7 @@ const mockSpawn = vi.mocked(spawnOpenclawCli);
 const CLI_MS = 200;
 
 let statusStarts = 0;
-let accountRow: Record<string, unknown>;
+let accountRow: Record<string, unknown> | null;
 /** When true the mocked CLI fails, i.e. "the gateway could not be asked". */
 let cliFails = false;
 
@@ -68,7 +68,11 @@ beforeEach(async () => {
       statusStarts += 1;
       await new Promise((resolve) => setTimeout(resolve, CLI_MS));
       if (cliFails) throw new Error("gateway unreachable");
-      return JSON.stringify({ channelAccounts: { whatsapp: [accountRow] } });
+      // `accountRow: null` is a valid payload with no WhatsApp entry at all —
+      // the gateway ANSWERING that the channel was never set up.
+      return JSON.stringify({
+        channelAccounts: accountRow ? { whatsapp: [accountRow] } : {},
+      });
     }
     if (args[0] === "gateway" && args[1] === "call") {
       return JSON.stringify({ connected: true });
@@ -174,6 +178,25 @@ describe("GET /setup-api/whatsapp/status — the CLI is asked once per window", 
     cliFails = false;
     vi.setSystemTime(Date.now() + 5_000);
     expect((await (await GET()).json()).state).toBe("enabled_not_paired");
+    expect(statusStarts).toBe(2);
+  });
+
+  it("holds 'this channel was never set up' for a full answer window", async () => {
+    // The short window above is for a gateway that could not be ASKED. A
+    // gateway that answered, and whose payload simply has no WhatsApp entry,
+    // has told the truth about a box the owner never configured — the common
+    // case, and the one that must not pay a cold start five times as often as
+    // a configured box just because both render as `not_configured`.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    accountRow = null;
+    expect((await (await GET()).json()).state).toBe("not_configured");
+
+    vi.setSystemTime(Date.now() + 4_000);
+    expect((await (await GET()).json()).state).toBe("not_configured");
+    expect(statusStarts).toBe(1);
+
+    vi.setSystemTime(Date.now() + 12_000);
+    await GET();
     expect(statusStarts).toBe(2);
   });
 });

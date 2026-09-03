@@ -346,13 +346,39 @@ export async function readChannelStatus(
  */
 export async function readChannelRow(
   channelId: string,
+  options: Omit<SpawnOpenclawOptions, "captureStdout"> = {},
+): Promise<Record<string, unknown> | null> {
+  return (await readChannelRowResult(channelId, options)).row;
+}
+
+/**
+ * What {@link readChannelRow} learned, with "could not ask the gateway" kept
+ * apart from "asked, and there is no row".
+ *
+ * Both are a `null` row, and to every caller that only wants the row they are
+ * the same thing. The memo is the one place they are NOT: an absent channel is
+ * a real, stable answer that stands for a full window, while an unreachable
+ * gateway must be re-asked soon. Collapsing them made a box whose WhatsApp was
+ * never set up — the common case — re-spawn the CLI five times as often as one
+ * where it is configured, which is the opposite of the point.
+ */
+interface ChannelRowResult {
+  /** False only when the gateway could not be asked, or its output not read. */
+  answered: boolean;
+  row: Record<string, unknown> | null;
+}
+
+async function readChannelRowResult(
+  channelId: string,
   // `captureStdout` is deliberately not offerable: this function's whole job is
   // to parse the CLI's `--json`, and a caller that turned stdout off would get
   // an empty string and a silent `null` — "the gateway said nothing" — for a
   // channel that is perfectly healthy.
   options: Omit<SpawnOpenclawOptions, "captureStdout"> = {},
-): Promise<Record<string, unknown> | null> {
-  if (openclawIsAbsent()) return null;
+): Promise<ChannelRowResult> {
+  // No CLI to ask on a Hermes box. Not an answer: the edition is read per call,
+  // so this must not be remembered as one.
+  if (openclawIsAbsent()) return { answered: false, row: null };
   let parsed: unknown;
   try {
     const out = await spawnOpenclawCli(
@@ -375,10 +401,13 @@ export async function readChannelRow(
       `[openclaw-channels] could not read ${channelId} status:`,
       err instanceof Error ? err.message : err,
     );
-    return null;
+    return { answered: false, row: null };
   }
 
-  if (!parsed || typeof parsed !== "object") return null;
+  // The CLI exited fine but what came back is not a payload — the same class of
+  // "could not read the gateway" as a spawn failure, not an answer about the
+  // channel.
+  if (!parsed || typeof parsed !== "object") return { answered: false, row: null };
   const payload = parsed as {
     channelAccounts?: Record<string, unknown>;
     channels?: Record<string, unknown>;
@@ -390,13 +419,19 @@ export async function readChannelRow(
   const accounts = payload.channelAccounts?.[channelId];
   if (Array.isArray(accounts) && accounts.length > 0) {
     const first = accounts[0];
-    if (first && typeof first === "object") return first as Record<string, unknown>;
+    if (first && typeof first === "object") {
+      return { answered: true, row: first as Record<string, unknown> };
+    }
   }
 
   const channel = payload.channels?.[channelId];
-  if (channel && typeof channel === "object") return channel as Record<string, unknown>;
+  if (channel && typeof channel === "object") {
+    return { answered: true, row: channel as Record<string, unknown> };
+  }
 
-  return null;
+  // The gateway answered and this channel is simply not in the payload — it was
+  // never set up. A real answer, and it stands for a full window.
+  return { answered: true, row: null };
 }
 
 // ── One memo for `channels status`, shared by every channel ─────────────────
@@ -415,7 +450,10 @@ export async function readChannelRow(
 // is why one panel answered in 20 ms and the other in three and a half seconds
 // from the same command.
 
-/** How long one gateway ANSWER about a channel stands. */
+/**
+ * How long one gateway ANSWER about a channel stands — including the answer
+ * "there is no such channel here", which is what an un-set-up channel gets.
+ */
 const CHANNEL_STATUS_TTL_MS = 15_000;
 /**
  * How long a FAILED read stands — "the gateway could not be asked".
@@ -428,11 +466,16 @@ const CHANNEL_STATUS_TTL_MS = 15_000;
  * A few seconds is still enough to stop a wedged CLI being re-entered per poll,
  * which is the only thing negative caching is for. The same success/failure
  * split the Discord and Telegram bot-info caches use.
+ *
+ * This is keyed on {@link ChannelRowResult.answered}, NOT on the row being
+ * `null`: the two produce the same `null` row and only one of them is a failure.
  */
 const CHANNEL_STATUS_FAILURE_TTL_MS = 3_000;
 
 interface CachedRow {
   row: Record<string, unknown> | null;
+  /** See {@link ChannelRowResult} — picks which of the two TTLs applies. */
+  answered: boolean;
   at: number;
 }
 interface InFlightRow {
@@ -464,7 +507,7 @@ export function readCachedChannelRow(channelId: string): Promise<Record<string, 
   const cached = cachedRows.get(channelId);
   if (cached) {
     const age = Date.now() - cached.at;
-    const ttl = cached.row ? CHANNEL_STATUS_TTL_MS : CHANNEL_STATUS_FAILURE_TTL_MS;
+    const ttl = cached.answered ? CHANNEL_STATUS_TTL_MS : CHANNEL_STATUS_FAILURE_TTL_MS;
     // `age >= 0` because the clock is wall-clock: a Jetson whose RTC is corrected
     // BACKWARDS by NTP would otherwise pin the entry until the clock caught up.
     if (age >= 0 && age < ttl) return Promise.resolve(cached.row);
@@ -476,12 +519,12 @@ export function readCachedChannelRow(channelId: string): Promise<Record<string, 
   const existing = inFlightRows.get(channelId);
   if (existing && existing.epoch === epoch) return existing.promise;
 
-  const promise = readChannelRow(channelId)
-    .then((row) => {
+  const promise = readChannelRowResult(channelId)
+    .then(({ answered, row }) => {
       // Same rule for storing: an invalidation that landed while this was in
       // flight means the answer predates the change that caused it.
       if ((epochs.get(channelId) ?? 0) === epoch) {
-        cachedRows.set(channelId, { row, at: Date.now() });
+        cachedRows.set(channelId, { row, answered, at: Date.now() });
       }
       return row;
     })
