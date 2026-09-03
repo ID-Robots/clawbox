@@ -17,7 +17,7 @@ import {
   readHermesDiscordAccess,
   readHermesGatewaySnapshot,
 } from "@/lib/hermes-discord";
-import { type ChannelStatus, readChannelStatus } from "@/lib/openclaw-channels";
+import { type ChannelStatus, readCachedChannelStatus } from "@/lib/openclaw-channels";
 
 export const dynamic = "force-dynamic";
 
@@ -112,35 +112,6 @@ async function fetchBotProbe(token: string): Promise<BotProbe> {
     inFlightFetch.delete(token);
   });
   inFlightFetch.set(token, pending);
-  return pending;
-}
-
-// ── OpenClaw: one CLI cold start, shared ────────────────────────────────────
-//
-// `openclaw channels status` is a full CLI invocation plus a gateway round trip
-// — ~10-12 s on a Jetson before the gateway even answers. The Settings panel
-// polls this route, so the probe is cached and concurrent callers share one
-// in-flight call, exactly like the Hermes probe below. Failures are cached too:
-// the slower the CLI gets, the more often the panel would otherwise pay for the
-// call it had just given up on.
-const CHANNEL_PROBE_TTL = 15_000;
-let cachedChannel: { value: ChannelStatus | null; at: number } | null = null;
-let inFlightChannel: Promise<ChannelStatus | null> | null = null;
-
-function probeChannel(): Promise<ChannelStatus | null> {
-  if (cachedChannel && Date.now() - cachedChannel.at < CHANNEL_PROBE_TTL) {
-    return Promise.resolve(cachedChannel.value);
-  }
-  if (inFlightChannel) return inFlightChannel;
-  const pending = readChannelStatus(DISCORD_CHANNEL_ID)
-    .then((value) => {
-      cachedChannel = { value, at: Date.now() };
-      return value;
-    })
-    .finally(() => {
-      inFlightChannel = null;
-    });
-  inFlightChannel = pending;
   return pending;
 }
 
@@ -253,7 +224,12 @@ export async function GET() {
     // `tokenStatus` and `lastError`, which is exactly the vocabulary the Hermes
     // branch above maps. So the card was blank on a box whose bot was
     // answering in Discord.
-    const channel = await probeChannel();
+    // Through the shared memo in openclaw-channels: one CLI cold start per
+    // channel per window, concurrent callers coalesced, failures remembered
+    // too. This route used to hold a private copy of that cache — which is why
+    // /whatsapp/status, reading the same command with no memo at all, cost 3.6 s
+    // a poll where this one cost 20 ms.
+    const channel = await readCachedChannelStatus(DISCORD_CHANNEL_ID);
     // `null` = the gateway could not be asked (CLI timeout, gateway restarting,
     // no openclaw binary). UNKNOWN, which the panel renders as its neutral
     // state — never "offline", which would accuse a healthy bot, and never
@@ -278,7 +254,7 @@ export async function GET() {
       // gateway's account row carries no bot identity unless `channels status`
       // is given `--probe`, and that probe is itself a call to Discord — so on
       // a device that cannot reach Discord there is no second opinion to fall
-      // back to. See readChannelStatus() for why we do not pay for `--probe`.
+      // back to. See readChannelRow() for why we do not pay for `--probe`.
       username: bot.info?.displayName,
       botId: bot.info?.id,
     });

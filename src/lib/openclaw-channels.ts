@@ -346,13 +346,39 @@ export async function readChannelStatus(
  */
 export async function readChannelRow(
   channelId: string,
+  options: Omit<SpawnOpenclawOptions, "captureStdout"> = {},
+): Promise<Record<string, unknown> | null> {
+  return (await readChannelRowResult(channelId, options)).row;
+}
+
+/**
+ * What {@link readChannelRow} learned, with "could not ask the gateway" kept
+ * apart from "asked, and there is no row".
+ *
+ * Both are a `null` row, and to every caller that only wants the row they are
+ * the same thing. The memo is the one place they are NOT: an absent channel is
+ * a real, stable answer that stands for a full window, while an unreachable
+ * gateway must be re-asked soon. Collapsing them made a box whose WhatsApp was
+ * never set up — the common case — re-spawn the CLI five times as often as one
+ * where it is configured, which is the opposite of the point.
+ */
+interface ChannelRowResult {
+  /** False only when the gateway could not be asked, or its output not read. */
+  answered: boolean;
+  row: Record<string, unknown> | null;
+}
+
+async function readChannelRowResult(
+  channelId: string,
   // `captureStdout` is deliberately not offerable: this function's whole job is
   // to parse the CLI's `--json`, and a caller that turned stdout off would get
   // an empty string and a silent `null` — "the gateway said nothing" — for a
   // channel that is perfectly healthy.
   options: Omit<SpawnOpenclawOptions, "captureStdout"> = {},
-): Promise<Record<string, unknown> | null> {
-  if (openclawIsAbsent()) return null;
+): Promise<ChannelRowResult> {
+  // No CLI to ask on a Hermes box. Not an answer: the edition is read per call,
+  // so this must not be remembered as one.
+  if (openclawIsAbsent()) return { answered: false, row: null };
   let parsed: unknown;
   try {
     const out = await spawnOpenclawCli(
@@ -375,10 +401,22 @@ export async function readChannelRow(
       `[openclaw-channels] could not read ${channelId} status:`,
       err instanceof Error ? err.message : err,
     );
-    return null;
+    return { answered: false, row: null };
   }
 
-  if (!parsed || typeof parsed !== "object") return null;
+  // The CLI exited fine but what came back is not a payload — the same class of
+  // "could not read the gateway" as a spawn failure, not an answer about the
+  // channel. `Array.isArray` is not redundant: `typeof [] === "object"`, so a
+  // JSON array would otherwise walk on, find no channel in it, and be filed as
+  // the gateway ANSWERING that this channel does not exist — for 15 s.
+  //
+  // The check stops here on purpose. Demanding a `channelAccounts` or
+  // `channels` key would be the same mistake inverted: a gateway with nothing
+  // configured is entitled to answer `{}`, and calling that a failed read would
+  // put exactly the box this change is for back on the 3 s window.
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { answered: false, row: null };
+  }
   const payload = parsed as {
     channelAccounts?: Record<string, unknown>;
     channels?: Record<string, unknown>;
@@ -390,13 +428,144 @@ export async function readChannelRow(
   const accounts = payload.channelAccounts?.[channelId];
   if (Array.isArray(accounts) && accounts.length > 0) {
     const first = accounts[0];
-    if (first && typeof first === "object") return first as Record<string, unknown>;
+    if (first && typeof first === "object") {
+      return { answered: true, row: first as Record<string, unknown> };
+    }
   }
 
   const channel = payload.channels?.[channelId];
-  if (channel && typeof channel === "object") return channel as Record<string, unknown>;
+  if (channel && typeof channel === "object") {
+    return { answered: true, row: channel as Record<string, unknown> };
+  }
 
-  return null;
+  // The gateway answered and this channel is simply not in the payload — it was
+  // never set up. A real answer, and it stands for a full window.
+  return { answered: true, row: null };
+}
+
+// ── One memo for `channels status`, shared by every channel ─────────────────
+//
+// A status read is a full CLI cold start plus a gateway round trip — 3.2-3.6 s
+// on a Jetson — and the status routes are re-read on every entry into a
+// Settings section, after every save and unpair, and at pairing success; on a
+// phone, where the panel's `!isMobile` escapes never return early, ONE section
+// change re-reads every channel. OpenClaw has nowhere cheaper to ask:
+// `channels status` IS the gateway's own status surface, `openclaw gateway
+// call` pays the identical CLI start-up, and the gateway's only non-WebSocket
+// endpoints are the `/healthz`, `/readyz` and `/startupz` liveness probes, none
+// of which carries a channel row. So the memo belongs on this side of the CLI —
+// and there is exactly ONE of it, here, rather than a private copy per route:
+// /discord/status grew the first one and /whatsapp/status never got it, which
+// is why one panel answered in 20 ms and the other in three and a half seconds
+// from the same command.
+
+/**
+ * How long one gateway ANSWER about a channel stands — including the answer
+ * "there is no such channel here", which is what an un-set-up channel gets.
+ */
+const CHANNEL_STATUS_TTL_MS = 15_000;
+/**
+ * How long a FAILED read stands — "the gateway could not be asked".
+ *
+ * Short, and much shorter than an answer, because the two are not equally true:
+ * `readOpenclawWhatsappStatus` turns a `null` row into `state:"not_configured"`,
+ * which the panel draws as an actionable "Not configured" card with a pairing
+ * CTA. Pinning that for 15 s after a gateway restart would report a paired,
+ * connected box as unconfigured for a quarter of a minute — a false failure.
+ * A few seconds is still enough to stop a wedged CLI being re-entered per poll,
+ * which is the only thing negative caching is for. The same success/failure
+ * split the Discord and Telegram bot-info caches use.
+ *
+ * This is keyed on {@link ChannelRowResult.answered}, NOT on the row being
+ * `null`: the two produce the same `null` row and only one of them is a failure.
+ */
+const CHANNEL_STATUS_FAILURE_TTL_MS = 3_000;
+
+interface CachedRow {
+  row: Record<string, unknown> | null;
+  /** See {@link ChannelRowResult} — picks which of the two TTLs applies. */
+  answered: boolean;
+  at: number;
+}
+interface InFlightRow {
+  /** The channel's invalidation count when this read started. */
+  epoch: number;
+  promise: Promise<Record<string, unknown> | null>;
+}
+
+const cachedRows = new Map<string, CachedRow>();
+const inFlightRows = new Map<string, InFlightRow>();
+/** Per channel, so one channel's mutation never discards another's fresh read. */
+const epochs = new Map<string, number>();
+
+/**
+ * {@link readChannelRow}, but at most one CLI start per channel per window, with
+ * concurrent callers sharing the one in flight. This is what a status route
+ * should call; {@link readChannelRow} stays the uncached "ask right now" read
+ * that {@link waitForChannelConnected} polls a transition with.
+ *
+ * The returned row is SHARED with every other caller in the window — read it,
+ * never mutate it.
+ *
+ * Every path that CHANGES a channel must call {@link invalidateChannelStatus},
+ * or a poll can keep serving a "not paired" that the owner's scan has already
+ * disproved.
+ */
+export function readCachedChannelRow(channelId: string): Promise<Record<string, unknown> | null> {
+  const epoch = epochs.get(channelId) ?? 0;
+  const cached = cachedRows.get(channelId);
+  if (cached) {
+    const age = Date.now() - cached.at;
+    const ttl = cached.answered ? CHANNEL_STATUS_TTL_MS : CHANNEL_STATUS_FAILURE_TTL_MS;
+    // `age >= 0` because the clock is wall-clock: a Jetson whose RTC is corrected
+    // BACKWARDS by NTP would otherwise pin the entry until the clock caught up.
+    if (age >= 0 && age < ttl) return Promise.resolve(cached.row);
+  }
+  // Join a read in flight — but only one started since the last invalidation.
+  // An older one is answering a question the owner has already changed the
+  // answer to: it is what would hand a poll made AFTER the QR was scanned the
+  // "not linked" row that a read started before it is about to return.
+  const existing = inFlightRows.get(channelId);
+  if (existing && existing.epoch === epoch) return existing.promise;
+
+  const promise = readChannelRowResult(channelId)
+    .then(({ answered, row }) => {
+      // Same rule for storing: an invalidation that landed while this was in
+      // flight means the answer predates the change that caused it.
+      if ((epochs.get(channelId) ?? 0) === epoch) {
+        cachedRows.set(channelId, { row, answered, at: Date.now() });
+      }
+      return row;
+    })
+    .finally(() => {
+      // Only ever clear our OWN entry: an abandoned read must not evict the
+      // replacement that an invalidation started, or the next caller pays for a
+      // third CLI start.
+      if (inFlightRows.get(channelId)?.epoch === epoch) inFlightRows.delete(channelId);
+    });
+  inFlightRows.set(channelId, { epoch, promise });
+  return promise;
+}
+
+/** {@link readChannelStatus} over {@link readCachedChannelRow}. */
+export async function readCachedChannelStatus(channelId: string): Promise<ChannelStatus | null> {
+  const row = await readCachedChannelRow(channelId);
+  return row ? parseChannelRow(row) : null;
+}
+
+/**
+ * Forget what the gateway said about `channelId`, including a read still in
+ * flight.
+ *
+ * Called from every path that CHANGES a channel: enabling or disabling it,
+ * dropping its session, completing a pairing, and the gateway restart at the end
+ * of a save. Without this the memo is a probe-once answer with a 15 s fuse, and
+ * the owner watches the panel insist the phone is unpaired for a quarter of a
+ * minute after the scan that paired it.
+ */
+export function invalidateChannelStatus(channelId: string): void {
+  epochs.set(channelId, (epochs.get(channelId) ?? 0) + 1);
+  cachedRows.delete(channelId);
 }
 
 export interface WaitForChannelOptions {

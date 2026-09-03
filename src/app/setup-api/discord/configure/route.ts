@@ -21,6 +21,7 @@ import {
   type ChannelPluginFailure,
   type ChannelStatus,
   ensureChannelPlugin,
+  invalidateChannelStatus,
   waitForChannelConnected,
 } from "@/lib/openclaw-channels";
 import {
@@ -417,6 +418,14 @@ export async function POST(request: Request) {
         attempts: CHANNEL_VERIFY_ATTEMPTS,
         delayMs: CHANNEL_VERIFY_DELAY_MS,
       });
+    }
+    if (harness !== "hermes") {
+      // The token, the plugin and the gateway all changed above, so anything the
+      // status memo holds about this channel — including a poll that ran while
+      // the gateway was restarting — describes the box as it was before the
+      // save. Drop it here, at the end, because the panel refreshes the card the
+      // moment this response lands.
+      invalidateChannelStatus(DISCORD_CHANNEL_ID);
     }
 
     // Root cause first: a plugin that never installed explains every state

@@ -16,13 +16,16 @@ vi.mock("@/lib/openclaw-config", async () => {
   );
   return { ...actual, openclawIsAbsent: () => false, spawnOpenclawCli: vi.fn() };
 });
-vi.mock("@/lib/openclaw-channels", () => ({ readChannelRow: vi.fn() }));
+vi.mock("@/lib/openclaw-channels", () => ({
+  invalidateChannelStatus: vi.fn(),
+  readCachedChannelRow: vi.fn(),
+}));
 
 import { spawnOpenclawCli } from "@/lib/openclaw-config";
-import { readChannelRow } from "@/lib/openclaw-channels";
+import { readCachedChannelRow } from "@/lib/openclaw-channels";
 
 const mockSpawn = vi.mocked(spawnOpenclawCli);
-const mockChannel = vi.mocked(readChannelRow);
+const mockChannel = vi.mocked(readCachedChannelRow);
 
 const QR_A = "data:image/png;base64,AAAA";
 const QR_B = "data:image/png;base64,BBBB";

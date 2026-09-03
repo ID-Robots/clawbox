@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { whatsappSessionDirs } from "@/lib/hermes-whatsapp";
 import { unpairWhatsapp } from "@/lib/whatsapp-pairing";
+import { invalidateChannelStatus } from "@/lib/openclaw-channels";
 import { restartGateway } from "@/lib/openclaw-config";
 import {
+  WHATSAPP_CHANNEL_ID,
   getOpenclawWhatsappPairing,
   logoutOpenclawWhatsapp,
   setOpenclawWhatsappEnabled,
@@ -55,6 +57,10 @@ export async function POST() {
       await restartGateway().catch((err) => {
         console.error("[whatsapp/unpair] gateway restart failed:", err);
       });
+      // The config write and the logout each dropped the status memo already;
+      // this drops what a poll taken while the gateway was restarting may have
+      // put back, so the panel's post-unpair refresh reads the box as it is now.
+      invalidateChannelStatus(WHATSAPP_CHANNEL_ID);
       if (logoutError) throw logoutError;
       console.info("[whatsapp/unpair] logged out and disabled the channel");
       return NextResponse.json({ success: true });

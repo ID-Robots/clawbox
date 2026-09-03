@@ -17,7 +17,7 @@ vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 // is pinned by status-openclaw-state.test.ts; this file is about the Discord
 // bot probe, so the gateway answers "could not be asked" (null) unless a case
 // says otherwise.
-vi.mock("@/lib/openclaw-channels", () => ({ readChannelStatus: vi.fn() }));
+vi.mock("@/lib/openclaw-channels", () => ({ readCachedChannelStatus: vi.fn() }));
 vi.mock("@/lib/hermes-discord", async () => {
   const actual = await vi.importActual<typeof import("@/lib/hermes-discord")>("@/lib/hermes-discord");
   return {
@@ -39,11 +39,11 @@ vi.mock("@/lib/hermes-discord", async () => {
 
 import { get } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
-import { readChannelStatus } from "@/lib/openclaw-channels";
+import { readCachedChannelStatus } from "@/lib/openclaw-channels";
 
 const mockGet = vi.mocked(get);
 const mockHarness = vi.mocked(getActiveHarness);
-const mockChannel = vi.mocked(readChannelStatus);
+const mockChannel = vi.mocked(readCachedChannelStatus);
 
 const TOKEN = "clawbox-test-not-a-real-discord-bot-token-000000";
 
