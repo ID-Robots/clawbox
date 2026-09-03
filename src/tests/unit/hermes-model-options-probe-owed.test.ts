@@ -162,14 +162,18 @@ describe("probeStillOwed — a dashboard that is still booting is not a dashboar
     expect(await mod.probeStillOwed()).toBe(false);
   });
 
-  it("owes nothing at all when the unit has failed, is masked, or is CRASH-LOOPING", async () => {
+  it("owes nothing at all when the unit has failed, is masked, or is stopped", async () => {
     dashboardDown();
     await mod.getModelOptions();
-    // Inside the clock backstop, so only the unit state can produce this answer.
-    // `down` is also what `activating`/`auto-restart` classifies as (see
-    // `hermes-dashboard-control`), and that is the case that matters most here:
-    // a dashboard restarting every 5 s since boot degrades on the first poll
-    // instead of reading "Checking..." for as long as the panel stays open.
+    // Inside the clock backstop, so only the unit state can produce this answer:
+    // `down` is `failed`, masked, or stopped-and-disabled (which is what an
+    // OpenClaw box does to this unit). Nothing is coming, so a grace here would
+    // be a promise about a unit systemd has already given up on.
+    //
+    // NOT the crash loop: `activating`/`auto-restart` classifies as
+    // `restarting`, not `down` (see `hermes-dashboard-control`), because that
+    // is also where this app's OWN `bounceHermesDashboard` parks for the whole
+    // RestartSec. It gets the short clock instead — pinned below.
     unitStateMock.mockResolvedValue("down");
 
     expect(await mod.probeStillOwed()).toBe(false);
