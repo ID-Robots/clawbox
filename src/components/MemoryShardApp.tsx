@@ -572,7 +572,7 @@ export default function MemoryShardApp() {
         <div className="flex items-center justify-between gap-4 pb-3 mb-1 border-b border-white/[0.06]">
           <div className="flex items-center gap-2 min-w-0">
             <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }} aria-hidden="true">
-              diamond_shine
+              diamond
             </span>
             <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">
               {t("clawkeep.memory.title")}

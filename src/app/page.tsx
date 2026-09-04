@@ -257,9 +257,12 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     files: "folder",
     clawkeep: "shield_lock",
     // A faceted gem rather than a memory chip: the shard is the thing the app
-    // is named for, and `diamond_shine` is one of the crystal-shaped glyphs the
-    // bundled Material Symbols subset actually ships a ligature for.
-    "memory-shard": "diamond_shine",
+    // is named for. `diamond`, not `diamond_shine` — both ship a ligature in
+    // the bundled subset, but the shine variant's sparkle marks sit right on
+    // top of the facet lines, and at desktop-icon size (48px) the two read as
+    // one blob instead of a gem. The plain gem keeps the identity and stays
+    // legible small.
+    "memory-shard": "diamond",
     system_update: "system_update",
     vnc: "desktop_windows",
     camera: "photo_camera",
