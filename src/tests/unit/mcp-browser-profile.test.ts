@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { saveEnv } from "@/tests/helpers/env";
 import { createRegistrar, type Profile } from "../../../mcp/lib/register";
 import { registerBrowserTools } from "../../../mcp/tools/browser";
+import { registerMediaTools } from "../../../mcp/tools/media";
 import { profileForActiveModel } from "../../../mcp/lib/profile";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
@@ -22,6 +23,9 @@ function stubServer(): McpServer {
 function names(profile: Profile, edition: "openclaw" | "hermes" = "openclaw"): string[] {
   const reg = createRegistrar(stubServer(), edition, profile);
   registerBrowserTools(reg);
+  // The media tools declare the same family so a run gets them; they are
+  // registered here too, or "everything in the profile" would be a half-truth.
+  registerMediaTools(reg);
   // A non-browser tool riding along must be dropped by the profile — and so
   // must a tool that merely NAMED itself browser_* without declaring the
   // family: the gate is the declaration, never the christening.
@@ -38,9 +42,10 @@ function names(profile: Profile, edition: "openclaw" | "hermes" = "openclaw"): s
 let restore: () => void;
 
 beforeEach(() => {
-  restore = saveEnv("CLAWBOX_RUN_DIR", "CLAWBOX_RUN_ARTIFACTS_DIR", "CLAWBOX_MCP_PROFILE");
+  restore = saveEnv("CLAWBOX_RUN_DIR", "CLAWBOX_RUN_ARTIFACTS_DIR", "CLAWBOX_RUN_MEDIA", "CLAWBOX_MCP_PROFILE");
   delete process.env.CLAWBOX_RUN_DIR;
   delete process.env.CLAWBOX_RUN_ARTIFACTS_DIR;
+  delete process.env.CLAWBOX_RUN_MEDIA;
 });
 
 afterEach(() => restore());
@@ -54,12 +59,13 @@ describe("the browser profile", () => {
     expect(browser).not.toContain("email_send");
     expect(browser).not.toContain("browser_impostor");
     expect(browser).toContain("family_member");
-    // And every real browser_* tool declares it. Two names in the profile are
-    // deliberately not browser_*: the test's own ride-along, and
-    // describe_image — text eyes for a local image file, registered in this
-    // family so a coding-agent run gets it (see mcp/README.md).
+    // And every real browser_* tool declares it. Four names in the profile are
+    // deliberately not browser_*: the test's own ride-along, describe_image —
+    // text eyes for a local image file — and the two media tools, all
+    // registered in this family so a coding-agent run gets them (mcp/README.md).
     expect(browser).toContain("describe_image");
-    expect(browser.filter((n) => n !== "family_member" && n !== "describe_image").every((n) => n.startsWith("browser_"))).toBe(true);
+    const notBrowser = new Set(["family_member", "describe_image", "generate_image", "generate_audio"]);
+    expect(browser.filter((n) => !notBrowser.has(n)).every((n) => n.startsWith("browser_"))).toBe(true);
     const full = names("full");
     for (const name of ["email_send", "browser_impostor", "family_member", "browser_open"]) expect(full).toContain(name);
   });
@@ -72,6 +78,24 @@ describe("the browser profile", () => {
     expect(names("browser")).not.toContain("browser_view_local");
     process.env.CLAWBOX_RUN_ARTIFACTS_DIR = "/home/clawbox/clawbox/data/coding-agent-artifacts/run-abc12345";
     expect(names("browser")).toContain("browser_view_local");
+  });
+
+  it("offers a media tool only inside a run AND only where the runner allowed it", () => {
+    // No run context: neither tool exists, whatever the variable says.
+    process.env.CLAWBOX_RUN_MEDIA = "images,audio";
+    expect(names("browser")).not.toContain("generate_image");
+    process.env.CLAWBOX_RUN_DIR = "/home/clawbox/Projects/site";
+    process.env.CLAWBOX_RUN_ARTIFACTS_DIR = "/home/clawbox/clawbox/data/coding-agent-artifacts/run-abc12345";
+    expect(names("browser")).toContain("generate_image");
+    expect(names("browser")).toContain("generate_audio");
+    // One switch off means one tool gone — not a tool that exists and refuses,
+    // which is the shape a small model argues with and Hermes' circuit
+    // breaker eventually takes the whole server offline for.
+    process.env.CLAWBOX_RUN_MEDIA = "audio";
+    expect(names("browser")).not.toContain("generate_image");
+    expect(names("browser")).toContain("generate_audio");
+    delete process.env.CLAWBOX_RUN_MEDIA;
+    expect(names("browser")).not.toContain("generate_audio");
   });
 
   it("is selectable through CLAWBOX_MCP_PROFILE", () => {

@@ -888,9 +888,15 @@ describe("what a run can verify with", () => {
     expect(server.env.CLAWBOX_ROOT).toBe(root);
     expect(fs.readFileSync(path.join(server.env.CLAWBOX_ROOT, "data", ".mcp-token"), "utf-8")).toBe(onDisk);
 
-    // The browser family is approved for headless mode; nothing else MCP is.
+    // The browser family plus the media tools the owner's switches allow, and
+    // nothing else MCP: both media switches default ON, so this run has both.
     for (const tool of lib.MCP_BROWSER_TOOLS) expect(argv).toContain(tool);
-    expect(argv.filter((a) => a.startsWith("mcp__"))).toHaveLength(lib.MCP_BROWSER_TOOLS.length);
+    expect(argv).toContain(lib.MCP_MEDIA_TOOLS.images);
+    expect(argv).toContain(lib.MCP_MEDIA_TOOLS.audio);
+    expect(argv.filter((a) => a.startsWith("mcp__"))).toHaveLength(lib.MCP_BROWSER_TOOLS.length + 2);
+    // The run's own server is told which of the two it may register; the
+    // variable carries no secret, like everything else in this block.
+    expect(server.env.CLAWBOX_RUN_MEDIA).toBe("images,audio");
 
     // The run's own environment names the evidence folder, which exists, and
     // its PATH reaches the snap-installed Chromium.

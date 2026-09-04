@@ -71,6 +71,10 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     progress: [],
     todos: [],
     exitCode: 0,
+    media: { images: true, audio: true },
+    mediaGenerated: { images: 0, audio: 0 },
+    pgid: null,
+    leftover: false,
     ...over,
   };
 }

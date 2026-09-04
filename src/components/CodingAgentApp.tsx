@@ -10,6 +10,7 @@ import CodingAgentReportPreview from "./CodingAgentReportPreview";
 import CodingAgentSettingsPanel from "./CodingAgentSettingsPanel";
 import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
+import InstalledAppIcon from "./InstalledAppIcon";
 import CodingAgentSetupWizard from "./CodingAgentSetupWizard";
 import { BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD, SECTION_LABEL } from "./coding-agent-ui";
 import { startHarnessTest } from "@/lib/coding-agent-harness-test";
@@ -101,7 +102,11 @@ interface Run {
   /** The run's evidence folder — screenshots, test output and its report.md.
    *  `markdown` is the kind that opens rendered in the app; every other
    *  non-image opens as the plain text the route serves it as. */
-  artifacts?: { name: string; bytes: number; kind: "image" | "markdown" | "text" | "other" }[];
+  artifacts?: { name: string; bytes: number; kind: "image" | "audio" | "markdown" | "text" | "other" }[];
+  /** Something this run started is still running now that it has settled —
+   *  the server an app serves itself on, most often. Never true of a run
+   *  that was stopped or failed: those have their group ended for them. */
+  leftover?: boolean;
 }
 
 /**
@@ -121,6 +126,8 @@ interface Project {
   name: string;
   lastCommit: { subject: string; date: number } | null;
   onDesktop: boolean;
+  /** The project's own icon, once the box has drawn one; null while it has not. */
+  iconUrl?: string | null;
   latestRun: Pick<Run, "id" | "status" | "task" | "startedAt" | "completedAt"> | null;
 }
 
@@ -598,7 +605,7 @@ export default function CodingAgentApp() {
    */
   const runAction = async (
     id: string,
-    action: "pause" | "resume" | "start" | "stop" | "draft",
+    action: "pause" | "resume" | "start" | "stop" | "draft" | "kill",
     failText: string,
     opts: { method?: "POST" | "DELETE" } = {},
   ) => {
@@ -1330,6 +1337,12 @@ export default function CodingAgentApp() {
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
+                        {/* The picture the box drew for this project while a run
+                            worked in it (src/lib/project-icon.ts). Absent until
+                            one has been drawn, which is most of a fresh box. */}
+                        {project.iconUrl && (
+                          <InstalledAppIcon appId={project.folder} iconUrl={project.iconUrl} name={project.name} size="w-6 h-6" />
+                        )}
                         <span className="text-xs font-medium text-[var(--text-primary)] break-words">{project.name}</span>
                         {/* Says where the folder lives: a code project's is
                             under the checkout, not in the owner's folder. */}
@@ -1402,7 +1415,10 @@ export default function CodingAgentApp() {
           const reviewedBy = runs.find((r) => r.reviewOf === run.id);
           const artifacts = run.artifacts ?? [];
           const images = artifacts.filter((a) => a.kind === "image");
-          const files = artifacts.filter((a) => a.kind !== "image");
+          // Clips get a player rather than a link: a run can now record its own
+          // narration, and a download is not how you check what it says.
+          const clips = artifacts.filter((a) => a.kind === "audio");
+          const files = artifacts.filter((a) => a.kind !== "image" && a.kind !== "audio");
           const reportFile = files.find((a) => a.kind === "markdown" && a.name === "report.md") ?? files.find((a) => a.kind === "markdown");
           const helpers = Object.entries(run.subagentsByType ?? {});
           const todos = run.todos ?? [];
@@ -1485,6 +1501,25 @@ export default function CodingAgentApp() {
                     testId={`coding-agent-progress-${run.id}`}
                     className="mt-2"
                   />
+                )}
+                {/* A run that finished on its own keeps whatever it started:
+                    an app that serves itself on a port is meant to stay up,
+                    so the device says what survived instead of killing it
+                    unasked, and the owner ends it when they are done. */}
+                {run.leftover && (
+                  <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-2.5 flex items-center gap-2 flex-wrap" data-testid="coding-agent-run-leftover">
+                    <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 16 }} aria-hidden="true">bolt</span>
+                    <span className="text-[11px] text-[var(--text-secondary)]">{t("codingAgent.leftoverRunning")}</span>
+                    <button
+                      type="button"
+                      onClick={() => runAction(run.id, "kill", t("codingAgent.killLeftoverFailed"))}
+                      disabled={busy === run.id}
+                      data-testid={`coding-agent-kill-${run.id}`}
+                      className={`${BTN_SECONDARY} ml-auto`}
+                    >
+                      {t("codingAgent.killLeftover")}
+                    </button>
+                  </div>
                 )}
                 <div className="mt-3 flex flex-wrap items-center gap-1.5" data-testid="coding-agent-run-actions">
                   {runControls(run, "page")}
@@ -1695,6 +1730,19 @@ export default function CodingAgentApp() {
                       ))}
                     </div>
                   )}
+                  {clips.length > 0 && (
+                    <div className="mt-2 space-y-1.5" data-testid="coding-agent-artifact-audio">
+                      {clips.map((a) => (
+                        <div key={a.name} className="flex items-center gap-2 flex-wrap">
+                          <span className="text-[11px] text-[var(--text-secondary)] break-all">{a.name}</span>
+                          {formatBytes(a.bytes) && <span className="text-[11px] text-[var(--text-muted)]">· {formatBytes(a.bytes)}</span>}
+                          {/* No track: the clip is speech the run generated, and
+                              the text it was made from is in the run's report. */}
+                          <audio controls preload="none" src={artifactUrl(run.id, a.name)} className="h-8 max-w-full" />
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {files.length > 0 && (
                     <ul className="mt-2 space-y-0.5">
                       {files.map((a) => (
@@ -1758,6 +1806,9 @@ export default function CodingAgentApp() {
             </button>
             <div className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-3">
               <div className="flex items-center gap-2 flex-wrap">
+                {view.project.iconUrl && (
+                  <InstalledAppIcon appId={view.project.folder} iconUrl={view.project.iconUrl} name={view.project.name} size="w-7 h-7" />
+                )}
                 <span className="text-sm font-semibold text-[var(--text-primary)] break-words">{view.project.name}</span>
                 {view.project.kind === "codeProject" && (
                   <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--text-muted)] border-white/20">

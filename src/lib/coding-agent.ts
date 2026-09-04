@@ -93,6 +93,9 @@ import {
   type PrState,
 } from "@/lib/coding-pr";
 import { commitRunWork, lastCommit, type LastCommit } from "@/lib/coding-git";
+import { closeSessionsForRun } from "@/lib/browser-sessions";
+import { ensureProjectIcon } from "@/lib/project-icon";
+import { webappIconPath } from "@/lib/webapp-icon";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -242,6 +245,31 @@ export const CODING_AGENT_AUTO_PR_CONFIG_KEY = "coding_agent_auto_pr";
 
 export const CODING_AGENT_SETUP_CONFIG_KEY = "coding_agent_setup_complete";
 
+/**
+ * May a run draw its own pictures — and may the box draw the project's desktop
+ * icon and its favicon while the run works?
+ *
+ * ON when the key is absent, unlike every other switch here, because this one
+ * is not a consent: the icon pipeline already spends the same allowance on a
+ * web app the agent creates (src/lib/webapp-icon.ts), and a project that ships
+ * with a placeholder glyph is the thing the owner asked to stop seeing. What it
+ * costs is bounded twice over — MAX_IMAGES_PER_RUN on the record, and the
+ * proxy's own per-UTC-day allowance — so the switch is here for the owner who
+ * would rather spend that allowance on the chat.
+ */
+export const CODING_AGENT_GEN_IMAGES_CONFIG_KEY = "coding_agent_generate_images";
+
+/**
+ * May a run have this box SPEAK for it — narration, a greeting, a sound cue —
+ * written into its project as a WAV?
+ *
+ * ON when absent, for the same reason as the pictures. What it costs is
+ * different, though, and the brief says so: synthesis is one box-wide slot
+ * shared with the chat's spoken replies (withSpeechQueue), and the cloud voice
+ * is billed per character.
+ */
+export const CODING_AGENT_GEN_AUDIO_CONFIG_KEY = "coding_agent_generate_audio";
+
 /** Every key the reset clears. The switch is last: it is the consent, and a
  *  half-cleared box that is still switched on would be the one state where the
  *  wizard shows over a live delegated shell. */
@@ -252,9 +280,23 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_TOKENS_CONFIG_KEY,
   CODING_AGENT_REVIEW_CONFIG_KEY,
   CODING_AGENT_AUTO_PR_CONFIG_KEY,
+  CODING_AGENT_GEN_IMAGES_CONFIG_KEY,
+  CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_SETUP_CONFIG_KEY,
   CODING_AGENT_CONFIG_KEY,
 ] as const;
+
+/**
+ * Pictures and clips ONE run may ask this box for.
+ *
+ * Per RUN and on the record, never per process: finishRun respawns the same
+ * record on a transient retry and the review pass resumes the same session, and
+ * neither may buy the owner's daily allowance a second time. A model that keeps
+ * asking is told how many it has left in every reply, which is what stops the
+ * loop before the cap has to.
+ */
+export const MAX_IMAGES_PER_RUN = 20;
+export const MAX_AUDIO_PER_RUN = 40;
 export const MIN_TOKEN_LIMIT = 10_000;
 export const MAX_TASK_CHARS = 4_000;
 export const MAX_DIRECTORY_CHARS = 512;
@@ -582,6 +624,36 @@ export interface CodingRun {
    */
   todos: CodingTodo[];
   exitCode: number | null;
+  /**
+   * The media switches as they stood when this run STARTED, like `effort` and
+   * `maxTurns`: the tools a run was given cannot appear or vanish under it
+   * because the owner flipped a switch while it worked.
+   */
+  media: RunMedia;
+  /** Pictures and clips this run has already been given, against the caps. */
+  mediaGenerated: { images: number; audio: number };
+  /**
+   * The process group this run was spawned into, kept so a leftover server can
+   * still be ended after the run itself has settled and `live` has forgotten
+   * it. Null for a record that never spawned, or one from before this field.
+   */
+  pgid: number | null;
+  /**
+   * Something the run started is STILL RUNNING now that the run has finished.
+   *
+   * Not a fault: the orientation guide tells a run to leave a server listening
+   * so its app can be reached from the desktop, so a naturally-finished run's
+   * process group is deliberately not killed. The owner is told, and the run's
+   * page offers to end it — which is the difference between a documented
+   * pattern and a leak nobody can see.
+   */
+  leftover: boolean;
+}
+
+/** Which media a run may ask this box for — read once, at its start. */
+export interface RunMedia {
+  images: boolean;
+  audio: boolean;
 }
 
 /** One item of the run's plan, as Claude Code's TodoWrite tool reports it. */
@@ -634,6 +706,10 @@ export interface CodingAgentStatus {
   reviewPass: boolean;
   /** The owner's switch for branch -> pull request -> wait for checks -> merge. */
   autoPr: boolean;
+  /** May a run draw pictures, and may the box draw the project's icon? */
+  generateImages: boolean;
+  /** May a run have this box speak a clip into its project? */
+  generateAudio: boolean;
   harnessCommand: string;
   maxTaskChars: number;
   /** How hard a run thinks per turn. */
@@ -882,6 +958,39 @@ export async function setAutoPr(on: unknown): Promise<boolean> {
   return on;
 }
 
+/** The two media switches. ON when absent — see their config keys. */
+function generateImagesFrom(raw: unknown): boolean {
+  return raw !== false;
+}
+
+function generateAudioFrom(raw: unknown): boolean {
+  return raw !== false;
+}
+
+export async function getGenerateImages(): Promise<boolean> {
+  return generateImagesFrom(await configGet(CODING_AGENT_GEN_IMAGES_CONFIG_KEY));
+}
+
+export async function setGenerateImages(on: unknown): Promise<boolean> {
+  if (typeof on !== "boolean") {
+    throw new CodingAgentError("invalid", "The picture switch must be true or false.");
+  }
+  await configSet(CODING_AGENT_GEN_IMAGES_CONFIG_KEY, on);
+  return on;
+}
+
+export async function getGenerateAudio(): Promise<boolean> {
+  return generateAudioFrom(await configGet(CODING_AGENT_GEN_AUDIO_CONFIG_KEY));
+}
+
+export async function setGenerateAudio(on: unknown): Promise<boolean> {
+  if (typeof on !== "boolean") {
+    throw new CodingAgentError("invalid", "The voice switch must be true or false.");
+  }
+  await configSet(CODING_AGENT_GEN_AUDIO_CONFIG_KEY, on);
+  return on;
+}
+
 /** Record that the owner finished (or re-entered) the setup wizard. */
 export async function setSetupComplete(done: unknown): Promise<boolean> {
   if (typeof done !== "boolean") {
@@ -1026,6 +1135,12 @@ export interface CodingProject {
   lastCommit: LastCommit | null;
   /** Registered on the desktop as a web app (data/webapps/<folder>/meta.json). */
   onDesktop: boolean;
+  /**
+   * The project's own icon, once one has been drawn for it — the URL the app
+   * puts in an <img>, not a path. Null while there is none, which is what the
+   * row draws its lettered placeholder for.
+   */
+  iconUrl: string | null;
   /** The newest run that worked in this folder, if any has. */
   latestRun: Pick<CodingRun, "id" | "status" | "task" | "startedAt" | "completedAt"> | null;
 }
@@ -1143,12 +1258,13 @@ async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate
   // and a folder a run has worked in by that run, as long as it still exists.
   const workedIn = fromRun === true && self?.isDirectory() === true;
   if (!hasGit && !workedIn && !(kind === "codeProject" && metaName !== null)) return null;
-  const [commit, onDesktop, real] = await Promise.all([
+  const [commit, onDesktop, hasIcon, real] = await Promise.all([
     // Only a folder with its own history is asked. `git log` in one without
     // walks UP to the nearest repository — for a code project, ClawBox's own
     // checkout — and would present the OS's last commit as the app's.
     hasGit ? lastCommit(directory) : Promise.resolve(null),
     isOnDesktop(folder),
+    hasProjectIcon(folder),
     // A run records the folder it worked in symlink-resolved; match both
     // spellings so a project reached through a link still shows its run.
     fs.promises.realpath(directory).catch(() => directory),
@@ -1167,6 +1283,7 @@ async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate
       name: metaName ?? folder,
       lastCommit: commit,
       onDesktop,
+      iconUrl: hasIcon ? `/setup-api/apps/icon/${folder}` : null,
       latestRun: run
         ? { id: run.id, status: run.status, task: run.task, startedAt: run.startedAt, completedAt: run.completedAt }
         : null,
@@ -1233,6 +1350,19 @@ async function readProjectJson(file: string): Promise<string> {
  * not a valid app id cannot be one, and is never spliced into a path under
  * data/webapps to find out.
  */
+/**
+ * Has a picture been drawn for this project (src/lib/project-icon.ts)?
+ *
+ * The same id rule as the desktop's, for the same reason: a folder name the
+ * icon route would refuse is one no <img> could ever load, so it is never
+ * spliced into a path under data/icons to find out.
+ */
+async function hasProjectIcon(folder: string): Promise<boolean> {
+  if (!validateProjectId(folder)) return false;
+  const icon = await fs.promises.stat(webappIconPath(folder)).catch(() => null);
+  return icon?.isFile() === true;
+}
+
 async function isOnDesktop(folder: string): Promise<boolean> {
   if (!validateProjectId(folder)) return false;
   const meta = await fs.promises.stat(path.join(WEBAPPS_DIR, folder, "meta.json")).catch(() => null);
@@ -1364,6 +1494,8 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     running: runningCount(),
     reviewPass: config[CODING_AGENT_REVIEW_CONFIG_KEY] === true,
     autoPr: config[CODING_AGENT_AUTO_PR_CONFIG_KEY] === true,
+    generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
+    generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
     effort,
@@ -1500,7 +1632,25 @@ function normalizeRun(raw: CodingRun): CodingRun {
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
     todos: parseTodos(raw.todos) ?? [],
     exitCode: typeof raw.exitCode === "number" ? raw.exitCode : null,
+    // A record written before the media switches existed had neither tool, so
+    // "off" is the truth about that run and not merely a safe default.
+    media: normalizeMedia(raw.media),
+    mediaGenerated: {
+      images: countOf(raw.mediaGenerated?.images),
+      audio: countOf(raw.mediaGenerated?.audio),
+    },
+    pgid: typeof raw.pgid === "number" && raw.pgid > 0 ? raw.pgid : null,
+    leftover: raw.leftover === true,
   };
+}
+
+function normalizeMedia(raw: unknown): RunMedia {
+  const value = (raw ?? {}) as Partial<RunMedia>;
+  return { images: value.images === true, audio: value.audio === true };
+}
+
+function countOf(raw: unknown): number {
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
 }
 
 function readAll(): CodingRun[] {
@@ -2064,6 +2214,39 @@ export const ULTRACODE_BRIEF = [
   "A script's meta must be a plain object literal. If a workflow fails or returns nothing useful, send a narrower script inline — never scriptPath or resumeFromRunId, and never Read the script file, transcript or journal its result names: that folder is closed to you and each attempt costs a step.",
 ].join(" ");
 
+/**
+ * Added to the brief only for a run whose owner left the picture switch on.
+ *
+ * Three things have to be said, and each of them was learned somewhere else in
+ * this file: what the tool actually costs (the ClawBox AI allowance is
+ * per-UTC-day and 1/day on the free plan — see clawai-images.ts), that a
+ * refusal naming the allowance is an answer and not a flake (a small model
+ * retries a 429 forever otherwise), and that the project's own icon is drawn
+ * for it — a run that drew its own would spend two pictures on one file and
+ * then lose the race with `wx`.
+ *
+ * The last sentence forbids the substitute a capable model reaches for when it
+ * cannot draw: rendering an SVG or a PIL canvas to PNG and calling it art. That
+ * is not what the owner asked for and it looks like it.
+ */
+export const MEDIA_BRIEF_IMAGES = [
+  "generate_image draws a real picture with this box's ClawBox AI plan and writes a PNG into your working folder — hero art, sprites, backgrounds, textures, a logo.",
+  "Spend it on the handful of pictures that carry the project, never one per element: each costs the owner's daily allowance, and a refusal that names the allowance or the credential means carry on without pictures rather than retry.",
+  "Do not fake one with an SVG-to-PNG script or a Python imaging library, and do not draw the project's own icon: this box draws favicon.png, favicon.ico and the desktop icon for you shortly after the run starts, so link <link rel=\"icon\" href=\"favicon.png\"> from every page and ship the two files with the project.",
+].join(" ");
+
+/**
+ * The audio half. Its costs are not the pictures' costs, so it says its own:
+ * synthesis is ONE box-wide slot shared with the chat's spoken replies
+ * (withSpeechQueue in voice-speak.ts), and Kokoro refuses outright when the
+ * board is short of memory — which a run's own node build makes likely, and
+ * which is a fact about the box rather than about the sentence.
+ */
+export const MEDIA_BRIEF_AUDIO = [
+  "generate_audio speaks text in this box's own voice and writes a WAV into your working folder — narration, a greeting, a spoken cue.",
+  "Keep the clips short and few: the box has one voice and the chat shares it, so \"busy\" or a memory refusal means try once more later and then carry on without sound.",
+].join(" ");
+
 const FILE_TOOLS = ["Read", "Edit", "Write"] as const;
 /** Always denied under data/, whether or not they exist yet. */
 // email-outcomes.json sits beside email-pending.json for the same reason: it
@@ -2156,12 +2339,45 @@ export const MCP_BROWSER_TOOLS = [
 ] as const;
 
 /**
+ * The two media tools, by the switch that offers each.
+ *
+ * Kept apart from MCP_BROWSER_TOOLS rather than folded into it because they
+ * are CONDITIONAL: a run whose owner switched pictures off is never told the
+ * tool exists, which is the difference between a capability and a refusal the
+ * model will spend steps arguing with.
+ */
+export const MCP_MEDIA_TOOLS: Record<keyof RunMedia, string> = {
+  images: "mcp__clawbox__generate_image",
+  audio: "mcp__clawbox__generate_audio",
+};
+
+/** Every MCP tool this run may call: the browser family, plus what it may draw and say. */
+export function runMcpTools(media: RunMedia | undefined): string[] {
+  const tools: string[] = [...MCP_BROWSER_TOOLS];
+  if (media?.images) tools.push(MCP_MEDIA_TOOLS.images);
+  if (media?.audio) tools.push(MCP_MEDIA_TOOLS.audio);
+  return tools;
+}
+
+/**
+ * The media the run's own MCP server registers, as its environment names it.
+ *
+ * A comma-separated list rather than two booleans so a run with neither gets
+ * NO variable at all, which is what the server reads as "register nothing".
+ * It carries no secret — see buildRunMcpConfig.
+ */
+export function runMediaEnv(media: RunMedia | undefined): string {
+  return [media?.images ? "images" : null, media?.audio ? "audio" : null].filter(Boolean).join(",");
+}
+
+/**
  * The MCP config a run gets: the clawbox server in its browser-only profile.
  * No token in here — argv is world-readable in /proc, so the server reads
  * data/.mcp-token itself through its normal file fallback. Exported for the
  * contract test.
  */
-export function buildRunMcpConfig(run: { id: string; directory: string }): string {
+export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia }): string {
+  const media = runMediaEnv(run.media);
   return JSON.stringify({
     mcpServers: {
       clawbox: {
@@ -2173,6 +2389,7 @@ export function buildRunMcpConfig(run: { id: string; directory: string }): strin
           CLAWBOX_MCP_PROFILE: "browser",
           CLAWBOX_RUN_ARTIFACTS_DIR: artifactsDir(run.id),
           CLAWBOX_RUN_DIR: run.directory,
+          ...(media ? { CLAWBOX_RUN_MEDIA: media } : {}),
         },
       },
     },
@@ -2180,7 +2397,14 @@ export function buildRunMcpConfig(run: { id: string; directory: string }): strin
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; run?: { id: string; directory: string } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; run?: { id: string; directory: string; media?: RunMedia } }): string[] {
+  const brief = [
+    opts.effort === ULTRACODE_EFFORT ? `${HEADLESS_BRIEF} ${ULTRACODE_BRIEF}` : HEADLESS_BRIEF,
+    // Only for the run that HAS the tool: a brief that described a picture
+    // tool to a run without one would spend steps on a call that is not there.
+    ...(opts.run?.media?.images ? [MEDIA_BRIEF_IMAGES] : []),
+    ...(opts.run?.media?.audio ? [MEDIA_BRIEF_AUDIO] : []),
+  ].join(" ");
   const args = [
     "-p",
     "--verbose",
@@ -2188,7 +2412,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     "--permission-mode", "acceptEdits",
     "--setting-sources", "user",
     "--max-turns", String(opts.maxTurns ?? DEFAULT_MAX_TURNS),
-    "--append-system-prompt", opts.effort === ULTRACODE_EFFORT ? `${HEADLESS_BRIEF} ${ULTRACODE_BRIEF}` : HEADLESS_BRIEF,
+    "--append-system-prompt", brief,
   ];
   // Ultracode travels as a flag, the fixed levels through the wrapper's env
   // pin (see EFFORT_LEVELS). The wrapper would add the flag itself from the
@@ -2222,7 +2446,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // Full access is about commands, not secrets.
     // The Workflow tool is listed AND pre-approved under ultracode: listed
     // alone it is refused headlessly (see WORKFLOW_TOOL).
-    args.push("--allowedTools", "Bash(*)", ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run ? MCP_BROWSER_TOOLS : []));
+    args.push("--allowedTools", "Bash(*)", ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run ? runMcpTools(opts.run.media) : []));
     args.push("--disallowedTools", ...fileDenyRules());
   }
   return args;
@@ -2280,6 +2504,102 @@ function endProcess(state: LiveRun): void {
   state.killTimer.unref();
 }
 
+/**
+ * Is anything still alive in this process group? Signal 0 delivers nothing and
+ * only asks the question — EPERM would mean "there, but not ours", which on a
+ * box where every run is the same user does not happen and is still not "gone".
+ */
+function groupAlive(pgid: number | null): boolean {
+  if (!pgid) return false;
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * End a settled run's process group by its recorded pgid — the escalation the
+ * kill path uses when nothing the run left is wanted, and the same thing the
+ * owner's Kill button asks for on a run that deliberately left a server.
+ *
+ * Answers whether anything was there to signal. Never throws: this runs on the
+ * settle path, where a failure to clean up must not change what the record says
+ * about the run.
+ */
+export function killRunGroup(pgid: number | null): boolean {
+  if (!groupAlive(pgid)) return false;
+  const group = pgid as number;
+  try {
+    process.kill(-group, "SIGTERM");
+  } catch {
+    return false;
+  }
+  const hard = setTimeout(() => {
+    try {
+      if (groupAlive(group)) process.kill(-group, "SIGKILL");
+    } catch {
+      // gone between the check and the signal — which is the outcome wanted
+    }
+  }, STOP_GRACE_MS);
+  hard.unref();
+  return true;
+}
+
+/**
+ * Everything a settled run holds that is not its record: the browser tab it
+ * opened, its timers, and whatever it left running.
+ *
+ * The process group is the one decision here that is not obvious. On a NATURAL
+ * completion it is deliberately left alone: the orientation guide tells a run
+ * to leave its server listening so the app it built can be reached from the
+ * desktop, and a settle that killed the group would break exactly the pattern
+ * the device documents. So a finished run RECORDS what survived and the run's
+ * page offers to end it; only an outcome where nothing the run left is wanted —
+ * stopped, failed, timed out — escalates to the kill.
+ */
+function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
+  if (state) {
+    clearInterval(state.timeout);
+    if (state.killTimer) clearTimeout(state.killTimer);
+  }
+  // The run's own tab, never the owner's: browser sessions are tagged with the
+  // run that opened them and a run always gets a new page (browser-sessions.ts).
+  void closeSessionsForRun(run.id).catch(() => {});
+  if (run.status === "completed" || run.status === "paused") {
+    run.leftover = groupAlive(run.pgid);
+    if (run.leftover) {
+      pushProgress(run, "Something this run started is still running — a server it left listening? The run's page can end it.");
+    }
+    return;
+  }
+  run.leftover = false;
+  if (killRunGroup(run.pgid)) {
+    pushProgress(run, "Ended what the run had left running");
+  }
+}
+
+/**
+ * The owner's Kill button: end whatever a settled run left behind.
+ *
+ * Only a settled run — a live one is Stop's business, and stopping is what
+ * that gesture already means. Idempotent: a group that is already gone answers
+ * `killed: false` rather than an error, because "nothing is running" is the
+ * state the caller wanted either way.
+ */
+export function killRunLeftovers(id: string): CodingRun {
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  if (isLive(run.status)) {
+    throw new CodingAgentError("invalid", "That run is still going. Stop it instead; stopping ends everything it started.");
+  }
+  if (killRunGroup(run.pgid)) pushProgress(run, "The owner ended what the run had left running");
+  run.leftover = false;
+  persist(true);
+  return cloneRun(run);
+}
+
 function pushProgress(run: CodingRun, line: string): void {
   const cleaned = line.replace(/\s+/g, " ").trim();
   if (!cleaned) return;
@@ -2296,6 +2616,33 @@ function relativeToRun(run: CodingRun, file: unknown): string | null {
 function noteFile(run: CodingRun, file: string | null): void {
   if (!file || run.filesTouched.includes(file)) return;
   run.filesTouched.push(file);
+}
+
+/**
+ * Record one picture or clip the media routes wrote for the LIVE run, and the
+ * file it landed in.
+ *
+ * The routes write it themselves, so nothing in the stream ever mentions it:
+ * without this the run's changed-files list would omit the very assets the
+ * owner is about to look at, and the per-run cap would count nothing. Answers
+ * how many of that kind the run has now had, which is what the tool reply says
+ * back to the model. Silent for anything that is not the live run — a stale
+ * bearer must not move a settled record's counters.
+ */
+export function noteRunMedia(runId: string, kind: keyof RunMedia, file: string | null): number {
+  const run = loadRuns().find((r) => r.id === runId);
+  if (!run) return 0;
+  run.mediaGenerated[kind] += 1;
+  if (file) noteFile(run, relativeToRun(run, file));
+  persist(true);
+  return run.mediaGenerated[kind];
+}
+
+/** What a media route needs to know before it spends anything. Null when no run is live. */
+export function activeRunMedia(): { id: string; directory: string; media: RunMedia; generated: { images: number; audio: number } } | null {
+  const run = activeRun();
+  if (!run) return null;
+  return { id: run.id, directory: run.directory, media: run.media, generated: { ...run.mediaGenerated } };
 }
 
 /**
@@ -2899,14 +3246,81 @@ async function recordRunWork(run: CodingRun): Promise<void> {
  * automatic follow-up seconds after they pressed Stop would be the box
  * overruling them.
  */
+/**
+ * Draw the project's icon and its favicons, while the run works.
+ *
+ * Fired at the START of a run rather than at its end, so the files are usually
+ * on disk within fifteen seconds and the run can LINK to them — a favicon that
+ * only appeared once the run had written every page would be a file nothing
+ * references. Never for a review pass: it resumes in a folder that already had
+ * its turn, and the icon is one per project, not one per run.
+ *
+ * Fire-and-forget on purpose: `ensureProjectIcon` never rejects, the box-wide
+ * generation slot serialises a queue of creates, and a project without a
+ * picture is cosmetic where a run that waited on one is not.
+ */
+async function drawProjectIcon(run: CodingRun): Promise<{ icon: string; favicon: boolean }> {
+  const folder = run.projectId ?? path.basename(run.directory);
+  const name = (await projectNameOf(run.directory, folder)) ?? folder;
+  return ensureProjectIcon({
+    id: folder,
+    directory: run.directory,
+    name,
+    description: firstLineOf(run.task),
+  });
+}
+
+/** The start-of-run hook: only when the owner left pictures on, and never for a review. */
+function startProjectIcon(run: CodingRun): void {
+  if (!run.media.images || run.reviewOf) return;
+  void drawProjectIcon(run).catch(() => {
+    // ensureProjectIcon already logged; a missing icon never reaches the run.
+  });
+}
+
 async function recordAndReview(run: CodingRun, ended: "stop" | "pause" | null): Promise<void> {
   await recordRunWork(run);
+  await commitProjectAssets(run);
   const review = ended !== null ? "skipped" : await maybeStartReviewPass(run);
   // After the review pass is decided, not before: when one is starting, the
   // pull request waits for it, because the review's own commits belong in it.
   // Reached after the owner's Stop too — not to open anything then, but so the
   // pull request that was being prepared is settled rather than left pending.
   await maybeOpenPullRequest(run, ended, review);
+}
+
+/**
+ * The last chance to give a project its icon, and the commit that ships it.
+ *
+ * A run that started before the picture could be drawn — an unlinked box that
+ * was linked mid-run, a generation that lost the slot to a queue of creates —
+ * would otherwise have written every page and left the favicon it links to
+ * missing. So the same call is made once more at settle, and anything it wrote
+ * is committed in its own right: `recordRunWork` has already run, so a favicon
+ * that landed after it would sit uncommitted in the folder and the review pass
+ * and the pull request would both go out without it.
+ *
+ * Never throws, like everything else on the settle path.
+ */
+async function commitProjectAssets(run: CodingRun): Promise<void> {
+  if (!run.media.images || run.reviewOf) return;
+  try {
+    const drawn = await drawProjectIcon(run);
+    if (!drawn.favicon) return;
+    const outcome = await commitRunWork({
+      directory: run.directory,
+      runId: run.id,
+      task: "Add the project's generated icon and favicon",
+      summary: null,
+    });
+    if (outcome.committed) {
+      run.commit = outcome.sha;
+      pushProgress(run, `Added the generated favicon, committed as ${outcome.sha}`);
+      persist(true);
+    }
+  } catch (err) {
+    console.error("[coding-agent] project assets:", err instanceof Error ? err.message : err);
+  }
 }
 
 /**
@@ -3256,8 +3670,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // A stop that raced the final message keeps "completed": the work is done.
   run.exitCode = exitCode;
   run.completedAt = Date.now();
-  clearInterval(state.timeout);
-  if (state.killTimer) clearTimeout(state.killTimer);
+  // Timers, the run's browser tab, and the verdict on what it left running.
+  // Before the retry branch below, which respawns into a fresh state and a
+  // fresh process group: a retry that inherited the first attempt's timers
+  // would be judged idle on the first attempt's clock.
+  cleanupRunResources(run, state);
   live.delete(run.id);
 
   // One automatic restart when the upstream blinked and the run got nowhere.
@@ -3358,7 +3775,7 @@ function spawnRun(
   settings: { effort: CodingEffort; maxTurns: number },
   stdinText?: string,
 ): void {
-  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, run: { id: run.id, directory: run.directory } }));
+  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, run: { id: run.id, directory: run.directory, media: run.media } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -3408,6 +3825,11 @@ function spawnRun(
   };
   state.timeout.unref();
   live.set(run.id, state);
+  // `detached: true` makes the child its own process-group leader, so its pid
+  // IS the group. Recorded now rather than derived at settle: by then the
+  // child object is the only thing that still knows it, and a leftover server
+  // has to be reachable after `live` has forgotten the run.
+  run.pgid = typeof child.pid === "number" ? child.pid : null;
   installExitHook();
 
   let settled = false;
@@ -3582,6 +4004,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   insertRun(loadRuns(), run);
   persist(true);
   console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
+  startProjectIcon(run);
   spawnOrSettle(run, resumeSessionId, setprivPath, settings);
   return cloneRun(run);
 }
@@ -3591,11 +4014,15 @@ interface RunSettings {
   effort: CodingEffort;
   maxTurns: number;
   tokenLimit: number | null;
+  generateImages: boolean;
+  generateAudio: boolean;
 }
 
 async function readRunSettings(): Promise<RunSettings> {
-  const [effort, maxTurns, tokenLimit] = await Promise.all([getEffort(), getMaxTurns(), getTokenLimit()]);
-  return { effort, maxTurns, tokenLimit };
+  const [effort, maxTurns, tokenLimit, generateImages, generateAudio] = await Promise.all([
+    getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(),
+  ]);
+  return { effort, maxTurns, tokenLimit, generateImages, generateAudio };
 }
 
 /** A fresh run record: every counter at zero, nothing seen yet. */
@@ -3647,6 +4074,10 @@ function newRunRecord(fields: {
     progress: [],
     todos: [],
     exitCode: null,
+    media: { images: fields.settings.generateImages, audio: fields.settings.generateAudio },
+    mediaGenerated: { images: 0, audio: 0 },
+    pgid: null,
+    leftover: false,
   };
 }
 
@@ -3699,6 +4130,10 @@ export function stopRun(id: string): CodingRun {
     run.status = "stopped";
     run.error = "Stopped.";
     run.completedAt = run.completedAt ?? Date.now();
+    // A pause left the group alone (a paused run may be resumed into the same
+    // folder, and anything it started is still wanted); closing the book on it
+    // is where that stops being true.
+    cleanupRunResources(run, null);
     // The pull request the pause kept "opening" (see maybeOpenPullRequest)
     // ends here with the run: this path never reaches finishRun, so nothing
     // else would settle it.
@@ -3717,6 +4152,7 @@ export function stopRun(id: string): CodingRun {
     run.status = "stopped";
     run.error = "Stopped.";
     run.completedAt = Date.now();
+    cleanupRunResources(run, null);
     persist(true);
     wakeWaiters(id);
     return cloneRun(run);
@@ -3800,6 +4236,7 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   pushProgress(run, "Resumed by the owner");
   persist(true);
   console.error(`[coding-agent] ${run.id} resumed from pause`);
+  startProjectIcon(run);
   // The session already holds the task; replaying it verbatim would read as
   // "start over". Say what actually happened instead.
   const continuation = run.sessionId
@@ -3852,12 +4289,14 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   run.effort = settings.effort;
   run.maxTurns = settings.maxTurns;
   run.tokenLimit = settings.tokenLimit;
+  run.media = { images: settings.generateImages, audio: settings.generateAudio };
   run.status = "running";
   run.startedAt = Date.now();
   run.lastActivityAt = Date.now();
   pushProgress(run, "Started from a draft");
   persist(true);
   console.error(`[coding-agent] ${run.id} started from draft by ${run.source} in ${run.directory}`);
+  startProjectIcon(run);
   spawnOrSettle(run, null, setprivPath, settings);
   return cloneRun(run);
 }
@@ -3928,6 +4367,9 @@ function spawnOrSettle(
     run.status = "failed";
     run.error = `Could not start ${CODING_HARNESS_COMMAND}: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
     run.completedAt = Date.now();
+    // Nothing settles this run through finishRun either, so the tab a previous
+    // attempt of the same record opened is closed here.
+    cleanupRunResources(run, null);
     // The branch made for its pull request is already on the record. Nothing
     // settles the run through finishRun on this path, so the pull request is
     // ended here too, or it stays "opening" — pending — for good.

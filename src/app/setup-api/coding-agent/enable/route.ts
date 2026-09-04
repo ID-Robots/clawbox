@@ -11,6 +11,8 @@ import {
   setEffort,
   setMaxTurns,
   setAutoPr,
+  setGenerateAudio,
+  setGenerateImages,
   setReviewPass,
   setSetupComplete,
   setTokenLimit,
@@ -47,6 +49,11 @@ function forbidden() {
  * POST { effort: "low"|"medium"|"high"|"xhigh"|"max"|"ultracode" } → how hard a run thinks.
  * POST { maxTurns: number } → how many steps a run gets.
  * POST { tokenLimit: number | null } → token ceiling, or null for none.
+ * POST { generateImages: boolean } → may a run draw pictures with ClawBox AI,
+ * and may the box draw the project's desktop icon and its favicon while a run
+ * works. POST { generateAudio: boolean } → may a run have this box speak a
+ * clip into its project. Both default ON; see their config keys in
+ * @/lib/coding-agent for why these two are not consents.
  * POST { autoPr: boolean } → branch, open a pull request into the repo's
  * default branch, wait for GitHub Actions, and merge when at least one real
  * check has passed. See @/lib/coding-pr for the guardrails.
@@ -96,12 +103,16 @@ export async function POST(request: Request) {
     tokenLimit?: unknown;
     reviewPass?: unknown;
     autoPr?: unknown;
+    generateImages?: unknown;
+    generateAudio?: unknown;
     setupComplete?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
   const hasReviewPass = typeof fields.reviewPass === "boolean";
   const hasSetupComplete = typeof fields.setupComplete === "boolean";
   const hasAutoPr = typeof fields.autoPr === "boolean";
+  const hasGenImages = typeof fields.generateImages === "boolean";
+  const hasGenAudio = typeof fields.generateAudio === "boolean";
   const hasEffort = typeof fields.effort === "string";
   const hasTurns = typeof fields.maxTurns === "number";
   // null is meaningful — it CLEARS the ceiling — so presence decides.
@@ -111,13 +122,14 @@ export async function POST(request: Request) {
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasGenImages && !hasGenAudio) {
     return NextResponse.json(
       {
         error:
           "Invalid body. Expected { enabled: boolean }, { defaultDirectory: string | null }, "
           + "{ effort: string }, { maxTurns: number }, "
-          + "{ tokenLimit: number | null }, { reviewPass: boolean } or "
+          + "{ tokenLimit: number | null }, { reviewPass: boolean }, "
+          + "{ generateImages: boolean }, { generateAudio: boolean } or "
           + "{ setupComplete: boolean } or { autoPr: boolean }.",
       },
       { status: 400 },
@@ -160,6 +172,14 @@ export async function POST(request: Request) {
     if (hasAutoPr) {
       const saved = await setAutoPr(fields.autoPr);
       console.error(`[coding-agent] auto pull requests switched ${saved ? "on" : "off"} by the owner`);
+    }
+    if (hasGenImages) {
+      const saved = await setGenerateImages(fields.generateImages);
+      console.error(`[coding-agent] generated pictures switched ${saved ? "on" : "off"} by the owner`);
+    }
+    if (hasGenAudio) {
+      const saved = await setGenerateAudio(fields.generateAudio);
+      console.error(`[coding-agent] generated audio switched ${saved ? "on" : "off"} by the owner`);
     }
     if (hasSetupComplete) {
       const saved = await setSetupComplete(fields.setupComplete);

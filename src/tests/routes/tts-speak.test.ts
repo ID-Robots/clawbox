@@ -3,17 +3,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * POST /setup-api/tts/speak — the desktop chat's spoken reply.
  *
- * Pinned: the chain is walked in the order the Voice tab set (the preferred
- * engine first, the other behind it), the Markdown is lifted off the text
- * before it is spoken, the owner's switch gates it, and the engine that spoke
- * is named on the answer.
+ * Pinned here: the owner's switch gates it, the Markdown is lifted off the
+ * text before anything speaks, and the engine that spoke is named on the
+ * answer. HOW the box speaks — which engines are usable and in which order —
+ * moved into `speakReply` when the coding agent needed the same assembly, and
+ * is pinned in src/tests/unit/voice-speak-reply.test.ts.
  */
 
 const readConfigMock = vi.fn();
 const inventoryMock = vi.fn();
 const stateMock = vi.fn();
 const autoReplyMock = vi.fn();
-const chainMock = vi.fn();
+const speakReplyMock = vi.fn();
 
 vi.mock("@/lib/openclaw-config", () => ({
   openclawIsAbsent: () => false,
@@ -30,7 +31,7 @@ vi.mock("@/lib/voice-output-store", () => ({
 vi.mock("@/lib/voice-reply", () => ({ getVoiceAutoReply: (...a: unknown[]) => autoReplyMock(...a) }));
 vi.mock("@/lib/voice-speak", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/voice-speak")>();
-  return { ...actual, speakThroughChain: (...a: unknown[]) => chainMock(...a) };
+  return { ...actual, speakReply: (...a: unknown[]) => speakReplyMock(...a) };
 });
 vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>();
@@ -63,22 +64,17 @@ beforeEach(() => {
   inventoryMock.mockReset().mockResolvedValue(kokoro);
   stateMock.mockReset().mockResolvedValue({ choice: "auto" });
   autoReplyMock.mockReset().mockResolvedValue(true);
-  chainMock.mockReset().mockImplementation(async () => audio());
+  speakReplyMock.mockReset().mockImplementation(async () => audio());
 });
 
 describe("POST /setup-api/tts/speak", () => {
-  it("hands the chain the words of the reply, not its Markdown, and the owner's order", async () => {
-    stateMock.mockResolvedValue({ choice: "local" });
+  it("speaks the words of the reply, not its Markdown, and names the engine that spoke", async () => {
     const { POST } = await route();
     const res = await POST(post({ text: "**Done.** See [docs](https://x.y)." }));
     expect(res.status).toBe(200);
     expect(res.headers.get("x-clawbox-voice-engine")).toBe("cloud");
-    expect(chainMock).toHaveBeenCalledTimes(1);
-    const [, engines, choice, text] = chainMock.mock.calls[0] as [unknown, { id: string; configured: boolean }[], string, string];
-    expect(choice).toBe("local");
-    expect(text).toBe("Done. See docs.");
-    // The engines as the status card judges them: both usable on this box.
-    expect(engines.map((e) => [e.id, e.configured])).toEqual([["local", true], ["cloud", true]]);
+    expect(speakReplyMock).toHaveBeenCalledTimes(1);
+    expect(speakReplyMock.mock.calls[0][0]).toBe("Done. See docs.");
   });
 
   it("is refused while the owner's switch is off", async () => {
@@ -87,13 +83,13 @@ describe("POST /setup-api/tts/speak", () => {
     const res = await POST(post({ text: "hello" }));
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe("switched_off");
-    expect(chainMock).not.toHaveBeenCalled();
+    expect(speakReplyMock).not.toHaveBeenCalled();
   });
 
   it("has nothing to say for a reply that is only markup", async () => {
     const { POST } = await route();
     const res = await POST(post({ text: "MEDIA: /a.png" }));
     expect(res.status).toBe(400);
-    expect(chainMock).not.toHaveBeenCalled();
+    expect(speakReplyMock).not.toHaveBeenCalled();
   });
 });
