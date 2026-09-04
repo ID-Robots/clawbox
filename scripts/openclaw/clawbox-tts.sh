@@ -142,13 +142,45 @@ KOKORO_LD_PATH="${KOKORO_LD_PATH:-$(kokoro_ld_path)}"
 # quietly come back. The budget is the sum of the slices that are actually
 # handed to `timeout` below and nothing else; a slice for an engine that no
 # longer runs would only be rope the caller pays for and nobody uses.
+#
+#   EMAIL_DIRECTIVES     10s (+5s grace)  the directive strip, which runs BEFORE
+#                               the engine chain and is handed to `timeout` like
+#                               any other slice — so it belongs in the sum.
+#
+# EVERY one of these arrives through the service environment, and `${VAR:-N}`
+# substitutes on unset and empty and on NOTHING else — so a value already in the
+# environment is used exactly as given. Two spellings silently undo the slice
+# they name: `timeout 0` (and "00", "000") means NO timeout at all, and a
+# non-numeric duration makes `timeout` exit 125 WITHOUT running the command, so
+# `KOKORO_TIMEOUT=abc` is a local voice that never works and `CONVERT_TIMEOUT=abc`
+# is no audio at all — while `--provider-timeout-ms` still reports a healthy
+# number that install.sh bakes into the provider. Validate all of them, in one
+# place, rather than the one whose failure is mildest.
+positive_seconds() { # $1 = variable name, $2 = default
+  local value="${!1}"
+  case "$value" in ''|*[!0-9]*) value="$2" ;; esac
+  # The glob rejects a value that is not a run of digits; this rejects the ones
+  # that ARE — every spelling of zero, which no `|0)` glob catches — and coerces
+  # a value too large for an integer, where `[` fails rather than compares.
+  [ "$value" -gt 0 ] 2>/dev/null || value="$2"
+  printf -v "$1" '%s' "$value"
+}
 KOKORO_SERVER_TIMEOUT="${KOKORO_SERVER_TIMEOUT:-10}"
 KOKORO_TIMEOUT="${KOKORO_TIMEOUT:-40}"
 CONVERT_TIMEOUT="${CONVERT_TIMEOUT:-10}"
 TTS_BUDGET_MARGIN_SECONDS="${TTS_BUDGET_MARGIN_SECONDS:-25}"
+EMAIL_DIRECTIVES_TIMEOUT="${EMAIL_DIRECTIVES_TIMEOUT:-10}"
+# The SIGKILL grace `timeout -k` is given on the strip. It is part of that
+# slice's worst case, so it is part of the budget too.
+EMAIL_DIRECTIVES_KILL_GRACE=5
+positive_seconds KOKORO_SERVER_TIMEOUT 10
+positive_seconds KOKORO_TIMEOUT 40
+positive_seconds CONVERT_TIMEOUT 10
+positive_seconds TTS_BUDGET_MARGIN_SECONDS 25
+positive_seconds EMAIL_DIRECTIVES_TIMEOUT 10
 
 tts_budget_seconds() {
-  printf '%s' "$((KOKORO_SERVER_TIMEOUT + KOKORO_TIMEOUT + CONVERT_TIMEOUT))"
+  printf '%s' "$((EMAIL_DIRECTIVES_TIMEOUT + EMAIL_DIRECTIVES_KILL_GRACE + KOKORO_SERVER_TIMEOUT + KOKORO_TIMEOUT + CONVERT_TIMEOUT))"
 }
 tts_provider_timeout_ms() {
   printf '%s' "$(( ($(tts_budget_seconds) + TTS_BUDGET_MARGIN_SECONDS) * 1000 ))"
@@ -428,6 +460,84 @@ try_kokoro() {
   return 1
 }
 
+# ── EMAIL: directives are for a chat, not for a voice ───────────────────────
+# `EMAIL:4471` is how the agent tells a ClawBox CHAT that its reply refers to a
+# message the owner can open: chat-email-refs.ts lifts the line out and the
+# bubble shows a card instead of the id. Speech has no cards. Both editions hand
+# this script the reply text with the directive still in it — OpenClaw as
+# `{{Text}}` in argv (install.sh step_openclaw_tts), Hermes through
+# --text-file — so without this the box says "EMAIL four four seven one" after
+# the summary. That is TASK-697's local-voice half.
+#
+# NOT A SECOND GRAMMAR. The rule lives in the plugin module the Hermes hook
+# already uses, and this calls it: one file, two consumers, and the parity test
+# pins it to the chat's own parser. python3 is not a new dependency here —
+# `kokoro` IS a Python entry point, so a box where this cannot run is a box that
+# cannot speak anyway.
+#
+# FAILS OPEN, LOUDLY. A missing parser or a failed call speaks the reply as it
+# arrived and says so on stderr: a directive read aloud is a blemish, a silent
+# box is the failure this whole script exists to prevent.
+# TWO PLACES TO LOOK, because there are two copies of THIS file. Both harnesses
+# register the CHECKOUT's copy as the provider command
+# ("$PROJECT_DIR/scripts/openclaw/clawbox-tts.sh" — install.sh step_openclaw_tts,
+# and the Hermes `clawbox-local` provider defined beside it), while
+# install-voice.sh's deploy_voice_scripts ALSO drops a copy into the agent's
+# workspace at $WORKSPACE/scripts/openclaw/. Resolving only against this file's
+# own directory would leave that second copy speaking the id — and, because the
+# strip fails open, it would do so silently.
+resolve_email_directives_dir() {
+  local d
+  for d in "$(dirname "${BASH_SOURCE[0]}")/../hermes-plugins/clawbox_email_directives" \
+           "${CLAWBOX_ROOT:-/home/clawbox/clawbox}/scripts/hermes-plugins/clawbox_email_directives"; do
+    if [ -r "$d/email_directives.py" ]; then
+      (cd "$d" && pwd) && return 0
+    fi
+  done
+  printf ''
+}
+EMAIL_DIRECTIVES_DIR="${EMAIL_DIRECTIVES_DIR:-$(resolve_email_directives_dir)}"
+# EMAIL_DIRECTIVES_TIMEOUT is declared, validated and counted into the budget
+# with the other slices, up in "The time budget" — it is handed to `timeout`
+# exactly like the engine slices, and the worst case the caller is told about
+# has to include it. Its consequence is the one that made the validation
+# non-negotiable: `timeout abc` exits 125 without ever running python, the strip
+# fails open, and the box READS THE UID ALOUD, which is the whole defect this
+# file was changed to remove.
+
+strip_email_directives() {
+  local text="$1" out
+  if [ -z "$EMAIL_DIRECTIVES_DIR" ] || [ ! -r "$EMAIL_DIRECTIVES_DIR/email_directives.py" ]; then
+    echo "clawbox-tts: no EMAIL: directive parser at '${EMAIL_DIRECTIVES_DIR:-<unresolved>}' — speaking the reply as it arrived" >&2
+    printf '%s' "$text"
+    return 0
+  fi
+  # The reply travels in the environment, never in argv or a shell string: it is
+  # model output, it can be long, and this is the same rule kokoro_via_server
+  # already follows.
+  # `-k 5` for the same reason as the two `hermes` calls in register-mcp.sh:
+  # plain `timeout` sends SIGTERM only, and this is a command substitution, so a
+  # child that ignores it keeps the pipe open and bash blocks reading it until
+  # the survivor dies — the ceiling would not be one. A `python3` started here
+  # dies on SIGTERM, so the grace is a guard against the interpreter wedging
+  # rather than a path anything takes today.
+  if ! out=$(CLAWBOX_TTS_RAW_TEXT="$text" timeout -k 5 "$EMAIL_DIRECTIVES_TIMEOUT" "$PYTHON_BIN" -c '
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from email_directives import strip_email_directives
+sys.stdout.write(strip_email_directives(os.environ["CLAWBOX_TTS_RAW_TEXT"]))
+# The sentinel is what survives `$(…)`, which strips every trailing newline
+# from what it captures. Removing exactly one trailing X is safe even when
+# the reply itself ends in one, because exactly one was added.
+sys.stdout.write("X")
+' "$EMAIL_DIRECTIVES_DIR" 2>/dev/null); then
+    echo "clawbox-tts: could not strip EMAIL: directives — speaking the reply as it arrived" >&2
+    printf '%s' "$text"
+    return 0
+  fi
+  printf '%s' "${out%X}"
+}
+
 # ── Entry ───────────────────────────────────────────────────────────────────
 
 # Refuse an option that was handed no value, rather than looping on it.
@@ -544,10 +654,34 @@ else
   OUTPUT="${ARGS[1]}"
 fi
 
+# Only a reply that carries the marker pays for the strip, so the ordinary
+# reply's bytes reach the engine exactly as they did before this existed —
+# `$(…)` would otherwise eat a trailing newline off every utterance on the box.
+#
+# The sentinel extends that to a reply which merely MENTIONS an address: the
+# parser now returns such a reply untouched (it removed no line), and this is
+# what stops `$(…)` reshaping it anyway. Same rule in all four places that
+# understand the grammar — a reply is changed only when a directive was taken
+# out of it.
+case "$TEXT" in
+  *[Ee][Mm][Aa][Ii][Ll]:*)
+    TEXT_BEFORE_STRIP="$TEXT"
+    TEXT="$(strip_email_directives "$TEXT"; printf X)"
+    TEXT="${TEXT%X}"
+    ;;
+esac
+
 if [ -z "$TEXT" ]; then
   # Named by its source: "empty text" over a --text-file that exists and is
   # empty sends the operator looking at the wrong end of the call.
-  if [ -n "$TEXT_FILE" ]; then
+  if [ -n "${TEXT_BEFORE_STRIP:-}" ]; then
+    # A reply that was NOTHING but directives. Exiting non-zero rather than
+    # synthesising silence, for the reason at the bottom of this file: a run
+    # that exits 0 with no audio is indistinguishable from a working TTS to
+    # everything upstream. The gateway's cloud voice answers instead, and it
+    # gets the same nothing to say.
+    echo "clawbox-tts: the reply was only EMAIL: card directives — nothing left to speak" >&2
+  elif [ -n "$TEXT_FILE" ]; then
     echo "clawbox-tts: --text-file $TEXT_FILE is empty — refusing to speak nothing" >&2
   else
     echo "clawbox-tts: empty text" >&2

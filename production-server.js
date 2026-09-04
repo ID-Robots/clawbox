@@ -187,8 +187,14 @@ try {
 // is the one unit active on every edition, and both a deploy and an in-app
 // update finish by restarting it.
 //
-// Fire-and-forget on purpose. The reconcile is idempotent and takes ~200ms, but
-// it must never delay or block the web server coming up — a device whose UI
+// Fire-and-forget on purpose, and that matters more since TASK-697: the
+// reconcile is idempotent, but it is no longer ~200ms. It now also runs
+// `hermes plugins doctor`, which imports the plugin in a sandboxed temporary
+// HERMES_HOME — seconds on an Orin — on every web-server boot, with no stamp
+// and no backoff. The OpenClaw twin (scripts/gateway-pre-start.sh) was given
+// both because it runs in an ExecStartPre that the gateway waits on; this one
+// blocks nothing, so it pays the cost every time and reports every time.
+// It must never delay or block the web server coming up — a device whose UI
 // does not start is worse than one whose agent has to wait for the next boot.
 try {
   const registerMcp = require("child_process").spawn(

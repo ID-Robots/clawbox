@@ -44,6 +44,39 @@ MCP_ENTRY="$PROJECT_DIR/mcp/clawbox-mcp.ts"
 MCP_TOKEN_FILE="$PROJECT_DIR/data/.mcp-token"
 EDITION_FILE="${CLAWBOX_EDITION_FILE:-/etc/clawbox/edition.env}"
 API_BASE="${CLAWBOX_API_BASE:-http://127.0.0.1:80}"
+# The ceiling on every `hermes` call this script makes. `production-server.js`
+# launches this script, so an unbounded CLI is a helper and its child left
+# running for as long as the box is up. 45 s is the budget the OpenClaw twin
+# gives its own `plugins inspect` (gateway-pre-start.sh) — well past a loaded
+# Jetson's CLI start, well short of forever.
+#
+# Overridable like every other tunable here, and for one reason: a test can turn
+# it down and prove the ceiling actually FIRES, which asserting the command line
+# does not. Both call sites also pass `-k 5`, because plain `timeout` only sends
+# SIGTERM: a `hermes` that ignores it keeps running after `timeout` has returned
+# 124, and both calls are inside the `acquire_config_lock` critical section, so
+# a survivor inherits fd 9 and holds ~/.hermes/config.yaml.lock after this
+# script exits — leaving setup-hermes-dashboard-auth.sh to burn its 120 s wait
+# and then write unlocked, which is the config-clobber that lock exists to stop.
+HERMES_CLI_TIMEOUT="${HERMES_CLI_TIMEOUT:-45}"
+# `${:-}` substitutes on unset and empty but NOT on "0" — and `timeout 0` means
+# NO timeout, so a bare `HERMES_CLI_TIMEOUT=0` would silently undo the bound
+# this variable exists to impose. A non-numeric value is worse: `timeout` exits
+# 125 without running the CLI at all, which at the `tools disable` call below is
+# a permanent "could not disable the built-in browser toolset" with the toolset
+# left ON — a false failure with a functional regression behind it. This value
+# arrives in an environment clawbox-setup.service builds partly from a
+# user-writable .env (the same reason EDITION is read from a root-owned file
+# below), so validate it rather than trust it.
+# The glob rejects a value that is not a run of digits; the arithmetic test then
+# rejects the ones that ARE — "0", but also "00" and "000", which no `|0)` glob
+# catches and which `timeout` reads as zero just the same. `[` fails rather than
+# compares on a value too large for an integer, and a 22-digit ceiling is no
+# ceiling either, so that path coerces too.
+case "$HERMES_CLI_TIMEOUT" in
+  ''|*[!0-9]*) HERMES_CLI_TIMEOUT=45 ;;
+esac
+[ "$HERMES_CLI_TIMEOUT" -gt 0 ] 2>/dev/null || HERMES_CLI_TIMEOUT=45
 # Shared with setup-hermes-dashboard-auth.sh: BOTH scripts read-modify-write
 # ~/.hermes/config.yaml, and at install time they run seconds apart
 # (production-server.js fire-and-forgets this script on the clawbox-setup
@@ -135,6 +168,86 @@ chmod 600 "$MCP_TOKEN_FILE" 2>/dev/null || true
 # ~/.hermes/config.yaml — which several /setup-api/hermes/* routes rewrite —
 # never holds a second copy of it.
 
+# ── 2b. Install the outbound EMAIL:-directive hook plugin. ──────────────────
+# `EMAIL:4471` is how the agent tells a ClawBox CHAT that its reply points at a
+# message the owner can open; the chat lifts the line out and shows a card. A
+# channel has no cards, so there the line is an internal id printed at the owner
+# (TASK-679). PR #605 stopped the tools ASKING for it on a channel — a sentence
+# a model can misread — and this is the guarantee behind the sentence: Hermes'
+# own `transform_llm_output` hook, which fires once per turn before delivery and
+# before speech, takes the line out whatever the model wrote.
+#
+# HERE, not in the ClawBox-AI link path where the image backend is installed
+# (src/lib/hermes-image-plugin.ts). That one is a paid capability and only a
+# linked box needs it; this one has to be on EVERY Hermes box, and a factory
+# reset wipes ~/.hermes bar `hermes-agent` and `bin` (setup/reset/route.ts).
+# This script runs from production-server.js at every web-server boot, so a
+# reset box re-provisions itself without anyone asking.
+#
+# Copied rather than symlinked, and overwritten unconditionally: the files are
+# OURS, versioned with the app, and an update that ships a fixed plugin must
+# actually deliver it. The stale `__pycache__` goes with them, because Python
+# will happily import a `.pyc` whose source no longer exists.
+EMAIL_HOOK_PLUGIN="clawbox_email_directives"
+EMAIL_HOOK_SRC="$PROJECT_DIR/scripts/hermes-plugins/$EMAIL_HOOK_PLUGIN"
+# `HERMES_HOME` first, exactly like Hermes' own `get_hermes_home()` and like
+# `hermesHome()` in src/lib/hermes-env.ts — NOT `dirname $HERMES_CONFIG`. With
+# HERMES_HOME set and HERMES_CONFIG left at its default the two disagree, the
+# copy lands where Hermes will never look, and the box logs a "did not register
+# its hook" warning on every boot with the plugin sitting right there.
+HERMES_PLUGINS_DIR="${HERMES_PLUGINS_DIR:-${HERMES_HOME:-$HOME_DIR/.hermes}/plugins}"
+EMAIL_HOOK_DST="$HERMES_PLUGINS_DIR/$EMAIL_HOOK_PLUGIN"
+EMAIL_HOOK_INSTALLED=0
+
+if [ -f "$EMAIL_HOOK_SRC/__init__.py" ] && [ -f "$EMAIL_HOOK_SRC/plugin.yaml" ] \
+  && [ -f "$EMAIL_HOOK_SRC/email_directives.py" ]; then
+  # THE SOURCES ARE READ BEFORE ANYTHING ON DISK IS TOUCHED, exactly as the
+  # OpenClaw twin does it (gateway-pre-start.sh). `cp` opens its source first
+  # and leaves the destination alone when that open fails, so a source-side
+  # problem — a checkout still being written by the updater, a permission slip —
+  # must NOT be treated the same as a copy that died half-way. Answering that
+  # question here is what lets the failure branch below know which state the box
+  # is in.
+  if ! cat "$EMAIL_HOOK_SRC/__init__.py" "$EMAIL_HOOK_SRC/plugin.yaml" \
+           "$EMAIL_HOOK_SRC/email_directives.py" >/dev/null 2>&1; then
+    # The installed copy, if there is one, is untouched and still the last one
+    # that worked. Leaving it alone is strictly better than removing it.
+    log "WARNING: could not read the $EMAIL_HOOK_PLUGIN plugin sources in $EMAIL_HOOK_SRC — leaving whatever is already installed in place"
+  elif mkdir -p "$EMAIL_HOOK_DST" 2>/dev/null \
+    && cp -f "$EMAIL_HOOK_SRC/__init__.py" "$EMAIL_HOOK_SRC/plugin.yaml" \
+             "$EMAIL_HOOK_SRC/email_directives.py" "$EMAIL_HOOK_DST/" 2>/dev/null; then
+    rm -rf "$EMAIL_HOOK_DST/__pycache__" 2>/dev/null || true
+    EMAIL_HOOK_INSTALLED=1
+  else
+    # Never fatal. A box with its device tools registered but this plugin not
+    # copied still works; it only shows the directive on a channel, which is
+    # exactly where it stood before this existed.
+    #
+    # BUT THE HALF-WRITTEN COPY GOES. The sources read cleanly a moment ago, so
+    # a failure here is on the WRITE side — ENOSPC, an I/O error, a target that
+    # is not a file any more — and `cp -f` truncates each target before it
+    # writes it. What is in the destination now is a mixture of new, truncated
+    # and stale files, while `plugins.enabled` can still name the plugin from an
+    # earlier boot (the enable below only gates the write of a NEW entry, not
+    # the removal of one already there), so Hermes would import it. Removing it
+    # leaves ONE state — no plugin, no strip, and a line that says so — instead
+    # of a module that may raise half-way through parsing. Where the removal
+    # cannot work either — a read-only filesystem, or a destination directory
+    # whose mode lets `cp` truncate the files already in it but does not let
+    # `rm` unlink them — the removal is REPORTED as not done. Claiming a
+    # cleanup that did not happen is the false success this whole step exists
+    # to avoid, and it is the difference between "nothing loads" and "Hermes
+    # imports a package that is missing a file".
+    if rm -rf "$EMAIL_HOOK_DST" 2>/dev/null; then
+      log "WARNING: could not install the $EMAIL_HOOK_PLUGIN plugin into $EMAIL_HOOK_DST — anything partial there has been removed rather than left for Hermes to import, so EMAIL: directives will reach channels until the next boot repairs it"
+    else
+      log "WARNING: could not install the $EMAIL_HOOK_PLUGIN plugin into $EMAIL_HOOK_DST AND could not remove what is there — Hermes may import a partial copy. EMAIL: directives will reach channels; the next boot repairs it only if that path becomes writable"
+    fi
+  fi
+else
+  log "WARNING: $EMAIL_HOOK_SRC is not a complete plugin — skipping the EMAIL: directive hook"
+fi
+
 # ── 3. Reconcile mcp_servers.clawbox in ~/.hermes/config.yaml. ──────────────
 # Done in Python/PyYAML for the same reason gateway-pre-start.sh does its
 # openclaw.json pass in Python: read-modify-write with an atomic rename, and a
@@ -152,9 +265,14 @@ export CLAWBOX_MCP_HERMES_CONFIG="$HERMES_CONFIG"
 export CLAWBOX_MCP_BUN_BIN="$BUN_BIN"
 export CLAWBOX_MCP_ENTRY="$MCP_ENTRY"
 export CLAWBOX_MCP_API_BASE="$API_BASE"
+# Empty unless the plugin's files are on disk, so the enable below can never
+# name a plugin that is not there — "enabled in config, nothing loaded" is the
+# false success this whole step exists to avoid.
+export CLAWBOX_EMAIL_HOOK_PLUGIN=""
+[ "$EMAIL_HOOK_INSTALLED" = "1" ] && export CLAWBOX_EMAIL_HOOK_PLUGIN="$EMAIL_HOOK_PLUGIN"
 
 python3 - <<'PY'
-import ast, os, sys, tempfile
+import ast, json, os, sys, tempfile
 
 try:
     import yaml
@@ -341,6 +459,72 @@ else:
     print("[register-mcp] WARNING: agent is not a mapping; "
           "leaving the clarify timeout at hermes' own default.", file=sys.stderr)
 
+# ── Enable the outbound EMAIL:-directive hook plugin. ───────────────────────
+# `plugins.enabled` is opt-in for every user plugin on the box
+# (hermes_cli/plugins.py:4000 skips anything not listed), and it is the SAME
+# list that gates the ClawAI image backend — so this is MERGED, never replaced.
+# Writing our name over the list would silently unload the customer's image
+# generation, and any other plugin they installed, as a side effect of a
+# directive strip.
+#
+# A shape this script does not understand is left alone rather than repaired:
+# `hermes config set` stores lists as a JSON string ('["a","b"]'), which
+# `parse_config_string_list` reads, and the same two forms the skills block
+# below handles turn up here.
+hook_plugin = os.environ.get("CLAWBOX_EMAIL_HOOK_PLUGIN") or ""
+if hook_plugin:
+    plugins_cfg = cfg.get("plugins")
+    if plugins_cfg is None:
+        plugins_cfg = {}
+        cfg["plugins"] = plugins_cfg
+    if isinstance(plugins_cfg, dict):
+        raw_enabled = plugins_cfg.get("enabled")
+        if isinstance(raw_enabled, str):
+            text = raw_enabled.strip()
+            if text.startswith("["):
+                # `hermes config set` stores a list as a JSON string, and
+                # src/lib/hermes-clawai.ts writes this very key that way with
+                # JSON.stringify — so JSON first, and the Python literal form
+                # only as a fallback for anything hand-written.
+                parsed = None
+                try:
+                    parsed = json.loads(text)
+                except ValueError:
+                    try:
+                        parsed = ast.literal_eval(text)
+                    except (ValueError, SyntaxError):
+                        parsed = None
+                if isinstance(parsed, list):
+                    names = [str(item) for item in parsed]
+                else:
+                    # A list we cannot read is left ALONE. Falling back to
+                    # "the whole string is one plugin name" would write
+                    # `['["clawai", …', 'clawbox_email_directives']` and the
+                    # customer's image backend would stop loading on the next
+                    # boot — the exact failure the merge above exists to
+                    # prevent, caused by the code preventing it.
+                    names = None
+                    print("[register-mcp] WARNING: plugins.enabled is a list this script cannot parse; "
+                          "leaving it untouched and the EMAIL: directive hook disabled.", file=sys.stderr)
+            else:
+                names = [raw_enabled] if raw_enabled else []
+        elif isinstance(raw_enabled, (list, tuple)):
+            names = [str(item) for item in raw_enabled]
+        elif raw_enabled is None:
+            names = []
+        else:
+            names = None
+            print("[register-mcp] WARNING: plugins.enabled is not a list or a string; "
+                  "leaving the EMAIL: directive hook disabled.", file=sys.stderr)
+        if names is not None and hook_plugin not in names:
+            plugins_cfg["enabled"] = names + [hook_plugin]
+            changed = True
+            print("[register-mcp] enabled the " + hook_plugin
+                  + " plugin — EMAIL: card directives are stripped on the way to a channel")
+    else:
+        print("[register-mcp] WARNING: plugins is not a mapping; "
+              "leaving the EMAIL: directive hook disabled.", file=sys.stderr)
+
 if not changed:
     print("[register-mcp] Hermes MCP registration already current, skipping write")
     sys.exit(0)
@@ -405,9 +589,123 @@ PY
 # of a file.
 #
 # Never fatal: a device with its device tools registered but this step failed is
-# strictly better than a boot that aborted here.
-if "$HERMES_BIN" tools disable browser >/dev/null 2>&1; then
+# strictly better than a boot that aborted here — and never unbounded, the same
+# reason the doctor below is bounded: this is the OTHER CLI call in a script
+# `production-server.js` launches, so a `hermes` that wedges here would leave
+# the helper and its child running for as long as the box is up. A timeout
+# lands in the branch that already exists for a refusal, which is the honest
+# answer for both.
+# The braces are load-bearing, not style. `-k 5` makes `timeout` SIGKILL its own
+# process group, so `timeout` ITSELF dies by a signal — and bash announces a
+# signal-killed foreground child on the SCRIPT's stderr, which the command's own
+# `2>&1` cannot reach: "register-mcp.sh: line NNN: <pid> Killed  timeout -k 5 …".
+# production-server.js forwards this script's stderr into the clawbox-setup
+# journal line by line, so that notice lands there naming this script and reads
+# as the reconcile itself having been killed — beside the honest "could not
+# disable" line. A misleading journal entry is the thing this whole step exists
+# to avoid, so the group gives the shell's message somewhere to go. The exit
+# status is unchanged: 137 still reaches the else, 0 still reaches the then.
+# The `plugins doctor` call below needs no such group — bash does not print that
+# notice for a child of a command substitution, and its output is captured.
+# The STATUS is kept, because the group throws away the only other trace. This
+# call does the CLI's own load -> save_config on ~/.hermes/config.yaml, which is
+# why it sits inside the lock — so "we SIGKILLed it" (137) and "it declined"
+# are very different facts for whoever is later holding a truncated config, and
+# 125 (a bad duration) and 127 (no `timeout`) are different again. One sentence
+# for all four was all the journal had.
+# Being the `if` CONDITION is what keeps a refusal non-fatal under `set -e`;
+# the group is only about stderr. `$?` in the `else` is still the condition's
+# status, so the exit code reaches the log without a separate capture line.
+if { timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools disable browser >/dev/null 2>&1; } 2>/dev/null; then
   log "built-in browser toolset off; browsing goes through the ClawBox browser_* tools"
 else
-  log "could not disable the built-in browser toolset — continuing"
+  BROWSER_DISABLE_RC=$?
+  log "could not disable the built-in browser toolset (exit $BROWSER_DISABLE_RC) — continuing"
+fi
+
+# ── 5. Prove the EMAIL: hook plugin actually LOADS, every boot. ─────────────
+# `hermes plugins list` would say "enabled" for a plugin that raises on import,
+# has no `register()`, or registers a mistyped hook name: its status is read
+# straight back out of the config sets it was just written into
+# (hermes_cli/plugins_cmd.py:1931). Believing it is the false success this
+# check exists to catch.
+#
+# `plugins doctor` is the honest one — it really imports the plugin in a
+# sandboxed temporary HERMES_HOME and prints what registered
+# (hermes_cli/plugin_dev.py:84-107). For this plugin the line must read
+# "1 hook(s)"; "0 hook(s)" means the file loaded but the hook did not register,
+# which is precisely the state nothing else on the box would report.
+#
+# EVERY BOOT, not once behind a marker — the same reasoning as the browser
+# toolset above. The state lives in Hermes' own tree, so a marker in ClawBox's
+# data/ can drift from it, and anything that resets ~/.hermes without wiping
+# data/ would leave the marker set and the plugin gone, permanently.
+#
+# Advisory: it must never hold up the web server. What it buys is a line in the
+# log that says which of the two states the box is actually in.
+#
+# BOUNDED like every other `hermes` call here, and its exit status KEPT. The
+# `|| EMAIL_HOOK_DOCTOR_RC=$?` is load-bearing under `set -e`, where a command
+# substitution that exits non-zero aborts the assignment — i.e. a missing or
+# refusing `hermes` would stop the boot here, over a DIAGNOSTIC.
+if [ "$EMAIL_HOOK_INSTALLED" = "1" ]; then
+  EMAIL_HOOK_DOCTOR_RC=0
+  EMAIL_HOOK_DOCTOR="$(timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" plugins doctor "$EMAIL_HOOK_PLUGIN" 2>&1)" \
+    || EMAIL_HOOK_DOCTOR_RC=$?
+  # The doctor's own words, trimmed to one line: "no register() function",
+  # "No __init__.py in ...", an import traceback's last line. Naming the plugin
+  # without naming the reason is what sends an operator to the wrong file. The
+  # `|| :=""` for the same reason as the line above: no diagnostic may end the
+  # boot, and under `pipefail` any stage of this is enough to do it.
+  EMAIL_HOOK_DETAIL="$(printf '%s' "$EMAIL_HOOK_DOCTOR" | tr '\n' ' ' | cut -c1-300)" \
+    || EMAIL_HOOK_DETAIL=""
+  # The exit STATUS is read before the words. By the time `timeout` kills it the
+  # doctor has usually printed its banner, and on the text alone that banner IS
+  # the "ran and refused" branch below — so a wedged CLI would print a hard
+  # WARNING about a hook that is very probably registered and working, on every
+  # boot. Like the other unknowns this is a NOTE.
+  #
+  # BOTH 124 and 137, because `-k 5` makes 137 the usual answer for exactly the
+  # wedge `-k` was added for: `timeout` signals its whole process group, and
+  # SIGKILL cannot be ignored, so it kills ITSELF alongside the child that rode
+  # out the SIGTERM and the caller reads 128+9. Matching 124 alone would send
+  # that one input into the text case below. And 137 also arrives with no
+  # `timeout` involved at all — the OOM killer on a loaded box, where `plugins
+  # doctor` imports the whole agent — which says just as little about the hook.
+  #
+  # Neither code claims the CLI was killed: a child can exit with either itself,
+  # and the two are indistinguishable from here.
+  #
+  # NO ELAPSED SPLIT HERE, unlike the OpenClaw twin, and that difference is
+  # deliberate rather than drift. The twin splits 124/137 on the seconds burned
+  # because it has a stamp and a 24 h backoff to protect, and stamping a cheap
+  # kill costs a day of blindness. This script has neither: it runs once per
+  # web-server boot, fire-and-forget, and asks again the next time regardless.
+  # With nothing to protect there is nothing for the split to decide.
+  if [ "$EMAIL_HOOK_DOCTOR_RC" = "124" ] || [ "$EMAIL_HOOK_DOCTOR_RC" = "137" ]; then
+    log "NOTE: 'hermes plugins doctor' answered $EMAIL_HOOK_DOCTOR_RC — the ${HERMES_CLI_TIMEOUT}s ceiling (SIGTERM, then SIGKILL 5s later), a kill from outside, or the CLI's own exit code — so $EMAIL_HOOK_PLUGIN is installed and enabled but whether its hook registered is unknown here. hermes had printed: $EMAIL_HOOK_DETAIL"
+  else
+    case "$EMAIL_HOOK_DOCTOR" in
+      *"1 hook(s)"*)
+        log "$EMAIL_HOOK_PLUGIN loaded and registered its outbound hook"
+        ;;
+      *"hook(s)"*|*"Plugin Doctor"*|*"registration failed"*)
+        # The doctor RAN and did not report our hook: it imported and registered
+        # a count that is not one, or it refused to import at all. That IS the
+        # defect, and it is the one nothing else on the box reports — `plugins
+        # list` reads "enabled" straight back out of the config it was written
+        # into (hermes_cli/plugins_cmd.py:1931).
+        log "WARNING: $EMAIL_HOOK_PLUGIN did not register its hook — EMAIL: directives will still reach channels. hermes plugins doctor said: $EMAIL_HOOK_DETAIL"
+        ;;
+      *)
+        # The doctor could not answer at all — a `hermes` too old for the
+        # subcommand, one that is not there (127) or not executable (126).
+        # Reported as UNKNOWN rather than as a defect: saying "directives will
+        # still reach channels" about a box where the hook is registered and
+        # working is a false failure, and an operator who sees it every boot
+        # stops reading the line that matters.
+        log "NOTE: could not verify $EMAIL_HOOK_PLUGIN with 'hermes plugins doctor' — the plugin is installed and enabled, but whether its hook registered is unknown here. hermes said: $EMAIL_HOOK_DETAIL"
+        ;;
+    esac
+  fi
 fi

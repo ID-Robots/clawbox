@@ -54,7 +54,14 @@ describe("both writers share ONE lock file", () => {
     // before BOTH — "before the CLI call" alone was satisfied by taking it one
     // line above, leaving the reconcile unprotected.
     const reconcile = REGISTER_SRC.search(/^export CLAWBOX_MCP_HERMES_CONFIG=/m);
-    const cliCall = REGISTER_SRC.search(/^if "\$HERMES_BIN" tools disable browser/m);
+    // Anchored at column 0 and on the binary, and on NOTHING that wraps the
+    // call. The wrapper has now moved three times — `if "$HERMES_BIN" …`, then
+    // `if timeout -k 5 … "$HERMES_BIN" …`, then a brace group whose status was
+    // captured, now `if { timeout -k 5 … ; } 2>/dev/null; then` with the status
+    // read in the `else` — and each time a marker that pinned the wrapper stopped
+    // matching. Each time the -1 guard below is what caught it, which is the
+    // argument for keeping the marker as loose as the ordering claim needs.
+    const cliCall = REGISTER_SRC.search(/^.*"\$HERMES_BIN" tools disable browser/m);
     // Every marker must have been FOUND before their order means anything: a
     // `search` miss returns -1, and -1 < anything, so an ordering assertion over
     // a moved marker passes while checking nothing.
@@ -66,6 +73,42 @@ describe("both writers share ONE lock file", () => {
 
     expect(AUTH_SRC).toContain("flock -w 120 9");
     expect(REGISTER_SRC).toContain("flock -w 120 9");
+  });
+
+  it("bounds EVERY hermes invocation with a SIGKILL grace, so no survivor keeps fd 9", () => {
+    // This is a LOCK invariant, which is why it lives here. Both `hermes` calls
+    // run inside the fd-9 critical section, and a child inherits that fd: a
+    // `hermes` that ignores SIGTERM outlives `timeout` and goes on holding
+    // ~/.hermes/config.yaml.lock after this script has exited, leaving
+    // setup-hermes-dashboard-auth.sh to burn its 120 s wait and then write
+    // UNLOCKED — the lost update this whole file exists to prevent, with the
+    // lock in place and doing nothing. Plain `timeout` sends SIGTERM only, so
+    // the `-k` grace is what actually ends such a child.
+    //
+    // The sweep is over the WHOLE file rather than the critical section, which
+    // is the stronger rule and the one worth keeping: a `hermes` call added
+    // outside the lock inherits fd 9 just the same, because the `exec 9>` that
+    // opens it is inherited by every later child.
+    //
+    // An INVOCATION is the binary followed by a word — a subcommand or a flag.
+    // Every spelling of the expansion counts, because "EVERY hermes call" is
+    // what this claims: `"$HERMES_BIN"`, `${HERMES_BIN}`, and the bare
+    // `$HERMES_BIN` a future edit might reach for. The two things that are NOT
+    // invocations are excluded by name rather than by an accident of quoting,
+    // so a change to either fails here instead of quietly widening the sweep:
+    // the `[ ! -x "$HERMES_BIN" ]` executable guard and the `HERMES_BIN=`
+    // assignment.
+    const calls = REGISTER_SRC.split("\n").filter(
+      (line) =>
+        /\$\{?HERMES_BIN\}?"?\s+[a-z-]/.test(line)
+        && !/^\s*#/.test(line)
+        && !/\[\s*!?\s*-[a-z]\s+"?\$\{?HERMES_BIN/.test(line)
+        && !/^\s*HERMES_BIN=/.test(line),
+    );
+    expect(calls.length).toBeGreaterThan(0);
+    for (const line of calls) {
+      expect(line, `unbounded hermes call: ${line.trim()}`).toMatch(/timeout -k \d+ /);
+    }
   });
 
   it("keeps the exec that opens the lock fd free of a stderr redirect", () => {
