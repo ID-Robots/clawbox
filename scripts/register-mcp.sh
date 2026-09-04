@@ -59,6 +59,18 @@ API_BASE="${CLAWBOX_API_BASE:-http://127.0.0.1:80}"
 # script exits — leaving setup-hermes-dashboard-auth.sh to burn its 120 s wait
 # and then write unlocked, which is the config-clobber that lock exists to stop.
 HERMES_CLI_TIMEOUT="${HERMES_CLI_TIMEOUT:-45}"
+# `${:-}` substitutes on unset and empty but NOT on "0" — and `timeout 0` means
+# NO timeout, so a bare `HERMES_CLI_TIMEOUT=0` would silently undo the bound
+# this variable exists to impose. A non-numeric value is worse: `timeout` exits
+# 125 without running the CLI at all, which at the `tools disable` call above is
+# a permanent "could not disable the built-in browser toolset" with the toolset
+# left ON — a false failure with a functional regression behind it. This value
+# arrives in an environment clawbox-setup.service builds partly from a
+# user-writable .env (the same reason EDITION is read from a root-owned file
+# below), so validate it rather than trust it.
+case "$HERMES_CLI_TIMEOUT" in
+  ''|*[!0-9]*|0) HERMES_CLI_TIMEOUT=45 ;;
+esac
 # Shared with setup-hermes-dashboard-auth.sh: BOTH scripts read-modify-write
 # ~/.hermes/config.yaml, and at install time they run seconds apart
 # (production-server.js fire-and-forgets this script on the clawbox-setup
@@ -619,15 +631,24 @@ if [ "$EMAIL_HOOK_INSTALLED" = "1" ]; then
   # boot, and under `pipefail` any stage of this is enough to do it.
   EMAIL_HOOK_DETAIL="$(printf '%s' "$EMAIL_HOOK_DOCTOR" | tr '\n' ' ' | cut -c1-300)" \
     || EMAIL_HOOK_DETAIL=""
-  # 124 is read BEFORE the words. By the time `timeout` kills it the doctor has
-  # usually printed its banner, and on the text alone that banner IS the "ran
-  # and refused" branch below — so a wedged CLI would print a hard WARNING about
-  # a hook that is very probably registered and working, on every boot. Like the
-  # other unknowns this is a NOTE. It does NOT claim the CLI was killed: 124 is
-  # also what `timeout` returns when the child chose that exit code itself, and
-  # the two are indistinguishable from here.
-  if [ "$EMAIL_HOOK_DOCTOR_RC" = "124" ]; then
-    log "NOTE: 'hermes plugins doctor' answered 124 — the ${HERMES_CLI_TIMEOUT}s ceiling, or the CLI's own exit code — so $EMAIL_HOOK_PLUGIN is installed and enabled but whether its hook registered is unknown here. hermes had printed: $EMAIL_HOOK_DETAIL"
+  # The exit STATUS is read before the words. By the time `timeout` kills it the
+  # doctor has usually printed its banner, and on the text alone that banner IS
+  # the "ran and refused" branch below — so a wedged CLI would print a hard
+  # WARNING about a hook that is very probably registered and working, on every
+  # boot. Like the other unknowns this is a NOTE.
+  #
+  # BOTH 124 and 137, because `-k 5` makes 137 the usual answer for exactly the
+  # wedge `-k` was added for: `timeout` signals its whole process group, and
+  # SIGKILL cannot be ignored, so it kills ITSELF alongside the child that rode
+  # out the SIGTERM and the caller reads 128+9. Matching 124 alone would send
+  # that one input into the text case below. And 137 also arrives with no
+  # `timeout` involved at all — the OOM killer on a loaded box, where `plugins
+  # doctor` imports the whole agent — which says just as little about the hook.
+  #
+  # Neither code claims the CLI was killed: a child can exit with either itself,
+  # and the two are indistinguishable from here.
+  if [ "$EMAIL_HOOK_DOCTOR_RC" = "124" ] || [ "$EMAIL_HOOK_DOCTOR_RC" = "137" ]; then
+    log "NOTE: 'hermes plugins doctor' answered $EMAIL_HOOK_DOCTOR_RC — the ${HERMES_CLI_TIMEOUT}s ceiling (SIGTERM, then SIGKILL 5s later), a kill from outside, or the CLI's own exit code — so $EMAIL_HOOK_PLUGIN is installed and enabled but whether its hook registered is unknown here. hermes had printed: $EMAIL_HOOK_DETAIL"
   else
     case "$EMAIL_HOOK_DOCTOR" in
       *"1 hook(s)"*)

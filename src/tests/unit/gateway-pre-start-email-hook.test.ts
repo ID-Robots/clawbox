@@ -352,7 +352,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     expect(r.stderr).toMatch(/NOTE: the openclaw CLI could not be run/);
   });
 
-  it("does not fail the gateway when the config cannot be written", () => {
+  it.skipIf(process.getuid?.() === 0)("does not fail the gateway when the config cannot be written", () => {
     // ExecStartPre with no leading `-`, under `set -euo pipefail`: an
     // unwritable ~/.openclaw would otherwise fail the unit and leave the box
     // with no agent at all — over an optional directive strip.
@@ -441,6 +441,36 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     expect(calls()).not.toContain("plugins inspect");
   });
 
+  it("backs off 137 the same as 124 — the SIGKILL `-k 5` sends, and the OOM killer", () => {
+    // `timeout -k 5 45` does NOT answer 124 for the case `-k` was added for: it
+    // signals its own process group, SIGKILL cannot be ignored, so it kills
+    // itself alongside the child that rode out the SIGTERM and the caller reads
+    // 128+9 = 137. A classifier that knows only 124 would drop that into the
+    // `*)` arm — a cli-unavailable verdict that is never stamped, so the box
+    // pays the full 45 s ceiling again on EVERY gateway restart. 137 is also
+    // what an OOM-killed `plugins inspect` answers with no `timeout` involved.
+    stubOpenclaw("exit 137");
+    const first = run();
+    expect(first.stderr).toMatch(/NOTE: the openclaw CLI could not be run/);
+    expect(first.stderr).toContain("cli-unavailable exit 137");
+    expect(existsSync(attemptStamp())).toBe(true);
+    writeFileSync(path.join(dir, "calls.log"), "");
+    run();
+    expect(calls()).not.toContain("plugins inspect");
+  });
+
+  it("bounds the inspect with a SIGKILL grace, not SIGTERM alone", () => {
+    // Static, and deliberately so: unlike the Hermes twin the ceiling here is a
+    // literal 45, with no env knob to turn down, so a real wedge would cost this
+    // suite 50 s of wall clock. What `-k` actually DOES is proven dynamically
+    // against the real script in register-mcp-email-hook.test.ts ("a CLI that
+    // IGNORES SIGTERM…"); this pins that the twin still carries it. Without it,
+    // an `openclaw` that ignores SIGTERM keeps this command substitution's pipe
+    // open and bash blocks reading it until the survivor dies — an ExecStartPre
+    // stalling the gateway's start long past the ceiling it appears to have.
+    expect(block()).toMatch(/timeout -k 5 45 "\$OPENCLAW_BIN" plugins inspect/);
+  });
+
   it.skipIf(process.getuid?.() === 0)("leaves the installed plugin ALONE when it is the sources that cannot be read", () => {
     // `cp` opens its source first and never touches the destination when that
     // open fails, so a source-side problem — a checkout still being written by
@@ -483,6 +513,29 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     expect(r.stderr).toMatch(/WARNING: could not install/);
     expect(r.stderr).toContain("has been removed rather than left for the gateway to import");
     expect(installed()).toEqual([]);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("says so when it could NOT remove the partial copy", () => {
+    // The other arm of that same line, and the reason it is a line and not a
+    // claim: `cp` truncates through the modes of files that already exist,
+    // while `rm` needs the directory's write bit — so a destination the box
+    // cannot write leaves a package missing a file, with
+    // `plugins.entries.<id>.enabled` still true. Reporting that as a completed
+    // cleanup is the false success this step exists to avoid. The Hermes twin
+    // pins the same arm (register-mcp-email-hook.test.ts, the 0o555 case).
+    run();
+    const dst = path.join(openclawHome, "extensions", PLUGIN_ID);
+    rmSync(path.join(dst, "openclaw.plugin.json")); // so `cp` must CREATE, and fails
+    chmodSync(dst, 0o555);
+    try {
+      const r = run();
+      expect(r.status).toBe(0);
+      expect(r.stderr).toContain("could not remove what is there");
+      expect(r.stderr).not.toContain("has been removed rather than left");
+      expect(existsSync(dst)).toBe(true);
+    } finally {
+      chmodSync(dst, 0o755);
+    }
   });
 
   // ── A CORRUPT attempt stamp must never cost the box its gateway ───────────

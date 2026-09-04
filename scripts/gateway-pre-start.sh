@@ -2501,7 +2501,15 @@ PY
     # `set -e`, where a command substitution that exits non-zero aborts the
     # assignment — i.e. a missing or wedged `openclaw` would stop the gateway
     # from starting because a DIAGNOSTIC could not run.
-    CLAWBOX_HOOK_JSON="$(timeout 45 "$OPENCLAW_BIN" plugins inspect "$CLAWBOX_HOOK_PLUGIN_ID" --runtime --json 2>"$CLAWBOX_HOOK_ERR_FILE")" \
+    # `-k 5`, the same as register-mcp.sh's two `hermes` calls: plain `timeout`
+    # only sends SIGTERM, and an `openclaw` that ignores it — or any surviving
+    # grandchild of it — keeps this command substitution's pipe open. Bash
+    # blocks reading that pipe until EOF, so the assignment completes when the
+    # SURVIVOR dies, not when `timeout` returns 124: measured 20 s of wall clock
+    # against a 2 s ceiling. This block is an ExecStartPre with no leading `-`,
+    # so that stall is the gateway's start time and then the unit's failure,
+    # over a diagnostic this block itself calls advisory.
+    CLAWBOX_HOOK_JSON="$(timeout -k 5 45 "$OPENCLAW_BIN" plugins inspect "$CLAWBOX_HOOK_PLUGIN_ID" --runtime --json 2>"$CLAWBOX_HOOK_ERR_FILE")" \
       || CLAWBOX_HOOK_RC=$?
     CLAWBOX_HOOK_ERR="$(tr '\n\r' '  ' < "$CLAWBOX_HOOK_ERR_FILE" 2>/dev/null | cut -c1-200 || true)"
     # Never `rm` the fallback.
@@ -2520,10 +2528,14 @@ PY
       126|127)
         CLAWBOX_HOOK_VERDICT="cli-missing exit $CLAWBOX_HOOK_RC${CLAWBOX_HOOK_ERR:+: $CLAWBOX_HOOK_ERR}"
         ;;
-      # 124 is `timeout` killing it at 45 s. Also an unknown — but an EXPENSIVE
-      # one, and a box that cannot module-load its plugins inside 45 s will
-      # usually not manage it on the next restart either. This one is stamped.
-      124)
+      # 124 is `timeout` killing it at 45 s; 137 is the SIGKILL `-k 5` sends five
+      # seconds later when SIGTERM did not move it — `timeout` signals its whole
+      # process group and SIGKILL cannot be ignored, so it kills itself too and
+      # the caller reads 128+9. 137 also arrives with no `timeout` involved at
+      # all, from the OOM killer. Also an unknown — but an EXPENSIVE one, and a
+      # box that cannot module-load its plugins inside 45 s will usually not
+      # manage it on the next restart either. This one is stamped.
+      124|137)
         CLAWBOX_HOOK_VERDICT="cli-unavailable exit $CLAWBOX_HOOK_RC${CLAWBOX_HOOK_ERR:+: $CLAWBOX_HOOK_ERR}"
         ;;
       0)

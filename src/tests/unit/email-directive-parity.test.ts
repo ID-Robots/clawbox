@@ -119,6 +119,110 @@ describe("EMAIL: directive grammar — one rule, three implementations", () => {
       .map((row) => JSON.stringify(row));
     expect(disagreements).toEqual([]);
   });
+  // ── The other axis: what each engine folds onto the keyword ───────────────
+  //
+  // The whitespace sweep above GENERATES its inputs. The case-fold axis — the
+  // one this change actually moved — was two hand-written fixtures, U+0130 and
+  // U+0131. Those two are the complete offender set for the literal `email`,
+  // but nothing regenerates them: change the keyword to one carrying an `s` or
+  // a `k` and U+017F (ſ) and U+212A (K) walk in unnoticed, because Python's
+  // `re.IGNORECASE` folds them onto ASCII and JavaScript's `/i` refuses to.
+  // So ASK the engines what they would confuse with each letter instead of
+  // remembering their answer.
+  const KEYWORD = "email";
+  const KEYWORD_LETTERS = [...new Set(KEYWORD.split(""))].sort();
+
+  /**
+   * Every code point JavaScript's case tables OR its `/i` could read as one of
+   * the keyword's letters. The combined class is a cheap filter over the whole
+   * range; only the handful it admits pay for the per-letter resolution.
+   */
+  function jsCaseFoldCandidates(): Map<string, Set<number>> {
+    const anyLetter = new RegExp(`^[${KEYWORD_LETTERS.join("")}]$`, "i");
+    const perLetter = KEYWORD_LETTERS.map((l) => [l, new RegExp(`^${l}$`, "i")] as const);
+    const out = new Map(KEYWORD_LETTERS.map((l) => [l, new Set<number>()]));
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue; // lone surrogates are not characters
+      const ch = String.fromCodePoint(cp);
+      const hits = new Set<string>();
+      if (anyLetter.test(ch)) for (const [l, re] of perLetter) if (re.test(ch)) hits.add(l);
+      const lower = ch.toLowerCase();
+      if (lower.length === 1 && out.has(lower)) hits.add(lower);
+      const upper = ch.toUpperCase();
+      if (upper.length === 1) {
+        const back = upper.toLowerCase();
+        if (back.length === 1 && out.has(back)) hits.add(back);
+      }
+      for (const l of hits) if (ch !== l) out.get(l)!.add(cp);
+    }
+    return out;
+  }
+
+  /** The same question put to Python, whose folding table is its own. */
+  function pythonCaseFoldCandidates(): Record<string, number[]> {
+    const program = [
+      "import json, re, sys",
+      "letters = json.loads(sys.argv[1])",
+      'anyp = re.compile("[" + "".join(letters) + "]", re.IGNORECASE)',
+      "per = [(l, re.compile(l, re.IGNORECASE)) for l in letters]",
+      "out = {l: [] for l in letters}",
+      "for cp in range(0x110000):",
+      "    if 0xd800 <= cp <= 0xdfff: continue",
+      "    ch = chr(cp)",
+      "    hits = set()",
+      "    if anyp.fullmatch(ch):",
+      "        for l, p in per:",
+      "            if p.fullmatch(ch): hits.add(l)",
+      "    lo = ch.lower()",
+      "    if len(lo) == 1 and lo in out: hits.add(lo)",
+      "    up = ch.upper()",
+      "    if len(up) == 1:",
+      "        back = up.lower()",
+      "        if len(back) == 1 and back in out: hits.add(back)",
+      "    for l in hits:",
+      "        if ch != l: out[l].append(cp)",
+      "print(json.dumps(out))",
+    ].join("\n");
+    return JSON.parse(
+      execFileSync("python3", ["-c", program, JSON.stringify(KEYWORD_LETTERS)], { encoding: "utf-8" }),
+    );
+  }
+
+  it("the three agree on every code point any of them folds onto the keyword", () => {
+    const js = jsCaseFoldCandidates();
+    const py = pythonCaseFoldCandidates();
+
+    // A generator that generates nothing is a green no-op, which is the whole
+    // failure mode this file exists to refuse. The Turkish pair is the answer
+    // both engines are known to give for `i`, so it doubles as the fixture that
+    // proves the sweep ran.
+    const iCandidates = new Set([...(js.get("i") ?? []), ...(py.i ?? [])]);
+    expect(iCandidates.has(0x130)).toBe(true);
+    expect(iCandidates.has(0x131)).toBe(true);
+
+    const inputs: string[] = [];
+    for (let pos = 0; pos < KEYWORD.length; pos++) {
+      const letter = KEYWORD[pos];
+      for (const cp of new Set([...(js.get(letter) ?? []), ...(py[letter] ?? [])])) {
+        const variant = KEYWORD.slice(0, pos) + String.fromCodePoint(cp) + KEYWORD.slice(pos + 1);
+        // Alone, and beside a directive that unambiguously IS one — the second
+        // is the shape the fixtures pin: one engine strips both lines, another
+        // strips one, and a uid reaches a channel.
+        inputs.push(`Done.\n${variant}:4471`);
+        inputs.push(`Done.\nEMAIL:4471\n${variant}:7`);
+      }
+    }
+    expect(inputs.length).toBeGreaterThan(0);
+
+    const tsOut = inputs.map((raw) => splitEmailRefs(raw).text);
+    const jsOut = inputs.map((raw) => stripEmailDirectives(raw));
+    const pyOut = pythonAnswers(inputs);
+    const disagreements = inputs
+      .map((raw, i) => ({ raw, ts: tsOut[i], js: jsOut[i], py: pyOut[i] }))
+      .filter((row) => row.ts !== row.js || row.ts !== row.py)
+      .map((row) => JSON.stringify(row));
+    expect(disagreements).toEqual([]);
+  }, 60_000);
 
   // ── The line grammar must be LINEAR in the length of a line ───────────────
   //

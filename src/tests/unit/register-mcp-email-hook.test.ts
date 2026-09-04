@@ -347,6 +347,52 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(enabledPlugins()).toEqual([PLUGIN]);
     expect((readConfig().mcp_servers as Record<string, unknown>).clawbox).toBeTruthy();
   });
+  it("a CLI that IGNORES SIGTERM is still bounded AND still reads as UNKNOWN", () => {
+    // The case `-k 5` exists for, and the one a plain `sleep 30` stub never
+    // reaches: a `hermes` that ignores SIGTERM survives the ceiling, so
+    // `timeout` SIGKILLs it 5s later — and because SIGKILL cannot be ignored,
+    // `timeout` kills ITSELF along with the process group and the caller reads
+    // 128+9 = **137**, never 124. A classifier that knows only 124 therefore
+    // sends exactly this input into the text `case`, where the banner the
+    // doctor already printed IS the "ran and refused" branch — the hard
+    // WARNING, about a hook that is very probably registered and working, on
+    // every boot. 137 is not only `-k`: an OOM-killed `plugins doctor` (it
+    // imports the whole agent) answers 137 with no `timeout` involved, and
+    // tells us just as little about the hook.
+    fs.writeFileSync(
+      hermesBin,
+      [
+        "#!/usr/bin/env bash",
+        'printf "%s\\n" "$*" >> "$HERMES_CALLS"',
+        // SIG_IGN survives execve, so the `sleep` inherits the ignore and
+        // rides out the SIGTERM the way a wedged CLI does.
+        "trap '' TERM",
+        'if [ "$1" = "plugins" ] && [ "$2" = "doctor" ]; then',
+        `  echo "Plugin Doctor: ${PLUGIN}"`,
+        "fi",
+        "exec sleep 30",
+      ].join("\n"),
+    );
+    fs.chmodSync(hermesBin, 0o755);
+    const started = Date.now();
+    const r = run({ HERMES_CLI_TIMEOUT: "1" });
+    const elapsed = Date.now() - started;
+    expect(r.status).toBe(0);
+    // 1s ceiling + 5s grace, twice, and nothing waiting on the stub's sleep.
+    expect(elapsed).toBeLessThan(20_000);
+    // The verdict: UNKNOWN, never the defect.
+    expect(r.stdout).toMatch(/NOTE: 'hermes plugins doctor' answered 137/);
+    expect(r.stdout).not.toMatch(/did not register its hook/);
+    expect(r.stdout).not.toMatch(/WARNING/);
+    // The sibling call site reads 137 and 124 alike — every non-zero status
+    // lands in the same arm — so it must still say the honest thing.
+    expect(r.stdout).toContain("could not disable the built-in browser toolset");
+    // And the box still got its device tools and its plugin.
+    expect(enabledPlugins()).toEqual([PLUGIN]);
+    expect((readConfig().mcp_servers as Record<string, unknown>).clawbox).toBeTruthy();
+    // Two calls, each 1s ceiling + the 5s grace, so this one outlasts the
+    // default 5s test budget by design.
+  }, 60_000);
 
   it("reads 124 BEFORE the doctor's words, so a banner is not a defect", () => {
     // By the time `timeout` kills it, the doctor has usually printed its
