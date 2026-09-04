@@ -10,6 +10,8 @@ vi.mock("@/lib/openclaw-config", () => ({
   listTelegramPairingRequests: vi.fn(),
   readTelegramPairingRequests: vi.fn(),
   approveTelegramPairing: vi.fn(),
+  // OpenClaw's OWN credential store, which the gateway long-polls from.
+  readConfigStrict: vi.fn(),
   // The route imports this constant for its own format check — the mock must
   // provide it or `PAIRING_CODE_RE.test(...)` throws and every POST 500s.
   PAIRING_CODE_RE: /^[A-Z0-9]{8}$/,
@@ -21,6 +23,7 @@ import {
   listTelegramPairingRequests,
   readTelegramPairingRequests,
   approveTelegramPairing,
+  readConfigStrict,
 } from "@/lib/openclaw-config";
 
 const mockGet = vi.mocked(get);
@@ -28,6 +31,7 @@ const mockReadAllow = vi.mocked(readTelegramAllowFrom);
 const mockListPending = vi.mocked(listTelegramPairingRequests);
 const mockReadPending = vi.mocked(readTelegramPairingRequests);
 const mockApprove = vi.mocked(approveTelegramPairing);
+const mockReadConfigStrict = vi.mocked(readConfigStrict);
 const mockSet = vi.mocked(set);
 
 describe("/setup-api/telegram/pairing", () => {
@@ -53,6 +57,7 @@ describe("/setup-api/telegram/pairing", () => {
     mockListPending.mockResolvedValue([]);
     mockReadPending.mockResolvedValue([]);
     mockApprove.mockResolvedValue();
+    mockReadConfigStrict.mockResolvedValue({});
 
     const mod = await import("@/app/setup-api/telegram/pairing/route");
     GET = mod.GET;
@@ -75,6 +80,26 @@ describe("/setup-api/telegram/pairing", () => {
     expect(body.approved).toEqual([]);
     expect(body.pending).toEqual([]);
     expect(mockReadAllow).not.toHaveBeenCalled();
+  });
+
+  // Same blind spot as /telegram/status: the credential belongs to OpenClaw
+  // (channels.telegram.botToken in openclaw.json), and ClawBox's copy is written
+  // only by /setup-api/telegram/configure. This route answers an EMPTY pairing
+  // state when it thinks there is no bot, and page.tsx polls it every 20 s for
+  // the "someone wants to talk to your bot" popup — so on a natively-paired box
+  // a household member's request was never shown to anyone.
+  it("GET reports configured from OpenClaw's own store when ClawBox has no copy", async () => {
+    mockGet.mockResolvedValue(null);
+    mockReadConfigStrict.mockResolvedValue({
+      channels: { telegram: { enabled: true, botToken: "654321:NativeOpenClawBot" } },
+    });
+
+    const res = await GET(getReq());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.configured).toBe(true);
+    expect(body.approved).toEqual([{ id: "6057319791" }]);
   });
 
   it("GET returns the approved list and skips the slow pending CLI by default", async () => {

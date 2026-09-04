@@ -22,7 +22,12 @@ vi.mock("@/lib/email-approval-telegram", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/email-approval-telegram")>()),
   fetchApprovalBotInfo: vi.fn(),
 }));
-vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "openclaw") }));
+// The edition lock decides which harness stores count as evidence; with none
+// installed but OpenClaw, a stray ~/.hermes/.env is not this box's business.
+vi.mock("@/lib/harness", () => ({
+  getActiveHarness: vi.fn(async () => "openclaw"),
+  getEdition: vi.fn(() => "openclaw"),
+}));
 vi.mock("@/lib/openclaw-config", () => ({
   readTelegramAllowFrom: vi.fn(async () => ["6001"]),
   // The same-bot guard asks the HARNESS which bot it polls. Empty here, so this
@@ -188,6 +193,24 @@ describe("connecting the approvals bot", () => {
 
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ kind: "same_bot" });
+    expect(stored.email_approval_bot_token).toBeUndefined();
+  });
+
+  // The case above still seeds ClawBox's mirror, so it proves the rotation rule
+  // and not the native store. This one has NO mirror at all — the state of a box
+  // paired with `openclaw config set` — so both halves have to hold at once.
+  it("REFUSES a rotated secret against OpenClaw's own store, with no mirror", async () => {
+    vi.mocked(openclawConfig.readConfigStrict).mockResolvedValue({
+      channels: { telegram: { enabled: true, botToken: MAIN_BOT_TOKEN } },
+    });
+
+    const rotated = "111111:MainBotSecretValue_11";
+    const res = await POST(request({ cookie: ownerCookie(), body: { botToken: rotated } }));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ kind: "same_bot" });
+    expect(stored.telegram_bot_token).toBeUndefined();
+    expect(telegram.fetchApprovalBotInfo).not.toHaveBeenCalled();
     expect(stored.email_approval_bot_token).toBeUndefined();
   });
 

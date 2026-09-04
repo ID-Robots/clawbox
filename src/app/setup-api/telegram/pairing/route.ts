@@ -15,11 +15,8 @@ import {
   notifyHermesTelegramUser,
   type HermesPairingRequest,
 } from "@/lib/hermes-telegram";
-import { hermesSecretsPresent } from "@/lib/hermes-skill-secrets";
+import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 import { PAIRING_TOKEN_RE, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
-
-/** Where Hermes keeps its own bot token — `hermes config set` writes this key. */
-const HERMES_TELEGRAM_TOKEN_KEY = "TELEGRAM_BOT_TOKEN";
 
 export const dynamic = "force-dynamic";
 
@@ -36,29 +33,27 @@ const APPROVED_NOTICE = "You're approved — send me a message and I'll answer."
 /**
  * Does this box have a Telegram bot at all?
  *
- * Asked per edition, because the two keep the credential in different places.
- * On OpenClaw ClawBox holds it and `telegram_bot_token` IS the answer. On
- * Hermes the harness holds its own in ~/.hermes/.env — `hermes config set
- * TELEGRAM_BOT_TOKEN` writes there and `hermes send` reads from there — and
- * ClawBox's copy is written only as a side effect of
- * /setup-api/telegram/configure. Asking for it on a box paired with `hermes
- * config set`, or restored without config.json, answered `configured: false`
- * for a working bot, and this route's GET returns an empty pairing state on
- * that answer: page.tsx polls it every 20 s for the "someone wants to talk to
- * your bot" popup, so a new household member's request was never shown to
- * anyone.
+ * ONE reader for both editions, `telegram-bot-identity.ts` — the same one
+ * /telegram/status, /setup/status and the approvals guard use. On both editions
+ * the credential is the HARNESS's (openclaw.json's channel block, ~/.hermes/.env
+ * plus the config.yaml fallback its env bridge reads) and ClawBox's copy is
+ * written only as a side effect of /setup-api/telegram/configure. Asking that
+ * copy on a box paired through the harness's own CLI, or restored without
+ * config.json, answered `configured: false` for a working bot — and this route's
+ * GET returns an EMPTY pairing state on that answer: page.tsx polls it every 20 s
+ * for the "someone wants to talk to your bot" popup, so a new household member's
+ * request was never shown to anyone.
  *
- * Presence only, and never the value — `hermesSecretsPresent` is the same
- * write-only reader the skills store uses. A plain file read, no CLI: this
- * route is on a 20 s desktop poll, which is why its Hermes paths are
- * deliberately CLI-free.
+ * The three surfaces used to answer this from three different places with three
+ * different failure policies — this one raised a 500 out of `hermesSecretsPresent`
+ * where the others degraded — which meant the panel's verdict depended on which
+ * route it happened to call. Now they share the reader and its tri-state.
+ *
+ * A plain file read, no CLI: this route is on a 20 s desktop poll, which is why
+ * its Hermes paths are deliberately CLI-free.
  */
 async function isConfigured(harness: Harness): Promise<boolean> {
-  if (harness === "hermes") {
-    return (await hermesSecretsPresent([HERMES_TELEGRAM_TOKEN_KEY]))[HERMES_TELEGRAM_TOKEN_KEY] === true;
-  }
-  const token = await get("telegram_bot_token");
-  return typeof token === "string" && token.length > 0;
+  return (await readActiveTelegramBot(harness)).token !== null;
 }
 
 async function readApprovedNames(): Promise<Record<string, string>> {

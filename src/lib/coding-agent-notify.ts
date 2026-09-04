@@ -31,10 +31,10 @@
  */
 
 import { pushPendingAction } from "@/lib/pending-actions";
-import { get as configGet } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { notifyHermesTelegramUser, readHermesApprovedUsers } from "@/lib/hermes-telegram";
 import { readTelegramAllowFrom } from "@/lib/openclaw-config";
+import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 import type { CodingRun } from "@/lib/coding-agent";
 
 const MAX_TOAST_CHARS = 280;
@@ -171,9 +171,15 @@ async function notifyTelegram(message: string): Promise<void> {
   }
 
   // OpenClaw: the web server has no CLI send path, so it calls the Bot API
-  // itself and the stored token IS the credential — no token, nothing to send
-  // with.
-  const token = await configGet("telegram_bot_token");
+  // itself and needs the credential in hand — but the credential is the
+  // HARNESS's here too. `channels.telegram.botToken` in openclaw.json is the
+  // same bot's token and is equally usable from this side, while ClawBox's
+  // `telegram_bot_token` is a mirror /setup-api/telegram/configure writes; a box
+  // paired with `openclaw config set`, or restored with ~/.openclaw intact and a
+  // fresh data/config.json, has none. Gating on the mirror silenced the notice
+  // on such a box — working bot, approved senders, nothing delivered — and said
+  // so at INFO, so nothing ever told the owner.
+  const { token } = await readActiveTelegramBot("openclaw");
   if (typeof token !== "string" || !token.trim()) {
     console.info("[coding-agent] no Telegram bot is configured on this device; notice not sent");
     return;

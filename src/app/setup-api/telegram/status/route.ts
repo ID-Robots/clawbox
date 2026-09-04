@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { get } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesGatewayStatus, hermesTelegramRegistered } from "@/lib/hermes-telegram";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
@@ -156,10 +155,14 @@ export async function GET() {
       });
     }
 
-    const token = await get("telegram_bot_token");
-    if (!token || typeof token !== "string") {
-      return NextResponse.json({ configured: false });
-    }
+    // Same reader, same reason: on OpenClaw the credential is
+    // `channels.telegram.botToken` in openclaw.json — what `setTelegramToken()`
+    // writes and what the gateway long-polls from — and ClawBox's copy is again
+    // only a side effect of the configure route. A box paired with `openclaw
+    // config set`, or restored with ~/.openclaw intact and a fresh
+    // data/config.json, was told to set up the bot it already answers on.
+    const { token } = await readActiveTelegramBot(harness);
+    if (!token) return NextResponse.json({ configured: false });
     const info = await fetchBotInfo(token);
     return NextResponse.json({ configured: true, ...info });
   } catch (err) {

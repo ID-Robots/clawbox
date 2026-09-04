@@ -209,12 +209,34 @@ export async function patchHermesConfig(patch: HermesConfigPatch): Promise<Herme
   return result;
 }
 
-/** Read one dotted key straight from the file. Returns null when unset. */
-export async function readHermesConfigValue(key: string): Promise<string | null> {
+/**
+ * Read one dotted key straight from the file, saying whether we could look.
+ *
+ * A missing config.yaml is not a failure — `readConfigText` answers `""` for
+ * ENOENT, which is a box that has never been configured. Anything else (EACCES
+ * after a root-run `hermes config set`, EIO, a directory at the path) is, and a
+ * caller deciding whether a credential collides has to be able to tell the two
+ * apart: see telegram-bot-identity.ts, where "we could not look" is the only
+ * answer allowed to make a save gate refuse.
+ */
+export async function readHermesConfigEntry(
+  key: string,
+): Promise<{ value: string | null; known: boolean }> {
   try {
     const { text } = await readConfigText(hermesConfigPath());
-    return getYamlPath(text, splitKey(key));
-  } catch {
-    return null;
+    return { value: getYamlPath(text, splitKey(key)), known: true };
+  } catch (err) {
+    // The message only — this file holds credentials, and Node puts the failing
+    // path (and a YAML reader its input) into the error it hands over.
+    console.error(
+      "[hermes-config-yaml] config.yaml could not be read:",
+      err instanceof Error ? err.message : err,
+    );
+    return { value: null, known: false };
   }
+}
+
+/** Read one dotted key straight from the file. Returns null when unset. */
+export async function readHermesConfigValue(key: string): Promise<string | null> {
+  return (await readHermesConfigEntry(key)).value;
 }

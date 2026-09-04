@@ -102,11 +102,15 @@ export async function POST(request: Request) {
     // like the first one, and the previous bot's approved senders carried over
     // to the new bot.
     //
-    // A store that could not be READ counts as changed. The reset runs before
-    // the persist (see below), so treating the unknown as a bot change costs a
-    // re-pair at worst; treating it as "no previous bot" — which is what
-    // reading only `.token` would do — silently keeps the old bot's approved
-    // senders on the new bot and answers `success: true, reset: false`.
+    // A store that could not be READ refuses the save, exactly as the approvals
+    // guard one directory over does with the same fact
+    // (email/chat-approval/route.ts). Both readings of an unknown are wrong:
+    // "no previous bot" silently keeps the old bot's approved senders on the new
+    // one under `success: true, reset: false`, and "changed" performs an
+    // IRREVERSIBLE reset — every household member unpaired — on a guess, which
+    // is what a half-written openclaw.json caught mid-`config set` would have
+    // cost an owner who merely re-entered the same token. Refusing changes
+    // nothing and is safe to retry.
     //
     // Compared whole, deliberately, and NOT by bot id the way the approvals
     // guard compares: a /revoke-rotated secret for the same bot is exactly the
@@ -115,7 +119,17 @@ export async function POST(request: Request) {
     // asks a different question — "would these two pollers collide" — where the
     // id is the whole point.
     const previous = await readActiveTelegramBot(harness);
-    const tokenChanged = !previous.known || (previous.token !== null && previous.token !== botToken);
+    if (!previous.known) {
+      return NextResponse.json(
+        {
+          error:
+            "Could not read this device's Telegram configuration, so the previously approved senders cannot be checked against this bot. Nothing was changed. See the ClawBox service log.",
+          kind: "bot_unknown",
+        },
+        { status: 503 },
+      );
+    }
+    const tokenChanged = previous.token !== null && previous.token !== botToken;
 
     // The reset runs BEFORE the new token is persisted, on purpose. A reset
     // that fails then fails the save with nothing changed: the old bot keeps

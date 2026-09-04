@@ -152,19 +152,26 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
       expect(mockSet).toHaveBeenCalledWith("telegram_approved_names", undefined);
     });
 
-    // A store that could not be READ is not a box with no previous bot. Reading
-    // only the token treated it as a first save: no reset, no cleared name map,
-    // and `{success: true, reset: false}` over a new bot that inherited every
-    // sender approved for the old one.
-    it("resets rather than assuming a first save when the harness store cannot be read", async () => {
+    // A store that could not be READ is not a box with no previous bot — and it
+    // is not a bot change either. Reading only the token treated it as a first
+    // save (`{success: true, reset: false}` over a new bot that inherited every
+    // sender approved for the old one); treating it as changed unpairs the whole
+    // household on a guess. Both are answers to a question this route could not
+    // ask, so it refuses — nothing changed, safe to retry — exactly as the
+    // approvals guard does with the same fact.
+    it("refuses the save, changing nothing, when the harness store cannot be read", async () => {
       mockGet.mockResolvedValue(undefined);
       mockHermesToken.mockResolvedValue({ token: null, known: false });
 
-      const body = await (await POST(req({ botToken: NEW_TOKEN }))).json();
+      const res = await POST(req({ botToken: NEW_TOKEN }));
+      const body = await res.json();
 
-      expect(body.reset).toBe(true);
-      expect(mockClearHermesPairing).toHaveBeenCalled();
-      expect(mockSet).toHaveBeenCalledWith("telegram_approved_names", undefined);
+      expect(res.status).toBe(503);
+      expect(body.kind).toBe("bot_unknown");
+      expect(mockClearHermesPairing).not.toHaveBeenCalled();
+      expect(mockSet).not.toHaveBeenCalledWith("telegram_approved_names", undefined);
+      expect(mockSet).not.toHaveBeenCalledWith("telegram_bot_token", expect.anything());
+      expect(mockSetHermesToken).not.toHaveBeenCalled();
     });
 
     it("does not let a browser that walked away cancel the half it has already committed to", async () => {

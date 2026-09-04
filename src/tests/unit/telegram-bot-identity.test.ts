@@ -39,6 +39,21 @@ function writeOpenClawToken(value: string | null): void {
   fs.writeFileSync(path.join(openclawHome, "openclaw.json"), JSON.stringify(config), "utf-8");
 }
 
+function writeOpenClawConfig(config: unknown): void {
+  fs.writeFileSync(path.join(openclawHome, "openclaw.json"), JSON.stringify(config), "utf-8");
+}
+
+/** Hermes' config.yaml — the FALLBACK half of its own env bridge. */
+function writeHermesConfigYaml(contents: string): void {
+  fs.writeFileSync(path.join(hermesHome, "config.yaml"), contents, { mode: 0o600 });
+}
+
+/** Break a store so it exists and cannot be read (EISDIR on the read). */
+function makeUnreadable(file: string): void {
+  fs.rmSync(file, { force: true });
+  fs.mkdirSync(file);
+}
+
 beforeEach(async () => {
   hermesHome = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-bot-identity-hermes-"));
   openclawHome = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-bot-identity-openclaw-"));
@@ -78,6 +93,37 @@ describe("telegramBotId", () => {
 
   it("refuses a value long enough to have been pasted over the real one", () => {
     expect(identity.telegramBotId(`123456:${"a".repeat(201)}`)).toBeNull();
+  });
+
+  // LOAD-BEARING INVARIANT, and until now unasserted. The approvals route
+  // proves the submitted value with `safeBotToken` and then compares it by id;
+  // if `telegramBotId` rejected something `safeBotToken` accepted, `approvalBotId`
+  // would be null, the same-bot comparison would be SKIPPED entirely, and — with
+  // `known: true` — the save would go straight through. The two patterns live in
+  // two modules on purpose (each rebuilds its own token from its own match, which
+  // is what CodeQL reads as a sanitizer), so what has to be pinned is that they
+  // accept the same language.
+  it("accepts exactly what the approvals route's own token check accepts", async () => {
+    const { safeBotToken } = await import("@/lib/email-approval-telegram");
+    const corpus = [
+      "123456:AbC-def_0",
+      " 123456:AbC-def_0 ",
+      `123456:${"a".repeat(200)}`,
+      `123456:${"a".repeat(201)}`,
+      `${"9".repeat(20)}:secret`,
+      `${"9".repeat(21)}:secret`,
+      "123456:has space",
+      "123:abc/../../evil?x=",
+      "123456:sec.ret",
+      "abc:def",
+      ":secret",
+      "123456:",
+      "token123",
+      "",
+    ];
+    for (const value of corpus) {
+      expect([value, safeBotToken(value) !== null]).toEqual([value, identity.telegramBotId(value) !== null]);
+    }
   });
 });
 
@@ -126,10 +172,51 @@ describe("readActiveTelegramBot", () => {
 
     expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: true });
   });
+
+  // Hermes resolves this credential through its env bridge, not through one
+  // file: .env into the environment first, then config.yaml's TOP-LEVEL scalars
+  // for the keys .env does not define (gateway/run.py, hermes_cli/send_cmd.py).
+  // A box provisioned that way polls a real bot that a .env-only read reported
+  // as absent — with `known: true` over it, which is what fails a guard open.
+  it("reads the bot out of Hermes' config.yaml when .env defines none", async () => {
+    writeHermesConfigYaml(`model: openrouter/some-model\nTELEGRAM_BOT_TOKEN: ${HERMES_BOT}\n`);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: HERMES_BOT, known: true });
+  });
+
+  // .env is loaded with override and the config.yaml bridge skips keys already
+  // in the environment, so a config.yaml copy is a fallback, never an override.
+  it("prefers .env over a shadowed config.yaml copy, as the bridge does", async () => {
+    writeHermesToken(HERMES_BOT);
+    writeHermesConfigYaml(`TELEGRAM_BOT_TOKEN: ${MIRROR_BOT}\n`);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: HERMES_BOT, known: true });
+  });
+
+  it("says known:false when config.yaml could hold the fallback and cannot be read", async () => {
+    makeUnreadable(path.join(hermesHome, "config.yaml"));
+    mockGet.mockResolvedValue(MIRROR_BOT);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: MIRROR_BOT, known: false });
+  });
+
+  // A channel can carry an env REFERENCE instead of a literal (the form Discord
+  // uses). We cannot resolve it, and saying "no bot" over one is the confident
+  // wrong answer this module exists to stop.
+  it("says known:false for an OpenClaw channel whose credential is a reference", async () => {
+    writeOpenClawConfig({
+      channels: {
+        telegram: { enabled: true, token: { source: "env", provider: "default", id: "TELEGRAM_BOT_TOKEN" } },
+      },
+    });
+
+    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({ token: null, known: false });
+  });
 });
 
 describe("readTelegramBotsInUse", () => {
-  it("collects every bot any harness on this box could be polling", async () => {
+  it("collects every bot any INSTALLED harness on this box could be polling", async () => {
+    process.env.CLAWBOX_EDITION = "dual";
     writeOpenClawToken(OPENCLAW_BOT);
     writeHermesToken(HERMES_BOT);
     mockGet.mockResolvedValue(MIRROR_BOT);
@@ -163,9 +250,27 @@ describe("readTelegramBotsInUse", () => {
 
   // A store that exists but cannot be read is not evidence of anything, and the
   // approval guard refuses on exactly this flag.
-  it("reports known:false when a harness store cannot be read", async () => {
-    fs.rmSync(path.join(hermesHome, ".env"));
-    fs.mkdirSync(path.join(hermesHome, ".env"));
+  it("reports known:false when THIS edition's harness store cannot be read", async () => {
+    makeUnreadable(path.join(openclawHome, "openclaw.json"));
+
+    expect((await identity.readTelegramBotsInUse()).known).toBe(false);
+  });
+
+  // ...and the mirror image: the edition lock says which harnesses are
+  // INSTALLED, so a stray root-owned ~/.hermes/.env on an OpenClaw box — from a
+  // dual base image, or a provisioning step run as root — is not a store this
+  // device polls. Counting it made `known` false permanently, and every
+  // approvals-bot save answer 503 on the flagship SKU with no way back.
+  it("ignores an unreadable store belonging to a harness this box does not run", async () => {
+    makeUnreadable(path.join(hermesHome, ".env"));
+    writeOpenClawToken(OPENCLAW_BOT);
+
+    expect(await identity.readTelegramBotsInUse()).toEqual({ ids: ["111111"], known: true });
+  });
+
+  it("still consults both stores on a dual box, where both harnesses ARE installed", async () => {
+    process.env.CLAWBOX_EDITION = "dual";
+    makeUnreadable(path.join(hermesHome, ".env"));
 
     expect((await identity.readTelegramBotsInUse()).known).toBe(false);
   });

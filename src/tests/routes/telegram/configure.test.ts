@@ -26,8 +26,9 @@ vi.mock("@/lib/openclaw-config", () => ({
 }));
 
 import { get, set } from "@/lib/config-store";
-import { GatewayNotReadyError, setTelegramToken, restartGateway, clearTelegramPairingState } from "@/lib/openclaw-config";
+import { GatewayNotReadyError, setTelegramToken, restartGateway, clearTelegramPairingState, readConfigStrict } from "@/lib/openclaw-config";
 
+const mockReadConfigStrict = vi.mocked(readConfigStrict);
 const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
 const mockSetTelegramToken = vi.mocked(setTelegramToken);
@@ -54,6 +55,7 @@ describe("POST /setup-api/telegram/configure", () => {
     mockSetTelegramToken.mockResolvedValue();
     mockRestartGateway.mockResolvedValue();
     mockClearPairing.mockResolvedValue();
+    mockReadConfigStrict.mockResolvedValue({});
 
     const mod = await import("@/app/setup-api/telegram/configure/route");
     telegramConfigurePost = mod.POST;
@@ -124,6 +126,64 @@ describe("POST /setup-api/telegram/configure", () => {
     expect(body.error).toMatch(/not saved/);
     expect(mockSet).not.toHaveBeenCalledWith("telegram_bot_token", expect.anything());
     expect(mockSet).not.toHaveBeenCalledWith("telegram_approved_names", undefined);
+    expect(mockSetTelegramToken).not.toHaveBeenCalled();
+    expect(mockRestartGateway).not.toHaveBeenCalled();
+  });
+
+  // The mirror is not the store the gateway polls. `channels.telegram.botToken`
+  // is, so on a box whose bot was rotated with `openclaw config set` re-saving
+  // ClawBox's older copy IS a bot change — and the reset has to run, in front of
+  // both writes, or senders approved for the previous bot carry over.
+  it("compares against OpenClaw's own store, not the mirror, and resets first", async () => {
+    mockGet.mockResolvedValue("111:MIRROR_token_val");
+    mockReadConfigStrict.mockResolvedValue({
+      channels: { telegram: { enabled: true, botToken: "333:NATIVE_token_val" } },
+    });
+
+    const res = await telegramConfigurePost(jsonRequest({ botToken: "111:MIRROR_token_val" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.reset).toBe(true);
+    expect(mockClearPairing).toHaveBeenCalledTimes(1);
+    const tokenSave = mockSet.mock.calls.findIndex(([key]) => key === "telegram_bot_token");
+    expect(mockClearPairing.mock.invocationCallOrder[0])
+      .toBeLessThan(mockSet.mock.invocationCallOrder[tokenSave]);
+    expect(mockClearPairing.mock.invocationCallOrder[0])
+      .toBeLessThan(mockSetTelegramToken.mock.invocationCallOrder[0]);
+  });
+
+  it("keeps the approvals when the native store already holds this exact token", async () => {
+    const token = "333:NATIVE_token_val";
+    mockReadConfigStrict.mockResolvedValue({
+      channels: { telegram: { enabled: true, botToken: token } },
+    });
+
+    const res = await telegramConfigurePost(jsonRequest({ botToken: token }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.reset).toBe(false);
+    expect(mockClearPairing).not.toHaveBeenCalled();
+  });
+
+  // FAIL CLOSED, and identically to the approvals guard next door. Treating an
+  // unreadable openclaw.json as "the bot changed" performs an IRREVERSIBLE reset
+  // — every household member unpaired — on a guess, which a config caught
+  // half-written by a concurrent `openclaw config set` would have been enough to
+  // trigger while the owner merely re-entered the same token.
+  it("refuses the save, changing nothing, when the harness store cannot be read", async () => {
+    mockGet.mockResolvedValue("111:OLD_token_value");
+    mockReadConfigStrict.mockRejectedValue(Object.assign(new Error("EACCES"), { code: "EACCES" }));
+
+    const res = await telegramConfigurePost(jsonRequest({ botToken: "222:new_token_value" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(503);
+    expect(body.kind).toBe("bot_unknown");
+    expect(mockClearPairing).not.toHaveBeenCalled();
+    expect(mockSet).not.toHaveBeenCalledWith("telegram_approved_names", undefined);
+    expect(mockSet).not.toHaveBeenCalledWith("telegram_bot_token", expect.anything());
     expect(mockSetTelegramToken).not.toHaveBeenCalled();
     expect(mockRestartGateway).not.toHaveBeenCalled();
   });

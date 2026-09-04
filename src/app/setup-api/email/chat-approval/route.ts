@@ -116,10 +116,18 @@ export async function POST(request: Request) {
       // it the token the harness is already long-polling would make both
       // pollers fight ("Conflict: terminated by other getUpdates request") and
       // take the owner's normal Telegram chat down with it.
+      //
+      // The sentence says "another bot on this device already uses this token"
+      // rather than "this is the bot ClawBox chats with", because the set also
+      // holds ClawBox's own mirror — which on a box whose harness has since been
+      // re-pointed names a bot nothing polls any more. Refusing is still the
+      // right call there (the mirror is the only trace left of a bot whose
+      // harness store cannot be read), but the owner must not be told a fact
+      // this route cannot prove.
       return NextResponse.json(
         {
           error:
-            "This is the bot ClawBox already chats with. Approvals need a second bot, so the approval never travels through the same connection as the conversation.",
+            "Another Telegram bot on this device already uses this token. Approvals need a bot of their own, so the approval never travels through the same connection as the conversation.",
           kind: "same_bot",
         },
         { status: 400 },

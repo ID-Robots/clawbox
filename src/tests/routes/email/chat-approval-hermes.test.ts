@@ -63,6 +63,11 @@ function writeHermesEnv(contents: string): void {
   fs.writeFileSync(path.join(hermesHome, ".env"), contents, { mode: 0o600 });
 }
 
+function writeHermesConfigYaml(contents: string): void {
+  fs.mkdirSync(hermesHome, { recursive: true });
+  fs.writeFileSync(path.join(hermesHome, "config.yaml"), contents, { mode: 0o600 });
+}
+
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-approval-hermes-"));
   hermesHome = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-hermes-home-"));
@@ -131,6 +136,37 @@ describe("POST /setup-api/email/chat-approval — the same-bot guard on Hermes",
 
   it("still saves a genuinely different bot", async () => {
     writeHermesEnv(`TELEGRAM_BOT_TOKEN=${MAIN_BOT_TOKEN}\n`);
+
+    const res = await POST(ownerRequest({ botToken: OTHER_BOT_TOKEN }));
+
+    expect(res.status).toBe(200);
+    expect(storedConfig().email_approval_bot_token).toBe(OTHER_BOT_TOKEN);
+  });
+
+  // ~/.hermes/.env is only HALF of Hermes' own resolution. Its env bridge —
+  // gateway/run.py "Top-level simple values (fallback only — don't override
+  // .env)", and hermes_cli/send_cmd.py's `_load_hermes_env` — also bridges every
+  // TOP-LEVEL scalar in ~/.hermes/config.yaml into the environment for keys .env
+  // does not define. A box provisioned that way polls a real bot that a .env-only
+  // read reports as absent, with `known: true` on top of it.
+  it("refuses the bot Hermes holds in config.yaml when .env defines none", async () => {
+    writeHermesEnv("# nothing configured yet\n");
+    writeHermesConfigYaml(`model: openrouter/some-model\nTELEGRAM_BOT_TOKEN: ${MAIN_BOT_TOKEN}\n`);
+
+    const res = await POST(ownerRequest({ botToken: MAIN_BOT_TOKEN }));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ kind: "same_bot" });
+    expect(telegram.fetchApprovalBotInfo).not.toHaveBeenCalled();
+    expect(storedConfig().email_approval_bot_token).toBeUndefined();
+  });
+
+  // The same bridge loads .env FIRST and with override, so a config.yaml scalar
+  // is a fallback, never an override. A shadowed copy names a bot nothing polls
+  // and must not cost the owner the bot he is actually trying to configure.
+  it("prefers .env over a shadowed config.yaml copy, as Hermes' own bridge does", async () => {
+    writeHermesEnv(`TELEGRAM_BOT_TOKEN=${MAIN_BOT_TOKEN}\n`);
+    writeHermesConfigYaml(`TELEGRAM_BOT_TOKEN: ${OTHER_BOT_TOKEN}\n`);
 
     const res = await POST(ownerRequest({ botToken: OTHER_BOT_TOKEN }));
 

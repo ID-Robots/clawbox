@@ -8,21 +8,23 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
  */
 
 vi.mock("@/lib/config-store", () => ({ get: vi.fn(), set: vi.fn() }));
-vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
+vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(), getEdition: vi.fn(() => "hermes") }));
 vi.mock("@/lib/openclaw-config", () => ({
   readTelegramAllowFrom: vi.fn(),
   listTelegramPairingRequests: vi.fn(),
   readTelegramPairingRequests: vi.fn(),
   approveTelegramPairing: vi.fn(),
 }));
-// Hermes keeps its own bot token in ~/.hermes/.env; the route asks for its
-// PRESENCE, never its value.
-vi.mock("@/lib/hermes-skill-secrets", () => ({ hermesSecretsPresent: vi.fn() }));
+// "Does this box have a bot" comes from the SHARED reader now — the same one
+// /telegram/status, /setup/status and the approvals guard use — so all four
+// surfaces answer from one store and one failure policy instead of this route
+// raising a 500 out of `hermesSecretsPresent` where the others degraded.
 vi.mock("@/lib/hermes-telegram", () => ({
   approveHermesPairing: vi.fn(),
   listHermesPairing: vi.fn(),
   readHermesApprovedUsers: vi.fn(),
   readHermesPairingRequests: vi.fn(),
+  readHermesTelegramToken: vi.fn(),
   notifyHermesTelegramUser: vi.fn(),
 }));
 
@@ -34,12 +36,12 @@ import {
   readTelegramPairingRequests,
   approveTelegramPairing,
 } from "@/lib/openclaw-config";
-import { hermesSecretsPresent } from "@/lib/hermes-skill-secrets";
 import {
   approveHermesPairing,
   listHermesPairing,
   readHermesApprovedUsers,
   readHermesPairingRequests,
+  readHermesTelegramToken,
   notifyHermesTelegramUser,
 } from "@/lib/hermes-telegram";
 
@@ -55,7 +57,7 @@ const mockHermesList = vi.mocked(listHermesPairing);
 const mockHermesApproved = vi.mocked(readHermesApprovedUsers);
 const mockHermesRead = vi.mocked(readHermesPairingRequests);
 const mockNotify = vi.mocked(notifyHermesTelegramUser);
-const mockSecrets = vi.mocked(hermesSecretsPresent);
+const mockHermesToken = vi.mocked(readHermesTelegramToken);
 
 const REQUEST_ID = "a1b2c3d4e5f60718";
 
@@ -94,7 +96,7 @@ describe("/setup-api/telegram/pairing on Hermes", () => {
     });
     mockHermesApprove.mockResolvedValue({ userId: "123456789", userName: "Krasimir Kralev" });
     mockNotify.mockResolvedValue(true);
-    mockSecrets.mockResolvedValue({ TELEGRAM_BOT_TOKEN: true });
+    mockHermesToken.mockResolvedValue({ token: "999000:HermesOwnBotSecret", known: true });
 
     const mod = await import("@/app/setup-api/telegram/pairing/route");
     GET = mod.GET;
@@ -129,7 +131,7 @@ describe("/setup-api/telegram/pairing on Hermes", () => {
 
   it("still says not configured when the harness has no bot either", async () => {
     mockGet.mockResolvedValue(undefined);
-    mockSecrets.mockResolvedValue({ TELEGRAM_BOT_TOKEN: false });
+    mockHermesToken.mockResolvedValue({ token: null, known: true });
 
     const body = await (await GET(new Request(`${url}?poll=1`))).json();
 
