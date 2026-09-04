@@ -12,11 +12,7 @@ import { handoffSettingsSection, STANDALONE_SETTINGS_SECTION_PARAM } from "@/lib
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import type { InstalledMeta } from "@/lib/store-categories";
-import {
-  hiddenAppIdsForHarness,
-  HERMES_ONLY_APP_IDS,
-  OPENCLAW_ONLY_APP_IDS,
-} from "@/lib/desktop-app-editions";
+import { HARNESS_ONLY_APP_IDS, hiddenAppIdsForHarness } from "@/lib/desktop-app-editions";
 import type { StoreApp } from "@/components/AppStore";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 
@@ -35,11 +31,6 @@ const AppStore = dynamic(() => import("@/components/AppStore"), { ssr: false });
 const HermesSkillsStore = dynamic(() => import("@/components/HermesSkillsStore"), { ssr: false });
 const MemoryShardApp = dynamic(() => import("@/components/MemoryShardApp"), { ssr: false });
 
-// Apps that exist on only ONE harness. This page is reachable directly
-// ("Open in new tab"), so without the same gate the desktop applies, /app/store
-// would render the whole OpenClaw App Store on a Hermes device. The lists are
-// the desktop's own (src/lib/desktop-app-editions.ts), not a second copy.
-const HARNESS_ONLY_APP_IDS: readonly string[] = [...OPENCLAW_ONLY_APP_IDS, ...HERMES_ONLY_APP_IDS];
 
 // This window is the same app the desktop shows, so its title comes from the
 // SAME registry rather than a second table of names — which is what it used to
@@ -182,6 +173,11 @@ export default function StandaloneAppPage() {
 
   const renderApp = () => {
     const appId = id ?? "";
+    // Apps that exist on only ONE harness. This page is reachable directly
+    // ("Open in new tab"), so without the same gate the desktop applies,
+    // /app/store would render the whole OpenClaw App Store on a Hermes device.
+    // Only these ids wait on the harness fetch; `settings` and `files` render
+    // straight away.
     if (HARNESS_ONLY_APP_IDS.includes(appId)) {
       if (!harness) return loading;
       // An unknown harness hides BOTH sets — fail closed.

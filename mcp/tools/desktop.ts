@@ -112,25 +112,25 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     },
     { editions: ["openclaw", "hermes"], readOnly: false, profile: "core" },
     async ({ app_id }: { app_id: string }) => {
-      if (!/^(installed-)?[a-z0-9][a-z0-9-]{0,63}$/.test(app_id)) {
-        throw new ToolError(
-          "BAD_ARGUMENT",
-          "That is not a valid app id.",
-          `Call ui_list_apps and pass an id from its list. Built-in ids: ${appLine}.`,
-        );
-      }
       // Order matters: check the app EXISTS on this edition before writing the
       // pending action. The previous version wrote first and then answered
       // "Opening X" for apps that are not installed on this harness at all.
+      //
+      // A built-in is gated on MEMBERSHIP, never on a slug shape. It used to be
+      // matched against a hyphen-only regex first, which rejected
+      // `system_update` — an id this tool's own description advertises — as
+      // "not a valid app id", and then told the agent to pass an id from that
+      // same list. The shape check survives only where it is the injection
+      // guard: an `installed-<id>` the caller invented.
       const isInstalled = app_id.startsWith("installed-");
-      if (!isInstalled && !builtInIds.includes(app_id)) {
-        throw new ToolError(
-          "NOT_FOUND",
-          "There is no such app on this ClawBox.",
-          `Call ui_list_apps to see what exists here. Built-in ids: ${appLine}.`,
-        );
-      }
       if (isInstalled) {
+        if (!/^installed-[a-z0-9][a-z0-9-]{0,63}$/.test(app_id)) {
+          throw new ToolError(
+            "BAD_ARGUMENT",
+            "That is not a valid installed-app id.",
+            "Call ui_list_apps and pass an id from its installed_apps list, unchanged.",
+          );
+        }
         const ids = await installedAppIds();
         if (!ids.includes(app_id.slice("installed-".length))) {
           throw new ToolError(
@@ -139,12 +139,27 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
             "Call ui_list_apps to see which installed apps exist, and use one of those ids.",
           );
         }
+      } else if (!builtInIds.includes(app_id)) {
+        throw new ToolError(
+          "NOT_FOUND",
+          "There is no such app on this ClawBox.",
+          `Call ui_list_apps to see what exists here. Built-in ids: ${appLine}.`,
+        );
       }
       await pushUiAction({ type: "open_app", appId: app_id });
       if (app_id === "browser") {
         return text("Opened the Browser Setup panel. That is the settings panel — to actually browse the web, use browser_open.");
       }
       const known = apps.find((a) => a.id === app_id);
+      // An `external` app is not a desktop window: the desktop calls
+      // window.open() for it, from a poll rather than a click, so the browser's
+      // popup blocker can drop it with nothing to report back here. Claiming it
+      // opened would be a false success on the one path the agent cannot see.
+      if (known?.external) {
+        return text(
+          `Asked the desktop to open ${known.name}. It opens in a new browser tab, so ask the user to look at the screen — and to allow the popup if their browser blocked it.`,
+        );
+      }
       return text(`Opened ${known?.name ?? app_id} on the desktop.`);
     },
   );

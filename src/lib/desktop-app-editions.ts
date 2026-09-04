@@ -11,7 +11,11 @@
 // whose import graph is relative paths and node builtins — the `@/` alias, and
 // anything React, would drag the Next.js runtime into that stdio process.
 
-/** The harness whose app set applies. `dual` resolves to `openclaw`. */
+/**
+ * A RESOLVED harness: the premium `dual` install has already become
+ * `openclaw` by the time an edition reaches here. Not the same value as the
+ * `harness` string the browser holds — see `hiddenAppIdsForHarness`.
+ */
 export type AppEdition = "openclaw" | "hermes";
 
 // Apps that only make sense on ONE harness. The other harness's backend isn't
@@ -26,22 +30,35 @@ export type AppEdition = "openclaw" | "hermes";
 export const OPENCLAW_ONLY_APP_IDS = ["openclaw", "store", "memory-shard"] as const;
 export const HERMES_ONLY_APP_IDS = ["hermes", "hermes-skills"] as const;
 
-/**
- * Built-in ids to hide for a harness that is not resolved yet.
- *
- * `null` — the harness is still being fetched — hides BOTH sets: showing an app
- * and then taking it away is the surface flash the desktop is built to avoid,
- * and a wrong app is worse than a late one.
- */
-export function hiddenAppIdsForHarness(harness: string | null): string[] {
-  if (harness === "hermes") return [...OPENCLAW_ONLY_APP_IDS];
-  if (harness === "openclaw") return [...HERMES_ONLY_APP_IDS];
-  return [...OPENCLAW_ONLY_APP_IDS, ...HERMES_ONLY_APP_IDS];
+/** Every id that is gated on a harness at all — the two lists above, joined. */
+export const HARNESS_ONLY_APP_IDS: readonly string[] = [
+  ...OPENCLAW_ONLY_APP_IDS,
+  ...HERMES_ONLY_APP_IDS,
+];
+
+function hiddenFor(harness: string | null): readonly string[] {
+  if (harness === "hermes") return OPENCLAW_ONLY_APP_IDS;
+  if (harness === "openclaw") return HERMES_ONLY_APP_IDS;
+  // Fail closed. `null` is "still fetching"; anything else — `"dual"`, a value
+  // from a newer release — is a harness this build cannot reason about, and a
+  // wrong app is worse than a late one.
+  return HARNESS_ONLY_APP_IDS;
 }
 
-/** Whether a built-in app id exists on this edition at all. */
+/**
+ * Built-in ids hidden on this harness — the whole per-harness policy, read by
+ * the desktop grid, the icon layout, the launcher menu and the standalone
+ * window.
+ *
+ * Takes the ACTIVE harness the browser resolved, which is `null` while the
+ * fetch is in flight and can be any string the device reports. Both hide BOTH
+ * sets.
+ */
+export function hiddenAppIdsForHarness(harness: string | null): string[] {
+  return [...hiddenFor(harness)];
+}
+
+/** Whether a built-in app id exists on this (resolved) edition at all. */
 export function appExistsOnEdition(id: string, edition: AppEdition): boolean {
-  const hidden: readonly string[] =
-    edition === "hermes" ? OPENCLAW_ONLY_APP_IDS : HERMES_ONLY_APP_IDS;
-  return !hidden.includes(id);
+  return !hiddenFor(edition).includes(id);
 }

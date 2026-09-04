@@ -16,6 +16,13 @@ export interface DesktopApp {
   id: string;
   name: string;
   description: string;
+  /**
+   * The desktop opens this one in a NEW BROWSER TAB (`window.open`), not in a
+   * desktop window — so the browser's popup blocker can drop it, and
+   * `ui_open_app` must not claim it appeared. Mirrors `type: "external"` in
+   * src/lib/desktop-apps.ts; the drift test holds the two together.
+   */
+  external?: boolean;
 }
 
 // Every built-in desktop app, in the order src/lib/desktop-apps.ts declares
@@ -29,11 +36,11 @@ export interface DesktopApp {
 //
 // The EDITION gate is not repeated here: src/lib/desktop-app-editions.ts is
 // the one copy, shared with the desktop grid and the standalone window.
-const APP_DESCRIPTIONS: Record<string, { name: string; description: string }> = {
+const APP_DESCRIPTIONS: Record<string, Omit<DesktopApp, "id">> = {
   settings: { name: "Settings", description: "Device settings, AI provider, backup" },
-  clawbox: { name: "Chat", description: "The ClawBox chat window on the desktop — this conversation, where the user can see it" },
-  openclaw: { name: "OpenClaw", description: "OpenClaw's own Control UI chat, in a browser tab" },
-  hermes: { name: "Hermes", description: "The Hermes dashboard, in a browser tab" },
+  clawbox: { name: "Chat", description: "The ClawBox chat window on the desktop — the device's MAIN conversation, which is not necessarily this one" },
+  openclaw: { name: "OpenClaw", description: "OpenClaw's own Control UI chat, in a browser tab", external: true },
+  hermes: { name: "Hermes", description: "The Hermes dashboard, in a browser tab", external: true },
   "hermes-skills": { name: "Hermes Skills", description: "Install skills for the agent" },
   terminal: { name: "Terminal", description: "Shell" },
   coding: { name: "Coding Agent", description: "The owner's switch for delegated coding runs, what a run needs, and recent runs" },

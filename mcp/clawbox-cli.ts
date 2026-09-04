@@ -189,6 +189,16 @@ async function main() {
       console.error("Usage: clawbox app open <appId>");
       process.exit(1);
     }
+    // Same gate ui_open_app applies. Without it this printed "Opening x" for a
+    // typo, for an installed id missing its `installed-` prefix, and for the
+    // other harness's apps — a false success on the CLI sibling of the list
+    // `app list` below prints from.
+    const openHarness = installEdition() === "hermes" ? "hermes" : "openclaw";
+    const openable = builtInApps(openHarness).map((a) => a.id);
+    if (!appId.startsWith("installed-") && !openable.includes(appId)) {
+      console.error(`No built-in app "${appId}" on this ClawBox. Try: ${openable.join(", ")}`);
+      process.exit(1);
+    }
     await apiPost("/setup-api/kv", {
       key: "ui:pending-action",
       value: JSON.stringify({ type: "open_app", appId, ts: Date.now() }),

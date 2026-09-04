@@ -1,7 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { builtInApps } from "../../../mcp/lib/context";
+const { apiGet, apiPost } = vi.hoisted(() => ({ apiGet: vi.fn(), apiPost: vi.fn() }));
+
+// Registration and the ui_open_app handler are what this file exercises; the
+// device calls behind them (the KV write, the installed-apps read) are stubbed.
+vi.mock("../../../mcp/lib/api", () => ({
+  apiGet,
+  apiPost,
+  apiTry: async () => null,
+  API_BASE: "http://127.0.0.1:80",
+  CLAWBOX_ROOT: "/home/clawbox/clawbox",
+}));
+
+import { builtInApps, type McpContext } from "../../../mcp/lib/context";
+import { captureRegistrar } from "../helpers/mcp-registrar";
+import { registerDesktopTools } from "../../../mcp/tools/desktop";
 import {
+  HARNESS_ONLY_APP_IDS,
   hiddenAppIdsForHarness,
   HERMES_ONLY_APP_IDS,
   OPENCLAW_ONLY_APP_IDS,
@@ -26,6 +41,22 @@ import { apps } from "@/lib/desktop-apps";
 function idsFor(edition: "openclaw" | "hermes"): string[] {
   return builtInApps(edition).map((a) => a.id);
 }
+
+const ctx = (edition: "openclaw" | "hermes"): McpContext => ({
+  edition,
+  install: edition,
+  profile: "full",
+  capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
+  providers: [],
+  emailCanRead: false,
+  codingAgent: false,
+  canGenerateImages: false,
+});
+
+beforeEach(() => {
+  apiPost.mockResolvedValue({});
+  apiGet.mockResolvedValue({ installed_apps: [] });
+});
 
 describe("MCP built-in apps match the desktop registry", () => {
   it("offers the Hermes dashboard, chat, ClawKeep and System Update on Hermes", () => {
@@ -66,6 +97,54 @@ describe("MCP built-in apps match the desktop registry", () => {
       }
     }
   });
+
+  it("marks exactly the apps the desktop opens in a browser tab", () => {
+    // `external` decides whether ui_open_app claims the window appeared, so it
+    // has to follow the registry rather than a second opinion.
+    const externalInRegistry = apps.filter((a) => a.type === "external").map((a) => a.id).sort();
+    const externalInMcp = [
+      ...new Set(
+        (["openclaw", "hermes"] as const).flatMap((edition) =>
+          builtInApps(edition).filter((a) => a.external).map((a) => a.id),
+        ),
+      ),
+    ].sort();
+    expect(externalInMcp).toEqual(externalInRegistry);
+  });
+});
+
+describe("ui_open_app accepts every id it advertises", () => {
+  // The bug this closes: `system_update` was advertised in the tool's own
+  // description and in ui_list_apps, then refused by an id validator that
+  // allowed no underscore — with a remedy naming the id that had just failed.
+  for (const edition of ["openclaw", "hermes"] as const) {
+    it(`opens each built-in on ${edition} instead of rejecting the id`, async () => {
+      const h = captureRegistrar(edition);
+      registerDesktopTools(h.reg, ctx(edition));
+      for (const app of builtInApps(edition)) {
+        const outcome = await h.call("ui_open_app", { app_id: app.id });
+        expect(outcome.isError, `${app.id}: ${JSON.stringify(outcome)}`).toBe(false);
+      }
+    });
+  }
+
+  it("still refuses an id no app claims, and a malformed installed id", async () => {
+    const h = captureRegistrar("hermes");
+    registerDesktopTools(h.reg, ctx("hermes"));
+
+    const unknown = await h.call("ui_open_app", { app_id: "not-an-app" });
+    expect(unknown.isError).toBe(true);
+    if (unknown.isError) expect(unknown.error.code).toBe("NOT_FOUND");
+
+    // The other harness's app is still hidden, not merely unlisted.
+    const otherHarness = await h.call("ui_open_app", { app_id: "store" });
+    expect(otherHarness.isError).toBe(true);
+    if (otherHarness.isError) expect(otherHarness.error.code).toBe("NOT_FOUND");
+
+    const malformed = await h.call("ui_open_app", { app_id: "installed-../etc" });
+    expect(malformed.isError).toBe(true);
+    if (malformed.isError) expect(malformed.error.code).toBe("BAD_ARGUMENT");
+  });
 });
 
 describe("the edition gate has one copy", () => {
@@ -84,8 +163,15 @@ describe("the edition gate has one copy", () => {
 
   it("names only ids the desktop registry actually declares", () => {
     const registry = apps.map((a) => a.id);
-    for (const id of [...OPENCLAW_ONLY_APP_IDS, ...HERMES_ONLY_APP_IDS]) {
+    for (const id of HARNESS_ONLY_APP_IDS) {
       expect(registry, `${id} is gated but not declared`).toContain(id);
     }
+  });
+
+  it("joins the two lists into the set the standalone window waits on", () => {
+    expect([...HARNESS_ONLY_APP_IDS]).toEqual([
+      ...OPENCLAW_ONLY_APP_IDS,
+      ...HERMES_ONLY_APP_IDS,
+    ]);
   });
 });
