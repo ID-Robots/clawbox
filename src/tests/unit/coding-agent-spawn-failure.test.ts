@@ -21,6 +21,11 @@ import { execFileSync } from "child_process";
 import { saveEnv } from "@/tests/helpers/env";
 import { isPrPending, runBranchName } from "@/lib/coding-pr-state";
 
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const spawnMock = vi.hoisted(() => vi.fn());
 // Only spawn is the subject here. The rest of child_process stays real,
 // because modules further down the import graph (openclaw-config's execFile)

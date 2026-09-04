@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import HermesProviderConfig from "@/components/HermesProviderConfig";
 
+// Long waits on a loaded CI runner: vitest's 5 s test and 10 s hook defaults
+// are not enough. See src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 // The inline provider sign-in that replaced the jump to the Hermes dashboard's
 // :8090 proxy (unreachable through clawbox-tunnel / Cloudflare tunnels). The
 // whole flow must run inside this panel against same-origin /setup-api routes:

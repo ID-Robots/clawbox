@@ -4,6 +4,11 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 // Same env-override dance as gateway-pre-start-clawai-images.test.ts:
 // `CLAWBOX_AI_VISION_MODEL_ID` resolves an env var at module load and the .sh
 // hardcodes the default, so a developer who happens to export that variable

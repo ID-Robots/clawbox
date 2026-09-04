@@ -2,7 +2,7 @@ import { execFileSync } from 'child_process';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   diffManifest,
   fetchGithubBlob,
@@ -30,6 +30,11 @@ import {
  *   pdf              REFERENCE.md and FORMS.md named in running prose, plus
  *                    eight scripts/*.py → 1 of 12 files installed.
  */
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const ALGORITHMIC_ART_SKILL_MD = `---
 name: algorithmic-art

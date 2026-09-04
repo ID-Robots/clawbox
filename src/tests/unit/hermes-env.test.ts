@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "child_process";
 import fs from "fs/promises";
 import os from "os";
@@ -18,6 +18,11 @@ import {
   setHermesEnvValues,
   removeEnvValues,
 } from "@/lib/hermes-env";
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 describe("quoteEnvValue", () => {
   it("leaves plain values unquoted", () => {

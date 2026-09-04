@@ -14,6 +14,11 @@ import path from "node:path";
  * changed its output, which is exactly the drift this panel exists to expose.
  */
 
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const REAL_STATUS = JSON.parse(
   await fs.readFile(new URL("../fixtures/openclaw-memory-status.json", import.meta.url), "utf8"),
 ) as unknown;

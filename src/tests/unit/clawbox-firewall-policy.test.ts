@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
 import {
   mkdtempSync,
   rmSync,
@@ -43,6 +43,11 @@ import path from "node:path";
  *     and nothing in this repo re-adds them, so the captive portal would go
  *     down mid-setup and stay down until a reboot.
  */
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const REPO = process.cwd();
 const FIREWALL = path.join(REPO, "scripts", "clawbox-firewall.sh");

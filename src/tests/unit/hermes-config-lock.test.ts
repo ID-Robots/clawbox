@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -17,6 +17,11 @@ import path from "node:path";
  * path so they always collide on one lock file. These pin the contract and the
  * runtime behaviour.
  */
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const REPO = process.cwd();
 const AUTH = path.join(REPO, "scripts", "setup-hermes-dashboard-auth.sh");
 const REGISTER = path.join(REPO, "scripts", "register-mcp.sh");

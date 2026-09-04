@@ -21,6 +21,10 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vite
  * serial route needs the clock to move 1500 ms.
  */
 
+// Long waits on a loaded CI runner: vitest's 5 s test and 10 s hook defaults
+// are not enough. See src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/harness/clawai-images", () => ({ clawaiImageRouteReachable: vi.fn() }));

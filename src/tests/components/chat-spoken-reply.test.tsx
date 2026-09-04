@@ -8,7 +8,7 @@ import { resetHarnessCache } from "@/lib/client-harness";
 // a slice of the Jetson's six cores and the 5 s default started expiring on
 // whichever test mounted while the box was busiest (a different one each
 // run — solo runs never failed). The work is real, not hung: give it room.
-vi.setConfig({ testTimeout: 15000 });
+vi.setConfig({ testTimeout: 15000, hookTimeout: 15000 });
 
 /**
  * A spoken reply has to be something the user can play.
