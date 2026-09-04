@@ -2512,7 +2512,10 @@ PY
     # `set -e`, where a command substitution that exits non-zero aborts the
     # assignment — i.e. a missing or wedged `openclaw` would stop the gateway
     # from starting because a DIAGNOSTIC could not run.
-    # `-k 5`, the same as register-mcp.sh's two `hermes` calls: plain `timeout`
+    # `-k 5`, the same grace register-mcp.sh's two `hermes` calls carry (only
+    # the grace — that script deliberately does not split 124/137 on elapsed
+    # time, because it has no stamp to protect; the reason is written out at its
+    # own classifier). Plain `timeout`
     # only sends SIGTERM, and an `openclaw` that ignores it — or any surviving
     # grandchild of it — keeps this command substitution's pipe open. Bash
     # blocks reading that pipe until EOF, so the assignment completes when the

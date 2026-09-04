@@ -378,15 +378,24 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     const r = run({ HERMES_CLI_TIMEOUT: "1" });
     const elapsed = Date.now() - started;
     expect(r.status).toBe(0);
-    // 1s ceiling + 5s grace, twice, and nothing waiting on the stub's sleep.
-    expect(elapsed).toBeLessThan(20_000);
+    // Two bounded calls at 1s + a 5s grace each is a 12s FLOOR, and this runs in
+    // a vitest worker pool beside everything else — so the threshold is set
+    // against what it has to discriminate, not tight against the floor. The
+    // unbounded case is two `sleep 30`s, i.e. 60s; anything under 40s proves
+    // the ceiling fired and leaves 28s of headroom for a loaded runner.
+    expect(elapsed).toBeLessThan(40_000);
     // The verdict: UNKNOWN, never the defect.
     expect(r.stdout).toMatch(/NOTE: 'hermes plugins doctor' answered 137/);
     expect(r.stdout).not.toMatch(/did not register its hook/);
     expect(r.stdout).not.toMatch(/WARNING/);
     // The sibling call site reads 137 and 124 alike — every non-zero status
-    // lands in the same arm — so it must still say the honest thing.
-    expect(r.stdout).toContain("could not disable the built-in browser toolset");
+    // lands in the same arm — so it must still say the honest thing, AND carry
+    // the status. That call does the CLI's own load -> save_config on
+    // ~/.hermes/config.yaml, which is why it sits inside the lock: "we
+    // SIGKILLed it mid-write" (137) and "it declined" are very different facts
+    // for whoever is later holding a truncated config, and the brace group that
+    // hides bash's misleading "Killed" notice threw away the only other trace.
+    expect(r.stdout).toContain("could not disable the built-in browser toolset (exit 137)");
     // And the box still got its device tools and its plugin.
     expect(enabledPlugins()).toEqual([PLUGIN]);
     expect((readConfig().mcp_servers as Record<string, unknown>).clawbox).toBeTruthy();

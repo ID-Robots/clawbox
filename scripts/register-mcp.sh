@@ -607,10 +607,19 @@ PY
 # status is unchanged: 137 still reaches the else, 0 still reaches the then.
 # The `plugins doctor` call below needs no such group — bash does not print that
 # notice for a child of a command substitution, and its output is captured.
-if { timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools disable browser >/dev/null 2>&1; } 2>/dev/null; then
+# The STATUS is kept, because the group throws away the only other trace. This
+# call does the CLI's own load -> save_config on ~/.hermes/config.yaml, which is
+# why it sits inside the lock — so "we SIGKILLed it" (137) and "it declined"
+# are very different facts for whoever is later holding a truncated config, and
+# 125 (a bad duration) and 127 (no `timeout`) are different again. One sentence
+# for all four was all the journal had.
+EMAIL_HOOK_BROWSER_RC=0
+{ timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools disable browser >/dev/null 2>&1; } 2>/dev/null \
+  || EMAIL_HOOK_BROWSER_RC=$?
+if [ "$EMAIL_HOOK_BROWSER_RC" = "0" ]; then
   log "built-in browser toolset off; browsing goes through the ClawBox browser_* tools"
 else
-  log "could not disable the built-in browser toolset — continuing"
+  log "could not disable the built-in browser toolset (exit $EMAIL_HOOK_BROWSER_RC) — continuing"
 fi
 
 # ── 5. Prove the EMAIL: hook plugin actually LOADS, every boot. ─────────────
@@ -665,6 +674,13 @@ if [ "$EMAIL_HOOK_INSTALLED" = "1" ]; then
   #
   # Neither code claims the CLI was killed: a child can exit with either itself,
   # and the two are indistinguishable from here.
+  #
+  # NO ELAPSED SPLIT HERE, unlike the OpenClaw twin, and that difference is
+  # deliberate rather than drift. The twin splits 124/137 on the seconds burned
+  # because it has a stamp and a 24 h backoff to protect, and stamping a cheap
+  # kill costs a day of blindness. This script has neither: it runs once per
+  # web-server boot, fire-and-forget, and asks again the next time regardless.
+  # With nothing to protect there is nothing for the split to decide.
   if [ "$EMAIL_HOOK_DOCTOR_RC" = "124" ] || [ "$EMAIL_HOOK_DOCTOR_RC" = "137" ]; then
     log "NOTE: 'hermes plugins doctor' answered $EMAIL_HOOK_DOCTOR_RC — the ${HERMES_CLI_TIMEOUT}s ceiling (SIGTERM, then SIGKILL 5s later), a kill from outside, or the CLI's own exit code — so $EMAIL_HOOK_PLUGIN is installed and enabled but whether its hook registered is unknown here. hermes had printed: $EMAIL_HOOK_DETAIL"
   else

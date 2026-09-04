@@ -54,11 +54,13 @@ describe("both writers share ONE lock file", () => {
     // before BOTH — "before the CLI call" alone was satisfied by taking it one
     // line above, leaving the reconcile unprotected.
     const reconcile = REGISTER_SRC.search(/^export CLAWBOX_MCP_HERMES_CONFIG=/m);
-    // Anchored at column 0 and on the binary, but NOT on what wraps the call:
-    // it is `if timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools disable
-    // browser` today, and pinning that wrapper here made this marker miss the
-    // moment the call was bounded — which is what the -1 guard below caught.
-    const cliCall = REGISTER_SRC.search(/^if .*"\$HERMES_BIN" tools disable browser/m);
+    // Anchored at column 0 and on the binary, and on NOTHING that wraps the
+    // call. The wrapper has now moved twice — `if "$HERMES_BIN" …`, then
+    // `if timeout -k 5 … "$HERMES_BIN" …`, then a brace group whose status is
+    // captured — and each time a marker that pinned the wrapper stopped
+    // matching. Both times the -1 guard below is what caught it, which is the
+    // argument for keeping the marker as loose as the ordering claim needs.
+    const cliCall = REGISTER_SRC.search(/^.*"\$HERMES_BIN" tools disable browser/m);
     // Every marker must have been FOUND before their order means anything: a
     // `search` miss returns -1, and -1 < anything, so an ordering assertion over
     // a moved marker passes while checking nothing.
@@ -87,11 +89,20 @@ describe("both writers share ONE lock file", () => {
     // outside the lock inherits fd 9 just the same, because the `exec 9>` that
     // opens it is inherited by every later child.
     //
-    // An INVOCATION is `"$HERMES_BIN" <word>` — a subcommand or a flag; the
-    // `[ ! -x "$HERMES_BIN" ]` guard and the `HERMES_BIN=` assignment are not,
-    // and must not be demanded to carry a timeout.
+    // An INVOCATION is the binary followed by a word — a subcommand or a flag.
+    // Every spelling of the expansion counts, because "EVERY hermes call" is
+    // what this claims: `"$HERMES_BIN"`, `${HERMES_BIN}`, and the bare
+    // `$HERMES_BIN` a future edit might reach for. The two things that are NOT
+    // invocations are excluded by name rather than by an accident of quoting,
+    // so a change to either fails here instead of quietly widening the sweep:
+    // the `[ ! -x "$HERMES_BIN" ]` executable guard and the `HERMES_BIN=`
+    // assignment.
     const calls = REGISTER_SRC.split("\n").filter(
-      (line) => /"\$HERMES_BIN"\s+[a-z-]/.test(line) && !/^\s*#/.test(line),
+      (line) =>
+        /\$\{?HERMES_BIN\}?"?\s+[a-z-]/.test(line)
+        && !/^\s*#/.test(line)
+        && !/\[\s*!?\s*-[a-z]\s+"?\$\{?HERMES_BIN/.test(line)
+        && !/^\s*HERMES_BIN=/.test(line),
     );
     expect(calls.length).toBeGreaterThan(0);
     for (const line of calls) {
