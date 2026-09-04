@@ -170,7 +170,11 @@ export async function refreshHermesImageTools(before: boolean, after: boolean): 
   //    installed into a process that had already scanned for plugins. Only a
   //    restart re-scans, and the bounce respawns the MCP child with it, so no
   //    reload is wanted after this one.
-  if (await bounceHermesDashboard()) {
+  // Only "restarted" is the dashboard drawing again. "pending" means it is on
+  // its way back and this call cannot prove it, which is the same as a failure
+  // HERE: the next family pays for its own `reload.mcp`, a redundant respawn
+  // rather than anything the owner sees.
+  if ((await bounceHermesDashboard()) === "restarted") {
     console.log("[hermes/image-refresh] bounced the Hermes dashboard so it picks up the image backend");
     // The bounce takes the MCP children down with the dashboard and brings them
     // back, so every family's tool list is rebuilt — the same effect a reload

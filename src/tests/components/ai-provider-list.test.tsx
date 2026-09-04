@@ -26,7 +26,7 @@ const ROWS = [
 
 let posts: { url: string; body: unknown }[] = [];
 
-function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string }; locale?: string } = {}) {
+function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string }; locale?: string; defaultAnswer?: { body: unknown; status?: number } } = {}) {
   posts = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -46,6 +46,7 @@ function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string
     }
     if (url === "/setup-api/providers/default" && init?.method === "POST") {
       posts.push({ url, body: JSON.parse(String(init.body)) });
+      if (opts.defaultAnswer) return json(opts.defaultAnswer.body, opts.defaultAnswer.status ?? 200);
       return json({ ok: true });
     }
     return json({ error: "unexpected" }, 404);
@@ -121,6 +122,43 @@ describe("AiProviderList", () => {
     expect(screen.queryByTestId("ai-provider-make-default-anthropic")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId("ai-provider-make-default-openai"));
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/providers/default", body: { provider: "openai" } }));
+  });
+
+  /**
+   * TASK-608. On OpenClaw, making a provider the default restarts the gateway,
+   * and the gateway does not always bind again inside the route's readiness
+   * budget. The default IS written; only the restart is still in flight, and
+   * the route says so with `ok` plus a `warning`.
+   *
+   * Read as a failure this is the worst of both: the star stays on the old
+   * provider, nothing tells the chat header or the capability probe, and the
+   * owner clicks again and pays a second restart — over a change that landed.
+   * So the warning is a notice, and everything the success path does still runs.
+   */
+  it("treats a default whose gateway is still coming back as saved, with a notice", async () => {
+    stubFetch(ROWS, { defaultAnswer: { body: {
+      ok: true,
+      provider: "openai",
+      model: "openai/gpt-5",
+      warning: "Saved, but the gateway did not come back — the new model applies once it is serving again.",
+    } } });
+    renderList();
+    fireEvent.click(await screen.findByTestId("ai-provider-make-default-openai"));
+
+    // waitFor on the TEXT, not on the node: the region is mounted in every
+    // state (so the announcement is a text change rather than a node
+    // insertion), which means finding it proves nothing on its own.
+    await waitFor(() =>
+      expect(screen.getByTestId("ai-provider-default-warning")).toHaveTextContent("the gateway did not come back"));
+    // A notice, not the red failure line: `role="status"` and no `alert`.
+    expect(screen.getByTestId("ai-provider-default-warning")).toHaveAttribute("role", "status");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    // ...and the panel still re-read the box, which is what repaints the star.
+    await waitFor(() => {
+      const statusReads = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .filter((c) => String(c[0]).startsWith("/setup-api/providers/status"));
+      expect(statusReads.length).toBeGreaterThanOrEqual(2);
+    });
   });
 
   it("shows the box's refusal in its own words", async () => {

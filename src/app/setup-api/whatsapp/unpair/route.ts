@@ -54,7 +54,10 @@ export async function POST() {
       } catch (err) {
         logoutError = err;
       }
-      await restartGateway().catch((err) => {
+      // No readiness wait: the answer is logged and dropped, and the channel
+      // status is re-read below anyway — so the poll would only add up to the
+      // whole budget to an unpair that has already done its work.
+      await restartGateway({ awaitReady: false }).catch((err) => {
         console.error("[whatsapp/unpair] gateway restart failed:", err);
       });
       // The config write and the logout each dropped the status memo already;

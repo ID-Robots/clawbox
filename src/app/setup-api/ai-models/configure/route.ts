@@ -5,6 +5,7 @@ import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
 import { getAll, setMany } from "@/lib/config-store";
+import { readSetupGateFacts } from "@/lib/route-auth";
 import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
@@ -26,6 +27,7 @@ import {
   openclawIsAbsent,
   OpenclawUnavailableError,
   type OpenClawConfig,
+  GatewayNotReadyError,
 } from "@/lib/openclaw-config";
 import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { getActiveHarness } from "@/lib/harness";
@@ -1474,7 +1476,12 @@ type GatewayState =
   | "untouched"
   /** Stopped for `doctor --fix`; no later step has restarted it. */
   | "stopped-for-doctor"
-  /** Step 9 issued its restart — it came up, or step 9 answered its own 502. */
+  /**
+   * Step 9 issued its restart. It came up; or it had not finished coming up and
+   * step 9 answered its own 200 with a warning; or the restart was refused and
+   * step 9 answered its own 502. Either way the gateway is not left stopped, so
+   * the wrapper below has nothing to restore.
+   */
   | "restart-issued";
 
 /** Shared by reference: `configureModel` has too many exits to return it. */
@@ -1496,7 +1503,10 @@ export async function POST(request: Request) {
     // the failure this whole tracker exists to prevent. Restore, then let the
     // original throw become Next's generic 500.
     if (gateway.state === "stopped-for-doctor") {
-      await restartGateway().catch((restartErr) => {
+      // No readiness wait: this answer is logged and dropped — the original
+      // throw becomes Next's 500 either way — so waiting out the budget would
+      // only add blocking time to a request that has already failed.
+      await restartGateway({ awaitReady: false }).catch((restartErr) => {
         console.error(
           "[configure] Gateway restart after an unhandled save failure also failed:",
           restartErr instanceof Error ? logSafe(restartErr.message) : restartErr,
@@ -1511,7 +1521,13 @@ export async function POST(request: Request) {
   // it runs AFTER the rollback archived the legacy file, so the gateway does
   // not boot straight into the AuthProfileMigrationRequired it would have hit.
   try {
-    await restartGateway();
+    // No readiness wait: the only question this restore asks is "did systemd
+    // take the restart", which is what the hint below turns on. Waiting for the
+    // port would widen that hint to "the gateway did not bind inside 30 s" —
+    // the ordinary case on a cold box — and tell the owner to go press Restart
+    // on a gateway that is already coming back, while adding the whole budget
+    // to a request that has already failed.
+    await restartGateway({ awaitReady: false });
     return response;
   } catch (err) {
     // A runtime mask (an update in flight) refuses the restart; never unmask
@@ -2854,24 +2870,71 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
 
     // 9. Restart OpenClaw gateway so it picks up the new auth profile and model
     gateway.state = "restart-issued";
+    let gatewayWarning: string | undefined;
+    // `setup_complete` flips at the very end of the wizard
+    // (/setup-api/setup/complete), so "not true" is exactly "the first-run
+    // wizard is still driving this box".
+    //
+    // Read through route-auth, NOT through the config-store snapshot above.
+    // `readConfig()` there is fail-OPEN — a damaged config.json reads as `{}` —
+    // and route-auth exists precisely to say that must not decide this key: it
+    // fails CLOSED, so an unreadable config is "provisioned", which is also
+    // what `/setup-api/setup/status` and middleware serve. Fail open here and a
+    // box whose config.json is truncated renders Settings while this route
+    // treats it as the wizard and silently drops the notice Settings is the one
+    // branch that renders. Re-read per request; nothing is cached.
+    const firstRunWizard = !readSetupGateFacts().setupComplete;
     try {
-      await restartGateway();
+      // The readiness answer is worth waiting for only where something reads
+      // it, and in the wizard nothing does: AIModelsStep's wizard branch logs
+      // `warning` and calls onNext() (Settings is the branch that renders it),
+      // and llamacpp/install, clawai/poll and useOllamaModels all drop it too.
+      // The cost is not theoretical — e2e-install measured THIS request at
+      // 52 894 ms on a cold first boot: ~23 s of config writes and `systemctl
+      // restart`, then the whole 30 s budget, expired. So first boot pays the
+      // full budget for a value with no consumer, on the one path where the
+      // budget is not even enough to answer. Skip the port poll there, exactly
+      // as /setup-api/system/hostname does for its own discarded answer.
+      //
+      // Only the poll is skipped, never the restart: a REFUSED restart still
+      // throws from the exec below and still 502s, in the wizard too. And a
+      // gateway that never comes back is not silent either — the chat the
+      // wizard hands off to cannot open a session without one.
+      await restartGateway({ awaitReady: !firstRunWizard });
     } catch (err) {
       console.error("[configure] Gateway restart failed after configuring", ocProvider, ":", err instanceof Error ? logSafe(err.message) : err);
-      return NextResponse.json(
-        { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
-        { status: 502 },
-      );
+      // A gateway that has not finished coming back is NOT a failed configure.
+      // The provider, the credential and the model are all written by the time
+      // this runs; only the wait gave up. This 502 predates the readiness wait,
+      // when it could fire only if `systemctl restart` itself failed — the wait
+      // widened it to "the port did not open inside 30 s", which is a state the
+      // box recovers from on its own, and reporting it as a failure stops the
+      // first-boot wizard dead at the AI step and tells the owner to reboot a
+      // box that needed ten more seconds.
+      //
+      // A restart that was REFUSED is a different fact: nothing is coming, and
+      // the owner does have to act. That one keeps the 502.
+      if (!(err instanceof GatewayNotReadyError)) {
+        return NextResponse.json(
+          { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
+          { status: 502 },
+        );
+      }
+      gatewayWarning = "Saved, but the gateway has not finished restarting — the new model applies once it is serving again.";
     }
 
     // Configuration fully applied — now consume the OAuth handoff file (if any).
-    // Deferring the unlink to here means a transient failure above returned
-    // early with the file intact, so the client can retry within the TTL.
+    // Deferring the unlink to here means a failure that returned EARLY left the
+    // file intact, so the client can retry within the TTL. A gateway that has
+    // not finished restarting is not one of those: it falls through to here and
+    // consumes the file, which is right — the configure landed, and a retry
+    // would redo a completed save.
     if (pendingHandoffTokensPath) {
       await fs.unlink(pendingHandoffTokensPath).catch(() => {});
     }
 
-    return NextResponse.json({ success: true, ...(chatgptOrderWarning ? { warning: chatgptOrderWarning } : {}) });
+    const warning = [chatgptOrderWarning, gatewayWarning].filter(Boolean).join(" ");
+    return NextResponse.json({ success: true, ...(warning ? { warning } : {}) });
   } catch (err) {
     // Never surface the raw error: it can carry CLI internals and filesystem
     // paths. Log it server-side for diagnosis and return a generic, actionable

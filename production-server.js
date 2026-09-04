@@ -12,9 +12,20 @@ const path = require("path");
 const WebSocket = require("ws");
 const { attachAccessLog } = require("./scripts/access-log.js");
 
-const GATEWAY_PORT = parseInt(process.env.GATEWAY_PORT || "18789", 10);
-const TERMINAL_WS_PORT = parseInt(process.env.TERMINAL_WS_PORT || "3006", 10);
-const NOVNC_WS_PORT = parseInt(process.env.NOVNC_WS_PORT || "6080", 10);
+// Same rule as envPort() in src/lib/port-probe.ts, written out because this
+// entry point is standalone CommonJS and cannot import the TypeScript helper:
+// an integer in 1-65535, or the default. `parseInt` alone yields NaN on a typo
+// and lets `-1` / `70000` through, and every one of those makes `net.connect`
+// throw ERR_SOCKET_BAD_PORT on the first proxied request rather than falling
+// back to the default the `||` promises.
+function envPort(value, fallback) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : fallback;
+}
+
+const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
+const TERMINAL_WS_PORT = envPort(process.env.TERMINAL_WS_PORT, 3006);
+const NOVNC_WS_PORT = envPort(process.env.NOVNC_WS_PORT, 6080);
 const IS_DEV = process.env.NODE_ENV === "development";
 
 // Path prefixes that the production server routes to a non-gateway upstream.

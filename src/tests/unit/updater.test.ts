@@ -17,8 +17,14 @@ vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(),
 }));
 
-vi.mock("@/lib/port-probe", () => ({
-  isPortOpen: vi.fn(),
+// `waitForGateway` is the readiness wait, and it is what these tests drive: the
+// polling loop lives in port-probe now (shared with restartGateway's own wait),
+// and mocking the whole wait keeps each case a single "is the gateway up at
+// this point in the sequence?" predicate rather than a call sequence a fast
+// poll could consume. The loop itself is covered in port-probe.test.ts.
+vi.mock("@/lib/port-probe", async (orig) => ({
+  ...(await orig<typeof import("@/lib/port-probe")>()),
+  waitForPortOpen: vi.fn(),
 }));
 
 // The Hermes version probe goes through the shared CLI wrapper, so the wrapper
@@ -27,7 +33,7 @@ const { mockRunHermesCli } = vi.hoisted(() => ({ mockRunHermesCli: vi.fn() }));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: mockRunHermesCli }));
 
 import { get, set, setMany } from "@/lib/config-store";
-import { isPortOpen } from "@/lib/port-probe";
+import { waitForPortOpen } from "@/lib/port-probe";
 import { deferred } from "@/tests/helpers/deferred";
 
 const mockGet = vi.mocked(get);
@@ -36,7 +42,7 @@ const mockSetMany = vi.mocked(setMany);
 const mockExec = vi.mocked(childProcess.exec);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockReadFile = vi.mocked(fs.readFile);
-const mockIsPortOpen = vi.mocked(isPortOpen);
+const mockGatewayUp = vi.mocked(waitForPortOpen);
 let execFileFallbackResults: Record<string, { stdout: string; stderr: string } | Error> = {};
 
 function setupExecMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
@@ -158,7 +164,7 @@ describe("updater", () => {
     mockSet.mockResolvedValue();
     mockSetMany.mockResolvedValue();
     mockReadFile.mockRejectedValue(new Error("ENOENT"));
-    mockIsPortOpen.mockResolvedValue(true);
+    mockGatewayUp.mockResolvedValue(true);
 
     setupExecMock({
       "ls-remote": { stdout: "abc123\trefs/tags/v1.0.0\ndef456\trefs/tags/v1.1.0\n", stderr: "" },
@@ -543,7 +549,7 @@ describe("updater", () => {
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
       mockReadFile.mockRejectedValue(new Error("ENOENT"));
-      mockIsPortOpen.mockResolvedValue(false);
+      mockGatewayUp.mockResolvedValue(false);
       updater = await import("@/lib/updater");
 
       updater.resetUpdateState();
@@ -580,7 +586,7 @@ describe("updater", () => {
       mockReadFile.mockRejectedValue(new Error("ENOENT"));
       // Health is impossible until BOTH explicit consent and the later system
       // restart occurred. Merely invoking pre-start must never make this green.
-      mockIsPortOpen.mockImplementation(async () => {
+      mockGatewayUp.mockImplementation(async () => {
         const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
           `${cmd} ${(args as string[]).join(" ")}`,
         );
@@ -670,7 +676,7 @@ describe("updater", () => {
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
       mockReadFile.mockRejectedValue(new Error("ENOENT"));
-      mockIsPortOpen.mockImplementation(async () =>
+      mockGatewayUp.mockImplementation(async () =>
         mockExecFile.mock.calls.some(([cmd, args]) =>
           cmd === "/usr/bin/sudo"
             && (args as string[]).join(" ").includes("systemctl restart clawbox-gateway.service"),
@@ -755,7 +761,7 @@ describe("updater", () => {
         }
         throw new Error("ENOENT");
       });
-      mockIsPortOpen.mockImplementation(async () =>
+      mockGatewayUp.mockImplementation(async () =>
         mockExecFile.mock.calls.some(([cmd, args]) =>
           cmd === "/usr/bin/sudo"
             && (args as string[]).join(" ").includes("systemctl restart clawbox-gateway.service"),
@@ -843,7 +849,7 @@ describe("updater", () => {
       // in these tests), so the old sequence could be fully consumed by the very
       // first poll — reporting recovery BEFORE quarantine ran and leaving no
       // /bin/bash call to assert on. That made this test flaky (~1 in 3).
-      mockIsPortOpen.mockImplementation(async () =>
+      mockGatewayUp.mockImplementation(async () =>
         mockExecFile.mock.calls.some(([cmd]) => cmd === "/bin/bash"),
       );
       updater = await import("@/lib/updater");
@@ -1381,7 +1387,7 @@ describe("updater", () => {
 
     it("completes a hermes update and records it as completed", async () => {
       // The gateway is closed on this SKU — the old list could not get here.
-      mockIsPortOpen.mockResolvedValue(false);
+      mockGatewayUp.mockResolvedValue(false);
       const fresh = await loadUpdater("hermes");
 
       // Resume past `restart` so the test doesn't have to drive the rebuild

@@ -26,7 +26,7 @@ import type { ProviderStatusRow } from "@/lib/provider-status";
 
 export default function AiProviderList() {
   const { t } = useT();
-  const { summary, loading, error, settingDefault, defaultError, setDefault, refresh } = useProviderStatus();
+  const { summary, loading, error, settingDefault, defaultError, defaultWarning, setDefault, refresh } = useProviderStatus();
   const [toggling, setToggling] = useState<string | null>(null);
   const [toggleError, setToggleError] = useState<string | null>(null);
 
@@ -96,6 +96,27 @@ export default function AiProviderList() {
           {defaultError ?? toggleError}
         </div>
       )}
+      {/* A default that WAS written, with the box qualifying it — the gateway
+          restart had not finished when the route answered, or it was refused
+          by a unit an update has masked. Amber and `status`, never the red
+          `alert` above: the change landed either way, and a failure here sends
+          the owner to click it again for another restart.
+
+          MOUNTED IN EVERY STATE, for the same reason the checking region below
+          is: a live region that appears together with its text announces a node
+          insertion, which assistive tech may drop entirely — and this sentence
+          is the only thing on screen saying the change landed at all. The
+          chrome is what is conditional, not the node. */}
+      <div
+        role="status"
+        aria-live="polite"
+        data-testid="ai-provider-default-warning"
+        className={defaultWarning
+          ? "mb-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-200"
+          : ""}
+      >
+        {defaultWarning ?? ""}
+      </div>
 
       {/* Three grey bars are indistinguishable from a hung page, and the wait
           they stand for is the unit's own start window — up to

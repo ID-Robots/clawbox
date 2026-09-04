@@ -30,6 +30,16 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfigStrict: vi.fn(async () => ({})),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
+  // The route tells "the gateway has not come back" apart from every other
+  // restart failure with `instanceof`, so the mock owes a real class: a plain
+  // `vi.fn()` here would make the check itself throw, and leaving the export
+  // out makes it `instanceof undefined`.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
   runOpenclawConfigSet: configSetMock,
   // The route writes the primary in a batch now. Record every assignment of
   // a batch on `runOpenclawConfigSet` too, the way config-set-calls flattens
@@ -57,7 +67,7 @@ vi.mock("@/lib/sqlite-store", () => ({
 }));
 
 import { getAll } from "@/lib/config-store";
-import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { GatewayNotReadyError, inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { promisify } from "util";
@@ -280,6 +290,56 @@ describe("/setup-api/chat/model", () => {
     expect(restartGateway).toHaveBeenCalled();
     expect(body.activeSource).toBe("local");
     expect(body.activeLabel).toBe("Gemma 4 Local");
+  });
+
+  it("answers 502 when the switch landed but the gateway did not come back", async () => {
+    // The primary is already written when the restart runs, so a gateway that
+    // never starts listening again is neither the 200 this route used to give
+    // (the box still answers on the OLD model) nor the 500 "Failed to switch
+    // chat model" the outer catch would give — that would be a false failure
+    // over a change that IS on disk.
+    vi.mocked(restartGateway).mockRejectedValue(new GatewayNotReadyError());
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "llamacpp/gemma4-e2b-it-q4_0" }),
+    }));
+    const body = await response.json();
+    errorSpy.mockRestore();
+
+    expect(response.status).toBe(502);
+    expect(body.warning).toMatch(/did not come back/i);
+    // The switch still happened: the body describes the new model, not an error.
+    expect(body.error).toBeUndefined();
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      "agents.defaults.model.primary",
+      "llamacpp/gemma4-e2b-it-q4_0",
+    ]);
+  });
+
+  it("answers 502, not 500, when the restart is refused outright", async () => {
+    // A masked unit (an update in flight) or a denied sudo is still not a failed
+    // switch: the primary is on disk either way, and 500 "Failed to switch chat
+    // model" over a written model is the same false failure by another route.
+    // The warning distinguishes it, because the owner's next step differs.
+    vi.mocked(restartGateway).mockRejectedValue(new Error("Unit is masked"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "llamacpp/gemma4-e2b-it-q4_0" }),
+    }));
+    const body = await response.json();
+    errorSpy.mockRestore();
+
+    expect(response.status).toBe(502);
+    expect(body.warning).toMatch(/could not be restarted/i);
+    expect(body.error).toBeUndefined();
+    // Never the raw exec text: it carries unit and path internals.
+    expect(JSON.stringify(body)).not.toContain("Unit is masked");
   });
 
   it("does not arm the Codex runtime for a non-Codex model", async () => {

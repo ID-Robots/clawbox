@@ -15,9 +15,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const cliMock = vi.hoisted(() => vi.fn());
 const execFileMock = vi.hoisted(() => vi.fn());
+const waitForPortOpenMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("child_process", () => ({ execFile: execFileMock }));
+vi.mock("@/lib/port-probe", async (orig) => ({
+  ...(await orig<typeof import("@/lib/port-probe")>()),
+  waitForPortOpen: waitForPortOpenMock,
+}));
 
 import {
   bounceHermesDashboard,
@@ -25,14 +30,43 @@ import {
   hermesDashboardUnitState,
 } from "@/lib/hermes-dashboard-control";
 
+/**
+ * Answer every `systemctl show` this module makes — the restart policy, the
+ * unit's main PID and its state — in systemd's own `Key=Value` form, which is
+ * what `showUnit` parses. `pids` is consumed in order, so a case can say "this
+ * process before the stop, that one after". `unit` is the state read: left out,
+ * that query answers nothing recognisable, which is the "cannot be asked" case.
+ */
+function systemd({ restart = "always", pids = ["4242", "5353"], unit }: {
+  restart?: string;
+  pids?: string[];
+  unit?: Record<string, string>;
+} = {}): void {
+  const remaining = [...pids];
+  execFileMock.mockImplementation((_bin: string, args: string[], _opts: unknown, cb: unknown) => {
+    const done = cb as (e: Error | null, out: { stdout: string; stderr: string }) => void;
+    const property = (args as string[]).find((a) => a.startsWith("--property=")) ?? "";
+    if (property === "--property=MainPID") {
+      const pid = (remaining.length > 1 ? remaining.shift() : remaining[0]) ?? "0";
+      done(null, { stdout: `MainPID=${pid}\n`, stderr: "" });
+      return;
+    }
+    // Matched on the property NAME, not on the whole list, so adding a property
+    // to the state read does not silently route it to the restart answer.
+    if (unit && property.includes("ActiveState")) {
+      done(null, {
+        stdout: Object.entries(unit).map(([k, v]) => `${k}=${v}`).join("\n") + "\n",
+        stderr: "",
+      });
+      return;
+    }
+    done(null, { stdout: `Restart=${restart}\n`, stderr: "" });
+  });
+}
+
 /** `systemctl show … --property=Restart` prints `Restart=value`. */
 function systemdRestartPolicy(value: string): void {
-  execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: unknown) => {
-    (cb as (e: Error | null, out: { stdout: string; stderr: string }) => void)(null, {
-      stdout: `Restart=${value}\n`,
-      stderr: "",
-    });
-  });
+  systemd({ restart: value });
 }
 
 /** The argv of the `systemctl` read, so the query itself can be asserted. */
@@ -44,13 +78,14 @@ function systemctlCall(): [string, string[]] {
 beforeEach(() => {
   cliMock.mockReset();
   execFileMock.mockReset();
+  waitForPortOpenMock.mockReset().mockResolvedValue(true);
   cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
   systemdRestartPolicy("always");
 });
 
 describe("bounceHermesDashboard", () => {
   it("stops the dashboard when systemd promises to start it again", async () => {
-    await expect(bounceHermesDashboard()).resolves.toBe(true);
+    await expect(bounceHermesDashboard()).resolves.toBe("restarted");
     expect(cliMock).toHaveBeenCalledWith(["dashboard", "--stop"], expect.anything());
   });
 
@@ -74,7 +109,9 @@ describe("bounceHermesDashboard", () => {
     // stop would leave the owner with no chat at all, which is far worse than
     // whatever staleness the caller was trying to clear.
     systemdRestartPolicy("no");
-    await expect(bounceHermesDashboard()).resolves.toBe(false);
+    // "failed", not "pending": nothing has been asked to restart, so nothing is
+    // coming back on its own and the caller's owner DOES have to act.
+    await expect(bounceHermesDashboard()).resolves.toBe("failed");
     expect(cliMock).not.toHaveBeenCalled();
   });
 
@@ -84,18 +121,212 @@ describe("bounceHermesDashboard", () => {
     execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: unknown) => {
       (cb as (e: Error) => void)(new Error("no such unit"));
     });
-    await expect(bounceHermesDashboard()).resolves.toBe(false);
+    await expect(bounceHermesDashboard()).resolves.toBe("failed");
     expect(cliMock).not.toHaveBeenCalled();
   });
 
-  it("reports false when the stop itself did not take", async () => {
+  it("reports a failure when the stop itself did not take", async () => {
     cliMock.mockResolvedValue({ code: 1, stdout: "", stderr: "unkillable" });
-    await expect(bounceHermesDashboard()).resolves.toBe(false);
+    await expect(bounceHermesDashboard()).resolves.toBe("failed");
   });
 
   it("does not throw when the CLI is missing entirely", async () => {
     cliMock.mockRejectedValue(new Error("ENOENT"));
-    await expect(bounceHermesDashboard()).resolves.toBe(false);
+    await expect(bounceHermesDashboard()).resolves.toBe("failed");
+  });
+
+  /**
+   * A stop is not a bounce. `Restart=always` promises systemd will start the
+   * dashboard again — it does not promise it came back, and the callers act on
+   * the answer: a ClawKeep restore reports the restored state.db is being
+   * served, and the image refresh reports the box can draw. Both were true
+   * only once the dashboard was listening again.
+   */
+  it("answers restarted only once the dashboard is listening again", async () => {
+    waitForPortOpenMock.mockResolvedValue(false);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // "pending", not "failed". The stop exited 0 over a Restart=always unit, so
+    // the restart HAS been taken and systemd owns what happens next; the socket
+    // simply has not opened inside the budget. ClawKeep's restore card renders
+    // the two differently, and prescribing `systemctl restart` for this one
+    // kills a dashboard mid-start.
+    await expect(bounceHermesDashboard()).resolves.toBe("pending");
+    errorSpy.mockRestore();
+  });
+
+  it("probes the dashboard's own socket", async () => {
+    await bounceHermesDashboard();
+    const [port, host] = waitForPortOpenMock.mock.calls[0];
+    // 127.0.0.2:9119 — config/clawbox-hermes-dashboard.service's ExecStart.
+    expect(port).toBe(9119);
+    expect(host).toBe("127.0.0.2");
+  });
+
+  it("requires a DIFFERENT process, not merely an open port", async () => {
+    // The port cannot tell the outgoing dashboard from the incoming one, and
+    // between our stop and the unit's RestartSec=5 there is no instant where it
+    // could: a probe that lands early finds the process we just killed. systemd
+    // knows which process is the unit's, so it is asked.
+    systemd({ pids: ["4242", "4242"] });
+    process.env.HERMES_DASHBOARD_WAIT_MS = "40";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // finally, not a trailing statement: a failing assertion would otherwise
+    // skip the cleanup and leak a 40 ms dashboard budget into every later test
+    // in this worker, turning one red into a cascade nowhere near its cause.
+    try {
+      // No `unit` in the mock, so the state read answers nothing recognisable —
+      // "cannot be asked", which stays `pending`. The two cases below are the
+      // ones where systemd DOES answer.
+      await expect(bounceHermesDashboard()).resolves.toBe("pending");
+      expect(waitForPortOpenMock).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+      delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    }
+  });
+
+  /**
+   * A unit systemd has GIVEN UP on is `failed`, not `pending`.
+   *
+   * No new MainPID inside the budget, against `RestartSec=5`, is not ordinarily
+   * slowness — it is systemd refusing to try again: a dashboard that crash-looped
+   * through `StartLimitBurst` rejects every restart for the rest of the interval.
+   * This module is unprivileged and has no `reset-failed` to clear that, unlike
+   * the OpenClaw path (`openclaw-config.ts`), so nothing here is going to change
+   * it either. Calling it `pending` puts "Nothing to do." on ClawKeep's restore
+   * card over a dashboard that is never coming back — the exact false success
+   * the three-valued outcome was introduced to stop.
+   *
+   * The discriminator is systemd's own, asked through the read this module
+   * already has: `ActiveState=failed` is `hermesDashboardUnitState() === "down"`.
+   */
+  it("answers failed when systemd has stopped trying to restart the unit", async () => {
+    systemd({
+      pids: ["4242", "4242"],
+      unit: { LoadState: "loaded", ActiveState: "failed", SubState: "failed" },
+    });
+    process.env.HERMES_DASHBOARD_WAIT_MS = "40";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(bounceHermesDashboard()).resolves.toBe("failed");
+    } finally {
+      errorSpy.mockRestore();
+      delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    }
+  });
+
+  it("keeps a unit that is merely between runs as pending", async () => {
+    // `activating/auto-restart` is the `RestartSec` gap — the state a HEALTHY
+    // bounce parks in for five seconds. Escalating there would report a failure
+    // over a restart that is on its way and send the owner to `systemctl
+    // restart` a dashboard mid-start, which is the same lie the other way round.
+    systemd({
+      pids: ["4242", "4242"],
+      unit: { LoadState: "loaded", ActiveState: "activating", SubState: "auto-restart" },
+    });
+    process.env.HERMES_DASHBOARD_WAIT_MS = "40";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(bounceHermesDashboard()).resolves.toBe("pending");
+    } finally {
+      errorSpy.mockRestore();
+      delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    }
+  });
+
+  it("reads the outgoing PID before it stops anything", async () => {
+    await bounceHermesDashboard();
+    const mainPidQueries = execFileMock.mock.calls.filter(([, args]) =>
+      (args as string[]).includes("--property=MainPID"),
+    );
+    // One before the stop to name the outgoing process, at least one after.
+    expect(mainPidQueries.length).toBeGreaterThanOrEqual(2);
+    expect(mainPidQueries[0][1]).toContain("clawbox-hermes-dashboard.service");
+  });
+
+  /**
+   * ONE budget for both halves, which is what the module's own doc block
+   * promises and what makes 45 s a safe number: the bounce runs synchronously
+   * inside three Hermes request routes that can reach the owner through
+   * cloudflared, whose edge cuts a response at 100 s. Two independent 45 s
+   * waits is a 90 s ceiling — inside the edge only by 10 s, and a 90 s spinner
+   * where the file says 45.
+   */
+  it("spends ONE budget across both halves, not one each", async () => {
+    const budgetMs = 300;
+    const readDelayMs = 120;
+    process.env.HERMES_DASHBOARD_WAIT_MS = String(budgetMs);
+    try {
+      // Each systemd read costs real time, and the replacement PID only shows
+      // up on the third one — so the first half eats the whole budget and the
+      // second half must be left with none of it.
+      const pids = ["4242", "4242", "5353"];
+      execFileMock.mockImplementation((_bin: string, args: string[], _opts: unknown, cb: unknown) => {
+        const done = cb as (e: Error | null, out: { stdout: string; stderr: string }) => void;
+        const property = (args as string[]).find((a) => a.startsWith("--property=")) ?? "";
+        if (property !== "--property=MainPID") {
+          done(null, { stdout: "Restart=always\n", stderr: "" });
+          return;
+        }
+        const pid = (pids.length > 1 ? pids.shift() : pids[0]) ?? "0";
+        setTimeout(() => done(null, { stdout: `MainPID=${pid}\n`, stderr: "" }), readDelayMs);
+      });
+
+      let probeStartedAt = 0;
+      waitForPortOpenMock.mockImplementation(async () => {
+        probeStartedAt = Date.now();
+        return true;
+      });
+
+      // Measured from the stop, which is where the shared deadline starts — not
+      // from the call, so the two `systemctl show` reads before it cannot push a
+      // loaded CI worker over the tolerance and turn this red for the wrong
+      // reason. The tolerance then only has to absorb scheduler jitter between
+      // the stop resolving and the deadline being taken.
+      let deadlineStartedAt = 0;
+      cliMock.mockImplementation(async () => {
+        deadlineStartedAt = Date.now();
+        return { code: 0, stdout: "", stderr: "" };
+      });
+
+      await expect(bounceHermesDashboard()).resolves.toBe("restarted");
+
+      const [, , options] = waitForPortOpenMock.mock.calls[0] as [number, string, { timeoutMs: number }];
+      // The budget the socket half was handed, plus what the PID half already
+      // spent, may not exceed the ONE budget the whole bounce has. Two separate
+      // budgets put this at roughly 2x.
+      expect((probeStartedAt - deadlineStartedAt) + options.timeoutMs)
+        .toBeLessThanOrEqual(budgetMs + 150);
+    } finally {
+      delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    }
+  });
+
+  /**
+   * The same guard `waitForPortOpen` carries, for the same reason: this budget
+   * comes from `Number(process.env…)` too. `Number("soon")` is NaN, and
+   * `Date.now() + NaN` is NaN — every `remaining <= 0` comparison is then
+   * false, `Math.min(500, NaN)` is NaN, and `setTimeout(_, NaN)` clamps to
+   * 1 ms. The replacement wait would never return and would fork a
+   * `systemctl show` per iteration for the life of the process.
+   */
+  it("falls back to the built-in budget when the wait override is malformed", async () => {
+    process.env.HERMES_DASHBOARD_WAIT_MS = "soon";
+    try {
+      systemd({ pids: ["4242", "5353"] });
+      await expect(bounceHermesDashboard()).resolves.toBe("restarted");
+      const [, , options] = waitForPortOpenMock.mock.calls[0] as [number, string, { timeoutMs: number }];
+      expect(Number.isFinite(options.timeoutMs)).toBe(true);
+    } finally {
+      delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    }
+  });
+
+  it("counts a respawn even when the unit had no running process to begin with", async () => {
+    // A dashboard already down (crashed, mid-RestartSec) shows MainPID 0. The
+    // replacement is still a real respawn, and `null !== 6464` says so.
+    systemd({ pids: ["0", "6464"] });
+    await expect(bounceHermesDashboard()).resolves.toBe("restarted");
   });
 });
 

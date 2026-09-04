@@ -23,6 +23,15 @@ vi.mock("@/lib/openclaw-config", () => ({
   runOpenclawConfigSetBatch: (...a: unknown[]) => batchMock(...a),
   restartGateway: (...a: unknown[]) => restartMock(...a),
   openclawIsAbsent: () => openclawAbsentMock(),
+  // A REAL class: the route narrows on `instanceof GatewayNotReadyError` to
+  // tell a gateway that is still coming back from one that refused, and
+  // `instanceof undefined` throws a TypeError the first time it rejects.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
 }));
 vi.mock("@/lib/owner-session", () => ({
   hasOwnerSession: (...a: unknown[]) => ownerSessionMock(...a),
@@ -273,6 +282,34 @@ describe("POST /setup-api/stt — the write", () => {
     expect(await res.json()).toEqual({ error: "Could not change the transcription engine on this box." });
     expect(store.size).toBe(0);
     expect(restartMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * TASK-608. A gateway that has not finished coming back is not a failed
+   * engine change: the media-understanding order and the stored preference are
+   * both already on disk, and the only client of this route
+   * (`LocalAiPanel.runAction`) discards the body on `!res.ok` — so a 502 here
+   * paints the panel's red "couldn't change that" over a change that landed
+   * AND skips `applySnapshot`, leaving the row showing the old engine. The
+   * owner clicks again and pays a second gateway restart.
+   *
+   * On beta this branch could only fire if `systemctl restart` itself failed.
+   * The readiness wait widened it to "the port did not open inside 30 s", which
+   * is the ordinary cold-box case, so the answer has to distinguish the two.
+   */
+  it("reports a landed engine change whose gateway is still coming back as saved", async () => {
+    const { GatewayNotReadyError } = await import("@/lib/openclaw-config");
+    restartMock.mockRejectedValue(new GatewayNotReadyError("gateway did not come back"));
+    const { POST } = await route();
+    const res = await POST(post({ primary: "local" }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // Still honest about the gateway, and still carrying the snapshot the panel
+    // needs to repaint the row.
+    expect(body.restarted).toBe(false);
+    expect(body.warning).toMatch(/gateway/i);
+    expect(body.primary).toBe("local");
+    expect(store.get("stt_primary")).toBe("local");
   });
 
   it("says so when the write landed but the gateway would not restart", async () => {

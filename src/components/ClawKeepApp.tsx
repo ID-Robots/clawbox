@@ -112,7 +112,14 @@ interface RestoreResponse {
   archive: string;
   archiveBytes: number;
   assets: { kind: string; targetPath: string; backupPath: string; bytesRestored: number }[];
+  /** Restarts that could NOT be taken — the owner has to act. */
   restartErrors: string[];
+  /**
+   * Restarts that WERE taken and have not finished. Absent from older servers,
+   * which folded these into `restartErrors` and told the owner to run
+   * `systemctl restart` over a service that was already restarting.
+   */
+  restartPending?: string[];
   /** Members the daemon could not recreate. Absent from older servers. */
   skippedMembers?: string[];
 }
@@ -1418,12 +1425,12 @@ function BackupResultCard({ result }: { result: BackupResponse }) {
   );
 }
 
-/** The unit named by the first restart failure (`"<unit>: <detail>"`), so the
- *  remedy we print is the one that actually failed rather than a guess that is
- *  wrong on half the fleet. Falls back to the OpenClaw unit only when the
- *  string is not in the expected shape. */
-function restartUnit(errors: string[]): string {
-  const unit = errors[0]?.split(":")[0]?.trim();
+/** The unit named by the first restart entry (`"<unit>: <detail>"`), so the
+ *  remedy — or the "still coming back" line — names the one that is actually
+ *  involved rather than a guess that is wrong on half the fleet. Falls back to
+ *  the OpenClaw unit only when the string is not in the expected shape. */
+function restartUnit(entries: string[]): string {
+  const unit = entries[0]?.split(":")[0]?.trim();
   return unit && unit.length > 0 ? unit : "clawbox-gateway.service";
 }
 
@@ -1461,6 +1468,17 @@ function RestoreResultCard({ result }: { result: RestoreResponse }) {
             sudo systemctl restart {restartUnit(result.restartErrors)}
           </code>{" "}
           {t("clawkeep.result.manually")}
+        </p>
+      )}
+      {(result.restartPending?.length ?? 0) > 0 && (
+        <p className="text-xs text-[var(--text-muted)]" data-testid="clawkeep-restart-pending">
+          {/* No ⚠️ and no command. The unit WAS restarted; it is re-reading the
+              state files this restore just wrote, which is the slowest start
+              this box performs. The manual `systemctl restart` the failure
+              line prints would kill it mid-start and, repeated, trip
+              StartLimitBurst — so the one thing this line must never do is
+              read like that one. */}
+          {t("clawkeep.result.restartPending", { unit: restartUnit(result.restartPending!) })}
         </p>
       )}
       {(result.skippedMembers?.length ?? 0) > 0 && (

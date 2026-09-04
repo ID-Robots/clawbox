@@ -163,12 +163,61 @@ describe("/setup-api/system/hostname POST", () => {
     expect(setMock).toHaveBeenCalledWith("hostname", "stillpersisted");
   });
 
-  it("tolerates gateway-restart failures (logs but proceeds)", async () => {
+  it("still applies the hostname when the gateway leg fails, and says so", async () => {
+    // The rename proceeds — it never depended on the gateway — but the answer
+    // stops calling itself a plain success: the control UI keeps the old
+    // allowed-origins list until the gateway is serving again, so the body
+    // carries `gatewayRestarted: false` and the status says which half failed.
     execFileMock.mockReturnValue({ stdout: "" });
     setControlUiAllowedOriginsMock.mockRejectedValue(new Error("config locked"));
     const mod = await import("@/app/setup-api/system/hostname/route");
     const res = await mod.POST(makeRequest({ hostname: "gracedeg" }));
-    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(body).toMatchObject({ success: true, hostname: "gracedeg", gatewayRestarted: false });
+    expect(typeof body.warning).toBe("string");
+    // The rename itself still ran: this must never become a false failure.
+    expect(setMock).toHaveBeenCalledWith("hostname", "gracedeg");
+    expect(vi.mocked(startRootStep)).toHaveBeenCalledWith("set_hostname");
+  });
+
+  it("names the restart, not the origins write, when the restart is the half that failed", async () => {
+    execFileMock.mockReturnValue({ stdout: "" });
+    setControlUiAllowedOriginsMock.mockResolvedValue(undefined);
+    restartGatewayMock.mockRejectedValue(new Error("Unit is masked"));
+    const mod = await import("@/app/setup-api/system/hostname/route");
+    const res = await mod.POST(makeRequest({ hostname: "maskedgw" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(body).toMatchObject({ success: true, gatewayRestarted: false });
+    expect(body.warning).toMatch(/gateway could not be restarted/i);
+    expect(vi.mocked(startRootStep)).toHaveBeenCalledWith("set_hostname");
+  });
+
+  it("does not bounce the gateway when the origin list was never written", async () => {
+    // A restart onto the config it already has costs the owner an outage and
+    // tells them nothing — and the warning must blame the write, not the
+    // gateway that was never asked to do anything.
+    execFileMock.mockReturnValue({ stdout: "" });
+    setControlUiAllowedOriginsMock.mockRejectedValue(new Error("config locked"));
+    const mod = await import("@/app/setup-api/system/hostname/route");
+    const body = await (await mod.POST(makeRequest({ hostname: "nowrite" }))).json();
+
+    expect(restartGatewayMock).not.toHaveBeenCalled();
+    expect(body.warning).toMatch(/allowed-origin list/i);
+  });
+
+  it("does not spend the readiness budget on a rename that reboots the box", async () => {
+    // The caller's next act is POST /setup-api/system/power, and the reboot
+    // restarts the gateway anyway. Waiting here would only delay it.
+    execFileMock.mockReturnValue({ stdout: "" });
+    setControlUiAllowedOriginsMock.mockResolvedValue(undefined);
+    const mod = await import("@/app/setup-api/system/hostname/route");
+    await mod.POST(makeRequest({ hostname: "nowait" }));
+
+    expect(restartGatewayMock).toHaveBeenCalledWith({ awaitReady: false });
   });
 
   it("does not manufacture ~/.openclaw on an edition that has no gateway", async () => {

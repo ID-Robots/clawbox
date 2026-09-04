@@ -6,13 +6,14 @@ import path from "path";
 import { get, set, setMany } from "./config-store";
 import {
   findOpenclawBin,
+  GATEWAY_PORT,
   restartGateway,
   openclawIsAbsent,
   gatewayIsAbsent,
 } from "./openclaw-config";
 import { hasHermesHarness, readEdition, type EditionName } from "./edition-source";
 import { runHermesCli } from "./hermes-cli";
-import { isPortOpen } from "./port-probe";
+import { waitForPortOpen } from "./port-probe";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { startRootStep } from "./root-step-runner";
@@ -767,7 +768,6 @@ async function updateClawBoxAndReboot(): Promise<void> {
 // 2-3 min; shared across both UPDATE_STEPS and OPENCLAW_UPDATE_STEPS so the
 // two flows can't drift apart.
 const OPENCLAW_INSTALL_TIMEOUT_MS = 300_000;
-const GATEWAY_PORT = Number(process.env.GATEWAY_PORT || "18789");
 const GATEWAY_HEALTH_WAIT_MS = Number(process.env.GATEWAY_HEALTH_WAIT_MS || "30000");
 const GATEWAY_RECOVERY_WAIT_MS = Number(process.env.GATEWAY_RECOVERY_WAIT_MS || "45000");
 const GATEWAY_WAIT_INTERVAL_MS = Number(process.env.GATEWAY_WAIT_INTERVAL_MS || "1500");
@@ -792,13 +792,12 @@ async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForGateway(timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await isPortOpen(GATEWAY_PORT, "127.0.0.1", 1_000)) return true;
-    await delay(GATEWAY_WAIT_INTERVAL_MS);
-  }
-  return false;
+function waitForGateway(timeoutMs: number): Promise<boolean> {
+  return waitForPortOpen(GATEWAY_PORT, "127.0.0.1", {
+    timeoutMs,
+    intervalMs: GATEWAY_WAIT_INTERVAL_MS,
+    probeTimeoutMs: 1_000,
+  });
 }
 
 async function runOpenclawDoctorFix(): Promise<void> {
@@ -1144,7 +1143,12 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     await repairCodexCapabilityConsent(journal);
     await runOpenclawDoctorFix();
   });
-  await restartGateway();
+  // `awaitReady: false` on both restarts in this function, and only here: the
+  // recovery below IS the readiness wait, with a longer budget and a journal
+  // read that turns "not listening" into a diagnosis. A throw from inside
+  // restartGateway would abort the function before the legacy-state quarantine
+  // it exists to perform ever ran.
+  await restartGateway({ awaitReady: false });
   if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
 
   const beforeRecoveryLog = await readGatewayJournalTail();
@@ -1161,7 +1165,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     await quarantineLegacyOpenclawState();
     await runOpenclawDoctorFix();
   });
-  await restartGateway();
+  await restartGateway({ awaitReady: false });
   if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
 
   const afterRecoveryLog = await readGatewayJournalTail();

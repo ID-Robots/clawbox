@@ -12,6 +12,19 @@ vi.mock("child_process", () => ({
   spawn: vi.fn(),
 }));
 
+// PARTIAL mock — only the setup-gate read is replaceable, and it is pinned
+// rather than left to the filesystem. Without it `readSetupGateFacts()` runs
+// for real, reads `${CLAWBOX_ROOT}/data/config.json` under the hermetic floor
+// vitest.config.ts sets, gets ENOENT and answers `setupComplete: false` — so
+// every case in this file silently exercised the FIRST-RUN WIZARD branch
+// (`awaitReady: false`), which is not the box these Settings-side cases
+// describe. Deterministic, but named by accident; the first assertion on
+// restartGateway's argument added here would have pinned the wrong one.
+vi.mock("@/lib/route-auth", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/route-auth")>("@/lib/route-auth");
+  return { ...actual, readSetupGateFacts: () => ({ setupComplete: true, passwordConfigured: true }) };
+});
+
 vi.mock("fs/promises", () => ({
   default: {
     readFile: vi.fn(),
@@ -31,6 +44,16 @@ vi.mock("@/lib/config-store", () => ({
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
+  // A REAL class, not `vi.fn()` and not an omitted export: the configure route
+  // narrows on `instanceof GatewayNotReadyError` to tell "the gateway has not
+  // finished coming back" from "the restart was refused", and `instanceof
+  // undefined` throws a TypeError the first time a test makes it reject.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR: 24000,
   compactionReserveFloorForContext: (n: number) =>
     Number.isFinite(n) && n > 0 ? Math.min(24000, Math.max(4096, Math.round(n / 4))) : 24000,

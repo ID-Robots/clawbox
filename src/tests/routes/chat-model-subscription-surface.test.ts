@@ -28,6 +28,9 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfigStrict: vi.fn(async () => ({})),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
+  // A real class, not a vi.fn(): the route narrows a restart failure with
+  // `instanceof`, and an undefined export there throws instead of narrowing.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {},
   runOpenclawConfigSet: configSetMock,
   // The route writes the primary in a batch now. Record every assignment of
   // a batch on `runOpenclawConfigSet` too, the way config-set-calls flattens

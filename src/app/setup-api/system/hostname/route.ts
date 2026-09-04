@@ -79,12 +79,35 @@ export async function POST(request: Request) {
   // unaffected either way, so this was never a false success — just litter,
   // and litter that makes `~/.openclaw` exist is the kind that misleads the
   // next person debugging an edition question.
+  // Which half of the gateway leg failed, if either — the two need different
+  // words, and one try around both would have blamed a gateway that was never
+  // restarted for a failed origins write. `null` means nothing is outstanding:
+  // both halves worked, or this edition has no gateway to have a leg at all.
+  let gatewayGap: "origins" | "restart" | null = null;
   if (!gatewayIsAbsent()) {
     try {
       await setControlUiAllowedOrigins(name);
-      await restartGateway();
     } catch (err) {
       console.warn("[hostname] Failed to update OpenClaw allowed origins:", err);
+      gatewayGap = "origins";
+    }
+    // Only when there is a new origin list to pick up. Bouncing the gateway
+    // onto the same config it already has would cost the owner a restart and
+    // tell them nothing.
+    if (!gatewayGap) {
+      try {
+        // `awaitReady: false`: the caller's next act on a success is to REBOOT
+        // the box (SettingsApp posts /setup-api/system/power, and the wizard
+        // does not even read this response), and the reboot restarts the
+        // gateway anyway. Waiting up to 30 s here would delay that reboot —
+        // worst on a cold first boot, which is exactly when it is slowest — to
+        // learn something nothing consumes. A restart that is REFUSED is still
+        // reported; only "has it finished coming back" is not asked.
+        await restartGateway({ awaitReady: false });
+      } catch (err) {
+        console.warn("[hostname] Failed to restart the OpenClaw gateway:", err);
+        gatewayGap = "restart";
+      }
     }
   }
 
@@ -107,6 +130,26 @@ export async function POST(request: Request) {
         fqdn: `${name}.local`,
       },
       { status: 500 }
+    );
+  }
+
+  // The rename happened and the root step is running, so this is never an
+  // error — but it is not a plain success either while the control UI is still
+  // configured for the old name. 502 says a half is outstanding without
+  // retracting the half that worked; SettingsApp reads it that way and still
+  // reboots the box, which is what actually completes the rename.
+  if (gatewayGap) {
+    return NextResponse.json(
+      {
+        success: true,
+        hostname: name,
+        fqdn: `${name}.local`,
+        gatewayRestarted: false,
+        warning: gatewayGap === "origins"
+          ? `Renamed, but the chat UI's allowed-origin list could not be updated — it reaches ${name}.local after the reboot.`
+          : `Renamed, but the OpenClaw gateway could not be restarted — the chat UI reaches ${name}.local after the reboot.`,
+      },
+      { status: 502 },
     );
   }
 

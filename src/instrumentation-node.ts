@@ -9,6 +9,7 @@ import { spawn, type ChildProcess } from 'child_process'
 import path from 'path'
 import fs from 'fs'
 import { CONFIG_ROOT } from './lib/config-store'
+import { envPort } from './lib/port-probe'
 
 /**
  * How long a child that keeps dying is left alone between attempts: its own
@@ -140,7 +141,12 @@ function registerCleanupHandlers() {
 
 export function startTerminalServer() {
   registerCleanupHandlers()
-  const PORT = process.env.TERMINAL_WS_PORT || '3006'
+  // Guarded, not `|| '3006'`: production-server.js proxies /terminal-ws to
+  // envPort(TERMINAL_WS_PORT, 3006), so a malformed value there falls back to
+  // 3006 while the raw string here would have the child `listen(NaN)` on a
+  // random port. The proxy and the server would then disagree silently and the
+  // terminal would be unreachable with nothing saying why.
+  const PORT = String(envPort(process.env.TERMINAL_WS_PORT, 3006))
   // The checkout, reached the way every other server module reaches it — NOT
   // the cwd. In production the cwd is `.next/standalone` (the Next standalone
   // server chdirs there), and the copy of this script that lands in that tree

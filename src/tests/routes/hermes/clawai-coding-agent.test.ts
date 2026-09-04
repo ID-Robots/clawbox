@@ -57,7 +57,7 @@ vi.mock("@/lib/coding-agent", () => ({
   getCodingAgentStatus: statusMock,
 }));
 vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: rpcMock }));
-vi.mock("@/lib/hermes-dashboard-control", () => ({ bounceHermesDashboard: vi.fn(async () => true) }));
+vi.mock("@/lib/hermes-dashboard-control", () => ({ bounceHermesDashboard: vi.fn(async () => "restarted") }));
 
 import { POST } from "@/app/setup-api/hermes/clawai/route";
 

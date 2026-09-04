@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
+import { envPort } from "@/lib/port-probe";
 
 // Server-side helper to call the Hermes dashboard's own API (127.0.0.2:9119)
 // from a ClawBox setup-api route, authenticated the same way the reverse proxy
@@ -22,9 +23,20 @@ import path from "path";
  */
 export const HERMES_DASHBOARD_UNIT = "clawbox-hermes-dashboard.service";
 
-const DASH_HOST = process.env.HERMES_DASH_HOST || "127.0.0.2";
-const DASH_PORT = process.env.HERMES_PORT || "9119";
-const DASH_ORIGIN = `http://${DASH_HOST}:${DASH_PORT}`;
+/**
+ * The socket the dashboard listens on — `config/clawbox-hermes-dashboard.service`
+ * spells the same host and port in its ExecStart. Exported for the same reason
+ * as the unit name above: `hermes-dashboard-control` has to probe it to know
+ * whether a bounce actually brought the dashboard back, and a second copy of
+ * "127.0.0.2:9119" is a rename waiting to half-land.
+ */
+export const DASHBOARD_HOST = process.env.HERMES_DASH_HOST || "127.0.0.2";
+// Validated, not merely coerced: a non-numeric HERMES_PORT would make this NaN
+// and every consumer below would build `http://127.0.0.2:NaN`, and an
+// out-of-range one (`70000`, `-1`, `1.5`) is worse — truthy, so it survives a
+// bare `||`, and then rejected by Node at the socket. See envPort.
+export const DASHBOARD_PORT = envPort(process.env.HERMES_PORT, 9119);
+const DASH_ORIGIN = `http://${DASHBOARD_HOST}:${DASHBOARD_PORT}`;
 const CLAWBOX_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const USERNAME = process.env.HERMES_DASH_USERNAME || "clawbox";
 
@@ -108,7 +120,7 @@ export async function dashboardWsTicket(signal?: AbortSignal): Promise<string | 
 }
 
 /** Where the dashboard's WebSocket endpoints live, for a caller that opens one. */
-export const DASHBOARD_WS_ORIGIN = `ws://${DASH_HOST}:${DASH_PORT}`;
+export const DASHBOARD_WS_ORIGIN = `ws://${DASHBOARD_HOST}:${DASHBOARD_PORT}`;
 
 /**
  * Fetch a dashboard API path with a valid session, re-logging in once on 401.

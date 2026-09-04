@@ -35,6 +35,17 @@ vi.mock("fs", async () => {
   };
 });
 
+const readSetupGateFacts = vi.fn<() => { setupComplete: boolean; passwordConfigured: boolean }>();
+
+// PARTIAL mock — only the setup-gate read is replaceable. The configure route
+// asks it whether the first-run wizard is still driving the box, which decides
+// whether step 9 waits for the gateway to bind; everything else in route-auth
+// (session checks other modules in this graph import) keeps its real behaviour.
+vi.mock("@/lib/route-auth", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/route-auth")>("@/lib/route-auth");
+  return { ...actual, readSetupGateFacts: () => readSetupGateFacts() };
+});
+
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
@@ -71,6 +82,16 @@ const { parseFullyQualifiedModelImpl } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
+  // A REAL class, not `vi.fn()` and not an omitted export: the configure route
+  // narrows on `instanceof GatewayNotReadyError` to tell "the gateway has not
+  // finished coming back" from "the restart was refused", and `instanceof
+  // undefined` throws a TypeError the first time a test makes it reject.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR: 24000,
   compactionReserveFloorForContext: () => 24000,
   restartGateway: vi.fn(),
@@ -116,6 +137,7 @@ vi.mock("@/lib/local-ai-token", () => ({
 import { promises as nodeFsPromises } from "fs";
 import { getAll, setMany } from "@/lib/config-store";
 import {
+  GatewayNotReadyError,
   readConfig,
   readConfigStrict,
   restartGateway,
@@ -240,6 +262,9 @@ async function primeConfigureRoute(): Promise<(request: Request) => Promise<Resp
   );
 
   vi.mocked(getAll).mockResolvedValue({});
+  // Past the wizard: the shape these cases mean, and the one where step 9
+  // still waits for the gateway (the first-run skip is pinned in configure.test).
+  readSetupGateFacts.mockReturnValue({ setupComplete: true, passwordConfigured: true });
   vi.mocked(setMany).mockResolvedValue();
   vi.mocked(readConfig).mockResolvedValue({} as never);
   vi.mocked(readConfigStrict).mockResolvedValue({} as never);
@@ -680,6 +705,42 @@ describe("POST /setup-api/ai-models/configure and the gateway doctor --fix stopp
     expect(res.status).toBe(502);
     expect((await res.json()).error).toMatch(/failed to restart/);
     expect(restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not tell the owner the assistant is offline over a merely slow restart", async () => {
+    vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("doctor exited 1"));
+    mockFs.readdir.mockResolvedValueOnce([MIGRATED_SIBLING] as never);
+    // A faithful stand-in for a cold Jetson: `systemctl restart` succeeded and
+    // the gateway IS coming back, it just has not bound :18789 inside the
+    // readiness budget. The real restartGateway raises GatewayNotReadyError for
+    // that ONLY when it waited, so this mock answers the option the same way.
+    vi.mocked(restartGateway).mockImplementationOnce(async (options) => {
+      if (options?.awaitReady === false) return;
+      throw new GatewayNotReadyError();
+    });
+
+    const res = await configurePost(subscribe());
+
+    expect(res.status).toBe(502);
+    const { error } = await res.json();
+    // The save's own failure still reaches the owner...
+    expect(error).toMatch(/rolled back/);
+    // ...but not an instruction to go restart a gateway that is already coming
+    // back on its own. The restore only needs "did systemd take the restart".
+    expect(error).not.toMatch(/offline until the gateway restarts/);
+    expect(restartGateway).toHaveBeenCalledWith({ awaitReady: false });
+  });
+
+  it("does not wait on the port while restoring after the route's own error handling throws", async () => {
+    const poisoned = new Error("boom") as unknown as { message: unknown };
+    poisoned.message = null;
+    vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(poisoned);
+
+    await expect(configurePost(subscribe())).rejects.toThrow();
+    // This restore's answer is logged and dropped — the original throw becomes
+    // Next's 500 either way — so waiting out the readiness budget for it buys
+    // nothing but latency on a request that has already failed.
+    expect(restartGateway).toHaveBeenCalledWith({ awaitReady: false });
   });
 
   it("leaves the gateway alone when an API-key save fails — nothing stopped it", async () => {

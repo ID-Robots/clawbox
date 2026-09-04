@@ -14,6 +14,7 @@ import {
 } from "@/lib/discord-api";
 import {
   EnvSecretProviderConflictError,
+  GatewayNotReadyError,
   restartGateway,
   setDiscordToken,
 } from "@/lib/openclaw-config";
@@ -202,6 +203,17 @@ async function applyRestart(harness: string, secret: string): Promise<boolean> {
     await restartGateway();
     return true;
   } catch (err) {
+    // A gateway that has not finished BINDING is not a failed restart:
+    // `systemctl restart` returned 0 and the new process is starting. Beta
+    // answered `true` for exactly that state, and the live channel check the
+    // caller runs next — the probe this route is cleared on — is what settles
+    // whether the bot is actually up. Reporting `false` here would BOTH call a
+    // landed save a failure and skip that check, which is the one thing that
+    // could have contradicted it (TASK-608).
+    //
+    // A REFUSED restart stays `false`: nothing is coming back on its own, and
+    // the live check would only spend its attempts confirming it.
+    if (err instanceof GatewayNotReadyError) return true;
     // The credential and the allowlist are already persisted, so a service
     // failure is a warning, not a failed save — the same contract
     // /telegram/configure has always had.

@@ -187,9 +187,16 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   const [roles, setRoles] = useState<Roles>({});
   const [localOnly, setLocalOnly] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Not an error: the box did something other than what was asked and said
-  // so — a voice pick that settled on the default (see the tts route's
-  // `fallback`). Amber, and cleared by the next action.
+  // Not an error: a change that WENT THROUGH, which the box then qualified.
+  // Three writers, one channel — a voice pick that settled on the default (the
+  // tts route's `fallback`), "Use as fallback" posting
+  // /setup-api/providers/default, and the local-only switch posting
+  // /setup-api/local-ai/exclusive. The last two restart the gateway on OpenClaw
+  // and answer `ok` with a `warning` for either of two causes: the restart has
+  // not finished, or it was refused (a unit masked by an update in flight). Its
+  // own channel, because the red box below is for changes that did NOT happen:
+  // a failure painted over a landed change sends the owner to repeat it, and
+  // the repeat costs another restart. Amber, and cleared by the next action.
   const [notice, setNotice] = useState<string | null>(null);
   // Only the FIRST read has nothing to fall back on; a later failed poll keeps
   // the last good reading. So this is only ever true while there is no snapshot.
@@ -387,6 +394,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
         return;
       }
       const data = await res.json().catch(() => ({}));
+      if (typeof data?.warning === "string" && data.warning) setNotice(data.warning);
       if (isSnapshot(data)) applySnapshot(data);
       if (data && typeof data === "object" && "fallback" in data && data.fallback) {
         setNotice(t("localModels.notice.voiceFallback"));
@@ -416,9 +424,14 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     setLocalOnly(null);
     // A refusal from the last flip must not outlive a flip that went through.
     setError(null);
+    setNotice(null);
     try {
       const res = await post("/setup-api/local-ai/exclusive", { enabled: next });
       const data = await res.json().catch(() => ({}));
+      // That route answers 200 with a `warning` when the flip was written but
+      // the gateway restart behind it was not — the one sentence explaining why
+      // the switch has not taken effect yet, and it was being dropped.
+      if (typeof data?.warning === "string" && data.warning) setNotice(data.warning);
       if (!res.ok) setError(typeof data?.error === "string" ? data.error : t("localModels.error.changeFailed"));
       setLocalOnly(res.ok ? next : !next);
     } catch {
@@ -525,11 +538,25 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
           {error}
         </div>
       )}
-      {notice && (
-        <div role="status" className="rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200" data-testid="local-ai-notice">
-          {notice}
-        </div>
-      )}
+      {/* Mounted in every state: a live region that appears along with its text
+          announces a node insertion, which assistive tech may drop — and this
+          sentence is the only thing saying the change landed. Chrome is
+          conditional, the node is not.
+          `sr-only` when empty, not "": this parent is `space-y-4`, whose
+          `> * + *` gives an empty in-flow div a 1 rem margin AND another to the
+          block after it — a permanent gap on every visit in the normal state.
+          Out of flow it costs nothing, and the node and its text stay in the
+          accessibility tree, which is the whole point of mounting it. */}
+      <div
+        role="status"
+        aria-live="polite"
+        data-testid="local-ai-notice"
+        className={notice
+          ? "rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200"
+          : "sr-only"}
+      >
+        {notice ?? ""}
+      </div>
       {snapshot.unavailable.length > 0 && (
         <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200" data-testid="local-ai-unavailable">
           {t("localModels.unavailable", { list: snapshot.unavailable.map((id) => unavailableName(id, t)).join(", ") })}

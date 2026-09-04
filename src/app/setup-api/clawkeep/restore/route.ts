@@ -12,6 +12,8 @@ import {
 import { getEdition } from "@/lib/harness";
 import { HERMES_DASHBOARD_UNIT } from "@/lib/hermes-dashboard-auth";
 import { bounceHermesDashboard } from "@/lib/hermes-dashboard-control";
+import { GATEWAY_PORT, gatewayReadyWaitMs } from "@/lib/openclaw-config";
+import { waitForPortOpen } from "@/lib/port-probe";
 
 export const dynamic = "force-dynamic";
 
@@ -56,20 +58,47 @@ const OPENCLAW_RESTART_UNIT = "clawbox-gateway.service";
  *
  * Either way a failure is REPORTED, never swallowed: an unrestarted process
  * keeps serving pre-restore state from the handles it already holds, so the one
- * thing this must not do is stay quiet about it. The caller puts whatever comes
- * back into `restartErrors` and the result card tells the owner which unit to
- * restart by hand.
+ * thing this must not do is stay quiet about it.
+ *
+ * THE TWO ANSWERS ARE NOT THE SAME ANSWER. `errors` is a restart that did not
+ * happen — the result card turns it into "Could not auto-restart 1 service(s).
+ * Run `sudo systemctl restart <unit>` manually", and there the owner does have
+ * to act. `pending` is a restart that DID happen and has not finished: the
+ * process is re-reading the state files this restore just replaced, which is
+ * the slowest start this box performs, on the one path where several hundred
+ * megabytes of I/O went first. Folding that into `errors` told the owner a
+ * service that WAS restarted could not be, and prescribed a command that kills
+ * it mid-start, restarts the whole boot, and on a couple of repeats trips
+ * StartLimitBurst (20/hour) — after which the unit refuses every restart for
+ * the rest of the window. The false failure would have become a real one.
  */
-async function restartStateHolder(edition: string): Promise<string[]> {
+interface RestartOutcome {
+  /** The restart could not be taken. The owner has to act. */
+  errors: string[];
+  /** The restart was taken and has not finished. Nothing to do. */
+  pending: string[];
+}
+
+async function restartStateHolder(edition: string): Promise<RestartOutcome> {
   if (edition === "hermes") {
-    if (await bounceHermesDashboard()) return [];
     // No exception to quote: bounceHermesDashboard() never throws, it answers
-    // "this box was left exactly as it was". Say which of its two reasons the
-    // owner can act on rather than inventing a detail we do not have.
+    // which of the three things happened. Say the one the owner can act on
+    // rather than inventing a detail we do not have.
+    const outcome = await bounceHermesDashboard();
+    if (outcome === "restarted") return { errors: [], pending: [] };
+    if (outcome === "pending") {
+      const detail = "was restarted and is not serving the restored state yet";
+      console.warn(`[clawkeep/restore] ${HERMES_DASHBOARD_UNIT} ${detail}`);
+      return { errors: [], pending: [`${HERMES_DASHBOARD_UNIT}: ${detail}`] };
+    }
+    // Three causes, because "failed" carries all three: no Restart=always, a
+    // stop that did not take, and a unit systemd has stopped restarting. The
+    // journal line is the only place any of them is named, so it names them all
+    // rather than describing two of the three.
     const detail =
-      "could not be bounced from here — the unit is not Restart=always, or the stop did not take";
+      "could not be bounced from here — the unit is not Restart=always, the stop did not take, or systemd has stopped restarting it";
     console.warn(`[clawkeep/restore] ${HERMES_DASHBOARD_UNIT} ${detail}`);
-    return [`${HERMES_DASHBOARD_UNIT}: ${detail}`];
+    return { errors: [`${HERMES_DASHBOARD_UNIT}: ${detail}`], pending: [] };
   }
   try {
     // The unit name comes from the const above rather than being spelled again
@@ -78,13 +107,24 @@ async function restartStateHolder(edition: string): Promise<string[]> {
     await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", OPENCLAW_RESTART_UNIT], {
       timeout: 30_000,
     });
-    return [];
+    // The unit is Type=simple: `restart` returns when the process is forked,
+    // seconds before it re-opens :18789 with the restored state. Answering
+    // "done" there reported the restore as served by a gateway that was still
+    // starting — the false success the Hermes half above no longer reports
+    // either. Past this line the restart HAS been taken, so the wait timing out
+    // is `pending`, never an error.
+    if (await waitForPortOpen(GATEWAY_PORT, "127.0.0.1", { timeoutMs: gatewayReadyWaitMs() })) {
+      return { errors: [], pending: [] };
+    }
+    const detail = "was restarted and is not serving the restored state yet";
+    console.warn(`[clawkeep/restore] ${OPENCLAW_RESTART_UNIT} ${detail}`);
+    return { errors: [], pending: [`${OPENCLAW_RESTART_UNIT}: ${detail}`] };
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
     // Visible in journalctl this way even if the user dismisses the result
     // card before reading restartErrors.
     console.warn(`[clawkeep/restore] systemctl restart ${OPENCLAW_RESTART_UNIT} failed: ${detail}`);
-    return [`${OPENCLAW_RESTART_UNIT}: ${detail}`];
+    return { errors: [`${OPENCLAW_RESTART_UNIT}: ${detail}`], pending: [] };
   }
 }
 
@@ -117,8 +157,9 @@ export async function POST(request: NextRequest) {
 
     // The restore itself has succeeded by here. A process that could not be
     // brought back onto the restored inodes is still a partial result, so the
-    // reasons travel out to the caller instead of being swallowed.
-    const restartErrors = await restartStateHolder(getEdition());
+    // reasons travel out to the caller instead of being swallowed — in the
+    // field that says which KIND of unfinished this is.
+    const restart = await restartStateHolder(getEdition());
 
     return NextResponse.json(
       {
@@ -130,7 +171,11 @@ export async function POST(request: NextRequest) {
         // recreate part of the archive is not a clean success, and the card
         // has to be able to say which part.
         skippedMembers: result.skippedMembers ?? [],
-        restartErrors,
+        restartErrors: restart.errors,
+        // Separate from `restartErrors` on purpose: the card prescribes a
+        // manual `systemctl restart` for that one, and prescribing it over a
+        // service that is mid-start is how a slow restore became a broken box.
+        restartPending: restart.pending,
       },
       { headers: { "Cache-Control": "no-store" } },
     );
