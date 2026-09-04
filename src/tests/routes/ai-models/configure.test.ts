@@ -4,6 +4,7 @@ import * as childProcess from "child_process";
 import fsp from "fs/promises";
 import type { ChildProcess } from "child_process";
 import { EventEmitter } from "events";
+import { getProviderCatalog } from "@/lib/provider-models";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
@@ -395,7 +396,57 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.success).toBe(true);
 
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
-    expect(commands).toContain("config set agents.defaults.model.primary openai/gpt-5");
+    expect(commands).toContain("config set agents.defaults.model.primary openai/gpt-5.4");
+  });
+
+  // A save that carries no `model` lands on the PROVIDERS table's cold start,
+  // and that table is hand-maintained beside three other lists of the same
+  // ids. It had already drifted: openai's entry was `openai/gpt-5`, an id
+  // neither OPENAI_MODELS nor any live enumeration on the pinned core (2026.8.1)
+  // carries — it exists only as an OpenRouter slug. The CLI refuses that
+  // reference against the enabled plugins' catalogs, the route falls through to
+  // setPrimaryModelWithoutCatalogValidation and answers 200, and nothing
+  // surfaces it until the owner's first turn fails. The picker never offers it,
+  // so there is no second chance to notice.
+  //
+  // Driven through the route rather than pinned against a copy of the table:
+  // PROVIDERS is module-private, and what matters is the id the box is actually
+  // left on.
+  describe("cold-start defaults", () => {
+    const coldStarts: ReadonlyArray<{ provider: string; apiKey: string }> = [
+      { provider: "anthropic", apiKey: "sk-ant-test" },
+      { provider: "openai", apiKey: "sk-openai-test" },
+      { provider: "google", apiKey: "AIza-test" },
+      { provider: "openrouter", apiKey: "sk-or-test" },
+    ];
+
+    it.each(coldStarts)(
+      "$provider lands on a model its curated catalogue carries",
+      async ({ provider, apiKey }) => {
+        await configurePost(jsonRequest({ provider, apiKey }));
+
+        const commands = configSetCommands(
+          vi.mocked(runOpenclawConfigSet),
+          vi.mocked(runOpenclawConfigSetBatch),
+        );
+        const primary = commands
+          .map((c) => /^config set agents\.defaults\.model\.primary (.+)$/.exec(c)?.[1])
+          .filter((v): v is string => Boolean(v))
+          .at(-1);
+        expect(primary).toBeDefined();
+
+        const parsed = parseFullyQualifiedModelImpl(primary!);
+        expect(parsed).not.toBeNull();
+        expect(parsed!.provider).toBe(provider);
+
+        const catalog = getProviderCatalog(provider);
+        expect(catalog).not.toBeNull();
+        // Both halves matter: the id has to be renderable by the picker, and
+        // the two tables have to agree on which id is the cold start.
+        expect(catalog!.models.map((m) => m.id)).toContain(parsed!.modelId);
+        expect(catalog!.defaultModelId).toBe(parsed!.modelId);
+      },
+    );
   });
 
   it("refuses an unknown authMode before any write", async () => {
@@ -851,7 +902,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockReadOpenClawConfig.mockResolvedValue({
       auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
       agents: {
-        defaults: { models: { "openai/gpt-5": { agentRuntime: { id: "codex" } } } },
+        defaults: { models: { "openai/gpt-5.4": { agentRuntime: { id: "codex" } } } },
       },
     } as never);
 
@@ -859,7 +910,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(vi.mocked(runOpenclawConfigUnset)).toHaveBeenCalledWith(
-      'agents.defaults.models["openai/gpt-5"].agentRuntime',
+      'agents.defaults.models["openai/gpt-5.4"].agentRuntime',
       expect.anything(),
     );
   });
@@ -876,7 +927,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockReadOpenClawConfig.mockResolvedValue({
       auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
       agents: {
-        defaults: { models: { "openai/gpt-5": { agentRuntime: { id: "codex" } } } },
+        defaults: { models: { "openai/gpt-5.4": { agentRuntime: { id: "codex" } } } },
       },
     } as never);
     vi.mocked(runOpenclawConfigUnset).mockRejectedValue(new Error("unset failed"));
@@ -885,7 +936,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.warning).toMatch(/still routes openai\/gpt-5 through your ChatGPT account/);
+    expect(body.warning).toMatch(/still routes openai\/gpt-5\.4 through your ChatGPT account/);
   });
 
   it("leaves the arm alone when the save IS the subscription", async () => {

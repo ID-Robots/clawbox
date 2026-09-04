@@ -24,7 +24,12 @@ import {
   CLAWBOX_AI_DEFAULT_TIER,
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
-import { ANTHROPIC_DEFAULT_MODEL_ID, isValidModelId, parseModelSlug } from "@/lib/provider-models";
+import {
+  ANTHROPIC_DEFAULT_MODEL_ID,
+  OPENAI_DEFAULT_MODEL_ID,
+  isValidModelId,
+  parseModelSlug,
+} from "@/lib/provider-models";
 import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
 import { isClawboxAiImageModelId, isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
 import {
@@ -108,7 +113,7 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   clawai: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
   deepseek: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
   anthropic: `anthropic/${ANTHROPIC_DEFAULT_MODEL_ID}`,
-  openai: "openai/gpt-5.4",
+  openai: `openai/${OPENAI_DEFAULT_MODEL_ID}`,
   google: "google/gemini-2.5-flash",
   openrouter: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
 };

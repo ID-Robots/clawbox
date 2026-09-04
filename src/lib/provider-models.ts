@@ -179,6 +179,22 @@ export const OPENAI_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "Fast, cheap." },
 ] as const;
 
+/**
+ * The OpenAI model this box lands on when nothing named one.
+ *
+ * The twin of ANTHROPIC_DEFAULT_MODEL_ID above, and for the same reason: the
+ * two routes that WRITE `agents.defaults.model.primary` for an API-key save
+ * that carried no model — ai-models/configure's PROVIDERS table and
+ * chat/model's DEFAULT_PROVIDER_MODELS — used to each hold their own copy, and
+ * they had drifted. configure's was `gpt-5`, which is in neither the list above
+ * nor any live enumeration on the pinned core (2026.8.1); it exists only as an
+ * OpenRouter slug. The CLI refuses that reference against the enabled plugins'
+ * catalogs, the route falls through to setPrimaryModelWithoutCatalogValidation
+ * and still answers 200, and the picker never offers the id — so nothing
+ * surfaced it until the owner's first turn failed. TASK-705.
+ */
+export const OPENAI_DEFAULT_MODEL_ID = "gpt-5.4";
+
 // ChatGPT-subscription (Codex) models. `codex` is the UI id for the
 // subscription; the models themselves are written as `openai/<id>` — OpenClaw
 // 2 retired the `codex` provider id (`openai-codex` before 2026.6), see
@@ -388,7 +404,7 @@ export const PROVIDER_CATALOGS = Object.freeze({
   openai: {
     provider: "openai",
     models: OPENAI_MODELS,
-    defaultModelId: "gpt-5.4",
+    defaultModelId: OPENAI_DEFAULT_MODEL_ID,
     allowCustom: true,
   },
   codex: {

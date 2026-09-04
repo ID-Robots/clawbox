@@ -83,6 +83,7 @@ import {
   isValidModelId,
   GOOGLE_MODELS,
   ANTHROPIC_DEFAULT_MODEL_ID,
+  OPENAI_DEFAULT_MODEL_ID,
   ANTHROPIC_MODELS,
   extractProviderModelId,
   routesSubscriptionNatively,
@@ -172,7 +173,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     profileKey: "anthropic:default",
   },
   openai: {
-    defaultModel: "openai/gpt-5",
+    defaultModel: `openai/${OPENAI_DEFAULT_MODEL_ID}`,
     profileKey: "openai:default",
     subscriptionOverride: {
       // The ChatGPT sign-in is an OAuth profile of the SAME provider, under a
