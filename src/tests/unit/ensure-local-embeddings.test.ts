@@ -723,7 +723,10 @@ describe("gateway-pre-start.sh local embeddings hand-off", () => {
     // .openclaw directory must never reach it. The updater passes
     // CLAWBOX_OPENCLAW_HOME instead, and the two canonical overrides win.
     expect(src).toMatch(/^export OPENCLAW_CONFIG_PATH="\$OPENCLAW_CONFIG"$/m);
-    expect(src).toMatch(/^export OPENCLAW_STATE_DIR="\$\(dirname "\$OPENCLAW_CONFIG"\)"$/m);
+    // Assigned and exported on two lines: `export X="$(cmd)"` hides cmd's
+    // failure behind export's own exit status.
+    expect(src).toMatch(/^OPENCLAW_STATE_DIR="\$\(dirname "\$OPENCLAW_CONFIG"\)"$/m);
+    expect(src).toMatch(/^export OPENCLAW_STATE_DIR$/m);
     expect(src).toMatch(/^unset OPENCLAW_HOME$/m);
     expect(src).toContain("${CLAWBOX_OPENCLAW_HOME:-${OPENCLAW_HOME:-$CLAWBOX_HOME_DIR/.openclaw}}");
     const firstCli = src.indexOf('"$OPENCLAW_BIN"');

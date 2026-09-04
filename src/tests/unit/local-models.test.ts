@@ -366,7 +366,7 @@ describe("the Memory search row is the embedder's own row", () => {
     expect(emb.memoryBytes).toBeNull();
   });
 
-  it("reads as searching on this box while the unit is up, and counts its memory", async () => {
+  it("reads as searching on this box while the unit is up, and probes its memory", async () => {
     embedUnit("running");
     bareBox();
     const { buildLocalModelInventory } = await lib();
@@ -375,7 +375,9 @@ describe("the Memory search row is the embedder's own row", () => {
     expect(emb.running).toBe("running");
     expect(emb.detailCode).toBe("embeddingsLocal");
     expect(emb.detail).toMatch(/on this box/i);
-    // The memory probe ran, and it selected on the embedder's own flag.
+    // The memory probe ran only for a unit that is up. The partition between
+    // this row and the Gemma row — the `--embedding` flag on the same binary —
+    // is pinned against a fake /proc in local-models-memory.test.ts.
     expect(calls.some(c => c.cmd === "/usr/bin/pgrep" && c.args.includes("llama-server"))).toBe(true);
   });
 

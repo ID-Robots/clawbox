@@ -277,14 +277,17 @@ fi
 embed_ready() {
   curl -fsS --max-time 200 -H "Authorization: Bearer $TOKEN" "$EMBED_PROXY_URL/models" >/dev/null 2>&1
 }
-waited=0
+# The budget is wall-clock, not a count of naps: one probe can itself hold the
+# line for its whole --max-time when the proxy accepts and then stalls, so
+# adding up the sleeps let a 120 s promise run for the better part of an hour
+# — with the flock held throughout, which kept every later gateway start out.
+deadline=$(( $(date +%s) + EMBED_PROXY_WAIT_SECONDS ))
 until embed_ready; do
-  if [ "$waited" -ge "$EMBED_PROXY_WAIT_SECONDS" ]; then
+  if [ "$(date +%s)" -ge "$deadline" ]; then
     log "the embedder did not answer through $EMBED_PROXY_URL within ${EMBED_PROXY_WAIT_SECONDS}s — semantic memory stays as it is; trying again on the next gateway start"
     exit 0
   fi
   sleep 5
-  waited=$((waited + 5))
 done
 
 # --- point memory search at it -----------------------------------------------

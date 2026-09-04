@@ -650,7 +650,9 @@ d("the allow-list a device ends up with", () => {
     // (src/lib/local-ai-runtime.ts), the same standby as ollama's pair above.
     // No enable/disable half — the unit has no [Install] section.
     "start clawbox-embed.service",
+    "start clawbox-embed",
     "stop clawbox-embed.service",
+    "stop clawbox-embed",
     // No `clawbox-root-update@` instance appears here any more. Removing the
     // unscoped polkit `manage-units` grant meant the web server had to start
     // ~25 of those units through sudo rather than four, and enumerating them

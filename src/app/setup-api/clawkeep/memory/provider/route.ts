@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
+import { isSameOriginRequest } from "@/lib/same-origin";
 import { switchToLocalEmbeddings } from "@/lib/memory-shard";
 import { invalidateMemoryStatusCache } from "@/lib/clawkeep-memory";
 import {
@@ -24,11 +25,23 @@ export const dynamic = "force-dynamic";
  * cache that still says "ollama".
  *
  * OWNER ONLY: it changes where the owner's memories are embedded.
+ *
+ * And OUR PAGE ONLY, the same guard the wizard's other write (embed/install)
+ * keeps: the owner's browser attaches the session cookie to a POST any other
+ * site's page fires at the box, and the two routes are one flow — a page that
+ * is refused the model download must not be able to move the index onto a
+ * model that is not there.
  */
 export async function POST(request: Request) {
   if (!(await hasOwnerSession(request))) {
     return NextResponse.json(
       { error: "Changing the embedding provider needs a signed-in browser session.", kind: "owner_only" },
+      { status: 403 },
+    );
+  }
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json(
+      { error: "Changing the embedding provider only works from this ClawBox's own pages.", kind: "cross_origin" },
       { status: 403 },
     );
   }

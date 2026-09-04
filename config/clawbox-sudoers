@@ -133,7 +133,9 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    ollama.service
 # beyond the ollama pair: the unit runs User=clawbox, so this starts a process
 # the clawbox user could start itself.
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-embed.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-embed
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-embed.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-embed
 
 # Update / power / install paths.
 #

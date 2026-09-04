@@ -26,7 +26,7 @@ const PULL_FAILED = "clawkeep.memory.setup.pullFailed";
 // cancelled a request it no longer had a window for.
 let posts: { url: string; body: unknown; signal?: AbortSignal | null }[] = [];
 
-function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: boolean; pullFails?: boolean } = {}) {
+function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: boolean; pullFails?: boolean; pullTruncated?: boolean } = {}) {
   posts = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -57,9 +57,13 @@ function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: 
       }
       // The route's NDJSON: journal lines while the root step runs, then one
       // closing line. A failure arrives in-stream as a 200 with {error}.
+      // A TRUNCATED stream — the web server restarted or the connection
+      // dropped mid-download — is a 200 that ends with neither.
       const body = opts.pullFails
         ? '{"status":"Fetching…"}\n{"error":"hf: connection reset"}\n'
-        : '{"status":"Fetching…"}\n{"status":"Qwen3-Embedding-0.6B-Q8_0.gguf:  50%|#####     | 320M/639M"}\n{"success":true,"status":"The memory-search model is on this box."}\n';
+        : opts.pullTruncated
+          ? '{"status":"Fetching…"}\n{"status":"Qwen3-Embedding-0.6B-Q8_0.gguf:  50%|#####     | 320M/639M"}\n'
+          : '{"status":"Fetching…"}\n{"status":"Qwen3-Embedding-0.6B-Q8_0.gguf:  50%|#####     | 320M/639M"}\n{"success":true,"status":"The memory-search model is on this box."}\n';
       return new Response(body, { status: 200, headers: { "content-type": "application/x-ndjson" } });
     }
     if (url === "/setup-api/clawkeep/memory/index" && init?.method === "POST") {
@@ -163,6 +167,22 @@ describe("MemoryShardWizard", () => {
     expect(clawkeepTranslations.en[PULL_FAILED]).toBe("Could not download the embedding model.");
     expect(done).not.toHaveBeenCalled();
     expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/provider")).toBeUndefined();
+  });
+
+  it("treats a download stream that ends without its closing line as a failed download", async () => {
+    // The route's contract is ONE closing {success} or {error}. A stream that
+    // simply ends — the web server restarting mid-download, the connection
+    // dropping — has said neither, and a wizard that read the end of the body
+    // as "done" would switch the provider and start a full reindex against a
+    // model that is not on the box, with the owner watching the ready phase.
+    stub({ pullTruncated: true });
+    const done = vi.fn();
+    await runProvision(done);
+    expect(await screen.findByText(PULL_FAILED)).toBeInTheDocument();
+    expect(clawkeepTranslations.en[PULL_FAILED]).toBe("Could not download the embedding model.");
+    expect(done).not.toHaveBeenCalled();
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/provider")).toBeUndefined();
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/enable")).toBeUndefined();
   });
 
   it("says so in the wizard when the first pass could not be started, and does not finish", async () => {

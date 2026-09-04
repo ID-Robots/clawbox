@@ -550,8 +550,13 @@ describe("an openai-compatible embedder is on device only at the loopback proxy"
   });
 
   it("still reads the old ollama embedder as local, whatever the URL says", async () => {
+    // The provider is checked before the URL: an ollama box whose config
+    // happens to carry a remote address is still embedding on this box.
     const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
-    const status = await parseMemoryStatus(row("ollama", "qwen3-embedding:0.6b"), IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+    const status = await parseMemoryStatus(
+      row("ollama", "qwen3-embedding:0.6b"), IDLE_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(),
+      "http://192.168.1.50:8081/v1",
+    );
     expect(status.location).toBe("local");
   });
 });

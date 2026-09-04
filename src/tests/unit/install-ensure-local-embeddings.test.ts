@@ -31,6 +31,11 @@ function extractShellFunction(name: string): string {
   return INSTALL_SH.slice(start, end);
 }
 
+/** A single-quoted shell word for an arbitrary string, so a hostile pin reaches the stub verbatim. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 function shellCode(fn: string): string {
   return fn
     .split(NL)
@@ -58,6 +63,11 @@ describe("the embedding model is repaired on an update, not only on a fresh inst
     // The helper reaches the embedder through the proxy, and the proxy starts
     // clawbox-embed.service through `sudo systemctl start` — a grant
     // step_systemd_services writes. Called earlier it would wake nothing.
+    // indexOf answers -1 for a step that is gone, and -1 is "before" anything,
+    // so each marker has to be there before its position means a thing.
+    expect(POST_UPDATE).toContain("ensure_local_embeddings");
+    expect(POST_UPDATE).toContain("step_systemd_services");
+    expect(POST_UPDATE).toContain("step_resource_limits");
     const at = POST_UPDATE.indexOf("ensure_local_embeddings");
     expect(POST_UPDATE.indexOf("step_systemd_services")).toBeLessThan(at);
     expect(POST_UPDATE.indexOf("step_resource_limits")).toBeLessThan(at);
@@ -81,6 +91,7 @@ describe("the embedding model is repaired on an update, not only on a fresh inst
   it("frees the embedder's memory before a build, the way it frees ollama's", () => {
     const FREE = shellCode(extractShellFunction("free_memory_for_build"));
     expect(FREE).toContain("systemctl stop clawbox-embed.service");
+    expect(FREE).toContain("stop ollama.service");
     expect(FREE.indexOf("stop ollama.service")).toBeLessThan(FREE.indexOf("stop clawbox-embed.service"));
   });
 
@@ -102,6 +113,80 @@ describe("the embedding model is repaired on an update, not only on a fresh inst
   });
 });
 
+describe("every HF pin read from .env is checked before it reaches an as_clawbox_login command", () => {
+  // as_clawbox_login runs its argument through `su -c`; a pin with shell
+  // syntax in it would run as clawbox. The check has to sit between the read
+  // and the command in BOTH functions that build one from these pins.
+  for (const [fn, repoKey, fileKey] of [
+    ["ensure_llamacpp_model_cached", "LLAMACPP_HF_REPO", "LLAMACPP_HF_FILE"],
+    ["ensure_embed_model_cached", "EMBED_HF_REPO", "EMBED_HF_FILE"],
+  ] as const) {
+    it(`${fn} validates ${repoKey} and ${fileKey} first`, () => {
+      const code = shellCode(extractShellFunction(fn));
+      const repoCheck = `require_safe_hf_ref "${repoKey}" "$HF_REPO" || return 1`;
+      const fileCheck = `require_safe_hf_ref "${fileKey}" "$HF_FILE" || return 1`;
+      expect(code).toContain(repoCheck);
+      expect(code).toContain(fileCheck);
+      expect(code).toContain("as_clawbox_login");
+      expect(code.indexOf(repoCheck)).toBeLessThan(code.indexOf("as_clawbox_login"));
+      expect(code.indexOf(fileCheck)).toBeLessThan(code.indexOf("as_clawbox_login"));
+    });
+  }
+
+  function verdicts(values: readonly string[]): string[] {
+    const script = [
+      "set -uo pipefail",
+      `sed -n '/^require_safe_hf_ref() {/,/^}/p' "$1" > "$2"`,
+      '. "$2"',
+      'shift 2; for v in "$@"; do if require_safe_hf_ref KEY "$v" 2>/dev/null; then echo ok; else echo refused; fi; done',
+    ].join(NL);
+    const fn = path.join(os.tmpdir(), `hf-ref-${process.pid}-${Math.random().toString(36).slice(2)}.sh`);
+    try {
+      return execFileSync("bash", ["-c", script, "bash", INSTALL_SH_PATH, fn, ...values], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+        .split(NL)
+        .filter(Boolean);
+    } finally {
+      fs.rmSync(fn, { force: true });
+    }
+  }
+
+  it("accepts every pin this installer ships or migrates from, and a subfolder inside a repo", () => {
+    const shipped = [
+      "google/gemma-4-E2B-it-qat-q4_0-gguf",
+      "gemma-4-E2B_q4_0-it.gguf",
+      "gguf-org/gemma-4-e2b-it-gguf",
+      "gemma-4-e2b-it-edited-q4_0.gguf",
+      "Qwen/Qwen3-Embedding-0.6B-GGUF",
+      "Qwen3-Embedding-0.6B-Q8_0.gguf",
+      "q8_0/model.gguf",
+    ];
+    expect(verdicts(shipped)).toEqual(shipped.map(() => "ok"));
+  });
+
+  it("refuses shell syntax, a `..` segment, a leading dash or slash, and an empty pin", () => {
+    const hostile = [
+      "Qwen/$(id)",
+      "Qwen/`id`",
+      'x" ; id ; "',
+      "a;b",
+      "a b",
+      "..",
+      "../x.gguf",
+      "a/../x.gguf",
+      "a/..",
+      "-rf",
+      "--local-dir",
+      "/etc/passwd",
+      "",
+      "a\nb",
+    ];
+    expect(verdicts(hostile)).toEqual(hostile.map(() => "refused"));
+  });
+});
+
 /**
  * The behaviour that matters most cannot be read out of a regex: that these
  * never fail the run and never fetch what is already there. Drive the real
@@ -115,7 +200,14 @@ describe("step_embed_model — driven against stubs", () => {
   });
   afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
-  function run({ hermes = false, testMode = false, hf = true, present = false, hfRc = 0 } = {}) {
+  function run({
+    hermes = false,
+    testMode = false,
+    hf = true,
+    present = false,
+    hfRc = 0,
+    pins = {} as Record<string, string>,
+  } = {}) {
     const project = path.join(tmp, "project");
     fs.mkdirSync(path.join(project, "data"), { recursive: true });
     fs.writeFileSync(path.join(project, ".env"), "");
@@ -140,6 +232,10 @@ describe("step_embed_model — driven against stubs", () => {
     );
     const script = [
       "set -euo pipefail",
+      // The step's refusals go to stderr, and a script that ends in `echo RC=`
+      // exits 0 — execFileSync then hands back stdout alone. Fold the two so
+      // the refusal is in what the cases read.
+      "exec 2>&1",
       // The stub hf comes first on PATH on EVERY run: a box with the real CLI
       // on the developer's PATH must never download 640 MB inside a unit test.
       `export PATH="${tmp}/bin:$PATH"`,
@@ -153,8 +249,13 @@ describe("step_embed_model — driven against stubs", () => {
       hf
         ? 'as_clawbox_login() { eval "$*"; }'
         : 'as_clawbox_login() { case "$*" in *"command -v hf"*) return 1 ;; *) eval "$*" ;; esac; }',
-      'get_env_setting_or_default() { echo "$3"; }',
-      `sed -n '/^ensure_embed_model_cached() {/,/^}/p' "$1" > "${tmp}/fn.sh"`,
+      // What .env says for a key, or the function's own default: the way the
+      // real helper answers, minus the file.
+      `get_env_setting_or_default() { case "$2" in ${Object.entries(pins)
+        .map(([k, v]) => `${k}) printf '%s' ${shellQuote(v)} ;;`)
+        .join(" ")} *) printf '%s' "$3" ;; esac; }`,
+      `sed -n '/^require_safe_hf_ref() {/,/^}/p' "$1" > "${tmp}/fn.sh"`,
+      `sed -n '/^ensure_embed_model_cached() {/,/^}/p' "$1" >> "${tmp}/fn.sh"`,
       `sed -n '/^step_embed_model() {/,/^}/p' "$1" >> "${tmp}/fn.sh"`,
       `. "${tmp}/fn.sh"`,
       "rc=0; step_embed_model || rc=$?; echo RC=$rc",
@@ -200,6 +301,28 @@ describe("step_embed_model — driven against stubs", () => {
     expect(r.out).toContain("RC=1");
     expect(r.cached).toBe(false);
   });
+
+  // The pin is spliced into an as_clawbox_login command string, which the
+  // real helper hands to `su -c`: without the check, $(...) inside .env runs
+  // as the clawbox user, and here the eval-backed stub would run it just the
+  // same and hand hf the expanded word.
+  for (const [what, pins, key] of [
+    // Expanded, the substitution leaves a marker file beside the call log:
+    // the proof that nothing ran is that the file is never there. The refusal
+    // itself may well quote the pin back, so its text is not the test.
+    ["a repo id carrying a command substitution", { EMBED_HF_REPO: 'Qwen/$(touch "$LOG.injected")' }, "EMBED_HF_REPO"],
+    ["a file name that climbs out of the models directory", { EMBED_HF_FILE: "../../.ssh/authorized_keys" }, "EMBED_HF_FILE"],
+    ["a file name that would become an hf option", { EMBED_HF_FILE: "--local-dir" }, "EMBED_HF_FILE"],
+  ] as const) {
+    it(`refuses ${what} before anything runs as clawbox`, () => {
+      const r = run({ pins: { ...pins } });
+      expect(r.calls).toEqual([]);
+      expect(fs.existsSync(path.join(tmp, "calls.log.injected"))).toBe(false);
+      expect(r.out).toContain("RC=1");
+      expect(r.out).toMatch(new RegExp(`Error: ${key}=`));
+      expect(r.cached).toBe(false);
+    });
+  }
 
   for (const [name, opts, said] of [
     ["a hermes box with no core to point at the model", { hermes: true }, /does not include it/],
@@ -270,6 +393,8 @@ describe("ensure_local_embeddings never fails the update", () => {
 
   it("caches the model, then runs the helper, on a healthy OpenClaw box", () => {
     const r = run();
+    expect(r.out).toContain("MODEL_STEP_RAN");
+    expect(r.out).toContain("HELPER_RAN");
     expect(r.out.indexOf("MODEL_STEP_RAN")).toBeLessThan(r.out.indexOf("HELPER_RAN"));
     expect(r.out).toContain("RC=0");
   });

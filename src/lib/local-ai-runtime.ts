@@ -114,7 +114,10 @@ export function getLocalAiIdleTimeoutMs(): number {
 }
 
 export function getEmbedWakeMinAvailableMb(): number {
-  const raw = Number(process.env.EMBED_WAKE_MIN_AVAILABLE_MB ?? DEFAULT_EMBED_WAKE_MIN_AVAILABLE_MB);
+  // `||`, like the idle and wake timeouts above: an `EMBED_WAKE_MIN_AVAILABLE_MB=`
+  // line left empty in the resource-limits file must mean "unset". Under `??`
+  // it meant Number("") — zero — which is "no guard", and a wake on a full box.
+  const raw = Number(process.env.EMBED_WAKE_MIN_AVAILABLE_MB || DEFAULT_EMBED_WAKE_MIN_AVAILABLE_MB);
   return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : DEFAULT_EMBED_WAKE_MIN_AVAILABLE_MB;
 }
 

@@ -182,9 +182,28 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
         // one even though the response was ok. The download's own progress
         // reaches the journal as lines; a percentage in one is shown when it
         // is there and nothing is guessed when it is not.
+        //
+        // The closing line is REQUIRED. A stream that simply ends — the web
+        // server restarting mid-download, the connection dropping — has said
+        // neither, and reading its end as "done" would switch the provider
+        // and start a full reindex against a model that is not on the box,
+        // with the owner watching the ready phase.
         const reader = pull.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        let finished = false;
+        const readLine = (line: string) => {
+          if (!line.trim()) return;
+          let parsed: PullLine;
+          try { parsed = JSON.parse(line) as PullLine; } catch { return; }
+          if (parsed.error) throw new Error(parsed.error);
+          if (parsed.success === true) finished = true;
+          if (parsed.status) {
+            setDetail(parsed.status);
+            const percent = /(\d{1,3})%/.exec(parsed.status);
+            if (percent) setProgress(Math.min(100, Number(percent[1])) / 100);
+          }
+        };
         try {
           for (;;) {
             const { done, value } = await reader.read();
@@ -192,18 +211,13 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split("\n");
             buffer = lines.pop() ?? "";
-            for (const line of lines) {
-              if (!line.trim()) continue;
-              let parsed: PullLine;
-              try { parsed = JSON.parse(line) as PullLine; } catch { continue; }
-              if (parsed.error) throw new Error(parsed.error);
-              if (parsed.status) {
-                setDetail(parsed.status);
-                const percent = /(\d{1,3})%/.exec(parsed.status);
-                if (percent) setProgress(Math.min(100, Number(percent[1])) / 100);
-              }
-            }
+            for (const line of lines) readLine(line);
           }
+          // The route ends every line with a newline, but the closing line is
+          // the one this step now depends on, so a final line the stream
+          // closed on without one is read rather than left in the buffer.
+          buffer += decoder.decode();
+          readLine(buffer);
         } finally {
           // Leaving the loop on an error line releases the body rather than
           // holding a locked reader on it until garbage collection; on a
@@ -211,6 +225,7 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
           // route its client is gone.
           await reader.cancel().catch(() => {});
         }
+        if (!finished) throw new Error(t("clawkeep.memory.setup.pullFailed"));
         setProgress(1);
       }
 

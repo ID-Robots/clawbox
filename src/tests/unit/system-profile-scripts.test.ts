@@ -181,10 +181,12 @@ describe("clawbox-resource-limits.sh --check", () => {
       CLAWBOX_RESOURCE_LIMITS_FILE: limits,
       CLAWBOX_SYSTEMD_DIR: tmpdir(),
     });
-    expect(out).toContain("MemoryHigh=3G MemoryMax=4G");
-    expect(out).toContain("MemoryHigh=500M MemoryMax=600M");
-    expect(out).toContain("MemoryHigh=100M MemoryMax=200M");
-    expect(out).toContain("MemoryHigh=300M MemoryMax=400M");
+    // Each cap named WITH its unit: the bare pair also matched when the script
+    // printed the right numbers beside the wrong unit.
+    expect(out).toContain("unit: ollama.service MemoryHigh=3G MemoryMax=4G");
+    expect(out).toContain("unit: clawbox-embed.service MemoryHigh=500M MemoryMax=600M");
+    expect(out).toContain("unit: clawbox-browser.service MemoryHigh=100M MemoryMax=200M");
+    expect(out).toContain("unit: user@1000.service MemoryHigh=300M MemoryMax=400M");
   });
 
   it("skips a unit whose keys an older env file lacks, and still caps the rest", () => {
@@ -203,8 +205,8 @@ describe("clawbox-resource-limits.sh --check", () => {
       CLAWBOX_RESOURCE_LIMITS_FILE: limits,
       CLAWBOX_SYSTEMD_DIR: tmpdir(),
     });
-    expect(out).toContain("MemoryHigh=3G MemoryMax=4G");
-    expect(out).toContain("MemoryHigh=300M MemoryMax=400M");
+    expect(out).toContain("unit: ollama.service MemoryHigh=3G MemoryMax=4G");
+    expect(out).toContain("unit: user@1000.service MemoryHigh=300M MemoryMax=400M");
     expect(out).not.toContain("clawbox-embed.service MemoryHigh");
   });
 

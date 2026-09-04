@@ -15,7 +15,7 @@ import path from "node:path";
 import { getMemoryShardEnabled, getMemoryShardSetupComplete } from "@/lib/memory-shard";
 
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
-import { findOpenclawBin } from "@/lib/openclaw-config";
+import { CONFIG_PATH, findOpenclawBin } from "@/lib/openclaw-config";
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 
 export type MemoryScheduleFrequency = "daily" | "weekly";
@@ -432,10 +432,16 @@ function providerLocation(provider: string, remoteBaseUrl: string | null): ClawK
  * does not carry. Read from the file rather than the CLI because this runs
  * beside a probe that already costs a process boot. Null when unset or
  * unreadable — which providerLocation reports as "unknown", never as local.
+ *
+ * The file is `CONFIG_PATH`, never a path built from the home directory:
+ * that constant honours `CLAWBOX_OPENCLAW_HOME` / `OPENCLAW_HOME`, and on an
+ * installation that moves the state directory a hand-built `~/.openclaw`
+ * read a file that is not there, so the card said "unknown" about an
+ * embedder the boot script had just wired up.
  */
 async function readEmbeddingRemoteBaseUrl(): Promise<string | null> {
   try {
-    const raw = await fs.readFile(path.join(os.homedir(), ".openclaw", "openclaw.json"), "utf8");
+    const raw = await fs.readFile(CONFIG_PATH, "utf8");
     const config = JSON.parse(raw) as Record<string, unknown>;
     const pick = (root: unknown, keys: readonly string[]): string | null => {
       let node: unknown = root;

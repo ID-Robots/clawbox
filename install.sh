@@ -929,6 +929,31 @@ get_env_setting_or_default() {
   fi
 }
 
+# A Hugging Face repo id or file name read out of .env, checked BEFORE it is
+# spliced into an as_clawbox_login command string. That helper hands its
+# argument to `su -c`, so a value carrying shell syntax would run as the
+# clawbox user the moment a root-invoked step read the pin — and the same
+# value becomes MODEL_PATH and the download's argv, where a `..` segment
+# reaches past the models directory and a leading dash turns into an `hf`
+# option. The allow-list is exactly what a repo id (owner/name) or a GGUF
+# name (with an optional subfolder) is made of; anything else is refused with
+# the key named, since get_env_setting_or_default takes the line as written.
+# Usage: require_safe_hf_ref KEY VALUE
+require_safe_hf_ref() {
+  local key="$1"
+  local value="$2"
+  # ASCII ranges only: in a UTF-8 locale [A-Z] can admit other scripts.
+  local LC_ALL=C
+  if [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+    case "/$value/" in
+      */../*) ;;
+      *) return 0 ;;
+    esac
+  fi
+  echo "Error: ${key}=$(printf '%q' "$value") in .env is not a Hugging Face repo id or file name (letters, digits, . _ / -; no '..' segment; no leading '-'). Refusing to use it — fix the pin and re-run." >&2
+  return 1
+}
+
 ensure_llamacpp_model_cached() {
   local ENV_FILE="$PROJECT_DIR/.env"
   local MODEL_DIR="$PROJECT_DIR/data/llamacpp/models"
@@ -942,6 +967,9 @@ ensure_llamacpp_model_cached() {
 
   HF_REPO=$(get_env_setting_or_default "$ENV_FILE" "LLAMACPP_HF_REPO" "google/gemma-4-E2B-it-qat-q4_0-gguf")
   HF_FILE=$(get_env_setting_or_default "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-E2B_q4_0-it.gguf")
+  # Both are about to be interpolated into an as_clawbox_login command string.
+  require_safe_hf_ref "LLAMACPP_HF_REPO" "$HF_REPO" || return 1
+  require_safe_hf_ref "LLAMACPP_HF_FILE" "$HF_FILE" || return 1
   MODEL_PATH="$MODEL_DIR/$HF_FILE"
 
   mkdir -p "$MODEL_DIR"
@@ -2336,6 +2364,9 @@ ensure_embed_model_cached() {
   # Keep the defaults in step with src/lib/embed-server.ts.
   HF_REPO=$(get_env_setting_or_default "$ENV_FILE" "EMBED_HF_REPO" "Qwen/Qwen3-Embedding-0.6B-GGUF")
   HF_FILE=$(get_env_setting_or_default "$ENV_FILE" "EMBED_HF_FILE" "Qwen3-Embedding-0.6B-Q8_0.gguf")
+  # Both are about to be interpolated into an as_clawbox_login command string.
+  require_safe_hf_ref "EMBED_HF_REPO" "$HF_REPO" || return 1
+  require_safe_hf_ref "EMBED_HF_FILE" "$HF_FILE" || return 1
   MODEL_PATH="$MODEL_DIR/$HF_FILE"
   mkdir -p "$MODEL_DIR"
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/embed"

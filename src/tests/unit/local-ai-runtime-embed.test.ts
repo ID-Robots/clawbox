@@ -11,6 +11,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const execFileMock = vi.hoisted(() => vi.fn());
+// The memory guard reads /proc/meminfo; the log tail reads the unit's log.
+// Both go through fs/promises, stubbed so no case depends on the host kernel
+// — a runner without /proc would skip the guard, start the unit, and poll
+// real timers for the whole 20-minute provisioning budget.
+const readFileMock = vi.hoisted(() => vi.fn(async (): Promise<string> => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); }));
+vi.mock("fs/promises", () => ({ default: { readFile: readFileMock } }));
 const embed = vi.hoisted(() => ({
   isEmbedHealthy: vi.fn(),
   getEmbedProvisioningStatus: vi.fn(async () => ({
@@ -125,14 +131,28 @@ describe("waking the memory embedder for a proxied request", () => {
   });
 
   it("refuses the wake when the box is short of memory, before touching systemctl", async () => {
-    // No box has this much free; the guard must fire and the unit stay down.
-    process.env.EMBED_WAKE_MIN_AVAILABLE_MB = String(1_000_000_000);
+    // 512 MB reported free against the shipped 2,300 MB floor: the guard must
+    // fire and the unit stay down, on any host.
+    process.env.EMBED_WAKE_MIN_AVAILABLE_MB = "2300";
+    readFileMock.mockResolvedValueOnce("MemTotal:       7789948 kB\nMemAvailable:    524288 kB\n");
     embed.isEmbedHealthy.mockResolvedValue(false);
     execSucceeds(/.*/);
     const { ensureLocalAiReady } = await import("@/lib/local-ai-runtime");
 
-    await expect(ensureLocalAiReady("embed")).rejects.toThrow(/Not enough free memory to wake the memory embedder/);
+    await expect(ensureLocalAiReady("embed")).rejects.toThrow(/Not enough free memory to wake the memory embedder \(512 MB available, 2300 MB needed\)/);
     expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it("wakes when the box has the room, reading the same file", async () => {
+    process.env.EMBED_WAKE_MIN_AVAILABLE_MB = "2300";
+    readFileMock.mockResolvedValueOnce("MemAvailable:    4653056 kB\n");
+    embed.isEmbedHealthy.mockResolvedValueOnce(false).mockResolvedValue(true);
+    execSucceeds(/sudo -n \/usr\/bin\/systemctl start clawbox-embed\.service/);
+    const { ensureLocalAiReady } = await import("@/lib/local-ai-runtime");
+
+    await ensureLocalAiReady("embed");
+
+    expect(argvLines()).toEqual(["/usr/bin/sudo -n /usr/bin/systemctl start clawbox-embed.service"]);
   });
 
   it("fails rather than reporting an embedder that never came up", async () => {
@@ -153,6 +173,23 @@ describe("putting the memory embedder to sleep", () => {
 
     expect(argvLines()).toEqual(["/usr/bin/sudo -n /usr/bin/systemctl stop clawbox-embed.service"]);
     expect(argvLines().join("\n")).not.toMatch(/disable/);
+  });
+
+  it("never matches the Gemma llama-server when it falls back to signalling", async () => {
+    // Same binary, same path: only the flag the embedder alone carries may
+    // select it — the defect class that once killed a live chat turn through
+    // the ollama pkill.
+    execSucceeds(); // both sudo and the plain systemctl refuse
+    const { terminateByArgv } = await import("@/lib/process-match");
+    const { stopLocalAiProvider } = await import("@/lib/local-ai-runtime");
+
+    await stopLocalAiProvider("embed");
+
+    expect(terminateByArgv).toHaveBeenCalledTimes(1);
+    const accepts = vi.mocked(terminateByArgv).mock.calls[0][0] as (argv: string[]) => boolean;
+    expect(accepts(["/usr/local/bin/llama-server", "--embedding", "--port", "8081"])).toBe(true);
+    expect(accepts(["/usr/local/bin/llama-server", "--port", "8080"])).toBe(false);
+    expect(accepts(["/usr/bin/node", "--embedding"])).toBe(false);
   });
 
   it("re-arms the idle stop at boot for a unit that outlived the web server", async () => {

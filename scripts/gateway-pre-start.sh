@@ -38,7 +38,12 @@ OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-${CLAWBOX_OPENCLAW_HOME:-${OPENCLAW_HOME:-$C
 # child can inherit it. Neither reaches the gateway: ExecStartPre's
 # environment ends with it.
 export OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG"
-export OPENCLAW_STATE_DIR="$(dirname "$OPENCLAW_CONFIG")"
+# Assigned apart from the export: `export X="$(cmd)"` answers with export's
+# own status, so a dirname that failed would have handed every child an EMPTY
+# state dir behind a clean exit. As a plain assignment the substitution's
+# status is the line's, and `set -e` stops this ExecStartPre on it instead.
+OPENCLAW_STATE_DIR="$(dirname "$OPENCLAW_CONFIG")"
+export OPENCLAW_STATE_DIR
 unset OPENCLAW_HOME
 HOSTNAME_ENV="${HOSTNAME_ENV:-$CLAWBOX_ROOT/data/hostname.env}"
 
