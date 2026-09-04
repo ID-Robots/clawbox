@@ -40,10 +40,20 @@ import path from "node:path";
 const REPO = process.cwd();
 const INSTALL_SH = readFileSync(path.join(REPO, "install.sh"), "utf-8");
 
-/** One shell function, verbatim, closing brace included; "" when there is none. */
+/**
+ * One shell function, verbatim, closing brace included; "" when there is none.
+ *
+ * Anchored at a LINE START. `indexOf(name + "() {")` also matches inside a
+ * longer identifier, so a future `pre_do_rebuild() {` above `do_rebuild` would
+ * hand back the tail of that definition — and the "extracted whole" guard,
+ * which checks the body STARTS with `name() {`, is satisfied by the suffix. The
+ * harness would then run the wrong body and the suite would pass for the wrong
+ * reason.
+ */
 function findShellFunction(name: string): string {
-  const start = INSTALL_SH.indexOf(name + "() {");
-  if (start < 0) return "";
+  const opener = new RegExp(`^${name}\\(\\) \\{$`, "m").exec(INSTALL_SH);
+  if (!opener) return "";
+  const start = opener.index;
   const end = INSTALL_SH.indexOf("\n}", start);
   if (end < 0) throw new Error(name + " has no closing brace");
   return INSTALL_SH.slice(start, end + 2);
@@ -405,9 +415,14 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
   });
 
   it("does not touch a parked build when the current one is servable", () => {
-    const r = run({ build: "succeeds", previousBuild: "servable", parkedBuild: "servable" });
-    expect(r.status).toBe(0);
-    expect(r.buildId).toBe("new-build-id");
+    // A FAILING build, so the preserved identity is observable: with
+    // `succeeds` the build overwrites BUILD_ID either way, and removing the
+    // guard in promote_parked_build would leave every assertion holding.
+    // Failing, the box must end on its OWN previous build, not the parked one.
+    const r = run({ build: "oom-killed", previousBuild: "servable", parkedBuild: "servable" });
+
+    expect(r.status).not.toBe(0);
+    expect(r.buildId).toBe("old-build-id");
   });
 });
 
