@@ -32,7 +32,7 @@
  * "Dismiss": the desktop shell's aria labels are not translated today, and a
  * label that lied would be worse than one that is untranslated.
  */
-const NOTIFY_ACTION_TARGETS = {
+export const NOTIFY_ACTION_TARGETS = {
   settings: { email: "Open Settings → Email" },
 } as const;
 
@@ -68,4 +68,26 @@ export function parseNotifyAction(value: unknown): NotifyAction | null {
 export function notifyActionLabel(action: NotifyAction): string {
   const sections: Record<string, string> = NOTIFY_ACTION_TARGETS[action.open];
   return sections[action.section];
+}
+
+/** What `ToastHost` is handed for one notice: the words, and where clicking goes. */
+export interface ToastNoticeDetail {
+  message: string;
+  action?: NotifyAction;
+}
+
+/**
+ * The `clawbox:toast` detail for one `notify` entry off the owner-notice ring,
+ * or null when there is nothing to show.
+ *
+ * Lives here rather than inline in the desktop's poll loop so that the one
+ * step which carries a destination OUT of the ring is testable: `page.tsx` has
+ * no render tests, and a wrong field name there would leave the feature dead
+ * on the box with a green suite.
+ */
+export function toastDetailForNotice(notice: Record<string, unknown>): ToastNoticeDetail | null {
+  const message = typeof notice.message === "string" ? notice.message : "";
+  if (!message) return null;
+  const target = parseNotifyAction(notice.action);
+  return { message, ...(target ? { action: target } : {}) };
 }

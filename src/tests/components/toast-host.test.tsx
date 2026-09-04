@@ -6,10 +6,11 @@
  * listened — the events fired into the void. This pins that a dispatched
  * message is rendered as text, can be dismissed, and that junk is ignored.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@/tests/helpers/test-utils";
 import ToastHost, { TOAST_EVENT } from "@/components/ToastHost";
 import { OPEN_APP_EVENT, OPEN_SETTINGS_SECTION_EVENT } from "@/lib/ui-events";
+import { NOTICE_AUTO_HIDE_MS } from "@/lib/use-auto-hide";
 
 function dispatch(detail: unknown) {
   act(() => {
@@ -122,6 +123,28 @@ describe("ToastHost — a notice that can be acted on", () => {
     render(<ToastHost />);
     dispatch({ message: "Coding agent finished" });
     expect(screen.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual(["Dismiss"]);
+  });
+
+  it("stays for the desktop's shared clock, not the eight seconds a plain notice gets", () => {
+    // Eight seconds is how long it takes to READ a bubble. This one has to be
+    // clicked, and a toast that vanishes under the pointer puts the owner back
+    // on the walk to Settings this feature exists to remove.
+    vi.useFakeTimers();
+    try {
+      render(<ToastHost />);
+      dispatch({ message: "plain notice" });
+      dispatch({ message: "an email is waiting", action: { open: "settings", section: "email" } });
+
+      act(() => { vi.advanceTimersByTime(8_001); });
+      const left = screen.getAllByRole("status").map((el) => el.textContent);
+      expect(left).toHaveLength(1);
+      expect(left[0]).toContain("an email is waiting");
+
+      act(() => { vi.advanceTimersByTime(NOTICE_AUTO_HIDE_MS - 8_000); });
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("drops an action that is not on the allowlist rather than rendering it", () => {

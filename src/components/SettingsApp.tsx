@@ -521,8 +521,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       requestClawAiOffer();
       delete w.__clawboxPendingClawAiOffer;
     }
-    const handler = (event: Event) =>
+    const handler = (event: Event) => {
       apply((event as CustomEvent<{ section?: string }>).detail?.section);
+      // The dispatcher sets the cold-open handoff AND fires this event, not
+      // knowing whether Settings is up. When it is, this path is what applies
+      // the section — so the handoff has to be taken here too, or it sits on
+      // `window` until the NEXT cold open of Settings, which then lands on
+      // whatever section some earlier deep link asked for.
+      delete (window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection;
+    };
     const providerHandler = (event: Event) =>
       requestProviderSelection((event as CustomEvent<{ providerId?: string }>).detail?.providerId);
     const offerHandler = () => requestClawAiOffer();

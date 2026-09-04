@@ -44,8 +44,13 @@ function parseLegacyAction(value: string): Record<string, unknown> | null {
   // name where the owner lands would hand it a target on their desktop.
   // ClawBox's own in-process producers attach one through notifyOwner()
   // (src/lib/email-notify.ts), which checks it against the allowlist in
-  // src/lib/notify-action.ts.
-  delete fields.action;
+  // src/lib/notify-action.ts. Logged rather than dropped in silence, so that
+  // a future out-of-process notice which legitimately wants an `action` field
+  // finds out here instead of shipping without one.
+  if (Object.hasOwn(fields, "action")) {
+    console.error("[kv] dropped the click destination of a notice posted through the legacy slot");
+    delete fields.action;
+  }
   return fields;
 }
 

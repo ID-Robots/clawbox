@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { notifyActionLabel, parseNotifyAction, type NotifyAction } from "@/lib/notify-action";
 import { dispatchOpenSettingsSection } from "@/lib/ui-events";
+import { NOTICE_AUTO_HIDE_MS } from "@/lib/use-auto-hide";
 
 /**
  * The desktop's toast surface.
@@ -29,7 +30,17 @@ import { dispatchOpenSettingsSection } from "@/lib/ui-events";
  */
 
 export const TOAST_EVENT = "clawbox:toast";
+/** A notice that only says something. Long enough to read, short enough to stay out of the way. */
 const TOAST_MS = 8_000;
+/**
+ * A notice the owner can ACT on: the desktop's shared clock
+ * (`NOTICE_AUTO_HIDE_MS`, the one the finish card, the update card and the
+ * pairing request run on), because eight seconds is the time it takes to read
+ * a bubble, not the time it takes to decide to click it — and a toast that
+ * vanishes under the pointer leaves the owner back at the walk to Settings
+ * this exists to remove.
+ */
+const ACTIONABLE_TOAST_MS = NOTICE_AUTO_HIDE_MS;
 const MAX_TOASTS = 4;
 const MAX_CHARS = 280;
 
@@ -78,7 +89,7 @@ export default function ToastHost() {
       const timer = setTimeout(() => {
         timers.delete(timer);
         setToasts((prev) => prev.filter((toast) => toast.id !== id));
-      }, TOAST_MS);
+      }, action ? ACTIONABLE_TOAST_MS : TOAST_MS);
       timers.add(timer);
     };
     window.addEventListener(TOAST_EVENT, handler);
@@ -99,15 +110,20 @@ export default function ToastHost() {
             <span className="material-symbols-rounded text-[var(--coral-bright)] shrink-0" style={{ fontSize: 20 }} aria-hidden="true">
               notifications
             </span>
-            <div className="flex-1 min-w-0 text-sm text-white break-words">{toast.message}</div>
+            <span className="block flex-1 min-w-0 text-sm text-white break-words">{toast.message}</span>
           </>
         );
+        // The bubble's own padding sits on these two children rather than on
+        // the row, so that on an actionable notice the whole area around the
+        // text is inside the button — the owner asked to click "inside the
+        // bubble", and padding that did nothing is still bubble to them.
+        const bodyClass = "flex flex-1 min-w-0 items-start gap-3 pl-4 pr-1 py-3 text-left";
         return (
           <div
             key={toast.id}
             role="status"
             aria-live="polite"
-            className="pointer-events-auto flex items-start gap-3 rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl px-4 py-3 animate-in slide-in-from-bottom-2 fade-in duration-300"
+            className="pointer-events-auto flex items-start rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl animate-in slide-in-from-bottom-2 fade-in duration-300"
           >
             {action ? (
               <button
@@ -123,16 +139,18 @@ export default function ToastHost() {
                   openNotifyAction(action);
                   dismiss(toast.id);
                 }}
-                className="flex flex-1 min-w-0 items-start gap-3 text-left rounded-lg hover:opacity-80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--coral-bright)]"
+                className={`${bodyClass} cursor-pointer rounded-l-xl hover:bg-white/[0.06] focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--coral-bright)]`}
               >
                 {body}
               </button>
-            ) : body}
+            ) : (
+              <div className={bodyClass}>{body}</div>
+            )}
             <button
               type="button"
               aria-label="Dismiss"
               onClick={() => dismiss(toast.id)}
-              className="shrink-0 text-white/50 hover:text-white"
+              className="shrink-0 cursor-pointer pl-1 pr-4 py-3 text-white/50 hover:text-white"
             >
               <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">close</span>
             </button>

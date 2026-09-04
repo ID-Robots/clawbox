@@ -847,6 +847,23 @@ describe("SettingsApp providers and Local AI pages", () => {
     const local = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.localAi"))!;
     expect(local.className).toContain("coral-bright");
   });
+
+  // The dispatcher cannot know whether Settings is up, so it always does both:
+  // leaves the cold-open handoff on `window` AND fires the event. When Settings
+  // IS up this path applies it, and the handoff has to be taken here too —
+  // left behind, the NEXT cold open of Settings silently lands on whatever
+  // section some earlier deep link asked for.
+  it("takes the cold-open handoff when the event path is the one that applied it", async () => {
+    const pending = window as Window & { __clawboxPendingSettingsSection?: string };
+    delete pending.__clawboxPendingSettingsSection;
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    pending.__clawboxPendingSettingsSection = "localModels";
+    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "localModels" } }));
+    expect(await screen.findByTestId("local-ai-loading")).toBeInTheDocument();
+    const local = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.localAi"))!;
+    expect(local.className).toContain("coral-bright");
+    expect(pending.__clawboxPendingSettingsSection).toBeUndefined();
+  });
 });
 
 /**
