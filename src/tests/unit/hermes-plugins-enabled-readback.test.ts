@@ -33,6 +33,7 @@ const envMock = vi.hoisted(() => vi.fn());
 const installMock = vi.hoisted(() => vi.fn());
 const drawsMock = vi.hoisted(() => vi.fn());
 const refreshMock = vi.hoisted(() => vi.fn());
+const resolveVisionMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: drawsMock }));
@@ -44,6 +45,12 @@ vi.mock("@/lib/coding-agent-mcp-refresh", () => ({
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
 vi.mock("@/lib/config-store", () => ({ setMany: vi.fn() }));
 vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: envMock }));
+// The vision probe reaches the proxy over the network and waits seconds for it.
+// Nothing in this file is about vision; stubbing it keeps the suite hermetic.
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  resolveVisionModelId: resolveVisionMock,
+}));
 vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-image-plugin")>()),
   installHermesImagePlugin: installMock,
@@ -97,17 +104,28 @@ function renderPlain(value: unknown): string {
  * `value: undefined` is an unset key, which the CLI reports as a non-zero exit.
  */
 function box(opts: { value: unknown; onSet?: Reply }): void {
+  // STATEFUL: a `config set` changes what the next `config get` answers, unless
+  // the case says the write fails. Without that the read-back compares the
+  // written names against the PRE-write value and every success path really
+  // exercises the mismatch branch — the tests would pass for the wrong reason.
+  let stored = opts.value;
   cliMock.mockImplementation(async (args: string[]) => {
     if (args[1] === "get" && args[2] === "plugins.enabled") {
-      if (opts.value === undefined) {
+      if (stored === undefined) {
         return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
       }
       return args.includes("--json")
-        ? { code: 0, stdout: JSON.stringify(opts.value), stderr: "" }
-        : { code: 0, stdout: renderPlain(opts.value), stderr: "" };
+        ? { code: 0, stdout: JSON.stringify(stored), stderr: "" }
+        : { code: 0, stdout: renderPlain(stored), stderr: "" };
     }
     if (args[1] === "set" && args[2] === "plugins.enabled") {
-      return opts.onSet ?? { code: 0, stdout: "", stderr: "" };
+      const reply = opts.onSet ?? { code: 0, stdout: "", stderr: "" };
+      // A write the case made fail leaves the old value; the CLI's own
+      // "storing as string" is a write that landed AS TEXT.
+      if (reply.code === 0) {
+        stored = /storing as string/i.test(reply.stderr) ? args[3] : JSON.parse(args[3]);
+      }
+      return reply;
     }
     return { code: 0, stdout: "", stderr: "" };
   });
@@ -123,6 +141,7 @@ beforeEach(() => {
   refreshMock.mockReset();
   cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
   drawsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+  resolveVisionMock.mockResolvedValue({ model: "", reason: "probe stubbed" });
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 
@@ -192,10 +211,9 @@ describe("plugins.enabled is written on a read-back, not on an exit code", () =>
     // Already listed as a real list: nothing to write, and the backend is named.
     expect(wrotePluginsEnabled()).toBe(false);
     expect(claimedItCanDraw()).toBe(true);
-    expect(warn).not.toHaveBeenCalledWith(
-      expect.stringContaining("plugins.enabled"),
-      expect.anything(),
-    );
+    // Nothing to report: assert on the recorded arguments, not on a matcher
+    // pair that could never line up with a one-argument console.warn.
+    expect(warn.mock.calls.flat().join(" ")).not.toContain("plugins.enabled");
   });
 
   it("keeps the customer's plugins when it adds itself", async () => {

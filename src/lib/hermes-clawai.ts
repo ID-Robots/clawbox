@@ -1072,23 +1072,13 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
 }
 
 /**
- * Write `plugins.enabled` and PROVE it landed as a list.
+ * Read `plugins.enabled` as Hermes would, and say whether the TYPE could be
+ * asked about at all.
  *
- * AN EXIT CODE IS NOT AN OUTCOME — the same rule `reconcileClawaiModelsWithHermes`
- * follows for `providers.clawai.models`, and it matters more here. That key
- * degrades one picker; this one is the opt-in allow-list for every user plugin
- * on the box, and a value Hermes cannot read as a list disables all of them.
- *
- * It THROWS rather than returning a verdict, and the caller's ordering is what
- * makes that the right shape: `image_gen.provider` — the key
- * `hermesAgentDrawsImages` reads, and therefore the key that turns the agent's
- * picture ability on — is written after this. So a plugin that did not land
- * means the box never claims it can draw. A wrong `false` only hides an
- * ability; a wrong `true` is an apology.
- *
- * Fails closed when the read-back cannot be RUN, for the same reason. There is
- * no retry loop: this runs once, at link time, and the caller logs the throw
- * while the link itself still succeeds.
+ * `typed` is the second half of the answer: false means this build cannot
+ * render the key machine-readably, so a list and a string that spells one are
+ * indistinguishable here and no proof is possible on this box — a permanent
+ * property, not a moment, which is why the caller keeps its claim there.
  */
 async function readPluginsEnabledFromCli(): Promise<{ state: PluginsEnabledState; typed: boolean }> {
   const typedRead = await runHermesCli(
@@ -1162,6 +1152,22 @@ async function withdrawImageProviderClaim(): Promise<void> {
 const UNSUPPORTED_OPTION_RE = /unrecognized arguments?:|no such option|unknown option|invalid choice/i;
 
 /**
+ * Write `plugins.enabled` and PROVE it landed as a list.
+ *
+ * AN EXIT CODE IS NOT AN OUTCOME — the same rule `reconcileClawaiModelsWithHermes`
+ * follows for `providers.clawai.models`, and it matters more here. That key
+ * degrades one picker; this one is the opt-in allow-list for every user plugin
+ * on the box, and a value Hermes cannot read as a list disables all of them.
+ *
+ * The caller's ordering is what turns the answer into behaviour:
+ * `image_gen.provider` — the key `hermesAgentDrawsImages` reads, and therefore
+ * the key that turns the agent's picture ability on — is written after this. So
+ * anything short of proof means the box does not claim it can draw. A wrong
+ * `false` only hides an ability; a wrong `true` is an apology.
+ *
+ * There is no retry loop: this runs once, at link time, and the caller logs
+ * while the link itself still succeeds.
+ *
  * @returns true when the plugin is loadable as far as this build can be asked —
  *          false when the write exited 0 and the read-back that would prove it
  *          could not be run. Throws when the write, or the proof, said no.
