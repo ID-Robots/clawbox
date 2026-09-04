@@ -205,6 +205,23 @@ async function main() {
         console.error(`"${appId}" is not a valid installed-app id.`);
         process.exit(1);
       }
+      // …and then MEMBERSHIP, also where ui_open_app applies it. A well-formed
+      // id the device does not have is still a window that never opens, and
+      // printing a tick over it is the same false success the built-in branch
+      // below exists to stop.
+      const prefs = await api("/setup-api/preferences?keys=installed_apps") as {
+        installed_apps?: unknown;
+      };
+      const installed = Array.isArray(prefs?.installed_apps)
+        ? prefs.installed_apps.filter((v): v is string => typeof v === "string")
+        : [];
+      if (!installed.includes(appId.slice("installed-".length))) {
+        console.error(
+          `No installed app "${appId.slice("installed-".length)}" on this ClawBox.`
+          + (installed.length ? ` Installed: ${installed.join(", ")}` : " Nothing is installed."),
+        );
+        process.exit(1);
+      }
     } else if (!openable.includes(appId)) {
       console.error(`No built-in app "${appId}" on this ClawBox. Try: ${openable.join(", ")}`);
       process.exit(1);
