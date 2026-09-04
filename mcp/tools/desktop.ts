@@ -9,7 +9,7 @@
 import { apiGet, apiPost, CLAWBOX_ROOT } from "../lib/api";
 import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
-import { zBool, zConfirm, zEnumOf, zInt, zOptText, zSlug, zText } from "../lib/schema";
+import { INSTALLED_APP_ID_RE, zBool, zConfirm, zEnumOf, zInt, zOptText, zSlug, zText } from "../lib/schema";
 import { builtInApps, type McpContext } from "../lib/context";
 import type { InstalledHermesSkill } from "../../src/lib/hermes-skills";
 
@@ -124,7 +124,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
       // guard: an `installed-<id>` the caller invented.
       const isInstalled = app_id.startsWith("installed-");
       if (isInstalled) {
-        if (!/^installed-[a-z0-9][a-z0-9-]{0,63}$/.test(app_id)) {
+        if (!INSTALLED_APP_ID_RE.test(app_id)) {
           throw new ToolError(
             "BAD_ARGUMENT",
             "That is not a valid installed-app id.",

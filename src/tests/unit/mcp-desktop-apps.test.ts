@@ -13,6 +13,8 @@ vi.mock("../../../mcp/lib/api", () => ({
 }));
 
 import { builtInApps, type McpContext } from "../../../mcp/lib/context";
+import { INSTALLED_APP_ID_RE } from "../../../mcp/lib/schema";
+import { APP_ID_RE } from "@/lib/code-projects";
 import { captureRegistrar } from "../helpers/mcp-registrar";
 import { registerDesktopTools } from "../../../mcp/tools/desktop";
 import {
@@ -144,6 +146,21 @@ describe("ui_open_app accepts every id it advertises", () => {
     const malformed = await h.call("ui_open_app", { app_id: "installed-../etc" });
     expect(malformed.isError).toBe(true);
     if (malformed.isError) expect(malformed.error.code).toBe("BAD_ARGUMENT");
+  });
+
+  it("accepts every installed id the device is able to create", async () => {
+    // The producers' alphabet is wider than `zSlug`'s: `APP_ID_RE` and the
+    // store's SLUG both take upper case and underscores, so a webapp called
+    // `Foo_Bar` exists on boxes today. Refusing it would be the tool calling an
+    // id the device itself minted invalid.
+    for (const id of ["Foo_Bar", "weather", "a", "A1_b-c", "x".repeat(64)]) {
+      expect(APP_ID_RE.test(id), `${id} must be creatable`).toBe(true);
+      expect(INSTALLED_APP_ID_RE.test(`installed-${id}`), `${id} must be openable`).toBe(true);
+    }
+    // …and no wider: nothing that could become a path or a second field.
+    for (const id of ["../etc", "a/b", "a b", "a.b", "", "-lead"]) {
+      expect(INSTALLED_APP_ID_RE.test(`installed-${id}`), `${id} must be refused`).toBe(false);
+    }
   });
 });
 

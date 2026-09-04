@@ -53,6 +53,23 @@ export function zOptText(max: number, description: string) {
 }
 
 /** A lowercase id: app ids, project ids, webapp ids. */
+/**
+ * An `installed-<id>` the caller invented, gated on SHAPE only — membership is
+ * checked separately against what the device reports.
+ *
+ * The alphabet is the PRODUCERS', not this file's: `APP_ID_RE`
+ * (src/lib/code-projects.ts, the webapp routes) and the store's `SLUG`
+ * (setup-api/apps/install) both accept upper case and underscores, so a webapp
+ * legitimately called `Foo_Bar` exists on boxes today. Gating on `zSlug`'s
+ * narrower lowercase-and-hyphen rule refused to open it — a tool saying "that
+ * is not a valid app id" about an id the device created. Kept in step by
+ * src/tests/unit/mcp-desktop-apps.test.ts.
+ *
+ * Deliberately still a closed alphabet: no dots, no slashes, no whitespace, so
+ * the value cannot become a path or a second field on its way to the desktop.
+ */
+export const INSTALLED_APP_ID_RE = /^installed-[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
 export function zSlug(description: string) {
   return z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, "lowercase letters, digits and hyphens only").describe(description);
 }

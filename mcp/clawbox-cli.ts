@@ -20,6 +20,7 @@ import { join } from "path";
 import { spawnSync } from "child_process";
 import { installEdition } from "./lib/edition";
 import { builtInApps } from "./lib/context";
+import { INSTALLED_APP_ID_RE } from "./lib/schema";
 
 const API_BASE = process.env.CLAWBOX_API_BASE || "http://127.0.0.1:80";
 const UI_PICKUP_DELAY_MS = 2500; // Time for the desktop UI to poll and pick up KV actions
@@ -200,7 +201,7 @@ async function main() {
       // The shape check, exactly where ui_open_app applies it: an installed id
       // is caller-supplied, and `installed-../etc` would otherwise be posted as
       // a pending action with a tick printed over it.
-      if (!/^installed-[a-z0-9][a-z0-9-]{0,63}$/.test(appId)) {
+      if (!INSTALLED_APP_ID_RE.test(appId)) {
         console.error(`"${appId}" is not a valid installed-app id.`);
         process.exit(1);
       }
