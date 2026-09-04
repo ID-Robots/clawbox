@@ -613,14 +613,14 @@ PY
 # are very different facts for whoever is later holding a truncated config, and
 # 125 (a bad duration) and 127 (no `timeout`) are different again. One sentence
 # for all four was all the journal had.
-# The group is the `if` CONDITION, which is what keeps a refusal non-fatal
-# under `set -e`, and `$?` in the `else` is still the condition's status — so
-# the exit code reaches the log without a separate capture line.
+# Being the `if` CONDITION is what keeps a refusal non-fatal under `set -e`;
+# the group is only about stderr. `$?` in the `else` is still the condition's
+# status, so the exit code reaches the log without a separate capture line.
 if { timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools disable browser >/dev/null 2>&1; } 2>/dev/null; then
   log "built-in browser toolset off; browsing goes through the ClawBox browser_* tools"
 else
-  EMAIL_HOOK_BROWSER_RC=$?
-  log "could not disable the built-in browser toolset (exit $EMAIL_HOOK_BROWSER_RC) — continuing"
+  BROWSER_DISABLE_RC=$?
+  log "could not disable the built-in browser toolset (exit $BROWSER_DISABLE_RC) — continuing"
 fi
 
 # ── 5. Prove the EMAIL: hook plugin actually LOADS, every boot. ─────────────

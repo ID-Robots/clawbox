@@ -55,10 +55,11 @@ describe("both writers share ONE lock file", () => {
     // line above, leaving the reconcile unprotected.
     const reconcile = REGISTER_SRC.search(/^export CLAWBOX_MCP_HERMES_CONFIG=/m);
     // Anchored at column 0 and on the binary, and on NOTHING that wraps the
-    // call. The wrapper has now moved twice — `if "$HERMES_BIN" …`, then
-    // `if timeout -k 5 … "$HERMES_BIN" …`, then a brace group whose status is
-    // captured — and each time a marker that pinned the wrapper stopped
-    // matching. Both times the -1 guard below is what caught it, which is the
+    // call. The wrapper has now moved three times — `if "$HERMES_BIN" …`, then
+    // `if timeout -k 5 … "$HERMES_BIN" …`, then a brace group whose status was
+    // captured, now `if { timeout -k 5 … ; } 2>/dev/null; then` with the status
+    // read in the `else` — and each time a marker that pinned the wrapper stopped
+    // matching. Each time the -1 guard below is what caught it, which is the
     // argument for keeping the marker as loose as the ordering claim needs.
     const cliCall = REGISTER_SRC.search(/^.*"\$HERMES_BIN" tools disable browser/m);
     // Every marker must have been FOUND before their order means anything: a

@@ -482,6 +482,12 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     // reason, which is the false success this whole file guards against.
     const second = run();
     expect(second.status).toBe(0);
+    // ...and the BRANCH is asserted too: a run that skipped the CLI for any
+    // other reason (unreadable plugin sources, say) also exits 0 without an
+    // inspect, so only the backoff message proves the 24 h stamp did the work.
+    expect(second.stderr).toMatch(
+      /did not confirm its hook[\s\S]*not repeating the check this boot/,
+    );
     expect(calls()).not.toContain("plugins inspect");
   }, 60_000);
 
@@ -537,6 +543,12 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     // reason, which is the false success this whole file guards against.
     const second = run();
     expect(second.status).toBe(0);
+    // ...and the BRANCH is asserted too: a run that skipped the CLI for any
+    // other reason (unreadable plugin sources, say) also exits 0 without an
+    // inspect, so only the backoff message proves the 24 h stamp did the work.
+    expect(second.stderr).toMatch(
+      /did not confirm its hook[\s\S]*not repeating the check this boot/,
+    );
     expect(calls()).not.toContain("plugins inspect");
   }, 60_000);
 
