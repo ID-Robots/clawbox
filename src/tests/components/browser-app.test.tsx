@@ -4,64 +4,95 @@ import { fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
 import BrowserApp from "@/components/BrowserApp";
 import { resetHarnessCache } from "@/lib/client-harness";
 
+/**
+ * The Browser app's three faces and its one-click launch.
+ *
+ * The app IS the browser now: the home face shows the device's screen and
+ * starts Chromium if it is not running. The cards it used to be live in the
+ * settings page (browser-settings-panel.test.tsx) and the wizard
+ * (browser-setup-wizard.test.tsx); what is pinned here is which face appears,
+ * when the automatic launch fires, and — just as important — when it does not.
+ */
+
 vi.mock("@/lib/i18n", () => ({
   useT: () => ({
-    t: (key: string) => {
-      const translations: Record<string, string> = {
+    t: (key: string, params?: Record<string, string | number>) => {
+      const table: Record<string, string> = {
         "browser.checkingStatus": "Checking browser status...",
         "browser.title": "Browser Integration",
-        "browser.subtitle": "Real Chromium browser for OpenClaw AI",
-        "browser.chromiumBrowser": "Chromium Browser",
-        "browser.openclawIntegration": "OpenClaw Integration",
-        "browser.desktopBrowser": "Desktop Browser",
-        "browser.chromiumRequired": "Chromium is required.",
-        "browser.enabledMessage": "Browser is connected to OpenClaw.",
-        "browser.disabledMessage": "Connect the browser to OpenClaw.",
-        "browser.builtInMessage": "Browsing is built into this edition.",
-        "browser.launchMessage": "Launch a real Chromium window on the desktop that OpenClaw can control.",
-        "browser.runningMessage": "Browser is already running.",
-        "browser.installChromium": "Install Chromium",
-        "browser.installing": "Installing...",
-        "browser.enable": "Enable",
-        "browser.enabling": "Enabling...",
-        "browser.disable": "Disable",
-        "browser.disabling": "Disabling...",
+        "browser.openSettings": "Settings",
+        "browser.back": "Back",
         "browser.openBrowser": "Open Browser",
         "browser.opening": "Opening...",
         "browser.closeBrowser": "Close Browser",
-        "browser.closing": "Closing...",
         "browser.openInVNC": "Open in VNC",
-        "browser.ready": "Ready",
-        "browser.starting": "Starting",
+        "browser.startingChromium": "Starting Chromium…",
+        "browser.moveBrowsing": "Move it here",
+        "browser.chromiumRequired": "Chromium is required.",
+        "browser.errorNotServiceSafe": "Only the snap build is installed.",
+        "browser.settings.notRunning": "Not running",
+        "browser.settings.runningPid": `Running · PID ${params?.pid ?? ""}`,
+        "browser.agentHeadlessMessage": "The assistant is browsing in its own background browser.",
       };
-      return translations[key] ?? key;
+      return table[key] ?? key;
     },
   }),
   I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
 
+// The home face mounts the real VNCApp, which dynamically imports noVNC.
+vi.mock("@novnc/novnc", () => ({
+  default: class {
+    disconnect = vi.fn();
+    addEventListener = vi.fn();
+    removeEventListener = vi.fn();
+    focus = vi.fn();
+    blur = vi.fn();
+    constructor(target: HTMLElement) { target.appendChild(document.createElement("canvas")); }
+  },
+}));
+
+const json = (body: unknown) => ({
+  ok: true,
+  status: 200,
+  redirected: false,
+  url: "http://localhost/",
+  json: async () => body,
+});
+
 /**
- * Serve the status route the given payload and the harness route the given
- * harness, so a test can describe a whole device rather than one endpoint.
+ * Serve each route its own answer, so a test can describe a whole device
+ * rather than one endpoint — the app reads four of them (the manage status,
+ * the harness, the VNC screen and, on a write, the setup route).
  */
 function stubDevice(status: Record<string, unknown>, harness = "openclaw") {
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    void init;
     const url = String(input);
-    if (url.includes("/setup-api/harness/active")) {
-      return { ok: true, json: async () => ({ active: harness, edition: harness }) };
-    }
-    return { ok: true, json: async () => status };
+    if (url.includes("/setup-api/harness/active")) return json({ active: harness, edition: harness });
+    if (url.includes("/setup-api/browser/manage")) return json(status);
+    if (url.includes("/setup-api/browser/setup")) return json({ setupComplete: true, autoOpen: true, startUrl: "https://www.google.com" });
+    if (url.includes("/setup-api/vnc")) return json({ available: true, wsPort: 6080 });
+    return json({});
   });
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
 
 const READY_STATUS = {
-  chromium: { installed: true, path: "/usr/bin/chromium-browser", version: "Chromium 146" },
-  browser: { running: false, cdpReady: false },
+  chromium: { installed: true, path: "/usr/bin/chromium-browser", version: "Chromium 146", serviceSafe: true },
+  browser: { running: true, pid: 4242, cdpReady: true },
   enabled: true,
   cdpPort: 18800,
+  setupComplete: true,
+  autoOpen: true,
+  startUrl: "https://www.google.com",
 };
+
+const postedActions = (fetchMock: ReturnType<typeof stubDevice>) =>
+  fetchMock.mock.calls
+    .filter(([url, init]) => String(url).includes("/setup-api/browser/manage") && (init as RequestInit | undefined)?.method === "POST")
+    .map(([, init]) => JSON.parse(String((init as RequestInit).body)).action);
 
 describe("BrowserApp", () => {
   beforeEach(() => {
@@ -71,103 +102,145 @@ describe("BrowserApp", () => {
     stubDevice(READY_STATUS);
   });
 
-  it("shows the VNC button even before the desktop browser is running", async () => {
+  it("shows the device's screen, not a panel of steps", async () => {
+    const { findByTestId, queryByRole } = render(<BrowserApp />);
+
+    expect(await findByTestId("browser-state")).toHaveTextContent("Running · PID 4242");
+    // The install/link cards moved to the settings page.
+    expect(queryByRole("button", { name: /Install Chromium/i })).toBeNull();
+  });
+
+  it("opens the Remote Desktop window on request", async () => {
     const onOpenApp = vi.fn();
-    const { getByRole } = render(<BrowserApp onOpenApp={onOpenApp} />);
+    const { findByTestId } = render(<BrowserApp onOpenApp={onOpenApp} />);
 
-    await waitFor(() => {
-      expect(getByRole("button", { name: /Open Browser/i })).toBeInTheDocument();
-    });
-
-    const openVncButton = getByRole("button", { name: /Open in VNC/i });
-    expect(openVncButton).toBeInTheDocument();
-
-    fireEvent.click(openVncButton);
+    fireEvent.click(await findByTestId("browser-open-vnc"));
     expect(onOpenApp).toHaveBeenCalledWith("vnc");
   });
 
-  it("does not offer Chromium installation when status cannot be read", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-      if (String(input).includes("/setup-api/harness/active")) {
-        return { ok: true, json: async () => ({ active: "openclaw", edition: "openclaw" }) };
-      }
-      return { ok: false, status: 503, json: async () => ({ error: "offline" }) };
-    }));
+  it("starts Chromium by itself when the app opens on a stopped browser", async () => {
+    const fetchMock = stubDevice({ ...READY_STATUS, browser: { running: false, cdpReady: false } });
+    render(<BrowserApp />);
 
-    const { findByText, queryByRole, queryByText } = render(<BrowserApp />);
-
-    expect(await findByText("Failed to fetch status")).toBeInTheDocument();
-    expect(queryByRole("button", { name: /Install Chromium/i })).toBeNull();
-    expect(queryByText("Chromium is required.")).toBeNull();
+    await waitFor(() => expect(postedActions(fetchMock)).toEqual(["open-browser"]));
   });
 
-  it("offers Chromium installation only after status explicitly reports it absent", async () => {
-    stubDevice({
+  it("says what it is doing while the launch is in flight", async () => {
+    // The real route blocks for up to fifteen seconds; a POST that never
+    // settles is what that looks like from here.
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/setup-api/harness/active")) return json({ active: "openclaw", edition: "openclaw" });
+      if (url.includes("/setup-api/vnc")) return json({ available: true, wsPort: 6080 });
+      if (url.includes("/setup-api/browser/manage") && init?.method === "POST") return new Promise(() => {});
+      return json({ ...READY_STATUS, browser: { running: false, cdpReady: false } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { findByTestId } = render(<BrowserApp />);
+
+    expect(await findByTestId("browser-starting-pill")).toHaveTextContent("Starting Chromium…");
+  });
+
+  it("launches once, however many times the status is re-read", async () => {
+    const fetchMock = stubDevice({ ...READY_STATUS, browser: { running: false, cdpReady: false } });
+    render(<BrowserApp />);
+
+    await waitFor(() => expect(postedActions(fetchMock)).toEqual(["open-browser"]));
+    await new Promise((r) => setTimeout(r, 60));
+    expect(postedActions(fetchMock)).toEqual(["open-browser"]);
+  });
+
+  it("does not launch when the owner switched that off", async () => {
+    const fetchMock = stubDevice({ ...READY_STATUS, browser: { running: false, cdpReady: false }, autoOpen: false });
+    const { findByTestId } = render(<BrowserApp />);
+
+    await findByTestId("browser-open");
+    expect(postedActions(fetchMock)).toEqual([]);
+  });
+
+  /**
+   * `open-browser` terminates the headless browser holding the CDP port. That
+   * is fair when a person presses the button and not fair as a side effect of
+   * the agent's own `ui_open_app("browser")`, so the window offers the action
+   * instead of taking it.
+   */
+  it("does not take the browser away from the agent by itself", async () => {
+    const fetchMock = stubDevice({
       ...READY_STATUS,
-      chromium: { installed: false },
-      enabled: false,
+      browser: { running: false, cdpReady: true, agentBrowsing: true },
     });
+    const { findByTestId } = render(<BrowserApp />);
 
-    const { findByRole } = render(<BrowserApp />);
+    const move = await findByTestId("browser-move-browsing");
+    expect(postedActions(fetchMock)).toEqual([]);
 
-    expect(await findByRole("button", { name: /Install Chromium/i })).toBeInTheDocument();
+    fireEvent.click(move);
+    await waitFor(() => expect(postedActions(fetchMock)).toEqual(["open-browser"]));
   });
 
-  describe("when the integration is a switch", () => {
-    it("offers the toggle", async () => {
-      const { getByRole } = render(<BrowserApp />);
-
-      await waitFor(() => {
-        expect(getByRole("button", { name: /Disable/i })).toBeInTheDocument();
-      });
+  it("does not try to launch a Chromium a system service cannot start", async () => {
+    const fetchMock = stubDevice({
+      ...READY_STATUS,
+      chromium: { installed: true, path: "/snap/bin/chromium", serviceSafe: false },
+      browser: { running: false, cdpReady: false },
     });
+    const { findByTestId } = render(<BrowserApp />);
 
-    it("describes the link as a connection that was made", async () => {
-      const { findByText } = render(<BrowserApp />);
-      expect(await findByText(/Browser is connected to OpenClaw\./)).toBeInTheDocument();
-    });
-
-    it("shows the OpenClaw tools profile it wrote", async () => {
-      const { findByText } = render(<BrowserApp />);
-      expect(await findByText("tools profile: full")).toBeInTheDocument();
-    });
+    expect(await findByTestId("browser-cannot-run")).toHaveTextContent("Only the snap build is installed.");
+    expect(postedActions(fetchMock)).toEqual([]);
   });
 
-  // On an edition with no OpenClaw CLI the link is permanent, so a toggle here
-  // would be a control with nothing to control — and, before this, one whose
-  // only possible outcome was an error banner.
-  describe("when the integration is always on", () => {
-    beforeEach(() => {
-      stubDevice({ ...READY_STATUS, alwaysOn: true }, "hermes");
+  it("shows the wizard until the owner has been through it, and never auto-launches under it", async () => {
+    const fetchMock = stubDevice({
+      ...READY_STATUS,
+      browser: { running: false, cdpReady: false },
+      setupComplete: false,
     });
+    const { findByTestId, queryByTestId } = render(<BrowserApp />);
 
-    it("offers no toggle", async () => {
-      const { queryByRole, findByRole } = render(<BrowserApp />);
+    expect(await findByTestId("browser-wizard")).toBeInTheDocument();
+    expect(queryByTestId("browser-state")).toBeNull();
+    expect(postedActions(fetchMock)).toEqual([]);
+  });
 
-      // Wait for the panel to finish loading before asserting an absence.
-      await findByRole("button", { name: /Open Browser/i });
+  it("keeps the browser screen when the flag is absent on an already-working box", async () => {
+    const { setupComplete, ...noFlag } = READY_STATUS;
+    void setupComplete;
+    stubDevice(noFlag);
+    const { findByTestId, queryByTestId } = render(<BrowserApp />);
 
-      expect(queryByRole("button", { name: /^Enable$/i })).toBeNull();
-      expect(queryByRole("button", { name: /^Disable$/i })).toBeNull();
+    await findByTestId("browser-state");
+    expect(queryByTestId("browser-wizard")).toBeNull();
+  });
+
+  it("switches to the settings page and back", async () => {
+    const { findByTestId, queryByTestId } = render(<BrowserApp />);
+
+    fireEvent.click(await findByTestId("browser-open-settings"));
+    expect(await findByTestId("browser-settings-panel")).toBeInTheDocument();
+    expect(queryByTestId("browser-state")).toBeNull();
+
+    fireEvent.click(await findByTestId("browser-settings-back"));
+    expect(await findByTestId("browser-state")).toBeInTheDocument();
+  });
+
+  it("says what went wrong, in this device's words, when a launch is refused", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/setup-api/harness/active")) return json({ active: "openclaw", edition: "openclaw" });
+      if (url.includes("/setup-api/vnc")) return json({ available: true, wsPort: 6080 });
+      if (url.includes("/setup-api/browser/manage") && init?.method === "POST") {
+        return { ok: false, status: 400, json: async () => ({ error: "Chromium not installed", code: "chromium_not_service_safe" }) };
+      }
+      return json({ ...READY_STATUS, browser: { running: false, cdpReady: false } });
     });
+    vi.stubGlobal("fetch", fetchMock);
 
-    it("says the capability is built in rather than connected", async () => {
-      const { findByText, queryByText } = render(<BrowserApp />);
+    const { findByTestId, findAllByText } = render(<BrowserApp />);
 
-      expect(await findByText(/Browsing is built into this edition\./)).toBeInTheDocument();
-      expect(queryByText(/Browser is connected to OpenClaw\./)).toBeNull();
-    });
-
-    it("names the tools the agent actually holds instead of an OpenClaw config key", async () => {
-      const { findByText, queryByText } = render(<BrowserApp />);
-
-      expect(await findByText(/browser_open/)).toBeInTheDocument();
-      expect(queryByText("tools profile: full")).toBeNull();
-    });
-
-    it("still lets the owner open the desktop browser", async () => {
-      const { findByRole } = render(<BrowserApp />);
-      expect(await findByRole("button", { name: /Open Browser/i })).toBeInTheDocument();
-    });
+    fireEvent.click(await findByTestId("browser-open"));
+    // The stable code, said in the owner's language — not the route's English.
+    expect((await findAllByText("Only the snap build is installed.")).length).toBeGreaterThan(0);
   });
 });

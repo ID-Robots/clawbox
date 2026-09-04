@@ -9,7 +9,12 @@ HOME="${HOME:-$(getent passwd "$CURRENT_USER" | cut -d: -f6)}"
 PROFILE="$HOME/.config/clawbox-browser"
 CDP_PORT="${CDP_PORT:-18800}"
 VNC_STATE_FILE="${HOME}/.cache/clawbox/vnc-display.env"
+# The owner's start page, written by the web server (src/lib/browser-setup.ts)
+# because systemd is what starts this browser — the setting cannot be passed as
+# an argument from the page that changed it.
+BROWSER_STATE_FILE="${HOME}/.cache/clawbox/browser.env"
 DEFAULT_DISPLAY="${DISPLAY:-:99}"
+DEFAULT_START_URL="https://www.google.com"
 
 display_ready() {
   local display="$1"
@@ -57,6 +62,13 @@ if [ -f "$VNC_STATE_FILE" ]; then
   # shellcheck disable=SC1090
   source "$VNC_STATE_FILE"
 fi
+
+if [ -f "$BROWSER_STATE_FILE" ]; then
+  # shellcheck disable=SC1090
+  source "$BROWSER_STATE_FILE"
+fi
+
+START_URL="${CLAWBOX_BROWSER_START_URL:-$DEFAULT_START_URL}"
 
 DISPLAY="${CLAWBOX_VNC_DISPLAY:-$DEFAULT_DISPLAY}"
 [ -n "${CLAWBOX_VNC_XAUTHORITY:-}" ] && export XAUTHORITY="$CLAWBOX_VNC_XAUTHORITY"
@@ -141,4 +153,4 @@ exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   --disable-background-networking \
   --password-store=basic \
   --metrics-recording-only \
-  "https://www.google.com"
+  "$START_URL"
