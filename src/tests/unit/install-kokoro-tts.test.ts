@@ -272,6 +272,13 @@ function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: str
   const ttsStatus = path.join(root, "tts-status");
   if (ttsStatusContents !== null) writeFileSync(ttsStatus, ttsStatusContents);
 
+  // The apt step is stubbed, and the probe is an absolute path inside the
+  // fake root: a runner that happens to have ffmpeg on its own PATH would
+  // otherwise skip the branch under test, and one that does not would run a
+  // real `apt-get install`.
+  const ffmpegLog = path.join(root, "ffmpeg.log");
+  const ffmpegBin = path.join(root, "ffmpeg");
+
   const program = [
     "set -uo pipefail",
     `PROJECT_DIR="${projectDir}"`,
@@ -285,9 +292,14 @@ function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: str
     // call is the difference between a failure the operator sees and one that
     // ends at a log line nobody greps.
     `record_provision_failure() { printf '%s\\n' "$1" >> "${provisionLog}"; }`,
+    // The apt half of the ffmpeg install, stubbed: FFMPEG_INSTALL_WORKS says
+    // whether the package actually arrives, which is how the "warn and carry
+    // on" arm gets exercised without an unreachable mirror.
+    `step_ffmpeg_install() { printf 'install\\n' >> "${ffmpegLog}"; [ "\${FFMPEG_INSTALL_WORKS:-1}" = "1" ] || return 1; printf '#!/usr/bin/env bash\\n' > "${ffmpegBin}"; chmod +x "${ffmpegBin}"; }`,
     extractShellFn(INSTALL_SH, "oc_config_set"),
     extractShellFn(INSTALL_SH, "tts_ensure_provider_registered"),
     extractShellFn(INSTALL_SH, "tts_write_local_provider_definition"),
+    extractShellFn(INSTALL_SH, "tts_ensure_ffmpeg"),
     // The real knob, not a stub: the test is about what the step does with it.
     extractShellFn(INSTALL_SH, "harness_has_no_gpu"),
     extractShellFn(INSTALL_SH, "step_openclaw_tts"),
@@ -300,7 +312,7 @@ function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: str
   const res = spawnSync("bash", ["-c", program], {
     encoding: "utf-8",
     timeout: 60_000,
-    env: { ...process.env, ...extraEnv, TTS_STATUS_FILE: ttsStatus },
+    env: { ...process.env, TTS_FFMPEG_BIN: ffmpegBin, ...extraEnv, TTS_STATUS_FILE: ttsStatus },
   });
   const read = (f: string) => (existsSync(f) ? readFileSync(f, "utf-8").trim().split("\n").filter(Boolean) : []);
   return {
@@ -309,6 +321,10 @@ function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: str
     stderr: res.stderr ?? "",
     voiceArgs: read(voiceArgs),
     openclaw: read(callsLog),
+    /** One entry per time the step asked apt for ffmpeg. */
+    ffmpeg: read(ffmpegLog),
+    /** Where the ffmpeg probe looks — pre-create it to play a box that has it. */
+    ffmpegBin,
     /** Step names handed to record_provision_failure, one per entry. */
     provisionFailures: read(provisionLog),
   };
@@ -500,6 +516,41 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
     expect(res.openclaw.some((c) => c.startsWith("config set messages.tts.providers.tts-local-cli "))).toBe(true);
     expect(res.openclaw).not.toContain("config set messages.tts.provider tts-local-cli");
     expect(res.openclaw.some((c) => c.startsWith("config set messages.tts.provider "))).toBe(false);
+  });
+
+  it("installs ffmpeg, without which the box's own voice can never reach a channel", () => {
+    // OpenClaw's Local CLI provider forces `opus` for a voice-note target and
+    // converts this script's WAV with `ffmpeg -c:a libopus`. With no ffmpeg
+    // the local attempt throws for EVERY Telegram voice note and the gateway
+    // falls through to the cloud voice — a box speaking with a voice its owner
+    // did not choose, silently. install.sh defined step_ffmpeg_install for
+    // years and called it from nowhere.
+    const res = runStep(0);
+    expect(res.status).toBe(0);
+    expect(res.ffmpeg).toEqual(["install"]);
+    expect(res.stdout).toContain("ffmpeg installed");
+  });
+
+  it("asks apt for nothing when ffmpeg is already on the box", () => {
+    // This step runs on every in-app update; a package that is already there
+    // must not turn each of those into an apt transaction.
+    writeExec(path.join(root, "ffmpeg"), "exit 0");
+    const res = runStep(0);
+    expect(res.status).toBe(0);
+    expect(res.ffmpeg).toEqual([]);
+  });
+
+  it("says which voice the channels will use when ffmpeg could not be installed, and installs the rest anyway", () => {
+    // An unreachable mirror is not a reason to abandon the voice install: the
+    // desktop chat's voice needs no ffmpeg at all, and the cloud voice still
+    // answers the channels. What the operator must not be left with is silence
+    // about which voice is speaking there.
+    const res = runStep(0, "", null, { FFMPEG_INSTALL_WORKS: "0" });
+    expect(res.status).toBe(0);
+    expect(res.ffmpeg).toEqual(["install"]);
+    expect(res.stderr).toMatch(/ffmpeg is NOT installed/);
+    expect(res.stderr).toMatch(/cloud voice/);
+    expect(res.stdout).toContain("On-device TTS configured (Kokoro GPU)");
   });
 
   it("hands install-voice.sh the verdict path so both halves cannot drift", () => {
