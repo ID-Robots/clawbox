@@ -390,6 +390,15 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     // And the box still got its device tools and its plugin.
     expect(enabledPlugins()).toEqual([PLUGIN]);
     expect((readConfig().mcp_servers as Record<string, unknown>).clawbox).toBeTruthy();
+    // ...and NOTHING said the script itself was killed. `-k 5` makes `timeout`
+    // die by a signal, and bash announces a signal-killed foreground child on
+    // the SCRIPT's stderr — past the command's own `2>&1`. production-server.js
+    // pipes this stderr into the clawbox-setup journal, so an unguarded call
+    // puts "register-mcp.sh: line NNN: <pid> Killed  timeout …" in front of an
+    // operator, next to the honest line. That is the misleading journal entry
+    // this step exists to prevent, so it must not be one.
+    expect(r.stderr).not.toMatch(/Killed/);
+    expect(r.stderr).not.toMatch(/register-mcp\.sh: line/);
     // Two calls, each 1s ceiling + the 5s grace, so this one outlasts the
     // default 5s test budget by design.
   }, 60_000);

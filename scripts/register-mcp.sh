@@ -62,7 +62,7 @@ HERMES_CLI_TIMEOUT="${HERMES_CLI_TIMEOUT:-45}"
 # `${:-}` substitutes on unset and empty but NOT on "0" — and `timeout 0` means
 # NO timeout, so a bare `HERMES_CLI_TIMEOUT=0` would silently undo the bound
 # this variable exists to impose. A non-numeric value is worse: `timeout` exits
-# 125 without running the CLI at all, which at the `tools disable` call above is
+# 125 without running the CLI at all, which at the `tools disable` call below is
 # a permanent "could not disable the built-in browser toolset" with the toolset
 # left ON — a false failure with a functional regression behind it. This value
 # arrives in an environment clawbox-setup.service builds partly from a
@@ -595,7 +595,19 @@ PY
 # the helper and its child running for as long as the box is up. A timeout
 # lands in the branch that already exists for a refusal, which is the honest
 # answer for both.
-if timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools disable browser >/dev/null 2>&1; then
+# The braces are load-bearing, not style. `-k 5` makes `timeout` SIGKILL its own
+# process group, so `timeout` ITSELF dies by a signal — and bash announces a
+# signal-killed foreground child on the SCRIPT's stderr, which the command's own
+# `2>&1` cannot reach: "register-mcp.sh: line NNN: <pid> Killed  timeout -k 5 …".
+# production-server.js forwards this script's stderr into the clawbox-setup
+# journal line by line, so that notice lands there naming this script and reads
+# as the reconcile itself having been killed — beside the honest "could not
+# disable" line. A misleading journal entry is the thing this whole step exists
+# to avoid, so the group gives the shell's message somewhere to go. The exit
+# status is unchanged: 137 still reaches the else, 0 still reaches the then.
+# The `plugins doctor` call below needs no such group — bash does not print that
+# notice for a child of a command substitution, and its output is captured.
+if { timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools disable browser >/dev/null 2>&1; } 2>/dev/null; then
   log "built-in browser toolset off; browsing goes through the ClawBox browser_* tools"
 else
   log "could not disable the built-in browser toolset — continuing"
