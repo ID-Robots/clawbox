@@ -163,6 +163,13 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
 
   let clawaiAccountTier: ClawboxAiTier | null = null;
   let accountTierSource: "portal" | "picker" = "picker";
+  // The portal's own list of model ids this token may run. NULL MEANS "NOT
+  // ANSWERED" — no token, portal unreachable, or a portal build that does not
+  // publish the field — and no caller may read that as a refusal. It is
+  // deliberately not backed by a local fallback the way the tier badge is: a
+  // remembered entitlement is a guess, and a guess is what locked a Max owner
+  // out of the model he pays for (TASK-691).
+  let clawaiAllowedModels: string[] | null = null;
   if (state.hasClawaiProfile) {
     clawaiAccountTier = localTier;
     // Ask the portal whenever a clawai token is paired, regardless
@@ -174,6 +181,7 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
       const lookup = await fetchPortalTier(state.clawaiToken);
       if (lookup.source === "portal") {
         clawaiAccountTier = lookup.tier;
+        clawaiAllowedModels = lookup.allowedModels;
         accountTierSource = "portal";
         // Persist the portal-confirmed tier so the portal-unreachable
         // fallback reflects the last *confirmed* tier, not a stale
@@ -202,6 +210,9 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
     model: state.model,
     clawaiTier,
     clawaiAccountTier,
+    // Model ids the portal says this account may run, or null when it did not
+    // say. The picker gates on this, never on the tier badge above.
+    clawaiAllowedModels,
     // Whether *any* clawai profile is configured. Distinguishes
     // "no ClawBox AI account at all" (false) from "Free user with
     // a paired clawai token" (true, clawaiAccountTier=null) — the
@@ -230,7 +241,8 @@ export async function GET() {
     return NextResponse.json(
       {
         connected: false, provider: null, providerLabel: null, mode: null, model: null,
-        clawaiTier: null, clawaiAccountTier: null, clawaiConfigured: false, tierSource: "picker",
+        clawaiTier: null, clawaiAccountTier: null, clawaiAllowedModels: null,
+        clawaiConfigured: false, tierSource: "picker",
       },
       {
         headers: {

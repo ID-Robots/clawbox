@@ -54,17 +54,28 @@ const PORTAL_UNREACHABLE_TTL_MS = 30_000;
 export interface DeviceInfoResponse {
   tier?: string;
   deviceTier?: string | null;
+  /**
+   * Model ids this token may run, as the portal publishes them (bare ids,
+   * e.g. `["deepseek-v4-flash","deepseek-v4-pro",…]`). The portal's own
+   * answer to "what is this account entitled to" — see
+   * `portalDeniesClawboxAiModel`, which is the only thing allowed to read it
+   * as a refusal. Absent on older portal builds.
+   */
+  allowedModels?: unknown;
 }
 
 export type PortalLookup =
   | {
       source: "portal";
       tier: ClawboxAiTier | null;
+      /** Entitled model ids, or null when the portal published none. */
+      allowedModels: string[] | null;
     }
   | { source: "unreachable" };
 
 interface PortalCacheEntry {
   tier: ClawboxAiTier | null;
+  allowedModels: string[] | null;
   expiresAt: number;
 }
 
@@ -89,6 +100,7 @@ const inFlightPortalLookups = new Map<string, Promise<PortalLookup>>();
 function rememberTier(
   token: string,
   tier: ClawboxAiTier | null,
+  allowedModels: string[] | null,
   now: number,
 ) {
   for (const [key, entry] of portalTierCache) {
@@ -101,8 +113,26 @@ function rememberTier(
   }
   portalTierCache.set(token, {
     tier,
+    allowedModels,
     expiresAt: now + PORTAL_TIER_CACHE_TTL_MS,
   });
+}
+
+/**
+ * The entitlement list out of a device-info body, or null when the portal
+ * published none.
+ *
+ * Null and an empty list mean the same thing downstream — "not answered" —
+ * so an all-blank list is normalised to null here rather than travelling as
+ * a list that refuses everything.
+ */
+export function mapPortalAllowedModels(body: DeviceInfoResponse): string[] | null {
+  if (!Array.isArray(body.allowedModels)) return null;
+  const ids = body.allowedModels
+    .filter((id): id is string => typeof id === "string")
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0);
+  return ids.length > 0 ? ids : null;
 }
 
 /**
@@ -155,6 +185,7 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
     return {
       source: "portal",
       tier: cached.tier,
+      allowedModels: cached.allowedModels,
     };
   }
 
@@ -179,9 +210,10 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
       if (res.ok) {
         const body = await res.json() as DeviceInfoResponse;
         const tier = mapPortalTier(body);
-        rememberTier(token, tier, now);
+        const allowedModels = mapPortalAllowedModels(body);
+        rememberTier(token, tier, allowedModels, now);
         portalUnreachableCache.delete(token);
-        return { source: "portal", tier };
+        return { source: "portal", tier, allowedModels };
       }
       // 401/403 is ambiguous: it can mean genuinely Free OR token
       // revoked / migrated / corrupted on a still-paid account. We

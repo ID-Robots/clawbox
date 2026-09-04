@@ -273,7 +273,7 @@ import {
 } from '@/lib/hermes-reasoning'
 import { readHermesChatPrefs, writeHermesChatPrefs } from '@/lib/hermes-chat-prefs'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
-import { isClawboxAiProModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-models'
+import { portalDeniesClawboxAiModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-models'
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
@@ -4149,15 +4149,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // same reference, and the server cannot tell them apart from the model alone.
   const switchChatModel = useCallback(async (target: { model: string; label: string; provider?: string | null }) => {
     if (switchingModel || chatModelState?.activeModel === target.model) return
-    // Intercept clawai Pro picks from non-Max users. The portal's
-    // /api/ai gateway silently downgrades these requests to flash via
-    // its live-tier reconcile, which previously left the user staring
-    // at a "Switched chat to deepseek-v4-pro" success toast while every
-    // reply came from flash. Surface the gate here with an actionable
-    // upgrade prompt and skip the network call entirely. The portal URL
-    // is wrapped as `[text](url)` so chat-markdown renders it as a
-    // clickable link instead of a bare string.
-    if (isClawboxAiProModel(target.model) && clawboxLogin.tier !== 'pro') {
+    // Intercept clawai Pro picks the portal POSITIVELY refuses. Its /api/ai
+    // gateway silently downgrades an unentitled request to flash via its
+    // live-tier reconcile, which left the user staring at a "Switched chat to
+    // deepseek-v4-pro" success toast while every reply came from flash.
+    // Surface that with an actionable upgrade prompt and skip the network call.
+    // The portal URL is wrapped as `[text](url)` so chat-markdown renders it as
+    // a clickable link instead of a bare string.
+    //
+    // Gated on the portal's own entitlement list, never on the tier badge: the
+    // badge is the device-pair stamp, so a Max account paired while it was on
+    // the Pro plan reads "flash" and was refused the model it pays for. An
+    // unanswered entitlement (portal unreachable, poll failed) is not a
+    // refusal — the pick goes through and the proxy has the last word.
+    if (portalDeniesClawboxAiModel(target.model, clawboxLogin.allowedModels)) {
       setMessages(prev => [...prev, {
         role: 'system',
         text: `${target.label} requires a Max subscription. [Upgrade in the ClawBox portal](${PORTAL_DASHBOARD_URL}) to unlock it. Staying on the current model.`,
@@ -4217,19 +4222,30 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } finally {
       setSwitchingModel(false)
     }
-  }, [chatModelState, connect, switchingModel, clawboxLogin.tier])
+  }, [chatModelState, connect, switchingModel, clawboxLogin.allowedModels])
 
-  // The dropdown gate above only catches Max-tier picks the user *clicks*. A
-  // non-Max account can also boot with the Max tier already saved as the
-  // default (picked during setup, or left over after a plan downgrade). The
-  // portal gateway then silently rejects every turn — the user only sees the
-  // opaque "[assistant turn failed]". Catch that on load: explain it with an
-  // upgrade link and drop to the Pro tier the plan supports so chat works.
+  // The dropdown gate above only catches picks the user *clicks*. An account
+  // the portal refuses can also boot with the Max model already saved as the
+  // default (picked during setup, chosen from the Telegram `/model` keyboard,
+  // or left over after a plan downgrade). The portal gateway then silently
+  // rejects every turn — the user only sees the opaque "[assistant turn
+  // failed]". Catch that on load: explain it with an upgrade link and drop to
+  // the Pro tier the plan supports so chat works.
+  //
+  // This one WRITES: it moves the box off the model the owner chose. So it
+  // fires only on a positive refusal from the portal's entitlement list. On
+  // the badge it fired for "tier unknown" too — a single failed status poll
+  // was enough to rewrite a Max box's primary model to flash and tell its
+  // owner to buy the subscription he already had (TASK-691).
   const tierGuardRef = useRef(false)
   useEffect(() => {
     if (tierGuardRef.current || clawboxLogin.loading) return
     const active = chatModelState?.activeModel
-    if (!active || !isClawboxAiProModel(active) || clawboxLogin.tier === 'pro') return
+    if (!portalDeniesClawboxAiModel(active, clawboxLogin.allowedModels)) return
+    // The recovery is "drop to the Flash tier", so only run it when the portal
+    // allows that one. Switching to a second refused model would move the
+    // error rather than fix it.
+    if (portalDeniesClawboxAiModel(CLAWBOX_AI_MODEL_BY_TIER.flash, clawboxLogin.allowedModels)) return
     tierGuardRef.current = true
     setMessages(prev => [...prev, {
       role: 'system',
@@ -4238,7 +4254,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       variant: 'error',
     }])
     void switchChatModel({ model: CLAWBOX_AI_MODEL_BY_TIER.flash, label: 'Pro Tier' })
-  }, [chatModelState?.activeModel, clawboxLogin.tier, clawboxLogin.loading, switchChatModel])
+  }, [chatModelState?.activeModel, clawboxLogin.allowedModels, clawboxLogin.loading, switchChatModel])
 
   const handleChatSourceChange = useCallback(async (optionId: string) => {
     const target = chatModelState?.options.find(option => option.id === optionId)

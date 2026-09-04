@@ -301,6 +301,40 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.tierSource).toBe("picker");
     });
 
+    it("surfaces the portal's entitlement list beside the badge", async () => {
+      // The badge is the device-pair stamp; the list is what the account may
+      // actually run. A Max account paired while it was on the Pro plan reads
+      // "flash" and still carries the Pro id — the picker gates on the list.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("flash");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({
+          tier: "max",
+          deviceTier: "flash",
+          allowedModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
+        }),
+        { status: 200 },
+      ));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiAccountTier).toBe("flash");
+      expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
+    });
+
+    it("says null — not an empty list — when the portal could not be asked", async () => {
+      // Null is "not answered". An empty list would read as "nothing is
+      // allowed" and lock the box out of its own models.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockRejectedValue(new Error("ETIMEDOUT"));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiTier).toBe("pro");
+      expect(body.clawaiAllowedModels).toBeNull();
+    });
+
     it("negative-caches an unreachable verdict so back-to-back polls don't hammer the portal", async () => {
       mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
       mockGetConfigValue.mockResolvedValue("pro");
