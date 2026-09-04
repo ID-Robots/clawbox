@@ -44,6 +44,24 @@ describe("the lock is written where a run starts and released where one ends", (
     expect(run.indexOf("await setUpdateLock()")).toBeLessThan(run.indexOf("for (let i = startFrom"));
   });
 
+  it("is re-asserted at every step boundary, because another process can drop it", () => {
+    // config-store.set is an unlocked read-modify-write of the whole of
+    // data/config.json, and post_update runs install.sh and restarts the
+    // gateway — both of which write that file by their own paths. A writer that
+    // read it before the flag was set and wrote after removes it silently.
+    //
+    // Observed on hardware 2026-09-04: set 17:44, gone by 17:51, run finished
+    // 17:53:29 — the desktop unlocked while post_update was still rewriting the
+    // box. One write per step heals it within a step.
+    const run = fn("runUpdate");
+    const loopAt = run.indexOf("for (let i = startFrom");
+    expect(loopAt).toBeGreaterThan(-1);
+    const body = run.slice(loopAt);
+    expect(body, "the loop must re-take the lock").toContain("setUpdateLock()");
+    // Before the step runs, not after it.
+    expect(body.indexOf("setUpdateLock()")).toBeLessThan(body.indexOf("Running step:"));
+  });
+
   it("is taken by the flow that rewrites the tree, and not by the other one", () => {
     // The OpenClaw-only flow reinstalls a package and bounces the gateway; it
     // never runs `git reset --hard`, so locking the owner's desktop for it

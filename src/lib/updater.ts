@@ -1957,7 +1957,8 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // `git clean -fd` over the project. The OpenClaw-only flow reinstalls a
   // package and bounces the gateway, and locking the owner's desktop for that
   // would be over-reach.
-  if (steps.some((s) => s.id === RESTART_STEP_ID)) {
+  const ownsTheDesktop = steps.some((s) => s.id === RESTART_STEP_ID);
+  if (ownsTheDesktop) {
     await setUpdateLock();
   }
 
@@ -1968,6 +1969,22 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     state.currentStepIndex = i;
     state.steps[i].status = "running";
     state.steps[i].error = undefined;
+
+    // Re-assert the lock at every step boundary, because another PROCESS can
+    // drop it. config-store.set is an unlocked read-modify-write of the whole
+    // of data/config.json, and post_update runs install.sh and restarts the
+    // gateway — both of which have that file open by their own paths
+    // (install.sh:2894, scripts/gateway-pre-start.sh's CLAWBOX_DEVICE_STORE).
+    // A writer that READ the file before we set the flag and wrote after
+    // silently removes it, and nothing in this process would ever know.
+    //
+    // Observed on hardware, 2026-09-04: the flag was set at 17:44, gone by
+    // 17:51, and the run did not finish until 17:53:29 — so the owner's
+    // desktop unlocked while post_update was still rewriting the box, which is
+    // the one thing this lock exists to prevent. One cheap write per step
+    // heals that within a step instead of leaving it lost for the rest of a
+    // ten-minute run.
+    if (ownsTheDesktop) await setUpdateLock();
 
     console.log(`[Updater] Running step: ${step.label}`);
 
