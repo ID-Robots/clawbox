@@ -194,6 +194,11 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     // write, so the call form — a quoted destination — is what is matched).
     const writes = lines.filter((line) =>
       /^(if |elif )?(install|cp|mv|tee|truncate|rm)\b/.test(line)
+      // The rollback is two commands on two lines — `if ! truncate …` and the
+      // continued `&& ! dd of=…` — and without this the six-line minimum would
+      // still be met with BOTH of them deleted.
+      || /^(if\s+)?!\s*truncate\b/.test(line)
+      || /^&&\s*!\s*dd\b/.test(line)
       || />>/.test(line)
       // The helper's CALL, not its definition line. Matched on the name alone
       // so an unquoted first argument cannot slip past the filter — which is
@@ -205,13 +210,19 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     const unguarded = writes.filter((line) =>
       !/^(if|elif)\b/.test(line)
       && !/;\s*then$/.test(line)
-      // A rollback that cannot roll back must not take the boot down either.
-      && !/\|\|\s*true$/.test(line));
+      // A rollback that cannot roll back must not take the boot down either —
+      // but the exception is `rm`'s alone. `printf … >> "$f" || true` would
+      // otherwise pass this audit while printing a success line over a failed
+      // write, which is the class the audit exists to catch.
+      && !/^rm\b.*\|\|\s*true$/.test(line));
 
     // Sanity: the filter has to be finding this block's write sites — the seed,
     // the three appends, the helper's own redirection and its two rollback
     // verbs — or an empty `unguarded` would prove nothing.
     expect(writes.length).toBeGreaterThanOrEqual(6);
+    // Both rollback verbs, by name: a six-line count can be met without them.
+    expect(writes.join("\n")).toMatch(/truncate -s/);
+    expect(writes.join("\n")).toMatch(/dd of=/);
     expect(unguarded).toEqual([]);
   });
 
