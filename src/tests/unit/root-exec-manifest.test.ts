@@ -370,9 +370,14 @@ d("clawbox-root-step.sh — the gate in front of the exec", () => {
       const r = sh(`"${dispatcher}" chpasswd`);
       expect(r.status, `a ${what} helper let the step through`).toBe(65);
       expect(ran(), `a ${what} helper let root exec the tree`).toBe("");
-      // Loudly, and with a repair the operator can actually type: the step that
-      // re-installs the helper AND re-records the manifest.
-      expect(r.stderr).toMatch(/--step systemd_services/);
+      // Loudly, and with a repair the operator can actually type — the whole
+      // command, not a fragment. `systemd_services` is the step that re-installs
+      // the helper AND re-records the manifest, and the path has to be the
+      // on-disk entrypoint: a few lines below this check the script repoints
+      // $ENTRYPOINT at a copy under /run that is deleted on reboot and that the
+      // operator cannot execute, so a probe moved after that point would print a
+      // remedy which cannot be run.
+      expect(r.stderr).toContain(`sudo bash ${path.join(project, "install.sh")} --step systemd_services`);
       fs.rmSync(marker, { force: true });
       retarget(MANIFEST_SRC, helper, [
         [/^PROJECT_DIR=.*$/m, `PROJECT_DIR="${project}"`],
