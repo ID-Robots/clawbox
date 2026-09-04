@@ -575,8 +575,10 @@ export default function AIModelsStep({
   // we flip into custom-input mode so it isn't silently overwritten.
   // Provider+authMode selects the effective CATALOGUE. For OpenAI the two auth
   // modes offer different model sets — `gpt-5.4-mini` only on the ChatGPT
-  // subscription, `gpt-5` and the `-pro` tiers only on the API key — so the
-  // picker must not offer ids the chosen credential will reject.
+  // subscription, the `-pro` tiers only on the API key — so the picker must not
+  // offer ids the chosen credential will reject. (`gpt-5` is NOT one of those:
+  // it is in no openai enumeration on the pinned core, only an OpenRouter slug.
+  // TASK-705.)
   //
   // `codex` is the catalogue id for the subscription, and ONLY that: OpenClaw 2
   // retired the namespace and both lanes are written `openai/<id>`

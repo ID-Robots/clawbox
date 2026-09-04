@@ -412,6 +412,17 @@ describe("POST /setup-api/ai-models/configure", () => {
   // Driven through the route rather than pinned against a copy of the table:
   // PROVIDERS is module-private, and what matters is the id the box is actually
   // left on.
+  //
+  // What this still catches, precisely: a cold start the provider's own picker
+  // list does not carry. It cannot constrain WHICH curated id is chosen — a
+  // cold start of `gpt-5.5-pro` would sail through — and for the three
+  // providers whose two tables now resolve from one exported symbol the
+  // `defaultModelId` half is structurally true. It stays because it is the half
+  // that fails the day a table is edited back to a hand-written id.
+  //
+  // clawai is excluded on purpose: its refs are `deepseek/…`, so the provider
+  // assertion below could not hold, and its ids come from
+  // CLAWBOX_AI_*_MODEL_ID, which a deploy-time env var can move.
   describe("cold-start defaults", () => {
     const coldStarts: ReadonlyArray<{ provider: string; apiKey: string }> = [
       { provider: "anthropic", apiKey: "sk-ant-test" },
@@ -423,7 +434,10 @@ describe("POST /setup-api/ai-models/configure", () => {
     it.each(coldStarts)(
       "$provider lands on a model its curated catalogue carries",
       async ({ provider, apiKey }) => {
-        await configurePost(jsonRequest({ provider, apiKey }));
+        const res = await configurePost(jsonRequest({ provider, apiKey }));
+        // A route that writes the primary and then refuses would otherwise pass
+        // here: the assertions below only read the recorded `config set` calls.
+        expect(res.status).toBe(200);
 
         const commands = configSetCommands(
           vi.mocked(runOpenclawConfigSet),
@@ -2190,6 +2204,47 @@ describe("POST /setup-api/ai-models/configure", () => {
       const retryPaths = (batches[1][0] as Array<[string, string]>).map(([p]) => p);
       expect(retryPaths).not.toContain("agents.defaults.model.primary");
       expect(vi.mocked(setPrimaryModelWithoutCatalogValidation)).toHaveBeenCalledWith(primaryOp?.[1]);
+    });
+
+    it("says so in the answer when the primary had to be written past the catalog check", async () => {
+      // The silence that hid `openai/gpt-5`. The route wrote a primary the CLI
+      // had just refused, logged one console.warn nobody reads, and answered a
+      // clean {success:true} — so Settings said "Configured" and the owner
+      // found out on the first turn. The id is fixed elsewhere in this PR; this
+      // is what makes the NEXT unresolvable id a visible event.
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(
+        new Error(
+          'Cannot set model reference "deepseek/deepseek-v4-pro" at agents.defaults.model.primary: Unable to refresh provider catalog',
+        ),
+      );
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.success).toBe(true);
+      expect(body.warning).toContain("could not confirm");
+      // The model it could not confirm is named — a warning that does not say
+      // which id is unresolvable sends the owner nowhere. Read off the batch
+      // rather than restated, so it is the id actually written.
+      const refusedOps = vi.mocked(runOpenclawConfigSetBatch).mock.calls[0][0] as Array<[string, string]>;
+      const written = refusedOps.find(([p]) => p === "agents.defaults.model.primary")?.[1];
+      expect(written).toBeDefined();
+      expect(body.warning).toContain(written!);
+    });
+
+    it("says nothing extra when the catalog accepted the primary", async () => {
+      // The other half: a clean save must not grow a warning nobody needs.
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.warning).toBeUndefined();
     });
 
     it("stores an API key through the CLI's auth store, key on stdin, no doctor", async () => {

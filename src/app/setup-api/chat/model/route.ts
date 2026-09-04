@@ -26,6 +26,7 @@ import {
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import {
   ANTHROPIC_DEFAULT_MODEL_ID,
+  GOOGLE_DEFAULT_MODEL_ID,
   OPENAI_DEFAULT_MODEL_ID,
   isValidModelId,
   parseModelSlug,
@@ -114,7 +115,7 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   deepseek: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
   anthropic: `anthropic/${ANTHROPIC_DEFAULT_MODEL_ID}`,
   openai: `openai/${OPENAI_DEFAULT_MODEL_ID}`,
-  google: "google/gemini-2.5-flash",
+  google: `google/${GOOGLE_DEFAULT_MODEL_ID}`,
   openrouter: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
 };
 

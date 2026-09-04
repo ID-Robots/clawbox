@@ -83,6 +83,7 @@ import {
   isValidModelId,
   GOOGLE_MODELS,
   ANTHROPIC_DEFAULT_MODEL_ID,
+  GOOGLE_DEFAULT_MODEL_ID,
   OPENAI_DEFAULT_MODEL_ID,
   ANTHROPIC_MODELS,
   extractProviderModelId,
@@ -188,7 +189,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     },
   },
   google: {
-    defaultModel: "google/gemini-2.5-flash",
+    defaultModel: `google/${GOOGLE_DEFAULT_MODEL_ID}`,
     profileKey: "google:default",
   },
   openrouter: {
@@ -2355,6 +2356,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //     After the validation above, not before it: the profile ids reach the
     //     CLI as argv.
     let chatgptOrderWarning: string | undefined;
+    // Set when the primary had to be written past the CLI's catalog check. It
+    // used to be a console.warn and nothing else: the box answered a clean
+    // `{success:true}`, Settings said "Configured", and the owner found out on
+    // the first turn. That is how `openai/gpt-5` — an id no openai catalogue on
+    // the pinned core carries — sat in the PROVIDERS table unnoticed. The id is
+    // fixed below; this is what makes the NEXT one visible.
+    let unvalidatedPrimaryWarning: string | undefined;
     if (ocProvider === CHATGPT_PROVIDER) {
       // ONE config read for both OpenAI decisions this save makes: which
       // credential to prefer, and whether the previous lane left the Codex
@@ -2501,6 +2509,10 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // JSON-quoted: the modeled sanitizer for js/log-injection (see 3ef684a1).
         JSON.stringify(logSafe(message)),
       );
+      unvalidatedPrimaryWarning =
+        `Saved, but OpenClaw could not confirm ${primaryModel} against this provider's catalogue. `
+        + "That is expected while a key is still being validated or a plugin is on its first boot; "
+        + "if the model is wrong, chat turns will fail. Pick a model in Settings to change it.";
     }
 
     // 5. Ensure openclaw config files are owned by clawbox
@@ -2934,7 +2946,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       await fs.unlink(pendingHandoffTokensPath).catch(() => {});
     }
 
-    const warning = [chatgptOrderWarning, gatewayWarning].filter(Boolean).join(" ");
+    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, gatewayWarning]
+      .filter(Boolean)
+      .join(" ");
     return NextResponse.json({ success: true, ...(warning ? { warning } : {}) });
   } catch (err) {
     // Never surface the raw error: it can carry CLI internals and filesystem
