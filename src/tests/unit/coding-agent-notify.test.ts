@@ -166,7 +166,10 @@ describe("the desktop leg", () => {
 });
 
 describe("the Telegram leg", () => {
-  it("does nothing without a bot token", async () => {
+  it("does nothing without a bot token — on OpenClaw, where the token IS the credential", async () => {
+    // The default harness in this suite is openclaw. On that edition the web
+    // server calls the Bot API itself, so no token means nothing can be sent.
+    // Hermes is the opposite case and has its own tests below.
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     await announceCodingAgent(run());
@@ -221,6 +224,56 @@ describe("the Telegram leg", () => {
     expect(body.text).toBe(buildAnnouncement(run()));
     expect(body.parse_mode).toBeUndefined();
     expect(body.text).not.toContain("DO-NOT-LEAK");
+  });
+
+  it("on Hermes sends even with no ClawBox-side bot token — the harness owns the credential", async () => {
+    // `hermes send` reads its own token from ~/.hermes/.env and the approved
+    // senders come from Hermes' pairing store. ClawBox's `telegram_bot_token`
+    // is written only as a side effect of /setup-api/telegram/configure, so a
+    // box paired with `hermes config set` — or restored without config.json —
+    // has a working bot, approved users, and no ClawBox token. Gating on that
+    // token silenced the notice on every one of them, without a log line.
+    getActiveHarness.mockResolvedValue("hermes");
+    configGet.mockResolvedValue(undefined);
+    readHermesApprovedUsers.mockResolvedValue([{ id: "42", name: "Maya" }]);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceCodingAgent(run());
+
+    expect(notifyHermesTelegramUser).toHaveBeenCalledWith("42", buildAnnouncement(run()));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("on Hermes a malformed ClawBox-side token does not silence it either", async () => {
+    // A partial restore can leave a truncated value in config.json. It is not
+    // the credential this path uses, so it has no business deciding anything.
+    getActiveHarness.mockResolvedValue("hermes");
+    configGet.mockImplementation(async (key: string) =>
+      key === "telegram_bot_token" ? "not-a-token" : undefined);
+    readHermesApprovedUsers.mockResolvedValue([{ id: "42" }]);
+
+    await announceCodingAgent(run());
+
+    expect(notifyHermesTelegramUser).toHaveBeenCalledWith("42", buildAnnouncement(run()));
+  });
+
+  it("says in the log when there was nobody to send to, on either edition", async () => {
+    // "No notice arrived" and "no notice was sent" are different problems, and
+    // a silent return made them the same one to whoever went looking.
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    getActiveHarness.mockResolvedValue("hermes");
+    configGet.mockResolvedValue(undefined);
+    readHermesApprovedUsers.mockResolvedValue([]);
+    await announceCodingAgent(run());
+    expect(info).toHaveBeenCalledWith(expect.stringMatching(/no approved Telegram/i));
+
+    info.mockClear();
+    getActiveHarness.mockResolvedValue("openclaw");
+    await announceCodingAgent(run());
+    expect(info).toHaveBeenCalledWith(expect.stringMatching(/no Telegram bot/i));
+    info.mockRestore();
   });
 
   it("on Hermes goes through the hermes send path for each approved user", async () => {
