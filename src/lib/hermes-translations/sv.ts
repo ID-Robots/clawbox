@@ -658,7 +658,6 @@ export const sv: Record<string, string> = {
   "codingAgent.summaryTitle": "Sammanfattning",
   "codingAgent.noSummaryYet": "Ingen sammanfattning än — körningen arbetar fortfarande.",
   "codingAgent.noSummary": "Den här körningen lämnade ingen sammanfattning.",
-  "codingAgent.filesTitle": "Ändrade filer",
   "codingAgent.activityTitle": "Aktivitet",
   "codingAgent.loadFailed": "Kunde inte läsa kodagentens inställningar.",
   "codingAgent.toggleFailed": "Kunde inte ändra kodagentens inställning.",

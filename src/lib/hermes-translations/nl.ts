@@ -662,7 +662,6 @@ export const nl: Record<string, string> = {
   "codingAgent.summaryTitle": "Samenvatting",
   "codingAgent.noSummaryYet": "Nog geen samenvatting — de run is nog bezig.",
   "codingAgent.noSummary": "Deze run liet geen samenvatting achter.",
-  "codingAgent.filesTitle": "Gewijzigde bestanden",
   "codingAgent.activityTitle": "Activiteit",
   "codingAgent.loadFailed": "De instellingen van de codeeragent konden niet worden gelezen.",
   "codingAgent.toggleFailed": "De instelling van de codeeragent kon niet worden gewijzigd.",

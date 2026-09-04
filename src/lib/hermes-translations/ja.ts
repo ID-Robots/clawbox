@@ -664,7 +664,6 @@ export const ja: Record<string, string> = {
   "codingAgent.summaryTitle": "要約",
   "codingAgent.noSummaryYet": "まだ要約はありません — 実行中です。",
   "codingAgent.noSummary": "この実行は要約を残しませんでした。",
-  "codingAgent.filesTitle": "変更されたファイル",
   "codingAgent.activityTitle": "アクティビティ",
   "codingAgent.loadFailed": "コーディングエージェントの設定を読み込めませんでした。",
   "codingAgent.toggleFailed": "コーディングエージェントの設定を変更できませんでした。",

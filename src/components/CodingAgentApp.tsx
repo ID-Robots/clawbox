@@ -1699,7 +1699,7 @@ export default function CodingAgentApp() {
               {/* The figures. */}
               <div className="mt-3 grid grid-cols-2 @md:grid-cols-4 @3xl:grid-cols-2 gap-2" data-testid="coding-agent-run-figures">
                 <StatTile label={t("codingAgent.statSteps")} value={started ? String(run.numTurns) : "—"} />
-                <StatTile label={t("codingAgent.statFiles")} value={String(run.filesTouched.length)} />
+                <StatTile label={t("codingAgent.statFiles")} value={String(run.filesTouched.length)} testId="coding-agent-stat-files" />
                 <StatTile label={t("codingAgent.statDuration")} value={started ? duration(run) : "—"} />
                 <StatTile
                   label={t("codingAgent.statTokens")}
@@ -1718,20 +1718,6 @@ export default function CodingAgentApp() {
                 />
                 <StatTile label={t("codingAgent.statModels")} value={run.modelsUsed?.length ? run.modelsUsed.join(" + ") : "—"} />
               </div>
-
-              {run.filesTouched.length > 0 && (
-                <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3" data-testid="coding-agent-run-files">
-                  <p className={SECTION_LABEL}>
-                    {t("codingAgent.filesTitle")}
-                    <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{run.filesTouched.length}</span>
-                  </p>
-                  <ul className="mt-2 flex flex-wrap gap-1.5">
-                    {run.filesTouched.map((f) => (
-                      <li key={f} className="text-[11px] font-mono text-[var(--text-secondary)] bg-black/20 border border-[var(--border-subtle)] rounded-md px-2 py-0.5 break-all">{f}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
 
               {/* The run's evidence: screenshots it took while verifying its
                   work, its report.md, and whatever test output it saved. */}

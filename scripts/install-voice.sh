@@ -683,17 +683,238 @@ install_kokoro_tts() {
   kokoro_report "ready"
 }
 
+# ── faster-whisper (STT) ─────────────────────────────────────────────────────
+
+# Written only after a COMPLETE Whisper install, and read as the idempotence
+# gate — the same rule, and the same reason, as KOKORO_STAMP above: the wheels
+# land before the CUDA library and before the model download, so `import
+# faster_whisper` alone would latch a half-done box in as ready and every
+# spoken request would still pay for the 148 MB the warm-up should have
+# fetched.
+WHISPER_STAMP="$CLAWBOX_HOME/.cache/clawbox/whisper-installed"
+# Bump when a step below changes in a way an already-stamped box must redo.
+WHISPER_STAMP_VERSION="1"
+
+# The CUDA architecture to compile CTranslate2 for.
+#
+# This is THE number that decides whether the build is five minutes or an hour.
+# Unpinned, nvcc emits code for every architecture it knows; pinned to the one
+# this board has, the same build finished in 255 s of `make -j4` on an Orin Nano
+# (measured, 2026-09-04 — the "roughly an hour" this file used to claim was
+# never measured at all).
+#
+# Read from the device tree rather than from a GPU query: Jetson has no
+# nvidia-smi, and torch is not importable this early on a fresh flash.
+cuda_arch_pin() {
+  local compat=""
+  [ -r /proc/device-tree/compatible ] && compat=$(tr -d '\0' < /proc/device-tree/compatible 2>/dev/null || true)
+  case "$compat" in
+    *tegra234*) printf '87' ;;   # Orin (Nano / NX / AGX)
+    *tegra194*) printf '72' ;;   # Xavier
+    *tegra186*) printf '62' ;;   # TX2
+    *)
+      # Unknown board: ask torch if it is there, else emit nothing and let the
+      # build decide for itself. Guessing an architecture the GPU does not have
+      # produces a library that loads and then fails at the first kernel.
+      clawbox_python 'import torch;print("%d%d" % torch.cuda.get_device_capability())' 2>/dev/null | tr -dc '0-9' || true
+      ;;
+  esac
+}
+
+# Is the CUDA CTranslate2 already built and installed for the clawbox user?
+ctranslate2_cuda_present() {
+  [ -f "$CLAWBOX_HOME/.local/lib/libctranslate2.so" ] || return 1
+  clawbox_python 'import ctranslate2; ctranslate2.get_supported_compute_types("cuda")' >/dev/null 2>&1
+}
+
+# Build CTranslate2 with CUDA and install it plus its python bindings.
+#
+# Replaces the prebuilt CPU wheel pip fetches for ctranslate2 — that wheel works
+# and would need no runtime change, so this build is a deliberate choice for GPU
+# transcription, not a necessity.
+build_ctranslate2_cuda() {
+  local build_dir="/tmp/CTranslate2-build" arch
+  arch=$(cuda_arch_pin)
+  local arch_flag=""
+  [ -n "$arch" ] && arch_flag="-DCMAKE_CUDA_ARCHITECTURES=$arch"
+  echo "  Building CTranslate2 with CUDA${arch:+ for sm_$arch}..."
+  rm -rf "$build_dir"
+  # -j4, not -j$(nproc): six parallel nvcc jobs on a 7.4 GB board is how this
+  # gets OOM-killed halfway through, and the wall clock barely differs.
+  if ! su - "$CLAWBOX_USER" -c "
+    set -e
+    git clone --depth 1 -q https://github.com/OpenNMT/CTranslate2.git '$build_dir'
+    cd '$build_dir'
+    git submodule update --init --recursive -q 2>/dev/null || true
+    mkdir -p build && cd build
+    cmake .. -DWITH_CUDA=ON -DWITH_CUDNN=ON -DOPENMP_RUNTIME=NONE \
+      -DCMAKE_INSTALL_PREFIX=$CLAWBOX_HOME/.local $arch_flag \
+      -DCUDA_TOOLKIT_ROOT_DIR=$CUDA_HOME_DIR -DWITH_MKL=OFF -DBUILD_CLI=OFF
+    make -j4
+    make install
+  " 2>&1 | tail -4; then
+    rm -rf "$build_dir"
+    return 1
+  fi
+  # The python bindings, linked against the library just installed.
+  if ! su - "$CLAWBOX_USER" -c "
+    set -e
+    export LD_LIBRARY_PATH=$CLAWBOX_HOME/.local/lib:$CUDA_HOME_DIR/lib64:\${LD_LIBRARY_PATH:-}
+    export LIBRARY_PATH=$CLAWBOX_HOME/.local/lib:\${LIBRARY_PATH:-}
+    export CPLUS_INCLUDE_PATH=$CLAWBOX_HOME/.local/include:\${CPLUS_INCLUDE_PATH:-}
+    cd '$build_dir/python' && $PIP install --user .
+  " 2>&1 | tail -4; then
+    rm -rf "$build_dir"
+    return 1
+  fi
+  rm -rf "$build_dir"
+}
+
+# Fetch the Whisper weights now, so the first transcription does not pay for
+# 148 MB while somebody waits on it.
+whisper_predownload_model() {
+  clawbox_python 'from faster_whisper import WhisperModel
+WhisperModel("base", device="cpu", compute_type="int8")' >/dev/null 2>&1
+}
+
+whisper_stack_present() {
+  [ "$(cat "$WHISPER_STAMP" 2>/dev/null || true)" = "$WHISPER_STAMP_VERSION" ] || return 1
+  clawbox_python "import faster_whisper" >/dev/null 2>&1
+}
+
+whisper_mark_installed() {
+  local dir
+  dir=$(dirname "$WHISPER_STAMP")
+  if ! (mkdir -p "$dir" && printf '%s\n' "$WHISPER_STAMP_VERSION" > "$WHISPER_STAMP"); then
+    echo "  Warning: could not write $WHISPER_STAMP - the next update will reinstall faster-whisper" >&2
+    return 0
+  fi
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$dir" 2>/dev/null || true
+}
+
+# The whisper-server.service heredoc lives here, once, so the full path and
+# --tts-only cannot ship two different units.
+#
+# It points at the WORKSPACE copy of whisper-server.py, which deploy_voice_scripts
+# writes on every run — $SCRIPTS_DST exists only on the full-pipeline path.
+write_whisper_unit() {
+  local ld
+  ld=$(kokoro_ld_path expected)
+  # Both failures are reportable: this runs inside a function called with `||`,
+  # so errexit is OFF for its body and an ignored mkdir or redirection would let
+  # the caller stamp the install and report a ready engine whose unit file does
+  # not exist — the same disagreement between local-models.ts (unit presence)
+  # and stt-local.ts (a real import) that the write-last ordering exists to
+  # prevent, arriving from the other direction.
+  mkdir -p "$SYSTEMD_USER" || return 1
+  cat > "$SYSTEMD_USER/whisper-server.service" << EOF
+[Unit]
+Description=Whisper STT Server (GPU)
+After=default.target
+
+[Service]
+Type=simple
+Environment=LD_LIBRARY_PATH=$ld
+Environment=WHISPER_MODEL=base
+ExecStart=/usr/bin/python3 $WORKSPACE/scripts/whisper-server.py
+Restart=no
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+# Install on-device speech-to-text.
+#
+#   0   faster-whisper is ready.
+#   13  this board cannot have it (no CUDA) — skipped, not failed.
+#   12  it was attempted and did not arrive.
+#
+# The unit file is written LAST, after the import has been verified, because
+# src/lib/local-models.ts derives `installed` from the unit's PRESENCE alone: a
+# unit written ahead of a failed pip would make Settings -> Local AI advertise
+# an engine the box does not have, while src/lib/stt-local.ts — which checks the
+# script, the unit AND a real import — would still correctly say no. Two probes
+# disagreeing about one engine is the state to avoid.
+install_whisper_stt() {
+  if [ "${CLAWBOX_SKIP_STT:-0}" = "1" ]; then
+    echo "  CLAWBOX_SKIP_STT=1, skipping faster-whisper"
+    return 13
+  fi
+  if whisper_stack_present; then
+    echo "  faster-whisper already installed"
+    if ! write_whisper_unit; then
+      echo "  Warning: could not write whisper-server.service" >&2
+      return 12
+    fi
+    activate_user_units
+    return 0
+  fi
+  # detect_cuda, not $HAS_CUDA: that variable is assigned further down this
+  # file, BELOW the --tts-only arm that exits before reaching it, so reading it
+  # here is an unbound variable and `set -u` would abort the whole install.
+  # install_kokoro_tts calls the function for the same reason.
+  if ! detect_cuda; then
+    echo "  No CUDA on this board - skipping faster-whisper (speech is transcribed in the cloud)"
+    return 13
+  fi
+
+  echo "  Installing faster-whisper..."
+  # numpy floor for the same reason install_kokoro_packages carries one: an
+  # unpinned resolve can take numpy 2.x, which breaks the Jetson torch wheel
+  # Kokoro runs on ("RuntimeError: Numpy is not available"). Measured on this
+  # board, `pip install faster-whisper` resolves 7 prebuilt aarch64 wheels and
+  # touches neither numpy nor transformers when Kokoro is already installed —
+  # the floor is here so that stays true on a box where it is not.
+  if ! pip_as_clawbox "'numpy>=1.24,<2' faster-whisper"; then
+    echo "  Warning: faster-whisper wheels did not install" >&2
+    return 12
+  fi
+
+  # The CUDA library, replacing the CPU wheel pip just fetched. Non-fatal: the
+  # CPU wheel transcribes, and both runtime scripts already fall back to
+  # cpu/int8, so a failed build costs speed and not the feature.
+  if ctranslate2_cuda_present; then
+    echo "  CTranslate2 CUDA build already present"
+  elif ! build_ctranslate2_cuda; then
+    echo "  Warning: the CTranslate2 CUDA build failed - faster-whisper will transcribe on the CPU" >&2
+  fi
+
+  if ! whisper_predownload_model; then
+    echo "  Warning: could not pre-fetch the Whisper weights" >&2
+  fi
+
+  if ! clawbox_python "import faster_whisper" >/dev/null 2>&1; then
+    echo "  Warning: faster-whisper does not import after install" >&2
+    return 12
+  fi
+
+  # Before the stamp, and before anything says "ready": a stamped box skips this
+  # work on every later update, so stamping over a missing unit would make the
+  # defect permanent.
+  if ! write_whisper_unit; then
+    echo "  Warning: could not write whisper-server.service" >&2
+    return 12
+  fi
+  whisper_mark_installed
+  activate_user_units
+  echo "  faster-whisper ready"
+}
+
 # --tts-only installs exactly what on-device TTS needs: the workspace scripts
 # OpenClaw execs, and the CUDA Kokoro stack with its on-demand server unit.
 # There is no second engine to install — Kokoro is the box's only voice, and a
 # Kokoro that is missing is reported (verdict file, exit status) rather than
 # papered over by a CPU fallback.
 #
-# It deliberately does NOT run the STT half of this file — faster-whisper, the
-# CTranslate2 CUDA source build, the Whisper model download — which is roughly
-# an hour on an Orin. install.sh runs this from step_openclaw_tts on every
-# install AND every in-app update; an hour of source builds per update is not
-# something a shipped device can absorb.
+# It DOES now install the STT half — faster-whisper, the CTranslate2 CUDA build
+# and the Whisper weights — which this file used to exclude on the grounds that
+# it was "roughly an hour on an Orin". That number was never measured. Pinned to
+# the one architecture the board actually has (cuda_arch_pin), the same build
+# took 255 s of `make -j4` plus a 34 s clone on an Orin Nano — measured
+# 2026-09-04. Unpinned, nvcc emits code for every architecture it knows, which
+# is where the hour went. Stamp-gated, so a box that has it pays one import
+# check per update and nothing else.
 #
 # The scripts go first so a Kokoro failure can never take the entrypoint with
 # it: clawbox-tts.sh is what turns "Kokoro is down" into an exit-1 report the
@@ -706,6 +927,19 @@ if [ "${1:-}" = "--tts-only" ]; then
 
   KOKORO_RC=0
   install_kokoro_tts || KOKORO_RC=$?
+
+  # AFTER Kokoro, so a failed pip or a lost network can never cost the box its
+  # voice, and BEFORE the case below, which exits: STT is independent of TTS,
+  # and a box whose Kokoro is missing should still get its ears. Its status is
+  # reported and deliberately does NOT feed the exit code — the contract
+  # documented above is Kokoro's, and install.sh grades this step by it.
+  STT_RC=0
+  install_whisper_stt || STT_RC=$?
+  case "$STT_RC" in
+    0)  echo "  On-device speech-to-text: ready" ;;
+    13) echo "  On-device speech-to-text: not applicable to this board" ;;
+    *)  echo "  On-device speech-to-text: NOT installed (speech is transcribed in the cloud)" >&2 ;;
+  esac
 
   # The exit status is the contract with install.sh's step_openclaw_tts (the
   # table in the header of this file):
@@ -935,21 +1169,10 @@ else
   kokoro_report "failed:install"
 fi
 
-cat > "$SYSTEMD_USER/whisper-server.service" << EOF
-[Unit]
-Description=Whisper STT Server (GPU)
-After=default.target
-
-[Service]
-Type=simple
-Environment=LD_LIBRARY_PATH=$(kokoro_ld_path expected)
-Environment=WHISPER_MODEL=base
-ExecStart=/usr/bin/python3 $SCRIPTS_DST/whisper-server.py
-Restart=no
-
-[Install]
-WantedBy=default.target
-EOF
+# One writer for this unit — see write_whisper_unit. The copy that used to sit
+# here pointed at $SCRIPTS_DST and the --tts-only path could not reach it, which
+# is exactly how two paths ship two different units.
+write_whisper_unit
 
 # Owner, lingering and daemon-reload (servers start on demand via stt-client.py)
 activate_user_units

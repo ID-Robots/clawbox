@@ -673,7 +673,6 @@ export const it: Record<string, string> = {
   "codingAgent.summaryTitle": "Riepilogo",
   "codingAgent.noSummaryYet": "Nessun riepilogo ancora — l'esecuzione è in corso.",
   "codingAgent.noSummary": "Questa esecuzione non ha lasciato un riepilogo.",
-  "codingAgent.filesTitle": "File modificati",
   "codingAgent.activityTitle": "Attività",
   "codingAgent.loadFailed": "Impossibile leggere le impostazioni dell'agente di codice.",
   "codingAgent.toggleFailed": "Impossibile modificare l'impostazione dell'agente di codice.",

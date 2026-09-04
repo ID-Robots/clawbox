@@ -188,7 +188,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.summaryTitle": "Summary",
   "codingAgent.noSummaryYet": "No summary yet — the run is still working.",
   "codingAgent.noSummary": "This run left no summary.",
-  "codingAgent.filesTitle": "Files changed",
   "codingAgent.activityTitle": "Activity",
 
   "codingAgent.loadFailed": "Could not read the coding agent settings.",

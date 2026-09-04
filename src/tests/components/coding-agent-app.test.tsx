@@ -785,7 +785,15 @@ describe("CodingAgentApp", () => {
       expect(figures).toContain("2× explorer, 1× reviewer");
       expect(figures).toContain("deepseek-v4-pro[1m] + deepseek-v4-flash");
       expect(screen.getByTestId("coding-agent-summary").textContent).toContain("Added the toggle");
-      expect(screen.getByTestId("coding-agent-run-files").textContent).toContain("index.html");
+      // The rail carries the COUNT, not the roster. A run that touched 29
+      // files filled the column with chips and told the reader nothing the
+      // figure did not — and the block repeated the tile's own label
+      // verbatim ("Files changed" was both `statFiles` and `filesTitle`).
+      // Not asserted as "the page never names a file": the summary above
+      // says "Added the toggle in index.html", and that sentence is the
+      // useful mention — it is the roster in the rail that went.
+      expect(screen.getByTestId("coding-agent-stat-files").textContent).toContain("1");
+      expect(screen.queryByTestId("coding-agent-run-files")).toBeNull();
       expect(screen.getByTestId("coding-agent-run-plan").textContent).toContain("Testing it");
       expect(screen.getByTestId("coding-agent-denied").textContent).toContain("curl http://example");
       expect(screen.getByRole("link", { name: "after.png" })).toHaveAttribute("href", expect.stringContaining("file=after.png"));
