@@ -107,7 +107,11 @@ function run(template = TEMPLATE): { stdout: string; stderr: string } {
  * headroom is a fixed small number rather than "up to 1023 bytes, depending on
  * how long the shipped template happens to be" — see `padToJustUnderABlock`.
  */
-function runCapped(bytes: number, template = TEMPLATE): { status: number | null; stdout: string; stderr: string } {
+function runCapped(
+  bytes: number,
+  template = TEMPLATE,
+  opts: { hideTruncate?: boolean } = {},
+): { status: number | null; stdout: string; stderr: string } {
   const root = mkdtempSync(path.join(dir, "root-"));
   mkdirSync(path.join(root, "config"), { recursive: true });
   writeFileSync(path.join(root, "config/clawbox-workspace-guide.md"), readFileSync(template, "utf-8"));
@@ -115,6 +119,9 @@ function runCapped(bytes: number, template = TEMPLATE): { status: number | null;
   const script = [
     "set -euo pipefail",
     'trap "" XFSZ',
+    // A rootfs without coreutils' `truncate`: the shell function shadows the
+    // binary, so the helper falls through to its python3 fallback.
+    ...(opts.hideTruncate ? ["truncate() { return 127; }"] : []),
     `ulimit -f ${blocks}`,
     `CLAWBOX_ROOT=${JSON.stringify(root)}`,
     `CLAWBOX_WORKSPACE=${JSON.stringify(workspace)}`,
@@ -198,7 +205,7 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
       // continued `&& ! dd of=…` — and without this the six-line minimum would
       // still be met with BOTH of them deleted.
       || /^(if\s+)?!\s*truncate\b/.test(line)
-      || /^&&\s*!\s*dd\b/.test(line)
+      || /^&&\s*!\s*python3\b/.test(line)
       || />>/.test(line)
       // The helper's CALL, not its definition line. Matched on the name alone
       // so an unquoted first argument cannot slip past the filter — which is
@@ -222,7 +229,7 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     expect(writes.length).toBeGreaterThanOrEqual(6);
     // Both rollback verbs, by name: a six-line count can be met without them.
     expect(writes.join("\n")).toMatch(/truncate -s/);
-    expect(writes.join("\n")).toMatch(/dd of=/);
+    expect(writes.join("\n")).toMatch(/os\.truncate/);
     expect(unguarded).toEqual([]);
   });
 
@@ -382,6 +389,20 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     expect(res.stderr).toContain("could not append");
     expect(res.stdout).not.toContain("Appended the system-actions section");
     // ...and the file is back to what it was, marker and fragment both gone.
+    expect(readFileSync(guide, "utf-8")).toBe(older);
+  });
+
+  it("rolls back without truncate on the PATH", () => {
+    // The fallback, exercised rather than assumed: a rootfs without coreutils'
+    // `truncate` must still remove the fragment, not empty the file.
+    const older = padToJustUnderABlock(readFileSync(TEMPLATE, "utf-8").split(`\n---\n\n${HEADING}`)[0]);
+    writeFileSync(guide, older);
+
+    const res = runCapped(Buffer.byteLength(older) + 64, TEMPLATE, { hideTruncate: true });
+
+    expect(res.status).toBe(0);
+    expect(res.stderr).toContain("could not append");
+    expect(res.stderr).not.toContain("could not roll");
     expect(readFileSync(guide, "utf-8")).toBe(older);
   });
 

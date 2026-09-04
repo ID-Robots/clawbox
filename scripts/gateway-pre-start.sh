@@ -3290,10 +3290,14 @@ clawbox_append_or_rollback() {
   if [ -n "$after" ] && [ "$after" = "$before" ]; then
     return 1
   fi
-  # `truncate` is coreutils, which is essential on both rootfs images; the `dd`
-  # form is the busybox fallback and costs nothing to carry.
+  # `truncate` is coreutils, which is essential on both rootfs images; python3
+  # is the fallback, and it is python rather than `dd` deliberately —
+  # `dd of=… seek=N count=0` truncates at the seek offset on GNU coreutils but
+  # is not guaranteed to elsewhere, and the one implementation that gets it
+  # wrong empties the file this function exists to preserve. `os.truncate` says
+  # exactly what is meant, and this script already depends on python3 throughout.
   if ! truncate -s "$before" "$dest" 2>/dev/null \
-    && ! dd of="$dest" bs=1 seek="$before" count=0 2>/dev/null; then
+    && ! python3 -c 'import os,sys; os.truncate(sys.argv[1], int(sys.argv[2]))' "$dest" "$before" 2>/dev/null; then
     echo "  WARNING: could not roll $dest back after a failed append; it may be cut mid-section" >&2
   fi
   return 1
