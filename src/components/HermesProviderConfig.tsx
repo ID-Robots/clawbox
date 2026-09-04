@@ -1374,9 +1374,16 @@ export default function HermesProviderConfig({
                 )}
                 {scope?.stale && !loading && (
                   <p className="mt-1.5 text-[11px] text-amber-400/80">
-                    {scope.source === "cold-start"
-                      ? t("hermesProvider.model.staleColdStart")
-                      : t("hermesProvider.model.staleCached")}
+                    {/* `degraded` first: this box HAD a live catalogue and lost
+                        it to a blip, which the other two lines cannot say — one
+                        of them describes a box that has never reached its
+                        dashboard, the other a cache that is merely old. Reuses
+                        the Providers strip's own wording for the same fact. */}
+                    {scope.degraded
+                      ? t("settings.providers.degraded")
+                      : scope.source === "cold-start"
+                        ? t("hermesProvider.model.staleColdStart")
+                        : t("hermesProvider.model.staleCached")}
                   </p>
                 )}
               </div>

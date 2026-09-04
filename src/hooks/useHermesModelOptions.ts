@@ -60,6 +60,8 @@ export interface HermesModelScope {
   warning?: string;
   source: "dashboard" | "catalog-file" | "cold-start";
   stale: boolean;
+  /** The box HAD a live catalogue and could not refresh it — not a cold box. */
+  degraded?: "dashboard-unreachable";
 }
 
 export interface UseHermesModelOptions {
@@ -198,7 +200,7 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
       if (attempt >= DEGRADED_RETRY_ATTEMPTS) return false;
       // ALWAYS a plain load, never the user's `refresh=1`. That flag busts
       // Hermes' per-provider disk cache and re-enumerates every provider's live
-      // /v1/models, and this schedule (1+2+4+8+8 s) crosses the server's 10 s
+      // /v1/models, and this schedule (1+2+4+8+8+8 s) crosses the server's 10 s
       // throttle twice — so carrying it would turn one Refresh click on a
       // degraded box into three device-wide sweeps. It also could not help: a
       // placeholder means the dashboard is unreachable, and `?refresh=true`

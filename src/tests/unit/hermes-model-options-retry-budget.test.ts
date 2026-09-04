@@ -17,9 +17,16 @@ import { useHermesModelOptions } from "@/hooks/useHermesModelOptions";
  * (hermes-model-options.ts — awaiting it was tried in #599 and is wrong), so a
  * poll can only ever return what a PREVIOUS poll's refresh installed. The last
  * poll therefore cannot recover: the deciding one is the second-to-last. That
- * is what the fixture below models — it is the server rule, not a convenience —
- * and it is why a client-side mock that answers live as soon as the dashboard
- * is up cannot see this at all.
+ * one rule is what the fixture below models, and it is why a client-side mock
+ * that answers live as soon as the dashboard is up cannot see this at all.
+ *
+ * WHAT THE FIXTURE DOES NOT MODEL, deliberately: the WARM-cache half only. The
+ * server's cold first read blocks on a live fetch (up to DASHBOARD_TIMEOUT_MS
+ * plus an untimed login), its refresh is throttled to one a second measured
+ * from `fetchedAt`, and `load()` is single-flight — so on a real box the first
+ * few polls are cheaper and later than they are here. This suite pins the
+ * CLIENT's timer arithmetic against that one server rule; the server's own
+ * behaviour is pinned in hermes-model-options-downgrade / -stale-cache.
  *
  * (M2) On exhaustion the placeholder was installed with `error: null`, so a box
  * whose dashboard is never coming back rendered as a provider that simply has
