@@ -187,8 +187,30 @@ export function decodePluginsEnabledPlain(stdout: string): PluginsEnabledState {
   return { kind: "list", names: parseYamlList(stdout) };
 }
 
-/** Names out of a value that is not a list, or [] when there are none. */
+/**
+ * Names out of a value that is not a list, or [] when there are none.
+ *
+ * A residue nothing can be recovered from is still REPLACED by the caller —
+ * leaving the box loading no plugins at all would be worse — but it is the one
+ * place the "merged, never replaced" invariant gives way, so what is being
+ * discarded is written to the journal first. `scripts/register-mcp.sh` prints
+ * the same kind of line before it declines a list it cannot parse.
+ */
 function recoverNames(value: unknown): string[] {
+  const names = recoverNamesFrom(value);
+  if (!names.length) {
+    // Plugin names only — this key holds no credential — and truncated anyway,
+    // since a hand-edited config can hold anything.
+    const shape = typeof value === "string" ? JSON.stringify(value.slice(0, 120)) : typeof value;
+    console.warn(
+      `[hermes/clawai] plugins.enabled holds ${shape}, which names no plugin;`
+      + " it is being replaced rather than merged into",
+    );
+  }
+  return names;
+}
+
+function recoverNamesFrom(value: unknown): string[] {
   // Our own literal, handed back as text. Its content is the customer's list.
   if (typeof value === "string") {
     const names = parseYamlList(value);
