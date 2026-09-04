@@ -519,8 +519,16 @@ d("install.sh::install_root_libexec", () => {
   it("clears only the token it repaired", () => {
     // The control: without this, "clears" would pass over a function that
     // emptied the whole array and lost every other step's failure.
+    //
+    // Anchored, like the sibling above it. Unanchored, the match only says the
+    // two survivors are adjacent somewhere in the line — which the ORDER
+    // already guarantees is false for a run that cleared nothing
+    // (`openclaw_tts root_exec_manifest hermes_edition`), but says nothing
+    // about a repair that removes the token and then puts it back at the end.
+    // `remaining-failures:openclaw_tts hermes_edition root_exec_manifest` is a
+    // false failure surviving its own repair, and it passed.
     const r = runBlock("PROVISION_FAILURES=(openclaw_tts root_exec_manifest hermes_edition)");
-    expect(r.stdout + r.stderr).toMatch(/remaining-failures:openclaw_tts hermes_edition/);
+    expect(r.stdout + r.stderr).toMatch(/remaining-failures:openclaw_tts hermes_edition\s*$/m);
   });
 
   it("does not clear the failure when the manifest does not verify after the write", () => {
