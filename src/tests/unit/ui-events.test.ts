@@ -18,8 +18,11 @@ import {
   dispatchFixError,
   FIX_ERROR_EVENT,
   handoffSettingsSection,
+  MEMORY_SHARD_CHANGED_EVENT,
   notifyCodingAgentChanged,
+  notifyMemoryShardChanged,
   onCodingAgentChanged,
+  onMemoryShardChanged,
   onStandaloneAppPage,
   OPEN_APP_EVENT,
   OPEN_SETTINGS_SECTION_EVENT,
@@ -139,5 +142,27 @@ describe("the coding agent changed signal", () => {
     notifyCodingAgentChanged();
     expect(seen).toHaveLength(1);
     expect(CODING_AGENT_CHANGED_EVENT).toBe("clawbox:coding-agent-changed");
+  });
+});
+
+describe("the memory shard changed signal", () => {
+  it("is its own event, so a memory switch does not reload the coding agent", () => {
+    // Two features, two signals: the Coding Agent app reloads its runs, its
+    // projects and its GitHub state on its own event, and none of that has
+    // anything to do with the memory index being switched off.
+    const shard: string[] = [];
+    const agent: string[] = [];
+    const offShard = onMemoryShardChanged(() => { shard.push("shard"); });
+    const offAgent = onCodingAgentChanged(() => { agent.push("agent"); });
+
+    notifyMemoryShardChanged();
+    expect(shard).toHaveLength(1);
+    expect(agent).toHaveLength(0);
+
+    offShard();
+    notifyMemoryShardChanged();
+    expect(shard).toHaveLength(1);
+    offAgent();
+    expect(MEMORY_SHARD_CHANGED_EVENT).toBe("clawbox:memory-shard-changed");
   });
 });

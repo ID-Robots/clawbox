@@ -433,6 +433,33 @@ export function onCodingAgentChanged(listener: () => void): () => void {
 }
 
 /**
+ * "Memory Shard's switch, or its setup, changed."
+ *
+ * The same need the coding agent's signal answers, for the same reason: the
+ * switch lives on a settings page that can be open while a second Memory Shard
+ * window — or the standalone /app/memory-shard on a phone — shows the On/Off
+ * chip and the indexing buttons the switch governs. Without this the owner
+ * switched it off in one window and the other kept offering "Index now".
+ *
+ * A signal, not data: the listener re-reads the status route, so there stays
+ * one source of truth for what the box is doing.
+ */
+export const MEMORY_SHARD_CHANGED_EVENT = "clawbox:memory-shard-changed";
+
+/** Emit the signal above — after the route answered, never on the click. */
+export function notifyMemoryShardChanged(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(MEMORY_SHARD_CHANGED_EVENT));
+}
+
+/** Subscribe to "memory shard changed" and return the unsubscribe. */
+export function onMemoryShardChanged(listener: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  window.addEventListener(MEMORY_SHARD_CHANGED_EVENT, listener);
+  return () => window.removeEventListener(MEMORY_SHARD_CHANGED_EVENT, listener);
+}
+
+/**
  * "A coding run was just started, or just finished, somewhere this browser
  * can see."
  *

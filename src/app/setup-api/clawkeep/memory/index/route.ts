@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { hasOwnerSession } from "@/lib/owner-session";
 import { startMemoryIndex } from "@/lib/clawkeep-memory";
+import { getMemoryShardEnabled } from "@/lib/memory-shard";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +26,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       { error: "Starting an index run needs a signed-in browser session.", kind: "owner_only" },
       { status: 403, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  // The owner's switch, not a preference: switching Memory Shard off has to
+  // stop the passes ClawBox starts, or "off" is a word on a screen. The
+  // scheduler disarms itself for the same reason; this is the by-hand half.
+  // 409 rather than 403, because nothing is wrong with WHO asked — the box is
+  // simply not indexing at the moment, and the app says so with `kind`.
+  if (!(await getMemoryShardEnabled())) {
+    return NextResponse.json(
+      { error: "Memory Shard is switched off. Switch it on in its settings to index.", kind: "disabled" },
+      { status: 409, headers: { "Cache-Control": "no-store" } },
     );
   }
   const body = await request.json().catch(() => ({}));

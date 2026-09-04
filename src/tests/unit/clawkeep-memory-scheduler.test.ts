@@ -13,9 +13,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 let tmpDir = "";
 
+// The owner's switch, which the scheduler now reads on every re-arm and on
+// every fire. Mocked rather than written to the config store: that store is a
+// file under a root shared by every test in the worker, so a switch left
+// behind here would decide another file's answer.
+const { shard } = vi.hoisted(() => ({ shard: { enabled: true } }));
+vi.mock("@/lib/memory-shard", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/memory-shard")>(),
+  getMemoryShardEnabled: async () => shard.enabled,
+}));
+
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawkeep-memsched-"));
   process.env.CLAWKEEP_DATA_DIR = tmpDir;
+  shard.enabled = true;
   vi.resetModules();
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-08-22T05:00:00"));
@@ -80,6 +91,55 @@ describe("the memory index scheduler", () => {
     await writeSchedule({ enabled: false, frequency: "daily", timeOfDay: "03:00", weekday: 0 });
     await sched.refresh();
     expect(sched.nextRunAtMs()).toBe(0);
+  });
+
+  it("arms nothing while Memory Shard is switched off, whatever the schedule file says", async () => {
+    // The switch is the owner's consent for this box to spend its night
+    // embedding their documents. A saved schedule under a switched-off shard
+    // used to arm a timer anyway — an "off" that kept indexing.
+    shard.enabled = false;
+    await writeSchedule({ enabled: true, frequency: "daily", timeOfDay: "03:00", weekday: 0 });
+    const sched = await import("@/lib/clawkeep-memory-scheduler");
+    await sched.start();
+    expect(sched.nextRunAtMs()).toBe(0);
+  });
+
+  it("arms the schedule the owner had saved when the switch goes back on", async () => {
+    shard.enabled = false;
+    await writeSchedule({ enabled: true, frequency: "daily", timeOfDay: "03:00", weekday: 0 });
+    const sched = await import("@/lib/clawkeep-memory-scheduler");
+    await sched.start();
+    expect(sched.nextRunAtMs()).toBe(0);
+
+    // What the enable route does after writing the switch: the hour the owner
+    // chose comes back, rather than waiting for the next reboot.
+    shard.enabled = true;
+    await sched.refresh();
+    expect(new Date(sched.nextRunAtMs()).getHours()).toBe(3);
+  });
+
+  it("stands down for a slot armed before the switch was turned off", async () => {
+    // The timer is set hours ahead of the slot, so the state that matters is
+    // the one at the moment it fires — not the one it was armed with.
+    const startMemoryIndex = vi.fn(async () => ({ accepted: true, run: {} as never }));
+    vi.doMock("@/lib/updater", () => ({ updateInFlight: vi.fn(async () => false) }));
+    vi.doMock("@/lib/clawkeep-memory", async () => {
+      const actual = await vi.importActual<typeof import("@/lib/clawkeep-memory")>("@/lib/clawkeep-memory");
+      return { ...actual, startMemoryIndex };
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await writeSchedule({ enabled: true, frequency: "daily", timeOfDay: "06:00", weekday: 0 });
+    const sched = await import("@/lib/clawkeep-memory-scheduler");
+    await sched.start();
+
+    shard.enabled = false;
+    await vi.advanceTimersByTimeAsync(61 * 60_000);
+    expect(startMemoryIndex).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("Memory Shard is switched off"));
+    // And nothing is armed for tomorrow either, so the panel cannot print a
+    // next run for a box that is not going to index.
+    await vi.waitFor(() => { expect(sched.nextRunAtMs()).toBe(0); });
+    log.mockRestore();
   });
 
   it("runs an incremental pass when the slot arrives, never a full reindex", async () => {

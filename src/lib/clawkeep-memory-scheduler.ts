@@ -20,6 +20,7 @@ import {
   startMemoryIndex,
   type MemoryIndexSchedule,
 } from "@/lib/clawkeep-memory";
+import { getMemoryShardEnabled } from "@/lib/memory-shard";
 import { updateInFlight } from "@/lib/updater";
 
 let armed: NodeJS.Timeout | null = null;
@@ -58,6 +59,15 @@ function fire(): void {
 }
 
 async function runSlot(): Promise<void> {
+  // The owner's switch, read when the slot FIRES and not only when it was
+  // armed. A switch flipped after the timer was set has to be honoured too —
+  // an "off" that still spends the night embedding the owner's documents
+  // because a timer predates it is exactly the half-applied setting this
+  // feature must not have.
+  if (!(await getMemoryShardEnabled())) {
+    console.log("[clawkeep-memory-scheduler] skipped: Memory Shard is switched off");
+    return;
+  }
   // An update owns the OpenClaw store while it runs: post_update repairs it
   // with the gateway masked and stopped so there is ONE writer, and
   // `openclaw memory index` would be a second. A slot that lands inside an
@@ -81,8 +91,14 @@ async function runSlot(): Promise<void> {
 async function rearm(): Promise<void> {
   const generation = ++rearmGeneration;
   clear();
-  const schedule = await readMemorySchedule();
+  const [schedule, enabled] = await Promise.all([readMemorySchedule(), getMemoryShardEnabled()]);
   if (generation !== rearmGeneration) return;
+  // Switched off means NO timer, not a timer that fires into the skip above:
+  // `nextRunAtMs()` is the number the app prints as "next run", and a box whose
+  // indexing is off must not name an hour it will index at. Boot goes through
+  // here too, so a box that was switched off before a reboot comes back
+  // disarmed rather than re-armed by the schedule file alone.
+  if (!enabled) return;
   arm(schedule);
 }
 
