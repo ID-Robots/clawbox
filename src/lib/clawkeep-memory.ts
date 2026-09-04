@@ -611,7 +611,11 @@ export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
     getMemoryShardEnabled(),
     getMemoryShardSetupComplete(),
   ]);
-  return { ...live, enabled, setupComplete };
+  // A "next run" while the switch is off would name an hour at which nothing
+  // happens: the scheduler arms no timer at all in that state, and this is the
+  // number every surface prints. The schedule itself is left as the owner saved
+  // it, so switching back on restores the hour they chose.
+  return { ...live, enabled, setupComplete, nextRunAtMs: enabled ? live.nextRunAtMs : 0 };
 }
 
 /**

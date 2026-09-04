@@ -2,7 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
+import { onMemoryShardChanged } from "@/lib/ui-events";
+import MemoryShardArt from "./MemoryShardArt";
 import MemoryShardWizard from "./MemoryShardWizard";
+import MemoryShardSettingsPanel, { type MemoryShardSettingsState } from "./MemoryShardSettingsPanel";
 import { BTN_PRIMARY, BTN_SECONDARY } from "./coding-agent-ui";
 import type {
   ClawKeepMemoryStatus,
@@ -76,12 +79,19 @@ function isRunState(value: unknown): value is MemoryRunState {
 /** What the server accepts as a time; anything else is still being typed. */
 const TIME_OF_DAY = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
+function MemoryIndexCard({ initial, onError }: {
+  /** The status the window already read on the way in, when it recognised one.
+   *  The card used to throw that payload away and probe again, which cost the
+   *  owner a second CLI-backed read — up to 90s on a cold box — to be shown the
+   *  figures the window was holding. Its own poll below carries on as before. */
+  initial: ClawKeepMemoryStatus | null;
+  onError: (msg: string) => void;
+}) {
   const { t } = useT();
-  const [status, setStatus] = useState<ClawKeepMemoryStatus | null>(null);
+  const [status, setStatus] = useState<ClawKeepMemoryStatus | null>(initial);
   const [busy, setBusy] = useState<MemoryIndexMode | null>(null);
   const [confirmFull, setConfirmFull] = useState(false);
-  const [draft, setDraft] = useState<MemoryIndexSchedule | null>(null);
+  const [draft, setDraft] = useState<MemoryIndexSchedule | null>(initial?.schedule ?? null);
   const [savingSchedule, setSavingSchedule] = useState(false);
   // The time field's text while it is not a valid time yet. Kept OUT of the
   // draft on purpose: every other control spreads the draft into its save,
@@ -128,8 +138,14 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
   // rather than in an effect of its own, which also keeps this off
   // react-hooks/set-state-in-effect.
   const running = status?.run.status === "running";
+  // Seeded from the window's own read: asking the route again in the same
+  // breath would boot a second OpenClaw probe to be told what is already on
+  // screen. Only the FIRST pass of this effect is skipped — a change of
+  // cadence re-reads as it always did.
+  const seeded = useRef(initial !== null);
   useEffect(() => {
-    void load();
+    if (seeded.current) seeded.current = false;
+    else void load();
     const id = setInterval(() => { void load(); }, running ? 3_000 : 30_000);
     return () => clearInterval(id);
   }, [load, running]);
@@ -143,9 +159,14 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
         body: JSON.stringify({ mode }),
       });
       if (res.status === 409) {
-        // Single-flight declined it. Say so plainly instead of leaving the
-        // button looking like it did nothing.
-        onError(t("clawkeep.memory.alreadyRunning"));
+        // Two different declines wear this code now: single-flight, and the
+        // owner's switch being off. "Indexing is already running" over a
+        // switched-off shard would send them looking for a run that was never
+        // started, so the route's `kind` decides which sentence they get.
+        const refusal = await res.json().catch(() => null) as { kind?: unknown } | null;
+        onError(refusal?.kind === "disabled"
+          ? t("clawkeep.memory.disabledError")
+          : t("clawkeep.memory.alreadyRunning"));
       } else {
         const { run } = await jsonOrError<{ run?: unknown }>(res);
         // The route answers with the run it just started. Adopt it now, so
@@ -236,6 +257,11 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
   // drops it; this is the same fact from the counts alone.
   const nothingToIndex = status.available && health !== "unavailable"
     && status.files === 0 && status.pendingFiles === 0 && status.chunks === 0 && !running;
+  // The owner's switch, as the server reports it. Only an EXPLICIT false pauses
+  // the controls: a status from a server that predates the switch carries no
+  // `enabled` at all, and that box is indexing — greying its buttons out over a
+  // field it never sent would be the app inventing a state.
+  const paused = status.enabled === false;
 
   return (
     <div className={`${CARD} space-y-4`}>
@@ -308,7 +334,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
       <div className="flex gap-2">
         <button
           type="button"
-          disabled={busy !== null || running}
+          disabled={busy !== null || running || paused}
           onClick={() => void startIndex("incremental")}
           className={`${BTN_PRIMARY} flex-1`}
         >
@@ -316,7 +342,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
         </button>
         <button
           type="button"
-          disabled={busy !== null || running}
+          disabled={busy !== null || running || paused}
           onClick={() => setConfirmFull(true)}
           className={`${BTN_SECONDARY} flex-1`}
         >
@@ -324,14 +350,27 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
         </button>
       </div>
 
+      {/* Disabled buttons with no explanation are the worst version of an off
+          switch: the route would refuse these anyway, so say why here. */}
+      {paused && (
+        <p className="text-[11px] text-amber-400" data-testid="memory-shard-paused">
+          {t("clawkeep.memory.pausedHint")}
+        </p>
+      )}
+
       <div className="space-y-3 border-t border-[var(--border-subtle)] pt-3" aria-busy={savingSchedule}>
         <div className="flex items-center justify-between">
           <div>
             <h4 className="text-xs font-semibold text-gray-100">{t("clawkeep.memory.schedule")}</h4>
             <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
-              {schedule.enabled
-                ? t("clawkeep.memory.nextRun", { when: formatNextRun(status.nextRunAtMs, t) })
-                : t("clawkeep.memory.scheduleOff")}
+              {/* A saved schedule under a switched-off shard arms no timer, so
+                  the server answers no next run and this line must not print
+                  the em-dash that would leave. */}
+              {!schedule.enabled
+                ? t("clawkeep.memory.scheduleOff")
+                : paused
+                  ? t("clawkeep.memory.schedulePaused")
+                  : t("clawkeep.memory.nextRun", { when: formatNextRun(status.nextRunAtMs, t) })}
             </p>
           </div>
           <label className="relative inline-flex items-center cursor-pointer">
@@ -450,10 +489,16 @@ export default function MemoryShardApp() {
    * which was the first shape of this and both ugly and a lint error (a
    * setState reachable synchronously from an effect).
    */
-  const [state, setState] = useState<{ enabled: boolean; setupComplete: boolean } | null>(null);
+  const [state, setState] = useState<MemoryShardSettingsState | null>(null);
   /** The first read has answered — however it answered. Without this a fresh
    *  box paints the index card for a moment and then swaps it for the wizard. */
   const [resolved, setResolved] = useState(false);
+  /** The whole status of that first read, when it was one, so the index card
+   *  can paint from it instead of asking the box the same question again. */
+  const [firstStatus, setFirstStatus] = useState<ClawKeepMemoryStatus | null>(null);
+  /** Which face the window shows. The settings page sits over whichever face
+   *  was up — the wizard included — because it is the way back out of itself. */
+  const [page, setPage] = useState<"home" | "settings">("home");
 
   const loadState = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -461,6 +506,7 @@ export default function MemoryShardApp() {
       if (!res.ok) throw new Error("status");
       const status = await res.json() as { enabled?: boolean; setupComplete?: boolean };
       if (signal?.aborted) return;
+      if (isMemoryStatus(status)) setFirstStatus(status);
       // ONLY an explicit boolean opens the wizard.
       //
       // A status this app cannot recognise — the e2e mock answers `{}` with a
@@ -488,7 +534,30 @@ export default function MemoryShardApp() {
     return () => ctl.abort();
   }, [loadState]);
 
+  // The switch can be flipped from another Memory Shard window — or from this
+  // app's own settings page — and this window's chip, its buttons and the
+  // wizard it may owe the owner all follow it. The visibility half is how a
+  // phone returns from /app/memory-shard in another tab.
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === "visible") void loadState(); };
+    const off = onMemoryShardChanged(() => { void loadState(); });
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      off();
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [loadState]);
+
   const showWizard = state !== null && !state.setupComplete;
+  /** Exclusive, and in this order: settings wins over the wizard (it is the way
+   *  back out), and nothing but the loader paints before the first read. */
+  const view = page === "settings"
+    ? "settings"
+    : !resolved
+      ? "loading"
+      : showWizard
+        ? "wizard"
+        : "home";
 
   return (
     // Same shell as the Coding Agent: a window that fills its frame, one
@@ -529,6 +598,26 @@ export default function MemoryShardApp() {
               </span>
             )}
           </div>
+          {/* ONE control on this axis, the Coding Agent's: Settings on the way
+              in, Back on the way out. It lives in the app rather than in the
+              Settings window so a phone that landed on /app/memory-shard from
+              "Open in new tab" reaches the switch with no desktop listening. */}
+          <div className="flex items-center gap-2 shrink-0">
+            {resolved && (
+              <button
+                type="button"
+                onClick={() => setPage(view === "settings" ? "home" : "settings")}
+                data-testid={view === "settings" ? "memory-shard-settings-back" : "memory-shard-open-settings"}
+                aria-expanded={view === "settings"}
+                className={BTN_SECONDARY}
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
+                  {view === "settings" ? "arrow_back" : "settings"}
+                </span>
+                {view === "settings" ? t("clawkeep.memory.settings.back") : t("clawkeep.memory.settings.open")}
+              </button>
+            )}
+          </div>
         </div>
 
         {error && (
@@ -545,13 +634,47 @@ export default function MemoryShardApp() {
           </div>
         )}
 
-        {!resolved
-          // Nothing until the first read answers, so a fresh box does not paint
-          // the index card and then replace it with the wizard.
-          ? null
-          : showWizard
-            ? <MemoryShardWizard onDone={() => { void loadState(); }} />
-            : <div className="mt-4"><MemoryIndexCard onError={setError} /></div>}
+        {view === "settings" && (
+          <div className="mt-3" data-testid="memory-shard-embedded-settings">
+            <MemoryShardSettingsPanel
+              // Before the first read has answered there is no switch to draw,
+              // so the panel is given the off state and its own write is what
+              // settles it — the route answers with the box's own truth.
+              state={state ?? { enabled: false, setupComplete: false }}
+              onChanged={setState}
+              // Start over lands on the front door, which for a box that has
+              // just forgotten its setup is the wizard.
+              onReset={() => { setPage("home"); void loadState(); }}
+            />
+          </div>
+        )}
+
+        {/* The window's own artwork rather than an empty column: the first read
+            shells out to the OpenClaw CLI and can take a minute and a half on a
+            cold box, and a blank body for that long reads as a broken app. The
+            art holds still for an owner who asked the OS for reduced motion. */}
+        {view === "loading" && (
+          <div
+            className="flex-1 flex flex-col items-center justify-center px-4 py-10"
+            data-testid="memory-shard-loading"
+            role="status"
+            aria-live="polite"
+          >
+            <MemoryShardArt className="mb-6" />
+            <p className="flex items-center gap-2 text-sm text-[var(--text-muted)]">
+              <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">
+                progress_activity
+              </span>
+              {t("clawkeep.memory.loadingIndex")}
+            </p>
+          </div>
+        )}
+
+        {view === "wizard" && <MemoryShardWizard onDone={() => { void loadState(); }} />}
+
+        {view === "home" && (
+          <div className="mt-4"><MemoryIndexCard initial={firstStatus} onError={setError} /></div>
+        )}
       </div>
     </div>
   );

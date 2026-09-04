@@ -35,6 +35,15 @@ vi.mock("@/lib/owner-session", () => ({
   hasOwnerSession: vi.fn(async () => ownerSession.value),
 }));
 
+// Starting a run also needs Memory Shard to be switched ON: the switch is the
+// owner's consent for this box to index at all. Mocked rather than written to
+// the config store, whose file is shared with every other test in the worker.
+const { shard } = vi.hoisted(() => ({ shard: { enabled: true } }));
+vi.mock("@/lib/memory-shard", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/memory-shard")>(),
+  getMemoryShardEnabled: async () => shard.enabled,
+}));
+
 let statusGET: typeof import("@/app/setup-api/clawkeep/memory/route").GET;
 let indexPOST: typeof import("@/app/setup-api/clawkeep/memory/index/route").POST;
 let scheduleGET: typeof import("@/app/setup-api/clawkeep/memory/schedule/route").GET;
@@ -64,6 +73,7 @@ afterAll(async () => {
 beforeEach(async () => {
   vi.clearAllMocks();
   ownerSession.value = true;
+  shard.enabled = true;
   await fs.rm(path.join(DATA_DIR, "memory-index-schedule.json"), { force: true });
   await fs.rm(path.join(DATA_DIR, "memory-index-state.json"), { force: true });
   await fs.rm(path.join(DATA_DIR, "memory-index.lock"), { recursive: true, force: true });
@@ -92,6 +102,20 @@ describe("GET /setup-api/clawkeep/memory", () => {
   it("is never cached, so the panel cannot show a stale index", async () => {
     const res = await statusGET();
     expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("names no next run while the shard is switched off, even with a schedule saved", async () => {
+    // The scheduler arms no timer in that state, so a "next run" here would be
+    // an hour at which nothing happens. The schedule itself is kept, which is
+    // what makes switching back on restore the hour the owner chose.
+    await schedulePUT(put({ enabled: true, frequency: "daily", timeOfDay: "03:00", weekday: 0 }));
+    expect((await (await statusGET()).json()).nextRunAtMs).toBeGreaterThan(0);
+
+    shard.enabled = false;
+    const body = await (await statusGET()).json();
+    expect(body.enabled).toBe(false);
+    expect(body.nextRunAtMs).toBe(0);
+    expect(body.schedule.enabled).toBe(true);
   });
 });
 
@@ -170,6 +194,25 @@ describe("POST /setup-api/clawkeep/memory/index", () => {
     } finally {
       process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = "false";
     }
+  });
+
+  it("refuses to index at all while Memory Shard is switched off", async () => {
+    // The half of "off" that the owner can reach by hand. The scheduler
+    // disarms itself; this button has to be refused too, or the switch is a
+    // word on a screen. `kind` is what lets the app say WHY — the same 409
+    // otherwise means "a run is already going", which would send the owner
+    // looking for a run nobody started.
+    shard.enabled = false;
+    const res = await indexPOST(new NextRequest("http://localhost/x", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "full" }),
+    }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).kind).toBe("disabled");
+    // And it never reached the CLI: no run state was written for a pass that
+    // was refused.
+    expect(
+      await fs.access(path.join(DATA_DIR, "memory-index-state.json")).then(() => true, () => false),
+    ).toBe(false);
   });
 
   it("never returns the pid it is running under", async () => {
