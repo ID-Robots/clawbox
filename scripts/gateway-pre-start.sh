@@ -42,7 +42,17 @@ elif [ -f "$OPENCLAW_PIN_FILE" ]; then
   # assignment aborts this ExecStartPre — which means no gateway at all. An
   # empty target is already a defined state here (see above); an aborted boot
   # is not. TASK-657.
-  OPENCLAW_TARGET=$(head -1 "$OPENCLAW_PIN_FILE" | awk '{print $1}' || true)
+  OPENCLAW_TARGET=$(head -1 "$OPENCLAW_PIN_FILE" 2>/dev/null | awk '{print $1}' || true)
+  if [ -z "$OPENCLAW_TARGET" ]; then
+    # Say it, for the same reason the two installer copies of this read do — and
+    # here the empty value is not merely a missing pin. It also switches OFF the
+    # codex version-skew guard below and turns CODEX_SPEC into the bare `codex`
+    # alias, which this file's own comment says makes every Codex chat crash
+    # with `createDiagnosticTraceContextFromActiveScope is not a function`.
+    # Reaching a defined-but-costly state through a NEW silent route is what
+    # needs the line.
+    echo "  WARN: $OPENCLAW_PIN_FILE is empty or could not be read — continuing with no pinned OpenClaw target" >&2
+  fi
 fi
 
 if [ ! -x "$OPENCLAW_BIN" ]; then
@@ -89,14 +99,26 @@ except Exception:
 print(v if isinstance(v, str) else "")
 PY
 )"
-# Both sources validate the SAME way. The manifest read accepted any non-empty
-# string while the fallback below applied this regex, so the stricter of the two
-# was the one almost never reached: a core whose version is not 20YY.M.P -- a
-# dev or nightly build, a fork, an `npm i -g <git url>` install, a vendor
-# rebuild -- yielded a non-empty value that sailed past the "write nothing"
-# guard and picked v1 semantics for a core that may well be v2, whose loader
-# then refuses the legacy names this script would write. A version that is not a
-# date says nothing about the generation, so it must read as "unknown".
+# The manifest read accepted any non-empty string while the fallback below
+# applied this regex, so the stricter of the two was the one almost never
+# reached: a core whose version is not 20YY.M.P -- a dev or nightly build, a
+# fork, an `npm i -g <git url>` install, a vendor rebuild -- yielded a non-empty
+# value that sailed past the "write nothing" guard and picked v1 semantics for a
+# core that may well be v2, whose loader then refuses the legacy names this
+# script would write. A version that is not a date says nothing about the
+# generation, so it must read as "unknown".
+#
+# ANCHORED, and the two sources are deliberately NOT graded alike. This one is
+# a version FIELD, so the whole string has to be the version. The CLI fallback
+# below reads a BANNER, where the version is one token among words this script
+# does not control, so it can only extract -- which means a `--version` that
+# happens to mention any other 20YY.M.P (a "built from" note, a schema warning
+# on its own line) is taken at face value there. Tightening that arm needs the
+# real banner of a shipped core measured on a box, not a guess: an anchor that
+# is wrong by one space turns every healthy fallback into "cannot identify the
+# core" and skips the whole pre-start fleet-wide, which is worse than the state
+# it would close. Recorded rather than guessed at; the manifest is the source
+# that answers on every ordinary box, and it is the one that is strict.
 CLAWBOX_OPENCLAW_EFFECTIVE="$(printf '%s' "$CLAWBOX_OPENCLAW_EFFECTIVE" | grep -oE '^20[0-9]{2}\.[0-9]+\.[0-9]+' || true)"
 # Second source, and time-boxed. `|| true` only rescues a CLI that RETURNS: a
 # wedged `--version` (an import that never resolves, an fs stall, a SQLite lock)
@@ -137,7 +159,7 @@ if [ -z "${CLAWBOX_OPENCLAW_V2:-}" ]; then
     # does NOT re-apply rather than sound like "one rewrite was left out".
     echo "  WARN: cannot tell which OpenClaw generation is installed ($CLAWBOX_OPENCLAW_PKG carries no usable version and $OPENCLAW_BIN did not answer)." >&2
     echo "  WARN: leaving openclaw.json exactly as it is and starting the gateway on it." >&2
-    echo "  WARN: this boot therefore does NOT re-apply the gateway auth token, the messaging-channel security pass, the gateway.controlUi.allowedOrigins rebuild (a changed LAN IP is not picked up), the MCP token seeding or the MCP registration reconcile." >&2
+    echo "  WARN: this boot therefore does NOT re-apply the gateway auth token, the messaging-channel security pass, the gateway.controlUi.allowedOrigins rebuild (a changed LAN IP is not picked up), the @openclaw/codex plugin install and repair, the deepseek catalog patch, the CLAWBOX.md workspace guide, the MCP token seeding or the MCP registration reconcile." >&2
     exit 0
   fi
   CLAWBOX_OPENCLAW_V2=0
@@ -355,7 +377,17 @@ except OSError as err:
         file=sys.stderr,
     )
     raise SystemExit(0)
-except json.JSONDecodeError as err:
+except (json.JSONDecodeError, UnicodeDecodeError) as err:
+    # UnicodeDecodeError is a ValueError, NOT a JSONDecodeError and NOT an
+    # OSError, so a config holding bytes that are not valid UTF-8 escaped all
+    # three arms and took the ExecStartPre down with a traceback -- on every
+    # boot, until someone with shell access fixed the file. That is the same
+    # class as the arm above, one exception type over, and it is reached by the
+    # same event this backup exists for: a power loss mid-write on a Jetson
+    # leaves arbitrary bytes here, not a truncated but decodable string.
+    # "Corrupt" is the right verdict for both, and the .corrupt-<utc> copy below
+    # preserves the bytes either way.
+    #
     # Corrupt file — start from an empty object and let the gateway re-seed on
     # first write; the alternative is refusing to boot. But that {} is written
     # back below, and until it was copied first the write replaced every
@@ -2316,18 +2348,34 @@ chmod 600 "$MCP_TOKEN_FILE" 2>/dev/null || true
 MCP_TOKEN_MODE="$(stat -c '%a' "$MCP_TOKEN_FILE" 2>/dev/null || echo unknown)"
 # `stat -c %a` prints three or four octal digits (setuid/setgid/sticky make it
 # four). Anything else is a box that cannot report a mode at all -- not a reason
-# to rotate a working token on its own, and `-r` above stays the backstop.
+# to rotate a working token on its own. `-r` backstops the UNREADABLE half of
+# that state; there is no backstop for the exposed half, so say so rather than
+# be silent about a bearer nothing could grade.
 mcp_mode_is_exposed() {
   case "${1:-}" in
     ''|*[!0-7]*) return 1 ;;
   esac
   [ "$(( 8#$1 & 8#077 ))" -ne 0 ]
 }
+# `unknown` is never "exposed", so this needs no second call to say so: a mode
+# that could not be read on a file that CAN be read is the one state nothing
+# below grades, and it passes through silently unless it is said here.
+if [ "$MCP_TOKEN_MODE" = unknown ] && [ -r "$MCP_TOKEN_FILE" ]; then
+  echo "  WARN: could not read the mode of $MCP_TOKEN_FILE; using it as it stands without checking whether other local users can read it" >&2
+fi
 if [ ! -r "$MCP_TOKEN_FILE" ] || mcp_mode_is_exposed "$MCP_TOKEN_MODE"; then
-  if [ ! -r "$MCP_TOKEN_FILE" ]; then
-    MCP_TOKEN_WHY="is mode $MCP_TOKEN_MODE and unreadable to this gateway (it belongs to another user)"
+  # State the STATE, never a cause this shell cannot establish. The earlier
+  # wording asserted "it belongs to another user" for a file that does not exist
+  # (the seeding above could not create it, because data/ is not writable) and
+  # for a 0644 file this uid owns perfectly well -- the same "a message
+  # asserting a cause it cannot know" the pin WARN was corrected for. The
+  # outcome sentences below carry the verbs; this carries the fact.
+  if [ ! -e "$MCP_TOKEN_FILE" ]; then
+    MCP_TOKEN_WHY="does not exist and could not be created"
+  elif [ ! -r "$MCP_TOKEN_FILE" ]; then
+    MCP_TOKEN_WHY="is mode $MCP_TOKEN_MODE, which this gateway cannot read"
   else
-    MCP_TOKEN_WHY="was mode $MCP_TOKEN_MODE and could not be re-hardened (it belongs to another user)"
+    MCP_TOKEN_WHY="is mode $MCP_TOKEN_MODE, which other local users can read"
   fi
   MCP_TOKEN_TMP="$(mktemp "$(dirname "$MCP_TOKEN_FILE")/.mcp-token.XXXXXX" 2>/dev/null || true)"
   if [ -n "$MCP_TOKEN_TMP" ] && mcp_write_token "$MCP_TOKEN_TMP" \

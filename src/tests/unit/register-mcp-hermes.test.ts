@@ -192,6 +192,38 @@ d("register-mcp.sh — registering on Hermes", () => {
     expect(fs.statSync(tokenPath).mode & 0o077, "the bearer was left readable by other local users").toBe(0);
   });
 
+  it.skipIf(isRoot)("still registers the MCP server when the bearer cannot be written", () => {
+    // REGISTERING is this script's job; minting the bearer is a convenience it
+    // does on the way past. The mint was a bare subshell in plain command
+    // position, so under `set -euo pipefail` (:36) a failed redirect — a
+    // root-owned token, a read-only data/ — exited the subshell 1 and killed
+    // the run before it reached the reconcile. On the hermes SKU nothing else
+    // writes mcp_servers.clawbox (there is no gateway pre-start), so
+    // `hermes mcp list` stayed "No MCP servers configured" and the agent had NO
+    // device tools at all, on every web-server boot. Nothing is lost by
+    // carrying on: production-server.js seeds the same file at every
+    // clawbox-setup boot and mcp/lib/api.ts reads it directly. TASK-657.
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
+    const dataDir = path.join(root, "data");
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.chmodSync(dataDir, 0o555);
+
+    let r;
+    try {
+      r = run();
+    } finally {
+      fs.chmodSync(dataDir, 0o755);
+    }
+
+    expect(r.status, `the registration aborted:\n${r.stdout}${r.stderr}`).toBe(0);
+    // The whole point: the device tools exist even though the bearer does not.
+    expect(clawboxEntry().command).toBe(path.join(home, "fake-bun"));
+    // And it says so, rather than failing silently or claiming it minted one.
+    expect(r.stdout).toMatch(/WARN: could not write .*\.mcp-token/);
+    expect(r.stdout).not.toMatch(/minted/);
+    expect(fs.existsSync(path.join(dataDir, ".mcp-token"))).toBe(false);
+  });
+
   it("does not disturb a bearer token that already exists", () => {
     fs.mkdirSync(path.join(root, "data"), { recursive: true });
     const tokenPath = path.join(root, "data", ".mcp-token");

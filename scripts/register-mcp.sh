@@ -131,12 +131,25 @@ if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$( { wc -c < "$MCP_TOKEN_FILE"; } 2>/dev/nul
   # It also cannot close it at all when the chmod fails (a file this uid does
   # not own), which is the state gateway-pre-start.sh's `mcp_write_token` was
   # written for. TASK-657.
+  # Guarded, because REGISTERING the MCP server is this script's job and minting
+  # the bearer is a convenience it does on the way past. In plain command
+  # position a failed redirect (a root-owned token, a read-only data/) exits the
+  # subshell 1 and `set -e` kills the run — and on the hermes SKU nothing else
+  # writes mcp_servers.clawbox, so `hermes mcp list` stays "No MCP servers
+  # configured" and the agent has NO device tools at all, on every web-server
+  # boot. The token is not lost by carrying on: production-server.js seeds the
+  # same file at every clawbox-setup boot, and mcp/lib/api.ts reads it directly.
+  # TASK-657.
   if command -v openssl >/dev/null 2>&1; then
-    ( umask 077; openssl rand -hex 32 > "$MCP_TOKEN_FILE" )
+    ( umask 077; openssl rand -hex 32 > "$MCP_TOKEN_FILE" ) 2>/dev/null || MCP_TOKEN_MINTED=no
   else
-    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MCP_TOKEN_FILE" )
+    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MCP_TOKEN_FILE" ) 2>/dev/null || MCP_TOKEN_MINTED=no
   fi
-  log "minted $MCP_TOKEN_FILE"
+  if [ "${MCP_TOKEN_MINTED:-yes}" = no ]; then
+    log "WARN: could not write $MCP_TOKEN_FILE — registering the MCP server anyway; the bearer is seeded again at every clawbox-setup boot"
+  else
+    log "minted $MCP_TOKEN_FILE"
+  fi
 fi
 chmod 600 "$MCP_TOKEN_FILE" 2>/dev/null || true
 
@@ -209,7 +222,10 @@ except OSError as err:
     # mcp_servers over a config whose contents we never saw. Same verdict as
     # invalid YAML below — refuse, and say why, instead of the traceback this
     # top-level `python3` under `set -euo pipefail` produced. TASK-657.
-    print(f"[register-mcp] ERROR: {os.path.basename(cfg_path)} could not be read "
+    # The full path, matching the YAML arm two lines down rather than the
+    # basename: there is no secret in a config path and the operator has to know
+    # WHICH file to fix.
+    print(f"[register-mcp] ERROR: {cfg_path} could not be read "
           f"({err.strerror or type(err).__name__}); refusing to overwrite it.", file=sys.stderr)
     sys.exit(1)
 except yaml.YAMLError as exc:

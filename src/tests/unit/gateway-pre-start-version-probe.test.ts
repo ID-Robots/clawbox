@@ -292,6 +292,25 @@ describe.runIf(canRun)("gateway-pre-start's OpenClaw generation probe", () => {
     });
   }
 
+  it("takes a date out of the CLI banner even when the manifest was rejected", () => {
+    // The two sources are graded DIFFERENTLY on purpose, and the difference is
+    // only visible when both arms run — every case above pairs a rejected
+    // manifest with a CLI that cannot answer, so none of them sees it. The
+    // manifest holds a version FIELD, so the whole string must be the version
+    // (`^20…`). The CLI prints a BANNER, where the version is one token among
+    // words this script does not control, so that arm can only EXTRACT — which
+    // means a banner mentioning any other date-shaped number is taken at face
+    // value. Pinned rather than tightened: an anchor that is wrong by one space
+    // turns every healthy fallback into "cannot identify the core" and skips
+    // the whole pre-start fleet-wide, and the real banner of a shipped core has
+    // not been measured. If this assertion ever has to change, that measurement
+    // is the thing to take first.
+    const r = probe({ cli: 'echo "openclaw 0.0.0-dev (built from 2026.8.1)"', pkg: "0.0.0-dev" });
+    expect(r.status, `the pre-start aborted:\n${r.out}`).toBe(0);
+    expect(r.effective).toBe("2026.8.1");
+    expect(r.v2).toBe("1");
+  });
+
   it("still reads a real date version, suffix and all", () => {
     // The control for the four above: the shape check must not reject the
     // versions the fleet actually runs.
@@ -546,6 +565,19 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
     // own copy — so the WARN has to name the unit that must pick the new
     // bearer up. See src/lib/mcp-token.ts.
     expect(r.out).toMatch(/clawbox-setup/);
+  });
+
+  it.skipIf(isRoot)("leaves a readable token no other user can read exactly as it is", () => {
+    // 0400 and 0000-that-this-uid-owns are exposed to NOBODY. Grading the mode
+    // on the literal "600" rotated both of them, and rotating a credential that
+    // was never exposed is pure cost: it invalidates the bearer the web server
+    // is holding for no benefit at all. The `& 077` grading is what makes this
+    // case a no-op, and nothing else in this block pins it.
+    const r = token({ contents: EXISTING, mode: 0o400, chmodFails: true });
+    expect(r.status, `the pre-start aborted:\n${r.out}`).toBe(0);
+    expect(r.contents, "a token no other user can read was rotated anyway").toBe(EXISTING);
+    expect(r.exported).toBe(EXISTING);
+    expect(r.out).not.toMatch(/WARN/);
   });
 
   it("seeds a missing token at 0600 without a chmod to do it", () => {

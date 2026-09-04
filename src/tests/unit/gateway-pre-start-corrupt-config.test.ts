@@ -106,6 +106,33 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh config load block", () => {
     expect(stderr).toContain(backups[0]);
   });
 
+  it("treats bytes that are not UTF-8 as corrupt, rather than tracing back", () => {
+    // `json.load` raises UnicodeDecodeError — a ValueError, NOT a
+    // JSONDecodeError and NOT an OSError — so a config holding arbitrary bytes
+    // escaped all three arms and killed this bare top-level heredoc under
+    // `set -euo pipefail`: no gateway, on every boot, until someone with shell
+    // access fixed the file. The event that produces it is the SAME one the
+    // .corrupt-<utc> copy exists for — a power loss mid-write on a Jetson
+    // leaves arbitrary bytes, not a truncated but decodable string — so the
+    // fixture that pinned the corrupt path (`'{not json'`, valid UTF-8) could
+    // not see it. TASK-657.
+    const torn = Buffer.concat([
+      Buffer.from('{"gateway":{"port":18789},"models":'),
+      Buffer.from([0xe9, 0xff, 0xfe]),
+    ]);
+    writeFileSync(cfgPath, torn);
+
+    const { result, stderr } = load(cfgPath);
+
+    expect(result).toEqual({});
+    // The bytes are preserved exactly, which is the whole point of the copy.
+    const backups = readdirSync(dir).filter((f) => f.startsWith("openclaw.json.corrupt-"));
+    expect(backups).toHaveLength(1);
+    expect(readFileSync(path.join(dir, backups[0]))).toEqual(torn);
+    expect(readFileSync(cfgPath)).toEqual(torn);
+    expect(stderr).toMatch(/WARN: openclaw\.json is not valid JSON/);
+  });
+
   it.skipIf(isRoot)("does not take the boot down on a file it cannot read, and does not answer {}", () => {
     // `PermissionError` is not a subclass of `FileNotFoundError`, so it escaped
     // the one arm that was caught. This heredoc is a bare top-level command in

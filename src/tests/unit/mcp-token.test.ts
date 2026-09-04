@@ -113,8 +113,8 @@ describe("mcp-token", () => {
 
     it("does not re-read the file for every rejected bearer", async () => {
       // The re-read above is on the failure path, which is the path an
-      // unauthenticated caller controls. Rate-limited so a bad-bearer flood
-      // cannot turn into one disk read per request.
+      // unauthenticated caller controls. Bounded by the file's mtime so a
+      // bad-bearer flood cannot turn into one disk read per request.
       const { getMcpToken, verifyMcpBearer } = await loadModule(tmpDir);
       getMcpToken();
       const tokenPath = path.join(tmpDir, "data", ".mcp-token");
@@ -132,6 +132,29 @@ describe("mcp-token", () => {
         spy.mockRestore();
       }
       expect(reads).toBeLessThanOrEqual(1);
+    });
+
+    it("a bad-bearer flood cannot stop the rotated token from being picked up", async () => {
+      // The bound on the re-read has to be a property of the FILE, not a slot
+      // on a wall clock. A slot is a shared resource an unauthenticated caller
+      // can consume: at more than one bad bearer per interval the flood takes
+      // every window, the legitimate rotated bearer keeps landing inside a
+      // spent one, and the 401s this re-read exists to end carry on for as long
+      // as the flood does — the defect back through its own remedy.
+      const { getMcpToken, verifyMcpBearer } = await loadModule(tmpDir);
+      const before = getMcpToken();
+      expect(verifyMcpBearer(`Bearer ${before}`)).toBe(true);
+
+      const rotated = "d".repeat(64);
+      fs.writeFileSync(path.join(tmpDir, "data", ".mcp-token"), `${rotated}\n`, { mode: 0o600 });
+
+      // The flood arrives first and keeps arriving, all within one second.
+      for (let i = 0; i < 50; i += 1) {
+        expect(verifyMcpBearer(`Bearer ${"e".repeat(64)}`)).toBe(false);
+      }
+      // The real caller still gets in, on its first attempt, with no wait.
+      expect(verifyMcpBearer(`Bearer ${rotated}`)).toBe(true);
+      expect(verifyMcpBearer(`Bearer ${before}`)).toBe(false);
     });
 
     it("rejects a token that's a prefix of the real one", async () => {

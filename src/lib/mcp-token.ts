@@ -22,6 +22,18 @@ import crypto from "crypto";
  * legacy sentinels — this is a fresh capability with no upgrade
  * compatibility window to maintain.
  *
+ * PRECEDENCE, and it is not symmetric. `CLAWBOX_MCP_TOKEN` wins when
+ * the value is first resolved — that is what makes it a test override
+ * and what lets `production-server.js` seed it before the first
+ * request. But the FILE is the rotation's authority: it is what
+ * `mcp/lib/api.ts` presents and what `scripts/gateway-pre-start.sh`
+ * rewrites, so once the file changes under this process the next
+ * failed bearer check adopts its contents and the earlier value stops
+ * being accepted. An env pin therefore holds only until the file is
+ * rotated, never after — which costs nothing in production, where the
+ * only setter of the variable is `production-server.js` and it sets it
+ * to that same file's contents.
+ *
  * Verification is constant-time via `crypto.timingSafeEqual` to keep
  * the bearer check robust against timing oracles.
  */
@@ -31,14 +43,19 @@ const DATA_ROOT = process.env.CLAWBOX_ROOT
 const TOKEN_PATH = path.join(DATA_ROOT, "data", ".mcp-token");
 
 let cached: string | null = null;
-/** Epoch ms of the last disk re-read triggered by a FAILED bearer check. */
-let lastRecheck = 0;
 /**
+ * `mtimeMs` of the token file the last time a FAILED bearer check re-read it.
+ *
  * The failure path is the one an unauthenticated caller controls, so the
- * re-read below is rate-limited: a bad-bearer flood must not become one disk
- * read per request. A second is well under a restart and well over a flood.
+ * re-read has to be bounded — but NOT by a wall clock. A time slot is a shared
+ * resource an attacker can consume: at more than one bad bearer per interval,
+ * the flood takes every slot and the legitimate rotated bearer keeps being
+ * rejected, which re-opens the very defect the re-read closes. Gating on the
+ * file's mtime instead makes the bound exact: a rotation always changes it, so
+ * the file is read at most ONCE per rotation no matter how many checks fail,
+ * and a flood costs one `statSync` per request rather than one read.
  */
-const RECHECK_INTERVAL_MS = 1000;
+let lastReadMtimeMs: number | null = null;
 
 function readTokenFile(): string | null {
   try {
@@ -103,26 +120,41 @@ export function verifyMcpBearer(headerValue: string | null): boolean {
   // change, or Restart=always after a crash) used to 401 every /setup-api/*
   // call from the agent's device tools until clawbox-setup happened to restart.
   //
-  // Re-read the file once, rate-limited, and only on a check that already
+  // Re-read the file, once per rotation, and only on a check that already
   // failed. This widens nothing: data/.mcp-token is 0600 under a directory this
   // uid owns and it is the source `cached` was read from in the first place —
   // the stale value is what has no authority, not the file. TASK-657.
-  const now = Date.now();
-  if (now - lastRecheck < RECHECK_INTERVAL_MS) return false;
-  lastRecheck = now;
+  let mtimeMs: number;
+  try {
+    mtimeMs = fs.statSync(TOKEN_PATH).mtimeMs;
+  } catch {
+    // No file to reconcile against; the cached value is all there is.
+    return false;
+  }
+  if (mtimeMs === lastReadMtimeMs) return false;
+  lastReadMtimeMs = mtimeMs;
 
   const onDisk = readTokenFile();
   if (!onDisk || onDisk === cached) return false;
-  if (!matches(presented, onDisk)) return false;
 
-  // Adopt it, so the superseded value stops being accepted and the MCP
-  // subprocess's env copy agrees with ours.
+  // Adopt on the ROTATION, not on a caller presenting the new value. Making the
+  // adoption conditional on `matches(presented, onDisk)` reintroduces the
+  // starvation this mtime bound exists to remove: the first failed check after
+  // a rotation consumes the one read that mtime allows, and if that check came
+  // from a bad bearer the new value is never adopted, so the legitimate one
+  // keeps failing until the file is rotated AGAIN. Reading the file is what
+  // settles the question — whoever wrote it already holds the credential, and
+  // `getMcpToken` would return exactly this value in a process that started now.
+  //
+  // Only `cached` is written: `process.env.CLAWBOX_MCP_TOKEN` is the value this
+  // process STARTED from, and overwriting it would leave a rotated secret in the
+  // environment of everything spawned afterwards for no gain — `getMcpToken`
+  // consults the env only while `cached` is null.
   cached = onDisk;
-  process.env.CLAWBOX_MCP_TOKEN = onDisk;
-  return true;
+  return matches(presented, onDisk);
 }
 
 export function _resetMcpTokenCacheForTests(): void {
   cached = null;
-  lastRecheck = 0;
+  lastReadMtimeMs = null;
 }

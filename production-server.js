@@ -153,13 +153,41 @@ try {
     fs.mkdirSync(path.dirname(MCP_TOKEN_PATH), { recursive: true });
     fs.writeFileSync(MCP_TOKEN_PATH, mcpToken, { mode: 0o600 });
   }
+  // Publish the value FIRST. The re-harden below is a separate concern and it
+  // can fail on its own (a root-owned token, a read-only data/); with it inside
+  // this try and above this line, an EPERM threw past the assignment and
+  // CLAWBOX_MCP_TOKEN was never set — so a permissions hiccup discarded a token
+  // that had just been read successfully, and middleware.ts lost the very
+  // first-request resolution this block exists to provide. On the Hermes SKU
+  // clawbox-gateway.service is masked, so gateway-pre-start.sh's replacement
+  // never runs and nothing else repairs it. TASK-657.
+  process.env.CLAWBOX_MCP_TOKEN = mcpToken;
   // Re-harden mode on every boot. fs.writeFileSync only applies mode
   // when creating; an existing file from an older install (or one
   // that drifted to broader perms via manual edit) would otherwise
   // stay readable to other local users. The bearer is the sole
   // /setup-api/* credential, so don't trust a reused file's perms.
-  fs.chmodSync(MCP_TOKEN_PATH, 0o600);
-  process.env.CLAWBOX_MCP_TOKEN = mcpToken;
+  // The MODE is the outcome, not chmod's exit code — the same rule
+  // scripts/gateway-pre-start.sh grades on — so report what the file
+  // is actually left at rather than that a call failed.
+  try {
+    fs.chmodSync(MCP_TOKEN_PATH, 0o600);
+  } catch {
+    let mode = null;
+    try {
+      mode = fs.statSync(MCP_TOKEN_PATH).mode & 0o777;
+    } catch {}
+    if (mode === null) {
+      console.warn(`[production-server] Could not re-harden ${MCP_TOKEN_PATH}, and its mode could not be read.`);
+    } else if (mode & 0o077) {
+      console.warn(
+        `[production-server] ${MCP_TOKEN_PATH} is mode ${mode.toString(8)}, which other local users can read, `
+          + "and it could not be re-hardened (it belongs to another user). The MCP bearer for /setup-api/* is exposed on this box.",
+      );
+    }
+    // A mode with no group/other bits is exposed to nobody; the failed chmod
+    // had nothing to fix and is not worth a line.
+  }
 } catch (err) {
   console.warn("[production-server] Failed to set up MCP token:", err.message);
 }
