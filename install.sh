@@ -3805,7 +3805,25 @@ step_openclaw_tts() {
         else
         case "$CURRENT_HERMES_TTS" in
           ""|null|edge|"$HERMES_TTS_PROVIDER")
-            if hermes_tts_cli config set tts.provider "$HERMES_TTS_PROVIDER"; then
+            # ── Only an engine this box HAS may be selected ──────────────────
+            #
+            # The definition above is safe to write whatever happened — it is
+            # what makes the engine selectable the moment it arrives. Selecting
+            # it is not. A box whose board declines Kokoro was left with
+            # `tts.provider: clawbox-local` pointing at nothing, so every spoken
+            # reply failed while the Voice panel called the box configured:
+            # exactly the "pointing the harness at a provider that does not
+            # exist is strictly worse than leaving tts.provider alone" rule this
+            # same block already applies to a definition that did not land.
+            #
+            # The CLOUD voice is deliberately not chosen here. It needs the
+            # box's `claw_` token, and the ClawBox AI link happens AFTER
+            # install — so that choice belongs to the link path
+            # (src/lib/hermes-clawai.ts), which owns the credential and makes
+            # it the moment there is one. TASK-699.
+            if [ "$KOKORO_READY" != true ]; then
+              echo "  Hermes TTS provider left unset — this box has no on-device engine (Kokoro: ${KOKORO_VERDICT:-no verdict published}). The $HERMES_TTS_PROVIDER definition is in place, and ClawBox AI cloud speech is selected when the box is linked." >&2
+            elif hermes_tts_cli config set tts.provider "$HERMES_TTS_PROVIDER"; then
               if [ "$CURRENT_HERMES_TTS" = "edge" ]; then
                 echo "  Hermes TTS provider set to $HERMES_TTS_PROVIDER (replacing Hermes' factory 'edge' cloud default)"
               else

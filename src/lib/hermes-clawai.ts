@@ -333,6 +333,21 @@ export async function applyClawaiToHermes(
   // The device's provider/model just changed — don't serve the old selection.
   invalidateModelOptions();
 
+  // A box with no on-device engine now has a voice, so give it one.
+  //
+  // install.sh registers `tts.providers.clawbox-local` on every Hermes box and
+  // selects it ONLY when Kokoro actually installed (TASK-699); a board that
+  // declines the engine is deliberately left with `tts.provider` unset rather
+  // than pointing at nothing. The cloud voice is the other half of that
+  // decision and it could not be made there: it needs this credential, and the
+  // link happens after the install. So it is made here, where the token is.
+  //
+  // Never over an owner's own pick — only where nothing has been chosen, where
+  // Hermes' factory `edge` cloud is still selected, or where the on-device
+  // provider is selected with no engine behind it, which is the state the
+  // measured box was left in.
+  await selectHermesCloudVoiceIfUnvoiced(trimmed);
+
   // Everything above wrote to DISK. The agent that will serve the next turn is
   // a process that has been running since long before any of it, and two of the
   // things just written — the credential in `~/.hermes/.env` and the backend in
@@ -1484,4 +1499,50 @@ async function readPluginsDisabledFromCli(): Promise<Set<string> | null> {
   // `image_gen.provider` from a box that is drawing today; the honest empty is
   // the only reading that matches what Hermes does.
   return state.kind === "residue" ? new Set() : new Set(state.names);
+}
+
+/**
+ * Point Hermes at the ClawBox cloud voice when nothing else can speak.
+ *
+ * Reads before it writes and writes only in the three states that are not an
+ * owner's choice:
+ *
+ *   unset            — install.sh left it alone because there is no engine.
+ *   `edge`           — Hermes' factory Microsoft cloud, which a ClawBox must
+ *                      never speak through by default (hermes-tts.ts).
+ *   `clawbox-local`  — selected, with no Kokoro behind it. The measured state
+ *                      on the Hermes box: the Voice panel said the box was
+ *                      configured and every utterance failed.
+ *
+ * Anything else — elevenlabs, piper, one an owner added by hand — is left
+ * alone. So is a `clawbox-local` that HAS its engine: an owner on the
+ * on-device voice does not get moved to the cloud by linking a box.
+ *
+ * Never throws: a link that worked must not report failure because the voice
+ * could not be pointed. The Voice panel remains the place to set it by hand.
+ */
+async function selectHermesCloudVoiceIfUnvoiced(token: string): Promise<void> {
+  try {
+    const [{ readHermesVoice, selectHermesEngine, HERMES_LOCAL_TTS_PROVIDER, HERMES_FACTORY_TTS_PROVIDER },
+           { hasLocalTtsEngine }] = await Promise.all([
+      import("@/lib/hermes-tts"),
+      import("@/lib/local-tts-engine"),
+    ]);
+    const voice = await readHermesVoice();
+    const current = voice.provider;
+    const unchosen = current === null
+      || current === HERMES_FACTORY_TTS_PROVIDER
+      || current === HERMES_LOCAL_TTS_PROVIDER;
+    if (!unchosen) return;
+    // A selected on-device provider that CAN speak is a working box, whoever
+    // selected it.
+    if (current === HERMES_LOCAL_TTS_PROVIDER && await hasLocalTtsEngine()) return;
+    await selectHermesEngine("cloud", token);
+    console.log("[hermes-clawai] no on-device voice on this box — speaking through ClawBox AI");
+  } catch (err) {
+    console.warn(
+      "[hermes-clawai] could not point the cloud voice:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 }

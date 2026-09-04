@@ -285,6 +285,56 @@ describe.skipIf(!hasBash)("the on-device voice is registered with Hermes nativel
     }
   });
 
+  // TASK-699. The step registered the provider AND selected it whatever the
+  // engine did: a Hermes box whose board declines Kokoro was left with
+  // `tts.provider: clawbox-local` pointing at nothing, so every spoken reply
+  // failed under a Voice panel that said the box was configured. A selected
+  // provider whose engine is missing is strictly worse than no selection — the
+  // rule this same block already applies to a definition that did not land.
+  describe("only selects an engine the box actually has", () => {
+    it("does not select the on-device provider when there is no engine", () => {
+      // 13 is "this board declines Kokoro" — the verdict shape the dev box
+      // publishes when there is no CUDA build for it.
+      const res = runStep("hermes", { voiceExit: 13, ttsStatus: "KOKORO=skipped:no-cuda\n" });
+      const calls = res.hermesCalls.join("\n");
+
+      // The DEFINITION still lands, so the moment an engine arrives the next
+      // update can select it.
+      expect(calls).toContain(`config set tts.providers.${HERMES_PROVIDER}.type command`);
+      expect(calls, `a provider with no engine was selected:\n${res.out}`)
+        .not.toContain(`config set tts.provider ${HERMES_PROVIDER}`);
+    });
+
+    it("says why nothing was selected, and where the voice comes from instead", () => {
+      const res = runStep("hermes", { voiceExit: 13, ttsStatus: "KOKORO=skipped:no-cuda\n" });
+
+      // Named with the verdict: "no engine" alone is not actionable, and the
+      // cloud voice needs the ClawBox AI link, which happens after install.
+      expect(res.out).toMatch(/skipped:no-cuda/);
+      expect(res.out).toMatch(/link/i);
+    });
+
+    it("still selects it when the engine is there", () => {
+      const res = runStep("hermes", { voiceExit: 0, ttsStatus: "KOKORO=ready\n" });
+
+      expect(res.hermesCalls.join("\n"), `the engine was installed and not selected:\n${res.out}`)
+        .toContain(`config set tts.provider ${HERMES_PROVIDER}`);
+    });
+
+    it("still leaves an owner's own provider alone when there is no engine", () => {
+      const res = runStep("hermes", {
+        voiceExit: 13,
+        ttsStatus: "KOKORO=skipped:no-cuda\n",
+        hermesProvider: "elevenlabs",
+      });
+
+      // The trailing space matters: `config set tts.providers.…` starts with
+      // the same characters, and an assertion that matched it would pass over
+      // the very definition this block is supposed to keep writing.
+      expect(res.hermesCalls.join("\n")).not.toContain("config set tts.provider ");
+    });
+  });
+
   it("pins the output format to wav, so no utterance needs ffmpeg", () => {
     // VERIFIED ON THE BOX: tts_tool.py's _get_command_tts_output_format reads
     // `format` or `output_format` and otherwise falls back to
