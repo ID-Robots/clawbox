@@ -127,13 +127,19 @@ describe("Documentation section while the phase-2 fetch runs", () => {
     expect(liveRegion().textContent).toBe("");
   });
 
-  it("does not put a stopwatch on phase 1, which never spawns the CLI", async () => {
+  it("does not put a stopwatch on phase 1, or announce a fetch that has not started", async () => {
+    // Phase 1 reads disk and never spawns the CLI, and `useSkillDetail` reports
+    // `meta` for a frame on every selection change. The placeholder stays —
+    // every card below it is gated on `detail`, so removing it would leave a
+    // blank body — but nothing times it and nothing is announced.
     renderDetail("meta");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
+
     expect(screen.queryByText(/\b\ds\b/)).toBeNull();
-    // The label is still there — just without a stopwatch on it.
-    expect(screen.getAllByText("Loading documentation…").length).toBe(2);
+    expect(liveRegion().textContent).toBe("");
+    // Still on screen, just silent: one occurrence, the visible one.
+    expect(screen.getAllByText("Loading documentation…").length).toBe(1);
   });
 });

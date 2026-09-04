@@ -11,7 +11,6 @@ import {
 } from '@/lib/hermes-skills';
 import { renderText } from '@/lib/chat-markdown';
 import { platformName, useCopy } from './copy';
-import type { DetailPhase } from './useSkillDetail';
 import {
   Alert,
   EmptyState,
@@ -83,24 +82,24 @@ function docsCollapsible(body: string): boolean {
  * outcome — body, or the `docs` failure note the panel already renders — is
  * what ends this.
  */
-function DocsPending({ phase, skillKey }: { phase: DetailPhase; skillKey: string }) {
+function DocsPending({ fetching }: { fetching: boolean }) {
   const COPY = useCopy();
-  const fetching = phase === 'docs';
   const [elapsed, setElapsed] = useState(0);
 
-  // Keyed on the identity the FETCH uses — `identifier || id` plus the tab the
-  // pick came from — not on `skill.id`: the same string is a lock name in the
-  // Installed tab and a registry identifier in Browse, and `onOpenSkill` can
-  // swap one for the other without unmounting this view.
+  // No reset here, and none needed: the caller keys this component on the
+  // identity the FETCH uses — `identifier || id` plus the tab the pick came
+  // from — and on whether the docs phase is running, so a new fetch is a new
+  // mount and `elapsed` starts at 0 by construction. Resetting it in the
+  // effect instead is a setState in an effect body, which cascades a render
+  // and which `react-hooks/set-state-in-effect` refuses.
   useEffect(() => {
-    setElapsed(0);
     if (!fetching) return;
     const startedAt = Date.now();
     const timer = setInterval(() => {
       setElapsed(Math.floor((Date.now() - startedAt) / 1000));
     }, 1000);
     return () => clearInterval(timer);
-  }, [skillKey, fetching]);
+  }, [fetching]);
 
   return (
     <div aria-hidden="true">
@@ -693,8 +692,17 @@ export function SkillDetail({
   const incompatible = detail?.incompatible ?? ('incompatible' in skill ? skill.incompatible : false);
 
   // The documentation is still on its way: no body yet, and the fetch that
-  // would bring one has not finished.
+  // would bring one has not finished. The SKELETON covers every pre-`done`
+  // phase, because during `meta` the panel has nothing else in it — every card
+  // below is gated on `detail` — and removing it would replace a placeholder
+  // with a blank body.
   const docsPending = phase !== 'done' && !detail?.body;
+  // What is ANNOUNCED, and what the stopwatch times, is narrower: only the
+  // phase that shells out to `hermes skills inspect`. Phase 1 never spawns the
+  // CLI, and `useSkillDetail` reports `meta` for a frame on every selection
+  // change, so saying "loading documentation" there would announce a fetch
+  // that has not started and time a request that is usually sub-second.
+  const docsFetching = phase === 'docs';
   // The identity `useSkillDetail` fetches and caches on — `detailKey()` there.
   const fetchKey = `${'origin' in skill ? 'i' : 'b'}:${
     ('identifier' in skill && skill.identifier) || skill.id
@@ -739,7 +747,7 @@ export function SkillDetail({
               is over. So it sits outside the branch below, which unmounts.
               (The same reasoning, and the same shape, as AiProviderList's.) */}
           <p className="sr-only" role="status" aria-live="polite">
-            {docsPending ? COPY.docsLoading : ''}
+            {docsFetching ? COPY.docsLoading : ''}
           </p>
           {/* Header */}
           <div className="flex gap-4 mb-5 flex-col @sm:flex-row">
@@ -826,7 +834,7 @@ export function SkillDetail({
 
               {docsPending && (
                 <Section title={COPY.sectionDocs}>
-                  <DocsPending phase={phase} skillKey={fetchKey} />
+                  <DocsPending key={`${fetchKey}:${docsFetching}`} fetching={docsFetching} />
                 </Section>
               )}
 
