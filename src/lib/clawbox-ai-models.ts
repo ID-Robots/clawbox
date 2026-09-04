@@ -91,12 +91,10 @@ export function normalizeClawboxAiTier(value: unknown): ClawboxAiTier | null {
  * True if `model` is a fully-qualified ClawBox AI Pro slug
  * (`clawai/deepseek-v4-pro` or `deepseek/deepseek-v4-pro`).
  *
- * The Pro device-tier maps to the V4 Pro frontier weights, which the
- * portal gateway gates to Max subscribers (`user.tier === "max"`,
- * `deviceTier === "pro"`). Non-Max users picking it would silently
- * have their requests downgraded to flash by the gateway's live-tier
- * reconcile, so the device-side picker uses this helper to surface
- * an upgrade prompt instead.
+ * Says WHICH model this is, and nothing about who may run it — that
+ * question is answered by {@link portalDeniesClawboxAiModel} from the
+ * portal's own entitlement list. The two used to be one check keyed on
+ * the device-tier badge, which is a device DEFAULT, not an entitlement.
  */
 export function isClawboxAiProModel(model: string | null | undefined): boolean {
   if (typeof model !== "string") return false;
@@ -106,6 +104,99 @@ export function isClawboxAiProModel(model: string | null | undefined): boolean {
   const modelId = model.slice(idx + 1);
   if (modelId !== CLAWBOX_AI_PRO_MODEL_ID) return false;
   return provider === CLAWBOX_AI_PROVIDER || provider === "clawai";
+}
+
+/**
+ * The entitlement list out of whatever the portal (or our own status route)
+ * put in that field: a non-empty list of trimmed ids, or null.
+ *
+ * ONE normaliser, called by the server that reads the portal and by the client
+ * that reads the server, because an empty list and a null mean the same thing
+ * downstream ("not answered") and two spellings of that rule is how this
+ * codebase drifts.
+ */
+export function normalizeAllowedModelIds(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const ids = value
+    .filter((id): id is string => typeof id === "string")
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0);
+  return ids.length > 0 ? ids : null;
+}
+
+/** Bare id of a model ref: `deepseek/deepseek-v4-pro` → `deepseek-v4-pro`. */
+function bareModelId(ref: string): string {
+  const slash = ref.lastIndexOf("/");
+  return (slash >= 0 ? ref.slice(slash + 1) : ref).trim().toLowerCase();
+}
+
+/**
+ * Is `ref` a fully-qualified model of the ClawBox AI proxy
+ * (`clawai/…` or `deepseek/…`)?
+ *
+ * The prefix is required. A bare id says nothing about whose model it is, and
+ * the portal's entitlement list governs ONLY ClawBox AI: matching an
+ * `anthropic/claude-opus-5` primary against it would refuse every model the
+ * owner brought their own key for.
+ */
+function isClawboxAiModelRef(ref: string): boolean {
+  const idx = ref.indexOf("/");
+  if (idx <= 0) return false;
+  const provider = ref.slice(0, idx).trim().toLowerCase();
+  return provider === CLAWBOX_AI_PROVIDER || provider === "clawai";
+}
+
+/**
+ * Does the portal POSITIVELY refuse `model` for this device's account?
+ *
+ * `allowedModels` is the list `GET /api/clawbox-ai/device-info` publishes for
+ * the paired `claw_*` token — the portal's own answer to "what may this device
+ * run", carried in the same response the tier badge is read from. Measured on
+ * a Max box (2026-09-04):
+ *
+ *   {"tier":"max","deviceTier":"pro",
+ *    "allowedModels":["deepseek-v4-flash","deepseek-v4-pro",…],
+ *    "defaultModel":"deepseek-v4-pro", …}
+ *
+ * WHY NOT THE TIER BADGE. The badge (`clawai_tier`) comes from
+ * `mapPortalTier`, which prefers the portal's `deviceTier` stamp — and that
+ * stamp is deliberately a DEVICE DEFAULT: "a Max subscriber who runs Flash on
+ * this device" is a state the configure route documents and keeps (TASK-481).
+ * A default is the right thing to write as the primary model. It is the wrong
+ * thing to VETO with: the old gate refused the Pro model, and rewrote the
+ * box's primary back to Flash, whenever the badge was not exactly `"pro"` —
+ * including when the status poll had simply not answered and the badge was
+ * `null`. That undid an explicit pick (from this picker or from the Telegram
+ * `/model` keyboard) on a Max box and told its owner to buy the plan he
+ * already had. A default may be overridden by a pick; an entitlement may not,
+ * and only the portal knows which is which.
+ *
+ * ONLY ClawBox AI refs are judged (`clawai/…`, `deepseek/…`). The list says
+ * nothing about a provider the owner brought their own key for.
+ *
+ * FALSE ON ANY DOUBT, deliberately. An absent, non-array or empty list is "I
+ * don't know" — an unreachable portal, a failed status poll — and an
+ * unanswered question must never read as a refusal: that is how the box came
+ * to rewrite its own model on a network blip. (A portal that answers the tier
+ * but publishes no list is NOT one of those cases: the status route fills the
+ * list from the badge there, so nothing that used to be refused becomes
+ * allowed on an older portal.) The proxy is the last word either way, and it
+ * speaks plainly — measured 2026-09-04 against the live proxy with a paired
+ * token: an id outside the account's list answers
+ * `400 {"error":{"message":"Model not allowed: …","code":"model_not_allowed"}}`,
+ * not a silent downgrade.
+ */
+export function portalDeniesClawboxAiModel(
+  model: string | null | undefined,
+  allowedModels: readonly string[] | null | undefined,
+): boolean {
+  if (typeof model !== "string" || !isClawboxAiModelRef(model)) return false;
+  if (!Array.isArray(allowedModels) || allowedModels.length === 0) return false;
+  const wanted = bareModelId(model);
+  if (!wanted) return false;
+  return !allowedModels.some(
+    (entry) => typeof entry === "string" && bareModelId(entry) === wanted,
+  );
 }
 
 /* ---------------------------------------------------------------------------

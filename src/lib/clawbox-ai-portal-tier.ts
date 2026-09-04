@@ -1,4 +1,5 @@
 import {
+  normalizeAllowedModelIds,
   normalizeClawboxAiTier,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
@@ -54,17 +55,39 @@ const PORTAL_UNREACHABLE_TTL_MS = 30_000;
 export interface DeviceInfoResponse {
   tier?: string;
   deviceTier?: string | null;
+  /**
+   * Model ids this token may run, as the portal publishes them (bare ids,
+   * e.g. `["deepseek-v4-flash","deepseek-v4-pro",…]`). The portal's own
+   * answer to "what is this account entitled to" — see
+   * `portalDeniesClawboxAiModel`, which is the only thing allowed to read it
+   * as a refusal. Absent on older portal builds.
+   */
+  allowedModels?: unknown;
 }
 
 export type PortalLookup =
   | {
       source: "portal";
       tier: ClawboxAiTier | null;
+      /**
+       * The PLAN, read WITHOUT the device stamp — see `mapPortalPlanTier`.
+       *
+       * `tier` above prefers `deviceTier`, so it answers "what does this box
+       * default to", not "what does this account pay for". Anything deciding
+       * ENTITLEMENT needs the second question, and collapsing the two into one
+       * field is how a Max subscriber's box came to refuse the model he pays
+       * for (TASK-691).
+       */
+      planTier: ClawboxAiTier | null;
+      /** Entitled model ids, or null when the portal published none. */
+      allowedModels: string[] | null;
     }
   | { source: "unreachable" };
 
 interface PortalCacheEntry {
   tier: ClawboxAiTier | null;
+  planTier: ClawboxAiTier | null;
+  allowedModels: string[] | null;
   expiresAt: number;
 }
 
@@ -89,6 +112,8 @@ const inFlightPortalLookups = new Map<string, Promise<PortalLookup>>();
 function rememberTier(
   token: string,
   tier: ClawboxAiTier | null,
+  planTier: ClawboxAiTier | null,
+  allowedModels: string[] | null,
   now: number,
 ) {
   for (const [key, entry] of portalTierCache) {
@@ -101,8 +126,19 @@ function rememberTier(
   }
   portalTierCache.set(token, {
     tier,
+    planTier,
+    allowedModels,
     expiresAt: now + PORTAL_TIER_CACHE_TTL_MS,
   });
+}
+
+/**
+ * The entitlement list out of a device-info body, or null when the portal
+ * published none. Normalised through the one shared rule so the server and
+ * the client cannot disagree about what an empty list means.
+ */
+export function mapPortalAllowedModels(body: DeviceInfoResponse): string[] | null {
+  return normalizeAllowedModelIds(body.allowedModels);
 }
 
 /**
@@ -126,6 +162,25 @@ export function mapPortalTier(body: DeviceInfoResponse): ClawboxAiTier | null {
   const stamped = normalizeClawboxAiTier(body.deviceTier);
   if (stamped) return stamped;
   return plan === "max" ? "pro" : "flash";
+}
+
+/**
+ * The subscription PLAN, mapped to the same two-value enum and ignoring the
+ * device stamp entirely: Max plan -> `"pro"`, Pro plan -> `"flash"`, anything
+ * unpaid -> `null`.
+ *
+ * The sibling of {@link mapPortalTier}, and the difference between them is the
+ * whole of TASK-691. `mapPortalTier` prefers `deviceTier` on purpose, because
+ * it answers "what should this BOX default to" and a Max subscriber is allowed
+ * to run Flash here. This one answers "what does this ACCOUNT pay for", which
+ * is the only question an entitlement may be derived from. Read the first for a
+ * default to write; read this one before refusing anything.
+ */
+export function mapPortalPlanTier(body: DeviceInfoResponse): ClawboxAiTier | null {
+  const plan = (body.tier ?? "").trim().toLowerCase();
+  if (plan === "max") return "pro";
+  if (plan === "pro") return "flash";
+  return null;
 }
 
 /**
@@ -155,6 +210,8 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
     return {
       source: "portal",
       tier: cached.tier,
+      planTier: cached.planTier,
+      allowedModels: cached.allowedModels,
     };
   }
 
@@ -179,9 +236,11 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
       if (res.ok) {
         const body = await res.json() as DeviceInfoResponse;
         const tier = mapPortalTier(body);
-        rememberTier(token, tier, now);
+        const planTier = mapPortalPlanTier(body);
+        const allowedModels = mapPortalAllowedModels(body);
+        rememberTier(token, tier, planTier, allowedModels, now);
         portalUnreachableCache.delete(token);
-        return { source: "portal", tier };
+        return { source: "portal", tier, planTier, allowedModels };
       }
       // 401/403 is ambiguous: it can mean genuinely Free OR token
       // revoked / migrated / corrupted on a still-paid account. We

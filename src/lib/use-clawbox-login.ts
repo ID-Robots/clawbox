@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { normalizeAllowedModelIds } from "@/lib/clawbox-ai-models";
 
 // Lightweight client hook for "is the device signed in to a ClawBox AI
 // account, and what does that account entitle?". Backed by
@@ -30,6 +31,14 @@ export type ClawboxAiTier = "flash" | "pro" | string;
 export interface ClawboxLoginState {
   loggedIn: boolean;
   tier: ClawboxAiTier | null;
+  /**
+   * Model ids the portal says this account may run, or null when the question
+   * has not been answered (no token, portal unreachable, poll failed, older
+   * portal build). Null is NOT "nothing is allowed" — see
+   * `portalDeniesClawboxAiModel`, the only reader permitted to turn this into
+   * a refusal.
+   */
+  allowedModels: string[] | null;
   loading: boolean;
 }
 
@@ -42,6 +51,9 @@ interface AiStatusResponse {
   // for chat. Falls back to `clawaiTier` when missing so older
   // callers (and pre-rollout responses) keep working.
   clawaiAccountTier?: ClawboxAiTier | null;
+  // The portal's entitlement list for the paired token. Absent on a
+  // pre-rollout server, which reads as "not answered", not as "empty".
+  clawaiAllowedModels?: string[] | null;
   // True when any clawai profile is configured. Distinguishes
   // "no ClawBox AI account" (false) from "Free user paired"
   // (true, clawaiAccountTier=null).
@@ -50,10 +62,18 @@ interface AiStatusResponse {
 
 const DEFAULT_INTERVAL_MS = 30_000;
 
+/** Same ids in the same order — or both unanswered. */
+function sameIds(a: string[] | null, b: string[] | null): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every((id, i) => id === b[i]);
+}
+
 export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS): ClawboxLoginState {
   const [state, setState] = useState<ClawboxLoginState>({
     loggedIn: false,
     tier: null,
+    allowedModels: null,
     loading: true,
   });
 
@@ -74,7 +94,12 @@ export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS): Clawb
       // out and downstream consumers don't re-render on every failed poll.
       setState((prev) => (
         prev.loading
-          ? { loggedIn: prev.loggedIn, tier: prev.tier, loading: false }
+          ? {
+              loggedIn: prev.loggedIn,
+              tier: prev.tier,
+              allowedModels: prev.allowedModels,
+              loading: false,
+            }
           : prev
       ));
     };
@@ -98,11 +123,20 @@ export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS): Clawb
         // Older responses without `clawaiConfigured` fall back to the
         // pre-rollout `provider === "clawai"` heuristic.
         const loggedIn = data.clawaiConfigured ?? (data.provider === "clawai");
-        setState({
-          loggedIn,
-          tier,
-          loading: false,
-        });
+        // One normaliser, shared with the server that produced the field, so
+        // the two cannot disagree about what an empty list means.
+        const allowedModels = normalizeAllowedModelIds(data.clawaiAllowedModels);
+        // Keep the previous array when the poll brought the same ids back.
+        // A fresh array every 30 s would be a new identity for every consumer
+        // that memoises on it — see the same-ref rule in preserveOnTransient.
+        setState((prev) => (
+          !prev.loading
+            && prev.loggedIn === loggedIn
+            && prev.tier === tier
+            && sameIds(prev.allowedModels, allowedModels)
+            ? prev
+            : { loggedIn, tier, allowedModels, loading: false }
+        ));
       } catch {
         preserveOnTransient();
       } finally {

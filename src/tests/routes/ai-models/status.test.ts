@@ -301,6 +301,78 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.tierSource).toBe("picker");
     });
 
+    it("surfaces the portal's entitlement list beside the badge", async () => {
+      // The badge is the device-pair stamp; the list is what the account may
+      // actually run. A Max account paired while it was on the Pro plan reads
+      // "flash" and still carries the Pro id — the picker gates on the list.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("flash");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({
+          tier: "max",
+          deviceTier: "flash",
+          allowedModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
+        }),
+        { status: 200 },
+      ));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiAccountTier).toBe("flash");
+      expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
+    });
+
+    it("fills the list from the badge when the portal answered without one", async () => {
+      // An older portal build publishes no `allowedModels`. There the badge is
+      // all the entitlement there has ever been, so nothing that used to be
+      // refused may quietly become allowed — but this is the ANSWERED branch
+      // only; an unreachable portal still yields null.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("flash");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "pro", deviceTier: "flash" }),
+        { status: 200 },
+      ));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash"]);
+    });
+
+    it("keeps the Max id in that fallback when the PLAN is Max and only the device stamp is Flash", async () => {
+      // TASK-691, reached through the compatibility door. `mapPortalTier`
+      // prefers `deviceTier` on purpose, so deriving the fallback list from the
+      // badge alone gave a Max subscriber `["deepseek-v4-flash"]` — which the
+      // boot guard reads as a POSITIVE refusal and writes his primary model
+      // down on, under a message telling him to buy the plan he already has.
+      // The plan is what an entitlement may be read from.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("flash");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "max", deviceTier: "flash" }),
+        { status: 200 },
+      ));
+
+      const body = await (await GET()).json();
+
+      // The BADGE still follows the device stamp — that is its job.
+      expect(body.clawaiAccountTier).toBe("flash");
+      expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
+    });
+
+    it("says null — not an empty list — when the portal could not be asked", async () => {
+      // Null is "not answered". An empty list would read as "nothing is
+      // allowed" and lock the box out of its own models.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockRejectedValue(new Error("ETIMEDOUT"));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiTier).toBe("pro");
+      expect(body.clawaiAllowedModels).toBeNull();
+    });
+
     it("negative-caches an unreachable verdict so back-to-back polls don't hammer the portal", async () => {
       mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
       mockGetConfigValue.mockResolvedValue("pro");

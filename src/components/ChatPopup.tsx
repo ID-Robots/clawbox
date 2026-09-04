@@ -273,7 +273,7 @@ import {
 } from '@/lib/hermes-reasoning'
 import { readHermesChatPrefs, writeHermesChatPrefs } from '@/lib/hermes-chat-prefs'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
-import { isClawboxAiProModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-models'
+import { isClawboxAiProModel, portalDeniesClawboxAiModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-models'
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
@@ -1077,11 +1077,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       && !!chatModelState?.subscriptionProviders?.includes(headerProvider),
     [headerProvider, chatModelState],
   )
-  // Pull live tier so the chat-model picker can filter ClawBox AI options
-  // by entitlement. Without this, a Free user could pick deepseek-v4-pro,
-  // see a "Switched chat to deepseek/deepseek-v4-pro" success message,
-  // then watch every reply silently downgrade to flash because Mike's
-  // gateway gates by user.tier — UI says one thing, gateway does another.
+  // Pull the account state so the chat-model picker can refuse a ClawBox AI
+  // model the PORTAL says this account may not run. Without it a Free user
+  // could pick deepseek-v4-pro, see a "Switched chat to
+  // deepseek/deepseek-v4-pro" success message, and then get nothing but
+  // "[assistant turn failed]" — the proxy answers such a turn
+  // `400 "Model not allowed: …"` (measured 2026-09-04), which no chat surface
+  // can render as anything the owner could act on. `tier` is the device
+  // DEFAULT and never the gate; `allowedModels` is the gate.
   const clawboxLogin = useClawboxLogin()
 
   // ── Hermes header: provider-scoped model list ──
@@ -4147,24 +4150,32 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // thing that can say a `openai/<id>` pick is the ChatGPT subscription rather
   // than the API key: on a box holding both credentials the two rows offer the
   // same reference, and the server cannot tell them apart from the model alone.
-  const switchChatModel = useCallback(async (target: { model: string; label: string; provider?: string | null }) => {
-    if (switchingModel || chatModelState?.activeModel === target.model) return
-    // Intercept clawai Pro picks from non-Max users. The portal's
-    // /api/ai gateway silently downgrades these requests to flash via
-    // its live-tier reconcile, which previously left the user staring
-    // at a "Switched chat to deepseek-v4-pro" success toast while every
-    // reply came from flash. Surface the gate here with an actionable
-    // upgrade prompt and skip the network call entirely. The portal URL
-    // is wrapped as `[text](url)` so chat-markdown renders it as a
-    // clickable link instead of a bare string.
-    if (isClawboxAiProModel(target.model) && clawboxLogin.tier !== 'pro') {
+  const switchChatModel = useCallback(async (target: { model: string; label: string; provider?: string | null }): Promise<boolean> => {
+    if (switchingModel || chatModelState?.activeModel === target.model) return false
+    // Intercept a ClawBox AI pick the portal POSITIVELY refuses, and say so
+    // here rather than letting every turn on it come back as the opaque
+    // "[assistant turn failed]" — measured against the live proxy on
+    // 2026-09-04, an id outside the account's list answers
+    // `400 {"error":{"message":"Model not allowed: …"}}`. The portal URL is
+    // wrapped as `[text](url)` so chat-markdown renders it as a clickable link
+    // instead of a bare string.
+    //
+    // Gated on the portal's own entitlement list, never on the tier badge: the
+    // badge follows the portal's `deviceTier`, which is a device DEFAULT — a
+    // Max subscriber may deliberately run Flash on this box — and a default is
+    // not something to veto an explicit pick with. An unanswered entitlement
+    // (portal unreachable, poll failed) is not a refusal either: the pick goes
+    // through and the proxy has the last word.
+    if (portalDeniesClawboxAiModel(target.model, clawboxLogin.allowedModels)) {
       setMessages(prev => [...prev, {
         role: 'system',
-        text: `${target.label} requires a Max subscription. [Upgrade in the ClawBox portal](${PORTAL_DASHBOARD_URL}) to unlock it. Staying on the current model.`,
+        text: isClawboxAiProModel(target.model)
+          ? `${target.label} requires a Max subscription. [Upgrade in the ClawBox portal](${PORTAL_DASHBOARD_URL}) to unlock it. Staying on the current model.`
+          : `${target.label} is not included in your ClawBox AI plan. [Manage it in the ClawBox portal](${PORTAL_DASHBOARD_URL}). Staying on the current model.`,
         timestamp: Date.now(),
         variant: 'error',
       }])
-      return
+      return false
     }
     setSwitchingModel(true)
     setErrorMsg('')
@@ -4208,37 +4219,91 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         try { wsRef.current.close() } catch { /* ignore */ }
       }
       connect()
+      return true
     } catch (err) {
       setMessages(prev => [...prev, {
         role: 'system',
         text: `Error: ${err instanceof Error ? err.message : 'Failed to switch chat model'}`,
         timestamp: Date.now(),
       }])
+      return false
     } finally {
       setSwitchingModel(false)
     }
-  }, [chatModelState, connect, switchingModel, clawboxLogin.tier])
+  }, [chatModelState, connect, switchingModel, clawboxLogin.allowedModels])
 
-  // The dropdown gate above only catches Max-tier picks the user *clicks*. A
-  // non-Max account can also boot with the Max tier already saved as the
-  // default (picked during setup, or left over after a plan downgrade). The
-  // portal gateway then silently rejects every turn — the user only sees the
-  // opaque "[assistant turn failed]". Catch that on load: explain it with an
-  // upgrade link and drop to the Pro tier the plan supports so chat works.
-  const tierGuardRef = useRef(false)
+  // The dropdown gate above only catches picks the user *clicks*. An account
+  // the portal refuses can also boot with the Max model already saved as the
+  // default (picked during setup, chosen from the Telegram `/model` keyboard,
+  // or left over after a plan downgrade). The portal gateway then silently
+  // rejects every turn — the user only sees the opaque "[assistant turn
+  // failed]". Catch that on load: explain it with an upgrade link and drop to
+  // the Pro tier the plan supports so chat works.
+  //
+  // This one WRITES: it moves the box off the model the owner chose. So it
+  // fires only on a positive refusal from the portal's entitlement list. On
+  // the badge it fired for "tier unknown" too — a single failed status poll
+  // was enough to rewrite a Max box's primary model to flash and tell its
+  // owner to buy the subscription he already had (TASK-691).
+  //
+  // WHAT THE LATCH BELOW REMEMBERS, and why it is not a boolean. `switchChatModel`
+  // writes `switchingModel`, which is one of its own useCallback deps, so calling
+  // it changes its identity — and this effect depends on that identity. A boolean
+  // latch released on failure therefore re-armed the guard with nothing about the
+  // box changed, and any repeatable failure of `/setup-api/chat/model` (400
+  // "provider is not configured", 409, 500, a proxy's non-JSON body) became a POST
+  // loop against the box's own setup server with two system messages per turn of
+  // it. A boolean latch never released is the other error: `page.tsx` keeps this
+  // component mounted for the whole session and only toggles `isOpen`, so one
+  // failed attempt would leave the box on a refused model until a page reload —
+  // a capability probed once and treated as settled, which is the shape this
+  // codebase keeps producing.
+  //
+  // So it remembers the INPUTS the last attempt was made for. Re-entry on the
+  // same box state buys nothing; a changed active model or a changed entitlement
+  // list buys exactly one more attempt, and so does closing and re-opening the
+  // chat, which is the retry an owner reaches for. `allowedModels` keeps its
+  // array identity across polls that bring the same ids back (`sameIds` in
+  // use-clawbox-login.ts), so `===` here means "the answer has not changed".
+  const tierGuardAttemptRef = useRef<{ model: string; allowed: readonly string[] | null } | null>(null)
   useEffect(() => {
-    if (tierGuardRef.current || clawboxLogin.loading) return
+    if (!isOpen) {
+      tierGuardAttemptRef.current = null
+      return
+    }
+    if (clawboxLogin.loading) return
     const active = chatModelState?.activeModel
-    if (!active || !isClawboxAiProModel(active) || clawboxLogin.tier === 'pro') return
-    tierGuardRef.current = true
-    setMessages(prev => [...prev, {
-      role: 'system',
-      text: `Max Tier needs a Max subscription. [Upgrade in the ClawBox portal](${PORTAL_DASHBOARD_URL}) to unlock it — switching you to Pro Tier so chat keeps working.`,
-      timestamp: Date.now(),
-      variant: 'error',
-    }])
+    // The Max tier and nothing else: it is the only ClawBox AI model with a
+    // tier below it to fall back to, and the message below says so by name.
+    if (!active || !isClawboxAiProModel(active)) return
+    if (!portalDeniesClawboxAiModel(active, clawboxLogin.allowedModels)) return
+    // The recovery is "drop to the Flash tier", so only run it when the portal
+    // allows that one. Switching to a second refused model would move the
+    // error rather than fix it.
+    if (portalDeniesClawboxAiModel(CLAWBOX_AI_MODEL_BY_TIER.flash, clawboxLogin.allowedModels)) return
+    const attempted = tierGuardAttemptRef.current
+    if (attempted && attempted.model === active && attempted.allowed === clawboxLogin.allowedModels) return
+    // `switchChatModel` early-returns without attempting anything while another
+    // switch is in flight, so wait rather than record an attempt that was never
+    // made. `switchingModel` is a dep, so the effect comes back by itself when
+    // that other switch finishes.
+    if (switchingModel) return
+    tierGuardAttemptRef.current = { model: active, allowed: clawboxLogin.allowedModels }
     void switchChatModel({ model: CLAWBOX_AI_MODEL_BY_TIER.flash, label: 'Pro Tier' })
-  }, [chatModelState?.activeModel, clawboxLogin.tier, clawboxLogin.loading, switchChatModel])
+      .then(switched => {
+        // Posted from the SUCCESS path only. This sentence says the box was
+        // moved, and until the POST comes back that is not known — announcing
+        // it first left a failed switch under a message claiming it had
+        // happened, above the `Error:` line saying it had not.
+        if (!switched) return
+        setMessages(prev => [...prev, {
+          role: 'system',
+          text: `Max Tier needs a Max subscription. [Upgrade in the ClawBox portal](${PORTAL_DASHBOARD_URL}) to unlock it — switched you to Pro Tier so chat keeps working.`,
+          timestamp: Date.now(),
+          variant: 'error',
+        }])
+      })
+  }, [isOpen, chatModelState?.activeModel, clawboxLogin.allowedModels, clawboxLogin.loading, switchChatModel, switchingModel])
 
   const handleChatSourceChange = useCallback(async (optionId: string) => {
     const target = chatModelState?.options.find(option => option.id === optionId)

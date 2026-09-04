@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { readConfig } from "@/lib/openclaw-config";
 import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
 import {
+  CLAWBOX_AI_FLASH_MODEL_ID,
+  CLAWBOX_AI_PRO_MODEL_ID,
   normalizeClawboxAiTier,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
@@ -33,6 +35,32 @@ const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
 // `applyClawaiToHermes` writes it here; the OpenClaw path reads the same token
 // from `models.providers.deepseek.apiKey` in openclaw.json instead.
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
+
+/**
+ * The entitlement list a device-info answer without `allowedModels` implies.
+ *
+ * Only the compatibility path uses this. A portal that publishes the real list
+ * always wins, and a portal that could not be reached gets no list at all.
+ *
+ * It reaches the Max id when EITHER reading of the response does, and that
+ * "either" is load-bearing in both directions. The device stamp alone is what
+ * the old badge rule used, and deriving the list from it reproduced TASK-691
+ * through this very door: a Max subscriber whose box is stamped
+ * `deviceTier: "flash"` — a state `mapPortalTier` preserves on purpose — would
+ * get `["deepseek-v4-flash"]`, which the boot guard reads as a positive refusal
+ * and WRITES his primary model down on. The plan alone would be the mirror
+ * mistake: a box the portal stamped `"pro"` used to be allowed to run the Max
+ * model under the old rule, and a compatibility path must not start refusing
+ * something that used to work. So: the more permissive of the two.
+ */
+function allowedModelsForCompat(
+  deviceTier: ClawboxAiTier | null,
+  planTier: ClawboxAiTier | null,
+): string[] {
+  return deviceTier === "pro" || planTier === "pro"
+    ? [CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID]
+    : [CLAWBOX_AI_FLASH_MODEL_ID];
+}
 
 function normalizeProvider(provider: string | null): string | null {
   if (!provider) return null;
@@ -163,6 +191,13 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
 
   let clawaiAccountTier: ClawboxAiTier | null = null;
   let accountTierSource: "portal" | "picker" = "picker";
+  // The portal's own list of model ids this token may run. NULL MEANS "NOT
+  // ANSWERED" — no token, portal unreachable, or a portal build that does not
+  // publish the field — and no caller may read that as a refusal. It is
+  // deliberately not backed by a local fallback the way the tier badge is: a
+  // remembered entitlement is a guess, and a guess is what locked a Max owner
+  // out of the model he pays for (TASK-691).
+  let clawaiAllowedModels: string[] | null = null;
   if (state.hasClawaiProfile) {
     clawaiAccountTier = localTier;
     // Ask the portal whenever a clawai token is paired, regardless
@@ -174,6 +209,14 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
       const lookup = await fetchPortalTier(state.clawaiToken);
       if (lookup.source === "portal") {
         clawaiAccountTier = lookup.tier;
+        // A portal that answered but published no list is not "unknown": it is
+        // an older portal build, and there the badge IS all the entitlement
+        // there has ever been. Fill the list from it so nothing that used to
+        // be refused silently becomes allowed on such a deployment. Only the
+        // portal-ANSWERED branch does this — an unreachable portal stays null,
+        // which is the whole point of the change.
+        clawaiAllowedModels = lookup.allowedModels
+          ?? allowedModelsForCompat(lookup.tier, lookup.planTier);
         accountTierSource = "portal";
         // Persist the portal-confirmed tier so the portal-unreachable
         // fallback reflects the last *confirmed* tier, not a stale
@@ -202,6 +245,9 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
     model: state.model,
     clawaiTier,
     clawaiAccountTier,
+    // Model ids the portal says this account may run, or null when it did not
+    // say. The picker gates on this, never on the tier badge above.
+    clawaiAllowedModels,
     // Whether *any* clawai profile is configured. Distinguishes
     // "no ClawBox AI account at all" (false) from "Free user with
     // a paired clawai token" (true, clawaiAccountTier=null) — the
@@ -230,7 +276,8 @@ export async function GET() {
     return NextResponse.json(
       {
         connected: false, provider: null, providerLabel: null, mode: null, model: null,
-        clawaiTier: null, clawaiAccountTier: null, clawaiConfigured: false, tierSource: "picker",
+        clawaiTier: null, clawaiAccountTier: null, clawaiAllowedModels: null,
+        clawaiConfigured: false, tierSource: "picker",
       },
       {
         headers: {
