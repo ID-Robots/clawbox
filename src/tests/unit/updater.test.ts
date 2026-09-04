@@ -43,6 +43,22 @@ const mockExec = vi.mocked(childProcess.exec);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockReadFile = vi.mocked(fs.readFile);
 const mockGatewayUp = vi.mocked(waitForPortOpen);
+
+/**
+ * A box whose rebuild produced a build, and no other readable file.
+ *
+ * These cases mean "there is nothing else on disk to read", and they used to
+ * say it with a blanket ENOENT. An absent `.next/BUILD_ID` is now a failed
+ * rebuild in its own right (TASK-709) — nothing is never evidence of a build —
+ * so the one file that decides whether the continuation may run has to be
+ * stated rather than left to the same rejection as everything else.
+ */
+function mockRebuiltBox(buildId = "rebuilt-build-id"): void {
+  mockReadFile.mockImplementation(async (file) => {
+    if (String(file).endsWith("BUILD_ID")) return `${buildId}\n`;
+    throw new Error("ENOENT");
+  });
+}
 let execFileFallbackResults: Record<string, { stdout: string; stderr: string } | Error> = {};
 
 function setupExecMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
@@ -163,7 +179,14 @@ describe("updater", () => {
     mockGet.mockResolvedValue(undefined);
     mockSet.mockResolvedValue();
     mockSetMany.mockResolvedValue();
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
+    // A box that got through the rebuild has a BUILD_ID; an absent one is now
+    // itself proof the rebuild failed (TASK-709), so the default fixture is a
+    // box that DID build and every case about a missing or unchanged build
+    // says so explicitly.
+    mockReadFile.mockImplementation(async (file) => {
+      if (String(file).endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+      throw new Error("ENOENT");
+    });
     mockGatewayUp.mockResolvedValue(true);
 
     setupExecMock({
@@ -283,7 +306,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(undefined);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       updater = await import("@/lib/updater");
 
       updater.resetUpdateState();
@@ -322,7 +345,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(undefined);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       updater = await import("@/lib/updater");
 
       updater.resetUpdateState();
@@ -357,7 +380,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(undefined);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       updater = await import("@/lib/updater");
 
       // Drive it through the post-restart continuation: resumes at post_update.
@@ -516,7 +539,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       updater = await import("@/lib/updater");
 
       updater.resetUpdateState();
@@ -548,7 +571,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       mockGatewayUp.mockResolvedValue(false);
       updater = await import("@/lib/updater");
 
@@ -583,7 +606,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       // Health is impossible until BOTH explicit consent and the later system
       // restart occurred. Merely invoking pre-start must never make this green.
       mockGatewayUp.mockImplementation(async () => {
@@ -684,7 +707,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       mockGatewayUp.mockImplementation(async () =>
         mockExecFile.mock.calls.some(([cmd, args]) =>
           cmd === "/usr/bin/sudo"
@@ -725,7 +748,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       updater = await import("@/lib/updater");
 
       updater.resetUpdateState();
@@ -762,6 +785,7 @@ describe("updater", () => {
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
       mockReadFile.mockImplementation(async (file) => {
+        if (String(file).endsWith("BUILD_ID")) return "rebuilt-build-id\n";
         if (String(file).endsWith("/openclaw.json")) {
           return JSON.stringify({
             agents: { defaults: { model: { primary: "openai/gpt-5.6-sol" } } },
@@ -809,7 +833,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       updater = await import("@/lib/updater");
       if (priorRoot === undefined) delete process.env.CLAWBOX_ROOT;
       else process.env.CLAWBOX_ROOT = priorRoot;
@@ -851,7 +875,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       // The gateway only "recovers" once the legacy-state quarantine has run.
       // Tie the probe to that side-effect instead of a fixed false/false/true
       // call sequence: waitForGateway polls in a loop (deadline/interval are 1ms
@@ -895,7 +919,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(undefined);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       updater = await import("@/lib/updater");
 
       updater.resetUpdateState();
@@ -1060,6 +1084,38 @@ describe("updater", () => {
       const state = updater.getUpdateState();
       expect(state.phase).toBe("failed");
       expect(state.error).toContain("without producing a new build");
+    });
+
+    it("reports a failed update when the rebuild left no build at all", async () => {
+      // The hole the BUILD_ID comparison left open. `do_rebuild` deleted
+      // `.next` before building, so an OOM-killed build (measured on the dev
+      // box 2026-09-04, three times in one night) left NO BUILD_ID — and an
+      // ABSENT id compares UNEQUAL to the one recorded before the rebuild, so
+      // "the build changed" read as "the build happened". The update then
+      // resumed and stamped itself complete over a box with no dashboard at
+      // all. Nothing is the one answer that can never be evidence of a build.
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue("build-aaa");
+      mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+
+      const result = await updater.checkContinuation();
+
+      expect(result).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toContain("no build");
+    });
+
+    it("reports a failed update when a box that had no build still has none", async () => {
+      // Same hole from the other side: a box with nothing to record wrote the
+      // "no-previous-build" sentinel, and after a failed rebuild the empty
+      // BUILD_ID differs from the sentinel too.
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue("no-previous-build");
+      mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+
+      expect(await updater.checkContinuation()).toBe(false);
+      expect(updater.getUpdateState().phase).toBe("failed");
     });
   });
 
