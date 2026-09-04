@@ -64,14 +64,23 @@ export async function POST(request: Request) {
   const blocked = await hermesSkillsGuard();
   if (blocked) return blocked;
 
-  let body: { id?: unknown };
+  let body: unknown;
   try {
     body = await request.json();
   } catch {
     return invalidArgument("body", "Invalid JSON");
   }
+  // `null`, an array and a bare string are all valid JSON, and reading `.id`
+  // off the first of them throws OUTSIDE this route's try — an uncoded 500 for
+  // a request that is simply malformed. Same guard the secrets route applies,
+  // for the same reason.
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return invalidArgument("body", "Invalid JSON");
+  }
 
-  const requested = typeof body.id === "string" ? body.id.trim() : "";
+  const requested = typeof (body as { id?: unknown }).id === "string"
+    ? ((body as { id: string }).id).trim()
+    : "";
   if (!isValidSkillName(requested)) {
     return invalidArgument("id", "Invalid skill name");
   }
@@ -196,12 +205,29 @@ export async function POST(request: Request) {
     const lockState = await readHubLockState();
     if (timedOut && !lockState.ok) {
       console.error("[hermes skills uninstall] timed out and the hub lock could not be read", JSON.stringify(id));
+      // Its own code, not `cli_timeout`: a deadline that left the skill plainly
+      // still listed IS a failure, and this one is the other thing — the
+      // removal is UNPROVEN. The store says so rather than painting a red
+      // "Uninstall failed" over a skill that may well be gone.
       return NextResponse.json(
-        { error: CLI_FAILURE_SENTENCES.cli_timeout, code: "cli_timeout" },
+        {
+          error: "The device ran out of time and could not confirm whether the skill was removed.",
+          code: "uninstall_unproven",
+        },
         { status: 502 },
       );
     }
-    const stillLocked = await isInHubLock(id);
+    // The SAME snapshot the check above validated. Asking `isInHubLock` here
+    // would be a second, lenient read of a file a concurrent rewrite can
+    // truncate between the two — and a truncated read answers "not there",
+    // which is exactly the evidence this branch must not accept.
+    // (`isInHubLock(id)` with no identifier is this same key lookup; the
+    // fallback is only reachable on the exit-0 path, where an unreadable lock
+    // reading as empty is the behaviour that was already there and that the
+    // CLI's own exit code and printed outcome are weighed against.)
+    const stillLocked = lockState.ok
+      ? Object.prototype.hasOwnProperty.call(lockState.installed, id)
+      : await isInHubLock(id);
     const removed = !stillLocked && (outcome.kind === "uninstalled" || hadEntry);
     if (!removed) {
       if (timedOut) {

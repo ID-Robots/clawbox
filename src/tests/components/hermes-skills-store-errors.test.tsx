@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, within } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import HermesSkillsStore from "@/components/HermesSkillsStore";
 import { bg } from "@/lib/hermes-translations/bg";
 
@@ -99,6 +99,8 @@ function mockStore(opts: {
   action?: () => Reply;
   /** The detail panel's two phases: `?id=` (metadata) and `?id=&docs=1`. */
   inspect?: (docs: boolean) => Reply;
+  /** Called on every read of the installed list, so a test can count them. */
+  onInstalled?: () => void;
 }) {
   const fetchMock = vi.fn(async (input: unknown) => {
     const url = String(input);
@@ -108,7 +110,10 @@ function mockStore(opts: {
     if (url.includes("/skills/browse")) return opts.browse ?? reply(200, BROWSE);
     // `/skills/installed` is a prefix match for `/skills/install`, so the list
     // endpoint has to be recognised first.
-    if (url.includes("/skills/installed")) return reply(200, opts.installed ?? EMPTY_INSTALLED);
+    if (url.includes("/skills/installed")) {
+      opts.onInstalled?.();
+      return reply(200, opts.installed ?? EMPTY_INSTALLED);
+    }
     if (url.includes("/skills/install") || url.includes("/skills/uninstall")) {
       return opts.action ? opts.action() : reply(200, { ok: true });
     }
@@ -143,7 +148,7 @@ async function installFromBrowse(announced = "skills.liveInstallFailed") {
 }
 
 /** Click Remove on the Installed row, then confirm in the dialog. */
-async function removeFromInstalled() {
+async function removeFromInstalled(announced = "skills.liveRemoveFailed") {
   render(<HermesSkillsStore />);
   await act(async () => {
     fireEvent.click(await screen.findByTestId("skill-tab-installed"));
@@ -156,7 +161,7 @@ async function removeFromInstalled() {
   await act(async () => {
     fireEvent.click(within(dialog).getByRole("button", { name: bgCopy("skills.remove") }));
   });
-  await screen.findByText(bgCopy("skills.liveRemoveFailed", { name: "pdf-tools" }));
+  await screen.findByText(bgCopy(announced, { name: "pdf-tools" }));
 }
 
 beforeEach(() => {
@@ -527,6 +532,32 @@ describe("TASK-658: a refusal the owner can undo says so", () => {
     const line = screen.getByText(bgCopy("skills.installUnknownOutcome", { name: "PDF Tools" }));
     expect(line.className).toContain("text-amber-400");
     expect(line.className).not.toContain("text-red-400");
+  });
+
+  it("an unproven removal is not painted as a failure, and re-reads the list it points at", async () => {
+    // The route answers this when it timed out AND could not read the hub lock:
+    // the removal may well have happened. Red chrome plus "Uninstall failed"
+    // over a skill that is gone is the false failure this card is about — and
+    // the copy sends the owner to the Installed tab, so that tab has to be
+    // re-read before they get there.
+    let installedReads = 0;
+    mockStore({
+      installed: ONE_INSTALLED,
+      onInstalled: () => {
+        installedReads += 1;
+      },
+      action: () =>
+        reply(502, {
+          error: "The device ran out of time and could not confirm whether the skill was removed.",
+          code: "uninstall_unproven",
+        }),
+    });
+    await removeFromInstalled("skills.liveRemoveUnknown");
+
+    const line = screen.getByText(bgCopy("skills.uninstallUnknownOutcome", { name: "pdf-tools" }));
+    expect(line.className).toContain("text-amber-400");
+    expect(screen.queryByText(bgCopy("skills.uninstallFailed"))).toBeNull();
+    await waitFor(() => expect(installedReads).toBeGreaterThan(1));
   });
 
   it("an invalid_argument from install keeps the owner's language, not the route's sentence", async () => {

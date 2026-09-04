@@ -73,8 +73,16 @@ type AnySkill = HermesSkill | InstalledHermesSkill;
  */
 type ProgressState = { status: 'working' | 'success' | 'error' | 'unknown'; message?: string };
 
-/** A refusal whose CODE says the outcome was not established, not that it failed. */
-const UNKNOWN_OUTCOME_CODES = new Set(['too_large']);
+/**
+ * A refusal whose CODE says the outcome was not established, not that it failed.
+ *
+ * `too_large` — the CLI ran and its output overran the read cap.
+ * `uninstall_unproven` — the CLI hit its deadline AND the hub lock could not be
+ *   read, so the one piece of evidence a removal has is missing. (A deadline
+ *   that left the skill plainly still listed is NOT here: that is a failure,
+ *   and it answers `cli_timeout`.)
+ */
+const UNKNOWN_OUTCOME_CODES = new Set(['too_large', 'uninstall_unproven']);
 
 class RefusalError extends Error {
   readonly outcome: 'failed' | 'unknown';
@@ -188,6 +196,7 @@ function uninstallRefusalCopy(COPY: SkillsCopy, data: RefusalBody, name: string)
       return candidates.length ? COPY.ambiguousName(name, candidates) : null;
     }
     case 'too_large':
+    case 'uninstall_unproven':
       return COPY.uninstallUnknownOutcome(name);
     case 'uninstall_failed':
     case 'cli_timeout':
@@ -409,6 +418,11 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
           6000,
         );
         setLive(outcome === 'unknown' ? COPY.liveInstallUnknown(skill.name) : COPY.liveInstallFailed(skill.name));
+        // The copy for an unknown outcome sends the owner to the Installed tab.
+        // Sending them to a list this request never re-read would show them the
+        // pre-request state — and a skill that DID land would be missing from
+        // the one place the message told them to look.
+        if (outcome === 'unknown') await installed.refresh();
       }
     },
     [COPY, detail, installed, setProgressAutoClear],
@@ -462,6 +476,9 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
           6000,
         );
         setLive(outcome === 'unknown' ? COPY.liveRemoveUnknown(name) : COPY.liveRemoveFailed(name));
+        // Same rule as the install path: the row the message tells them to
+        // check has to be the one the device holds now, not the one from before.
+        if (outcome === 'unknown') await installed.refresh();
       }
     },
     [COPY, detail, installed, setProgressAutoClear],

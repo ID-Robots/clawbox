@@ -134,9 +134,32 @@ describe("POST …/skills/uninstall — a deadline is not an outcome", () => {
     const { status, body } = await uninstall(INSTALLED);
 
     expect(status).toBe(502);
-    expect(body.code).toBe("cli_timeout");
+    // Its own code, not `cli_timeout`: a deadline that left the skill plainly
+    // still listed IS a failure; this one is the other thing — the removal is
+    // unproven, and the store paints it as such rather than as a red failure
+    // over a skill that may well be gone.
+    expect(body.code).toBe("uninstall_unproven");
     // ...and the files it could not prove were removed are still there.
     await expect(fs.stat(path.join(skillsDir(), INSTALLED))).resolves.toBeTruthy();
+  });
+
+  it("refuses a body that is valid JSON but not an object", async () => {
+    // `Request.json()` accepts `null`. Reading `.id` off it throws outside the
+    // route's try, so a malformed request answered an uncoded 500 rather than
+    // the coded 400 every other refusal on this route now carries.
+    const { POST } = await import("@/app/setup-api/hermes/skills/uninstall/route");
+    for (const payload of ["null", "[]", '"a string"']) {
+      const res = await POST(
+        new Request("http://localhost/setup-api/hermes/skills/uninstall", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload,
+        }),
+      );
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(res.status).toBe(400);
+      expect(body.code).toBe("invalid_argument");
+    }
   });
 
   it("leaves a non-timeout failure exactly as it was", async () => {

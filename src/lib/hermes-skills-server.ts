@@ -142,11 +142,16 @@ export async function readHubLockState(): Promise<
     return { ok: false };
   }
   try {
-    const parsed = JSON.parse(raw) as HubLock;
-    if (!parsed || typeof parsed !== 'object') return { ok: false };
-    if (parsed.installed === undefined) return { ok: true, installed: {} };
-    if (typeof parsed.installed !== 'object' || !parsed.installed) return { ok: false };
-    return { ok: true, installed: parsed.installed };
+    const parsed: unknown = JSON.parse(raw);
+    // `typeof [] === 'object'`, so the array check is not pedantry: a lock that
+    // parsed as an array would otherwise be read as a readable one with no
+    // entries — the very "unreadable means everything went" answer this
+    // function exists to refuse.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false };
+    const installed = (parsed as HubLock).installed;
+    if (installed === undefined) return { ok: true, installed: {} };
+    if (!installed || typeof installed !== 'object' || Array.isArray(installed)) return { ok: false };
+    return { ok: true, installed };
   } catch {
     // Truncated or mid-write: the one shape that used to read as "empty".
     return { ok: false };
