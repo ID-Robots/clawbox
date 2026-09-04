@@ -55,6 +55,8 @@ function stubFetch(
     maxTurns?: number;
     tokenLimit?: number | null;
     reviewPass?: boolean;
+    generateImages?: boolean;
+    generateAudio?: boolean;
   },
   opts: {
     resolveTo?: string;
@@ -72,6 +74,9 @@ function stubFetch(
   let maxTurns = status.maxTurns ?? 150;
   let tokenLimit: number | null = status.tokenLimit ?? null;
   let reviewPass = status.reviewPass ?? false;
+  // The two that are ON when the device has never stored them.
+  let generateImages = status.generateImages ?? true;
+  let generateAudio = status.generateAudio ?? true;
   const payload = () => ({
     enabled: status.enabled,
     ready: status.enabled && status.readiness.ready,
@@ -89,6 +94,8 @@ function stubFetch(
     tokenLimit,
     minTokenLimit: 10_000,
     reviewPass,
+    generateImages,
+    generateAudio,
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -123,6 +130,8 @@ function stubFetch(
       }
       if ("tokenLimit" in body) tokenLimit = body.tokenLimit;
       if (typeof body.reviewPass === "boolean") reviewPass = body.reviewPass;
+      if (typeof body.generateImages === "boolean") generateImages = body.generateImages;
+      if (typeof body.generateAudio === "boolean") generateAudio = body.generateAudio;
       return json(payload());
     }
     return json({ error: "unexpected" }, 404);
@@ -351,6 +360,43 @@ describe("effort and the ceilings", () => {
     fireEvent.change(tokens, { target: { value: "" } });
     fireEvent.blur(tokens);
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { tokenLimit: null } }));
+  });
+});
+
+describe("the media switches", () => {
+  const IMAGES = translations.en["codingAgent.genImagesLabel"];
+  const AUDIO = translations.en["codingAgent.genAudioLabel"];
+
+  it("render ON for a device that has never answered with them", async () => {
+    // These two are the only settings here that default ON, so a panel that
+    // fell back to `false` would show every box as switched off and invite the
+    // owner to "turn on" something that was never off.
+    stubFetch({ enabled: true, readiness: READY });
+    render(<CodingAgentSettingsPanel />);
+    expect(await screen.findByRole("switch", { name: IMAGES })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("switch", { name: AUDIO })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("post the field the route reads and render what it answers", async () => {
+    stubFetch({ enabled: true, readiness: READY, generateImages: true, generateAudio: true });
+    render(<CodingAgentSettingsPanel />);
+    const images = await screen.findByRole("switch", { name: IMAGES });
+    fireEvent.click(images);
+    await waitFor(() => expect(posts).toEqual([{ url: "/setup-api/coding-agent/enable", body: { generateImages: false } }]));
+    await waitFor(() => expect(images).toHaveAttribute("aria-checked", "false"));
+    // The other one is untouched by that write.
+    expect(screen.getByRole("switch", { name: AUDIO })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("keep their hints one tap away, like every other setting on this card", async () => {
+    stubFetch({ enabled: true, readiness: READY });
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByRole("switch", { name: IMAGES });
+    expect(screen.queryByText(translations.en["codingAgent.genImagesHint"])).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-gen-images-help"));
+    expect(screen.getByText(translations.en["codingAgent.genImagesHint"])).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("coding-agent-gen-audio-help"));
+    expect(screen.getByText(translations.en["codingAgent.genAudioHint"])).toBeInTheDocument();
   });
 });
 

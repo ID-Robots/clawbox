@@ -35,9 +35,10 @@ export const ARTIFACT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,99}$/;
 
 /**
  * The image types the artifacts route serves inline, ext → MIME. Everything
- * else is served text/plain — agent-written HTML must never execute in the
- * app's origin. IMAGE_EXTENSIONS derives from these keys so "renders as a
- * thumbnail" and "serves as an image" cannot drift apart.
+ * outside this table and INLINE_AUDIO_MIME is served text/plain — agent-written
+ * HTML must never execute in the app's origin. IMAGE_EXTENSIONS derives from
+ * these keys so "renders as a thumbnail" and "serves as an image" cannot drift
+ * apart.
  */
 export const INLINE_IMAGE_MIME: Record<string, string> = {
   ".png": "image/png",
@@ -47,7 +48,21 @@ export const INLINE_IMAGE_MIME: Record<string, string> = {
   ".webp": "image/webp",
 };
 
+/**
+ * The audio a run can now produce for itself (`generate_audio` writes a WAV
+ * into the project or the evidence folder). Served inline for the same reason
+ * the images are: the run's page plays it with a plain <audio> element, and the
+ * desktop's CSP allows `media-src 'self'`. The two tables are kept apart
+ * because `artifactKind` has to tell a picture from a clip.
+ */
+export const INLINE_AUDIO_MIME: Record<string, string> = {
+  ".wav": "audio/wav",
+  ".mp3": "audio/mpeg",
+  ".ogg": "audio/ogg",
+};
+
 const IMAGE_EXTENSIONS = new Set(Object.keys(INLINE_IMAGE_MIME));
+const AUDIO_EXTENSIONS = new Set(Object.keys(INLINE_AUDIO_MIME));
 const TEXT_EXTENSIONS = new Set([".txt", ".log", ".json", ".html", ".css", ".js", ".ts", ".csv", ".xml", ".yaml", ".yml"]);
 /**
  * Markdown is its own kind so the app can open it RENDERED — through the
@@ -58,7 +73,7 @@ const TEXT_EXTENSIONS = new Set([".txt", ".log", ".json", ".html", ".css", ".js"
  */
 const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown"]);
 
-export type ArtifactKind = "image" | "markdown" | "text" | "other";
+export type ArtifactKind = "image" | "audio" | "markdown" | "text" | "other";
 
 /**
  * The run's own account of what it did, kept next to its screenshots.
@@ -83,7 +98,8 @@ export function artifactsRoot(): string {
 
 /** The MIME type an artifact may be served inline with, or null → text/plain. */
 export function artifactMimeType(name: string): string | null {
-  return INLINE_IMAGE_MIME[path.extname(name).toLowerCase()] ?? null;
+  const ext = path.extname(name).toLowerCase();
+  return INLINE_IMAGE_MIME[ext] ?? INLINE_AUDIO_MIME[ext] ?? null;
 }
 
 /** The run's evidence folder. Throws on a malformed id — callers validate first. */
@@ -95,6 +111,7 @@ export function artifactsDir(runId: string): string {
 export function artifactKind(name: string): ArtifactKind {
   const ext = path.extname(name).toLowerCase();
   if (IMAGE_EXTENSIONS.has(ext)) return "image";
+  if (AUDIO_EXTENSIONS.has(ext)) return "audio";
   if (MARKDOWN_EXTENSIONS.has(ext)) return "markdown";
   if (TEXT_EXTENSIONS.has(ext)) return "text";
   return "other";

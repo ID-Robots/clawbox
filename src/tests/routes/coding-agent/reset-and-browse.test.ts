@@ -233,6 +233,10 @@ describe("POST /setup-api/coding-agent/reset", () => {
       // The auto-PR switch is standing consent for the box to push and merge
       // the agent's work, so "start over" must take it back too.
       "coding_agent_auto_pr",
+      // The two media switches are ON when absent, so clearing them is what
+      // puts a reset box back to "yes, draw and speak for my projects".
+      "coding_agent_generate_images",
+      "coding_agent_generate_audio",
       "coding_agent_setup_complete",
       "coding_agent_enabled",
     ]);

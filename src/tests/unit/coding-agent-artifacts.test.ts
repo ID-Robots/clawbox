@@ -130,6 +130,18 @@ describe("the report file", () => {
     expect(lib.artifactMimeType("report.md")).toBeNull();
   });
 
+  it("classifies a clip as audio and serves it with a real audio type", () => {
+    // A run can record its own narration now; the app plays it in place, and
+    // a WAV served as text/plain is a file nobody can hear.
+    expect(lib.artifactKind("intro.wav")).toBe("audio");
+    expect(lib.artifactKind("NARRATION.WAV")).toBe("audio");
+    expect(lib.artifactMimeType("intro.wav")).toBe("audio/wav");
+    expect(lib.artifactMimeType("theme.mp3")).toBe("audio/mpeg");
+    // Everything outside the two inline tables still comes back as text.
+    expect(lib.artifactKind("build.log")).toBe("text");
+    expect(lib.artifactMimeType("page.html")).toBeNull();
+  });
+
   it("writes the report once, in one piece, and never over one that is there", () => {
     expect(lib.writeRunReport(RUN_ID, "  \n")).toBe(false);
     expect(lib.writeRunReport(RUN_ID, "## Done\n")).toBe(true);

@@ -260,6 +260,23 @@ export async function generateClawaiImage(
   prompt: string,
   options: { signal?: AbortSignal; fetchImpl?: FetchLike } = {},
 ): Promise<ClawaiImageResult> {
+  const { bytes, extension } = await generateClawaiImageBytes(prompt, options);
+  return writeGeneratedImage(bytes, extension);
+}
+
+/**
+ * The picture as BYTES, without the chat media tree.
+ *
+ * The network half of `generateClawaiImage`, split out for the callers whose
+ * picture is not a chat picture: the coding-agent media route writes into the
+ * run's own folder, and putting the file into the media tree first only to move
+ * it out again would expose it — briefly — to the transcript reader and to that
+ * tree's 30-day sweep. The failure contract is the same `ClawaiImageError`.
+ */
+export async function generateClawaiImageBytes(
+  prompt: string,
+  options: { signal?: AbortSignal; fetchImpl?: FetchLike } = {},
+): Promise<{ bytes: Buffer; extension: string }> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const token = await resolveClawaiToken();
   if (!token) {
@@ -354,7 +371,7 @@ export async function generateClawaiImage(
     );
   }
 
-  return writeGeneratedImage(bytes, extension);
+  return { bytes, extension };
 }
 
 /**

@@ -65,6 +65,13 @@ function writeConfig(cfg: Record<string, unknown>): void {
   fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify(cfg), "utf-8");
 }
 
+/** Put an icon where the icon route reads it, the way project-icon.ts does. */
+function giveIcon(id: string): void {
+  const dir = path.join(root, "data", "icons");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${id}.png`), Buffer.from("89504e470d0a1a0a", "hex"));
+}
+
 /** Register a folder as a desktop web app the way deployWebapp does. */
 function putOnDesktop(id: string): void {
   const dir = path.join(root, "data", "webapps", id);
@@ -116,6 +123,9 @@ describe("GET projects", () => {
     expect(site.kind).toBe("folder");
     expect(site.directory).toBe(path.join(projectsDir, "site"));
     expect(site.onDesktop).toBe(true);
+    // No picture drawn for it yet, which is every project on a fresh box: the
+    // row draws its lettered placeholder rather than a broken image.
+    expect(site.iconUrl).toBeNull();
     expect(site.latestRun).toBeNull();
     const commit = site.lastCommit as { subject: string; date: number };
     expect(commit.subject).toBe("Coding agent: add a dark mode toggle");
@@ -125,6 +135,13 @@ describe("GET projects", () => {
     expect(scratch.name).toBe("scratch");
     expect(scratch.lastCommit).toBeNull();
     expect(scratch.onDesktop).toBe(false);
+  });
+
+  it("points at the picture the box drew for a project, once there is one", async () => {
+    makeRepo("site", { commit: "first" });
+    giveIcon("site");
+    const { projects } = await body();
+    expect(projects[0].iconUrl).toBe("/setup-api/apps/icon/site");
   });
 
   it("lists a folder a run has worked in even before it has a history of its own", async () => {

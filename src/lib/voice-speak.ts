@@ -28,8 +28,12 @@ import crypto from "crypto";
 import { runChild } from "@/lib/child-run";
 import { createSerialLock } from "@/lib/serial-lock";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
-import { cloudSpeechTarget, localCommandPath, cloudVoiceFrom, resolvePreferredEngine, type VoiceConfigView, type VoiceEngine, type VoiceEngineId } from "@/lib/voice-output";
-import { readLocalVoice } from "@/lib/voice-output-store";
+import { getActiveHarness } from "@/lib/harness";
+import { speakWithHermes } from "@/lib/hermes-tts";
+import { buildTtsInventory, KOKORO_STAMP } from "@/lib/local-models";
+import { readConfig } from "@/lib/openclaw-config";
+import { buildVoiceOutputStatus, cloudSpeechTarget, localCommandPath, cloudVoiceFrom, resolvePreferredEngine, type LocalVoiceProbe, type VoiceConfigView, type VoiceEngine, type VoiceEngineId } from "@/lib/voice-output";
+import { readLocalVoice, readVoiceState } from "@/lib/voice-output-store";
 import { DEFAULT_LOCAL_VOICE, isCloudVoiceFor, isLocalVoice } from "@/lib/voice-catalog";
 
 const NO_STORE = { "Cache-Control": "no-store" };
@@ -252,4 +256,70 @@ export async function speakThroughChain(
     first ??= res;
   }
   return first ?? refuse("Could not speak that on this box.", "failed", 500);
+}
+
+/**
+ * Speak a reply with whatever engine this box can speak with right now.
+ *
+ * The assembly that used to sit inside `POST /setup-api/tts/speak`: read what
+ * the box has, work out which engines are configured, and hand the text to the
+ * chain. It moved here because a SECOND caller needed exactly it — the coding
+ * agent's `generate_audio`, which writes a clip into a run's project — and the
+ * two must not be able to synthesise differently: a run whose narration came
+ * out in a different voice from the chat's spoken replies would be a fault
+ * nobody could see until they heard it.
+ *
+ * What is deliberately NOT here is the two gates the speak route keeps: its
+ * same-origin check and the owner's spoken-replies switch. Both are about the
+ * CHAT — "does the owner want the box talking back" — and neither is the right
+ * question to ask of a file being written into a project folder, which has its
+ * own switch.
+ *
+ * The caller decides whether to queue (`withSpeechQueue`) or refuse while the
+ * box is already speaking (`withSpeechLock`); this does neither.
+ *
+ * `speakers` is the same injection point `speakThroughChain` already offers,
+ * passed through so a test can watch the ORDER the engines are tried in
+ * without a real script or a real cloud key. Nothing on the box passes it.
+ *
+ * Never throws: every failure is one of this module's own `refuse()`
+ * responses, so a caller can relay the code and the sentence as they are.
+ */
+export async function speakReply(
+  text: string,
+  speakers?: Record<VoiceEngineId, Speaker>,
+): Promise<Response> {
+  try {
+    // On a box running Hermes the reply is spoken by Hermes' own speech route,
+    // with the provider the Voice tab wrote — the same voice its channel
+    // replies would have, and not necessarily a WAV.
+    if ((await getActiveHarness()) === "hermes") {
+      const spoken = await speakWithHermes(text);
+      if (!spoken.ok) return refuse("Could not speak that on this box.", spoken.code, spoken.status, spoken.reason ? { reason: spoken.reason } : {});
+      return new Response(spoken.audio, { headers: { "Content-Type": spoken.mime, ...NO_STORE } });
+    }
+    const [config, models, state] = await Promise.all([readConfig(), buildTtsInventory(), readVoiceState()]);
+    const installed = models.filter((m) => m.kind === "tts" && m.installed);
+    const command = localCommandPath(config);
+    const probe: LocalVoiceProbe = {
+      providerConfigured: Boolean(command),
+      commandPresent: command ? await fileExists(command) : await fileExists(KOKORO_STAMP),
+      engineInstalled: installed.length > 0,
+      engineNames: installed.map((m) => m.name),
+    };
+    const status = buildVoiceOutputStatus(config, probe, state);
+    return await speakThroughChain(config, status.engines, state.choice, text, speakers ?? { local: speakLocally, cloud: speakInCloud });
+  } catch (err) {
+    console.warn("[voice-speak] speakReply failed:", err instanceof Error ? err.message : err);
+    return refuse("Could not speak that on this box.", "failed", 500);
+  }
+}
+
+async function fileExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
 }

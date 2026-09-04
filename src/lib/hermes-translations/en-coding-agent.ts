@@ -253,6 +253,24 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.autoPrLabel": "Open a pull request and merge it when checks pass",
   "codingAgent.autoPrHint": "Each run works on its own branch, opens a pull request into the project's default branch, and waits for GitHub Actions. It merges only when at least one check actually ran and every one passed — a pull request with no checks is never merged. Needs a GitHub remote.",
   "codingAgent.autoPrFailed": "Could not change the pull-request setting.",
+
+  // What a run may SPEND on the project it builds. Both switches are on unless
+  // the owner turns them off, and each hint names its own cost — the pictures
+  // come out of the ClawBox AI daily allowance, the voice out of the one
+  // synthesis slot the chat shares.
+  "codingAgent.genImagesLabel": "Let runs draw pictures",
+  "codingAgent.genImagesHint": "A run can ask this box to draw artwork for the project it is building, and the box draws the project's desktop icon, favicon.png and favicon.ico by itself shortly after a run starts. Each picture comes out of your ClawBox AI daily allowance; a run gets at most twenty.",
+  "codingAgent.genImagesFailed": "Could not change the picture setting.",
+  "codingAgent.genAudioLabel": "Let runs record speech",
+  "codingAgent.genAudioHint": "A run can have this box speak a line and save it as a sound file in the project — narration, a greeting, a spoken cue. It uses the same voice as your spoken replies and waits its turn behind them; a run gets at most forty clips.",
+  "codingAgent.genAudioFailed": "Could not change the speech setting.",
+
+  // A run that finished on its own keeps whatever it started — the way an app
+  // that serves itself on a port is meant to work — so the page says so and
+  // offers to end it, rather than the device killing it unasked.
+  "codingAgent.leftoverRunning": "Something this run started is still running.",
+  "codingAgent.killLeftover": "End it",
+  "codingAgent.killLeftoverFailed": "Could not end what the run left running.",
   "codingAgent.prOpening": "Opening PR",
   "codingAgent.prWaiting": "Checks {done}/{total}",
   "codingAgent.prMerged": "Merged",
