@@ -224,7 +224,7 @@ function getProviderPillText(option: ChatModelState['options'][number]): string 
 
 import { renderText, plainTextForLabel } from '@/lib/chat-markdown'
 import SnapPreviewOverlay from '@/components/SnapPreviewOverlay'
-import { getSnapRect, getSnapZone, type SnapZone } from '@/lib/window-snap'
+import { DESKTOP_GAP, getSnapRect, getSnapZone, type SnapZone } from '@/lib/window-snap'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import {
   attachmentAcceptAttribute,
@@ -485,12 +485,14 @@ const DEFAULT_PANEL_WIDTH = 420
  * same chat, only wider, so it keeps the popup's radius and shadow and floats
  * clear of the edges instead.
  *
- * Exported because the desktop reserves this strip: `page.tsx` passes the
- * reserved width to windows and to the mascot as `rightInset`, and that
- * reservation has to include the gap or a maximized window slides under it and
- * shows through.
+ * It is the DESKTOP's gap, not the chat's own — the same margin a maximized
+ * window keeps — which is why the number comes from `window-snap`. Still
+ * exported under this name because the desktop reserves this strip: `page.tsx`
+ * passes the reserved width to windows and to the mascot as `rightInset`, and
+ * that reservation has to include the gap or a maximized window slides under
+ * it and shows through.
  */
-export const CHAT_PANEL_GAP = 12
+export const CHAT_PANEL_GAP = DESKTOP_GAP
 
 /** ChromeShelf's height — what the docked chat sits above. */
 const SHELF_HEIGHT_PX = 56
@@ -4615,7 +4617,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const mascotCenterPx = ((mascotX ?? 85) / 100) * winW
   const defaultLeft = Math.max(8, Math.min(mascotCenterPx - size.w / 2, winW - size.w - 8))
   const posStyle: React.CSSProperties = panelMode
-    ? { right: CHAT_PANEL_GAP, top: CHAT_PANEL_GAP, bottom: SHELF_HEIGHT_PX + CHAT_PANEL_GAP }
+    ? {
+        right: DESKTOP_GAP,
+        top: DESKTOP_GAP,
+        // The safe-area inset rides along because a maximized window subtracts
+        // it from its height too; a flat 62 left the panel hanging below the
+        // window's bottom edge on a device that has an inset.
+        bottom: `calc(${SHELF_HEIGHT_PX + DESKTOP_GAP}px + env(safe-area-inset-bottom, 0px))`,
+      }
     : mobile
       ? { left: 0, top: 0, right: 0, bottom: 0 }
       : pos
