@@ -209,6 +209,7 @@ export const zh: Record<string, string> = {
   "skills.filtersButton": "筛选",
   "skills.filtersButtonWithCount": "筛选 ({n})",
   "skills.filtersClearAll": "全部清除",
+  "skills.facetLimit": "一次最多 {n} 项。",
   "skills.filtersClose": "关闭筛选",
   "skills.filtersShowAll": "再显示 {n} 项",
   "skills.filtersShowFewer": "收起",
@@ -276,6 +277,8 @@ export const zh: Record<string, string> = {
   "skills.liveRemoving": "正在移除 {name}",
   "skills.liveRemoved": "{name} 已移除",
   "skills.liveRemoveFailed": "无法移除 {name}",
+  "skills.liveInstallUnknown": "无法确定 {name} 是否已安装",
+  "skills.liveRemoveUnknown": "无法确定 {name} 是否已删除",
   "skills.uninstallFailed": "移除失败",
 
   // === Empty and error states ===
@@ -505,6 +508,10 @@ export const zh: Record<string, string> = {
   "skills.browseUnavailable": "本设备未安装 Hermes，因此无法加载技能目录。",
   "skills.browseFailed": "无法加载技能目录。请重试。",
   "skills.browseBadQuery": "该搜索内容无法使用。请换一些词再试。",
+  "skills.browseBadFilter": "设备拒绝了其中一个筛选条件。请清除筛选条件后重试。",
+  "skills.browseTooManyFilters": "一次使用的筛选条件过多。请去掉几个后重试。",
+  "skills.installUnknownOutcome": "设备返回的内容过长无法读取，因此无法确定“{name}”是否已安装。请先查看“已安装”标签页再重试。",
+  "skills.uninstallUnknownOutcome": "设备返回的内容过长无法读取，因此无法确定“{name}”是否已删除。请先查看“已安装”标签页再重试。",
   "skills.detailFailed": "无法加载该技能的详细信息。请重试。",
   "skills.detailUnavailable": "本设备未安装 Hermes，因此无法加载该技能的详细信息。",
   "skills.detailDocsFailed": "无法加载该技能的完整文档。上方内容来自本设备。",

@@ -28,7 +28,7 @@ import { parseSkillFrontmatter, type SkillFrontmatter } from '@/lib/hermes-skill
 import { removeSkillDir } from '@/lib/hermes-skill-manifest';
 import { getActiveHarness } from '@/lib/harness';
 import { hermesConfigGet } from '@/lib/hermes-config-cache';
-import { isValidSkillName } from '@/lib/hermes-skills';
+import { isValidSkillName, MAX_FACET_SELECTION, REQUEST_REFUSAL } from '@/lib/hermes-skills';
 
 /**
  * Defense-in-depth gate for the skills-store routes: the store is a Hermes
@@ -49,6 +49,37 @@ export async function hermesSkillsGuard(): Promise<NextResponse | null> {
     return NextResponse.json({ error: 'Not found', code: 'not_hermes' }, { status: 404 });
   }
   return null;
+}
+
+/**
+ * The refusal a skills route answers when the CALLER's input is wrong.
+ *
+ * One shape for all of them, so a client can branch on the code and name the
+ * field instead of string-matching the sentence. The sentence itself stays
+ * exactly what it was — the browser's fallback, and the log's — and never
+ * carries a value the caller sent, so a rejected input cannot be echoed back
+ * into the page.
+ */
+export function invalidArgument(field: string, error: string): NextResponse {
+  return NextResponse.json({ error, code: REQUEST_REFUSAL.invalidArgument, field }, { status: 400 });
+}
+
+/**
+ * Its sibling for the one refusal that is not a bad value but too many good
+ * ones. Separate because the remedy is: untick one, not correct one — and
+ * because the rail renders up to MAX_FACET_VALUES options per group while the
+ * route accepts MAX_FACET_SELECTION, so the owner can reach it by clicking.
+ */
+export function tooManyFacets(field: string): NextResponse {
+  return NextResponse.json(
+    {
+      error: `Too many ${field} filters — at most ${MAX_FACET_SELECTION} at a time.`,
+      code: REQUEST_REFUSAL.tooManyFacets,
+      field,
+      limit: MAX_FACET_SELECTION,
+    },
+    { status: 400 },
+  );
 }
 
 export const HERMES_HOME =
@@ -87,15 +118,56 @@ interface HubLock {
   installed?: Record<string, HubLockEntry>;
 }
 
-/** Read the authoritative hub lock file. Missing/unparsable → empty. */
-export async function readHubLock(): Promise<Record<string, HubLockEntry>> {
+/**
+ * Read the authoritative hub lock file, keeping "could not read it" apart from
+ * "it lists nothing".
+ *
+ * The same distinction `pathState` below makes, for the same reason. A lock
+ * that is missing, truncated, mid-write, EACCES or EIO carries no information
+ * about what is installed, and a caller that reads it as an empty lock
+ * concludes that everything was removed. That is survivable behind a clean
+ * `exit 0`; it is not behind a SIGKILL, where a partial write is exactly what
+ * a deadline lands in the middle of.
+ */
+export async function readHubLockState(): Promise<
+  { ok: true; installed: Record<string, HubLockEntry> } | { ok: false }
+> {
+  let raw: string;
   try {
-    const raw = await fs.readFile(HUB_LOCK_PATH, 'utf8');
-    const parsed = JSON.parse(raw) as HubLock;
-    return parsed && typeof parsed.installed === 'object' && parsed.installed ? parsed.installed : {};
-  } catch {
-    return {};
+    raw = await fs.readFile(HUB_LOCK_PATH, 'utf8');
+  } catch (err) {
+    // ENOENT is the only one that proves a lock does not exist — a device with
+    // no store installs. Everything else is the file refusing to be read.
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { ok: true, installed: {} };
+    return { ok: false };
   }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    // `typeof [] === 'object'`, so the array check is not pedantry: a lock that
+    // parsed as an array would otherwise be read as a readable one with no
+    // entries — the very "unreadable means everything went" answer this
+    // function exists to refuse.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false };
+    const installed = (parsed as HubLock).installed;
+    if (installed === undefined) return { ok: true, installed: {} };
+    if (!installed || typeof installed !== 'object' || Array.isArray(installed)) return { ok: false };
+    return { ok: true, installed };
+  } catch {
+    // Truncated or mid-write: the one shape that used to read as "empty".
+    return { ok: false };
+  }
+}
+
+/**
+ * The lenient wrapper every existing caller uses: missing/unparsable → empty.
+ * Correct wherever an unreadable lock and an empty one lead to the same safe
+ * action (listing nothing, or reporting nothing installed) — and NOT correct
+ * where the emptiness is taken as evidence that a removal happened; those
+ * callers ask `readHubLockState` instead.
+ */
+export async function readHubLock(): Promise<Record<string, HubLockEntry>> {
+  const state = await readHubLockState();
+  return state.ok ? state.installed : {};
 }
 
 /**

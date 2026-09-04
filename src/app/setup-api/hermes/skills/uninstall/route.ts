@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { runHermesCli } from "@/lib/hermes-cli";
+import { runHermesCli, type HermesCliResult } from "@/lib/hermes-cli";
 import { isValidSkillName, CLI_FAILURE_SENTENCES, cliFailureCode } from "@/lib/hermes-skills";
 import { parseUninstallOutcome } from "@/lib/hermes-skill-cli-outcome";
 import {
@@ -11,8 +11,10 @@ import {
   isInHubLock,
   readBundledManifestNames,
   readHubLock,
+  readHubLockState,
   resolveUninstallKey,
   verifySkillRemoval,
+  invalidArgument,
 } from "@/lib/hermes-skills-server";
 
 // Uninstall a Hermes skill. The positional argument is the skill NAME (the
@@ -62,16 +64,25 @@ export async function POST(request: Request) {
   const blocked = await hermesSkillsGuard();
   if (blocked) return blocked;
 
-  let body: { id?: unknown };
+  let body: unknown;
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    return invalidArgument("body", "Invalid JSON");
+  }
+  // `null`, an array and a bare string are all valid JSON, and reading `.id`
+  // off the first of them throws OUTSIDE this route's try — an uncoded 500 for
+  // a request that is simply malformed. Same guard the secrets route applies,
+  // for the same reason.
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return invalidArgument("body", "Invalid JSON");
   }
 
-  const requested = typeof body.id === "string" ? body.id.trim() : "";
+  const requested = typeof (body as { id?: unknown }).id === "string"
+    ? ((body as { id: string }).id).trim()
+    : "";
   if (!isValidSkillName(requested)) {
-    return NextResponse.json({ error: "Invalid skill name" }, { status: 400 });
+    return invalidArgument("id", "Invalid skill name");
   }
 
   try {
@@ -101,14 +112,37 @@ export async function POST(request: Request) {
     // after the CLI has run there is no entry left to ask.
     const entry = hubLockEntry(await readHubLock(), id);
     const hadEntry = entry !== undefined;
-    const r = await runHermesCli(["skills", "uninstall", id], {
-      timeoutMs: 30_000,
-      input: "y\n",
-    });
+    // A DEADLINE IS NOT AN OUTCOME. `runHermesCli` throws when it kills the
+    // process, and this route's catch turned every throw into a 502 — so a
+    // removal that deleted the skill and then hung (on the prompt, on a slow
+    // fs sync, on the interpreter's teardown) was reported as "Uninstall
+    // failed" with the row still on screen, and the owner's next move was to
+    // remove something that was already gone.
+    //
+    // So on a timeout we do not answer yet: we fall through to the lock, which
+    // is the truth about what came off — exactly the rule the install route
+    // applies to what landed. `timedOut` steers only the two branches that
+    // still need the stdout it no longer has.
+    let r: HermesCliResult;
+    let timedOut = false;
+    try {
+      r = await runHermesCli(["skills", "uninstall", id], {
+        timeoutMs: 30_000,
+        input: "y\n",
+      });
+    } catch (err) {
+      // Anything that is not a deadline is still a failure with no verdict —
+      // the outer catch classifies it and answers with its code. Classified by
+      // `cliFailureCode`, which owns this mapping, rather than by a second copy
+      // of its regex three lines from a call to it.
+      if (cliFailureCode(err) !== "cli_timeout") throw err;
+      timedOut = true;
+      r = { code: 0, stdout: "", stderr: "" };
+    }
     // The skill directory may be gone — drop the cached installed list before
     // we answer so the client's re-fetch can't be served the pre-removal walk.
     invalidateInstalledCache();
-    if (r.code !== 0) {
+    if (!timedOut && r.code !== 0) {
       // Raw stderr can carry a Python traceback with the binary path and local
       // install dirs — log it, never send it to the browser.
       console.error("[hermes skills uninstall] exit", r.code, r.stderr);
@@ -118,7 +152,11 @@ export async function POST(request: Request) {
       );
     }
 
-    const outcome = parseUninstallOutcome(r.stdout, r.stderr);
+    // Nothing to parse when the process was killed: `unknown` is the honest
+    // kind, and it is the one the lock check below already handles.
+    const outcome = timedOut
+      ? ({ kind: "unknown" } as const)
+      : parseUninstallOutcome(r.stdout, r.stderr);
     if (outcome.kind === "not-installed") {
       // The CLI cannot tell a skill that shipped with the device from a name
       // it has never seen — the bundled manifest can, and the difference is
@@ -156,9 +194,52 @@ export async function POST(request: Request) {
     // that survived contradicts anything the output said — and for output this
     // parser does not recognise, only the entry's disappearance proves a
     // removal.
-    const stillLocked = await isInHubLock(id);
+    //
+    // On the TIMEOUT path the lock is the only evidence there is, so it has to
+    // be evidence: `readHubLock` reads a truncated or unreadable file as an
+    // empty one, and a deadline that SIGKILLs the CLI mid-write is precisely
+    // when that shape occurs. Read as "empty", it would say every entry went —
+    // and this route would then delete the directory too and answer ok, while
+    // the lock listed no skills at all. So an unreadable lock proves nothing
+    // here and the deadline is reported instead.
+    const lockState = await readHubLockState();
+    if (timedOut && !lockState.ok) {
+      console.error("[hermes skills uninstall] timed out and the hub lock could not be read", JSON.stringify(id));
+      // Its own code, not `cli_timeout`: a deadline that left the skill plainly
+      // still listed IS a failure, and this one is the other thing — the
+      // removal is UNPROVEN. The store says so rather than painting a red
+      // "Uninstall failed" over a skill that may well be gone.
+      return NextResponse.json(
+        {
+          error: "The device ran out of time and could not confirm whether the skill was removed.",
+          code: "uninstall_unproven",
+        },
+        { status: 502 },
+      );
+    }
+    // The SAME snapshot the check above validated. Asking `isInHubLock` here
+    // would be a second, lenient read of a file a concurrent rewrite can
+    // truncate between the two — and a truncated read answers "not there",
+    // which is exactly the evidence this branch must not accept.
+    // (`isInHubLock(id)` with no identifier is this same key lookup; the
+    // fallback is only reachable on the exit-0 path, where an unreadable lock
+    // reading as empty is the behaviour that was already there and that the
+    // CLI's own exit code and printed outcome are weighed against.)
+    const stillLocked = lockState.ok
+      ? Object.prototype.hasOwnProperty.call(lockState.installed, id)
+      : await isInHubLock(id);
     const removed = !stillLocked && (outcome.kind === "uninstalled" || hadEntry);
     if (!removed) {
+      if (timedOut) {
+        // It ran out of time AND nothing came off. There is no outcome to
+        // invent: the deadline is the one thing that is true, and retrying is
+        // the remedy it leaves open.
+        console.error("[hermes skills uninstall] timed out without removing", JSON.stringify(id));
+        return NextResponse.json(
+          { error: CLI_FAILURE_SENTENCES.cli_timeout, code: "cli_timeout" },
+          { status: 502 },
+        );
+      }
       console.error("[hermes skills uninstall] exit 0 without removing", outcome.kind, r.stdout);
       return NextResponse.json(
         {

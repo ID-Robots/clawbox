@@ -209,6 +209,7 @@ export const it: Record<string, string> = {
   "skills.filtersButton": "Filtri",
   "skills.filtersButtonWithCount": "Filtri ({n})",
   "skills.filtersClearAll": "Cancella tutto",
+  "skills.facetLimit": "Al massimo {n} alla volta.",
   "skills.filtersClose": "Chiudi i filtri",
   "skills.filtersShowAll": "Mostra altri {n}",
   "skills.filtersShowFewer": "Mostra meno",
@@ -276,6 +277,8 @@ export const it: Record<string, string> = {
   "skills.liveRemoving": "Rimozione di {name} in corso",
   "skills.liveRemoved": "{name} è stata rimossa",
   "skills.liveRemoveFailed": "Non è stato possibile rimuovere {name}",
+  "skills.liveInstallUnknown": "Non è stato possibile sapere se {name} sia stata installata",
+  "skills.liveRemoveUnknown": "Non è stato possibile sapere se {name} sia stata rimossa",
   "skills.uninstallFailed": "Disinstallazione non riuscita",
 
   // === Empty and error states ===
@@ -505,6 +508,10 @@ export const it: Record<string, string> = {
   "skills.browseUnavailable": "Hermes non è installato su questo dispositivo, quindi il catalogo delle competenze non può essere caricato.",
   "skills.browseFailed": "Non è stato possibile caricare il catalogo delle competenze. Riprovi.",
   "skills.browseBadQuery": "Questa ricerca non può essere usata. Provi con altre parole.",
+  "skills.browseBadFilter": "Il dispositivo ha rifiutato uno dei filtri. Cancelli i filtri e riprovi.",
+  "skills.browseTooManyFilters": "Troppi filtri contemporaneamente. Ne rimuova alcuni e riprovi.",
+  "skills.installUnknownOutcome": "La risposta del dispositivo era troppo lunga da leggere, quindi non si sa se «{name}» sia stata installata. Controlli la scheda Installate prima di riprovare.",
+  "skills.uninstallUnknownOutcome": "La risposta del dispositivo era troppo lunga da leggere, quindi non si sa se «{name}» sia stata rimossa. Controlli la scheda Installate prima di riprovare.",
   "skills.detailFailed": "Non è stato possibile caricare i dettagli di questa competenza. Riprovi.",
   "skills.detailUnavailable": "Hermes non è installato su questo dispositivo, quindi i dettagli di questa competenza non possono essere caricati.",
   "skills.detailDocsFailed": "Non è stato possibile caricare la documentazione completa di questa competenza. I dati qui sopra provengono dal dispositivo.",

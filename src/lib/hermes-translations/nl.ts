@@ -198,6 +198,7 @@ export const nl: Record<string, string> = {
   "skills.filtersButton": "Filteren",
   "skills.filtersButtonWithCount": "Filteren ({n})",
   "skills.filtersClearAll": "Alles wissen",
+  "skills.facetLimit": "Maximaal {n} tegelijk.",
   "skills.filtersClose": "Filters sluiten",
   "skills.filtersShowAll": "Nog {n} tonen",
   "skills.filtersShowFewer": "Minder tonen",
@@ -265,6 +266,8 @@ export const nl: Record<string, string> = {
   "skills.liveRemoving": "{name} verwijderen",
   "skills.liveRemoved": "{name} is verwijderd",
   "skills.liveRemoveFailed": "{name} kon niet worden verwijderd",
+  "skills.liveInstallUnknown": "Kon niet vaststellen of {name} is geïnstalleerd",
+  "skills.liveRemoveUnknown": "Kon niet vaststellen of {name} is verwijderd",
   "skills.uninstallFailed": "Verwijderen mislukt",
 
   // === Empty and error states ===
@@ -494,6 +497,10 @@ export const nl: Record<string, string> = {
   "skills.browseUnavailable": "Hermes is niet op dit apparaat geïnstalleerd, dus de skillcatalogus kan niet worden geladen.",
   "skills.browseFailed": "De skillcatalogus kon niet worden geladen. Probeer het opnieuw.",
   "skills.browseBadQuery": "Deze zoekopdracht kan niet worden gebruikt. Probeer andere woorden.",
+  "skills.browseBadFilter": "Het apparaat heeft een van de filters geweigerd. Wis de filters en probeer het opnieuw.",
+  "skills.browseTooManyFilters": "Te veel filters tegelijk. Verwijder er een paar en probeer het opnieuw.",
+  "skills.installUnknownOutcome": "Het antwoord van het apparaat was te lang om te lezen, dus of “{name}” is geïnstalleerd is onbekend. Controleer het tabblad Geïnstalleerd voordat u het opnieuw probeert.",
+  "skills.uninstallUnknownOutcome": "Het antwoord van het apparaat was te lang om te lezen, dus of “{name}” is verwijderd is onbekend. Controleer het tabblad Geïnstalleerd voordat u het opnieuw probeert.",
   "skills.detailFailed": "De details van deze skill konden niet worden geladen. Probeer het opnieuw.",
   "skills.detailUnavailable": "Hermes is niet op dit apparaat geïnstalleerd, dus de details van deze skill kunnen niet worden geladen.",
   "skills.detailDocsFailed": "De volledige documentatie van deze skill kon niet worden geladen. De gegevens hierboven komen van het apparaat.",

@@ -197,6 +197,7 @@ export const de: Record<string, string> = {
   "skills.filtersButton": "Filter",
   "skills.filtersButtonWithCount": "Filter ({n})",
   "skills.filtersClearAll": "Alle zurücksetzen",
+  "skills.facetLimit": "Höchstens {n} gleichzeitig.",
   "skills.filtersClose": "Filter schließen",
   "skills.filtersShowAll": "{n} weitere anzeigen",
   "skills.filtersShowFewer": "Weniger anzeigen",
@@ -264,6 +265,8 @@ export const de: Record<string, string> = {
   "skills.liveRemoving": "{name} wird entfernt",
   "skills.liveRemoved": "{name} wurde entfernt",
   "skills.liveRemoveFailed": "{name} konnte nicht entfernt werden",
+  "skills.liveInstallUnknown": "Konnte nicht feststellen, ob {name} installiert wurde",
+  "skills.liveRemoveUnknown": "Konnte nicht feststellen, ob {name} entfernt wurde",
   "skills.uninstallFailed": "Entfernen fehlgeschlagen",
 
   // === Empty and error states ===
@@ -493,6 +496,10 @@ export const de: Record<string, string> = {
   "skills.browseUnavailable": "Hermes ist auf diesem Gerät nicht installiert, daher kann der Skill-Katalog nicht geladen werden.",
   "skills.browseFailed": "Der Skill-Katalog konnte nicht geladen werden. Versuchen Sie es erneut.",
   "skills.browseBadQuery": "Diese Suche kann nicht verwendet werden. Versuchen Sie es mit anderen Wörtern.",
+  "skills.browseBadFilter": "Das Gerät hat einen der Filter abgelehnt. Löschen Sie die Filter und versuchen Sie es erneut.",
+  "skills.browseTooManyFilters": "Zu viele Filter auf einmal. Entfernen Sie einige und versuchen Sie es erneut.",
+  "skills.installUnknownOutcome": "Die Antwort des Geräts war zu lang zum Lesen, daher ist unklar, ob „{name}“ installiert wurde. Prüfen Sie den Tab „Installiert“, bevor Sie es erneut versuchen.",
+  "skills.uninstallUnknownOutcome": "Die Antwort des Geräts war zu lang zum Lesen, daher ist unklar, ob „{name}“ entfernt wurde. Prüfen Sie den Tab „Installiert“, bevor Sie es erneut versuchen.",
   "skills.detailFailed": "Die Details dieses Skills konnten nicht geladen werden. Versuchen Sie es erneut.",
   "skills.detailUnavailable": "Hermes ist auf diesem Gerät nicht installiert, daher können die Details dieses Skills nicht geladen werden.",
   "skills.detailDocsFailed": "Die vollständige Dokumentation dieses Skills konnte nicht geladen werden. Die Angaben oben stammen vom Gerät.",

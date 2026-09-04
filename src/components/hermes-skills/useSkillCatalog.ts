@@ -10,6 +10,7 @@ import {
   type HermesSkill,
   type SortOption,
   isBrowseFailureCode,
+  MAX_FACET_SELECTION,
 } from '@/lib/hermes-skills';
 
 // Browse-tab data: one endpoint (/browse) serves listing, search, the facet rail
@@ -146,10 +147,16 @@ export function useSkillCatalog(active: boolean): CatalogController {
     (group: BrowseFacetGroup, id: string) => {
       applySelection((prev) => {
         const current = prev[group];
-        return {
-          ...prev,
-          [group]: current.includes(id) ? current.filter((v) => v !== id) : [...current, id],
-        };
+        if (current.includes(id)) {
+          return { ...prev, [group]: current.filter((v) => v !== id) };
+        }
+        // The rail renders up to MAX_FACET_VALUES options per group and the
+        // route accepts MAX_FACET_SELECTION, so a group with more than twelve
+        // values let the owner CLICK their way into a 400. Untickable is the
+        // honest state for a cap — the alternative was a full grid replaced by
+        // a device-failure card because of one checkbox.
+        if (current.length >= MAX_FACET_SELECTION) return prev;
+        return { ...prev, [group]: [...current, id] };
       });
     },
     [applySelection],
@@ -285,7 +292,22 @@ export function useSkillCatalog(active: boolean): CatalogController {
   }, [loading, appending, hasMore, page, fetchPage]);
 
   const reload = useCallback(() => setReloadKey((k) => k + 1), []);
-  const clearFilters = useCallback(() => setSelected(EMPTY_SELECTION), []);
+  /**
+   * Put the whole request back to its defaults, and make sure it is re-sent.
+   *
+   * Everything the route can refuse with `invalid_argument` is reset here, not
+   * just the rail: `sort` is one of those branches, and a stale bundle sending
+   * a value a newer route no longer accepts is exactly when the owner presses
+   * this. And `setSelected(EMPTY_SELECTION)` alone is a no-op when nothing is
+   * ticked — same object reference, so React bails out, `queryKey` does not
+   * move and the fetch effect does not run. Bumping `reloadKey` is what turns
+   * "clear" into an action rather than a button that does nothing.
+   */
+  const clearFilters = useCallback(() => {
+    setSelected(EMPTY_SELECTION);
+    setSort('relevance');
+    setReloadKey((k) => k + 1);
+  }, []);
 
   const activeCount =
     selected.trust.length + selected.source.length + selected.category.length + selected.provider.length;

@@ -65,7 +65,37 @@ import { useSkillDetail } from './hermes-skills/useSkillDetail';
 // the presentation in ./hermes-skills/*.
 
 type AnySkill = HermesSkill | InstalledHermesSkill;
-type ProgressState = { status: 'working' | 'success' | 'error'; message?: string };
+/**
+ * `unknown` is not a failure. `too_large` means the CLI's own output overran
+ * the read cap AFTER it ran, so whether the skill landed is not established —
+ * red chrome and "could not install" would be the false failure the copy for
+ * that code exists to remove.
+ */
+type ProgressState = { status: 'working' | 'success' | 'error' | 'unknown'; message?: string };
+
+/**
+ * A refusal whose CODE says the outcome was not established, not that it failed.
+ *
+ * `too_large` — the CLI ran and its output overran the read cap.
+ * `uninstall_unproven` — the CLI hit its deadline AND the hub lock could not be
+ *   read, so the one piece of evidence a removal has is missing. (A deadline
+ *   that left the skill plainly still listed is NOT here: that is a failure,
+ *   and it answers `cli_timeout`.)
+ */
+const UNKNOWN_OUTCOME_CODES = new Set(['too_large', 'uninstall_unproven']);
+
+class RefusalError extends Error {
+  readonly outcome: 'failed' | 'unknown';
+  constructor(message: string, code: unknown) {
+    super(message);
+    this.name = 'RefusalError';
+    this.outcome = typeof code === 'string' && UNKNOWN_OUTCOME_CODES.has(code) ? 'unknown' : 'failed';
+  }
+}
+
+function outcomeOf(err: unknown): 'failed' | 'unknown' {
+  return err instanceof RefusalError ? err.outcome : 'failed';
+}
 
 /**
  * What a Remove button needs: the lock.json key the CLI takes, the key this
@@ -121,10 +151,27 @@ function installRefusalCopy(COPY: SkillsCopy, data: RefusalBody, name: string): 
     // case with its own line; the rest are one failure to the owner.
     case 'cli_timeout':
       return COPY.installTimeout(name);
+    // ...except `too_large`, which is not a failure: the installer's output
+    // overran the read cap AFTER it ran, so whether the skill landed is not
+    // known. The MCP tool has always told the agent exactly that ("call
+    // skill_list and look for it before deciding anything"); the store said
+    // "Install failed", so one device state had two contradictory stories.
+    case 'too_large':
+      return COPY.installUnknownOutcome(name);
     case 'cli_missing':
     case 'cli_failed':
-    case 'too_large':
     case 'cancelled':
+      return COPY.installFailed;
+    // The request itself was refused. On THIS route the offending field is
+    // never something the owner typed — the store POSTs `skill.id` straight
+    // off a browse card — so there is nothing for them to correct and the
+    // generic line is the honest one. (The browse tab is the opposite case:
+    // its 400s name the rail's own values and get their own copy.) Listed
+    // rather than left to `default`, because `refusalLine` hands an unknown
+    // code the route's English sentence, which is what this map exists to
+    // stop.
+    case 'invalid_argument':
+    case 'too_many_facets':
       return COPY.installFailed;
     default:
       return null;
@@ -148,12 +195,18 @@ function uninstallRefusalCopy(COPY: SkillsCopy, data: RefusalBody, name: string)
         : [];
       return candidates.length ? COPY.ambiguousName(name, candidates) : null;
     }
+    case 'too_large':
+    case 'uninstall_unproven':
+      return COPY.uninstallUnknownOutcome(name);
     case 'uninstall_failed':
     case 'cli_timeout':
     case 'cli_missing':
     case 'cli_failed':
-    case 'too_large':
     case 'cancelled':
+    // Same reasoning as the install map: the id came from the row the owner
+    // clicked, not from anything they typed.
+    case 'invalid_argument':
+    case 'too_many_facets':
       return COPY.uninstallFailed;
     default:
       return null;
@@ -344,7 +397,10 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         // has no copy for — still better than "HTTP 502".
         if (!res.ok) {
           const body = data ?? {};
-          throw new Error(refusalLine(installRefusalCopy(COPY, body, skill.name), body, res.status, COPY.installFailed, '[skills install]'));
+          throw new RefusalError(
+            refusalLine(installRefusalCopy(COPY, body, skill.name), body, res.status, COPY.installFailed, '[skills install]'),
+            body.code,
+          );
         }
         setProgressAutoClear(key, { status: 'success' }, 2000);
         // The detail answer changes completely once a skill is on disk (full
@@ -355,12 +411,18 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         setLive(COPY.liveInstalled(skill.name));
         await installed.refresh();
       } catch (err) {
+        const outcome = outcomeOf(err);
         setProgressAutoClear(
           key,
-          { status: 'error', message: err instanceof Error ? err.message : COPY.installFailed },
+          { status: outcome === 'unknown' ? 'unknown' : 'error', message: err instanceof Error ? err.message : COPY.installFailed },
           6000,
         );
-        setLive(COPY.liveInstallFailed(skill.name));
+        setLive(outcome === 'unknown' ? COPY.liveInstallUnknown(skill.name) : COPY.liveInstallFailed(skill.name));
+        // The copy for an unknown outcome sends the owner to the Installed tab.
+        // Sending them to a list this request never re-read would show them the
+        // pre-request state — and a skill that DID land would be missing from
+        // the one place the message told them to look.
+        if (outcome === 'unknown') await installed.refresh();
       }
     },
     [COPY, detail, installed, setProgressAutoClear],
@@ -387,7 +449,10 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         }
         if (!res.ok) {
           const body = data ?? {};
-          throw new Error(refusalLine(uninstallRefusalCopy(COPY, body, name), body, res.status, COPY.uninstallFailed, '[skills uninstall]'));
+          throw new RefusalError(
+            refusalLine(uninstallRefusalCopy(COPY, body, name), body, res.status, COPY.uninstallFailed, '[skills uninstall]'),
+            body.code,
+          );
         }
         const timer = timers.current.get(key);
         if (timer) clearTimeout(timer);
@@ -404,12 +469,16 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         setLive(COPY.liveRemoved(name));
         await installed.refresh();
       } catch (err) {
+        const outcome = outcomeOf(err);
         setProgressAutoClear(
           key,
-          { status: 'error', message: err instanceof Error ? err.message : COPY.uninstallFailed },
+          { status: outcome === 'unknown' ? 'unknown' : 'error', message: err instanceof Error ? err.message : COPY.uninstallFailed },
           6000,
         );
-        setLive(COPY.liveRemoveFailed(name));
+        setLive(outcome === 'unknown' ? COPY.liveRemoveUnknown(name) : COPY.liveRemoveFailed(name));
+        // Same rule as the install path: the row the message tells them to
+        // check has to be the one the device holds now, not the one from before.
+        if (outcome === 'unknown') await installed.refresh();
       }
     },
     [COPY, detail, installed, setProgressAutoClear],
@@ -431,10 +500,13 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
           </span>
         );
       }
-      if (state?.status === 'error') {
+      if (state?.status === 'error' || state?.status === 'unknown') {
         return (
           <span className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs text-red-400 line-clamp-1" title={state.message}>
+            <span
+              className={`text-xs line-clamp-1 ${state.status === 'unknown' ? 'text-amber-400' : 'text-red-400'}`}
+              title={state.message}
+            >
               {state.message}
             </span>
             {/*
@@ -494,9 +566,12 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
       if (state?.status === 'working') {
         return <span className="text-xs text-[var(--text-secondary)]">{COPY.removing}</span>;
       }
-      if (state?.status === 'error') {
+      if (state?.status === 'error' || state?.status === 'unknown') {
         return (
-          <span className="text-xs text-red-400 line-clamp-1" title={state.message}>
+          <span
+            className={`text-xs line-clamp-1 ${state.status === 'unknown' ? 'text-amber-400' : 'text-red-400'}`}
+            title={state.message}
+          >
             {state.message}
           </span>
         );
@@ -903,6 +978,9 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
   const q = catalog.query.trim();
   /** The one browse refusal the owner caused, and the only one Retry cannot fix. */
   const badQuery = catalog.error === 'bad_query';
+  // A refusal the owner can undo by unticking, not by retrying: the rail's own
+  // values, refused by the route. Retry resends exactly what was rejected.
+  const badFilter = catalog.error === 'invalid_argument' || catalog.error === 'too_many_facets';
   const rangeFrom = catalog.results.length ? 1 : 0;
   // Two ways to earn the first-run panel: the device says it is still building
   // the index (`preparing` — true even though the request has COMPLETED, which
@@ -1080,12 +1158,14 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
               // device's: Retry re-sends the same rejected text, so that case
               // gets the search's own icon and the button that empties it.
               <EmptyState
-                icon={badQuery ? 'search_off' : 'error'}
-                tone={badQuery ? 'muted' : 'danger'}
+                icon={badQuery || badFilter ? 'search_off' : 'error'}
+                tone={badQuery || badFilter ? 'muted' : 'danger'}
                 title={COPY.browseError(catalog.error)}
                 action={
                   badQuery ? (
                     <PrimaryButton onClick={() => catalog.setQuery('')}>{COPY.clearSearch}</PrimaryButton>
+                  ) : badFilter ? (
+                    <PrimaryButton onClick={catalog.clearFilters}>{COPY.filtersClearAll}</PrimaryButton>
                   ) : (
                     <PrimaryButton onClick={catalog.reload}>{COPY.retry}</PrimaryButton>
                   )
@@ -1152,7 +1232,11 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
                 icon="error"
                 tone="danger"
                 title={COPY.installedError}
-                hint={installed.error}
+                // No hint: the route used to answer the raw exception here — an
+                // absolute device path under a localised header — and now
+                // answers one fixed English sentence that says exactly what the
+                // localised title above already says. A second line in a
+                // language the owner may not read adds nothing.
                 action={<PrimaryButton onClick={() => installed.refresh()}>{COPY.retry}</PrimaryButton>}
               />
             )}

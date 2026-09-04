@@ -329,7 +329,15 @@ export function isCliFailureCode(value: unknown): value is CliFailureCode {
  * you type — is a 400, and a 400 carrying no code read as "the catalogue could
  * not be loaded, retry": the wrong story and a button that cannot help.
  */
-export const BROWSE_FAILURE_CODES = [...CLI_FAILURE_CODES, 'bad_query'] as const;
+export const BROWSE_FAILURE_CODES = [
+  ...CLI_FAILURE_CODES,
+  'bad_query',
+  // The rail's own refusals. Both are the owner's to undo — an unticking, not
+  // a retry — and until TASK-658 both arrived code-less and were painted as
+  // "couldn't load the catalogue, retry", whose button resends the same input.
+  'invalid_argument',
+  'too_many_facets',
+] as const;
 export type BrowseFailureCode = (typeof BROWSE_FAILURE_CODES)[number];
 
 export function isBrowseFailureCode(value: unknown): value is BrowseFailureCode {
@@ -365,6 +373,39 @@ export const CLI_FAILURE_SENTENCES: Record<CliFailureCode, string> = {
   cancelled: 'The request was cancelled.',
   too_large: "The device's answer was too large to use.",
 };
+
+/**
+ * Why a skills route refused the REQUEST — as opposed to why the CLI behind it
+ * could not answer (`CLI_FAILURE_CODES` above).
+ *
+ * These are the refusals the caller can fix, and until TASK-658 every one of
+ * them was a bare English sentence: `{"error":"Invalid sort"}` and nothing
+ * else. The store has no way to read a sentence, so all ten of them landed on
+ * the catalogue's "couldn't load, retry" — the wrong story, and a button whose
+ * only effect is to resend the input that was just rejected.
+ *
+ * `invalid_argument` carries a `field` naming WHICH input, because "something
+ * you sent was wrong" is not a next step. `too_many_facets` is separated from
+ * it deliberately: too many valid values is a different remedy (untick one)
+ * from one invalid value, and the browse route could not tell them apart at
+ * all — `facetParam` returned the same `null` for both.
+ */
+export const REQUEST_REFUSAL_CODES = ['invalid_argument', 'too_many_facets', 'not_found'] as const;
+export type RequestRefusalCode = (typeof REQUEST_REFUSAL_CODES)[number];
+
+/**
+ * The names the routes emit, so a producer cannot spell one differently from
+ * the vocabulary that documents it.
+ */
+export const REQUEST_REFUSAL = {
+  invalidArgument: 'invalid_argument',
+  tooManyFacets: 'too_many_facets',
+  notFound: 'not_found',
+} as const satisfies Record<string, RequestRefusalCode>;
+
+export function isRequestRefusalCode(value: unknown): value is RequestRefusalCode {
+  return typeof value === 'string' && (REQUEST_REFUSAL_CODES as readonly string[]).includes(value);
+}
 
 /** How many values one facet group may carry, and how many may be selected. */
 export const MAX_FACET_VALUES = 24;

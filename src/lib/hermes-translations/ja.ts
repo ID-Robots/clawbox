@@ -200,6 +200,7 @@ export const ja: Record<string, string> = {
   "skills.filtersButton": "絞り込み",
   "skills.filtersButtonWithCount": "絞り込み ({n})",
   "skills.filtersClearAll": "すべて解除",
+  "skills.facetLimit": "一度に最大 {n} 件までです。",
   "skills.filtersClose": "絞り込みを閉じる",
   "skills.filtersShowAll": "他 {n} 件を表示",
   "skills.filtersShowFewer": "表示を減らす",
@@ -267,6 +268,8 @@ export const ja: Record<string, string> = {
   "skills.liveRemoving": "{name} を削除しています",
   "skills.liveRemoved": "{name} を削除しました",
   "skills.liveRemoveFailed": "{name} を削除できませんでした",
+  "skills.liveInstallUnknown": "{name} がインストールされたかどうか確認できませんでした",
+  "skills.liveRemoveUnknown": "{name} が削除されたかどうか確認できませんでした",
   "skills.uninstallFailed": "アンインストールに失敗しました",
 
   // === Empty and error states ===
@@ -496,6 +499,10 @@ export const ja: Record<string, string> = {
   "skills.browseUnavailable": "この本体には Hermes がインストールされていないため、スキルカタログを読み込めません。",
   "skills.browseFailed": "スキルカタログを読み込めませんでした。もう一度お試しください。",
   "skills.browseBadQuery": "この検索語は使用できません。別の言葉でお試しください。",
+  "skills.browseBadFilter": "デバイスがフィルターの一つを拒否しました。フィルターをクリアして、もう一度お試しください。",
+  "skills.browseTooManyFilters": "一度に指定したフィルターが多すぎます。いくつか外して、もう一度お試しください。",
+  "skills.installUnknownOutcome": "デバイスの応答が長すぎて読み取れなかったため、「{name}」がインストールされたかどうかは不明です。もう一度試す前に「インストール済み」タブをご確認ください。",
+  "skills.uninstallUnknownOutcome": "デバイスの応答が長すぎて読み取れなかったため、「{name}」が削除されたかどうかは不明です。もう一度試す前に「インストール済み」タブをご確認ください。",
   "skills.detailFailed": "このスキルの詳細を読み込めませんでした。もう一度お試しください。",
   "skills.detailUnavailable": "この本体には Hermes がインストールされていないため、このスキルの詳細を読み込めません。",
   "skills.detailDocsFailed": "このスキルの完全なドキュメントを読み込めませんでした。上に表示されている内容は本体から取得したものです。",

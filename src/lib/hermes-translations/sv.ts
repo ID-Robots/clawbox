@@ -194,6 +194,7 @@ export const sv: Record<string, string> = {
   "skills.filtersButton": "Filter",
   "skills.filtersButtonWithCount": "Filter ({n})",
   "skills.filtersClearAll": "Rensa alla",
+  "skills.facetLimit": "Högst {n} åt gången.",
   "skills.filtersClose": "Stäng filter",
   "skills.filtersShowAll": "Visa {n} till",
   "skills.filtersShowFewer": "Visa färre",
@@ -261,6 +262,8 @@ export const sv: Record<string, string> = {
   "skills.liveRemoving": "Tar bort {name}",
   "skills.liveRemoved": "{name} har tagits bort",
   "skills.liveRemoveFailed": "Det gick inte att ta bort {name}",
+  "skills.liveInstallUnknown": "Kunde inte avgöra om {name} installerades",
+  "skills.liveRemoveUnknown": "Kunde inte avgöra om {name} togs bort",
   "skills.uninstallFailed": "Avinstallationen misslyckades",
 
   // === Empty and error states ===
@@ -490,6 +493,10 @@ export const sv: Record<string, string> = {
   "skills.browseUnavailable": "Hermes är inte installerat på den här enheten, så skillkatalogen kan inte läsas in.",
   "skills.browseFailed": "Skillkatalogen kunde inte läsas in. Försök igen.",
   "skills.browseBadQuery": "Den här sökningen går inte att använda. Prova andra ord.",
+  "skills.browseBadFilter": "Enheten avvisade ett av filtren. Rensa filtren och försök igen.",
+  "skills.browseTooManyFilters": "För många filter samtidigt. Ta bort några och försök igen.",
+  "skills.installUnknownOutcome": "Enhetens svar var för långt för att läsas, så om ”{name}” installerades är okänt. Kontrollera fliken Installerade innan du försöker igen.",
+  "skills.uninstallUnknownOutcome": "Enhetens svar var för långt för att läsas, så om ”{name}” togs bort är okänt. Kontrollera fliken Installerade innan du försöker igen.",
   "skills.detailFailed": "Det gick inte att läsa in den här skillens detaljer. Försök igen.",
   "skills.detailUnavailable": "Hermes är inte installerat på den här enheten, så den här skillens detaljer kan inte läsas in.",
   "skills.detailDocsFailed": "Det gick inte att läsa in den här skillens fullständiga dokumentation. Uppgifterna ovan kommer från enheten.",

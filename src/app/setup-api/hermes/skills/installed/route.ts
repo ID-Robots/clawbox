@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { enumerateInstalledSkills, hermesSkillsGuard } from "@/lib/hermes-skills-server";
+import { cliFailureCode } from "@/lib/hermes-skills";
 
 // Installed-skill enumeration for the store's "Installed" tab and for marking
 // browse results as already installed. Reads disk (lock.json + the SKILL.md
@@ -36,8 +37,17 @@ export async function GET() {
         .sort((a, b) => b.count - a.count || a.id.localeCompare(b.id)),
     });
   } catch (err) {
+    // The try covers the SKILL.md walk, the lock read and a `hermes config get`
+    // — an I/O failure here names absolute device paths, and the raw message
+    // was painted as the Installed tab's hint. Same rule as every other route
+    // in this family: a fixed sentence and a CLASSIFIED code out, the reason to
+    // the log. Classified, not hard-coded `cli_failed`: the config read reaches
+    // `runHermesCli`, so a device with no `hermes` throws "not installed" here,
+    // and that is the one code the MCP maps to "do not retry".
+    const code = cliFailureCode(err);
+    console.error("[hermes skills installed] read failed", code, err instanceof Error ? err.message : err);
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Could not read installed skills" },
+      { error: "Could not read the installed skills on this device.", code },
       { status: 500 },
     );
   }

@@ -11,6 +11,7 @@ import {
   checkInstallIdentifier,
   cliFailureCode,
   cliInstallIdentifier,
+  REQUEST_REFUSAL,
 } from "@/lib/hermes-skills";
 import { parseAmbiguousSkills } from "@/lib/hermes-skill-cli-outcome";
 import {
@@ -22,6 +23,7 @@ import {
   readScanReport,
   scanReportFromLock,
   statSkillDir,
+  invalidArgument,
 } from "@/lib/hermes-skills-server";
 import { getCatalogRecord } from "@/lib/hermes-skill-index";
 import { extractHeadings, parseSkillFrontmatter, type SkillFrontmatter } from "@/lib/hermes-skill-frontmatter";
@@ -253,7 +255,7 @@ export async function GET(request: Request) {
   // Installed tab may resolve a bare name against the disk.
   const fromInstalled = params.get("scope") === "installed";
   if (!checkInstallIdentifier(id).ok) {
-    return NextResponse.json({ error: "Invalid skill id" }, { status: 400 });
+    return invalidArgument("id", "Invalid skill id");
   }
 
   try {
@@ -464,7 +466,7 @@ async function remoteDocs(id: string, signal: AbortSignal): Promise<NextResponse
     if (candidates.length) {
       return NextResponse.json({ ambiguous: true, query: id, candidates });
     }
-    return NextResponse.json({ error: "Skill not found" }, { status: 404 });
+    return NextResponse.json({ error: "Skill not found", code: REQUEST_REFUSAL.notFound }, { status: 404 });
   }
 
   // ONLY prose survives the Rich panel — list fields (platforms/tags) are

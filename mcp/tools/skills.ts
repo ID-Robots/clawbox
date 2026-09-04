@@ -267,6 +267,22 @@ const uninstallRules = (name: string, shown = ""): ErrorRule[] => [
 ];
 
 const CATALOG_RULES: ErrorRule[] = [
+  // The browse route's 400s. Both tools that install these rules pre-validate
+  // with the ROUTE's own checks — `skill_search` calls `isValidQuery` and
+  // `skill_info` calls `checkInstallIdentifier` before the request goes out,
+  // and neither has a facet parameter at all — so a 400 from here is a device
+  // whose validation has moved ahead of this build, not an argument the agent
+  // could have got right. Without a rule it lands on the generic
+  // `fromApiError` BAD_ARGUMENT, which tells it to re-read the schema and call
+  // again: exactly the wrong advice for a refusal its schema cannot express.
+  // One rule, and a `next` that does not promise the agent a `field` the error
+  // envelope does not carry.
+  {
+    status: 400,
+    code: "BAD_ARGUMENT",
+    message: "This device refused one of the search arguments.",
+    next: "Do not call again with the same arguments. Simplify the request — a plain query with no filters — or tell the user this device's skill catalogue would not accept it.",
+  },
   // The browse route names its CLI-fallback deadline by code (HERMES-04).
   // Before it did, the status-only rule below sent the agent to wifi_status for
   // a device that was merely slow — and matchRule() takes the first rule that

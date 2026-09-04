@@ -193,6 +193,7 @@ export const es: Record<string, string> = {
   "skills.filtersButton": "Filtros",
   "skills.filtersButtonWithCount": "Filtros ({n})",
   "skills.filtersClearAll": "Borrar todo",
+  "skills.facetLimit": "Como máximo {n} a la vez.",
   "skills.filtersClose": "Cerrar filtros",
   "skills.filtersShowAll": "Mostrar {n} más",
   "skills.filtersShowFewer": "Mostrar menos",
@@ -260,6 +261,8 @@ export const es: Record<string, string> = {
   "skills.liveRemoving": "Eliminando {name}",
   "skills.liveRemoved": "{name} eliminada",
   "skills.liveRemoveFailed": "No se pudo eliminar {name}",
+  "skills.liveInstallUnknown": "No se pudo saber si {name} se instaló",
+  "skills.liveRemoveUnknown": "No se pudo saber si {name} se eliminó",
   "skills.uninstallFailed": "Error al desinstalar",
 
   // === Empty and error states ===
@@ -489,6 +492,10 @@ export const es: Record<string, string> = {
   "skills.browseUnavailable": "Hermes no está instalado en este dispositivo, así que el catálogo de habilidades no se puede cargar.",
   "skills.browseFailed": "No se pudo cargar el catálogo de habilidades. Inténtelo de nuevo.",
   "skills.browseBadQuery": "Esa búsqueda no se puede usar. Pruebe con otras palabras.",
+  "skills.browseBadFilter": "El dispositivo rechazó uno de los filtros. Borre los filtros e inténtelo de nuevo.",
+  "skills.browseTooManyFilters": "Demasiados filtros a la vez. Quite algunos e inténtelo de nuevo.",
+  "skills.installUnknownOutcome": "La respuesta del dispositivo era demasiado larga para leerla, así que no se sabe si «{name}» se instaló. Consulte la pestaña Instaladas antes de volver a intentarlo.",
+  "skills.uninstallUnknownOutcome": "La respuesta del dispositivo era demasiado larga para leerla, así que no se sabe si «{name}» se eliminó. Consulte la pestaña Instaladas antes de volver a intentarlo.",
   "skills.detailFailed": "No se pudieron cargar los detalles de esta habilidad. Inténtelo de nuevo.",
   "skills.detailUnavailable": "Hermes no está instalado en este dispositivo, así que los detalles de esta habilidad no se pueden cargar.",
   "skills.detailDocsFailed": "No se pudo cargar la documentación completa de esta habilidad. Los datos de arriba proceden del dispositivo.",

@@ -28,6 +28,7 @@ export const skillsEn: Record<string, string> = {
   "skills.filtersButton": "Filters",
   "skills.filtersButtonWithCount": "Filters ({n})",
   "skills.filtersClearAll": "Clear all",
+  "skills.facetLimit": "At most {n} at a time.",
   "skills.filtersClose": "Close filters",
   "skills.filtersShowAll": "Show {n} more",
   "skills.filtersShowFewer": "Show fewer",
@@ -95,6 +96,8 @@ export const skillsEn: Record<string, string> = {
   "skills.liveRemoving": "Removing {name}",
   "skills.liveRemoved": "{name} removed",
   "skills.liveRemoveFailed": "Could not remove {name}",
+  "skills.liveInstallUnknown": "Could not tell whether {name} was installed",
+  "skills.liveRemoveUnknown": "Could not tell whether {name} was removed",
   "skills.uninstallFailed": "Uninstall failed",
 
   // === Empty and error states ===
@@ -247,6 +250,10 @@ export const skillsEn: Record<string, string> = {
   "skills.browseUnavailable": "Hermes is not installed on this device, so the skill catalogue cannot be loaded.",
   "skills.browseFailed": "Couldn’t load the skill catalogue. Try again.",
   "skills.browseBadQuery": "That search can’t be used. Try different words.",
+  "skills.browseBadFilter": "The device refused one of the filters. Clear the filters and try again.",
+  "skills.browseTooManyFilters": "Too many filters at once. Remove a few and try again.",
+  "skills.installUnknownOutcome": "The device’s answer was too long to read, so whether “{name}” was installed is not known. Check the Installed tab before trying again.",
+  "skills.uninstallUnknownOutcome": "The device’s answer was too long to read, so whether “{name}” was removed is not known. Check the Installed tab before trying again.",
   "skills.detailFailed": "Couldn’t load this skill’s details. Try again.",
   "skills.detailUnavailable": "Hermes is not installed on this device, so this skill’s details cannot be loaded.",
   "skills.detailDocsFailed": "Couldn’t load this skill’s full documentation. The details above come from the device.",

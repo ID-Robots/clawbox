@@ -185,6 +185,7 @@ export const bg: Record<string, string> = {
   "skills.filtersButton": "Филтри",
   "skills.filtersButtonWithCount": "Филтри ({n})",
   "skills.filtersClearAll": "Изчисти всички",
+  "skills.facetLimit": "Най-много {n} едновременно.",
   "skills.filtersClose": "Затвори филтрите",
   "skills.filtersShowAll": "Покажи още {n}",
   "skills.filtersShowFewer": "Покажи по-малко",
@@ -252,6 +253,8 @@ export const bg: Record<string, string> = {
   "skills.liveRemoving": "Премахване на {name}",
   "skills.liveRemoved": "{name} е премахнато",
   "skills.liveRemoveFailed": "{name} не можа да бъде премахнато",
+  "skills.liveInstallUnknown": "Не можа да се установи дали {name} е инсталирано",
+  "skills.liveRemoveUnknown": "Не можа да се установи дали {name} е премахнато",
   "skills.uninstallFailed": "Премахването не успя",
 
   // === Empty and error states ===
@@ -481,6 +484,10 @@ export const bg: Record<string, string> = {
   "skills.browseUnavailable": "Hermes не е инсталиран на това устройство, затова каталогът с умения не може да бъде зареден.",
   "skills.browseFailed": "Каталогът с умения не можа да бъде зареден. Опитайте отново.",
   "skills.browseBadQuery": "Това търсене не може да се използва. Опитайте с друг текст.",
+  "skills.browseBadFilter": "Устройството отхвърли един от филтрите. Изчистете филтрите и опитайте отново.",
+  "skills.browseTooManyFilters": "Твърде много филтри едновременно. Премахнете няколко и опитайте отново.",
+  "skills.installUnknownOutcome": "Отговорът на устройството беше твърде дълъг за четене, затова не е известно дали „{name}“ е инсталирано. Проверете раздела „Инсталирани“, преди да опитате отново.",
+  "skills.uninstallUnknownOutcome": "Отговорът на устройството беше твърде дълъг за четене, затова не е известно дали „{name}“ е премахнато. Проверете раздела „Инсталирани“, преди да опитате отново.",
   "skills.detailFailed": "Подробностите за това умение не можаха да бъдат заредени. Опитайте отново.",
   "skills.detailUnavailable": "Hermes не е инсталиран на това устройство, затова подробностите за това умение не могат да бъдат заредени.",
   "skills.detailDocsFailed": "Пълната документация на това умение не можа да бъде заредена. Показаното по-горе идва от устройството.",

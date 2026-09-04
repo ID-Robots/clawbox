@@ -27,6 +27,7 @@ import {
   scanReportFromLock,
   updateLockFiles,
   verifySkillRemoval,
+  invalidArgument,
 } from "@/lib/hermes-skills-server";
 import { getCatalogRecord } from "@/lib/hermes-skill-index";
 import {
@@ -107,7 +108,7 @@ export async function POST(request: Request) {
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    return invalidArgument("body", "Invalid JSON");
   }
 
   const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -119,10 +120,10 @@ export async function POST(request: Request) {
 
   const idCheck = checkInstallIdentifier(id);
   if (!idCheck.ok) {
-    return NextResponse.json({ error: "Invalid skill id" }, { status: 400 });
+    return invalidArgument("id", "Invalid skill id");
   }
   if (category && !isValidMeta(category)) {
-    return NextResponse.json({ error: "Invalid category" }, { status: 400 });
+    return invalidArgument("category", "Invalid category");
   }
   // The NAME override becomes the lock KEY (`hermes skills install --name`), so
   // it is validated as a skill name, not as free-form metadata. isValidMeta
@@ -131,7 +132,7 @@ export async function POST(request: Request) {
   // line", which is what this repo now documents as the way to remove a skill,
   // names something else. A category is genuinely free-form and keeps isValidMeta.
   if (name && !isValidSkillName(name)) {
-    return NextResponse.json({ error: "Invalid name" }, { status: 400 });
+    return invalidArgument("name", "Invalid name");
   }
 
   // ── 1. Would this shadow a bundled skill? ────────────────────────────────

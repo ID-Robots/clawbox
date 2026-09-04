@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { hermesSkillsGuard } from "@/lib/hermes-skills-server";
+import { hermesSkillsGuard, invalidArgument } from "@/lib/hermes-skills-server";
 import {
   HermesEnvUnreadableError,
   clearHermesSecret,
@@ -46,7 +46,7 @@ export async function GET(request: Request) {
   // key that happens to be unset, so it is refused rather than reported false.
   const invalid = keys.filter((k) => !isValidEnvKey(k));
   if (invalid.length) {
-    return NextResponse.json({ error: "Invalid secret name" }, { status: 400 });
+    return invalidArgument("keys", "Invalid secret name");
   }
   try {
     return NextResponse.json({ secrets: await hermesSecretsPresent(keys) });
@@ -58,7 +58,9 @@ export async function GET(request: Request) {
     return NextResponse.json(
       {
         error: "The device's environment file could not be read.",
-        code: err instanceof HermesEnvUnreadableError ? "env_unreadable" : undefined,
+        // Always a code. `undefined` is dropped from the JSON, so the branch
+        // that could not name its cause used to answer no code at all.
+        code: err instanceof HermesEnvUnreadableError ? "env_unreadable" : "env_failed",
       },
       { status: 500 },
     );
@@ -73,19 +75,19 @@ export async function POST(request: Request) {
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    return invalidArgument("body", "Invalid JSON");
   }
   // `null`, an array and a bare string are all valid JSON, and reading .key off
   // the first of them throws. Establish that this is an object before anything
   // else looks at it.
   if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    return invalidArgument("body", "Invalid JSON");
   }
   const { key: rawKey, value: rawValue } = body as { key?: unknown; value?: unknown };
 
   const key = typeof rawKey === "string" ? rawKey.trim() : "";
   if (!isValidEnvKey(key)) {
-    return NextResponse.json({ error: "Invalid secret name" }, { status: 400 });
+    return invalidArgument("key", "Invalid secret name");
   }
 
   // Deleting a stored credential is destructive, so it has to be asked for. A
@@ -94,7 +96,7 @@ export async function POST(request: Request) {
   // caller silently remove the customer's API key. Only an explicit empty
   // string means remove.
   if (typeof rawValue !== "string") {
-    return NextResponse.json({ error: "Invalid value" }, { status: 400 });
+    return invalidArgument("value", "Invalid value");
   }
   // Not trimmed: a leading or trailing space can be part of a secret, and
   // silently altering a credential is worse than storing an odd one.
@@ -109,10 +111,10 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, key, set: false });
     }
     if (!isValidEnvValue(value)) {
-      return NextResponse.json({ error: "Invalid value" }, { status: 400 });
+      return invalidArgument("value", "Invalid value");
     }
     const stored = await setHermesSecret(key, value);
-    if (!stored) return NextResponse.json({ error: "Invalid value" }, { status: 400 });
+    if (!stored) return invalidArgument("value", "Invalid value");
     return NextResponse.json({ ok: true, key, set: true });
   } catch (err) {
     // The message could name the .env path; log it, answer generically.
@@ -130,6 +132,6 @@ export async function POST(request: Request) {
         { status: 500 },
       );
     }
-    return NextResponse.json({ error: "Could not save the key" }, { status: 500 });
+    return NextResponse.json({ error: "Could not save the key", code: "env_failed" }, { status: 500 });
   }
 }
