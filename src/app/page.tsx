@@ -539,6 +539,11 @@ function ChromeDesktopInner() {
     : { backgroundSize: "auto", backgroundPosition: "center", backgroundRepeat: "no-repeat" };
   const CUSTOM_WPS_KEY = "clawbox-custom-wallpapers";
   const [customWallpapers, setCustomWallpapers] = useState<string[]>([]);
+  // Mirrored so the two writers below can compute the next list without a
+  // functional updater. Both used to do their localStorage write and their
+  // sibling `setWallpaperId` from INSIDE one, which React may run twice.
+  const customWallpapersRef = useRef<string[]>([]);
+  useEffect(() => { customWallpapersRef.current = customWallpapers; }, [customWallpapers]);
   // Wallpapers are large base64 blobs — keep in localStorage to avoid
   // bloating the KV JSON file that gets read/written on every state save.
   useEffect(() => {
@@ -554,13 +559,16 @@ function ChromeDesktopInner() {
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result as string;
-      setCustomWallpapers(prev => {
-        const next = [...prev, dataUrl];
-        try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
-        setWallpaperId(`custom-${next.length - 1}`);
-        setWpOpacity(100);
-        return next;
-      });
+      // Computed from the ref, not from inside a `setCustomWallpapers` updater.
+      // React may run an updater twice, and this one wrote localStorage and
+      // called two other setters from inside it — the side-effect-in-an-updater
+      // shape TASK-703 removes from the chat surfaces. Idempotent today, which
+      // is exactly why it would go unnoticed.
+      const next = [...customWallpapersRef.current, dataUrl];
+      try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
+      setCustomWallpapers(next);
+      setWallpaperId(`custom-${next.length - 1}`);
+      setWpOpacity(100);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
@@ -1753,12 +1761,12 @@ function ChromeDesktopInner() {
               onMascotToggle: setMascotHidden,
               onWallpaperUpload: () => wallpaperInputRef.current?.click(),
               onCustomWallpaperDelete: (idx: number) => {
-                setCustomWallpapers(prev => {
-                  const next = prev.filter((_, i) => i !== idx);
-                  try { localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(next)); } catch {}
-                  if (wallpaperId === `custom-${idx}`) setWallpaperId("clawbox");
-                  return next;
-                });
+                // Same as the upload above: outside the updater, and off the
+                // ref rather than off `prev`.
+                const next = customWallpapersRef.current.filter((_, i) => i !== idx);
+                try { localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(next)); } catch {}
+                setCustomWallpapers(next);
+                if (wallpaperId === `custom-${idx}`) setWallpaperId("clawbox");
               },
             }} />
           </div>
