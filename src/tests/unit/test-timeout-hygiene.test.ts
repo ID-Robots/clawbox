@@ -86,31 +86,40 @@ function code(source: string): string {
  * call has to use, so `import { execFileSync as run }` is followed through to
  * `run(` rather than missed.
  */
-const CHILD_PROCESS_IMPORT =
-  /import\s+(\*\s+as\s+(\w+)|\{([^}]*)\}|(\w+))\s+from\s+["'](?:node:)?child_process["']|(?:const|let|var)\s+(?:\{([^}]*)\}|(\w+))\s*=\s*require\(\s*["'](?:node:)?child_process["']\s*\)/g;
+const CHILD_PROCESS_IMPORT = new RegExp(
+  [
+    // ESM: `import * as cp from`, `import { a, b as c } from`, `import cp from`
+    String.raw`import\s+(?:\*\s+as\s+(?<esmNs>\w+)|\{(?<esmNamed>[^}]*)\}|(?<esmDefault>\w+))\s+from\s+["'](?:node:)?child_process["']`,
+    // CJS: `const { a, b: c } = require(...)`, `const cp = require(...)`
+    String.raw`(?:const|let|var)\s+(?:\{(?<cjsNamed>[^}]*)\}|(?<cjsNs>\w+))\s*=\s*require\(\s*["'](?:node:)?child_process["']\s*\)`,
+  ].join("|"),
+  "g",
+);
 const STARTERS = ["spawnSync", "execFileSync", "execSync", "spawn", "execFile", "fork", "exec"];
 
 /** The local names this file can start a process through, or an empty list. */
 function processStarters(source: string): string[] {
   const names: string[] = [];
   for (const m of source.matchAll(CHILD_PROCESS_IMPORT)) {
-    const namespace = m[2] ?? m[7];
+    // NAMED groups, not indices: the two alternatives above number their
+    // captures differently, and reading the wrong one silently drops a file
+    // out of the check — which is the direction that loses the guard.
+    const g = m.groups ?? {};
+    const namespace = g.esmNs || g.cjsNs || g.esmDefault;
     if (namespace) {
-      // `import * as cp` / `const cp = require(...)`: any starter off it.
+      // `import * as cp` / `const cp = require(...)` / a default import: any
+      // starter reached off the module object.
       for (const starter of STARTERS) names.push(`${namespace}.${starter}`);
       continue;
     }
-    const named = m[3] ?? m[6];
+    const named = g.esmNamed || g.cjsNamed;
     if (named) {
       for (const spec of named.split(",")) {
-        const [original, alias] = spec.split(/\s+as\s+/).map((x) => x.trim());
+        // `execFileSync as run` in ESM, `execFileSync: run` in CJS.
+        const [original, alias] = spec.split(/\s+as\s+|:/).map((x) => x.trim());
         if (STARTERS.includes(original)) names.push(alias || original);
       }
-      continue;
     }
-    // A default import of child_process binds the module object.
-    const dflt = m[4];
-    if (dflt) for (const starter of STARTERS) names.push(`${dflt}.${starter}`);
   }
   return names;
 }
