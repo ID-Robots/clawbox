@@ -10,6 +10,7 @@ import fs from "fs";
 import { fileURLToPath, pathToFileURL } from "url";
 import { lookup as dnsLookup } from "dns/promises";
 import { activeRunDirectory, activeRunId } from "@/lib/coding-agent";
+import { closeSession, getSession, openSession, sessionCount, sweepIdle, touchSession } from "@/lib/browser-sessions";
 import { isInside } from "@/lib/file-guard";
 import { ensureArtifactsDir } from "@/lib/coding-agent-artifacts";
 import { describeImage } from "@/lib/vision-describe";
@@ -215,34 +216,16 @@ const KEY_MAP: Record<string, string> = {
   F7: "F7", F8: "F8", F9: "F9", F10: "F10", F11: "F11", F12: "F12",
 };
 
-// In-memory session store (single user device). Sessions only hold page
-// refs now — the Playwright Browser + context are cached once per process
-// and reused across sessions. The previous design called connectOverCDP on
-// every launch, which piled up concurrent CDP clients and could stall the
-// second connect for 5+ s under load; agents surfaced that as
-// "Browser control is currently blocked by a CDP connection timeout
-// (ws://127.0.0.1:18800)".
-interface BrowserSession {
-  page: import("playwright").Page;
-  lastActivity: number;
-}
-
-const sessions: Map<string, BrowserSession> = new Map();
-let sessionCounter = 0;
-
-// Close the page (not the shared Browser) after 10 min of inactivity so a
-// stale cleanup doesn't tear the CDP connection out from under the next
-// tool call.
-const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
+// The session store itself lives in src/lib/browser-sessions.ts: a coding run
+// has to be able to close ITS pages when it settles, and the runner cannot
+// reach into a route module to do it. Sessions only hold page refs — the
+// Playwright Browser + context are cached once per process and reused across
+// them. The previous design called connectOverCDP on every launch, which piled
+// up concurrent CDP clients and could stall the second connect for 5+ s under
+// load; agents surfaced that as "Browser control is currently blocked by a CDP
+// connection timeout (ws://127.0.0.1:18800)".
 setInterval(() => {
-  const now = Date.now();
-  for (const [id, session] of sessions) {
-    if (now - session.lastActivity > SESSION_TIMEOUT_MS) {
-      session.page.close().catch(() => {});
-      sessions.delete(id);
-      console.log(`[Browser] Cleaned up stale session: ${id}`);
-    }
-  }
+  for (const id of sweepIdle()) console.log(`[Browser] Cleaned up stale session: ${id}`);
   closeOwnedBrowserIfIdle();
 }, 60_000);
 
@@ -260,7 +243,7 @@ let ownedBrowser = false;
 
 /** Close the Chromium of our own once no session refers to it. Never the desktop's. */
 function closeOwnedBrowserIfIdle(): void {
-  if (!ownedBrowser || sessions.size > 0 || !cachedBrowser) return;
+  if (!ownedBrowser || sessionCount() > 0 || !cachedBrowser) return;
   const browser = cachedBrowser;
   ownedBrowser = false;
   cachedBrowser = null;
@@ -426,7 +409,12 @@ export async function POST(req: Request) {
         throw new Error("Desktop Chromium did not expose a browser context");
       }
 
-      const page = context.pages().at(-1) ?? await context.newPage();
+      // A run gets a page of its OWN. Borrowing `pages().at(-1)` meant a
+      // delegated run drove whatever the owner was reading and the idle sweep
+      // then closed that tab; with a page per run, closeSessionsForRun ends
+      // exactly what the run opened and never the owner's.
+      const runId = activeRunId();
+      const page = runId ? await context.newPage() : (context.pages().at(-1) ?? await context.newPage());
       await installNavGuard(page as unknown as GuardablePage);
       installDownloadCapture(page as unknown as DownloadablePage);
       await page.bringToFront().catch(() => {});
@@ -434,12 +422,16 @@ export async function POST(req: Request) {
       const { url } = body;
       if (url) {
         const nav = await resolveNavUrl(url);
-        if (!nav.ok) return NextResponse.json({ error: nav.error }, { status: 400 });
+        if (!nav.ok) {
+          // A page opened for this run and never registered is a tab nothing
+          // would ever close — the sweep only knows sessions.
+          if (runId) await page.close().catch(() => {});
+          return NextResponse.json({ error: nav.error }, { status: 400 });
+        }
         await page.goto(nav.url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
       }
 
-      const id = `browser-${++sessionCounter}`;
-      sessions.set(id, { page, lastActivity: Date.now() });
+      const id = openSession(page, runId);
 
       const screenshot = await page.screenshot({ type: "png", timeout: SCREENSHOT_TIMEOUT_MS }).catch(() => null);
 
@@ -452,12 +444,12 @@ export async function POST(req: Request) {
     }
 
     // All other actions require a session
-    const session = sessionId ? sessions.get(sessionId) : null;
+    const session = typeof sessionId === "string" ? getSession<import("playwright").Page>(sessionId) : null;
     if (!session) {
       return NextResponse.json({ error: "No active browser session" }, { status: 400 });
     }
 
-    session.lastActivity = Date.now();
+    touchSession(sessionId as string);
     const { page } = session;
 
     const respond = async (skipScreenshot = false) => {
@@ -613,8 +605,7 @@ export async function POST(req: Request) {
         // Close the session's page, not the shared Browser — leaving CDP
         // attached means the next tool call skips the 5-10 s reconnect.
         // A Chromium of our OWN is the exception: nobody else sees it.
-        await session.page.close().catch(() => {});
-        sessions.delete(sessionId);
+        await closeSession(sessionId as string);
         closeOwnedBrowserIfIdle();
         return NextResponse.json({ ok: true });
 

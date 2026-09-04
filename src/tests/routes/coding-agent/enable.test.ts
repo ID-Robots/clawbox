@@ -21,11 +21,15 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 const setEnabled = vi.hoisted(() => vi.fn());
 const getStatus = vi.hoisted(() => vi.fn());
 const setEffort = vi.hoisted(() => vi.fn());
+const setGenerateImages = vi.hoisted(() => vi.fn());
+const setGenerateAudio = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-agent")>()),
   setCodingAgentEnabled: setEnabled,
   getCodingAgentStatus: getStatus,
   setEffort,
+  setGenerateImages,
+  setGenerateAudio,
 }));
 
 // The reload is mocked at its own seam rather than at the refresh helper's, so
@@ -72,6 +76,8 @@ beforeEach(async () => {
   setEnabled.mockResolvedValue(undefined);
   reloadMcp.mockResolvedValue(true);
   setEffort.mockResolvedValue("low");
+  setGenerateImages.mockResolvedValue(false);
+  setGenerateAudio.mockResolvedValue(false);
   const route = await import("@/app/setup-api/coding-agent/enable/route");
   POST = route.POST;
 });
@@ -119,6 +125,22 @@ describe("the body", () => {
       expect(res.status, JSON.stringify(bad)).toBe(400);
     }
     expect(setEnabled).not.toHaveBeenCalled();
+  });
+
+  it("takes the two media switches, and names them in the refusal when a body carries nothing it knows", async () => {
+    const images = await POST(request({ cookie: ownerCookie(), body: { generateImages: false } }));
+    expect(images.status).toBe(200);
+    expect(setGenerateImages).toHaveBeenCalledWith(false);
+    const audio = await POST(request({ cookie: ownerCookie(), body: { generateAudio: true } }));
+    expect(audio.status).toBe(200);
+    expect(setGenerateAudio).toHaveBeenCalledWith(true);
+    // A body with none of the route's fields has to say which fields exist, or
+    // the caller is left guessing at the one that was misspelled.
+    const empty = await POST(request({ cookie: ownerCookie(), body: { nonsense: 1 } }));
+    expect(empty.status).toBe(400);
+    const message = (await empty.json()).error as string;
+    expect(message).toContain("{ generateImages: boolean }");
+    expect(message).toContain("{ generateAudio: boolean }");
   });
 
   it("rejects non-JSON", async () => {
@@ -184,6 +206,11 @@ describe("telling the running agent", () => {
     // WHICH tools exist, so none of them may cost a reload.
     const res = await POST(request({ cookie: ownerCookie(), body: { effort: "low" } }));
     expect(res.status).toBe(200);
+    expect(reloadMcp).not.toHaveBeenCalled();
+    // The media switches are read per RUN, at spawn, so they move no tool on
+    // the assistant's own long-lived server either.
+    await POST(request({ cookie: ownerCookie(), body: { generateImages: false } }));
+    await POST(request({ cookie: ownerCookie(), body: { generateAudio: false } }));
     expect(reloadMcp).not.toHaveBeenCalled();
   });
 

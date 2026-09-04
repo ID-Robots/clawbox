@@ -14,6 +14,13 @@ vi.mock("fs/promises", () => ({
     readdir: vi.fn().mockRejectedValue(new Error("ENOENT")),
     mkdir: vi.fn().mockResolvedValue(undefined),
     unlink: vi.fn().mockResolvedValue(undefined),
+    // The snap test (is this a small wrapper script or a real browser?) reads
+    // size and bytes through ONE handle, so the route opens rather than stats.
+    open: vi.fn().mockRejectedValue(new Error("ENOENT")),
+    stat: vi.fn().mockRejectedValue(new Error("ENOENT")),
+    // The start page handed to scripts/launch-browser.sh.
+    readFile: vi.fn().mockRejectedValue(new Error("ENOENT")),
+    writeFile: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -69,6 +76,10 @@ describe("/setup-api/browser/manage", () => {
     vi.mocked(fs.readdir).mockRejectedValue(new Error("ENOENT"));
     vi.mocked(fs.mkdir).mockResolvedValue(undefined as never);
     vi.mocked(fs.unlink).mockResolvedValue(undefined);
+    vi.mocked(fs.open).mockRejectedValue(new Error("ENOENT"));
+    vi.mocked(fs.stat).mockRejectedValue(new Error("ENOENT"));
+    vi.mocked(fs.readFile).mockRejectedValue(new Error("ENOENT"));
+    vi.mocked(fs.writeFile).mockResolvedValue(undefined);
     vi.mocked(findPlaywrightChromium).mockReturnValue(null);
     mockFetch.mockRejectedValue(new Error("connection refused"));
     mockExec = vi.fn();
@@ -160,6 +171,69 @@ describe("/setup-api/browser/manage", () => {
       const body = await res.json();
 
       expect(body.enabled).toBe(false);
+    });
+
+    /**
+     * The owner's three decisions ride on the SAME answer the app already
+     * polls, so the face it shows and the state it shows cannot come from two
+     * different moments.
+     */
+    it("carries the wizard flag and the owner's settings", async () => {
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body).toHaveProperty("setupComplete");
+      expect(body.autoOpen).toBe(true);
+      expect(body.startUrl).toBe("https://www.google.com");
+    });
+
+    /**
+     * "Installed" was never enough to promise a window: scripts/launch-browser.sh
+     * refuses the snap wrapper because snap's confinement makes Chromium fail
+     * under systemd, so a box with only the snap build answered the panel with
+     * a green tick and then a 500 ten seconds after the owner pressed Open.
+     */
+    it("reports the snap build as installed but not service-safe", async () => {
+      vi.mocked(fs.access).mockImplementation(async (p: unknown) => {
+        if (String(p) === "/snap/bin/chromium") return undefined;
+        throw new Error("ENOENT");
+      });
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.chromium.installed).toBe(true);
+      expect(body.chromium.path).toBe("/snap/bin/chromium");
+      expect(body.chromium.serviceSafe).toBe(false);
+    });
+
+    it("reports a system binary that only WRAPS the snap as not service-safe", async () => {
+      vi.mocked(fs.access).mockImplementation(async (p: unknown) => {
+        if (String(p) === "/usr/bin/chromium-browser") return undefined;
+        throw new Error("ENOENT");
+      });
+      vi.mocked(fs.open).mockResolvedValue({
+        stat: async () => ({ size: 512 }),
+        readFile: async () => "#!/bin/sh\nexec /snap/bin/chromium\n",
+        close: async () => undefined,
+      } as never);
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.chromium.serviceSafe).toBe(false);
+    });
+
+    it("reports the Playwright runtime as service-safe", async () => {
+      vi.mocked(findPlaywrightChromium).mockReturnValue("/home/clawbox/.cache/ms-playwright/chromium-1180/chrome-linux/chrome");
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.chromium.serviceSafe).toBe(true);
+      // The browser binary itself is never read to answer this: it is a
+      // hundred megabytes and cannot be a snap shim.
+      expect(fs.readFile).not.toHaveBeenCalled();
     });
 
     it("handles errors gracefully", async () => {
@@ -257,6 +331,61 @@ describe("/setup-api/browser/manage", () => {
       expect(body.alreadyRunning).toBeUndefined();
       expect(res.status).toBe(400);
       expect(body.error).toContain("Chromium not installed");
+    });
+
+    /**
+     * The refusal has to be immediate and NAMED. Starting the service anyway
+     * meant a ten-second wait for a CDP port that would never open, ending in
+     * "Browser failed to start. Check /tmp/clawbox-browser.log" — true, and
+     * the wrong remedy.
+     */
+    it("open-browser refuses a snap-only Chromium in no time, with a reason", async () => {
+      vi.mocked(fs.access).mockImplementation(async (p: unknown) => {
+        if (String(p) === "/snap/bin/chromium") return undefined;
+        throw new Error("ENOENT");
+      });
+      const req = new Request("http://localhost/setup-api/browser/manage", {
+        method: "POST",
+        body: JSON.stringify({ action: "open-browser" }),
+      });
+
+      const res = await POST(req);
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.code).toBe("chromium_not_service_safe");
+      // Nothing was started: the service is what would have failed.
+      expect(mockExec).not.toHaveBeenCalledWith("/usr/bin/sudo", expect.arrayContaining(["start", "clawbox-browser.service"]), expect.anything());
+    });
+
+    it("open-browser hands the start page to the launch script before starting it", async () => {
+      vi.mocked(findPlaywrightChromium).mockReturnValue("/home/clawbox/.cache/ms-playwright/chromium-1180/chrome-linux/chrome");
+      mockExec.mockResolvedValue({ stdout: "Chromium 146", stderr: "" });
+      // Nothing answers the port when the route looks; the browser it starts
+      // does, on the readiness poll's first probe.
+      let probes = 0;
+      mockFetch.mockImplementation(async () => {
+        probes += 1;
+        if (probes === 1) throw new Error("connection refused");
+        return { ok: true, json: async () => ({ Browser: "Chrome/146" }) } as never;
+      });
+      const req = new Request("http://localhost/setup-api/browser/manage", {
+        method: "POST",
+        body: JSON.stringify({ action: "open-browser" }),
+      });
+
+      const res = await POST(req);
+      expect((await res.json()).cdpReady).toBe(true);
+
+      expect(fs.writeFile).toHaveBeenCalledTimes(1);
+      const [file, body] = vi.mocked(fs.writeFile).mock.calls[0] as unknown as [string, string];
+      expect(String(file)).toMatch(/\.cache\/clawbox\/browser\.env$/);
+      expect(String(body)).toContain("CLAWBOX_BROWSER_START_URL='https://www.google.com'");
+      // Before the unit is started, not after: systemd is what reads it.
+      const startCall = mockExec.mock.calls.findIndex((call: unknown[]) => Array.isArray(call[1]) && (call[1] as string[]).includes("clawbox-browser.service"));
+      expect(startCall).toBeGreaterThanOrEqual(0);
+      expect(vi.mocked(fs.writeFile).mock.invocationCallOrder[0])
+        .toBeLessThan(mockExec.mock.invocationCallOrder[startCall]);
     });
 
     it("handles invalid JSON", async () => {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render as renderBare, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, cleanup, fireEvent, render as renderBare, screen, waitFor } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
 import VoiceOutputPanel, { isVoiceStatus } from "@/components/VoiceOutputPanel";
 import { sampleSentence } from "@/lib/voice-catalog";
@@ -51,6 +51,10 @@ interface MockOptions {
   hold?: boolean;
   refuse?: { status: number; body: Record<string, unknown> };
   sample?: { status: number; body?: Record<string, unknown> };
+  /** The NDJSON body /setup-api/tts/install streams back, verdict line included. */
+  install?: string;
+  /** The status the second GET answers, once the install has run. */
+  after?: unknown;
 }
 
 function mockFetch(first: unknown, opts: MockOptions = {}) {
@@ -59,19 +63,34 @@ function mockFetch(first: unknown, opts: MockOptions = {}) {
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   let release: () => void = () => {};
   const held = new Promise<void>((resolve) => { release = resolve; });
+  // A POST with no body at all is a real shape here — the warm-up sends none —
+  // and JSON.parse("undefined") threw where the panel was only being observed.
+  const sent = (raw: BodyInit | null | undefined) => {
+    if (raw == null) return null;
+    try {
+      return JSON.parse(String(raw));
+    } catch {
+      return String(raw);
+    }
+  };
+  let installed = false;
   const fn = vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     if (init?.method === "POST") {
-      posts.push({ url, body: JSON.parse(String(init.body)) });
+      posts.push({ url, body: sent(init.body) });
       if (url === "/setup-api/tts/sample") {
         if (opts.sample && opts.sample.status !== 200) return json(opts.sample.body ?? {}, opts.sample.status);
         return new Response(new Uint8Array(2048), { status: 200, headers: { "content-type": "audio/wav" } });
+      }
+      if (url === "/setup-api/tts/install") {
+        installed = true;
+        return new Response(opts.install ?? "", { status: 200, headers: { "content-type": "application/x-ndjson" } });
       }
       if (opts.hold) await held;
       if (opts.refuse) return json(opts.refuse.body, opts.refuse.status);
       return json(opts.answer ?? first);
     }
-    return json(first);
+    return json(installed && opts.after !== undefined ? opts.after : first);
   });
   vi.stubGlobal("fetch", fn);
   return { fn, release };
@@ -379,4 +398,92 @@ describe("status validation", () => {
     }
   });
 
+});
+
+/**
+ * A voice note on a channel is Opus and Kokoro speaks WAV, so a box without
+ * ffmpeg answers every Telegram voice message in the CLOUD voice while every
+ * screen still says it speaks for itself. That is the one state in this
+ * feature nothing on the box could see.
+ */
+describe("channel voice notes", () => {
+  const channels = (voiceNoteReady: boolean) => ({ channels: { supportedOnEdition: true, voiceNoteReady } });
+
+  it("says which voice the channels will use, and offers the repair", async () => {
+    mockFetch(status(channels(false)));
+    render(<VoiceOutputPanel active />);
+    const note = await screen.findByTestId("voice-channel-voice-notes");
+    expect(note).toHaveTextContent(/cloud voice/i);
+    expect(note).toHaveTextContent(/ffmpeg/);
+    expect(screen.getByTestId("voice-channel-voice-notes-fix")).toBeInTheDocument();
+  });
+
+  it("says nothing when the box can send one, and nothing to a server that has never heard of the question", async () => {
+    // An older server answers no `voiceNoteReady` at all; an amber warning
+    // invented out of `undefined` would be worse than silence.
+    mockFetch(status(channels(true)));
+    render(<VoiceOutputPanel active />);
+    await screen.findByTestId("voice-source");
+    expect(screen.queryByTestId("voice-channel-voice-notes")).toBeNull();
+
+    cleanup();
+    mockFetch(status({ channels: { supportedOnEdition: true } }));
+    render(<VoiceOutputPanel active />);
+    await screen.findByTestId("voice-source");
+    expect(screen.queryByTestId("voice-channel-voice-notes")).toBeNull();
+  });
+
+  it("keeps quiet while spoken replies are switched off", async () => {
+    // Nothing speaks on a channel then, so which voice would have spoken is
+    // not a fact the owner needs in amber.
+    mockFetch(status({ ...channels(false), autoReply: false }));
+    render(<VoiceOutputPanel active />);
+    await screen.findByTestId("voice-auto-reply");
+    expect(screen.queryByTestId("voice-channel-voice-notes")).toBeNull();
+  });
+
+  it("repairs it from here, and the line goes when the box can encode again", async () => {
+    // The Local AI tab's Install only appears on a Kokoro that is MISSING, so
+    // on a shipped box whose engine is installed this is the only route to the
+    // fix — the same root step, which now asks apt for ffmpeg.
+    mockFetch(status(channels(false)), {
+      install: '{"status":"Installing the voice on this box (Kokoro)…"}\n{"success":true}\n',
+      after: status(channels(true)),
+    });
+    render(<VoiceOutputPanel active />);
+    fireEvent.click(await screen.findByTestId("voice-channel-voice-notes-fix"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts/install", body: {} }));
+    // The box is re-read, so the amber line answers to the box rather than to
+    // the button having been pressed.
+    await waitFor(() => expect(screen.queryByTestId("voice-channel-voice-notes")).toBeNull());
+  });
+
+  it("says the repair did not finish, rather than clearing the warning it did not fix", async () => {
+    mockFetch(status(channels(false)), {
+      install: '{"error":"The voice install did not finish."}\n',
+    });
+    render(<VoiceOutputPanel active />);
+    fireEvent.click(await screen.findByTestId("voice-channel-voice-notes-fix"));
+    await screen.findByTestId("voice-channel-voice-notes-failed");
+    expect(screen.getByTestId("voice-channel-voice-notes")).toBeInTheDocument();
+  });
+});
+
+describe("waking the voice on the box", () => {
+  it("asks for the model as the owner picks 'This box', not once they press Play", async () => {
+    // Kokoro's server stops itself after five idle minutes and the reload is
+    // 13-19 s; the pick and the write that follows it cover most of that.
+    mockFetch(status(), { answer: status({ choice: "local" }) });
+    render(<VoiceOutputPanel active />);
+    fireEvent.change(await screen.findByTestId("voice-source"), { target: { value: "local" } });
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts/warm", body: null }));
+  });
+
+  it("asks for nothing when the cloud voice is picked", async () => {
+    mockFetch(status({ choice: "local", preferredEngine: "local" }), { answer: status() });
+    render(<VoiceOutputPanel active />);
+    fireEvent.change(await screen.findByTestId("voice-source"), { target: { value: "cloud" } });
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "select", choice: "auto" } }));
+    expect(posts.filter((p) => p.url === "/setup-api/tts/warm")).toEqual([]);
+  });
 });

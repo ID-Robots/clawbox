@@ -16,7 +16,6 @@ export const localModelsEn: Record<string, string> = {
   "localModels.memoryInUse": "Memory in use {size}",
   // "Disable", the menu's own verb: Ollama's idle standby also turns it OFF,
   // and that one comes back by itself, so "turn off" promised the wrong thing.
-  "localModels.ollama.title": "Ollama library",
   "localModels.footer": "Anything you disable stays off after a restart.",
   // The grouped list (LocalAiPanel): one row per engine, the actions behind a
   // "more" menu, and each row's role read from the surface that decides it.

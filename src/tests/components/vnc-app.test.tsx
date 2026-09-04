@@ -93,10 +93,10 @@ describe("VNCApp", () => {
     const { getByRole, queryByText } = render(<VNCApp />);
 
     await waitFor(() => {
-      expect(getByRole("button", { name: "Refresh to sign in again" })).toBeInTheDocument();
+      expect(getByRole("button", { name: "vnc.refreshSignIn" })).toBeInTheDocument();
     });
     expect(queryByText(SETUP_AUTH_EXPIRED_MESSAGE)).toBeInTheDocument();
-    expect(queryByText("Install / Repair & Reboot")).not.toBeInTheDocument();
+    expect(queryByText("vnc.repairButton")).not.toBeInTheDocument();
     expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get("Accept")).toBe("application/json");
   });
 
@@ -119,10 +119,10 @@ describe("VNCApp", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const { findByRole, getByRole } = render(<VNCApp />);
-    fireEvent.click(await findByRole("button", { name: /Install \/ Repair & Reboot/ }));
+    fireEvent.click(await findByRole("button", { name: /vnc\.repairButton/ }));
 
     await waitFor(() => {
-      expect(getByRole("button", { name: "Refresh to sign in again" })).toBeInTheDocument();
+      expect(getByRole("button", { name: "vnc.refreshSignIn" })).toBeInTheDocument();
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[1][0]).toBe("/setup-api/install/run-step");

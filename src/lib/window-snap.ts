@@ -18,6 +18,20 @@ export type SnapZone =
 /** Pixels from an edge that count as "dropped against it". */
 export const SNAP_THRESHOLD = 12;
 
+/**
+ * The margin the desktop's floating surfaces keep from the screen edges and
+ * from each other — a MAXIMIZED window and the DOCKED chat alike.
+ *
+ * One number, and it lives here, because the two are measured against each
+ * other: `page.tsx` adds this gap to the panel's width to build the strip
+ * windows reserve, so a maximized window's right-hand margin IS this gap while
+ * the chat keeps the same one on its far side. Kept apart they drifted — the
+ * window sat 10px inside the desktop and the chat 12px, which is exactly the
+ * lopsidedness that is visible when both are on screen. (A SNAPPED window is
+ * deliberately flush and takes no gap at all; see `getSnapRect`.)
+ */
+export const DESKTOP_GAP = 6;
+
 const SHELF_HEIGHT = 56;
 
 /**

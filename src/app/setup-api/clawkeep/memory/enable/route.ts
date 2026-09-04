@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { refresh as refreshMemoryScheduler } from "@/lib/clawkeep-memory-scheduler";
 import { hasOwnerSession } from "@/lib/owner-session";
 import {
   getMemoryShardEnabled,
@@ -46,6 +47,12 @@ export async function POST(request: Request) {
   if (hasEnabled) {
     await setMemoryShardEnabled(body.enabled as boolean);
     console.error(`[memory-shard] switched ${body.enabled ? "on" : "off"} by the owner`);
+    // The switch means nothing until the timer follows it. Off disarms the
+    // armed slot here and now — a switch that only took effect at the next
+    // reboot would let the box spend tonight embedding after the owner
+    // switched it off — and on re-arms the schedule they already saved,
+    // which is what the wizard relies on when it enables after its PUT.
+    await refreshMemoryScheduler();
   }
   if (hasSetup) {
     await setMemoryShardSetupComplete(body.setupComplete as boolean);

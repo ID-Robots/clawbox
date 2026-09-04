@@ -12,6 +12,9 @@ vi.mock("fs/promises", () => ({
     mkdir: vi.fn().mockResolvedValue(undefined),
     readFile: vi.fn().mockResolvedValue(""),
     writeFile: vi.fn().mockResolvedValue(undefined),
+    // `access` is how the route asks whether OpenClaw has already introduced
+    // the agent, which is what gates the persona write (personaWritesAllowed).
+    access: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -33,6 +36,11 @@ describe("/setup-api/preferences", () => {
     vi.mocked(fsMod.mkdir).mockResolvedValue(undefined as never);
     vi.mocked(fsMod.readFile).mockResolvedValue("# USER.md\n");
     vi.mocked(fsMod.writeFile).mockResolvedValue(undefined);
+    // The steady state of a box in the field: the agent has been introduced,
+    // so USER.md is there and the ritual's BOOTSTRAP.md is long gone.
+    vi.mocked(fsMod.access).mockImplementation(async (target) => {
+      if (String(target).endsWith("BOOTSTRAP.md")) throw new Error("ENOENT");
+    });
     const mod = await import("@/app/setup-api/preferences/route");
     GET = mod.GET;
     POST = mod.POST;

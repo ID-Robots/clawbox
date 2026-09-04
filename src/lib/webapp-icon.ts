@@ -157,6 +157,10 @@ const inFlight = new Map<string, Promise<WebappIconOutcome>>();
 /** The one generation slot: the tail of a chain every generation waits on. */
 let generationSlot: Promise<void> = Promise.resolve();
 
+/** Every generation admitted and not yet finished — the one running and the
+ *  ones behind it. What a bounded caller is judged against. */
+let generationsAdmitted = 0;
+
 /** App ids whose last generation failed, and until when they are left alone. */
 const appCooldownUntil = new Map<string, number>();
 
@@ -318,37 +322,83 @@ export function ensureWebappIcon(appId: string, hints: WebappIconHints): Promise
   return job;
 }
 
-async function ensureOnce(appId: string, hints: WebappIconHints): Promise<WebappIconOutcome> {
-  const target = webappIconPath(appId);
+function ensureOnce(appId: string, hints: WebappIconHints): Promise<WebappIconOutcome> {
+  return ensureIconFile(appId, hints, {
+    stillWanted: () => appExists(appId),
+    onPlaced: () => nudgeDesktop(appId, hints),
+  });
+}
+
+/**
+ * What a caller of `ensureIconFile` still gets to decide.
+ *
+ * Everything in this module that is specific to a WEB APP lives behind these
+ * two hooks, so a coding-agent project — which has no meta.json and no desktop
+ * entry to nudge (src/lib/project-icon.ts) — reuses the generation, the slot,
+ * the cooldowns and the never-overwrite placement without inheriting a web
+ * app's lifecycle.
+ */
+export interface IconFileHooks {
+  /**
+   * Is the thing this icon is FOR still there? Asked twice — before the write
+   * and again before `onPlaced` — because generation takes 5–15 s and an
+   * uninstall inside that window would leave an orphan icon, and a nudge that
+   * put the removed app back on the desktop.
+   */
+  stillWanted: () => Promise<boolean>;
+  /** Ran once the icon is on disk: the desktop nudge, for a web app. */
+  onPlaced?: () => Promise<void>;
+  /**
+   * The full-size picture, handed over before the media-tree copy is removed.
+   *
+   * The proxy answers 1024×1024 and `data/icons/<id>.png` keeps 256 of it, so a
+   * caller that wants another size — a 64 px favicon — has exactly this one
+   * moment to take it. Never throws through: a favicon is not worth losing an
+   * icon over.
+   */
+  onBytes?: (bytes: Buffer) => Promise<void>;
+}
+
+/**
+ * Make sure `data/icons/<id>.png` exists, generating it when the box can.
+ *
+ * The generic half of `ensureWebappIcon`: same rules, same slot, same
+ * cooldowns, and the same three outcomes. `id` must already have been through
+ * `safeAppId` — every path below is joined from it.
+ */
+export async function ensureIconFile(id: string, hints: WebappIconHints, hooks: IconFileHooks): Promise<WebappIconOutcome> {
+  const target = webappIconPath(id);
   if (await exists(target)) return "kept";
-  if (coolingDown(appId)) return "skipped";
+  if (coolingDown(id)) return "skipped";
   if (!(await hasClawaiToken())) return "skipped";
 
   return withGenerationSlot(async () => {
     // The wait for the slot can be long (a queue of creates, each 5–15 s);
     // what was true before it may not be now. Both checks are one stat.
     if (await exists(target)) return "kept";
-    if (!(await appExists(appId))) return "skipped";
+    if (!(await hooks.stillWanted())) return "skipped";
 
     let generatedPath: string | null = null;
     let placed = false;
+    let fullSize: Buffer | null = null;
     try {
       const result = await generateClawaiImage(buildIconPrompt(hints));
       generatedPath = result.path;
       const bytes = await fsp.readFile(generatedPath);
       if (!isPng(bytes)) {
-        warn(appId, "the picture was not a PNG");
-        rememberFailure(appId);
+        warn(id, "the picture was not a PNG");
+        rememberFailure(id);
         return "skipped";
       }
       // The app may have been uninstalled while the picture was drawn.
-      if (!(await appExists(appId))) return "skipped";
+      if (!(await hooks.stillWanted())) return "skipped";
       const outcome = await placeIcon(target, await shrinkIcon(bytes));
       if (outcome === "exists") return "kept";
       placed = true;
+      fullSize = bytes;
     } catch (err) {
-      warn(appId, err instanceof Error ? err.message : String(err));
-      rememberFailure(appId, err);
+      warn(id, err instanceof Error ? err.message : String(err));
+      rememberFailure(id, err);
       return "skipped";
     } finally {
       // Whatever happened, the media-tree copy is not a chat picture and must
@@ -356,18 +406,36 @@ async function ensureOnce(appId: string, hints: WebappIconHints): Promise<Webapp
       if (generatedPath) await fsp.unlink(generatedPath).catch(() => {});
     }
 
+    // Outside the try on purpose: a favicon that could not be written is not a
+    // failed icon, and must not put this id into the failure cooldown.
+    if (fullSize && hooks.onBytes) {
+      try {
+        await hooks.onBytes(fullSize);
+      } catch (err) {
+        warn(id, `the icon was placed but its extra sizes were not: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     // Checked once more before the nudge, because the nudge is what would
     // resurrect an uninstalled app. An uninstall that landed between the
     // check above and the `link` has already removed the icon it knew about,
     // so the one just placed is taken back too rather than left as an orphan.
-    if (placed && !(await appExists(appId))) {
+    if (placed && !(await hooks.stillWanted())) {
       await fsp.unlink(target).catch(() => {});
       return "skipped";
     }
-    await nudgeDesktop(appId, hints);
+    if (hooks.onPlaced) await hooks.onPlaced();
     return "generated";
   });
 }
+
+/**
+ * Refused before it joined the queue, because the queue was already as deep as
+ * this caller said it could stand. Its own class so a caller can tell "the box
+ * is busy drawing" — which is not a fault and must not be retried at once —
+ * from a generator that actually failed.
+ */
+export class GenerationSlotBusy extends Error {}
 
 /**
  * Run `fn` when no other generation is running.
@@ -375,8 +443,29 @@ async function ensureOnce(appId: string, hints: WebappIconHints): Promise<Webapp
  * A promise chain rather than a counter: each caller waits on the previous
  * caller's completion and hands its own to the next, so order is arrival order
  * and a throw inside `fn` releases the slot like a return does.
+ *
+ * Exported because the ONE slot has to cover every generation this box pays
+ * for — icons, project favicons and a run's own pictures alike — or N callers
+ * open N upstream requests against one daily allowance.
+ *
+ * `maxWaiting` is for callers that hold something while they wait. The icon
+ * pipeline passes none: it is fire-and-forget background work, and an icon
+ * that waits its turn costs nobody anything. A REQUEST thread is the other
+ * case — see the media image route — and one of those queued behind a
+ * two-minute upstream budget is a connection and a promise the box cannot
+ * reclaim for an answer the caller has already given up on.
  */
-async function withGenerationSlot<T>(fn: () => Promise<T>): Promise<T> {
+export async function withGenerationSlot<T>(
+  fn: () => Promise<T>,
+  opts: { maxWaiting?: number } = {},
+): Promise<T> {
+  // Counted at ADMISSION rather than from an in-flight flag, exactly as the
+  // speech queue counts its own: a burst that arrives together has set no
+  // flags yet, and would all be admitted by a test of "is one running".
+  if (opts.maxWaiting !== undefined && generationsAdmitted > opts.maxWaiting) {
+    throw new GenerationSlotBusy("This box is already generating as much as it can queue.");
+  }
+  generationsAdmitted += 1;
   const previous = generationSlot;
   let release!: () => void;
   generationSlot = new Promise<void>((resolve) => {
@@ -386,8 +475,14 @@ async function withGenerationSlot<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } finally {
+    generationsAdmitted -= 1;
     release();
   }
+}
+
+/** For tests: how many generations hold or wait for the slot right now. */
+export function admittedGenerations(): number {
+  return generationsAdmitted;
 }
 
 /** Is this app, or the whole box, inside a failure pause? */
@@ -431,10 +526,10 @@ const ICON_PX = 256;
  * loaded lazily so a box where its native binding will not load keeps the
  * full-size picture rather than no icon at all.
  */
-async function shrinkIcon(bytes: Buffer): Promise<Buffer> {
+export async function shrinkIcon(bytes: Buffer, size: number = ICON_PX): Promise<Buffer> {
   try {
     const { default: sharp } = await import("sharp");
-    return await sharp(bytes).resize(ICON_PX, ICON_PX, { fit: "cover" }).png({ compressionLevel: 9 }).toBuffer();
+    return await sharp(bytes).resize(size, size, { fit: "cover" }).png({ compressionLevel: 9 }).toBuffer();
   } catch {
     return bytes;
   }
@@ -448,7 +543,7 @@ async function shrinkIcon(bytes: Buffer): Promise<Buffer> {
  * EEXIST where `rename` would silently overwrite, which is the guarantee the
  * module comment makes. The temp name is removed either way.
  */
-async function placeIcon(target: string, bytes: Buffer): Promise<"placed" | "exists"> {
+export async function placeIcon(target: string, bytes: Buffer): Promise<"placed" | "exists"> {
   const dir = path.dirname(target);
   await fsp.mkdir(dir, { recursive: true });
   const tmp = path.join(dir, `.${path.basename(target)}.${randomUUID()}.tmp`);
@@ -502,7 +597,7 @@ async function nudgeDesktop(appId: string, hints: WebappIconHints): Promise<void
   }
 }
 
-function isPng(bytes: Buffer): boolean {
+export function isPng(bytes: Buffer): boolean {
   return bytes.length >= PNG_SIGNATURE.length && bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE);
 }
 

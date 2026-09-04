@@ -27,6 +27,9 @@ const hermesCliMock = vi.fn();
 let hermesConfig: Record<string, string> = {};
 const ttsInventoryMock = vi.fn();
 const accessMock = vi.fn();
+/** `access` decides which paths this fake box HAS; `stat` only says what kind
+ *  they are, because `executable()` refuses a directory that answers X_OK. */
+const statMock = vi.fn();
 const readStateMock = vi.fn();
 const writeStateMock = vi.fn();
 const writeLocalVoiceMock = vi.fn();
@@ -87,7 +90,11 @@ vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>();
   return {
     ...actual,
-    promises: { ...actual.promises, access: (...a: unknown[]) => accessMock(...a) },
+    promises: {
+      ...actual.promises,
+      access: (...a: unknown[]) => accessMock(...a),
+      stat: (...a: unknown[]) => statMock(...a),
+    },
   };
 });
 
@@ -117,6 +124,7 @@ beforeEach(() => {
   readConfigMock.mockRejectedValue(new Error("ENOENT ~/.openclaw/openclaw.json"));
   ttsInventoryMock.mockResolvedValue(kokoroInstalled);
   accessMock.mockResolvedValue(undefined);
+  statMock.mockReset().mockResolvedValue({ isFile: () => true });
   readStateMock.mockResolvedValue({ choice: "auto" });
   writeStateMock.mockResolvedValue(undefined);
   writeLocalVoiceMock.mockResolvedValue(undefined);

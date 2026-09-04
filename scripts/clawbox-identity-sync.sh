@@ -10,12 +10,18 @@
 #     FTS5 recall must re-index to see external markdown edits.
 #
 # Canonical is authoritative (edit there). Edits made from inside a harness are
-# NOT auto-propagated back in this version — that reverse sync is future work.
+# NOT auto-propagated back in this version — that reverse sync is future work,
+# with ONE exception: a canonical seeded before OpenClaw's first-conversation
+# ritual holds placeholders, not an identity, and is promoted from the
+# workspace once — see the `.provisional` marker below.
 set -euo pipefail
 
 HOME_DIR="${HOME:-/home/clawbox}"
 CANON="$HOME_DIR/.clawbox/agent-identity"
 OC_WS="$HOME_DIR/.openclaw/workspace"
+# Written by setup-shared-identity.sh when it seeds canonical on a box whose
+# agent has not been introduced yet; see promote_canonical_from_workspace.
+PROVISIONAL="$CANON/.provisional"
 
 # Optional target harness ("openclaw" | "hermes"). The harness/select route
 # passes the harness it is switching TO; the systemd path unit (canonical
@@ -89,6 +95,28 @@ systemd_manager_available() {
   return 1
 }
 
+# Canonical ← workspace, ONCE, for a canonical that was seeded before the
+# introduction. The bridge is one-way by design, but on a fresh dual box
+# setup-shared-identity.sh runs at install time — before the agent has ever
+# replied — so what it seeds is "# USER" and "# SOUL", not an identity. The
+# ritual is what writes the real one: the owner's name into USER.md and the
+# agent's vibe into SOUL.md. Copying the placeholders down over that would
+# throw the introduction away the moment the owner first switched harness. The
+# marker makes this exactly once; from then on canonical is authoritative as
+# the header says. Kept in step with the twin in setup-shared-identity.sh,
+# whichever of the two runs first after the ritual.
+promote_canonical_from_workspace() {
+  local f
+  for f in SOUL USER MEMORY; do
+    if [ -f "$OC_WS/$f.md" ]; then cp "$OC_WS/$f.md" "$CANON/$f.md" || return 1; fi
+  done
+  # The marker's removal is part of the promotion, not a tidy-up after it: a
+  # marker that survives would have this run again on every later sync, long
+  # after canonical became authoritative.
+  rm -f "$PROVISIONAL" || return 1
+  echo "[identity-sync] promoted the introduced OpenClaw identity into canonical"
+}
+
 should_refresh_openclaw() {
   if [ "$TARGET_HARNESS" = "openclaw" ]; then
     return 0
@@ -112,9 +140,35 @@ fi
 # the next OpenClaw start reads current identity; only bounce the running
 # gateway when OpenClaw is actually the harness in play (see above).
 if [ -d "$OC_WS" ]; then
-  for f in SOUL USER MEMORY; do
-    [ -f "$CANON/$f.md" ] && cp "$CANON/$f.md" "$OC_WS/$f.md"
-  done
+  # Held back until OpenClaw's first-conversation ritual is over — the same
+  # test setup-shared-identity.sh applies, and for the same reason: OpenClaw
+  # reads a customised USER.md/SOUL.md, or any MEMORY.md at all, as "this
+  # workspace is already configured" and never introduces the agent. USER.md
+  # present and BOOTSTRAP.md absent means the introduction is behind us; a
+  # BOOTSTRAP.md still on disk means it is armed and unfinished, and a write
+  # now would make the next turn delete it. A switch made before the first
+  # hello therefore waits for the next sync rather than costing the ritual.
+  if [ -f "$OC_WS/USER.md" ] && [ ! -e "$OC_WS/BOOTSTRAP.md" ]; then
+    # Promote first, copy down second. A failed promotion must not fall through
+    # to the copy: that copy is exactly the write that would replace the name
+    # and the vibe the ritual just recorded with the placeholders canonical was
+    # seeded with, and leaving the workspace alone loses nothing that is not
+    # already on disk there. The next switch tries again.
+    if [ -e "$PROVISIONAL" ] && ! promote_canonical_from_workspace; then
+      echo "[identity-sync] WARNING: could not promote the introduced identity into canonical;" >&2
+      echo "  leaving the OpenClaw workspace alone rather than copying placeholders over it" >&2
+    else
+      # `if` rather than the `[ … ] && cp` this used to be: nesting the loop
+      # inside a conditional made the loop's status the branch's status, and a
+      # missing canonical MEMORY.md on the last iteration would then have ended
+      # this script under `set -e` — a sync that reported nothing at all.
+      for f in SOUL USER MEMORY; do
+        if [ -f "$CANON/$f.md" ]; then cp "$CANON/$f.md" "$OC_WS/$f.md"; fi
+      done
+    fi
+  else
+    echo "[identity-sync] OpenClaw has not been introduced yet; leaving its workspace identity alone"
+  fi
   if should_refresh_openclaw; then
     if restart_openclaw_gateway; then
       echo "[identity-sync] clawbox-gateway restarted; OpenClaw has re-read the identity files"

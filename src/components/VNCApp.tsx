@@ -522,13 +522,13 @@ export default function VNCApp() {
           }
         } catch { /* device still rebooting, keep waiting */ }
       }
-      setRepairError("Reboot timed out waiting for the VNC service. Refresh the page if it has come back.");
+      setRepairError(t("vnc.rebootTimeout"));
       setRepairState("failed");
     } catch (err) {
       setRepairError(err instanceof Error ? err.message : "Repair request failed");
       setRepairState("failed");
     }
-  }, [setupFetch]);
+  }, [setupFetch, t]);
 
   const openPasteModal = useCallback(() => {
     setPasteText("");
@@ -708,17 +708,17 @@ export default function VNCApp() {
             onClick={() => window.location.reload()}
             className="px-4 py-2 btn-gradient rounded-lg text-sm text-white cursor-pointer"
           >
-            Refresh to sign in again
+            {t("vnc.refreshSignIn")}
           </button>
         ) : rebooting ? (
           <div className="flex flex-col items-center gap-2 mt-2">
             <span className="material-symbols-rounded animate-spin text-orange-400" style={{ fontSize: 28 }}>progress_activity</span>
-            <p className="text-sm text-white/80">Rebooting device — Remote Desktop will be ready in ~30s.</p>
+            <p className="text-sm text-white/80">{t("vnc.rebooting")}</p>
           </div>
         ) : repairing ? (
           <div className="flex flex-col items-center gap-2 mt-2">
             <span className="material-symbols-rounded animate-spin text-orange-400" style={{ fontSize: 28 }}>progress_activity</span>
-            <p className="text-sm text-white/80">Installing / repairing Remote Desktop… this may take a few minutes.</p>
+            <p className="text-sm text-white/80">{t("vnc.repairing")}</p>
           </div>
         ) : (
           <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
@@ -733,10 +733,10 @@ export default function VNCApp() {
               onClick={handleRepairAndReboot}
               disabled={busy}
               className="px-4 py-2 btn-gradient rounded-lg text-sm text-white transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-2"
-              title="Runs install.sh --step vnc_install, then reboots"
+              title={t("vnc.repairTitle")}
             >
               <span className="material-symbols-rounded" style={{ fontSize: 16 }}>build</span>
-              Install / Repair &amp; Reboot
+              {t("vnc.repairButton")}
             </button>
           </div>
         )}
@@ -851,7 +851,7 @@ export default function VNCApp() {
                   type="button"
                   onClick={dismissCopyToast}
                   className="px-2 py-1 rounded-md text-[11px] text-white/60 hover:text-white/90 cursor-pointer"
-                  aria-label="Dismiss"
+                  aria-label={t("vnc.dismiss")}
                 >
                   ✕
                 </button>
@@ -862,7 +862,7 @@ export default function VNCApp() {
             <button
               type="button"
               onClick={dismissCopyToast}
-              aria-label={t("dismiss")}
+              aria-label={t("vnc.dismiss")}
               className="text-white/50 hover:text-white/90 cursor-pointer"
             >
               <span className="material-symbols-rounded" style={{ fontSize: 16 }}>close</span>

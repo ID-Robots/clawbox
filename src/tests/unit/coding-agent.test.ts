@@ -888,9 +888,15 @@ describe("what a run can verify with", () => {
     expect(server.env.CLAWBOX_ROOT).toBe(root);
     expect(fs.readFileSync(path.join(server.env.CLAWBOX_ROOT, "data", ".mcp-token"), "utf-8")).toBe(onDisk);
 
-    // The browser family is approved for headless mode; nothing else MCP is.
+    // The browser family plus the media tools the owner's switches allow, and
+    // nothing else MCP: both media switches default ON, so this run has both.
     for (const tool of lib.MCP_BROWSER_TOOLS) expect(argv).toContain(tool);
-    expect(argv.filter((a) => a.startsWith("mcp__"))).toHaveLength(lib.MCP_BROWSER_TOOLS.length);
+    expect(argv).toContain(lib.MCP_MEDIA_TOOLS.images);
+    expect(argv).toContain(lib.MCP_MEDIA_TOOLS.audio);
+    expect(argv.filter((a) => a.startsWith("mcp__"))).toHaveLength(lib.MCP_BROWSER_TOOLS.length + 2);
+    // The run's own server is told which of the two it may register; the
+    // variable carries no secret, like everything else in this block.
+    expect(server.env.CLAWBOX_RUN_MEDIA).toBe("images,audio");
 
     // The run's own environment names the evidence folder, which exists, and
     // its PATH reaches the snap-installed Chromium.
@@ -1633,6 +1639,113 @@ describe("after a restart", () => {
     expect(run?.status).toBe("failed");
     expect(run?.error).toMatch(/restarted/);
     expect(JSON.parse(fs.readFileSync(runsFile(), "utf-8"))[0].status).toBe("failed");
+  });
+
+  it("forgets the process group a settled run left behind, because the restart took it", async () => {
+    // The recorded number belonged to the cgroup this restart replaced, and
+    // Linux may already have given it to something else — an offer to end a
+    // process nobody can still identify is worse than no offer at all.
+    fs.writeFileSync(runsFile(), JSON.stringify([{
+      id: "run-leftover1",
+      task: "left a server listening",
+      directory: home,
+      projectId: null,
+      source: "owner",
+      status: "completed",
+      startedAt: Date.now() - 60_000,
+      completedAt: Date.now() - 30_000,
+      sessionId: "sess-left",
+      model: null,
+      summary: null,
+      error: null,
+      numTurns: 2,
+      filesTouched: [],
+      commandsRun: 0,
+      permissionDenials: 0,
+      progress: [],
+      exitCode: 0,
+      pgid: 4242,
+      leftover: true,
+    }]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    // Nothing was settled, so the operator's count stays at zero.
+    expect(lib.reconcileAfterRestart()).toBe(0);
+    const run = lib.getRun("run-leftover1");
+    expect(run?.pgid).toBeNull();
+    expect(run?.leftover).toBe(false);
+    const onDisk = JSON.parse(fs.readFileSync(runsFile(), "utf-8"))[0];
+    expect(onDisk.pgid).toBeNull();
+    expect(onDisk.leftover).toBe(false);
+  });
+});
+
+/**
+ * The two counters the media routes spend, and the one property that is not
+ * visible from either route: the slot is taken BEFORE the money is, so two
+ * calls that overlap cannot both pass a cap with room for one.
+ */
+describe("the media a run generates", () => {
+  const ID = "run-med00001";
+
+  /** A record as the runner keeps it while a run is in flight. */
+  async function writeRun(over: Record<string, unknown> = {}): Promise<void> {
+    fs.writeFileSync(runsFile(), JSON.stringify([{
+      id: ID,
+      task: "draw something",
+      directory: home,
+      projectId: null,
+      source: "owner",
+      status: "running",
+      startedAt: Date.now(),
+      completedAt: null,
+      sessionId: "sess-media",
+      model: null,
+      summary: null,
+      error: null,
+      numTurns: 0,
+      filesTouched: [],
+      commandsRun: 0,
+      permissionDenials: 0,
+      progress: [],
+      exitCode: null,
+      mediaGenerated: { images: 0, audio: 0 },
+      ...over,
+    }]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+  }
+
+  it("lets only one of two callers take the last slot", async () => {
+    await writeRun({ mediaGenerated: { images: lib.MAX_IMAGES_PER_RUN - 1, audio: 0 } });
+    const first = lib.reserveRunMedia(ID, "images");
+    const second = lib.reserveRunMedia(ID, "images");
+    expect(first).toMatchObject({ ok: true, used: lib.MAX_IMAGES_PER_RUN });
+    expect(second).toMatchObject({ ok: false, reason: "cap", used: lib.MAX_IMAGES_PER_RUN });
+  });
+
+  it("gives a slot back, so a refused generator costs the run nothing", async () => {
+    await writeRun();
+    expect(lib.reserveRunMedia(ID, "audio")).toMatchObject({ ok: true, used: 1 });
+    lib.releaseRunMedia(ID, "audio");
+    expect(lib.reserveRunMedia(ID, "audio")).toMatchObject({ ok: true, used: 1 });
+  });
+
+  it("spends nothing on a record that is no longer live", async () => {
+    // The bearer a run holds outlives the run, and the audio route can be
+    // waiting in the speech queue when it settles.
+    await writeRun({ status: "completed", completedAt: Date.now() });
+    expect(lib.reserveRunMedia(ID, "images")).toMatchObject({ ok: false, reason: "no_run" });
+    expect(lib.getRun(ID)?.mediaGenerated.images).toBe(0);
+  });
+
+  it("records the file against the live run and nothing against a settled one", async () => {
+    await writeRun();
+    lib.noteRunMedia(ID, path.join(home, "hero.png"));
+    expect(lib.getRun(ID)?.filesTouched).toEqual(["hero.png"]);
+    await writeRun({ status: "stopped", completedAt: Date.now() });
+    lib.noteRunMedia(ID, path.join(home, "late.png"));
+    expect(lib.getRun(ID)?.filesTouched).toEqual([]);
   });
 });
 

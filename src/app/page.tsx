@@ -64,10 +64,13 @@ const BUILT_IN_APP_IDS = apps.map(a => a.id);
 // desktop" puts them back permanently; a fresh box just doesn't spend a grid
 // slot on them out of the box.
 //
-// Remote Desktop (`vnc`) is the one: it shows the box's own X session, which is
-// a diagnostic tool on a headless appliance, and it was the least-opened icon
-// on the default grid.
-const OFF_DESKTOP_BY_DEFAULT = new Set(["vnc"]);
+// Remote Desktop (`vnc`) shows the box's own X session, which is a diagnostic
+// tool on a headless appliance, and it was the least-opened icon on the default
+// grid. System Update (`system_update`) is a page the owner visits twice a year
+// and reaches from Settings → System Update, from the About tile and from the
+// desktop's own "new version" notice, so it does not need to hold a grid slot
+// of its own either.
+const OFF_DESKTOP_BY_DEFAULT = new Set(["vnc", "system_update"]);
 
 const DEFAULT_DESKTOP_APPS = BUILT_IN_APP_IDS.filter(id => !OFF_DESKTOP_BY_DEFAULT.has(id));
 
@@ -253,7 +256,10 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     terminal: "terminal",
     files: "folder",
     clawkeep: "shield_lock",
-    "memory-shard": "memory",
+    // A faceted gem rather than a memory chip: the shard is the thing the app
+    // is named for, and `diamond_shine` is one of the crystal-shaped glyphs the
+    // bundled Material Symbols subset actually ships a ligature for.
+    "memory-shard": "diamond_shine",
     system_update: "system_update",
     vnc: "desktop_windows",
     camera: "photo_camera",
@@ -602,7 +608,7 @@ function ChromeDesktopInner() {
   // panel and showing through it. Derived rather than folded into
   // `chatPanelWidth`, because that value is persisted and handed straight back
   // to the chat as `initialPanelWidth` — adding the gap there would widen the
-  // panel by 12px on every reload.
+  // panel by one gap on every reload.
   const chatPanelInset = chatPanelWidth > 0 ? chatPanelWidth + CHAT_PANEL_GAP : 0;
 
   // Open chat on skill-install, fix-error or handed-over-message events so

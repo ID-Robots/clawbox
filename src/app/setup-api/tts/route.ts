@@ -15,6 +15,7 @@ import {
 } from "@/lib/hermes-tts";
 import {
   buildTtsInventory,
+  ffmpegPresent,
   KOKORO_STAMP,
   localTtsCommandRunnable,
   type LocalModelEntry,
@@ -169,15 +170,23 @@ const CHANNELS_UNSUPPORTED = {
  * setting on this page was being written into Hermes' config, which serves no
  * channel at all. The panel would have confirmed a voice change that the
  * WhatsApp and Telegram replies never took.
+ *
+ * `voiceNoteReady` is a second fact, and it is about THIS box rather than the
+ * edition: a voice note is Opus, the encoder is ffmpeg, and without it every
+ * spoken channel reply comes from the cloud voice however clearly the rest of
+ * this page says the box speaks for itself (see `ffmpegPresent`). Reported
+ * beside `supportedOnEdition` rather than folded into it, because "this
+ * edition has no channels" and "this box cannot encode a voice note" are
+ * different answers with different fixes.
  */
 async function channelsSpeak(harness: Awaited<ReturnType<typeof getActiveHarness>>) {
   return harness === "openclaw" && !openclawIsAbsent()
-    ? { supportedOnEdition: true as const }
+    ? { supportedOnEdition: true as const, voiceNoteReady: await ffmpegPresent() }
     : CHANNELS_UNSUPPORTED;
 }
 
 type VoiceStatusBody = VoiceOutputStatus & {
-  channels: typeof CHANNELS_UNSUPPORTED | { supportedOnEdition: true };
+  channels: typeof CHANNELS_UNSUPPORTED | { supportedOnEdition: true; voiceNoteReady: boolean };
   /** The owner's switch for spoken replies (src/lib/voice-reply.ts). */
   autoReply: boolean;
 };

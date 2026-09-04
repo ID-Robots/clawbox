@@ -722,84 +722,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   };
 
-  /* ── User name (used by mascot greetings) ── */
-  const [userName, setUserName] = useState<string>("");
-  const [userNameSaved, setUserNameSaved] = useState<string>("");
-  const userNameSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Track whether the user has touched the field locally — without this,
-  // a slow GET /preferences could resolve after the user already started
-  // typing and overwrite their input mid-keystroke. Same flag also
-  // guards the periodic refetch below so an agent write that lands
-  // mid-edit doesn't clobber the user's in-flight typing.
-  const userNameEditedRef = useRef(false);
-  useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    // Refetch every 5 s so a name the agent just persisted via the
-    // `preferences_set` MCP tool ("Hey, I'm Krasi" → agent writes
-    // ui_user_name → field updates here without a manual reload).
-    // The userNameEditedRef gate keeps the user's local typing
-    // authoritative — once they touch the field, polling backs off
-    // entirely until the next mount.
-    const tick = () => {
-      fetch("/setup-api/preferences?keys=ui_user_name", { cache: "no-store" })
-        .then(r => r.ok ? r.json() : null)
-        .then(data => {
-          if (cancelled || !data) return;
-          if (userNameEditedRef.current) return;
-          const next = typeof data.ui_user_name === "string" ? data.ui_user_name : "";
-          // Avoid noisy state updates when the value didn't change —
-          // React's strict-equality bail-out covers it but the input
-          // still re-renders on parent state churn otherwise.
-          setUserName(prev => prev === next ? prev : next);
-          setUserNameSaved(prev => prev === next ? prev : next);
-        })
-        .catch(() => { /* transient — try again next tick */ })
-        .finally(() => {
-          // Stop scheduling once the user has started typing — otherwise
-          // we'd keep firing fetches every 5s with results discarded by
-          // the userNameEditedRef guard above. Effect cleanup re-mounts
-          // (after page navigation, etc.) restart polling fresh.
-          if (!cancelled && !userNameEditedRef.current) timer = setTimeout(tick, 5_000);
-        });
-    };
-    tick();
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-      // Cancel any debounce-pending POST so a tab-close or section-switch
-      // mid-debounce doesn't fire after the component is gone.
-      if (userNameSaveTimerRef.current) {
-        clearTimeout(userNameSaveTimerRef.current);
-        userNameSaveTimerRef.current = null;
-      }
-    };
-  }, []);
-  const persistUserName = useCallback((value: string) => {
-    if (userNameSaveTimerRef.current) clearTimeout(userNameSaveTimerRef.current);
-    // Debounce so every keystroke doesn't hit the API; the mascot only
-    // needs the latest committed value.
-    userNameSaveTimerRef.current = setTimeout(() => {
-      fetch("/setup-api/preferences", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ui_user_name: value.trim() }),
-      })
-        .then((res) => {
-          // Only treat the write as committed if the server actually accepted
-          // it. Previously every completed fetch flipped the "Saved." badge —
-          // including 4xx/5xx — which lied to the user when the preference
-          // never landed.
-          if (!res.ok) {
-            throw new Error(`preferences POST failed (${res.status})`);
-          }
-          setUserNameSaved(value.trim());
-          window.dispatchEvent(new Event("clawbox-user-name-changed"));
-        })
-        .catch(() => { /* keep local edit; next save attempt will retry */ });
-    }, 600);
-  }, []);
-
   /* ── Local URL (mDNS hostname) ── */
   const [hostname, setHostname] = useState<string>("");
   const [ipv4, setIpv4] = useState<string>("");
@@ -3089,30 +3011,58 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {activeSection === "appearance" && (
           <div className="max-w-xl space-y-5">
 
-            {/* Your name — used by the mascot for occasional name-greeting popups */}
+            {/* Language card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-              <div className="flex items-center gap-2 mb-3">
-                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>person</span>
-                <label htmlFor="ui-user-name" className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.userName.label")}</label>
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>translate</span>
+                {/* A <label> named this card and pointed at nothing: htmlFor
+                    only binds to form controls, and the control here is a
+                    button. A span the button names itself after is what
+                    actually reaches the accessibility tree. */}
+                <span id="settings-language-label" className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.language")}</span>
               </div>
-              <input
-                id="ui-user-name"
-                type="text"
-                value={userName}
-                maxLength={40}
-                onChange={e => {
-                  userNameEditedRef.current = true;
-                  setUserName(e.target.value);
-                  persistUserName(e.target.value);
-                }}
-                className="w-full rounded-xl bg-white/[0.04] border border-white/10 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-[var(--coral-bright)]/60 focus:bg-white/[0.06]"
-              />
-              <p className="mt-2 text-[11px] text-[var(--text-muted)]">
-                {t("settings.userName.helper")}
-                {userNameSaved && userNameSaved === userName.trim() && userNameSaved.length > 0 && (
-                  <span className="ml-1 text-emerald-400/80">{t("settings.userName.saved")}</span>
+              <div className="relative" ref={langRef}>
+                <button
+                  type="button"
+                  id="settings-language-button"
+                  onClick={() => setLangOpen(v => !v)}
+                  // Both ids: the heading says WHAT this control is, the
+                  // button's own text says which language is on it, and naming
+                  // it after the heading alone would take that answer away.
+                  aria-labelledby="settings-language-label settings-language-button"
+                  aria-haspopup="listbox"
+                  aria-expanded={langOpen}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 bg-white/[0.04] border border-[var(--border-subtle)] rounded-lg text-sm text-[var(--text-primary)] hover:border-white/20 transition-colors cursor-pointer"
+                >
+                  <span className="text-base leading-none" aria-hidden="true">{currentLang.flag}</span>
+                  <span className="flex-1 text-left">{currentLang.label}</span>
+                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }}>
+                    {langOpen ? "expand_less" : "expand_more"}
+                  </span>
+                </button>
+                {langOpen && (
+                  <div className="absolute z-50 mt-1 w-full bg-[var(--bg-elevated)] border border-white/10 rounded-lg shadow-xl max-h-60 overflow-y-auto">
+                    {LANGUAGES.map(lang => (
+                      <button
+                        key={lang.code}
+                        type="button"
+                        onClick={() => { setLocale(lang.code as Locale); setLangOpen(false); }}
+                        className={`w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm transition-colors cursor-pointer border-none ${
+                          lang.code === locale
+                            ? "bg-orange-500/15 text-[var(--coral-bright)]"
+                            : "text-white/70 hover:bg-white/[0.06]"
+                        }`}
+                      >
+                        <span className="text-base leading-none">{lang.flag}</span>
+                        <span className="flex-1 text-left">{lang.label}</span>
+                        {lang.code === locale && (
+                          <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }}>check</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
                 )}
-              </p>
+              </div>
             </div>
 
             {/* Wallpaper card */}
@@ -3277,50 +3227,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
             {/* Mascot pet — Hermes editions only; renders nothing on OpenClaw. */}
             <PetPicker />
-
-
-            {/* Language card */}
-            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>translate</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.language")}</label>
-              </div>
-              <div className="relative" ref={langRef}>
-                <button
-                  type="button"
-                  onClick={() => setLangOpen(v => !v)}
-                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 bg-white/[0.04] border border-[var(--border-subtle)] rounded-lg text-sm text-[var(--text-primary)] hover:border-white/20 transition-colors cursor-pointer"
-                >
-                  <span className="text-base leading-none">{currentLang.flag}</span>
-                  <span className="flex-1 text-left">{currentLang.label}</span>
-                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }}>
-                    {langOpen ? "expand_less" : "expand_more"}
-                  </span>
-                </button>
-                {langOpen && (
-                  <div className="absolute z-50 mt-1 w-full bg-[var(--bg-elevated)] border border-white/10 rounded-lg shadow-xl max-h-60 overflow-y-auto">
-                    {LANGUAGES.map(lang => (
-                      <button
-                        key={lang.code}
-                        type="button"
-                        onClick={() => { setLocale(lang.code as Locale); setLangOpen(false); }}
-                        className={`w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm transition-colors cursor-pointer border-none ${
-                          lang.code === locale
-                            ? "bg-orange-500/15 text-[var(--coral-bright)]"
-                            : "text-white/70 hover:bg-white/[0.06]"
-                        }`}
-                      >
-                        <span className="text-base leading-none">{lang.flag}</span>
-                        <span className="flex-1 text-left">{lang.label}</span>
-                        {lang.code === locale && (
-                          <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }}>check</span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
           </div>
         )}
 

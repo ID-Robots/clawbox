@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 import * as kv from "@/lib/client-kv";
 import SnapPreviewOverlay from "@/components/SnapPreviewOverlay";
 import {
+  DESKTOP_GAP,
   getSnapRect,
   getSnapZone,
   shelfHeight,
@@ -14,14 +15,6 @@ import {
 
 /** Flat fallback for the CSS `calc()` that maximizes a window. */
 const SHELF_HEIGHT = 56;
-/**
- * The margin a MAXIMIZED window keeps on every side — the same breathing
- * room the docked chat floats in, so a full-screen window sits in the
- * desktop like the chat does rather than against its edges. Beside a docked
- * chat the margin is kept between the window and the chat too: `rightInset`
- * ends at the chat's left edge (the chat's own gap is on its far side).
- */
-export const DOCK_GAP = 10;
 
 interface ChromeWindowProps {
   title: string;
@@ -389,15 +382,16 @@ export default function ChromeWindow({
 
   if (minimized && !restoring) return null;
 
-  // Maximized: DOCK_GAP on every side — beside a docked chat, between the
-  // window and the chat as well — corners kept, so a full-screen window sits
-  // in the desktop the way the chat does.
+  // Maximized: the desktop's one gap on every side — beside a docked chat,
+  // between the window and the chat as well, because `rightInset` ends at the
+  // chat's left edge and the chat's own gap is on its far side. Corners kept,
+  // so a full-screen window sits in the desktop the way the chat does.
   const windowStyle = maximized
     ? {
-      left: DOCK_GAP,
-      top: DOCK_GAP,
-      width: `calc(100% - ${DOCK_GAP * 2 + rightInset}px)`,
-      height: `calc(100vh - ${SHELF_HEIGHT}px - env(safe-area-inset-bottom, 0px) - ${DOCK_GAP * 2}px)`,
+      left: DESKTOP_GAP,
+      top: DESKTOP_GAP,
+      width: `calc(100% - ${DESKTOP_GAP * 2 + rightInset}px)`,
+      height: `calc(100vh - ${SHELF_HEIGHT}px - env(safe-area-inset-bottom, 0px) - ${DESKTOP_GAP * 2}px)`,
     }
       : { left: position.x, top: position.y, width: size.width, height: size.height };
 

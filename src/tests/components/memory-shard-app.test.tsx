@@ -46,11 +46,16 @@ const LOCAL_MEMORY = {
 let memory: Record<string, unknown> = { ...LOCAL_MEMORY };
 let indexCalls: unknown[] = [];
 let scheduleCalls: unknown[] = [];
+let enableCalls: unknown[] = [];
+let resetCalls = 0;
 let indexStatus = 200;
+let indexRefusalKind: string | null = null;
 // A promise a POST/PUT waits on before answering — never resolved when a test
 // needs the request to stay in flight.
 let indexGate: Promise<void> | null = null;
 let scheduleGate: Promise<void> | null = null;
+/** The same, for the status read the window opens with. */
+let statusGate: Promise<void> | null = null;
 
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -59,6 +64,7 @@ function installFetch() {
     if (url.includes("/setup-api/clawkeep/memory/index")) {
       indexCalls.push(JSON.parse(String(init?.body ?? "{}")));
       if (indexGate) await indexGate;
+      if (indexStatus === 409 && indexRefusalKind) return ok({ error: "no", kind: indexRefusalKind }, 409);
       return ok({ accepted: indexStatus === 200, run: memory.run, status: memory }, indexStatus);
     }
     if (url.includes("/setup-api/clawkeep/memory/schedule")) {
@@ -67,7 +73,23 @@ function installFetch() {
       if (scheduleGate) await scheduleGate;
       return ok({ schedule: body, nextRunAtMs: Date.now() + 3_600_000 });
     }
-    if (url.includes("/setup-api/clawkeep/memory")) return ok(memory);
+    if (url.includes("/setup-api/clawkeep/memory/enable")) {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { enabled?: boolean };
+      enableCalls.push(body);
+      // The route answers the state as it stands after the write, and the
+      // window is expected to adopt THAT rather than what was clicked.
+      memory = { ...memory, enabled: body.enabled };
+      return ok({ enabled: body.enabled, setupComplete: memory.setupComplete });
+    }
+    if (url.includes("/setup-api/clawkeep/memory/reset")) {
+      resetCalls += 1;
+      memory = { ...memory, enabled: false, setupComplete: false };
+      return ok({ enabled: false, setupComplete: false });
+    }
+    if (url.includes("/setup-api/clawkeep/memory")) {
+      if (statusGate) await statusGate;
+      return ok(memory);
+    }
     return ok({});
   }));
 }
@@ -81,9 +103,13 @@ describe("the Memory Shard app", () => {
     memory = { ...LOCAL_MEMORY };
     indexCalls = [];
     scheduleCalls = [];
+    enableCalls = [];
+    resetCalls = 0;
     indexStatus = 200;
+    indexRefusalKind = null;
     indexGate = null;
     scheduleGate = null;
+    statusGate = null;
     installFetch();
   });
 
@@ -294,6 +320,118 @@ describe("the Memory Shard app", () => {
     // And the chosen day is announced as chosen, not merely coloured.
     expect(screen.getByRole("button", { name: "Tue" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByRole("button", { name: "Wed" }).getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("shows the shard animation while the first status is still being read, rather than an empty window", async () => {
+    // The status route shells out to the OpenClaw CLI and can take up to 90
+    // seconds on a cold box. That used to be a blank column under a header,
+    // which reads as an app that failed to open.
+    let release = () => {};
+    statusGate = new Promise<void>((resolve) => { release = resolve; });
+    mount();
+    expect(await screen.findByTestId("memory-shard-loading")).toBeTruthy();
+    // Neither face before the box has answered: a fresh-looking window must
+    // not offer onboarding it may not need, nor an index it has not read.
+    expect(screen.queryByTestId("memory-shard-wizard")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Index now" })).toBeNull();
+
+    release();
+    expect(await screen.findByRole("button", { name: "Index now" }, { timeout: 5000 })).toBeTruthy();
+    expect(screen.queryByTestId("memory-shard-loading")).toBeNull();
+  });
+
+  it("paints the index from the status the window already read, instead of asking twice", async () => {
+    // Two reads meant two OpenClaw probes for one payload — the second of them
+    // behind the same 90 s ceiling as the first.
+    mount();
+    await screen.findByText("On device");
+    const reads = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .filter((call) => String(call[0]).endsWith("/setup-api/clawkeep/memory"));
+    expect(reads).toHaveLength(1);
+  });
+
+  it("opens its settings page from the header and comes back the same way", async () => {
+    mount();
+    fireEvent.click(await screen.findByTestId("memory-shard-open-settings"));
+    expect(await screen.findByTestId("memory-shard-embedded-settings")).toBeTruthy();
+    // The page REPLACES the index card rather than stacking over it, so Back
+    // is the only way out and the window has one subject at a time.
+    expect(screen.queryByRole("button", { name: "Index now" })).toBeNull();
+
+    fireEvent.click(screen.getByTestId("memory-shard-settings-back"));
+    expect(await screen.findByRole("button", { name: "Index now" })).toBeTruthy();
+  });
+
+  it("switches the shard off through the route, and shows what the route answered", async () => {
+    mount();
+    fireEvent.click(await screen.findByTestId("memory-shard-open-settings"));
+    fireEvent.click(await screen.findByTestId("memory-shard-switch"));
+    await waitFor(() => expect(enableCalls).toEqual([{ enabled: false }]));
+    // Never optimistic: this switch is the owner's consent for the box to read
+    // their documents, so what it shows is what the box said, not what was
+    // clicked. The header chip reads the same state.
+    await waitFor(() => expect(screen.getByTestId("memory-shard-switch").getAttribute("aria-checked")).toBe("false"));
+    expect(screen.getByTestId("memory-shard-state").textContent).toContain("Off");
+    expect(screen.getByTestId("memory-shard-off-hint")).toBeTruthy();
+  });
+
+  it("offers no indexing at all while the shard is switched off", async () => {
+    // The route refuses these too; a button that posts into a refusal is worse
+    // than one that says why it is not available.
+    memory = { ...LOCAL_MEMORY, enabled: false };
+    mount();
+    const indexNow = await screen.findByRole("button", { name: "Index now" });
+    expect((indexNow as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Full reindex" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("memory-shard-paused")).toBeTruthy();
+    expect(indexCalls).toEqual([]);
+  });
+
+  it("carries the switch it just flipped back to the index card, without waiting on the status probe", async () => {
+    mount();
+    await screen.findByRole("button", { name: "Index now" });
+    // Every status read from here on hangs, the way a cold box's does: the
+    // route shells out to the OpenClaw CLI and can take a minute and a half.
+    statusGate = new Promise<void>(() => {});
+
+    fireEvent.click(screen.getByTestId("memory-shard-open-settings"));
+    fireEvent.click(await screen.findByTestId("memory-shard-switch"));
+    await waitFor(() => expect(enableCalls).toEqual([{ enabled: false }]));
+
+    // Back REMOUNTS the card, which seeds itself from the status the window is
+    // holding. Without the switch reaching that copy the card kept its live
+    // buttons over a route that refuses them, for as long as the probe took.
+    fireEvent.click(screen.getByTestId("memory-shard-settings-back"));
+    const indexNow = await screen.findByRole("button", { name: "Index now" });
+    expect((indexNow as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("memory-shard-paused")).toBeTruthy();
+  });
+
+  it("says the shard is off when that is why a run was declined, not that one is already going", async () => {
+    // Both refusals are 409. Telling the owner a run is in progress when the
+    // switch is simply off sends them looking for something nobody started.
+    indexStatus = 409;
+    indexRefusalKind = "disabled";
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Index now" }));
+    expect(await screen.findByText(/switched off/)).toBeTruthy();
+    expect(screen.queryByText(/Indexing is already running/)).toBeNull();
+  });
+
+  it("asks twice before a reset, and then puts the setup wizard back in front of the owner", async () => {
+    mount();
+    fireEvent.click(await screen.findByTestId("memory-shard-open-settings"));
+    fireEvent.click(await screen.findByTestId("memory-shard-reset"));
+    // The first tap only arms it: nothing has been sent, and the button now
+    // says what the second one will do.
+    expect(resetCalls).toBe(0);
+    expect(screen.getByTestId("memory-shard-reset").textContent).toContain("tap again");
+
+    fireEvent.click(screen.getByTestId("memory-shard-reset"));
+    await waitFor(() => expect(resetCalls).toBe(1));
+    // And the window leaves the settings page on its own — the setup it
+    // described no longer exists.
+    expect(await screen.findByTestId("memory-shard-wizard")).toBeTruthy();
   });
 
   it("surfaces a mismatched index as something to fix, not as a healthy box", async () => {

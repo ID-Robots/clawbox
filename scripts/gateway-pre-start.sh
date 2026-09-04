@@ -3103,6 +3103,56 @@ else:
     print(default)
 PY
 )"
+# --- clawbox bootstrap seed ---
+# ClawBox's own first-conversation ritual.
+#
+# OpenClaw arms an introduction ("birth sequence") the first time the agent
+# replies in a brand-new workspace: it writes BOOTSTRAP.md, the agent works
+# through it and deletes the file, and the workspace is stamped complete so it
+# never runs again. The template it would use lives inside the npm package and
+# asks what to call the ASSISTANT — it never asks the owner's name. With the
+# "Your name" field gone from Settings, that first conversation is the only
+# thing on the device that asks, so the script has to be ours. A BOOTSTRAP.md
+# that is already on disk is adopted verbatim (upstream seeds it with a
+# write-if-missing), so pre-writing ours here is the supported way to ship one
+# and it survives a reinstall of the openclaw package, which patching the
+# package's own templates would not.
+#
+# GENUINELY FRESH ONLY. The test is not "there is no BOOTSTRAP.md": on a box
+# that has already been introduced, BOOTSTRAP.md is absent precisely BECAUSE
+# the ritual finished, and seeding on that test alone would re-run the
+# introduction on every ordinary reboot. So every file the first turn would
+# have created, and every trace of a working agent, has to be absent too.
+#
+# This is also the one write in this section that must reach a workspace that
+# does not exist yet: factory reset empties ~/.openclaw wholesale, and without
+# the directory the gateway would create it on the first turn and seed the
+# stock ritual before we ever got a say. An empty workspace directory is not
+# itself evidence of a configured agent, so creating it changes nothing else.
+CLAWBOX_BOOTSTRAP_SRC="$CLAWBOX_ROOT/config/clawbox-bootstrap.md"
+CLAWBOX_BOOTSTRAP_DST="$CLAWBOX_WORKSPACE/BOOTSTRAP.md"
+if [ -r "$CLAWBOX_BOOTSTRAP_SRC" ] \
+  && [ ! -e "$CLAWBOX_BOOTSTRAP_DST" ] \
+  && [ ! -e "$CLAWBOX_WORKSPACE/USER.md" ] \
+  && [ ! -e "$CLAWBOX_WORKSPACE/IDENTITY.md" ] \
+  && [ ! -e "$CLAWBOX_WORKSPACE/SOUL.md" ] \
+  && [ ! -e "$CLAWBOX_WORKSPACE/AGENTS.md" ] \
+  && [ ! -e "$CLAWBOX_WORKSPACE/MEMORY.md" ] \
+  && [ ! -d "$CLAWBOX_WORKSPACE/memory" ]; then
+  # Guarded like every other write here: config/clawbox-gateway.service runs
+  # this script as a bare ExecStartPre under `set -euo pipefail`, so a failure
+  # is the unit's failure and the box loses its assistant over a text file.
+  if mkdir -p "$CLAWBOX_WORKSPACE" 2>/dev/null \
+    && install -m 644 "$CLAWBOX_BOOTSTRAP_SRC" "$CLAWBOX_BOOTSTRAP_DST"; then
+    echo "  Seeded ClawBox's BOOTSTRAP.md into a fresh OpenClaw workspace"
+  else
+    # Not fatal, and not silent: OpenClaw still runs its own introduction, it
+    # just will not ask the owner their name.
+    echo "  WARNING: could not seed BOOTSTRAP.md; OpenClaw will use its own ritual" >&2
+  fi
+fi
+# --- end clawbox bootstrap seed ---
+
 # Make sure the workspace skills root exists before the gateway starts.
 # OpenClaw's skills watcher (skills.load.watch, on by default) hands each
 # configured root to chokidar once, when a turn first builds the skills
@@ -3274,5 +3324,123 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
       echo "  WARNING: could not append the system-actions rule to AGENTS.md" >&2
     fi
   fi
+
+  # --- clawbox language re-apply ---
+  # Re-apply the owner's chosen UI language to the persona.
+  #
+  # The Next app no longer writes USER.md/SOUL.md when the language is picked
+  # in the setup wizard: doing so before the agent's first reply is what told
+  # OpenClaw the workspace was already configured and cost every box its
+  # introduction (src/lib/language-persona.ts, personaWritesAllowed). The pick
+  # is still stored, in `pref:ui_language` in the device store, and this is one
+  # of the two places it is paid back.
+  #
+  # This one is the BOOT path, not the only one. Nothing restarts the gateway
+  # when the introduction ends, so a box left running would wait here for days;
+  # the five-minute portal heartbeat drains the same debt through
+  # applyDeferredLanguagePersona() (src/lib/language-persona.ts). This block
+  # stays because it costs nothing and it covers the box that reboots, or
+  # updates, before its first tick lands.
+  #
+  # Same two conditions the route applies, for the same reasons: USER.md must
+  # already exist (creating it is the suppressing act) and BOOTSTRAP.md must
+  # not (the ritual is armed and unfinished, and an edit now makes the next
+  # turn delete it). A language changed from Settings AFTER the introduction
+  # goes straight through the route and does not wait for this.
+  #
+  # The transformation is byte-for-byte the one writeLanguagePersona() performs
+  # — src/tests/unit/gateway-prestart-onboarding.test.ts runs this very block
+  # against that function and compares — and it rewrites nothing when the files
+  # already say the right thing, so it is a no-op on every reboot after the
+  # first.
+  if [ -f "$CLAWBOX_WORKSPACE/USER.md" ] && [ ! -e "$CLAWBOX_WORKSPACE/BOOTSTRAP.md" ]; then
+    export CLAWBOX_LANG_USER_MD="$CLAWBOX_WORKSPACE/USER.md"
+    export CLAWBOX_LANG_SOUL_MD="$CLAWBOX_WORKSPACE/SOUL.md"
+    # Guarded and warn-only, under this section's standing rule: this script is
+    # a bare ExecStartPre under `set -euo pipefail`, so an unguarded failure
+    # here is the gateway's failure.
+    if ! python3 - <<'PY_LANG'
+import json, os, re
+
+# The locales the desktop ships, with the names that reach the agent's system
+# prompt. Kept in step with LANG_NAMES in src/lib/language-persona.ts by the
+# test named above, which drives both and diffs the result.
+LANG_NAMES = {
+    "en": "English", "bg": "Български", "de": "Deutsch", "es": "Español",
+    "fr": "Français", "it": "Italiano", "ja": "日本語", "nl": "Nederlands",
+    "sv": "Svenska", "zh": "中文",
+}
+
+try:
+    with open(os.environ["CLAWBOX_DEVICE_STORE"], encoding="utf-8") as fh:
+        lang = json.load(fh).get("pref:ui_language")
+except (OSError, ValueError):
+    # No device store yet, or one that is mid-write: nothing was ever picked,
+    # so there is nothing to pay back. Not an error.
+    raise SystemExit(0)
+# The stored value is validated on the way in, but this reads a file on disk,
+# and this string is interpolated into a system prompt — so the closed set is
+# checked again here rather than trusted.
+if not isinstance(lang, str) or lang not in LANG_NAMES:
+    raise SystemExit(0)
+name = LANG_NAMES[lang]
+
+line = "- **Language:** %s (%s)" % (name, lang)
+if lang != "en":
+    line += " — Always respond in %s" % name
+
+SOUL_SECTION = re.compile(r"\n## Language\n[\s\S]*?(?=\n## |\n\Z|\Z)")
+
+
+def user_md(text):
+    text = re.sub(r"\n- \*\*Language:\*\*.*\n", "\n", text)
+    if "- **Name:**" in text:
+        return re.sub(r"(- \*\*Name:\*\*.*\n)", lambda m: m.group(1) + line + "\n", text, count=1)
+    return text.rstrip() + "\n" + line + "\n"
+
+
+def soul_md(text):
+    stripped = SOUL_SECTION.sub("", text, count=1)
+    if lang == "en":
+        # English is the absence of the instruction, not another instruction.
+        return stripped.rstrip() + "\n" if "## Language" in text else text
+    return stripped.rstrip() + (
+        "\n\n## Language\n\nYou MUST respond in %s. The user's preferred language is %s (%s). "
+        "All messages, explanations, and summaries must be in %s. Only use English for code, "
+        "technical terms, and tool names.\n" % (name, name, lang, name)
+    )
+
+
+def rewrite(path, transform, default=None):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            before = fh.read()
+    except FileNotFoundError:
+        # Only the non-English SOUL.md is worth creating; see soul_md above.
+        if default is None:
+            return
+        before = default
+    after = transform(before)
+    # Idempotence, and the reason a reboot is not a write: the persona is the
+    # agent's own file and rewriting it with identical bytes on every gateway
+    # start would churn its mtime for nothing.
+    if after == before:
+        return
+    tmp = path + ".clawbox-lang.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(after)
+    os.replace(tmp, path)
+
+
+rewrite(os.environ["CLAWBOX_LANG_USER_MD"], user_md)
+rewrite(os.environ["CLAWBOX_LANG_SOUL_MD"], soul_md,
+        None if lang == "en" else "# SOUL.md - Who You Are\n")
+PY_LANG
+    then
+      echo "  WARNING: could not apply the saved UI language to the workspace persona" >&2
+    fi
+    unset CLAWBOX_LANG_USER_MD CLAWBOX_LANG_SOUL_MD
+  fi
+  # --- end clawbox language re-apply ---
 fi
 # --- end guide seeding ---

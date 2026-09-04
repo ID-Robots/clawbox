@@ -3,47 +3,48 @@
 /**
  * BrowserApp — the desktop browser, and the agent's access to it.
  *
- * Three steps: install Chromium, link it to the agent, open/close the real
- * window. Step 2 is the one that differs by edition, and the route says which
- * shape it takes via `alwaysOn`: OpenClaw needs the link switched on (it writes
- * the agent's tool profile), Hermes has it permanently because the ClawBox
- * browser_* tools are part of the tool set it is given at boot. The panel never
- * decides this itself — see integrationIsAlwaysOn() in
+ * Three faces, chosen the way the Coding Agent app chooses its own: the setup
+ * WIZARD until the owner has been through it, the SETTINGS page while its
+ * button is pressed, and otherwise HOME — which is the browser itself, drawn
+ * on the device's own screen through VNCApp.
+ *
+ * Home is the point of the app. Opening it used to leave the owner in front of
+ * three numbered cards with the window they came for two buttons away ("Open
+ * Browser", then "Open in VNC", in that order, or the screen showed an empty
+ * desktop). Now the app starts Chromium if it is not running, waits for it and
+ * shows the screen — with an honest pill while that happens and a stated
+ * reason when it cannot. The owner can switch that off (`autoOpen`), and it
+ * never fires while the AGENT is browsing: `open-browser` terminates the
+ * headless browser holding the CDP port, which is fair when a person asks for
+ * it and not fair as a side effect of `ui_open_app("browser")`.
+ *
+ * The app never decides an edition's shape itself — the route says whether the
+ * agent link is a switch via `alwaysOn`; see integrationIsAlwaysOn() in
  * src/app/setup-api/browser/manage/route.ts.
  */
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
 import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
+import { browserErrorText, runBrowserAction, type BrowserAction } from "@/lib/browser-actions";
+import { autoLaunchSpent, spendAutoLaunch } from "@/lib/browser-auto-launch";
 import ErrorWithFix from "./ErrorWithFix";
+import VNCApp from "./VNCApp";
+import BrowserSetupWizard from "./BrowserSetupWizard";
+import BrowserSettingsPanel, { type BrowserStatus } from "./BrowserSettingsPanel";
+import { BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY } from "./coding-agent-ui";
 
 const BRAND_ORANGE = "#fe6e00";
-const BRAND_ORANGE_LIGHT = "#ff8b1a";
 
-interface BrowserStatus {
-  chromium: { installed: boolean; path?: string; version?: string };
-  browser: {
-    running: boolean;
-    pid?: number;
-    cdpReady?: boolean;
-    /**
-     * The agent's own headless browser owns the CDP port and no desktop
-     * browser window exists. A distinct state with its own words — the panel
-     * used to render this as "Chromium is running on the desktop" (TASK-515).
-     */
-    agentBrowsing?: boolean;
-  };
-  enabled: boolean;
-  /**
-   * True when this edition has no integration switch because the link is
-   * permanent — Hermes drives the desktop browser through the ClawBox
-   * browser_* tools, which it is given at every boot. The route decides this
-   * (see integrationIsAlwaysOn there); the panel only renders it, so a device
-   * and its UI can never disagree about whether a button should exist.
-   */
-  alwaysOn?: boolean;
-  cdpPort?: number;
-}
+/** How often the status is re-read while nothing is happening, and while
+ *  something is: a launch takes up to ~15 s to answer and the strip has to
+ *  follow it, but a browser that is simply up does not need that attention. */
+const POLL_IDLE_MS = 5000;
+const POLL_BUSY_MS = 1500;
+/** For how long a launch earns the fast poll. Comfortably past the route's own
+ *  ten readiness probes, and short enough that a Chromium which came up but
+ *  never bound its port drops back to the idle rate instead of holding it. */
+const POLL_BUSY_WINDOW_MS = 45_000;
 
 interface BrowserAppProps {
   onOpenApp?: (appId: string) => void;
@@ -72,10 +73,9 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
     return () => { alive = false; };
   }, []);
   const [loading, setLoading] = useState(true);
-  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [actionLoading, setActionLoading] = useState<BrowserAction | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [page, setPage] = useState<"home" | "settings">("home");
 
   const actionErrorRef = useRef(false);
   const lastStatusJson = useRef("");
@@ -104,11 +104,37 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
     }
   }, []);
 
+  const browserRunning = status?.browser?.running ?? false;
+  const cdpReady = status?.browser?.cdpReady ?? false;
+  // A launch is in flight, or a process exists that has not bound its port
+  // yet. Both are "something is happening, wait", and both want the faster
+  // poll and the pill over the screen.
+  const starting = actionLoading === "open-browser" || (browserRunning && !cdpReady);
+
+  // One read on mount. Its own effect so that a change of cadence below does
+  // not fire a second one milliseconds after the first.
+  useEffect(() => { void fetchStatus(); }, [fetchStatus]);
+
+  // The fast poll FOLLOWS a launch; it must never become the standing rate.
+  // `starting` also covers "a process exists that has not bound its port", and
+  // a Chromium that never binds one would otherwise keep this window reading
+  // the manage route every 1.5 s for as long as it is open — a route that runs
+  // `chromium --version` and walks the process table on every read.
+  const [fastPoll, setFastPoll] = useState(false);
   useEffect(() => {
-    fetchStatus();
-    pollRef.current = setInterval(fetchStatus, 5000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [fetchStatus]);
+    if (!starting) {
+      setFastPoll(false);
+      return;
+    }
+    setFastPoll(true);
+    const id = setTimeout(() => setFastPoll(false), POLL_BUSY_WINDOW_MS);
+    return () => clearTimeout(id);
+  }, [starting]);
+
+  useEffect(() => {
+    const id = setInterval(() => { void fetchStatus(); }, fastPoll ? POLL_BUSY_MS : POLL_IDLE_MS);
+    return () => clearInterval(id);
+  }, [fetchStatus, fastPoll]);
 
   // Clear actionLoading once polling sees the requested end-state. Some
   // actions (enable/disable restart the gateway) can outlast or hang the
@@ -116,43 +142,32 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   // even though the backend already reflects the new state.
   useEffect(() => {
     if (!actionLoading || !status) return;
-    const enabled = status.enabled;
-    const browserOn = status.browser?.running;
     if (
-      (actionLoading === "Enabling..." && enabled) ||
-      (actionLoading === "Disabling..." && !enabled) ||
-      (actionLoading === "Opening..." && browserOn) ||
-      (actionLoading === "Closing..." && !browserOn)
+      (actionLoading === "enable" && status.enabled) ||
+      (actionLoading === "disable" && !status.enabled) ||
+      (actionLoading === "open-browser" && status.browser?.running) ||
+      (actionLoading === "close-browser" && !status.browser?.running)
     ) {
       setActionLoading(null);
     }
   }, [status, actionLoading]);
 
-  const doAction = useCallback(async (action: string, loadingLabel: string, successLabel?: string) => {
-    setActionLoading(loadingLabel);
+  const doAction = useCallback(async (action: BrowserAction) => {
+    // The owner's own hand on the browser, whichever way it went: the window
+    // has nothing left to decide after it, and must not re-open on the next
+    // remount what was just closed on purpose.
+    if (action === "open-browser" || action === "close-browser") spendAutoLaunch();
+    setActionLoading(action);
     setError(null);
-    setSuccessMsg(null);
     actionErrorRef.current = false;
-    try {
-      const res = await fetch("/setup-api/browser/manage", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Action failed");
-      if (successLabel) {
-        setSuccessMsg(successLabel);
-        setTimeout(() => setSuccessMsg(null), 3000);
-      }
-      await fetchStatus();
-    } catch (err) {
+    const result = await runBrowserAction(action);
+    if (!result.ok) {
       actionErrorRef.current = true;
-      setError(err instanceof Error ? err.message : "Action failed");
-    } finally {
-      setActionLoading(null);
+      setError(browserErrorText(t, result));
     }
-  }, [fetchStatus]);
+    await fetchStatus();
+    setActionLoading(null);
+  }, [fetchStatus, t]);
 
   const openVncApp = useCallback(() => {
     if (onOpenApp) {
@@ -161,6 +176,40 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
     }
     window.open("/app/vnc", "_blank");
   }, [onOpenApp]);
+
+  const chromiumInstalled = status?.chromium?.installed ?? false;
+  const agentBrowsing = !browserRunning && (status?.browser?.agentBrowsing ?? false);
+  const isEnabled = status?.enabled ?? false;
+  // The window needs the link on the switch editions — that is what writes the
+  // agent's tools profile — and a binary a system service can start. Chromium
+  // being merely "installed" is not that: the snap build is refused by
+  // scripts/launch-browser.sh, which is why the route answers `serviceSafe`.
+  const canRunBrowser = isEnabled && chromiumInstalled && status?.chromium?.serviceSafe !== false;
+
+  const face: "wizard" | "settings" | "home" =
+    page === "settings" ? "settings"
+      : status?.setupComplete === false ? "wizard"
+        : "home";
+
+  // Kept outside React on purpose (see browser-auto-launch.ts): the fact has
+  // to outlive the mount, and "we have already tried" has to be true before
+  // the request comes back — the poll would otherwise fire a second launch
+  // while the first is still inside the route's ten-second wait for CDP.
+  useEffect(() => {
+    if (autoLaunchSpent() || face !== "home" || !status) return;
+    // The switch is the owner's, and the setup route refuses the MCP bearer,
+    // so `ui_open_app("browser")` cannot turn it back on to get itself a
+    // window the owner said no to.
+    if (status.autoOpen === false) return;
+    if (status.browser?.running) { spendAutoLaunch(); return; }
+    // Not while the agent is mid-task in its own headless browser: opening
+    // ours terminates that one. The notice below offers the same action by
+    // hand, which is a person asking rather than a window deciding.
+    if (status.browser?.agentBrowsing) return;
+    if (!canRunBrowser) return;
+    spendAutoLaunch();
+    void doAction("open-browser");
+  }, [status, face, canRunBrowser, doAction]);
 
   if (loading) {
     return (
@@ -171,25 +220,21 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
     );
   }
 
-  const chromiumInstalled = status?.chromium?.installed ?? false;
-  const browserRunning = status?.browser?.running ?? false;
-  const agentBrowsing = !browserRunning && (status?.browser?.agentBrowsing ?? false);
-  const isEnabled = status?.enabled ?? false;
-  const alwaysOn = status?.alwaysOn ?? false;
-  // Step 3 drives the Chromium that step 1 installs. Enabled-but-no-Chromium is
-  // unreachable on the switch editions (you cannot enable without it), but on an
-  // always-on edition step 2 is satisfied from the moment the device boots — so
-  // the browser controls have to check for the binary themselves rather than
-  // inherit that check from step 2.
-  const canRunBrowser = isEnabled && chromiumInstalled;
+  const stateLabel = starting
+    ? t("browser.startingChromium")
+    : browserRunning
+      ? t("browser.settings.runningPid", { pid: status?.browser?.pid ?? "?" })
+      : agentBrowsing
+        ? t("browser.agentBrowsingShort", { harness: harnessLabel })
+        : t("browser.settings.notRunning");
 
   return (
-    <div className="h-full flex flex-col bg-[var(--bg-deep)] text-white overflow-y-auto">
-      {/* Header */}
-      <div className="shrink-0 px-6 pt-6 pb-4 border-b border-white/10">
-        <div className="flex items-center gap-3 mb-1">
-          <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: BRAND_ORANGE }}>
-            <svg className="w-6 h-6" viewBox="0 0 135.47 135.47">
+    <div className="h-full flex flex-col bg-[var(--bg-deep)] text-white">
+      {/* Header: what this is, and the one control that switches faces. */}
+      <div className="shrink-0 px-5 py-3 border-b border-white/10 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0" style={{ backgroundColor: BRAND_ORANGE }}>
+            <svg className="w-5 h-5" viewBox="0 0 135.47 135.47" aria-hidden="true">
               <path d="m67.733 67.733 29.33 16.933-29.33 50.8c37.408 0 67.733-30.325 67.733-67.733 0-12.341-3.3168-23.901-9.0837-33.867h-58.65z" fill="#afccf9"/>
               <path d="m67.733-1e-6c-25.07 0-46.942 13.63-58.654 33.875l29.324 50.792 29.33-16.933v-33.867h58.65c-11.714-20.24-33.583-33.867-58.65-33.867z" fill="#1767d1"/>
               <path d="m0 67.733c0 37.408 30.324 67.733 67.733 67.733l29.33-50.8-29.33-16.933-29.33 16.933-29.324-50.792c-5.7637 9.9632-9.0794 21.519-9.0794 33.858" fill="#679ef5"/>
@@ -197,227 +242,163 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
               <path d="m95.25 67.733c0 15.197-12.32 27.517-27.517 27.517-15.197 0-27.517-12.32-27.517-27.517 0-15.197 12.32-27.517 27.517-27.517 15.197 0 27.517 12.32 27.517 27.517" fill="#1a74e7"/>
             </svg>
           </div>
-          <div>
-            <h1 className="text-lg font-semibold">{t("browser.title")}</h1>
-            <p className="text-xs text-white/50">{t("browser.subtitle", { harness: harnessLabel })}</p>
+          <div className="min-w-0">
+            <h1 className="text-sm font-semibold truncate">{t("browser.title")}</h1>
+            <p className="text-[11px] text-white/50 truncate">{t("browser.subtitle", { harness: harnessLabel })}</p>
           </div>
         </div>
+        {/* The settings live IN this app, on the desktop and on /app/browser
+            alike, so a phone that landed here reaches them without a desktop
+            listening for anything. */}
+        <button
+          type="button"
+          onClick={() => setPage(face === "settings" ? "home" : "settings")}
+          data-testid={face === "settings" ? "browser-settings-back" : "browser-open-settings"}
+          aria-expanded={face === "settings"}
+          className={BTN_SECONDARY}
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
+            {face === "settings" ? "arrow_back" : "settings"}
+          </span>
+          {face === "settings" ? t("browser.back") : t("browser.openSettings")}
+        </button>
       </div>
 
-      <div className="flex-1 p-6 space-y-6">
-        {/* Status messages */}
-        {error && <ErrorWithFix source="browser" message={error} />}
-        {successMsg && (
-          <div className="flex items-center gap-2 p-3 rounded-lg border" style={{ backgroundColor: `${BRAND_ORANGE}0d`, borderColor: `${BRAND_ORANGE}33` }}>
-            <span className="material-symbols-rounded" style={{ fontSize: 18, color: BRAND_ORANGE_LIGHT }}>check_circle</span>
-            <span className="text-sm" style={{ color: BRAND_ORANGE_LIGHT }}>{successMsg}</span>
-          </div>
-        )}
-
-        {/* Step 1: Chromium Installation */}
-        <div className="rounded-xl border border-white/10 bg-white/[0.02] overflow-hidden">
-          <div className="p-4 flex items-start gap-4">
-            <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-sm font-bold ${chromiumInstalled ? "text-white" : "bg-white/10 text-white/40"}`}
-              style={chromiumInstalled ? { backgroundColor: BRAND_ORANGE } : undefined}>
-              {chromiumInstalled ? (
-                <span className="material-symbols-rounded" style={{ fontSize: 18 }}>check</span>
-              ) : "1"}
-            </div>
-            <div className="flex-1 min-w-0">
-              <h3 className="font-medium text-sm">{t("browser.chromiumBrowser")}</h3>
-              {chromiumInstalled ? (
-                <div className="mt-1">
-                  <p className="text-xs text-white/50">
-                    {status?.chromium?.version || "Installed"}
-                  </p>
-                  {status?.chromium?.path && (
-                    <p className="text-xs text-white/30 mt-0.5 font-mono truncate">{status.chromium.path}</p>
-                  )}
-                </div>
-              ) : statusReadable ? (
-                <p className="text-xs text-white/50 mt-1">
-                  {t("browser.chromiumRequired")}
-                </p>
-              ) : null}
-            </div>
-            {statusReadable && !chromiumInstalled && (
+      {face === "home" ? (
+        <div className="flex-1 min-h-0 flex flex-col">
+          {/* The strip: what the browser is doing, and what can be done to it
+              without leaving the screen. */}
+          <div className="shrink-0 flex items-center gap-2 px-5 py-2 border-b border-white/10">
+            <span
+              aria-hidden="true"
+              className={`w-2 h-2 rounded-full shrink-0 ${
+                starting ? "bg-yellow-400 motion-safe:animate-pulse"
+                  : browserRunning ? "bg-green-400"
+                    : agentBrowsing ? "bg-amber-400" : "bg-white/25"
+              }`}
+            />
+            <span className="text-[11px] text-white/60 truncate" data-testid="browser-state">{stateLabel}</span>
+            <div className="flex-1" />
+            {browserRunning ? (
               <button
-                onClick={() => doAction("install-chromium", "Installing Chromium...", "Chromium installed")}
-                disabled={!!actionLoading}
-                className="px-4 py-1.5 rounded-lg text-xs font-medium text-white transition-colors cursor-pointer disabled:opacity-50"
-                style={{ backgroundColor: BRAND_ORANGE }}
+                type="button"
+                onClick={() => void doAction("close-browser")}
+                disabled={actionLoading !== null}
+                data-testid="browser-close"
+                className={BTN_QUIET}
               >
-                {actionLoading === "Installing Chromium..." ? (
-                  <span className="flex items-center gap-1.5">
-                    <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
-                    {t("browser.installing")}
-                  </span>
-                ) : t("browser.installChromium")}
+                {actionLoading === "close-browser" ? t("browser.closing") : t("browser.closeBrowser")}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void doAction("open-browser")}
+                disabled={actionLoading !== null || !canRunBrowser}
+                data-testid="browser-open"
+                className={BTN_PRIMARY}
+              >
+                {actionLoading === "open-browser" ? t("browser.opening") : t("browser.openBrowser")}
               </button>
             )}
+            <button type="button" onClick={openVncApp} data-testid="browser-open-vnc" className={BTN_SECONDARY}>
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">desktop_windows</span>
+              {t("browser.openInVNC")}
+            </button>
           </div>
-        </div>
 
-        {/* Step 2: agent integration — a switch on OpenClaw, permanent on Hermes */}
-        <div className={`rounded-xl border overflow-hidden ${chromiumInstalled ? "border-white/10 bg-white/[0.02]" : "border-white/5 bg-white/[0.01] opacity-50 pointer-events-none"}`}>
-          <div className="p-4 flex items-start gap-4">
-            <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-sm font-bold ${isEnabled ? "text-white" : "bg-white/10 text-white/40"}`}
-              style={isEnabled ? { backgroundColor: BRAND_ORANGE } : undefined}>
-              {isEnabled ? (
-                <span className="material-symbols-rounded" style={{ fontSize: 18 }}>check</span>
-              ) : "2"}
-            </div>
-            <div className="flex-1 min-w-0">
-              <h3 className="font-medium text-sm">{t("browser.openclawIntegration", { harness: harnessLabel })}</h3>
-              <p className="text-xs text-white/50 mt-1">
-                {alwaysOn
-                  ? t("browser.builtInMessage", { harness: harnessLabel })
-                  : isEnabled
-                    ? t("browser.enabledMessage", { harness: harnessLabel })
-                    : t("browser.disabledMessage", { harness: harnessLabel })}
-              </p>
-              {isEnabled && (
-                <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: BRAND_ORANGE }} />
-                    {/* Name the actual mechanism. "tools profile: full" is the
-                        OpenClaw config key the switch writes; on an always-on
-                        edition there is no such key, and the honest detail is
-                        which tools the agent holds. */}
-                    <span className={`text-xs text-white/40${alwaysOn ? " font-mono" : ""}`}>
-                      {alwaysOn ? "browser_open · browser_navigate · browser_screenshot" : "tools profile: full"}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="material-symbols-rounded text-white/30" style={{ fontSize: 14 }}>bug_report</span>
-                    <span className="text-xs text-white/30 font-mono">CDP port {status?.cdpPort ?? 18800}</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="material-symbols-rounded text-white/30" style={{ fontSize: 14 }}>folder</span>
-                    <span className="text-xs text-white/30 font-mono">~/.config/clawbox-browser/</span>
-                  </div>
-                </div>
-              )}
-            </div>
-            {/* No button where there is no choice: the link is part of the
-                edition, so anything offered here would be a control that does
-                nothing — or, as it did before, one that only ever errored. */}
-            {!alwaysOn && (
-              <button
-                onClick={() => isEnabled
-                  ? doAction("disable", "Disabling...", `Browser disconnected from ${harnessLabel}`)
-                  : doAction("enable", "Enabling...", `Browser connected to ${harnessLabel}`)
-                }
-                disabled={!!actionLoading}
-                className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer disabled:opacity-50 shrink-0 ${
-                  isEnabled ? "bg-white/10 text-white/60 hover:bg-white/15" : "text-white"
-                }`}
-                style={!isEnabled ? { backgroundColor: BRAND_ORANGE } : undefined}
-              >
-                {actionLoading === "Enabling..." || actionLoading === "Disabling..." ? (
-                  <span className="flex items-center gap-1.5">
-                    <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
-                    {actionLoading === "Enabling..." ? t("browser.enabling") : t("browser.disabling")}
-                  </span>
-                ) : isEnabled ? t("browser.disable") : t("browser.enable")}
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Step 3: Browser Controls */}
-        <div className={`rounded-xl border overflow-hidden ${canRunBrowser ? "border-white/10 bg-white/[0.02]" : "border-white/5 bg-white/[0.01] opacity-50 pointer-events-none"}`}>
-          <div className="p-4 flex items-start gap-4">
-            <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-sm font-bold ${browserRunning ? "text-white" : "bg-white/10 text-white/40"}`}
-              style={browserRunning ? { backgroundColor: BRAND_ORANGE } : undefined}>
-              {browserRunning ? (
-                <span className="material-symbols-rounded" style={{ fontSize: 18 }}>check</span>
-              ) : "3"}
-            </div>
-            <div className="flex-1 min-w-0">
-              <h3 className="font-medium text-sm">{t("browser.desktopBrowser")}</h3>
-              <p className="text-xs text-white/50 mt-1">
-                {browserRunning
-                  ? t("browser.runningMessage", { harness: harnessLabel })
-                  : agentBrowsing
-                    ? t("browser.agentHeadlessMessage", { harness: harnessLabel })
-                    : t("browser.launchMessage", { harness: harnessLabel })}
-              </p>
-              {!browserRunning && agentBrowsing && (
-                <div className="mt-2 flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-amber-400" />
-                  <span className="text-xs text-white/40 font-mono">CDP :{status?.cdpPort ?? 18800}</span>
-                </div>
-              )}
-              {browserRunning && (
-                <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                    <span className="text-xs text-white/40">PID {status?.browser?.pid ?? "?"}</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className={`w-2 h-2 rounded-full ${status?.browser?.cdpReady ? "bg-green-400" : "bg-yellow-400"}`} />
-                    <span className="text-xs text-white/40 font-mono">
-                      CDP :{status?.cdpPort ?? 18800} {status?.browser?.cdpReady ? t("browser.ready") : t("browser.starting")}
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className="flex gap-2 shrink-0">
-              <button
-                onClick={openVncApp}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium text-white/80 bg-white/5 border border-white/10 hover:bg-white/10 transition-colors cursor-pointer"
-              >
-                <span className="flex items-center gap-1.5">
-                  <span className="material-symbols-rounded" style={{ fontSize: 14 }}>desktop_windows</span>
-                  {t("browser.openInVNC")}
-                </span>
-              </button>
-              {browserRunning ? (
-                <>
-                  <button
-                    onClick={() => doAction("close-browser", "Closing...", "Browser closed")}
-                    disabled={!!actionLoading}
-                    className="px-4 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer disabled:opacity-50"
-                  >
-                    {actionLoading === "Closing..." ? (
-                      <span className="flex items-center gap-1.5">
-                        <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
-                        {t("browser.closing")}
-                      </span>
-                    ) : (
-                      <span className="flex items-center gap-1.5">
-                        <span className="material-symbols-rounded" style={{ fontSize: 14 }}>close</span>
-                        {t("browser.closeBrowser")}
-                      </span>
-                    )}
+          {(error || agentBrowsing || (statusReadable && !canRunBrowser)) && (
+            <div className="shrink-0 px-5 pt-3 space-y-2">
+              {error && (
+                <div className="flex items-start gap-2">
+                  <ErrorWithFix source="browser" message={error} className="flex-1" />
+                  <button type="button" onClick={() => setPage("settings")} className={BTN_SECONDARY}>
+                    {t("browser.openSettings")}
                   </button>
-                </>
-              ) : (
-                <button
-                  onClick={() => doAction("open-browser", "Opening...", "Browser launched")}
-                  disabled={!!actionLoading}
-                  className="px-4 py-1.5 rounded-lg text-xs font-medium text-white transition-colors cursor-pointer disabled:opacity-50"
-                  style={{ backgroundColor: BRAND_ORANGE }}
-                >
-                  {actionLoading === "Opening..." ? (
-                    <span className="flex items-center gap-1.5">
-                      <span className="material-symbols-rounded animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
-                      {t("browser.opening")}
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-1.5">
-                      <span className="material-symbols-rounded" style={{ fontSize: 14 }}>open_in_new</span>
-                      {t("browser.openBrowser")}
-                    </span>
-                  )}
-                </button>
+                </div>
+              )}
+              {/* The two states a picture of the screen cannot explain: the
+                  agent holding the browser, and a box with nothing to launch. */}
+              {agentBrowsing && !error && (
+                <div className="flex items-start gap-2 rounded-xl border border-amber-400/30 bg-amber-400/10 p-3">
+                  <p className="flex-1 text-xs leading-relaxed text-amber-200/90">
+                    {t("browser.agentHeadlessMessage", { harness: harnessLabel })}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void doAction("open-browser")}
+                    disabled={actionLoading !== null}
+                    data-testid="browser-move-browsing"
+                    className={BTN_SECONDARY}
+                  >
+                    {t("browser.moveBrowsing")}
+                  </button>
+                </div>
+              )}
+              {statusReadable && !canRunBrowser && !error && !agentBrowsing && (
+                <div className="flex items-start gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                  <p className="flex-1 text-xs leading-relaxed text-white/60" data-testid="browser-cannot-run">
+                    {!chromiumInstalled
+                      ? t("browser.chromiumRequired")
+                      : status?.chromium?.serviceSafe === false
+                        ? t("browser.errorNotServiceSafe")
+                        : t("browser.disabledMessage", { harness: harnessLabel })}
+                  </p>
+                  <button type="button" onClick={() => setPage("settings")} className={BTN_SECONDARY}>
+                    {t("browser.openSettings")}
+                  </button>
+                </div>
               )}
             </div>
+          )}
+
+          {/* The screen itself, mounted whatever Chromium is doing: an idle
+              virtual desktop is an honest picture of the device, and VNCApp
+              carries its own repair path for a screen that is missing. */}
+          <div className="relative flex-1 min-h-0 mt-3">
+            <VNCApp />
+            {starting && (
+              <div
+                className="absolute top-3 left-3 z-20 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-black/70 backdrop-blur-sm border border-white/10 text-xs text-white/90"
+                data-testid="browser-starting-pill"
+              >
+                <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 14 }} aria-hidden="true">progress_activity</span>
+                {t("browser.startingChromium")}
+              </div>
+            )}
           </div>
         </div>
-      </div>
+      ) : (
+        <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4">
+          <div className="mx-auto w-full max-w-2xl min-h-full flex flex-col">
+            {error && <ErrorWithFix source="browser" message={error} />}
+            {face === "settings" ? (
+              <BrowserSettingsPanel
+                status={status}
+                harnessLabel={harnessLabel}
+                actionLoading={actionLoading}
+                onAction={(action) => void doAction(action)}
+                onChanged={() => { void fetchStatus(); }}
+                onOpenVnc={openVncApp}
+                onShowWizard={() => setPage("home")}
+              />
+            ) : status ? (
+              <BrowserSetupWizard
+                status={status}
+                harnessLabel={harnessLabel}
+                onChanged={() => { void fetchStatus(); }}
+                // Finishing is just "read yourself again": the flag comes back
+                // true and the face flips to home. A wizard the owner left
+                // WITHOUT opening the browser spends the automatic launch, so
+                // home does not immediately do the thing they just skipped.
+                onDone={(opened) => {
+                  if (!opened) spendAutoLaunch();
+                  void fetchStatus();
+                }}
+              />
+            ) : null}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

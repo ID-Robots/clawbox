@@ -14,6 +14,7 @@ import fs from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
 import { isInside } from "../../src/lib/file-guard";
+import { runContext } from "../lib/run-context";
 import { apiPost } from "../lib/api";
 import { ToolError, type ErrorRule } from "../lib/errors";
 import { text, type Registrar, type ToolResult } from "../lib/register";
@@ -32,28 +33,13 @@ interface BrowserReply {
 // ── Coding-agent run context ─────────────────────────────────────────────────
 //
 // When the coding-agent runner spawns this server (CLAWBOX_MCP_PROFILE=browser)
-// it names the run's working folder and evidence folder. In that context the
+// it names the run's working folder and evidence folder — mcp/lib/run-context.ts
+// reads them, for this family and for the media tools alike. In that context the
 // calling model CANNOT see images (DeepSeek through the proxy — an image block
 // arrives as "[Unsupported Image]"), so the capturing tools ask the backend to
 // describe the frame it captures (describe: true) and every reply swaps the
 // inline screenshot for the PNG archived into the evidence folder plus that
 // written description.
-
-interface RunContext {
-  workingDir: string;
-  artifactsDir: string;
-}
-
-/**
- * All-or-nothing: the runner sets BOTH variables. Anything less is no run
- * context, so a stray variable can never produce a chimera — an inline image
- * the run's model cannot read, or a local-view tool outside any run.
- */
-function runContext(): RunContext | null {
-  const workingDir = process.env.CLAWBOX_RUN_DIR?.trim();
-  const artifactsDir = process.env.CLAWBOX_RUN_ARTIFACTS_DIR?.trim();
-  return workingDir && artifactsDir ? { workingDir, artifactsDir } : null;
-}
 
 let shotCounter = 0;
 

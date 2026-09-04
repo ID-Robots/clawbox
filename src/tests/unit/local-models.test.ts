@@ -293,6 +293,28 @@ describe("turning an engine on and off", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("warms an engine up without deciding how the box boots", async () => {
+    // The warm-up (the chat's microphone, the Voice tab's engine pick) starts
+    // the model server so the next reply is spoken in two seconds instead of
+    // fifteen. It must never reach `enable`: an engine the owner switched off
+    // for good would come back at the next boot because a chat turn ran.
+    responses.push({ match: /systemctl/, stdout: "" });
+    const { startUserEngine } = await lib();
+    const res = await startUserEngine("kokoro-server.service");
+    expect(res.ok).toBe(true);
+    expect(calls.at(-1)).toEqual({
+      cmd: "/usr/bin/systemctl",
+      args: ["--user", "start", "--no-block", "kokoro-server.service"],
+    });
+    expect(calls.some(c => c.args.includes("enable"))).toBe(false);
+  });
+
+  it("refuses to warm a unit that is not one of the engines", async () => {
+    const { startUserEngine } = await lib();
+    expect((await startUserEngine("clawbox-gateway.service")).ok).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
   it("never leaks the command line when sudo refuses", async () => {
     responses.push({ match: /sudo/, fail: "Command failed: /usr/bin/sudo /usr/bin/systemctl disable --now ollama.service\nsudo: a password is required" });
     const { setEngineEnabled } = await lib();
@@ -300,6 +322,49 @@ describe("turning an engine on and off", () => {
     expect(res.ok).toBe(false);
     expect(res.error).not.toContain("/usr/bin");
     expect(res.error).toMatch(/does not allow/i);
+  });
+});
+
+describe("whether the box can encode a voice note", () => {
+  /** A PATH of exactly one directory, so the probe's answer is this test's own doing. */
+  async function withPath(entries: string[], body: () => Promise<void>) {
+    const before = process.env.PATH;
+    process.env.PATH = entries.join(path.delimiter);
+    try {
+      await body();
+    } finally {
+      process.env.PATH = before;
+    }
+  }
+
+  it("finds ffmpeg where the gateway would find it — on the PATH, and executable", async () => {
+    const bin = path.join(tmpHome, "bin");
+    await fs.mkdir(bin, { recursive: true });
+    await fs.writeFile(path.join(bin, "ffmpeg"), "#!/bin/sh\n", { mode: 0o755 });
+    const { ffmpegPresent } = await lib();
+    await withPath([bin], async () => expect(await ffmpegPresent()).toBe(true));
+  });
+
+  it("says no when it is missing, and when it is there but not runnable", async () => {
+    // Not runnable is the honest "no": OpenClaw execs ffmpeg to convert the
+    // WAV, so a file without the bit set encodes exactly as many voice notes
+    // as no file at all.
+    const bin = path.join(tmpHome, "empty");
+    await fs.mkdir(bin, { recursive: true });
+    const { ffmpegPresent } = await lib();
+    await withPath([bin], async () => expect(await ffmpegPresent()).toBe(false));
+    await fs.writeFile(path.join(bin, "ffmpeg"), "", { mode: 0o644 });
+    await withPath([bin], async () => expect(await ffmpegPresent()).toBe(false));
+  });
+
+  it("is not fooled by a DIRECTORY called ffmpeg", async () => {
+    // A searchable directory answers X_OK on POSIX exactly as an executable
+    // does, so the probe used to report an encoder the box cannot start — and
+    // the Voice tab said voice notes were ready.
+    const bin = path.join(tmpHome, "dir-on-path");
+    await fs.mkdir(path.join(bin, "ffmpeg"), { recursive: true });
+    const { ffmpegPresent } = await lib();
+    await withPath([bin], async () => expect(await ffmpegPresent()).toBe(false));
   });
 });
 

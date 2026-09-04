@@ -611,7 +611,11 @@ export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
     getMemoryShardEnabled(),
     getMemoryShardSetupComplete(),
   ]);
-  return { ...live, enabled, setupComplete };
+  // A "next run" while the switch is off would name an hour at which nothing
+  // happens: the scheduler arms no timer at all in that state, and this is the
+  // number every surface prints. The schedule itself is left as the owner saved
+  // it, so switching back on restores the hour they chose.
+  return { ...live, enabled, setupComplete, nextRunAtMs: enabled ? live.nextRunAtMs : 0 };
 }
 
 /**
@@ -727,17 +731,29 @@ function fixedFailureMessage(timedOut: boolean, code: number | null, signal: Nod
  * took, then start a second run over the first one's record instead of
  * answering 409. The lock afterwards is the authoritative single-flight for
  * the few milliseconds two callers can both pass the read.
+ *
+ * The owner's switch is read inside that lock, and `declined` says which of
+ * the two refusals happened. Both callers check it before they get here, but
+ * neither check is the authorisation: the work between it and this point can
+ * take seconds — resolveIndexMode may wait on a cold CLI probe — and a switch
+ * flipped inside that window would otherwise start the very pass it forbids.
+ * Here the read and the start are on the same side of the lock, so an "off"
+ * either prevents a run or lands after one had already begun.
  */
 export async function startMemoryIndex(
   requested: MemoryIndexMode,
   trigger: MemoryIndexTrigger = "manual",
-): Promise<{ accepted: boolean; run: MemoryRunState }> {
+): Promise<{ accepted: boolean; run: MemoryRunState; declined?: "running" | "disabled" }> {
   const current = await readMemoryRunState();
-  if (current.status === "running") return { accepted: false, run: current };
+  if (current.status === "running") return { accepted: false, declined: "running", run: current };
 
   const mode = await resolveIndexMode(requested);
   if (!await acquireRunLock()) {
-    return { accepted: false, run: await readMemoryRunState() };
+    return { accepted: false, declined: "running", run: await readMemoryRunState() };
+  }
+  if (!(await getMemoryShardEnabled())) {
+    await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
+    return { accepted: false, declined: "disabled", run: await readMemoryRunState() };
   }
 
   const startedAtMs = Date.now();

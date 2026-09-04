@@ -85,6 +85,12 @@ export interface AgentStatus {
   /** The owner's switch for the automatic review pass: one more run, in the
    *  same session, after every completed run that changed files. */
   reviewPass: boolean;
+  /** May a run draw pictures, and may the box draw the project's icon and
+   *  favicon? Optional: an older server does not answer with it. ON by
+   *  default, so the fallback below is `?? true`, not `?? false`. */
+  generateImages?: boolean;
+  /** May a run have this box speak a clip into its project? */
+  generateAudio?: boolean;
 }
 
 /** How often to ask again while the GitHub answer is one we do not trust. */
@@ -689,6 +695,52 @@ export default function CodingAgentSettingsPanel({
             label={t("codingAgent.reviewPassLabel")}
             testId="coding-agent-review-pass"
             onChange={(next) => void saveSetting({ reviewPass: next }, "review", t("codingAgent.reviewPassFailed"))}
+          />
+        </div>
+
+        {/* The two media switches. Under the review pass because they are
+            about what a run may SPEND rather than how it works, and both are
+            on unless the owner says otherwise — the pictures one also draws
+            the project's own icon and favicon. */}
+        <div className="flex items-start justify-between gap-4 mt-4">
+          <div className="min-w-0 flex items-center gap-1.5">
+            <span className="text-xs font-medium text-[var(--text-secondary)]">
+              {t("codingAgent.genImagesLabel")}
+            </span>
+            <HelpTip
+              text={t("codingAgent.genImagesHint")}
+              label={t("codingAgent.genImagesLabel")}
+              testId="coding-agent-gen-images-help"
+            />
+          </div>
+          <Switch
+            checked={status?.generateImages ?? true}
+            busy={busy === "genImages"}
+            disabled={!status || saving}
+            label={t("codingAgent.genImagesLabel")}
+            testId="coding-agent-gen-images"
+            onChange={(next) => void saveSetting({ generateImages: next }, "genImages", t("codingAgent.genImagesFailed"))}
+          />
+        </div>
+
+        <div className="flex items-start justify-between gap-4 mt-4">
+          <div className="min-w-0 flex items-center gap-1.5">
+            <span className="text-xs font-medium text-[var(--text-secondary)]">
+              {t("codingAgent.genAudioLabel")}
+            </span>
+            <HelpTip
+              text={t("codingAgent.genAudioHint")}
+              label={t("codingAgent.genAudioLabel")}
+              testId="coding-agent-gen-audio-help"
+            />
+          </div>
+          <Switch
+            checked={status?.generateAudio ?? true}
+            busy={busy === "genAudio"}
+            disabled={!status || saving}
+            label={t("codingAgent.genAudioLabel")}
+            testId="coding-agent-gen-audio"
+            onChange={(next) => void saveSetting({ generateAudio: next }, "genAudio", t("codingAgent.genAudioFailed"))}
           />
         </div>
 

@@ -2985,8 +2985,50 @@ tts_write_local_provider_definition() {
   oc_config_set "$TTS_HOME.providers.tts-local-cli" "$TTS_PROVIDER_JSON" --json
 }
 
+# ffmpeg, because a channel voice note is Opus and Kokoro speaks WAV.
+#
+# The on-device engine's happy path needs no ffmpeg — Kokoro emits WAV, the
+# provider entry below is configured for WAV, and the desktop chat plays WAV.
+# A CHANNEL is the exception: OpenClaw's Local CLI provider FORCES the `opus`
+# format for a voice-note target and converts the script's WAV with
+# `ffmpeg -c:a libopus`, and Hermes hands a command provider an .mp3 path
+# unless output_format says otherwise. So on a box without ffmpeg the local
+# attempt throws for every Telegram voice note and the gateway falls through
+# to the cloud voice: the box's own voice cannot reach a channel at all,
+# silently, whatever this step and `capability tts status` report.
+#
+# It is asked for HERE rather than only in the main install flow because this
+# step is what /setup-api/tts/install and every update run (step_post_update)
+# invoke, and those are the only routes a box already in a customer's hands
+# has to the fix.
+#
+# Never fatal: a box that cannot reach an apt mirror still has a working chat
+# voice and a cloud voice for its channels, and losing the whole voice install
+# over one download would be the worse outcome by far.
+tts_ensure_ffmpeg() {
+  # The probe is a variable so the contract test can exercise both sides of it
+  # on a machine that happens to have ffmpeg already.
+  local ffmpeg_bin="${TTS_FFMPEG_BIN:-ffmpeg}"
+  if command -v "$ffmpeg_bin" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "  Installing ffmpeg (a channel voice note is Opus; without it this box's own voice cannot send one)"
+  step_ffmpeg_install || true
+  if command -v "$ffmpeg_bin" >/dev/null 2>&1; then
+    echo "  ffmpeg installed"
+  else
+    echo "  Warning: ffmpeg is NOT installed — spoken replies on Telegram and the other channels will come from the cloud voice, not from this box" >&2
+  fi
+  return 0
+}
+
 step_openclaw_tts() {
   local TTS_SCRIPT="$PROJECT_DIR/scripts/openclaw/clawbox-tts.sh"
+
+  # Before the engine itself, because this is the half that decides whether
+  # the engine can ever reach a channel — and because it has to run on the
+  # Hermes arm below too, which returns before the OpenClaw registration.
+  tts_ensure_ffmpeg
 
   # --tts-only installs the CUDA Kokoro stack and deploys the voice scripts,
   # and deliberately not the STT half of that script (faster-whisper + the
@@ -3289,11 +3331,11 @@ step_openclaw_tts() {
       # path on EVERY utterance — and that is the one path the script cannot
       # walk alone: it synthesises WAV and then shells out to
       # `ffmpeg -codec:a libmp3lame`, refusing the whole run when ffmpeg is
-      # absent rather than write WAV bytes into an .mp3. install.sh never
-      # installs ffmpeg in the main flow (step_ffmpeg_install is defined and
-      # dispatchable but uncalled), so on any image that does not happen to
-      # ship it the box's own voice fails 100% of the time; where it IS
-      # present it is a libmp3lame encode per reply inside a 12 s budget.
+      # absent rather than write WAV bytes into an .mp3. `tts_ensure_ffmpeg`
+      # now installs it from `step_openclaw_tts`, but it only warns when the
+      # install fails, so an image without ffmpeg still reaches this arm and
+      # the box's own voice fails every time; where it IS present it is a
+      # libmp3lame encode per reply inside a 12 s budget.
       #
       # wav matches the OpenClaw arm's deliberate `outputFormat: "wav"` a
       # screen below — same script, same reason ("Kokoro emits WAV natively,

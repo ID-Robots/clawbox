@@ -22,7 +22,9 @@ const liveness = {
   mayRestart: vi.fn(),
   markRestarted: vi.fn(),
 };
+const persona = { applyDeferredLanguagePersona: vi.fn() };
 
+vi.mock("@/lib/language-persona", () => persona);
 vi.mock("@/lib/cloudflared", () => cloudflared);
 vi.mock("@/lib/portal-heartbeat", () => heartbeat);
 vi.mock("@/lib/tunnel-liveness", () => liveness);
@@ -42,6 +44,7 @@ beforeEach(() => {
   vi.resetModules();
   liveness.mayRestart.mockReturnValue(true);
   cloudflared.startTunnelService.mockResolvedValue({ bootPersisted: true, bootPersistWarning: null });
+  persona.applyDeferredLanguagePersona.mockResolvedValue(false);
   // Default for the behavioural tests below: the systemd unit, presenting the
   // install's internal token.
   internalToken.isInternalRequest.mockReturnValue(true);
@@ -55,6 +58,7 @@ afterEach(() => {
     ...Object.values(liveness),
     ...Object.values(routeAuth),
     ...Object.values(internalToken),
+    ...Object.values(persona),
   ]) {
     fn.mockReset();
   }
@@ -180,5 +184,53 @@ describe("when the box cannot tell", () => {
     const res = await tick();
     expect(res.status).toBe(200);
     expect(heartbeat.pushHeartbeatTick).toHaveBeenCalledWith(null);
+  });
+});
+
+/**
+ * The tick is also what pays back a language pick OpenClaw's
+ * first-conversation ritual made ClawBox defer.
+ *
+ * POST /setup-api/preferences refuses to write USER.md/SOUL.md while the
+ * introduction is armed or unstarted — creating those files is what suppressed
+ * the ritual on every box that shipped — and records the debt instead. Nothing
+ * restarts the gateway when the agent finishes the introduction, so the
+ * ExecStartPre that re-applies the pick can sit unrun for as long as the box
+ * stays up: the desktop in the owner's language, the agent's persona with no
+ * language directive at all. This five-minute tick is the only thing on a
+ * running box that fires without anyone touching it, so it is where the debt
+ * is drained.
+ */
+describe("the deferred language pick", () => {
+  it("is drained on an ordinary tick", async () => {
+    cloudflared.readTunnelUrl.mockResolvedValue("https://alive.trycloudflare.com");
+    liveness.checkTunnelLiveness.mockResolvedValue("alive");
+
+    await tick();
+    expect(persona.applyDeferredLanguagePersona).toHaveBeenCalledTimes(1);
+  });
+
+  it("is drained on the dead-tunnel path too, which returns early", async () => {
+    // The tunnel and the persona have nothing to do with each other; a box
+    // whose tunnel died must still learn the owner's language.
+    cloudflared.readTunnelUrl.mockResolvedValue("https://dead.trycloudflare.com");
+    liveness.checkTunnelLiveness.mockResolvedValue("dead");
+
+    const res = await tick();
+    expect(res.status).toBe(200);
+    expect(persona.applyDeferredLanguagePersona).toHaveBeenCalledTimes(1);
+  });
+
+  it("is not drained for a caller the tick refuses", async () => {
+    // The drain writes the agent's system prompt from stored state. It belongs
+    // behind the same door as the unit restart below it.
+    internalToken.isInternalRequest.mockReturnValue(false);
+    routeAuth.requireSession.mockResolvedValue(
+      NextResponse.json({ error: "Authentication required" }, { status: 401 }),
+    );
+
+    const res = await tick();
+    expect(res.status).toBe(401);
+    expect(persona.applyDeferredLanguagePersona).not.toHaveBeenCalled();
   });
 });

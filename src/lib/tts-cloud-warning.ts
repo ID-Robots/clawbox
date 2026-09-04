@@ -66,8 +66,12 @@ function readableList(values: string[]): string {
 /**
  * The fact behind the privacy notice, before it is worded: whether the cloud
  * speaks first or only when the local voice cannot, and which cloud providers
- * are in the chain (by label). The Voice tab translates this itself; the chat
- * banner renders the English sentence `buildCloudTtsWarning` makes of it.
+ * are in the chain (by label). No screen renders it today — the owner had the
+ * chat's yellow banner removed and Settings → Voice never carried one — but
+ * /setup-api/tts still answers it beside the English sentence
+ * `buildCloudTtsWarning` makes of it, so a surface that is asked for the
+ * notice can say it in the owner's language instead of working out the chain
+ * a second time.
  */
 export interface CloudTtsDisclosure {
   kind: 'uses-cloud' | 'may-use-cloud'

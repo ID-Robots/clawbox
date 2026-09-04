@@ -825,6 +825,23 @@ describe("SettingsApp providers and Local AI pages", () => {
     expect(screen.queryByTestId("ai-provider-list")).toBeNull();
   });
 
+  it("names the language picker after its heading, so a screen reader hears both", () => {
+    // A <label> headed this card and pointed at nothing: htmlFor only binds to
+    // form controls, and the control here is a button. Naming the button after
+    // the heading ALONE would be the other half-fix — it would take away the
+    // one thing the button already said, which language is on it.
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const button = container.querySelector<HTMLButtonElement>("#settings-language-button");
+    if (!button) throw new Error("the language picker did not render");
+    expect(container.querySelector("label")).not.toHaveTextContent("settings.language");
+    expect(button.getAttribute("aria-labelledby")).toBe("settings-language-label settings-language-button");
+    expect(container.querySelector("#settings-language-label")?.textContent).toBe("settings.language");
+    expect(button.getAttribute("aria-haspopup")).toBe("listbox");
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(button);
+    expect(button.getAttribute("aria-expanded")).toBe("true");
+  });
+
   it("shows the provider list on Providers, and the grouped on-device page on Local AI", async () => {
     const { container } = render(<SettingsApp ui={defaultUi} />);
     const providers = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.providers"));

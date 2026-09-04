@@ -325,6 +325,28 @@ describe("ensureWebappIcon", () => {
     expect(fs.existsSync(iconPath("notes"))).toBe(true);
   });
 
+  it("turns away a caller that says it will not queue, and admits it once the queue drains", async () => {
+    // The icon pipeline is fire-and-forget and waits happily. A REQUEST thread
+    // cannot: the media image route enters this same slot, and a queue that
+    // only drains at 120 s an entry would hold connections and pending
+    // promises on the box long after the run stopped waiting for them.
+    const held = deferredGeneration();
+    const holding = mod.withGenerationSlot(() => held.promise);
+    expect(mod.admittedGenerations()).toBe(1);
+    // One running plus one waiting is the most this caller allows, so the
+    // second waits and the third is refused outright.
+    const waiting = mod.withGenerationSlot(async () => "waited", { maxWaiting: 1 });
+    await expect(mod.withGenerationSlot(async () => "third", { maxWaiting: 1 }))
+      .rejects.toBeInstanceOf(mod.GenerationSlotBusy);
+
+    held.finish(generationOf(PNG));
+    await holding;
+    await expect(waiting).resolves.toBe("waited");
+    // Drained: the slot is free again, and nothing leaked from the refusal.
+    await vi.waitFor(() => expect(mod.admittedGenerations()).toBe(0));
+    await expect(mod.withGenerationSlot(async () => "after", { maxWaiting: 1 })).resolves.toBe("after");
+  });
+
   it("releases the slot when a generation fails, so the next app is still drawn", async () => {
     installApp("notes");
     mocks.generate

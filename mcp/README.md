@@ -67,6 +67,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own, and a second unguarded shell doubles the attack surface for no gain |
 | Coding agent (`coding_agent_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
+| Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
 | Everything else | yes | yes |
 
 ## Tools
@@ -453,6 +454,39 @@ box's vision model — `src/lib/vision-describe.ts`). `browser_view_local` opens
 an HTML file from the run's working folder (`CLAWBOX_RUN_DIR`): the ONLY
 `file://` the browser route accepts, and only while that run is the active
 one, realpath-checked on both sides.
+
+### Media, inside a coding-agent run only
+`generate_image` · `generate_audio`
+
+Registered in the browser family (so a run gets them and the assistant's own
+server does not) and ONLY when three things hold: this server was spawned for a
+run, the owner's matching switch is on, and the runner said so in
+`CLAWBOX_RUN_MEDIA` (`images`, `audio`, or both — absent means neither is
+registered). A tool that existed and always answered "switched off" would be a
+refusal a small model argues with, and on Hermes a candidate for the per-server
+circuit breaker.
+
+`generate_image` draws a picture with the box's ClawBox AI plan and writes a PNG
+into the run's project; `generate_audio` speaks a line in the box's own voice
+and writes a WAV. Both are backed by owner-fenced routes
+(`/setup-api/coding-agent/media/image` and `…/audio`) which decide where the
+file may land — the active run's working folder and evidence folder, typed-path
+and realpath-checked exactly as `/setup-api/vision/describe` decides what may be
+read. The tool's own path check is a courtesy for a typo; the bearer this
+process holds is the same one a prompt-injected run holds.
+
+Both spend something of the owner's, so both are capped on the RUN RECORD (20
+pictures, 40 clips) rather than per process — a transient retry and the
+automatic review pass resume the same record and must not buy the allowance
+twice — and every successful reply states how many are left, which is what stops
+a looping model before the cap has to. A 429 (`CONFLICT`) is a spent daily
+allowance or a busy voice: an answer, not a fault, and the mapping says "carry
+on without" rather than "retry".
+
+A run does NOT draw its own icon: the box draws the project's desktop icon and
+its `favicon.png` / `favicon.ico` itself, shortly after the run starts
+(`src/lib/project-icon.ts`), never overwriting a file that is there. The brief
+tells the run to link them and ship them.
 
 ### Coding family (OpenClaw only)
 `bash` · `job_status` · `job_stop` · `read_file` · `write_file` · `edit_file` ·
