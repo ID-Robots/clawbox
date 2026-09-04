@@ -55,6 +55,7 @@ describe("resource limits (TASK-455)", () => {
   describe("the numbers are internally coherent", () => {
     const units = [
       ["ollama", RESOURCE_LIMITS.ollama],
+      ["embed", RESOURCE_LIMITS.embed],
       ["browser", RESOURCE_LIMITS.browser],
       ["desktop", RESOURCE_LIMITS.desktop],
     ] as const;

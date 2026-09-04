@@ -307,7 +307,6 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
   // the box, an unlinked one has only Kokoro and reads the cloud as
   // unavailable. Whisper is the "absent engine" every negative assertion leans
   // on: it must read as absent and offer no control.
-  let ollamaEnabled = true;
   let localOnly = false;
   let voiceChoice: "auto" | "local" | "cloud" = "auto";
   let voiceLanguage = "en";
@@ -513,15 +512,6 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
           detailCode: gemmaInstalled ? "llamacppAnswering" : "llamacppNotInstalled",
         },
         {
-          id: "ollama", name: "Ollama", kind: "llm", runtime: "Runs extra models on this box", runtimeCode: "runsExtraModels",
-          installed: true, enabled: ollamaEnabled, running: ollamaEnabled ? "running" : "idle",
-          diskBytes: 639_000_000, memoryBytes: ollamaEnabled ? 1_073_741_824 : null,
-          control: "system-unit",
-          detail: ollamaEnabled ? "Serving Qwen3 Embedding." : "Off. Turn it on from the menu.",
-          detailCode: ollamaEnabled ? "ollamaServing" : "ollamaOff",
-          ...(ollamaEnabled ? { params: { names: "Qwen3 Embedding" } } : {}),
-        },
-        {
           id: "kokoro", name: "Kokoro", kind: "tts", runtime: "Voice on this box", runtimeCode: "voiceOnBox",
           installed: true, enabled: true, running: "running",
           diskBytes: null, memoryBytes: 412_000_000, control: "user-unit",
@@ -532,6 +522,16 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
           installed: false, enabled: null, running: "not-installed",
           diskBytes: null, memoryBytes: null, control: "none",
           detail: "Not installed. Speech is transcribed in the cloud.", detailCode: "whisperNotInstalled",
+        },
+        // The memory embedder's own row: Qwen 3 on this box's llama.cpp, woken
+        // by the local-AI proxy and asleep in between. No switch — Memory
+        // Shard owns it — only the pointer there.
+        {
+          id: "embeddings", name: "Memory search", nameCode: "memorySearch", kind: "embedding",
+          runtime: "Qwen 3 via llama.cpp", runtimeCode: "modelVia", params: { model: "Qwen 3", via: "llama.cpp" },
+          installed: true, enabled: null, running: "on-demand",
+          diskBytes: 639_000_000, memoryBytes: null, control: "none", managedBy: "clawkeep",
+          detail: "Ready. Wakes when you search, then sleeps to save memory.", detailCode: "embeddingsReady",
         },
       ],
       unavailable: [],
@@ -1386,17 +1386,15 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
           return;
         }
         // The real route's two refusals: an id the inventory has never heard
-        // of (404), and a real engine with no switch here (400). Only
-        // Ollama's switch is mocked.
-        if (!["llamacpp", "ollama", "kokoro", "whisper", "embeddings"].includes(payload.id)) {
+        // of (404), and a real engine with no switch here (400). No switch is
+        // mocked: the voice engines' toggles are exercised by their own specs
+        // and the memory embedder has none (the proxy wakes it).
+        if (!["llamacpp", "kokoro", "whisper", "embeddings"].includes(payload.id)) {
           await fulfillJson(route, { error: "Unknown model." }, 404);
           return;
         }
-        if (payload.id !== "ollama") {
-          await fulfillJson(route, { error: "That model cannot be turned on or off here." }, 400);
-          return;
-        }
-        ollamaEnabled = payload.enabled;
+        await fulfillJson(route, { error: "That model cannot be turned on or off here." }, 400);
+        return;
       }
       await fulfillJson(route, buildLocalModels());
       return;

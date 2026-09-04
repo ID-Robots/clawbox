@@ -76,11 +76,25 @@ function bareBox() {
   responses.push({ match: /pgrep/, fail: "no match", stdout: "" });
 }
 
+const NO_ENGINE = { installed: false, modelBytes: null };
+const ENGINE = { installed: true, modelBytes: 639_000_000 };
+
 const PROBES = {
-  ollamaBaseUrl: "http://127.0.0.1:11434",
   llamacpp: { installed: false, running: false, model: null, configured: false },
-  embeddings: { supported: true, ready: true, available: false, provider: null, model: null, local: false },
+  embeddings: { supported: true, ready: true, available: false, provider: null, model: null, local: false, engine: NO_ENGINE },
 };
+
+/** OpenClaw pointed at the embedder on this box, as the boot script leaves it. */
+const OURS = { supported: true, ready: true, available: true, provider: "openai-compatible", model: "qwen3-embedding-0.6b", local: true, engine: ENGINE };
+
+/** The unit clawbox-embed.service, in one of its states. */
+function embedUnit(state: "asleep" | "running" | "failed") {
+  // No [Install] section: `is-enabled` answers "static", which is still a
+  // present unit.
+  responses.push({ match: /is-enabled clawbox-embed/, stdout: "static\n" });
+  if (state === "running") responses.push({ match: /is-active clawbox-embed/, stdout: "active\n" });
+  else responses.push({ match: /is-active clawbox-embed/, fail: "exit 3", stdout: state === "failed" ? "failed\n" : "inactive\n" });
+}
 
 function entry<T extends { id: string }>(models: T[], id: string): T {
   const found = models.find(m => m.id === id);
@@ -157,83 +171,22 @@ describe("local model inventory", () => {
         supported: true,
         ready: true,
         get available(): boolean { throw new Error("probe exploded"); },
-        provider: null, model: null, local: false,
+        provider: null, model: null, local: false, engine: NO_ENGINE,
       },
     } as unknown as Parameters<typeof mod.buildLocalModelInventory>[0];
     const { models, unavailable } = await mod.buildLocalModelInventory(broken);
     expect(unavailable).toContain("embeddings");
-    expect(models.map(m => m.id)).toEqual(expect.arrayContaining(["kokoro", "whisper", "ollama"]));
+    expect(models.map(m => m.id)).toEqual(expect.arrayContaining(["kokoro", "whisper", "llamacpp"]));
   });
 
-  it("sums the pulled Ollama models into a disk figure", async () => {
-    responses.push({ match: /is-enabled ollama/, stdout: "enabled\n" });
-    responses.push({ match: /is-active ollama/, stdout: "active\n" });
-    responses.push({ match: /pgrep/, fail: "no match", stdout: "" });
+  it("has no Ollama row any more", async () => {
+    // Nothing that ships needs it: the memory embedder runs on llama.cpp, and
+    // Ollama was retired from the provider picker before that.
     bareBox();
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ models: [{ name: "qwen3-embedding:0.6b", size: 639_000_000 }] }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const { buildLocalModelInventory } = await lib();
+    const { buildLocalModelInventory, ENGINE_IDS } = await lib();
     const { models } = await buildLocalModelInventory(PROBES);
-    const ollama = entry(models, "ollama") as unknown as { running: string; diskBytes: number; detail: string; detailCode: string; params: Record<string, string>; control: string };
-    expect(ollama.running).toBe("running");
-    expect(ollama.diskBytes).toBe(639_000_000);
-    expect(ollama.detail).toContain("Qwen 3");
-    // The translatable twin carries the same names, so the panel can render
-    // "Serving {names}." in the owner's language.
-    expect(ollama.detailCode).toBe("ollamaServing");
-    expect(ollama.params).toEqual({ names: "Qwen 3" });
-    expect(ollama.control).toBe("system-unit");
-  });
-
-  it("does not call a tag list it could not read an empty one", async () => {
-    // Right after `enable --now` the unit is active ~1 s before /api/tags
-    // answers. The POST's post-toggle inventory lost that race on the box and
-    // said "no models downloaded yet" over a 639 MB model that was there.
-    responses.push({ match: /is-enabled ollama/, stdout: "enabled\n" });
-    responses.push({ match: /is-active ollama/, stdout: "active\n" });
-    responses.push({ match: /pgrep/, fail: "no match", stdout: "" });
-    bareBox();
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
-    const { buildLocalModelInventory } = await lib();
-    const { models } = await buildLocalModelInventory(PROBES);
-    const ollama = entry(models, "ollama") as unknown as { running: string; diskBytes: number | null; detail: string; detailCode: string };
-    expect(ollama.running).toBe("running");
-    expect(ollama.diskBytes).toBeNull();
-    expect(ollama.detailCode).toBe("ollamaChecking");
-    expect(ollama.detail).not.toMatch(/no models/i);
-    expect(ollama.detail).not.toMatch(/^Off/);
-  });
-
-  it("reports the runtime's idle standby as starting when needed, not as off", async () => {
-    // Ten idle minutes after the last proxied use the runtime runs `systemctl
-    // stop` — never `disable` — so the unit is enabled and inactive, and the
-    // proxy starts it again on the next request. "Off. Turn it on from the
-    // menu." pointed at a menu whose only item for an enabled unit is Disable.
-    responses.push({ match: /is-enabled ollama/, stdout: "enabled\n" });
-    responses.push({ match: /is-active ollama/, fail: "exit 3", stdout: "inactive\n" });
-    bareBox();
-    const { buildLocalModelInventory } = await lib();
-    const { models } = await buildLocalModelInventory(PROBES);
-    const ollama = entry(models, "ollama") as unknown as { running: string; enabled: boolean; detail: string; detailCode: string };
-    expect(ollama.running).toBe("on-demand");
-    expect(ollama.enabled).toBe(true);
-    expect(ollama.detailCode).toBe("ollamaStandby");
-    expect(ollama.detail).not.toMatch(/^Off/);
-  });
-
-  it("keeps a unit that exited with an error apart from one that is asleep", async () => {
-    responses.push({ match: /is-enabled ollama/, stdout: "enabled\n" });
-    responses.push({ match: /is-active ollama/, fail: "exit 3", stdout: "failed\n" });
-    bareBox();
-    const { buildLocalModelInventory } = await lib();
-    const { models } = await buildLocalModelInventory(PROBES);
-    const ollama = entry(models, "ollama") as unknown as { running: string; detailCode: string };
-    // A crash reading as "starts when needed" is the lie the RunState comment forbids.
-    expect(ollama.running).toBe("idle");
-    expect(ollama.detailCode).toBe("ollamaFailed");
+    expect(models.find(m => m.id === "ollama")).toBeUndefined();
+    expect(ENGINE_IDS.has("ollama")).toBe(false);
   });
 
   it("badges an installed llama.cpp by whether anything will wake it", async () => {
@@ -371,72 +324,111 @@ describe("whether the box can encode a voice note", () => {
 describe("unit lookup", () => {
   it("maps only the engines that really have a service", async () => {
     const { unitForEngine } = await lib();
+    // ollama keeps its mapping for the chat-provider path an older box may
+    // still be on; it is no longer an inventory row.
     expect(unitForEngine("ollama")).toEqual({ unit: "ollama.service", scope: "system" });
     expect(unitForEngine("kokoro")).toEqual({ unit: "kokoro-server.service", scope: "user" });
     expect(unitForEngine("whisper")).toEqual({ unit: "whisper-server.service", scope: "user" });
-    // Piper is gone from the box (Kokoro-only voice) and llama.cpp is owned by Settings → Local AI.
+    // Piper is gone from the box (Kokoro-only voice), llama.cpp is owned by
+    // Settings → Local AI, and the memory embedder by Memory Shard — the proxy
+    // wakes it and puts it to sleep, so there is no switch to offer.
     expect(unitForEngine("piper")).toBeNull();
     expect(unitForEngine("llamacpp")).toBeNull();
+    expect(unitForEngine("embeddings")).toBeNull();
   });
 });
 
-describe("embeddings are checked against the engine that serves them", () => {
-  it("does not call memory embedding healthy while its engine is stopped", async () => {
-    // Found by driving a real box, not by reading the code: ClawKeep's memory
-    // status answers available/healthy from the index and the CONFIGURED
-    // provider, never from a live embed call. With Ollama stopped it still
-    // said healthy, so the tab printed "Embedding your memory on the box" one
-    // row under "Ollama — Stopped". Acceptance 4 of this task forbids exactly
-    // that: a model that is not actually able to run must not read as available.
-    responses.push({ match: /is-enabled ollama/, stdout: "disabled\n" });
-    responses.push({ match: /is-active ollama/, fail: "exit 3", stdout: "inactive\n" });
+describe("the Memory search row is the embedder's own row", () => {
+  // The embedder moved off ollama onto ClawBox's llama.cpp, run as
+  // clawbox-embed.service and woken by the local-AI proxy. The row used to be
+  // read against the Ollama row because a search did not wake a sleeping
+  // ollama; a sleeping unit is now exactly what "starts when needed" means.
+  it("reads as starting when needed while its unit is asleep", async () => {
+    embedUnit("asleep");
     bareBox();
     const { buildLocalModelInventory } = await lib();
-    const { models } = await buildLocalModelInventory({
-      ...PROBES,
-      embeddings: { supported: true, ready: true, available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
-    });
-    const emb = entry(models, "embeddings") as unknown as { running: string; detail: string; detailCode: string; params: Record<string, string> };
-    expect(emb.running).toBe("idle");
-    expect(emb.detail).toMatch(/Ollama is off/i);
-    expect(emb.detailCode).toBe("embeddingsPaused");
-    expect(emb.params).toEqual({ model: "Qwen 3", via: "Ollama", host: "Ollama" });
-  });
-
-  it("stays paused while Ollama is merely asleep, because a search does not wake it", async () => {
-    // OpenClaw's memory search embeds straight at 127.0.0.1:11434, not through
-    // the local-ai proxy that starts a sleeping Ollama. Standby reads as
-    // "starts when needed" on the Ollama row; on this row it is still a pause.
-    responses.push({ match: /is-enabled ollama/, stdout: "enabled\n" });
-    responses.push({ match: /is-active ollama/, fail: "exit 3", stdout: "inactive\n" });
-    bareBox();
-    const { buildLocalModelInventory } = await lib();
-    const { models } = await buildLocalModelInventory({
-      ...PROBES,
-      embeddings: { supported: true, ready: true, available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
-    });
-    expect((entry(models, "ollama") as unknown as { running: string }).running).toBe("on-demand");
-    const emb = entry(models, "embeddings") as unknown as { running: string; detail: string; detailCode: string; runtimeCode: string; nameCode: string };
-    expect(emb.running).toBe("idle");
-    expect(emb.detailCode).toBe("embeddingsAsleep");
-    expect(emb.detail).toMatch(/asleep/i);
+    const { models } = await buildLocalModelInventory({ ...PROBES, embeddings: OURS });
+    const emb = entry(models, "embeddings") as unknown as {
+      running: string; installed: boolean; detailCode: string; runtime: string; runtimeCode: string;
+      params: Record<string, string>; control: string; enabled: unknown; managedBy: string; diskBytes: number; memoryBytes: unknown;
+    };
+    expect(emb.running).toBe("on-demand");
+    expect(emb.installed).toBe(true);
+    expect(emb.detailCode).toBe("embeddingsReady");
+    expect(emb.runtime).toBe("Qwen 3 via llama.cpp");
     expect(emb.runtimeCode).toBe("modelVia");
-    expect(emb.nameCode).toBe("memorySearch");
+    expect(emb.params).toEqual({ model: "Qwen 3", via: "llama.cpp" });
+    // No switch: the proxy owns the lifecycle. "Manage in Memory Shard" stays.
+    expect(emb.control).toBe("none");
+    expect(emb.enabled).toBeNull();
+    expect(emb.managedBy).toBe("clawkeep");
+    expect(emb.diskBytes).toBe(639_000_000);
+    expect(emb.memoryBytes).toBeNull();
   });
 
-  it("still reports embedding as running when its engine is up", async () => {
-    responses.push({ match: /is-enabled ollama/, stdout: "enabled\n" });
-    responses.push({ match: /is-active ollama/, stdout: "active\n" });
+  it("reads as searching on this box while the unit is up, and counts its memory", async () => {
+    embedUnit("running");
     bareBox();
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ models: [] }) }));
+    const { buildLocalModelInventory } = await lib();
+    const { models } = await buildLocalModelInventory({ ...PROBES, embeddings: OURS });
+    const emb = entry(models, "embeddings") as unknown as { running: string; detailCode: string; detail: string };
+    expect(emb.running).toBe("running");
+    expect(emb.detailCode).toBe("embeddingsLocal");
+    expect(emb.detail).toMatch(/on this box/i);
+    // The memory probe ran, and it selected on the embedder's own flag.
+    expect(calls.some(c => c.cmd === "/usr/bin/pgrep" && c.args.includes("llama-server"))).toBe(true);
+  });
+
+  it("keeps a unit that exited with an error apart from one that is asleep", async () => {
+    embedUnit("failed");
+    bareBox();
+    const { buildLocalModelInventory } = await lib();
+    const { models } = await buildLocalModelInventory({ ...PROBES, embeddings: OURS });
+    const emb = entry(models, "embeddings") as unknown as { running: string; detailCode: string };
+    // A crash reading as "starts when needed" is the lie the RunState comment forbids.
+    expect(emb.running).toBe("idle");
+    expect(emb.detailCode).toBe("embeddingsFailed");
+  });
+
+  it("calls the engine not installed when its GGUF or unit is missing, whatever the config says", async () => {
+    bareBox();
+    const { buildLocalModelInventory } = await lib();
+    const { models } = await buildLocalModelInventory({ ...PROBES, embeddings: { ...OURS, engine: NO_ENGINE } });
+    const emb = entry(models, "embeddings") as unknown as { running: string; installed: boolean; detailCode: string; detail: string };
+    expect(emb.running).toBe("not-installed");
+    expect(emb.installed).toBe(false);
+    expect(emb.detailCode).toBe("embeddingsNotInstalled");
+    expect(emb.detail).toMatch(/Memory Shard/);
+  });
+
+  it("says memory search is not pointed at an installed engine yet", async () => {
+    // The GGUF and the unit are there but the core reports no provider: the
+    // box was updated and the boot script has not run, or the owner has not
+    // finished the wizard.
+    embedUnit("asleep");
+    bareBox();
+    const { buildLocalModelInventory } = await lib();
+    const { models } = await buildLocalModelInventory({ ...PROBES, embeddings: { ...PROBES.embeddings, engine: ENGINE } });
+    const emb = entry(models, "embeddings") as unknown as { running: string; installed: boolean; detailCode: string };
+    expect(emb.installed).toBe(true);
+    expect(emb.running).toBe("on-demand");
+    expect(emb.detailCode).toBe("embeddingsOff");
+  });
+
+  it("names a cloud embedder the owner chose, and measures nothing", async () => {
+    bareBox();
     const { buildLocalModelInventory } = await lib();
     const { models } = await buildLocalModelInventory({
       ...PROBES,
-      embeddings: { supported: true, ready: true, available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
+      embeddings: { supported: true, ready: true, available: true, provider: "openai", model: "text-embedding-3-large", local: false, engine: ENGINE },
     });
-    const emb = entry(models, "embeddings") as unknown as { running: string; detail: string };
-    expect(emb.running).toBe("running");
-    expect(emb.detail).toMatch(/on this box/i);
+    const emb = entry(models, "embeddings") as unknown as { running: string; detailCode: string; runtime: string; params: Record<string, string> };
+    expect(emb.detailCode).toBe("embeddingsCloud");
+    expect(emb.running).toBe("on-demand");
+    expect(emb.runtime).toBe("Text via Openai");
+    expect(emb.params).toEqual({ model: "Text", via: "Openai" });
+    // The unit was never asked about: it is not what serves this box's search.
+    expect(calls.some(c => c.args.join(" ").includes("clawbox-embed"))).toBe(false);
   });
 });
 
@@ -446,7 +438,7 @@ describe("the embeddings row on an edition that has no memory index", () => {
     const { buildLocalModelInventory } = await lib();
     const { models } = await buildLocalModelInventory({
       ...PROBES,
-      embeddings: { supported: false, ready: true, available: false, provider: null, model: null, local: false },
+      embeddings: { supported: false, ready: true, available: false, provider: null, model: null, local: false, engine: NO_ENGINE },
     });
     const emb = entry(models, "embeddings") as unknown as {
       running: string;
@@ -482,7 +474,7 @@ describe("the memory row waits for nobody", () => {
     // Not a failure either — nothing broke, the answer is simply not in yet.
     expect(unavailable).not.toContain("embeddings");
     // Every other engine is there, which is the whole point.
-    expect(models.map(m => m.id)).toEqual(["llamacpp", "ollama", "kokoro", "whisper"]);
+    expect(models.map(m => m.id)).toEqual(["llamacpp", "kokoro", "whisper"]);
   });
 
   it("still says so on an edition that has no memory index at all", async () => {
@@ -503,6 +495,7 @@ describe("the name a model is shown under", () => {
     // and quantisation are the installer's choices, not the owner's.
     expect(friendlyModelName("gemma4-e2b-it-q4_0")).toBe("Gemma 4");
     expect(friendlyModelName("qwen3-embedding:0.6b")).toBe("Qwen 3");
+    expect(friendlyModelName("qwen3-embedding-0.6b")).toBe("Qwen 3");
     expect(friendlyModelName("Llama-3.1-8B-Instruct")).toBe("Llama 3.1");
     expect(friendlyModelName("nomic-embed-text")).toBe("Nomic");
     // An unknown family is still named, not blanked.

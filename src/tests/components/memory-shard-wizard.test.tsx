@@ -5,10 +5,11 @@
  * the feature is OFF until the owner finishes setup, the completion flag is
  * written only at the very end (an earlier one would swap the last step for the
  * home page mid-wizard, which is the exact bug the coding agent's wizard hit),
- * and the provisioning step ENABLES Ollama rather than merely starting it —
- * OpenClaw's memory search connects to 127.0.0.1:11434 directly, so a box that
- * only started it would index once and fail every scheduled pass after the
- * ten-minute idle stop.
+ * and the provisioning step fetches the model as a ROOT STEP and then points
+ * the index at the embedder behind the local-AI proxy — it never enables or
+ * starts an engine itself, because the proxy wakes the embedder on every
+ * search (the ollama-era wizard had to enable a daemon permanently, since a
+ * search reached it directly and could not wake it).
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
@@ -19,12 +20,13 @@ import { clawkeepTranslations } from "@/lib/clawkeep-translations";
 // what these tests match on. The translation table is imported only to prove
 // the key the wizard shows is one that has words behind it.
 const START_FAILED = "clawkeep.memory.startFailed";
+const PULL_FAILED = "clawkeep.memory.setup.pullFailed";
 
 // The signal rides along so a test can ask, after the fact, whether the wizard
 // cancelled a request it no longer had a window for.
 let posts: { url: string; body: unknown; signal?: AbortSignal | null }[] = [];
 
-function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: boolean } = {}) {
+function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: boolean; pullFails?: boolean } = {}) {
   posts = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -38,27 +40,26 @@ function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: 
     if (url.startsWith("/setup-api/coding-agent/browse")) {
       return json({ root: "/home/clawbox", path: "/home/clawbox", parent: null, entries: [{ name: "Documents", path: "/home/clawbox/Documents" }] });
     }
-    if (url.startsWith("/setup-api/ollama/status")) {
-      return json({ running: false, models: opts.modelPresent ? [{ name: "qwen3-embedding:0.6b" }] : [] });
+    if (url.startsWith("/setup-api/embed/status")) {
+      return json({ supported: true, installed: !!opts.modelPresent, model: "qwen3-embedding-0.6b", engine: "llama.cpp" });
     }
-    if (url === "/setup-api/local-models" && init?.method === "POST") {
-      posts.push({ url, body: JSON.parse(String(init.body)) });
-      return json({ ok: true });
-    }
-    if (url === "/setup-api/ollama/pull" && init?.method === "POST") {
-      posts.push({ url, body: JSON.parse(String(init.body)), signal: init.signal });
+    if (url === "/setup-api/embed/install" && init?.method === "POST") {
+      posts.push({ url, body: null, signal: init.signal });
       if (opts.pullHangs) {
         // A download that never finishes: the stream stays open until the
         // client goes away, which is exactly what the real route does.
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
-            controller.enqueue(new TextEncoder().encode('{"status":"pulling","completed":1,"total":100}\n'));
+            controller.enqueue(new TextEncoder().encode('{"status":"Fetching the memory-search model (Qwen3-Embedding, about 640 MB)…"}\n'));
           },
         });
         return new Response(stream, { status: 200, headers: { "content-type": "application/x-ndjson" } });
       }
-      // Ollama's own NDJSON, byte counts and all.
-      const body = '{"status":"pulling","completed":50,"total":100}\n{"status":"success","completed":100,"total":100}\n';
+      // The route's NDJSON: journal lines while the root step runs, then one
+      // closing line. A failure arrives in-stream as a 200 with {error}.
+      const body = opts.pullFails
+        ? '{"status":"Fetching…"}\n{"error":"hf: connection reset"}\n'
+        : '{"status":"Fetching…"}\n{"status":"Qwen3-Embedding-0.6B-Q8_0.gguf:  50%|#####     | 320M/639M"}\n{"success":true,"status":"The memory-search model is on this box."}\n';
       return new Response(body, { status: 200, headers: { "content-type": "application/x-ndjson" } });
     }
     if (url === "/setup-api/clawkeep/memory/index" && init?.method === "POST") {
@@ -73,6 +74,16 @@ function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: 
 
 beforeEach(() => stub());
 afterEach(() => vi.unstubAllGlobals());
+
+/** Intro -> folders -> schedule -> provision, and press the button. */
+async function runProvision(done: () => void) {
+  const rendered = render(<MemoryShardWizard onDone={done} />);
+  fireEvent.click(await screen.findByTestId("memory-shard-enable"));
+  fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
+  fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
+  fireEvent.click(screen.getByTestId("memory-shard-index-now"));
+  return rendered;
+}
 
 describe("MemoryShardWizard", () => {
   it("opens on the intro, with nothing switched on yet", async () => {
@@ -99,23 +110,19 @@ describe("MemoryShardWizard", () => {
     await waitFor(() => expect(posts.some((p) => p.url.endsWith("/sources"))).toBe(true));
   });
 
-  it("ENABLES ollama, pulls the model, points the index at it, and only then marks setup done", async () => {
+  it("fetches the model, points the index at the embedder, and only then marks setup done", async () => {
     const done = vi.fn();
-    render(<MemoryShardWizard onDone={done} />);
-    fireEvent.click(await screen.findByTestId("memory-shard-enable"));
-    fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
-    fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
-    fireEvent.click(screen.getByTestId("memory-shard-index-now"));
+    await runProvision(done);
 
     await waitFor(() => expect(done).toHaveBeenCalled());
 
-    const localModels = posts.find((p) => p.url === "/setup-api/local-models");
-    // enabled:true, not a bare start — see the file header.
-    expect(localModels?.body).toEqual({ id: "ollama", enabled: true });
-    expect(posts.find((p) => p.url === "/setup-api/ollama/pull")?.body).toEqual({ model: "qwen3-embedding:0.6b" });
-
     const order = posts.map((p) => p.url);
-    expect(order.indexOf("/setup-api/clawkeep/memory/provider")).toBeGreaterThan(order.indexOf("/setup-api/ollama/pull"));
+    expect(order).toContain("/setup-api/embed/install");
+    // No engine is enabled or started here: the proxy wakes the embedder on
+    // every search, and there is no Ollama left to switch on.
+    expect(posts.find((p) => p.url === "/setup-api/local-models")).toBeUndefined();
+    expect(order.some((u) => u.startsWith("/setup-api/ollama"))).toBe(false);
+    expect(order.indexOf("/setup-api/clawkeep/memory/provider")).toBeGreaterThan(order.indexOf("/setup-api/embed/install"));
     // Under the route's own field names. The route replaces the whole
     // schedule and resets any field it does not recognise, so a body that
     // said `time`/`dayOfWeek` quietly saved 03:00 on Sunday whatever was
@@ -129,25 +136,34 @@ describe("MemoryShardWizard", () => {
       .toBeGreaterThan(order.indexOf("/setup-api/clawkeep/memory/enable"));
   });
 
-  it("skips the download when the model is already on the box", async () => {
-    stub({ modelPresent: true });
-    render(<MemoryShardWizard onDone={() => {}} />);
-    fireEvent.click(await screen.findByTestId("memory-shard-enable"));
-    fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
-    fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
-    fireEvent.click(screen.getByTestId("memory-shard-index-now"));
-    await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/clawkeep/memory/enable")).toBe(true));
-    expect(posts.find((p) => p.url === "/setup-api/ollama/pull")).toBeUndefined();
+  it("asks for a FULL first pass, because the provider switch changed the index identity", async () => {
+    const done = vi.fn();
+    await runProvision(done);
+    await waitFor(() => expect(done).toHaveBeenCalled());
+    // OpenClaw pauses vector search over an index built for another provider
+    // until it is rebuilt; the route's own incremental→full upgrade fires only
+    // on an EMPTY index, not a stale one.
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/index")?.body).toEqual({ mode: "full" });
   });
 
-  /** Intro -> folders -> schedule -> provision, and press the button. */
-  async function runProvision(done: () => void) {
-    render(<MemoryShardWizard onDone={done} />);
-    fireEvent.click(await screen.findByTestId("memory-shard-enable"));
-    fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
-    fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
-    fireEvent.click(screen.getByTestId("memory-shard-index-now"));
-  }
+  it("skips the download when the model is already on the box", async () => {
+    stub({ modelPresent: true });
+    const done = vi.fn();
+    await runProvision(done);
+    await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/clawkeep/memory/enable")).toBe(true));
+    expect(posts.find((p) => p.url === "/setup-api/embed/install")).toBeUndefined();
+  });
+
+  it("says so in the wizard when the download fails, and does not finish", async () => {
+    stub({ pullFails: true });
+    const done = vi.fn();
+    await runProvision(done);
+    // The route's own error line reaches the owner as it was said.
+    expect(await screen.findByText("hf: connection reset")).toBeInTheDocument();
+    expect(clawkeepTranslations.en[PULL_FAILED]).toBe("Could not download the embedding model.");
+    expect(done).not.toHaveBeenCalled();
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/provider")).toBeUndefined();
+  });
 
   it("says so in the wizard when the first pass could not be started, and does not finish", async () => {
     stub({ indexStatus: 500 });
@@ -172,23 +188,20 @@ describe("MemoryShardWizard", () => {
     expect(screen.queryByText(START_FAILED)).not.toBeInTheDocument();
   });
 
-  it("aborts the download when the window closes mid-pull", async () => {
+  it("aborts the download when the window closes mid-fetch", async () => {
     stub({ pullHangs: true });
     const done = vi.fn();
-    const { unmount } = render(<MemoryShardWizard onDone={done} />);
-    fireEvent.click(await screen.findByTestId("memory-shard-enable"));
-    fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
-    fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
-    fireEvent.click(screen.getByTestId("memory-shard-index-now"));
+    const { unmount } = await runProvision(done);
 
-    await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/ollama/pull")).toBe(true));
-    const pull = posts.find((p) => p.url === "/setup-api/ollama/pull");
+    await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/embed/install")).toBe(true));
+    const pull = posts.find((p) => p.url === "/setup-api/embed/install");
     expect(pull?.signal?.aborted).toBe(false);
 
     unmount();
 
-    // The pull route drops its Ollama connection when its client goes away;
-    // a fetch left running after the window closed would keep that client.
+    // The install route follows a root unit; a fetch left running after the
+    // window closed would keep its client — and the download itself goes on
+    // as root, which is the right outcome for a 640 MB file half fetched.
     expect(pull?.signal?.aborted).toBe(true);
     expect(done).not.toHaveBeenCalled();
     expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/provider")).toBeUndefined();

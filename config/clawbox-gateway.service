@@ -1,7 +1,13 @@
 [Unit]
 Description=ClawBox OpenClaw Gateway
-After=network-online.target
-Wants=network-online.target
+# After the web server as well: memory search reaches its embedder through the
+# web server's local-AI proxy, and OpenClaw's embedding client gives a refused
+# connection three attempts inside two seconds before it answers a search
+# keyword-only and leaves the index dirty. Started side by side at boot, the
+# gateway's first sync used to lose that race every time. Wants, not Requires:
+# a web server that fails to start must not keep the agent down with it.
+After=network-online.target clawbox-setup.service
+Wants=network-online.target clawbox-setup.service
 # A cold Jetson can legitimately spend up to TimeoutStartSec in
 # gateway-pre-start.sh. Keep the limiter window long enough to contain several
 # complete slow failures; inherited 5-in-10s defaults never tripped when one

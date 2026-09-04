@@ -16,6 +16,7 @@ import { getMemoryShardEnabled, getMemoryShardSetupComplete } from "@/lib/memory
 
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { findOpenclawBin } from "@/lib/openclaw-config";
+import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 
 export type MemoryScheduleFrequency = "daily" | "weekly";
 export type MemoryIndexMode = "incremental" | "full";
@@ -403,11 +404,49 @@ function identityStatus(value: unknown): ClawKeepMemoryStatus["indexIdentity"] {
   return value === "valid" || value === "missing" || value === "mismatched" ? value : "unknown";
 }
 
-function providerLocation(provider: string): ClawKeepMemoryStatus["location"] {
+/**
+ * Where the embedder runs, from the provider id the core reports.
+ *
+ * `openai-compatible` is one id for two things: ClawBox's own embedder behind
+ * the loopback proxy (what the wizard and the boot script configure), and a
+ * server somewhere else the owner pointed OpenClaw at by hand. The status the
+ * core answers names the provider but never its URL, so the caller reads
+ * `memory.search.remote.baseUrl` from the config and passes it here — a
+ * loopback host is this box, anything else is not, and no URL at all is an
+ * answer this function refuses to guess at rather than claim "on device".
+ */
+function providerLocation(provider: string, remoteBaseUrl: string | null): ClawKeepMemoryStatus["location"] {
   if (!provider) return "unknown";
   if (provider === "none") return "disabled";
   if (provider === "ollama" || provider === "local") return "local";
+  if (provider === "openai-compatible") {
+    if (!remoteBaseUrl) return "unknown";
+    return isLoopbackBaseUrl(remoteBaseUrl) ? "local" : "cloud";
+  }
   return "cloud";
+}
+
+/**
+ * `memory.search.remote.baseUrl` (or its pre-2026.8 home), straight from
+ * openclaw.json: the one fact providerLocation needs that the status probe
+ * does not carry. Read from the file rather than the CLI because this runs
+ * beside a probe that already costs a process boot. Null when unset or
+ * unreadable — which providerLocation reports as "unknown", never as local.
+ */
+async function readEmbeddingRemoteBaseUrl(): Promise<string | null> {
+  try {
+    const raw = await fs.readFile(path.join(os.homedir(), ".openclaw", "openclaw.json"), "utf8");
+    const config = JSON.parse(raw) as Record<string, unknown>;
+    const pick = (root: unknown, keys: readonly string[]): string | null => {
+      let node: unknown = root;
+      for (const key of keys) node = asRecord(node)[key];
+      return typeof node === "string" && node.trim() ? node.trim() : null;
+    };
+    return pick(config, ["memory", "search", "remote", "baseUrl"])
+      ?? pick(config, ["agents", "defaults", "memorySearch", "remote", "baseUrl"]);
+  } catch {
+    return null;
+  }
 }
 
 export async function parseMemoryStatus(
@@ -415,6 +454,7 @@ export async function parseMemoryStatus(
   run: MemoryRunState,
   schedule: MemoryIndexSchedule,
   now = new Date(),
+  remoteBaseUrl: string | null = null,
 ): Promise<ClawKeepMemoryStatus> {
   const rows = Array.isArray(raw) ? raw : [raw];
   const row = asRecord(rows.find((entry) => cleanString(asRecord(entry).agentId) === "main") ?? rows[0]);
@@ -477,7 +517,7 @@ export async function parseMemoryStatus(
     available: Boolean(provider || model || files || chunks),
     provider,
     model,
-    location: providerLocation(provider),
+    location: providerLocation(provider, remoteBaseUrl),
     health,
     semanticAvailable,
     indexIdentity,
@@ -552,10 +592,14 @@ async function loadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
     (raw) => ({ raw, ok: true as const }),
     () => ({ raw: null, ok: false as const }),
   );
-  const [run, schedule] = await Promise.all([readMemoryRunState(), readMemorySchedule()]);
+  const [run, schedule, remoteBaseUrl] = await Promise.all([
+    readMemoryRunState(),
+    readMemorySchedule(),
+    readEmbeddingRemoteBaseUrl(),
+  ]);
   if (!probe.ok) return unavailableStatus(run, schedule);
   try {
-    return await parseMemoryStatus(probe.raw, run, schedule);
+    return await parseMemoryStatus(probe.raw, run, schedule, new Date(), remoteBaseUrl);
   } catch {
     return unavailableStatus(run, schedule);
   }

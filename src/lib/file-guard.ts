@@ -106,6 +106,7 @@ export const DATA_DIR_PUBLIC_SUBTREES = new Set([
   "catalog-cache", // cached copies of the providers' public model catalogues
   "code-projects", // the code assistant's project sources
   "llamacpp",      // local-model runtime: downloaded weights, pid file, log
+  "embed",         // memory-search embedder runtime: its GGUF and log (embed-server.ts)
   CODING_AGENT_ARTIFACTS_SUBTREE,
 ]);
 

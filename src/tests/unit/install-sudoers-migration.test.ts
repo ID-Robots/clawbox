@@ -646,6 +646,11 @@ d("the allow-list a device ends up with", () => {
     "disable --now ollama.service",
     "start ollama.service",
     "stop ollama.service",
+    // The memory embedder: woken and put to sleep by the local-AI proxy
+    // (src/lib/local-ai-runtime.ts), the same standby as ollama's pair above.
+    // No enable/disable half — the unit has no [Install] section.
+    "start clawbox-embed.service",
+    "stop clawbox-embed.service",
     // No `clawbox-root-update@` instance appears here any more. Removing the
     // unscoped polkit `manage-units` grant meant the web server had to start
     // ~25 of those units through sudo rather than four, and enumerating them

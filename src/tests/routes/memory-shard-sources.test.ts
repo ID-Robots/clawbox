@@ -62,7 +62,8 @@ describe("the state module stays client-safe", () => {
     const imports = src.match(/^\s*import[\s\S]*?from\s+["'][^"']+["'];?$/gm) ?? [];
     expect(imports.join("\n")).not.toMatch(/child_process|openclaw-config|config-store|clawkeep-memory/);
     const state = await import("@/lib/memory-shard-state");
-    expect(state.LOCAL_EMBEDDING_MODEL).toBe("qwen3-embedding:0.6b");
+    // llama-server's --alias, sent as `model` — not an ollama tag any more.
+    expect(state.LOCAL_EMBEDDING_MODEL).toBe("qwen3-embedding-0.6b");
     expect(state.EXTRA_PATHS_CONFIG_PATH).toBe("memory.search.extraPaths");
     // PDFs are extracted BY CLAWBOX; OpenClaw's indexer reads .md and nothing
     // else, so these two lists must not be confused.

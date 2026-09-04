@@ -92,7 +92,6 @@ function isSnapshot(value: unknown): value is LocalModelsSnapshot {
 function unavailableName(id: string, t: Translate): string {
   switch (id) {
     case "llamacpp": return t("localModels.group.llm");
-    case "ollama": return "Ollama";
     case "kokoro": return "Kokoro";
     case "whisper": return "Whisper";
     // The key the row's own `nameCode` renders through.

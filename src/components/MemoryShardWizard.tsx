@@ -7,7 +7,6 @@ import StatusMessage from "./StatusMessage";
 import HelpTip from "./HelpTip";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import {
-  LOCAL_EMBEDDING_MODEL,
   type ProvisionPhase,
 } from "@/lib/memory-shard-state";
 
@@ -31,7 +30,8 @@ interface BrowseAnswer {
 }
 
 /** One line of Ollama's pull stream. */
-interface PullLine { status?: string; completed?: number; total?: number; error?: string }
+/** One NDJSON line from /setup-api/embed/install: a status while the root step runs, then success or error. */
+interface PullLine { status?: string; success?: boolean; error?: string }
 
 export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   const { t } = useT();
@@ -144,13 +144,16 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   const [detail, setDetail] = useState<string | null>(null);
 
   /**
-   * Enable Ollama, pull the embedding model, point the index at it, save the
-   * schedule, switch the feature on and start the first pass.
+   * Fetch the embedding model if it is missing, point the index at the
+   * embedder on this box, save the schedule, switch the feature on and start
+   * the first pass.
    *
-   * Ollama is ENABLED, not merely started: OpenClaw's memory search embeds
-   * straight at 127.0.0.1:11434, so it never wakes a sleeping daemon through
-   * ClawBox's proxy — a box that only started it would index once and then fail
-   * every scheduled pass after the ten-minute idle stop.
+   * The embedder is Qwen3-Embedding on ClawBox's own llama.cpp, run as a
+   * system unit that the web server's local-AI proxy starts on the first
+   * search and stops ten idle minutes later. Nothing here enables or starts
+   * it: OpenClaw is pointed at the PROXY, so the wake is part of every
+   * search — the ollama-era wizard had to enable a daemon permanently because
+   * a search reached it directly and never woke it.
    */
   const provision = async () => {
     provisionAbort.current?.abort();
@@ -162,37 +165,23 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
     try {
       setPhase("checking");
       setDetail(null);
-      const status = await fetch("/setup-api/ollama/status", { cache: "no-store", signal })
+      const status = await fetch("/setup-api/embed/status", { cache: "no-store", signal })
         .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null) as { running?: boolean; models?: { name: string }[] } | null;
+        .catch(() => null) as { installed?: boolean } | null;
       // The probe swallows its own failure; an abort is the one it must not.
       if (signal.aborted) return;
 
-      const have = (status?.models ?? []).some((m) => m.name.startsWith(LOCAL_EMBEDDING_MODEL.split(":")[0]));
-
-      setPhase("enabling-ollama");
-      const enabled = await fetch("/setup-api/local-models", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: "ollama", enabled: true }),
-        signal,
-      });
-      if (!enabled.ok) throw new Error(t("clawkeep.memory.setup.ollamaFailed"));
-
-      if (!have) {
+      if (!status?.installed) {
         setPhase("pulling-model");
-        setProgress(0);
-        const pull = await fetch("/setup-api/ollama/pull", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model: LOCAL_EMBEDDING_MODEL }),
-          signal,
-        });
+        setProgress(null);
+        const pull = await fetch("/setup-api/embed/install", { method: "POST", signal });
         if (!pull.ok || !pull.body) throw new Error(t("clawkeep.memory.setup.pullFailed"));
-        // NDJSON, one object per line, carrying Ollama's own byte counts — so
-        // this is a true percentage rather than a guess. A FAILURE arrives
+        // NDJSON, one object per line: `{status}` while the root step runs,
+        // then one closing `{success}` or `{error}`. A FAILURE arrives
         // in-stream as a 200 with {error}, which is why the body is read for
-        // one even though the response was ok.
+        // one even though the response was ok. The download's own progress
+        // reaches the journal as lines; a percentage in one is shown when it
+        // is there and nothing is guessed when it is not.
         const reader = pull.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
@@ -208,17 +197,18 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
               let parsed: PullLine;
               try { parsed = JSON.parse(line) as PullLine; } catch { continue; }
               if (parsed.error) throw new Error(parsed.error);
-              if (typeof parsed.completed === "number" && typeof parsed.total === "number" && parsed.total > 0) {
-                setProgress(parsed.completed / parsed.total);
+              if (parsed.status) {
+                setDetail(parsed.status);
+                const percent = /(\d{1,3})%/.exec(parsed.status);
+                if (percent) setProgress(Math.min(100, Number(percent[1])) / 100);
               }
-              if (parsed.status) setDetail(parsed.status);
             }
           }
         } finally {
           // Leaving the loop on an error line releases the body rather than
           // holding a locked reader on it until garbage collection; on a
-          // stream that has not ended, cancelling is what tells the pull route
-          // its client is gone.
+          // stream that has not ended, cancelling is what tells the install
+          // route its client is gone.
           await reader.cancel().catch(() => {});
         }
         setProgress(1);
@@ -244,15 +234,18 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
       });
       if (!done.ok) throw new Error(t("clawkeep.memory.setup.enableFailed"));
 
-      // The first pass. A box with no index yet needs a full one; the route
-      // resolves that itself, so "incremental" is honest here. A 409 means a
-      // pass is already going — the box IS indexing, which is all this asked
-      // for. Anything else is said here, in the wizard the owner is watching:
-      // the card that replaces it would only show "never ran", with no reason.
+      // The first pass, and a FULL one: the provider switch above changes the
+      // index identity, and OpenClaw pauses vector search over an index built
+      // for another provider until it is rebuilt — the route's own
+      // incremental→full upgrade fires only on an empty index, not a stale
+      // one. A 409 means a pass is already going — the box IS indexing, which
+      // is all this asked for. Anything else is said here, in the wizard the
+      // owner is watching: the card that replaces it would only show "never
+      // ran", with no reason.
       const index = await fetch("/setup-api/clawkeep/memory/index", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "incremental" }),
+        body: JSON.stringify({ mode: "full" }),
         signal,
       });
       if (!index.ok && index.status !== 409) throw new Error(t("clawkeep.memory.startFailed"));
@@ -275,10 +268,9 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   const phaseLine = (): string => {
     switch (phase) {
       case "checking": return t("clawkeep.memory.setup.phaseChecking");
-      case "enabling-ollama": return t("clawkeep.memory.setup.phaseEnabling");
-      case "pulling-model": return t("clawkeep.memory.setup.phasePulling", {
-        percent: progress === null ? 0 : Math.round(progress * 100),
-      });
+      case "pulling-model": return progress === null
+        ? t("clawkeep.memory.setup.phasePulling")
+        : t("clawkeep.memory.setup.phasePullingPercent", { percent: Math.round(progress * 100) });
       case "switching-provider": return t("clawkeep.memory.setup.phaseSwitching");
       case "ready": return t("clawkeep.memory.setup.phaseReady");
       default: return "";

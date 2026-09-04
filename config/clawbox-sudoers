@@ -121,6 +121,20 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl disable --now ollama.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   ollama.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    ollama.service
 
+# The memory-search embedder (config/clawbox-embed.service): qwen3-embedding on
+# llama.cpp, woken by the local-AI proxy on the first embedding request and
+# stopped ten idle minutes later (src/lib/local-ai-runtime.ts), the same
+# standby the two ollama grants above exist for. It is a SYSTEM unit so the
+# cgroup memory guard applies to it — the web server's own unit has none, and a
+# user unit would land under the desktop session's cap. `start` and `stop`
+# only: the unit has no [Install] section and is never a boot preference, so
+# there is no enable/disable half to grant, and a "Disable" in Settings would
+# be a verb that lies — the next search would start it again. No privilege
+# beyond the ollama pair: the unit runs User=clawbox, so this starts a process
+# the clawbox user could start itself.
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-embed.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-embed.service
+
 # Update / power / install paths.
 #
 # NO WILDCARDS, DELIBERATELY. These were three prefix rules — `reset-failed

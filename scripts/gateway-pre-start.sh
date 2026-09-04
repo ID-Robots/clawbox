@@ -2298,13 +2298,15 @@ fi
 # "Semantic memory search is still offline ... missing OpenAI provider
 # auth/API-key access", and on the boxes that do have a key it means every
 # indexed note is embedded by a third party. scripts/ensure-local-embeddings.sh
-# pulls the local model if it is missing, points memorySearch at it (only when
-# the provider is unset/"auto"/already ollama, so a deliberate remote setup
-# stays), and forces the reindex the dimension change requires.
+# fetches the local model if it is missing, points memory.search at the
+# embedder behind the web server's local-AI proxy (only when the provider is
+# unset/"auto"/the old ollama one/already ours, so a deliberate remote setup
+# stays), and forces the reindex the provider change requires.
 #
-# Launched DETACHED on purpose: this is a blocking ExecStartPre and the model is
-# a ~600MB download. The script takes its own lock, so overlapping restarts do
-# not stack up pulls.
+# Launched DETACHED on purpose: this is a blocking ExecStartPre, the model is a
+# ~640MB download, and the script waits for the web server's proxy, which may
+# still be starting beside this gateway. The script takes its own lock, so
+# overlapping restarts do not stack up downloads.
 LOCAL_EMBEDDINGS="$SCRIPT_DIR/ensure-local-embeddings.sh"
 LOCAL_EMBEDDINGS_LOG="$CLAWBOX_ROOT/data/local-embeddings.log"
 if [ -x "$LOCAL_EMBEDDINGS" ]; then

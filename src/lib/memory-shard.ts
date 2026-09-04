@@ -11,9 +11,12 @@ import { readFile } from "fs/promises";
 import path from "path";
 import { get as configGet, set as configSet } from "@/lib/config-store";
 import { findOpenclawBin, readConfig, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { getEmbedProxyBaseUrl } from "@/lib/embed-server";
+import { getLocalAiToken } from "@/lib/local-ai-token";
 import {
   EXTRA_PATHS_CONFIG_PATH,
   LOCAL_EMBEDDING_MODEL,
+  LOCAL_EMBEDDING_PROVIDER,
   MEMORY_SHARD_ENABLED_KEY,
   MEMORY_SHARD_SETUP_KEY,
   type MemorySource,
@@ -149,9 +152,21 @@ export function embeddingConfigHome(version: string | null): "memory.search" | "
  */
 export async function switchToLocalEmbeddings(): Promise<void> {
   const home = embeddingConfigHome(await installedOpenclawVersion());
+  // The embedder is reached through ClawBox's local-AI proxy — that is what
+  // wakes it on the first request — with the per-install service token as the
+  // bearer. `queryInputType`/`documentInputType` make OpenClaw label each
+  // request, and the proxy restores the model's query instruction from that
+  // label (src/lib/embed-query-instruction.ts); without them every query
+  // would be embedded bare and recall would quietly degrade. One batch, and
+  // the provider LAST in it: the batch is atomic, but the order is what a
+  // reader of the config sees if it is ever split into single writes.
   await runOpenclawConfigSetBatch([
-    [`${home}.provider`, "ollama"],
     [`${home}.model`, LOCAL_EMBEDDING_MODEL],
+    [`${home}.remote.baseUrl`, getEmbedProxyBaseUrl()],
+    [`${home}.remote.apiKey`, getLocalAiToken()],
+    [`${home}.queryInputType`, "query"],
+    [`${home}.documentInputType`, "document"],
+    [`${home}.provider`, LOCAL_EMBEDDING_PROVIDER],
   ]);
 }
 

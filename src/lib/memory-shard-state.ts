@@ -37,7 +37,6 @@ export interface MemorySource {
 export type ProvisionPhase =
   | "idle"
   | "checking"
-  | "enabling-ollama"
   | "pulling-model"
   | "switching-provider"
   | "ready"
@@ -45,24 +44,29 @@ export type ProvisionPhase =
 
 export interface ProvisionState {
   phase: ProvisionPhase;
-  /** 0..1 while pulling, null otherwise — Ollama's pull stream carries real
-   *  completed/total bytes, so this is a true percentage, not a guess. */
+  /** 0..1 while the download reports a percentage, null otherwise. */
   progress: number | null;
   /** One line the owner can act on. Never a raw stack. */
   detail: string | null;
 }
 
 /**
- * The local embedding model.
- *
- * Named here for the first time in TypeScript: it existed only in
- * scripts/ensure-local-embeddings.sh, so nothing the owner could click knew
- * what to pull. ~639 MB, 0.6B parameters — far under the ollama.service
- * ceiling in resource-limits.ts.
+ * The local embedding model, as OpenClaw names it: llama-server's `--alias`
+ * (config/clawbox-embed.service), sent as `model` in every request. Not a
+ * file name and not an ollama tag — the model moved off ollama onto ClawBox's
+ * own llama.cpp, where it costs ~2 GB while awake instead of 2.8 and nothing
+ * while asleep. Keep in step with src/lib/embed-server.ts.
  */
-export const LOCAL_EMBEDDING_MODEL = "qwen3-embedding:0.6b";
+export const LOCAL_EMBEDDING_MODEL = "qwen3-embedding-0.6b";
 
-/** Roughly what the pull costs, for the sentence shown before it starts. */
+/** The OpenClaw provider id the embedder is reached through: its core
+ *  OpenAI-compatible client, pointed at ClawBox's local-AI proxy. */
+export const LOCAL_EMBEDDING_PROVIDER = "openai-compatible";
+
+/** The engine, for the sentences that name it ("Qwen 3 via llama.cpp"). */
+export const LOCAL_EMBEDDING_ENGINE = "llama.cpp";
+
+/** Roughly what the download costs, for the sentence shown before it starts. */
 export const LOCAL_EMBEDDING_BYTES = 639_000_000;
 
 /** Where OpenClaw keeps the owner's extra folders. */
