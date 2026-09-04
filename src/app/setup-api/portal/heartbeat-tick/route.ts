@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { readTunnelUrl, startTunnelService } from "@/lib/cloudflared";
 import { isInternalRequest } from "@/lib/internal-token";
+import { applyDeferredLanguagePersona } from "@/lib/language-persona";
 import { pushHeartbeatTick } from "@/lib/portal-heartbeat";
 import { requireSession } from "@/lib/route-auth";
 import { checkTunnelLiveness, markRestarted, mayRestart } from "@/lib/tunnel-liveness";
@@ -50,6 +51,17 @@ export async function GET(request: Request) {
     const unauthorized = await requireSession(request);
     if (unauthorized) return unauthorized;
   }
+
+  // Pay back a language pick OpenClaw's first-conversation ritual made us
+  // defer, if the introduction is over. This rides on the heartbeat because
+  // the heartbeat is the only thing on a running box that fires without anyone
+  // touching it — POST /setup-api/preferences skips the persona write while
+  // the ritual is armed, and nothing restarts the gateway when the agent
+  // finishes it, so the ExecStartPre that re-applies the same pick may not run
+  // for days. It is a no-op on every box that owes nothing (see
+  // applyDeferredLanguagePersona), and it never throws, so it cannot turn a
+  // tick into the 500 that would make the systemd unit flap.
+  await applyDeferredLanguagePersona();
 
   const tunnelUrl = await readTunnelUrl();
   const liveness = await checkTunnelLiveness(tunnelUrl);

@@ -2,7 +2,12 @@ import { NextResponse } from "next/server";
 import * as config from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { PREFERENCE_KEY_PREFIX, sanitizePreferences, validatePreference } from "@/lib/preference-schema";
-import { personaFilesFor, personaWritesAllowed, writeLanguagePersona } from "@/lib/language-persona";
+import {
+  DEFERRED_LANGUAGE_KEY,
+  personaFilesFor,
+  personaWritesAllowed,
+  writeLanguagePersona,
+} from "@/lib/language-persona";
 import { logSafe } from "@/lib/log-safe";
 
 export const dynamic = "force-dynamic";
@@ -108,10 +113,16 @@ export async function POST(req: Request) {
     // pending or has never started: creating USER.md in a brand-new workspace
     // is what tells OpenClaw the agent is already configured, and the setup
     // wizard's language picker fires this route minutes before the owner's
-    // first hello. The preference is stored either way, and
-    // scripts/gateway-pre-start.sh re-applies it to the persona once the
-    // workspace is the agent's own — so a language chosen in the wizard is not
-    // lost, only deferred past the introduction.
+    // first hello. The preference is stored either way, so a language chosen
+    // in the wizard is not lost, only deferred past the introduction.
+    //
+    // A deferral is RECORDED rather than merely skipped, because "deferred"
+    // needs a due date. Nothing restarts the gateway when the introduction
+    // ends, so the ExecStartPre that re-applies the pick could sit unrun for
+    // as long as the box stayed up — the desktop in Bulgarian and the agent's
+    // persona carrying no language directive at all. The flag is what the
+    // five-minute portal heartbeat drains, through
+    // applyDeferredLanguagePersona(); see src/lib/language-persona.ts.
     //
     // The guard sits here rather than inside writeLanguagePersona because this
     // route is the single door: the desktop, the setup wizard and the agent's
@@ -119,9 +130,12 @@ export async function POST(req: Request) {
     // also stops the agent from suppressing its own ritual mid-conversation.
     if (typeof body.ui_language === "string" && body.ui_language) {
       const harness = await getActiveHarness();
-      if (await personaWritesAllowed(harness)) {
-        await writeLanguagePersona(body.ui_language, personaFilesFor(harness));
-      }
+      const allowed = await personaWritesAllowed(harness);
+      if (allowed) await writeLanguagePersona(body.ui_language, personaFilesFor(harness));
+      // Cleared on the way through as well as set: a pick that landed in the
+      // persona owes nothing, and a stale flag would cost one pointless
+      // rewrite of the agent's own files on the next tick.
+      await config.set(DEFERRED_LANGUAGE_KEY, !allowed);
     }
     return NextResponse.json({ ok: true });
   } catch (err) {

@@ -39,8 +39,12 @@ import * as config from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 
 const mockGetAll = vi.mocked(config.getAll);
+const mockSet = vi.mocked(config.set);
 const mockSetMany = vi.mocked(config.setMany);
 const mockActiveHarness = vi.mocked(getActiveHarness);
+
+/** The device-store key that records a pick the ritual made us defer. */
+const DEFERRED = "ui_language_persona_pending";
 
 // HOME is a throwaway directory per test rather than the literal
 // /home/clawbox, because the route now resolves the workspace from
@@ -83,6 +87,7 @@ describe("/setup-api/preferences — language", () => {
     process.env.HOME = HOME_DIR;
     delete process.env.HERMES_HOME;
     mockGetAll.mockResolvedValue({});
+    mockSet.mockResolvedValue(undefined);
     mockSetMany.mockResolvedValue(undefined);
     mockActiveHarness.mockResolvedValue("openclaw");
     const fsMod = (await import("fs/promises")).default;
@@ -302,12 +307,42 @@ describe("/setup-api/preferences — language", () => {
     });
 
     it("still stores the pick, so nothing is lost by deferring it", async () => {
-      // gateway-pre-start.sh re-applies it once the workspace is the agent's
-      // own; a pick that vanished would leave a non-English owner with an
+      // A pick that vanished would leave a non-English owner with an
       // English-speaking assistant for good.
       fresh();
       await post({ ui_language: "bg" });
       expect(mockSetMany).toHaveBeenCalledWith({ "pref:ui_language": "bg" });
+    });
+
+    it("records the deferral, so something can pay it back", async () => {
+      // "Deferred" needs a due date. Nothing restarts the gateway when the
+      // introduction ends, so the ExecStartPre that re-applies the pick could
+      // sit unrun for as long as the box stayed up; the five-minute heartbeat
+      // drains this flag instead.
+      fresh();
+      await post({ ui_language: "bg" });
+      expect(mockSet).toHaveBeenCalledWith(DEFERRED, true);
+    });
+
+    it("records it while the ritual is armed as well as before it starts", async () => {
+      ritualArmed();
+      await post({ ui_language: "bg" });
+      expect(mockSet).toHaveBeenCalledWith(DEFERRED, true);
+    });
+
+    it("owes nothing once the pick has landed in the persona", async () => {
+      // A stale flag would cost one pointless rewrite of the agent's own files
+      // on the next tick, and OpenClaw revalidates them by mtime.
+      introduced();
+      await post({ ui_language: "bg" });
+      expect(mockSet).toHaveBeenCalledWith(DEFERRED, false);
+    });
+
+    it("owes nothing on Hermes, which writes straight through", async () => {
+      fresh();
+      mockActiveHarness.mockResolvedValue("hermes");
+      await post({ ui_language: "bg" });
+      expect(mockSet).toHaveBeenCalledWith(DEFERRED, false);
     });
 
     it("writes nothing while BOOTSTRAP.md is still on disk", async () => {
@@ -349,5 +384,8 @@ describe("/setup-api/preferences — language", () => {
     await post({ wp_opacity: 80 });
     expect(writeFile).not.toHaveBeenCalled();
     expect(mockSetMany).toHaveBeenCalledWith({ "pref:wp_opacity": 80 });
+    // And it does not answer a question nobody asked: a wallpaper change says
+    // nothing about whether the persona is owed a language.
+    expect(mockSet).not.toHaveBeenCalled();
   });
 });
