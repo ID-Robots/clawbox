@@ -240,8 +240,8 @@ async function waitForReplacement(previousPid: number | null, deadline: number):
  * owner a dashboard that is mid-restart could not be restarted, and to run
  * `systemctl restart` over it by hand. They are opposite instructions:
  *
- * - `"failed"` — the restart was NOT taken. Nothing is coming back on its own
- *   and the owner has to act.
+ * - `"failed"` — nothing is coming back on its own and the owner has to act:
+ *   either the restart was not taken, or systemd has stopped retrying it.
  * - `"pending"` — the stop took and `Restart=always` owns the unit, it has just
  *   not finished inside the budget. Nothing to do; acting makes it worse.
  */
@@ -272,8 +272,8 @@ export async function bounceHermesDashboard(): Promise<HermesBounceOutcome> {
   if (result?.code !== 0) return "failed";
 
   // Past this line the restart HAS been taken: the stop exited 0 over a unit
-  // that restarts itself. Everything below is the clock running out, not a
-  // refusal — so it is "pending", whatever the owner is told about it.
+  // that restarts itself. The clock running out below is therefore "pending" —
+  // with one exception, asked of systemd rather than assumed, immediately after.
   //
   // ONE deadline across both halves — the doc block above budgets them together
   // because they are the same restart, and spending it twice would put the
@@ -282,8 +282,23 @@ export async function bounceHermesDashboard(): Promise<HermesBounceOutcome> {
   // so the leftover needs no clamp here.
   const deadline = Date.now() + respawnWaitMs();
   if (!(await waitForReplacement(outgoing, deadline))) {
-    console.error(`[hermes] ${HERMES_DASHBOARD_UNIT} did not come back after its stop`);
-    return "pending";
+    // NO new main process at all, against `RestartSec=5`. The ordinary cause is
+    // not slowness, it is that systemd has GIVEN UP: a unit that crash-looped
+    // through `StartLimitBurst` refuses every restart for the rest of the
+    // interval, and this module is unprivileged — it has no `reset-failed` to
+    // clear that, unlike the OpenClaw path. So ask the one thing that tells the
+    // two apart, using the state read this module already has: `down` is
+    // `failed`, masked, or stopped, and none of them is coming back on its own.
+    // Anything else — still activating, in the RestartSec gap, or a state that
+    // cannot be read — keeps the answer that tells the owner to leave it alone.
+    // One local read, bounded by SYSTEMCTL_TIMEOUT_MS, on the path that has
+    // already spent the whole budget: the ceiling moves 45 s → 50 s, still far
+    // inside the 100 s edge cut the budget above is sized against.
+    const state = await hermesDashboardUnitState();
+    console.error(
+      `[hermes] ${HERMES_DASHBOARD_UNIT} did not come back after its stop (unit is ${state})`,
+    );
+    return state === "down" ? "failed" : "pending";
   }
   if (await waitForPortOpen(DASHBOARD_PORT, DASHBOARD_HOST, { timeoutMs: deadline - Date.now() })) {
     return "restarted";

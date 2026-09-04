@@ -91,8 +91,12 @@ async function restartStateHolder(edition: string): Promise<RestartOutcome> {
       console.warn(`[clawkeep/restore] ${HERMES_DASHBOARD_UNIT} ${detail}`);
       return { errors: [], pending: [`${HERMES_DASHBOARD_UNIT}: ${detail}`] };
     }
+    // Three causes, because "failed" carries all three: no Restart=always, a
+    // stop that did not take, and a unit systemd has stopped restarting. The
+    // journal line is the only place any of them is named, so it names them all
+    // rather than describing two of the three.
     const detail =
-      "could not be bounced from here — the unit is not Restart=always, or the stop did not take";
+      "could not be bounced from here — the unit is not Restart=always, the stop did not take, or systemd has stopped restarting it";
     console.warn(`[clawkeep/restore] ${HERMES_DASHBOARD_UNIT} ${detail}`);
     return { errors: [`${HERMES_DASHBOARD_UNIT}: ${detail}`], pending: [] };
   }

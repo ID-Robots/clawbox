@@ -31,12 +31,17 @@ import {
 } from "@/lib/hermes-dashboard-control";
 
 /**
- * Answer every `systemctl show` this module makes — the restart policy and the
- * unit's main PID — in systemd's own `Key=Value` form, which is what `showUnit`
- * parses. `pids` is consumed in order, so a case can say "this process before
- * the stop, that one after".
+ * Answer every `systemctl show` this module makes — the restart policy, the
+ * unit's main PID and its state — in systemd's own `Key=Value` form, which is
+ * what `showUnit` parses. `pids` is consumed in order, so a case can say "this
+ * process before the stop, that one after". `unit` is the state read: left out,
+ * that query answers nothing recognisable, which is the "cannot be asked" case.
  */
-function systemd({ restart = "always", pids = ["4242", "5353"] }: { restart?: string; pids?: string[] } = {}): void {
+function systemd({ restart = "always", pids = ["4242", "5353"], unit }: {
+  restart?: string;
+  pids?: string[];
+  unit?: Record<string, string>;
+} = {}): void {
   const remaining = [...pids];
   execFileMock.mockImplementation((_bin: string, args: string[], _opts: unknown, cb: unknown) => {
     const done = cb as (e: Error | null, out: { stdout: string; stderr: string }) => void;
@@ -44,6 +49,15 @@ function systemd({ restart = "always", pids = ["4242", "5353"] }: { restart?: st
     if (property === "--property=MainPID") {
       const pid = (remaining.length > 1 ? remaining.shift() : remaining[0]) ?? "0";
       done(null, { stdout: `MainPID=${pid}\n`, stderr: "" });
+      return;
+    }
+    // Matched on the property NAME, not on the whole list, so adding a property
+    // to the state read does not silently route it to the restart answer.
+    if (unit && property.includes("ActiveState")) {
+      done(null, {
+        stdout: Object.entries(unit).map(([k, v]) => `${k}=${v}`).join("\n") + "\n",
+        stderr: "",
+      });
       return;
     }
     done(null, { stdout: `Restart=${restart}\n`, stderr: "" });
@@ -160,8 +174,60 @@ describe("bounceHermesDashboard", () => {
     // skip the cleanup and leak a 40 ms dashboard budget into every later test
     // in this worker, turning one red into a cascade nowhere near its cause.
     try {
+      // No `unit` in the mock, so the state read answers nothing recognisable —
+      // "cannot be asked", which stays `pending`. The two cases below are the
+      // ones where systemd DOES answer.
       await expect(bounceHermesDashboard()).resolves.toBe("pending");
       expect(waitForPortOpenMock).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+      delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    }
+  });
+
+  /**
+   * A unit systemd has GIVEN UP on is `failed`, not `pending`.
+   *
+   * No new MainPID inside the budget, against `RestartSec=5`, is not ordinarily
+   * slowness — it is systemd refusing to try again: a dashboard that crash-looped
+   * through `StartLimitBurst` rejects every restart for the rest of the interval.
+   * This module is unprivileged and has no `reset-failed` to clear that, unlike
+   * the OpenClaw path (`openclaw-config.ts`), so nothing here is going to change
+   * it either. Calling it `pending` puts "Nothing to do." on ClawKeep's restore
+   * card over a dashboard that is never coming back — the exact false success
+   * the three-valued outcome was introduced to stop.
+   *
+   * The discriminator is systemd's own, asked through the read this module
+   * already has: `ActiveState=failed` is `hermesDashboardUnitState() === "down"`.
+   */
+  it("answers failed when systemd has stopped trying to restart the unit", async () => {
+    systemd({
+      pids: ["4242", "4242"],
+      unit: { LoadState: "loaded", ActiveState: "failed", SubState: "failed" },
+    });
+    process.env.HERMES_DASHBOARD_WAIT_MS = "40";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(bounceHermesDashboard()).resolves.toBe("failed");
+    } finally {
+      errorSpy.mockRestore();
+      delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    }
+  });
+
+  it("keeps a unit that is merely between runs as pending", async () => {
+    // `activating/auto-restart` is the `RestartSec` gap — the state a HEALTHY
+    // bounce parks in for five seconds. Escalating there would report a failure
+    // over a restart that is on its way and send the owner to `systemctl
+    // restart` a dashboard mid-start, which is the same lie the other way round.
+    systemd({
+      pids: ["4242", "4242"],
+      unit: { LoadState: "loaded", ActiveState: "activating", SubState: "auto-restart" },
+    });
+    process.env.HERMES_DASHBOARD_WAIT_MS = "40";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(bounceHermesDashboard()).resolves.toBe("pending");
     } finally {
       errorSpy.mockRestore();
       delete process.env.HERMES_DASHBOARD_WAIT_MS;
