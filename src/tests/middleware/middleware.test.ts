@@ -865,4 +865,70 @@ describe("middleware", () => {
       expect(mod.config.matcher.length).toBeGreaterThan(0);
     });
   });
+
+  /**
+   * The update lock. `updateClawBoxAndReboot` runs `git reset --hard` and
+   * `git clean -fd` over the project while the desktop is still on screen, and
+   * every app on it can write through /setup-api — so a window left open can
+   * save into a tree being rewritten underneath it. While an update owns the
+   * box, page navigations go to the updating screen instead.
+   */
+  describe("update lock", () => {
+    async function authed(pathname: string) {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+      const req = new NextRequest(new URL(`http://localhost${pathname}`), {
+        headers: {
+          cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
+        },
+      });
+      return mod.middleware(req);
+    }
+
+    it("sends the desktop to the updating page while an update runs", async () => {
+      writeConfig({ setup_complete: true, update_in_progress: true });
+      const res = await authed("/");
+      expect(res.status).toBe(307);
+      expect(res.headers.get("location")).toContain("/updating");
+    });
+
+    it("sends a standalone app page there too", async () => {
+      // /app/<id> is a real surface an owner can be sitting on, and it can
+      // write through the same routes as the desktop.
+      writeConfig({ setup_complete: true, update_in_progress: true });
+      const res = await authed("/app/notes");
+      expect(res.status).toBe(307);
+      expect(res.headers.get("location")).toContain("/updating");
+    });
+
+    it("does not redirect the updating page to itself", async () => {
+      writeConfig({ setup_complete: true, update_in_progress: true });
+      expect((await authed("/updating")).status).toBe(200);
+    });
+
+    it("leaves /setup-api alone, because the updating page polls it", async () => {
+      // And because an API answering a navigation redirect with HTML is the
+      // defect #304 fixed — every caller parses the body as JSON.
+      writeConfig({ setup_complete: true, update_in_progress: true });
+      expect((await authed("/setup-api/update/status")).status).toBe(200);
+    });
+
+    it("does nothing when no update is running", async () => {
+      writeConfig({ setup_complete: true });
+      expect((await authed("/")).status).toBe(200);
+    });
+
+    it("fails OPEN on an unreadable config", async () => {
+      // The auth fields fail CLOSED on a corrupt config; this one must not. A
+      // config.json that will not parse is no evidence of an update, and
+      // locking the desktop on it would take away the surfaces the owner needs
+      // to fix the box.
+      const dataDir = path.join(tmpRoot, "data");
+      fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(path.join(dataDir, "config.json"), "{ not json");
+      expect((await authed("/")).status).toBe(200);
+    });
+  });
+
 });

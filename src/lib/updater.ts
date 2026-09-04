@@ -17,6 +17,7 @@ import { waitForPortOpen } from "./port-probe";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { startRootStep } from "./root-step-runner";
+import { setUpdateLock, clearUpdateLock } from "./update-lock";
 import { collectBuildIdentity } from "./build-identity";
 import type { AuthProfileEntries } from "./subscription-surface";
 import {
@@ -1737,6 +1738,11 @@ function launchUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOpt
     })
     .finally(() => {
       running = false;
+      // The lock is released here and nowhere else on the success path. This
+      // does NOT run when do_rebuild kills the server mid-run — the process
+      // simply ends — which is exactly right: the flag stays on disk and the
+      // desktop is still locked when the box comes back for post_update.
+      void clearUpdateLock();
     });
 }
 
@@ -1772,7 +1778,14 @@ export function checkContinuation(): Promise<boolean> {
 
 async function resumeContinuation(): Promise<boolean> {
   const needsContinuation = await get("update_needs_continuation");
-  if (!needsContinuation) return false;
+  if (!needsContinuation) {
+    // Boot safety. A run that died between setting the lock and writing its
+    // continuation flag would otherwise leave the desktop locked with nothing
+    // left to unlock it — there is no update to resume, so there is no lock to
+    // hold. This is the one release path that does not follow a finished run.
+    await clearUpdateLock();
+    return false;
+  }
 
   await set("update_needs_continuation", undefined);
 
@@ -1808,6 +1821,7 @@ async function resumeContinuation(): Promise<boolean> {
     state.steps[restartIndex].status = "failed";
     state.steps[restartIndex].error = message;
     state.error = message;
+    await clearUpdateLock();
     return false;
   }
 
@@ -1823,6 +1837,9 @@ async function resumeContinuation(): Promise<boolean> {
   }
   state.currentStepIndex = startFrom;
 
+  // Re-assert it: the flag survived the reboot, but a box that was power-cycled
+  // rather than rebooted by the update may have lost the write.
+  void setUpdateLock();
   launchUpdate(steps, startFrom, { markCompleted: true });
   return true;
 }
@@ -1838,6 +1855,10 @@ export function startUpdate(): { started: boolean; error?: string } {
   state.phase = "running";
   state.currentStepIndex = 0;
 
+  // Fire-and-forget: the desktop lock is a courtesy to the owner, not a
+  // precondition of the update, and awaiting a config write here would delay
+  // the run for it.
+  void setUpdateLock();
   launchUpdate(steps, 0, { markCompleted: true });
   return { started: true };
 }
