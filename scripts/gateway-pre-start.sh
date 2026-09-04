@@ -24,7 +24,22 @@ CLAWBOX_HOME_DIR="${CLAWBOX_HOME_DIR:-${HOME:-/home/clawbox}}"
 CLAWBOX_ROOT="${CLAWBOX_ROOT:-$CLAWBOX_HOME_DIR/clawbox}"
 CLAWBOX_PORT="${CLAWBOX_PORT:-80}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-$CLAWBOX_HOME_DIR/.npm-global/bin/openclaw}"
-OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-${OPENCLAW_HOME:-$CLAWBOX_HOME_DIR/.openclaw}/openclaw.json}"
+OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-${CLAWBOX_OPENCLAW_HOME:-${OPENCLAW_HOME:-$CLAWBOX_HOME_DIR/.openclaw}}/openclaw.json}"
+# Every `openclaw` below, and the scripts this one launches, must read and
+# write THAT file. The CLI does not look at OPENCLAW_CONFIG: it takes
+# OPENCLAW_CONFIG_PATH / OPENCLAW_STATE_DIR when set and otherwise derives
+# its tree from OPENCLAW_HOME — which it reads as the ACCOUNT home, so the
+# state lands in `$OPENCLAW_HOME/.openclaw`. ClawBox has always used that
+# name for the .openclaw directory itself, and the updater exported it into
+# this script: the CLI then built a second tree at ~/.openclaw/.openclaw/ and
+# wrote the memory-search switch there while the real config stayed
+# half-written (2026-09-04). The two canonical overrides win over
+# OPENCLAW_HOME, and the misread name is dropped from the environment so no
+# child can inherit it. Neither reaches the gateway: ExecStartPre's
+# environment ends with it.
+export OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG"
+export OPENCLAW_STATE_DIR="$(dirname "$OPENCLAW_CONFIG")"
+unset OPENCLAW_HOME
 HOSTNAME_ENV="${HOSTNAME_ENV:-$CLAWBOX_ROOT/data/hostname.env}"
 
 # Pinned OpenClaw target — external plugins (e.g. @openclaw/codex) must stay
@@ -1987,6 +2002,30 @@ fi
 # resolves to `~/.openclaw`, the same root OpenClaw's own plugin
 # installer writes under (`<openclaw-home>/npm/node_modules/...`).
 OPENCLAW_HOME_DIR="$(dirname "$OPENCLAW_CONFIG")"
+# A `.openclaw` INSIDE the state directory is what the CLI leaves behind when
+# it was run with OPENCLAW_HOME pointing at the state directory (see the pin
+# near the top): a second config, a second empty index, nothing the gateway
+# reads. OpenClaw never nests its own tree, so the only question is whether a
+# person could have put something there — a real home always carries a
+# workspace and a credentials directory, and one with neither is removed.
+remove_stray_state_tree() {
+  # Only ever the literal nesting `.openclaw/.openclaw`: a state directory
+  # under any other name is not the shape this bug produces, and a fresh
+  # home may not have its workspace yet.
+  [ "$(basename "$1")" = ".openclaw" ] || return 0
+  local stray="$1/.openclaw"
+  [ -d "$stray" ] || return 0
+  if [ -d "$stray/workspace" ] || [ -d "$stray/credentials" ]; then
+    echo "  WARN: $stray looks like a real OpenClaw home, leaving it alone"
+    return 0
+  fi
+  if rm -rf "$stray" 2>/dev/null; then
+    echo "  Removed the stray OpenClaw state tree at $stray (left by an update that ran the CLI under OPENCLAW_HOME)"
+  else
+    echo "  WARN: could not remove the stray OpenClaw state tree at $stray"
+  fi
+}
+remove_stray_state_tree "$OPENCLAW_HOME_DIR"
 # OpenClaw's plugin install layout changed across versions: older cores wrote
 # the plugin flat under <home>/npm/node_modules/@openclaw/codex, while current
 # cores (2026.7.x) isolate each plugin in its own project dir under

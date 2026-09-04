@@ -44,6 +44,7 @@ let binDir: string;
 let configPath: string;
 let statePath: string;
 let callsPath: string;
+let envLogPath: string;
 let modelDir: string;
 let tokenPath: string;
 
@@ -60,6 +61,7 @@ beforeEach(() => {
   configPath = path.join(dir, "openclaw.json");
   statePath = path.join(dir, "data", "local-embeddings.state");
   callsPath = path.join(dir, "calls.log");
+  envLogPath = path.join(dir, "env.log");
   modelDir = path.join(dir, "models");
   tokenPath = path.join(dir, ".local-ai-token");
   writeFileSync(configPath, JSON.stringify({ agents: { defaults: {} } }));
@@ -90,11 +92,17 @@ beforeEach(() => {
   // sleep: the proxy wait loop must not take real seconds.
   writeStub("sleep", "exit 0");
 
-  // openclaw: record every call and really apply `config set a.b.c value`.
+  // openclaw: record every call (and the tree-selecting environment it saw)
+  // and really apply `config set`. Which FILE it writes follows the real
+  // CLI's rules, not the test's: OPENCLAW_CONFIG_PATH when set, else
+  // `$OPENCLAW_HOME/.openclaw/openclaw.json` (OpenClaw reads OPENCLAW_HOME as
+  // the ACCOUNT home), else the fixture. A `--strict-json --merge` value is
+  // parsed and merged into the object at the key, like the real `--merge`.
   writeStub(
     "openclaw",
     [
       'echo "openclaw $*" >> "$CALLS_LOG"',
+      'echo "OPENCLAW_HOME=${OPENCLAW_HOME-<unset>} OPENCLAW_CONFIG_PATH=${OPENCLAW_CONFIG_PATH-<unset>} OPENCLAW_STATE_DIR=${OPENCLAW_STATE_DIR-<unset>}" >> "$ENV_LOG"',
       'if [ "${OPENCLAW_RC:-0}" != "0" ]; then exit "$OPENCLAW_RC"; fi',
       '# FAIL_ON matches against the whole argv so a test can fail exactly one call.',
       'if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then exit 1; fi',
@@ -104,7 +112,13 @@ beforeEach(() => {
       '  echo "agents.defaults.memorySearch moved to memory.search. Run \\"openclaw doctor --fix\\"." >&2; exit 1',
       'fi',
       'if [ "${1:-}" = "config" ] && [ "${2:-}" = "set" ]; then',
-      '  CFG_KEY="$3" CFG_VALUE="$4" python3 - "$TEST_CONFIG" <<\'PY\'',
+      '  target="$TEST_CONFIG"',
+      '  if [ -n "${OPENCLAW_CONFIG_PATH:-}" ]; then target="$OPENCLAW_CONFIG_PATH";',
+      '  elif [ -n "${OPENCLAW_HOME:-}" ]; then target="$OPENCLAW_HOME/.openclaw/openclaw.json"; fi',
+      '  if [ "${STUB_WRITE_ELSEWHERE:-0}" = "1" ]; then target="$TEST_CONFIG.elsewhere"; fi',
+      '  mkdir -p "$(dirname "$target")"',
+      '  [ -f "$target" ] || echo "{}" > "$target"',
+      '  CFG_KEY="$3" CFG_VALUE="$4" CFG_ARGV="$*" python3 - "$target" <<\'PY\'',
       "import json, os, sys",
       "path = sys.argv[1]",
       "cfg = json.load(open(path))",
@@ -112,7 +126,14 @@ beforeEach(() => {
       "parts = os.environ['CFG_KEY'].split('.')",
       "for key in parts[:-1]:",
       "    node = node.setdefault(key, {})",
-      "node[parts[-1]] = os.environ['CFG_VALUE']",
+      "argv = os.environ['CFG_ARGV']",
+      "value = os.environ['CFG_VALUE']",
+      "if '--strict-json' in argv:",
+      "    value = json.loads(value)",
+      "if '--merge' in argv and isinstance(value, dict) and isinstance(node.get(parts[-1]), dict):",
+      "    node[parts[-1]] = {**node[parts[-1]], **value}",
+      "else:",
+      "    node[parts[-1]] = value",
       "json.dump(cfg, open(path, 'w'))",
       "PY",
       "fi",
@@ -150,6 +171,12 @@ type RunOpts = {
   installedVersion?: string;
   /** Whether the stub CLI behaves like OpenClaw 2 (refuses the retired key). */
   stubV2?: boolean;
+  /** Extra keys memory.search already carries (what a merge must keep). */
+  extra?: Record<string, unknown>;
+  /** Environment an ancestor (the updater, a login shell) may have exported. */
+  extraEnv?: Record<string, string>;
+  /** The stub CLI answers 0 but writes a different file — what a misdirected CLI did on the box. */
+  writeElsewhere?: boolean;
 };
 
 /** The state of a box this script has already configured. */
@@ -165,6 +192,7 @@ function run(opts: RunOpts = {}) {
   // Each run starts from a clean call log so a second run in the same test
   // cannot inherit the first one's calls.
   rmSync(callsPath, { force: true });
+  rmSync(envLogPath, { force: true });
   const cfg: Record<string, unknown> = {};
   if (opts.provider !== undefined) cfg.provider = opts.provider;
   if (opts.model !== undefined) cfg.model = opts.model;
@@ -178,6 +206,7 @@ function run(opts: RunOpts = {}) {
     cfg.queryInputType = "query";
     cfg.documentInputType = "document";
   }
+  Object.assign(cfg, opts.extra ?? {});
   const home = opts.keys === "v2" ? { memory: { search: cfg } } : { agents: { defaults: { memorySearch: cfg } } };
   writeFileSync(configPath, JSON.stringify(Object.keys(cfg).length ? home : { agents: { defaults: {} } }));
   // The binary lives in bin/ and the core's package.json in ../lib/node_modules/openclaw,
@@ -224,15 +253,21 @@ function run(opts: RunOpts = {}) {
       OPENCLAW_RC: String(opts.openclawRc ?? 0),
       FAIL_ON: opts.failOn ?? "",
       FLOCK_BIN: opts.flockBin ?? "flock",
+      ENV_LOG: envLogPath,
+      STUB_WRITE_ELSEWHERE: opts.writeElsewhere ? "1" : "0",
+      ...(opts.extraEnv ?? {}),
     },
   });
   const calls = existsSync(callsPath) ? readFileSync(callsPath, "utf-8").trim().split("\n").filter(Boolean) : [];
+  const cliEnv = existsSync(envLogPath) ? readFileSync(envLogPath, "utf-8").trim().split("\n").filter(Boolean) : [];
   const config = JSON.parse(readFileSync(configPath, "utf-8"));
   return {
     status: res.status,
     stdout: res.stdout ?? "",
     stderr: res.stderr ?? "",
     calls,
+    /** The tree-selecting environment the stub CLI saw, one line per call. */
+    cliEnv,
     memorySearch: (config.agents?.defaults?.memorySearch ?? {}) as Record<string, unknown>,
     /** OpenClaw 2's home for the same choice. */
     search: (config.memory?.search ?? {}) as Record<string, unknown>,
@@ -245,16 +280,23 @@ const downloads = (calls: string[]) => calls.filter((c) => c.startsWith("hf down
 const reindexes = (calls: string[]) => calls.filter((c) => c.includes("memory index --force"));
 const probes = (calls: string[]) => calls.filter((c) => c.startsWith("curl") && c.includes(`${PROXY}/models`));
 
-/** Everything the embedder needs, in the order it is written; the provider LAST. */
-function ops(home: string, { provider = true } = {}) {
-  return [
-    `openclaw config set ${home}.model ${MODEL}`,
-    `openclaw config set ${home}.remote.baseUrl ${PROXY}`,
-    `openclaw config set ${home}.remote.apiKey ${TOKEN}`,
-    `openclaw config set ${home}.queryInputType query`,
-    `openclaw config set ${home}.documentInputType document`,
-    ...(provider ? [`openclaw config set ${home}.provider ${PROVIDER}`] : []),
-  ];
+/** The one value the script writes, spelled the way python's json.dumps spells it. */
+const SETTINGS_JSON = JSON.stringify({
+  model: MODEL,
+  remote: { baseUrl: PROXY, apiKey: TOKEN },
+  queryInputType: "query",
+  documentInputType: "document",
+  provider: PROVIDER,
+}).replace(/,"/g, ', "').replace(/":/g, '": ');
+
+/**
+ * Everything the embedder needs, in ONE merged write: a sequence of writes
+ * could be killed midway (the bearer write restarts the gateway, and during an
+ * update that restart is a `systemctl stop` of the cgroup this runs in), and
+ * a half-written switch is exactly what the box was found on.
+ */
+function ops(home: string) {
+  return [`openclaw config set ${home} ${SETTINGS_JSON} --strict-json --merge`];
 }
 const LEGACY = "agents.defaults.memorySearch";
 const V2 = "memory.search";
@@ -283,8 +325,8 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
     const r = run({ present: false });
     expect(r.status).toBe(0);
     expect(downloads(r.calls)).toEqual([`hf download ${HF_REPO} ${GGUF} --local-dir ${modelDir}`]);
-    // Order matters: the provider write is what activates the embedder, so it
-    // goes last and a failure earlier leaves the box where it was.
+    // One write: model, address, bearer, labels and provider land together or
+    // not at all, so no kill or failure can leave the box between two of them.
     expect(configSets(r.calls)).toEqual(ops(LEGACY));
     expect(reindexes(r.calls)).toHaveLength(1);
     expect(r.memorySearch).toMatchObject({
@@ -307,7 +349,7 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
     const r = run();
     expect(r.status).toBe(0);
     expect(downloads(r.calls)).toEqual([]);
-    expect(configSets(r.calls)).toHaveLength(6);
+    expect(configSets(r.calls)).toHaveLength(1);
     expect(reindexes(r.calls)).toHaveLength(1);
   });
 
@@ -340,7 +382,7 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
     // retries. It is not part of the index identity, so no reindex.
     const r = run({ ...OURS, apiKey: "stale" });
     expect(r.status).toBe(0);
-    expect(configSets(r.calls)).toEqual(ops(LEGACY, { provider: false }));
+    expect(configSets(r.calls)).toEqual(ops(LEGACY));
     expect(reindexes(r.calls)).toEqual([]);
     expect(r.state).not.toContain("reindex_pending=1");
     expect(r.stdout).toContain("already built");
@@ -350,9 +392,7 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
   it("re-points a box whose settings drifted, and reindexes for the new identity", () => {
     const r = run({ ...OURS, model: "nomic-embed-text" });
     expect(r.status).toBe(0);
-    // The provider is already ours, so it is not re-written; everything the
-    // identity is made of is.
-    expect(configSets(r.calls)).toEqual(ops(LEGACY, { provider: false }));
+    expect(configSets(r.calls)).toEqual(ops(LEGACY));
     expect(reindexes(r.calls)).toHaveLength(1);
   });
 
@@ -408,23 +448,74 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
     expect(configSets(r.calls)).toEqual([]);
   });
 
-  it("changes nothing when a settings write fails", () => {
-    const r = run({ failOn: "memorySearch.model" });
+  it("changes nothing when the settings write fails", () => {
+    const r = run({ failOn: "config set agents.defaults.memorySearch" });
     expect(r.status).toBe(0);
     expect(r.memorySearch).toEqual({});
     expect(reindexes(r.calls)).toEqual([]);
     expect(r.stdout).toContain("provider unchanged");
   });
 
-  it("leaves the provider as it was when the provider write fails", () => {
-    // Settings first, provider last: a failed provider write must not leave
-    // the box on a half-written embedder, and it keeps embedding exactly
-    // where it did before.
-    const r = run({ failOn: "memorySearch.provider" });
+  it("leaves the provider as it was when the write fails — there is no half-written embedder to be left on", () => {
+    const r = run({ provider: "ollama", model: "qwen3-embedding:0.6b", failOn: "config set" });
     expect(r.status).toBe(0);
-    expect(r.memorySearch.provider).toBeUndefined();
+    expect(r.memorySearch).toEqual({ provider: "ollama", model: "qwen3-embedding:0.6b" });
     expect(reindexes(r.calls)).toEqual([]);
-    expect(r.stdout).toContain("provider is unchanged");
+    expect(r.stdout).toContain("provider unchanged");
+  });
+
+  it("writes the whole switch in one call, never a sequence", () => {
+    // The old sequence (model, address, bearer, labels, provider) was killed
+    // between the bearer and the labels on the box: the bearer write restarts
+    // the gateway, and during an update that restart is a `systemctl stop`
+    // of the cgroup this script runs in. There is no midway in one write.
+    const r = run({ provider: "ollama", model: "qwen3-embedding:0.6b" });
+    expect(configSets(r.calls)).toHaveLength(1);
+    expect(configSets(r.calls)[0]).toContain("--strict-json --merge");
+    for (const key of ["model", "baseUrl", "apiKey", "queryInputType", "documentInputType", "provider"]) {
+      expect(configSets(r.calls)[0]).toContain(`"${key}"`);
+    }
+    expect(readFileSync(SCRIPT, "utf-8")).not.toMatch(/config set "\$MEMORY_SEARCH_KEY\.\$1"/);
+  });
+
+  it("merges into memory search rather than replacing it, so extraPaths survive", () => {
+    const r = run({ provider: "ollama", model: "qwen3-embedding:0.6b", extra: { extraPaths: ["/home/clawbox/Documents"] } });
+    expect(r.status).toBe(0);
+    expect(r.memorySearch).toMatchObject({ provider: PROVIDER, model: MODEL, extraPaths: ["/home/clawbox/Documents"] });
+  });
+
+  it("pins the CLI to the file it reads, whatever OPENCLAW_HOME an ancestor exported", () => {
+    // The updater exported OPENCLAW_HOME=<the .openclaw dir> into the
+    // pre-start that launches this script; the CLI reads that name as the
+    // ACCOUNT home and wrote every key under <.openclaw>/.openclaw/ while the
+    // script read the real file and logged success. The two canonical
+    // overrides must reach the CLI and the misread name must not.
+    const decoy = path.join(dir, "decoy-home");
+    const r = run({ provider: "ollama", model: "qwen3-embedding:0.6b", extraEnv: { OPENCLAW_HOME: decoy } });
+    expect(r.status).toBe(0);
+    expect(r.cliEnv.length).toBeGreaterThan(0);
+    for (const line of r.cliEnv) {
+      expect(line).toContain("OPENCLAW_HOME=<unset>");
+      expect(line).toContain(`OPENCLAW_CONFIG_PATH=${configPath}`);
+      expect(line).toContain(`OPENCLAW_STATE_DIR=${path.dirname(configPath)}`);
+    }
+    expect(existsSync(decoy)).toBe(false);
+    expect(r.memorySearch).toMatchObject({ provider: PROVIDER, model: MODEL });
+    expect(r.stdout).toContain("memory search -> local embeddings");
+  });
+
+  it("refuses to call it done when the write did not land in the file it reads", () => {
+    // A CLI that answers 0 after writing some other tree is exactly the
+    // failure that hid for twenty minutes on the box: the exit code is not
+    // the verdict, the file is.
+    const r = run({ provider: "ollama", model: "qwen3-embedding:0.6b", writeElsewhere: true });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("did not land");
+    expect(r.stdout).not.toContain("memory search -> local embeddings");
+    expect(reindexes(r.calls)).toEqual([]);
+    expect(r.memorySearch).toEqual({ provider: "ollama", model: "qwen3-embedding:0.6b" });
+    // The owed reindex stays recorded: the next run writes again and finishes.
+    expect(r.state).toContain("reindex_pending=1");
   });
 
   it("records the reindex as owed when it fails, and finishes it on the next run", () => {
@@ -463,10 +554,10 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
     expect(configSets(r.calls)).toEqual([]);
   });
 
-  it("records the owed reindex before the provider is switched, not after", () => {
-    // A run killed between the provider write and the marker would leave a
-    // configured backend and an index nobody ever rebuilds.
-    const r = run({ failOn: "memorySearch.provider" });
+  it("records the owed reindex before the switch is written, not after", () => {
+    // A run killed between the write and the marker would leave a configured
+    // backend and an index nobody ever rebuilds.
+    const r = run({ failOn: "config set" });
     expect(r.state).toContain("reindex_pending=1");
     expect(r.memorySearch.provider).toBeUndefined();
   });
@@ -515,7 +606,7 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh on OpenClaw 2", () => {
     expect(r.search).toMatchObject({ provider: PROVIDER, model: MODEL });
   });
 
-  it("writes memory.search.* (settings first, provider last) when pre-start says OpenClaw 2", () => {
+  it("writes memory.search in one call when pre-start says OpenClaw 2", () => {
     const r = run({ v2Env: "1" });
     expect(r.status).toBe(0);
     expect(configSets(r.calls)).toEqual(ops(V2));
@@ -586,7 +677,7 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh on OpenClaw 2", () => {
     // The control: the shape check must not reject the versions the fleet runs.
     const r = run({ installedVersion: "2026.8.1-rc.2", stubV2: true });
     expect(r.status).toBe(0);
-    expect(configSets(r.calls)[0]).toBe(`openclaw config set memory.search.model ${MODEL}`);
+    expect(configSets(r.calls)[0]).toBe(ops(V2)[0]);
   });
 
   it("lets the generation gateway-pre-start.sh exported win over the package on disk", () => {
@@ -594,7 +685,7 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh on OpenClaw 2", () => {
     // mid-update case, and the binary is the process that parses the write.
     const r = run({ installedVersion: "2026.8.1", v2Env: "0", stubV2: false });
     expect(r.status).toBe(0);
-    expect(configSets(r.calls)[0]).toBe(`openclaw config set agents.defaults.memorySearch.model ${MODEL}`);
+    expect(configSets(r.calls)[0]).toBe(ops(LEGACY)[0]);
   });
 
   it("never calls `openclaw --version` to find out — it costs ~10 s on a Jetson", () => {
@@ -625,6 +716,62 @@ describe("gateway-pre-start.sh local embeddings hand-off", () => {
   it("exports the generation it decided on, so the script cannot disagree with it", () => {
     expect(src).toMatch(/^export CLAWBOX_OPENCLAW_V2$/m);
     expect(src.indexOf("export CLAWBOX_OPENCLAW_V2")).toBeLessThan(src.indexOf('setsid nohup "$LOCAL_EMBEDDINGS"'));
+  });
+
+  it("pins every openclaw it runs, and every child, to the config it resolved — and drops the misread OPENCLAW_HOME", () => {
+    // The CLI reads OPENCLAW_HOME as the ACCOUNT home; ClawBox's name for the
+    // .openclaw directory must never reach it. The updater passes
+    // CLAWBOX_OPENCLAW_HOME instead, and the two canonical overrides win.
+    expect(src).toMatch(/^export OPENCLAW_CONFIG_PATH="\$OPENCLAW_CONFIG"$/m);
+    expect(src).toMatch(/^export OPENCLAW_STATE_DIR="\$\(dirname "\$OPENCLAW_CONFIG"\)"$/m);
+    expect(src).toMatch(/^unset OPENCLAW_HOME$/m);
+    expect(src).toContain("${CLAWBOX_OPENCLAW_HOME:-${OPENCLAW_HOME:-$CLAWBOX_HOME_DIR/.openclaw}}");
+    const firstCli = src.indexOf('"$OPENCLAW_BIN"');
+    expect(src.indexOf("unset OPENCLAW_HOME")).toBeLessThan(firstCli);
+    expect(src.indexOf("unset OPENCLAW_HOME")).toBeLessThan(src.indexOf('setsid nohup "$LOCAL_EMBEDDINGS"'));
+  });
+
+  it("removes the second tree a misdirected CLI left at <state>/.openclaw, and only that", () => {
+    const fn = src.match(/^remove_stray_state_tree\(\) \{[\s\S]*?^\}$/m)?.[0];
+    expect(fn).toBeTruthy();
+    expect(src).toMatch(/^remove_stray_state_tree "\$OPENCLAW_HOME_DIR"$/m);
+    const call = (state: string) =>
+      spawnSync("bash", ["-c", `${fn}\nremove_stray_state_tree "$1"`, "_", state], { encoding: "utf-8" });
+
+    // The box's case: config, backups, an empty index, no workspace.
+    const stray = path.join(dir, "state-a");
+    mkdirSync(path.join(stray, ".openclaw", "agents", "main", "agent"), { recursive: true });
+    writeFileSync(path.join(stray, ".openclaw", "openclaw.json"), "{}");
+    let r = call(stray);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("Removed the stray OpenClaw state tree");
+    expect(existsSync(path.join(stray, ".openclaw"))).toBe(false);
+
+    // Something a person could have put there is not ours to delete.
+    const real = path.join(dir, "state-b");
+    mkdirSync(path.join(real, ".openclaw", "workspace"), { recursive: true });
+    r = call(real);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("leaving it alone");
+    expect(existsSync(path.join(real, ".openclaw", "workspace"))).toBe(true);
+
+    // Nothing there: nothing said.
+    const clean = path.join(dir, "state-c");
+    mkdirSync(clean, { recursive: true });
+    r = call(clean);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("");
+
+    // Only the literal `.openclaw/.openclaw` nesting is the bug's shape: a
+    // state directory under another name keeps whatever `.openclaw` it holds,
+    // workspace or not (a fresh home has none yet).
+    const other = path.join(dir, "state-d", "openclaw-state");
+    mkdirSync(path.join(other, ".openclaw"), { recursive: true });
+    writeFileSync(path.join(other, ".openclaw", "openclaw.json"), "{}");
+    r = call(other);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("");
+    expect(existsSync(path.join(other, ".openclaw", "openclaw.json"))).toBe(true);
   });
 });
 

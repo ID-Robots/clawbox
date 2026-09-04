@@ -30,6 +30,22 @@ set -euo pipefail
 
 OPENCLAW_BIN="${OPENCLAW_BIN:-/home/clawbox/.npm-global/bin/openclaw}"
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-/home/clawbox/.openclaw/openclaw.json}"
+# --- the CLI must write the file this script reads --------------------------
+# `openclaw config set` and `openclaw memory index` do not read OPENCLAW_CONFIG
+# above; they find their tree from the environment: OPENCLAW_CONFIG_PATH and
+# OPENCLAW_STATE_DIR when set, otherwise `$OPENCLAW_HOME/.openclaw` — OpenClaw
+# reads OPENCLAW_HOME as the ACCOUNT home — otherwise `$HOME/.openclaw`.
+# ClawBox uses the same name for the .openclaw directory itself, and the
+# updater once exported it into the pre-start that launches this script: the
+# CLI then wrote every key, and "reindexed" an empty workspace, under
+# ~/.openclaw/.openclaw/ while this script read the real file and logged
+# success, and the box was left half-switched with a clean log (2026-09-04).
+# Pinning both to the file every read below is made of means a write can only
+# land where the read-back at the end will find it.
+OPENCLAW_STATE_DIR="$(dirname "$OPENCLAW_CONFIG")"
+export OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG"
+export OPENCLAW_STATE_DIR
+unset OPENCLAW_HOME
 # The alias llama-server answers to and the `model` OpenClaw sends. Keep in
 # step with src/lib/embed-server.ts and scripts/start-embed-server.sh.
 EMBED_MODEL="${EMBED_MODEL:-qwen3-embedding-0.6b}"
@@ -294,8 +310,47 @@ NEEDS_REINDEX=0
 [ "$NEEDS_REINDEX" -eq 0 ] || NEEDS_WRITE=1
 [ "$CURRENT_KEY" = "$TOKEN" ] || NEEDS_WRITE=1
 
-set_cfg() {
-  "$OPENCLAW_BIN" config set "$MEMORY_SEARCH_KEY.$1" "$2" >/dev/null 2>&1
+# ONE write, never a sequence. The keys used to go in one `config set` each,
+# provider last, so a failure midway left the old provider in charge. What it
+# could not survive was a KILL midway: the third write (the bearer, under
+# `remote`) makes the gateway restart itself, and during an update that
+# restart is a `systemctl stop` that ends every process in the unit's cgroup —
+# this one included, between the bearer and the input types. The box was then
+# on `ollama` pointed at an OpenAI-shaped proxy: a 405 on every embed and an
+# index marked dirty (2026-09-04). A single merged write is all-or-nothing, so
+# there is no "midway" left to be killed in. `--merge` keeps what the object
+# already carries (extraPaths); the value is built by python so the bearer
+# reaches the CLI byte-for-byte.
+embed_settings_json() {
+  python3 - "$EMBED_MODEL" "$EMBED_PROXY_URL" "$TOKEN" "$EMBED_PROVIDER" <<'PY'
+import json, sys
+model, base_url, token, provider = sys.argv[1:5]
+print(json.dumps({
+    "model": model,
+    "remote": {"baseUrl": base_url, "apiKey": token},
+    "queryInputType": "query",
+    "documentInputType": "document",
+    "provider": provider,
+}))
+PY
+}
+write_cfg() {
+  local payload
+  payload="$(embed_settings_json)" || return 1
+  [ -n "$payload" ] || return 1
+  "$OPENCLAW_BIN" config set "$MEMORY_SEARCH_KEY" "$payload" --strict-json --merge >/dev/null 2>&1
+}
+# What the CLI wrote is not taken on its exit code: the file is read back. A
+# CLI that answered 0 after writing another tree (see the pin at the top) or
+# a value it normalised into something else is the failure this script exists
+# to make visible, not one it may report as done.
+settings_landed() {
+  [ "$(read_cfg provider)" = "$EMBED_PROVIDER" ] \
+    && [ "$(read_cfg model)" = "$EMBED_MODEL" ] \
+    && [ "$(read_cfg remote.baseUrl)" = "$EMBED_PROXY_URL" ] \
+    && [ "$(read_cfg remote.apiKey)" = "$TOKEN" ] \
+    && [ "$(read_cfg queryInputType)" = "query" ] \
+    && [ "$(read_cfg documentInputType)" = "document" ]
 }
 
 if [ "$NEEDS_WRITE" -eq 0 ]; then
@@ -308,32 +363,24 @@ if [ "$NEEDS_WRITE" -eq 0 ]; then
   # provider it has no key for; retrying the reindex is the recoverable half.
   log "memory search is on local embeddings but its reindex never completed — retrying it"
 else
-  # Everything else first, the provider LAST. The provider write is what
-  # actually switches embedding backends, so if any earlier call fails the box
-  # is left on exactly the provider it already had — never on the new one
-  # pointed at a half-written address.
+  # Recorded BEFORE the write, not after: between switching the backend and
+  # recording that a reindex is owed there must be no window where a killed
+  # run leaves a configured provider and an index nobody rebuilds. The marker
+  # is deliberately kept if the write then fails — a later attempt finishes
+  # the job, and a stale marker only costs one extra reindex.
+  if [ "$NEEDS_REINDEX" -eq 1 ]; then
+    state_set_reindex_pending 1
+  fi
   # `queryInputType`/`documentInputType` are what make OpenClaw label each
   # request; the proxy restores the model's query instruction from that label
   # (src/lib/embed-query-instruction.ts). Without them every query would be
   # embedded bare and recall would quietly degrade.
-  if ! set_cfg model "$EMBED_MODEL" \
-    || ! set_cfg remote.baseUrl "$EMBED_PROXY_URL" \
-    || ! set_cfg remote.apiKey "$TOKEN" \
-    || ! set_cfg queryInputType query \
-    || ! set_cfg documentInputType document; then
+  if ! write_cfg; then
     log "WARN: could not write the local embedding settings (non-fatal; provider unchanged, memory search stays as it is)"
     exit 0
   fi
-  # Recorded BEFORE the provider write, not after: between switching the
-  # backend and recording that a reindex is owed there must be no window where
-  # a killed run leaves a configured provider and an index nobody rebuilds.
-  # The marker is deliberately kept if the provider write then fails — a later
-  # attempt finishes the job, and a stale marker only costs one extra reindex.
-  if [ "$NEEDS_REINDEX" -eq 1 ]; then
-    state_set_reindex_pending 1
-  fi
-  if [ "$PROVIDER" != "$EMBED_PROVIDER" ] && ! set_cfg provider "$EMBED_PROVIDER"; then
-    log "WARN: could not point memory search at the on-box embedder (non-fatal; provider is unchanged, memory search stays as it is)"
+  if ! settings_landed; then
+    log "WARN: the settings write did not land in $OPENCLAW_CONFIG — memory search stays as it is; trying again on the next gateway start"
     exit 0
   fi
   log "memory search -> local embeddings ($EMBED_MODEL via llama.cpp at $EMBED_PROXY_URL, no API key needed)"
