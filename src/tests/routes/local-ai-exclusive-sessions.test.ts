@@ -31,6 +31,17 @@ const { configSetMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
+  // A REAL class. The route narrows on `err instanceof GatewayNotReadyError` to
+  // keep "the gateway has not finished binding" out of a sentence that says the
+  // restart failed; `instanceof undefined` throws a TypeError, which the outer
+  // catch turns into a 500, so the first case here that makes `restartGateway`
+  // reject would lose the pending answer without saying why.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
   callGatewayRpc: vi.fn(),
   gatewayIsAbsent: () => false,
   readConfig: vi.fn(async () => ({

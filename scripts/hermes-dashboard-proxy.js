@@ -37,11 +37,23 @@ const PORT = parseInt(process.env.HERMES_DASH_PROXY_PORT || "8090", 10);
 // serves EVERY path on its own port, so a relative `Location: /login` would
 // bounce back into the proxy — an infinite redirect loop. We always redirect to
 // the ClawBox origin explicitly.
-const CLAWBOX_WEB_PORT = parseInt(process.env.CLAWBOX_WEB_PORT || "80", 10);
+// Same rule as envPort() in src/lib/port-probe.ts, written out because this
+// script is standalone CommonJS and cannot import the TypeScript helper: an
+// integer in 1-65535 or the default. `parseInt` alone yields NaN on a typo and
+// lets `-1` / `70000` through, and Node then rejects them at the socket.
+function envPort(value, fallback) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : fallback;
+}
+const CLAWBOX_WEB_PORT = envPort(process.env.CLAWBOX_WEB_PORT, 80);
 // Host-local, non-loopback: puts the dashboard in gated cookie-auth mode
 // (see file header) while staying off the LAN.
 const UPSTREAM_HOST = process.env.HERMES_DASH_HOST || "127.0.0.2";
-const UPSTREAM_PORT = parseInt(process.env.HERMES_PORT || "9119", 10);
+// Mirrors DASHBOARD_PORT in src/lib/hermes-dashboard-auth.ts. Unguarded, the
+// proxy would forward every request to `127.0.0.2:NaN` — and to a Host header
+// of the same, failing the dashboard's own Host guard — silently, and nowhere
+// near the typo that caused it.
+const UPSTREAM_PORT = envPort(process.env.HERMES_PORT, 9119);
 const CLAWBOX_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const UPSTREAM_AUTHORITY = `${UPSTREAM_HOST}:${UPSTREAM_PORT}`;
 // The dashboard's WS Host/Origin guard (_ws_host_origin_is_allowed) rejects any

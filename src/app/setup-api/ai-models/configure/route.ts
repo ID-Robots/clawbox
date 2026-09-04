@@ -5,6 +5,7 @@ import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
 import { getAll, setMany } from "@/lib/config-store";
+import { readSetupGateFacts } from "@/lib/route-auth";
 import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
@@ -26,6 +27,7 @@ import {
   openclawIsAbsent,
   OpenclawUnavailableError,
   type OpenClawConfig,
+  GatewayNotReadyError,
 } from "@/lib/openclaw-config";
 import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { getActiveHarness } from "@/lib/harness";
@@ -1474,7 +1476,12 @@ type GatewayState =
   | "untouched"
   /** Stopped for `doctor --fix`; no later step has restarted it. */
   | "stopped-for-doctor"
-  /** Step 9 issued its restart — it came up, or step 9 answered its own 502. */
+  /**
+   * Step 9 issued its restart. It came up; or it had not finished coming up and
+   * step 9 answered its own 200 with a warning; or the restart was refused and
+   * step 9 answered its own 502. Either way the gateway is not left stopped, so
+   * the wrapper below has nothing to restore.
+   */
   | "restart-issued";
 
 /** Shared by reference: `configureModel` has too many exits to return it. */
@@ -1496,7 +1503,10 @@ export async function POST(request: Request) {
     // the failure this whole tracker exists to prevent. Restore, then let the
     // original throw become Next's generic 500.
     if (gateway.state === "stopped-for-doctor") {
-      await restartGateway().catch((restartErr) => {
+      // No readiness wait: this answer is logged and dropped — the original
+      // throw becomes Next's 500 either way — so waiting out the budget would
+      // only add blocking time to a request that has already failed.
+      await restartGateway({ awaitReady: false }).catch((restartErr) => {
         console.error(
           "[configure] Gateway restart after an unhandled save failure also failed:",
           restartErr instanceof Error ? logSafe(restartErr.message) : restartErr,
@@ -1511,7 +1521,13 @@ export async function POST(request: Request) {
   // it runs AFTER the rollback archived the legacy file, so the gateway does
   // not boot straight into the AuthProfileMigrationRequired it would have hit.
   try {
-    await restartGateway();
+    // No readiness wait: the only question this restore asks is "did systemd
+    // take the restart", which is what the hint below turns on. Waiting for the
+    // port would widen that hint to "the gateway did not bind inside 30 s" —
+    // the ordinary case on a cold box — and tell the owner to go press Restart
+    // on a gateway that is already coming back, while adding the whole budget
+    // to a request that has already failed.
+    await restartGateway({ awaitReady: false });
     return response;
   } catch (err) {
     // A runtime mask (an update in flight) refuses the restart; never unmask
@@ -1680,6 +1696,30 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     if (!provider || (!normalizedApiKey && !isOllama && !isLlamaCpp && !isClawAI)) {
       return NextResponse.json(
         { error: "Provider is required; API key required for non-local providers" },
+        { status: 400 }
+      );
+    }
+    // A `claw_…` key authenticates to the ClawBox AI proxy and to nothing else.
+    // Stored as another provider's api_key profile it becomes that provider's
+    // credential and 401s on every turn: measured on a box, `openai:default`
+    // held one and turns on `openai/gpt-5.5` came back from api.openai.com with
+    // `Incorrect API key provided: claw_***`. Worse, an eligible api_key profile
+    // is a candidate ahead of nothing — it is tried, spends the request, and the
+    // gateway then falls back to another model — so the owner sees a provider
+    // that saved cleanly and answers as something else. Refuse the save rather
+    // than store a credential that cannot work. The prefix is a build-time
+    // constant and the message echoes no user input.
+    //
+    // This is about the AUTH PROFILE only. The image setup deliberately puts
+    // the same token in `models.providers.openai.apiKey`, which is a different
+    // slot with its own ownership rules (`canOwnOpenAiImageApiKey`) and its own
+    // measured consequences — see the note above that function.
+    // Not the local providers: for ollama / llamacpp this field carries a MODEL
+    // ID, not a credential (see the branch below), so a model whose name began
+    // with the prefix would be refused as if it were a key.
+    if (!isClawAI && !isOllama && !isLlamaCpp && normalizedApiKey.startsWith(CLAWBOX_AI_TOKEN_PREFIX)) {
+      return NextResponse.json(
+        { error: "That is a ClawBox AI key. Select ClawBox AI as the provider, or paste this provider's own key." },
         { status: 400 }
       );
     }
@@ -2789,10 +2829,39 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // stale file so the restart below regenerates it with the fresh token —
     // afterward the Codex app-server owns its own refresh, so we don't touch
     // it again.
+    //
+    // Every agent's `codex-home/auth.json` goes with it. That file is the
+    // Codex app-server's own CODEX_HOME copy, and scripts/codex-auth-mirror.js
+    // deliberately refuses to overwrite one holding a refresh token core does
+    // not have: overwriting a live app-server rotation with core's spent copy
+    // is what burnt the token family in #278. On a 2026.8 box that script can
+    // no longer write core's store back (the per-agent `auth_profile_store`
+    // row holds zero profiles after `doctor --fix`), so a diverged file never
+    // leaves that state — it keeps the PREVIOUS account's token for the life of
+    // the box and the sync timer warns about it every ten minutes, advising a
+    // re-login that did not clear it. A sign-in is the one moment the account
+    // genuinely changes, which makes it the only place the divergence can be
+    // settled without guessing.
     if (isChatgptSubscription) {
-      await fs
-        .rm(path.join(CLAWBOX_HOME_DIR, ".codex", "auth.json"), { force: true })
-        .catch(() => {});
+      const agentsRoot = path.join(OPENCLAW_HOME_DIR, "agents");
+      const agentIds = await fs.readdir(agentsRoot).catch((err: unknown) => {
+        // Not fatal — the sign-in itself succeeded — but a box that could not
+        // be enumerated keeps its stale codex-home mirrors, and that state is
+        // otherwise invisible: `force: true` swallows ENOENT, not EACCES.
+        console.warn("[configure] Could not enumerate agent dirs to clear stale Codex mirrors:", err instanceof Error ? logSafe(err.message) : err);
+        return [] as string[];
+      });
+      const staleMirrors = [
+        path.join(CLAWBOX_HOME_DIR, ".codex", "auth.json"),
+        ...agentIds.map((id) => path.join(agentsRoot, id, "agent", "codex-home", "auth.json")),
+      ];
+      await Promise.all(
+        staleMirrors.map((file) =>
+          fs.rm(file, { force: true }).catch((err: unknown) => {
+            console.warn("[configure] Could not clear a stale Codex mirror:", logSafe(file), err instanceof Error ? logSafe(err.message) : err);
+          }),
+        ),
+      );
     }
 
     // (The OAuth doctor migration runs right after the store write in step 1
@@ -2801,24 +2870,71 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
 
     // 9. Restart OpenClaw gateway so it picks up the new auth profile and model
     gateway.state = "restart-issued";
+    let gatewayWarning: string | undefined;
+    // `setup_complete` flips at the very end of the wizard
+    // (/setup-api/setup/complete), so "not true" is exactly "the first-run
+    // wizard is still driving this box".
+    //
+    // Read through route-auth, NOT through the config-store snapshot above.
+    // `readConfig()` there is fail-OPEN — a damaged config.json reads as `{}` —
+    // and route-auth exists precisely to say that must not decide this key: it
+    // fails CLOSED, so an unreadable config is "provisioned", which is also
+    // what `/setup-api/setup/status` and middleware serve. Fail open here and a
+    // box whose config.json is truncated renders Settings while this route
+    // treats it as the wizard and silently drops the notice Settings is the one
+    // branch that renders. Re-read per request; nothing is cached.
+    const firstRunWizard = !readSetupGateFacts().setupComplete;
     try {
-      await restartGateway();
+      // The readiness answer is worth waiting for only where something reads
+      // it, and in the wizard nothing does: AIModelsStep's wizard branch logs
+      // `warning` and calls onNext() (Settings is the branch that renders it),
+      // and llamacpp/install, clawai/poll and useOllamaModels all drop it too.
+      // The cost is not theoretical — e2e-install measured THIS request at
+      // 52 894 ms on a cold first boot: ~23 s of config writes and `systemctl
+      // restart`, then the whole 30 s budget, expired. So first boot pays the
+      // full budget for a value with no consumer, on the one path where the
+      // budget is not even enough to answer. Skip the port poll there, exactly
+      // as /setup-api/system/hostname does for its own discarded answer.
+      //
+      // Only the poll is skipped, never the restart: a REFUSED restart still
+      // throws from the exec below and still 502s, in the wizard too. And a
+      // gateway that never comes back is not silent either — the chat the
+      // wizard hands off to cannot open a session without one.
+      await restartGateway({ awaitReady: !firstRunWizard });
     } catch (err) {
       console.error("[configure] Gateway restart failed after configuring", ocProvider, ":", err instanceof Error ? logSafe(err.message) : err);
-      return NextResponse.json(
-        { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
-        { status: 502 },
-      );
+      // A gateway that has not finished coming back is NOT a failed configure.
+      // The provider, the credential and the model are all written by the time
+      // this runs; only the wait gave up. This 502 predates the readiness wait,
+      // when it could fire only if `systemctl restart` itself failed — the wait
+      // widened it to "the port did not open inside 30 s", which is a state the
+      // box recovers from on its own, and reporting it as a failure stops the
+      // first-boot wizard dead at the AI step and tells the owner to reboot a
+      // box that needed ten more seconds.
+      //
+      // A restart that was REFUSED is a different fact: nothing is coming, and
+      // the owner does have to act. That one keeps the 502.
+      if (!(err instanceof GatewayNotReadyError)) {
+        return NextResponse.json(
+          { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
+          { status: 502 },
+        );
+      }
+      gatewayWarning = "Saved, but the gateway has not finished restarting — the new model applies once it is serving again.";
     }
 
     // Configuration fully applied — now consume the OAuth handoff file (if any).
-    // Deferring the unlink to here means a transient failure above returned
-    // early with the file intact, so the client can retry within the TTL.
+    // Deferring the unlink to here means a failure that returned EARLY left the
+    // file intact, so the client can retry within the TTL. A gateway that has
+    // not finished restarting is not one of those: it falls through to here and
+    // consumes the file, which is right — the configure landed, and a retry
+    // would redo a completed save.
     if (pendingHandoffTokensPath) {
       await fs.unlink(pendingHandoffTokensPath).catch(() => {});
     }
 
-    return NextResponse.json({ success: true, ...(chatgptOrderWarning ? { warning: chatgptOrderWarning } : {}) });
+    const warning = [chatgptOrderWarning, gatewayWarning].filter(Boolean).join(" ");
+    return NextResponse.json({ success: true, ...(warning ? { warning } : {}) });
   } catch (err) {
     // Never surface the raw error: it can carry CLI internals and filesystem
     // paths. Log it server-side for diagnosis and return a generic, actionable

@@ -532,7 +532,23 @@ describe("the root-owned helper scripts the grants point at", () => {
 
   it("installs them root-owned at 0755 under a root-owned directory", () => {
     expect(libexec).toMatch(/install -d -o root -g root -m 0755 "\$ROOT_LIBEXEC_DIR"/);
-    expect(libexec).toMatch(/install -o root -g root -m 0755 "\$PROJECT_DIR\/scripts\/\$src"/);
+    // The copy goes through install_root_file, which is where the ownership and
+    // the mode now live — and which stages under a temp name and renames, so a
+    // copy killed part way through cannot leave an executable PREFIX of a root
+    // helper at the destination. Every script in here dispatches at the BOTTOM,
+    // so such a prefix is silently permissive: a truncated
+    // clawbox-root-manifest.sh exits 0 for --verify without looking, and a
+    // truncated clawbox-root-step.sh exits 0 without exec'ing the step at all.
+    // TASK-584.
+    expect(libexec).toMatch(/install_root_file "\$PROJECT_DIR\/scripts\/\$src" "\$ROOT_LIBEXEC_DIR\/\$src"/);
+    const installer = (() => {
+      const start = INSTALL_SH.indexOf("install_root_file() {");
+      expect(start, "install_root_file is gone from install.sh").toBeGreaterThan(-1);
+      return INSTALL_SH.slice(start, INSTALL_SH.indexOf("\n}", start));
+    })();
+    expect(installer).toMatch(/mode="\$\{3:-0755\}"/);
+    expect(installer).toMatch(/install -o root -g root -m "\$mode" "\$src" "\$dst\.new"/);
+    expect(installer).toMatch(/mv -f "\$dst\.new" "\$dst"/);
   });
 
   // Running the repo copy here would let a broken install_root_libexec pass

@@ -27,6 +27,9 @@ vi.mock("@/lib/openclaw-config", async () => {
     // The real error class: the route branches on `instanceof`, so a stub would
     // turn the one refusal that protects the gateway into a generic 500.
     EnvSecretProviderConflictError: actual.EnvSecretProviderConflictError,
+    // Same reason, for the other class the route branches on: a slow-but-healthy
+    // restart must not be reported as a failed save.
+    GatewayNotReadyError: actual.GatewayNotReadyError,
     setDiscordToken: vi.fn(),
     restartGateway: vi.fn(),
   };

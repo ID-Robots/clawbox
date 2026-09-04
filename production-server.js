@@ -12,9 +12,20 @@ const path = require("path");
 const WebSocket = require("ws");
 const { attachAccessLog } = require("./scripts/access-log.js");
 
-const GATEWAY_PORT = parseInt(process.env.GATEWAY_PORT || "18789", 10);
-const TERMINAL_WS_PORT = parseInt(process.env.TERMINAL_WS_PORT || "3006", 10);
-const NOVNC_WS_PORT = parseInt(process.env.NOVNC_WS_PORT || "6080", 10);
+// Same rule as envPort() in src/lib/port-probe.ts, written out because this
+// entry point is standalone CommonJS and cannot import the TypeScript helper:
+// an integer in 1-65535, or the default. `parseInt` alone yields NaN on a typo
+// and lets `-1` / `70000` through, and every one of those makes `net.connect`
+// throw ERR_SOCKET_BAD_PORT on the first proxied request rather than falling
+// back to the default the `||` promises.
+function envPort(value, fallback) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : fallback;
+}
+
+const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
+const TERMINAL_WS_PORT = envPort(process.env.TERMINAL_WS_PORT, 3006);
+const NOVNC_WS_PORT = envPort(process.env.NOVNC_WS_PORT, 6080);
 const IS_DEV = process.env.NODE_ENV === "development";
 
 // Path prefixes that the production server routes to a non-gateway upstream.
@@ -153,13 +164,34 @@ try {
     fs.mkdirSync(path.dirname(MCP_TOKEN_PATH), { recursive: true });
     fs.writeFileSync(MCP_TOKEN_PATH, mcpToken, { mode: 0o600 });
   }
+  // Publish the value FIRST. The re-harden below is a separate concern and it
+  // can fail on its own (a root-owned token, a read-only data/); with it inside
+  // this try and above this line, an EPERM threw past the assignment and
+  // CLAWBOX_MCP_TOKEN was never set — so a permissions hiccup discarded a token
+  // that had just been read successfully, and middleware.ts lost the very
+  // first-request resolution this block exists to provide. On the Hermes SKU
+  // clawbox-gateway.service is masked, so gateway-pre-start.sh's replacement
+  // never runs and nothing else repairs it. TASK-657.
+  process.env.CLAWBOX_MCP_TOKEN = mcpToken;
   // Re-harden mode on every boot. fs.writeFileSync only applies mode
   // when creating; an existing file from an older install (or one
   // that drifted to broader perms via manual edit) would otherwise
   // stay readable to other local users. The bearer is the sole
   // /setup-api/* credential, so don't trust a reused file's perms.
-  fs.chmodSync(MCP_TOKEN_PATH, 0o600);
-  process.env.CLAWBOX_MCP_TOKEN = mcpToken;
+  // In its own try, because it is the one step here that may fail
+  // without costing anything already achieved. The message states the
+  // STATE and never a cause: chmod fails with EPERM (another uid owns
+  // it), EROFS or EACCES (data/ read-only, or a path component), and
+  // no code here can tell which — the same correction the shell copy
+  // in scripts/gateway-pre-start.sh got.
+  try {
+    fs.chmodSync(MCP_TOKEN_PATH, 0o600);
+  } catch (err) {
+    console.warn(
+      `[production-server] Could not re-harden ${MCP_TOKEN_PATH} (${err.code || err.message}); `
+        + "if other local users can read it, the MCP bearer for /setup-api/* is exposed on this box.",
+    );
+  }
 } catch (err) {
   console.warn("[production-server] Failed to set up MCP token:", err.message);
 }
@@ -176,8 +208,14 @@ try {
 // is the one unit active on every edition, and both a deploy and an in-app
 // update finish by restarting it.
 //
-// Fire-and-forget on purpose. The reconcile is idempotent and takes ~200ms, but
-// it must never delay or block the web server coming up — a device whose UI
+// Fire-and-forget on purpose, and that matters more since TASK-697: the
+// reconcile is idempotent, but it is no longer ~200ms. It now also runs
+// `hermes plugins doctor`, which imports the plugin in a sandboxed temporary
+// HERMES_HOME — seconds on an Orin — on every web-server boot, with no stamp
+// and no backoff. The OpenClaw twin (scripts/gateway-pre-start.sh) was given
+// both because it runs in an ExecStartPre that the gateway waits on; this one
+// blocks nothing, so it pays the cost every time and reports every time.
+// It must never delay or block the web server coming up — a device whose UI
 // does not start is worse than one whose agent has to wait for the next boot.
 try {
   const registerMcp = require("child_process").spawn(

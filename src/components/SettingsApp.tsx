@@ -521,8 +521,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       requestClawAiOffer();
       delete w.__clawboxPendingClawAiOffer;
     }
-    const handler = (event: Event) =>
+    const handler = (event: Event) => {
       apply((event as CustomEvent<{ section?: string }>).detail?.section);
+      // The dispatcher sets the cold-open handoff AND fires this event, not
+      // knowing whether Settings is up. When it is, this path is what applies
+      // the section — so the handoff has to be taken here too, or it sits on
+      // `window` until the NEXT cold open of Settings, which then lands on
+      // whatever section some earlier deep link asked for.
+      delete (window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection;
+    };
     const providerHandler = (event: Event) =>
       requestProviderSelection((event as CustomEvent<{ providerId?: string }>).detail?.providerId);
     const offerHandler = () => requestClawAiOffer();
@@ -899,8 +906,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ hostname: name }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
+      // 502 WITH `success` = renamed, but the gateway has not come back with the
+      // new allowed-origins list. The reboot below is what completes the rename
+      // and starts the gateway clean, so it must still happen — treating that as
+      // a failed save would strand the box mid-rename and report a change that
+      // in fact went through. `success` is required, not just the status, so a
+      // 502 from anywhere else stays the error it is. `=== true`, not a truthy
+      // read: `res.json()` is an open record the assertion does not enforce, so
+      // a body carrying `success` as a string would otherwise buy a reboot over
+      // a rename that never landed. Same strict form as the Telegram saves and
+      // /setup-api/providers/default.
+      const data = await res.json().catch(() => ({} as { error?: string; success?: boolean }));
+      if (!res.ok && !(res.status === 502 && data.success === true)) {
         setHostnameStatus({ type: "error", message: data.error || t("settings.hostnameSaveFailed") });
         setHostnameSaving(false);
         setHostnameConfirm(false);
@@ -1260,6 +1277,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // null = loading; default ON when unset on the device.
   const [tgStreaming, setTgStreaming] = useState<boolean | null>(null);
   const [tgStreamingPending, setTgStreamingPending] = useState(false);
+  // The route answers "saved, but not live yet" in two shapes — 200 while the
+  // gateway is still coming back, 502 when the restart was refused — and the
+  // switch keeps its new position for both. Without this the owner saw a
+  // toggle that had moved and nothing saying it was not applied.
+  const [tgStreamingNotice, setTgStreamingNotice] = useState<string | null>(null);
   // Telegram pairing / user-access state.
   const [tgApproved, setTgApproved] = useState<Array<{ id: string; name?: string }>>([]);
   const [tgPending, setTgPending] = useState<Array<{ code?: string; id?: string; name?: string; createdAt?: string }> | null>(null);
@@ -1347,6 +1369,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const toggleTelegramStreaming = useCallback(async (next: boolean) => {
     const prev = tgStreaming;
     setTgStreamingPending(true);
+    setTgStreamingNotice(null);
     setTgStreaming(next); // optimistic
     try {
       const res = await fetch("/setup-api/telegram/streaming", {
@@ -1354,11 +1377,19 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: next }),
       });
-      // 502 = saved but gateway restart failed; the setting still persisted,
-      // so keep the optimistic value rather than reverting.
-      if (!res.ok && res.status !== 502) {
+      const body = (await res.json().catch(() => ({}))) as { warning?: unknown };
+      const warning = typeof body.warning === "string" && body.warning ? body.warning : null;
+      // 502 = saved, but not serving it yet; the setting IS persisted, so keep
+      // the optimistic value rather than reverting. The WARNING is required, not
+      // the status alone — a cloudflared or nginx 502 has an HTML body that the
+      // `.catch` turns into `{}`, and a request that may never have reached the
+      // box must not be rendered as a save. Same guard as
+      // /setup-api/providers/default and ChatPopup apply to the same hazard.
+      if (!res.ok && !(res.status === 502 && warning)) {
         setTgStreaming(prev); // revert on a real failure
+        return;
       }
+      if (warning) setTgStreamingNotice(warning);
     } catch {
       setTgStreaming(prev);
     } finally {
@@ -1456,21 +1487,45 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         configureReject(new Error("aborted"));
         return;
       }
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
+      const data = await res.json().catch(() => ({}));
+      // 502 = the token was saved but the gateway is not serving it yet, and
+      // that must not be reported as a failed save — the same split
+      // /telegram/streaming makes for the same condition. The exception is
+      // qualified by the BODY, not by the status alone: the route's own
+      // `success` AND the warning that explains the 502. A cloudflared or nginx
+      // 502 has an HTML body, which the `.catch` above turns into `{}`, and a
+      // request that may never have reached the box must stay the failure it is
+      // — reported in the card's own words rather than as a JSON parse error
+      // from an unguarded `res.json()`. Same guard as /telegram/streaming,
+      // /setup-api/providers/default and ChatPopup apply to the same hazard.
+      const gatewayPending =
+        res.status === 502 &&
+        data.success === true &&
+        typeof data.warning === "string" &&
+        data.warning.length > 0;
+      if (!res.ok && !gatewayPending) {
         configureReject(new Error(data.error || "configure failed"));
         setTgConfiguring(false);
         setTgStatus({ type: "error", message: data.error || t("settings.failedSave") });
         return;
       }
-      const data = await res.json();
       if (controller.signal.aborted) {
         configureReject(new Error("aborted"));
         return;
       }
       if (data.success) {
         configureResolve();
-        setTgStatus({ type: "success", message: t("settings.telegramConfigured") });
+        // On a warning the token is stored but nothing is serving it YET, and
+        // this is not the component that gets to decide how that ends:
+        // TelegramConfiguringOverlay is still mounted and still polling gateway
+        // health on its own deadline. It calls onDone when the gateway comes up
+        // (often seconds after this 502) and onTimeout, which sets the failure
+        // message, when it does not. Writing a verdict here would leave a red
+        // "will apply on next restart" sitting under a card that has since
+        // flipped to configured. One adjudicator, and it is the overlay.
+        if (!data.warning) {
+          setTgStatus({ type: "success", message: t("settings.telegramConfigured") });
+        }
         setTgConfigured(true);
         setTgReconfigure(false);
         setTgToken("");
@@ -3832,6 +3887,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </div>
                   </div>
                   )}
+                  {/* Mounted in every state so the announcement is a text
+                      change rather than a node insertion; polite, because the
+                      save landed and only the switch-over is pending. The TEXT
+                      is the live region's own child — a conditional <p> inside
+                      a mounted <div> is still a node insertion, which is the
+                      failure this pattern exists to avoid. Same shape as
+                      AiProviderList, HermesProviderConfig and LocalAiPanel. */}
+                  <p
+                    role="status"
+                    aria-live="polite"
+                    data-testid="telegram-streaming-notice"
+                    className={tgStreamingNotice ? "mb-4 text-xs text-amber-300/90" : ""}
+                  >
+                    {tgStreamingNotice ?? ""}
+                  </p>
                   <button
                     onClick={() => { setTgReconfigure(true); setTgStatus(null); }}
                     className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"

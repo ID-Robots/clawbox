@@ -23,6 +23,17 @@ vi.mock("fs/promises", () => ({
   },
 }));
 
+const readSetupGateFacts = vi.fn<() => { setupComplete: boolean; passwordConfigured: boolean }>();
+
+// PARTIAL mock — only the setup-gate read is replaceable. The configure route
+// asks it whether the first-run wizard is still driving the box, which decides
+// whether step 9 waits for the gateway to bind; everything else in route-auth
+// (session checks other modules in this graph import) keeps its real behaviour.
+vi.mock("@/lib/route-auth", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/route-auth")>("@/lib/route-auth");
+  return { ...actual, readSetupGateFacts: () => readSetupGateFacts() };
+});
+
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
@@ -86,6 +97,15 @@ vi.mock("@/lib/openclaw-config", () => ({
       ? Math.min(24000, Math.max(4096, Math.round(contextWindow / 4)))
       : 24000,
   restartGateway: vi.fn(),
+  // A REAL class, not `vi.fn()` and not an omitted export: the route narrows on
+  // `instanceof GatewayNotReadyError`, and `instanceof undefined` throws a
+  // TypeError the first time a test makes the restart reject.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
   readConfig: vi.fn(),
   readConfigStrict: vi.fn(),
@@ -153,6 +173,7 @@ import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway
   runOpenclawDoctorFix,
   spawnOpenclawCli,
   setProviderPlugins,
+  GatewayNotReadyError,
 } from "@/lib/openclaw-config";
 import { configSetCalls, configSetCommands, failConfigSetsMatching, findConfigSet } from "./config-set-calls";
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
@@ -247,6 +268,9 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockFs.rm.mockResolvedValue(undefined);
     mockFs.unlink.mockResolvedValue(undefined);
     mockGetAll.mockResolvedValue({});
+    // A provisioned box, past the wizard: that is the shape every case here
+    // means, and it is the one where step 9 waits for the gateway to come back.
+    readSetupGateFacts.mockReturnValue({ setupComplete: true, passwordConfigured: true });
     mockReadOpenClawConfig.mockResolvedValue({});
     mockReadOpenClawConfigStrict.mockResolvedValue({});
     mockInferConfiguredLocalModel.mockReturnValue(null);
@@ -795,6 +819,20 @@ describe("POST /setup-api/ai-models/configure", () => {
     );
   });
 
+  it("refuses a ClawBox AI key offered as another provider's API key", async () => {
+    // A `claw_…` key authenticates to the ClawBox AI proxy and nowhere else.
+    // Registered as the OpenAI api_key profile it becomes that provider's
+    // bearer: measured on a box, `openai:default` held one and every turn on
+    // `openai/gpt-5.5` went to https://api.openai.com/v1/responses and came
+    // back `401 … Incorrect API key provided: claw_***`. Worse, an eligible
+    // api_key profile shadows the owner's working ChatGPT sign-in on the same
+    // provider, so the box answers on a silent fallback instead.
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "claw_token_abc" }));
+
+    expect(res.status).toBe(400);
+    expect(pasteCallFor("openai:default")).toBeUndefined();
+  });
+
   it("leaves the order alone for a provider that is not OpenAI", async () => {
     await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant" }));
 
@@ -988,6 +1026,68 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
+  });
+
+  /**
+   * TASK-608. A gateway that has not finished coming back is NOT a failed
+   * configure: the provider, the credential and the model are all on disk, and
+   * `restartGateway` only stopped waiting.
+   *
+   * This route's 502 predates the readiness wait, when it could fire only if
+   * `systemctl restart` itself failed. The wait widened it to "the port did not
+   * open inside 30 s" — and `e2e-install`'s fresh-install wizard proved what
+   * that costs: OpenAI configured, the gateway a few seconds late, a 502, and
+   * the wizard stopped dead at the AI step with "Try rebooting the device" over
+   * a box that needed ten more seconds. A restart that was REFUSED is a
+   * different fact and keeps the 502 below.
+   */
+  it("keeps a configure that landed when only the gateway has not come back yet", async () => {
+    mockRestartGateway.mockRejectedValue(new GatewayNotReadyError("gateway did not come back"));
+
+    const res = await configurePost(jsonRequest({
+      provider: "anthropic",
+      apiKey: "sk-test",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.warning).toMatch(/gateway/i);
+  });
+
+  it("waits for the gateway to come back on a box past the wizard", async () => {
+    // Settings renders the "has not finished restarting" notice, so there the
+    // readiness answer has a reader and is worth the budget.
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
+
+    expect(res.status).toBe(200);
+    expect(mockRestartGateway).toHaveBeenCalledWith({ awaitReady: true });
+  });
+
+  it("does not wait for the gateway during the first-run wizard", async () => {
+    // TASK-608 / M2. `setup_complete` is written at the end of the wizard, so
+    // its absence is the first-run path — the one AIModelsStep discards the
+    // warning on, and the one e2e-install measured at 52.9 s (23 s of writes,
+    // then the whole 30 s budget, expired). Waiting there buys latency only.
+    readSetupGateFacts.mockReturnValue({ setupComplete: false, passwordConfigured: true });
+
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+    expect(mockRestartGateway).toHaveBeenCalledWith({ awaitReady: false });
+  });
+
+  it("still reports a refused restart during the first-run wizard", async () => {
+    // Skipping the poll must not swallow the fact that nothing is coming: the
+    // exec failure is still a 502, wizard or not.
+    readSetupGateFacts.mockReturnValue({ setupComplete: false, passwordConfigured: true });
+    mockRestartGateway.mockRejectedValue(new Error("Unit clawbox-gateway.service is masked."));
+
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
+
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toContain("gateway failed to restart");
   });
 
   it("returns 502 when gateway restart fails", async () => {
@@ -1592,6 +1692,45 @@ describe("POST /setup-api/ai-models/configure", () => {
     const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
     expect(written.profiles["openai:chatgpt"].access).toBe("access.token.jwt");
     expect(written.profiles["openai:chatgpt"].id).toBe("id.token.jwt");
+  });
+
+  it("clears EVERY agent's codex-home mirror on a ChatGPT sign-in, not just ~/.codex", async () => {
+    // The sync timer refuses to overwrite a `<agentDir>/codex-home/auth.json`
+    // whose refresh token core does not have — overwriting a live app-server
+    // rotation with core's spent copy is what burnt the token family in #278.
+    // On a 2026.8 box core's store can no longer be written from that script
+    // (the per-agent table holds zero profiles after `doctor --fix`), so the
+    // file never leaves that state: it keeps the PREVIOUS account's token for
+    // the life of the box and the timer warns about it every ten minutes.
+    //
+    // A sign-in is the one moment the account genuinely changes, so it is the
+    // only place the divergence can be settled. Clearing both mirrors here lets
+    // the restart below regenerate them from the fresh profile.
+    mockFs.readdir.mockResolvedValue(["main", "support"] as unknown as never);
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? JSON.stringify({
+            provider: "openai",
+            access_token: "access.token.jwt",
+            id_token: "id.token.jwt",
+            refresh_token: "refresh-token",
+            expires_in: 3600,
+            createdAt: Date.now(),
+          })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+    expect(res.status).toBe(200);
+
+    const removed = mockFs.rm.mock.calls.map((call) => String(call[0]));
+    expect(removed.some((file) => file.endsWith("/.codex/auth.json"))).toBe(true);
+    expect(removed.some((file) => file.endsWith("/agents/main/agent/codex-home/auth.json"))).toBe(true);
+    expect(removed.some((file) => file.endsWith("/agents/support/agent/codex-home/auth.json"))).toBe(true);
   });
 
   it("binds the handoff tokens to the provider recorded in the file, not the body", async () => {

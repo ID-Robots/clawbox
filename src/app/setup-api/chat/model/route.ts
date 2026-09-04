@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAll } from "@/lib/config-store";
 import {
+  GatewayNotReadyError,
   inferConfiguredLocalModel,
   readConfig,
   readConfigStrict,
@@ -1268,12 +1269,28 @@ export async function POST(request: Request) {
       if (flippedProvider) notifyProviderSetChanged(flippedProvider);
     }
 
-    await restartGateway();
+    // The model is already written; the restart is only what makes it live. So
+    // NO restart failure is a failed switch — the outer catch's 500 "Failed to
+    // switch chat model" would be a false failure over a change that IS on
+    // disk, whether the gateway never came back or the unit was masked by an
+    // update in flight. Both answer 502 with the new state, and the warning
+    // says which, because the owner's next step differs: wait, or find out why
+    // the service refused.
+    let gatewayWarning: string | undefined;
+    try {
+      await restartGateway();
+    } catch (err) {
+      gatewayWarning = err instanceof GatewayNotReadyError
+        ? "Saved, but the gateway did not come back — the new model applies once it is serving again."
+        : "Saved, but the gateway could not be restarted — the new model applies at its next restart.";
+      console.error("[chat/model] gateway restart failed after the model switch:", err);
+    }
 
     const nextState = await loadChatModelState();
+    const warning = [disarmWarning, gatewayWarning].filter(Boolean).join(" ");
     return NextResponse.json(
-      { ...nextState, ...(disarmWarning ? { warning: disarmWarning } : {}) },
-      { headers: { "Cache-Control": "no-store" } },
+      { ...nextState, ...(warning ? { warning } : {}) },
+      { status: gatewayWarning ? 502 : 200, headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {
     return NextResponse.json(

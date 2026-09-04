@@ -133,7 +133,12 @@ describe("install.sh", () => {
     ]) {
       expect(install, script).toContain(script);
     }
-    expect(install).toContain('install -o root -g root -m 0755 "$PROJECT_DIR/scripts/$src"');
+    // Root-owned and 0755 still, but through install_root_file, which stages
+    // under a temp name and renames rather than writing the live destination —
+    // an `install` killed part way through used to leave an executable PREFIX of
+    // a root-invoked script behind (TASK-584).
+    expect(install).toContain('install_root_file "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src"');
+    expect(install).toContain('install -o root -g root -m "$mode" "$src" "$dst.new"');
   });
 
   it("re-applies the memory guards on update, not only on a fresh install", () => {

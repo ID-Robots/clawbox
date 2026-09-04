@@ -386,6 +386,114 @@ describe("SettingsApp factory reset overlay", () => {
     expect(await screen.findByText("settings.connectionFailed")).toBeInTheDocument();
   });
 
+  /** Render, open Messaging Channels → Telegram, type a token, press Connect. */
+  async function submitTelegramToken() {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const nav = container.querySelector("nav");
+    if (!nav) throw new Error("desktop sidebar nav did not render");
+    const channels = [...nav.querySelectorAll(":scope > button")]
+      .find((button) => (button.textContent ?? "").includes("settings.channels"));
+    if (!channels) throw new Error("Messaging Channels nav entry did not render");
+    fireEvent.click(channels);
+    fireEvent.click(await screen.findByTestId("settings-channel-telegram"));
+    const token = await screen.findByLabelText("settings.botToken");
+    fireEvent.change(token, { target: { value: "123456789:test-token" } });
+    fireEvent.click(screen.getByRole("button", { name: /settings\.connect$/ }));
+  }
+
+  /**
+   * The 502 exception this branch gave the token save is for the ROUTE's own
+   * pending answer — `success` plus the warning that explains it. A cloudflared
+   * or nginx 502 has an HTML body and may never have reached the box, so it
+   * stays the failure it is, and says so in the card's own words: an unguarded
+   * `res.json()` used to throw and put its parse error in front of the owner
+   * instead.
+   */
+  it("does not accept a bare proxy 502 as a saved Telegram token", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      if (input.toString() === "/setup-api/telegram/configure") {
+        return Promise.resolve(new Response("<html>502 Bad Gateway</html>", { status: 502 }));
+      }
+      return defaultFetch(input, init);
+    }));
+
+    await submitTelegramToken();
+
+    expect(await screen.findByText("settings.failedSave")).toBeInTheDocument();
+    expect(screen.queryByText("settings.telegramConfigured")).not.toBeInTheDocument();
+    expect(screen.queryByText(/is not valid JSON/)).not.toBeInTheDocument();
+  });
+
+  it("does not accept a 502 that carries no warning as a saved Telegram token", async () => {
+    // A JSON 502 whose body has `success` but no sentence is not the route's
+    // pending answer — it only ever sends that 502 WITH the warning. Taking the
+    // status alone would flip the card to configured and clear the token over a
+    // save nothing has confirmed.
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      if (input.toString() === "/setup-api/telegram/configure") {
+        return Promise.resolve(new Response(JSON.stringify({ success: true }), {
+          status: 502,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+      return defaultFetch(input, init);
+    }));
+
+    await submitTelegramToken();
+
+    expect(await screen.findByText("settings.failedSave")).toBeInTheDocument();
+    expect(screen.queryByText("settings.telegramConfigured")).not.toBeInTheDocument();
+  });
+
+  /**
+   * The hostname save takes a 502 as "renamed, but the gateway has not come
+   * back with the new allowed origins", and goes straight on to the reboot
+   * that completes the rename. That exception belongs to the ROUTE's own
+   * pending answer, which sends `success: true` — and `res.json()` is an open
+   * record, so a body whose `success` is a truthy STRING must not buy the
+   * reboot. Taking it would restart the box over a rename that never landed
+   * and bring it back on a name nothing serves, with a green "restarting"
+   * message in front of the owner. Same strict form the Telegram saves above
+   * and /setup-api/providers/default already use.
+   */
+  it("does not take a 502 whose success is a truthy non-boolean as a rename", async () => {
+    const posted: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (init?.method === "POST") posted.push(url);
+      if (url === "/setup-api/system/hostname" && init?.method === "POST") {
+        return Promise.resolve(new Response(JSON.stringify({ success: "false" }), {
+          status: 502,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+      return defaultFetch(input, init);
+    }));
+
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const nav = container.querySelector("nav");
+    if (!nav) throw new Error("desktop sidebar nav did not render");
+    const network = [...nav.querySelectorAll(":scope > button")]
+      .find((button) => (button.textContent ?? "").includes("settings.network"));
+    if (!network) throw new Error("Network nav entry did not render");
+    fireEvent.click(network);
+
+    const field = await screen.findByPlaceholderText("clawbox");
+    fireEvent.change(field, { target: { value: "newbox" } });
+    const card = field.closest("div.rounded-2xl");
+    if (!card) throw new Error("Local URL card did not render");
+    fireEvent.click(within(card as HTMLElement).getByRole("button", { name: "settings.save" }));
+    fireEvent.click(await screen.findByRole("button", { name: "settings.saveAndRestart" }));
+
+    await waitFor(() => expect(posted).toContain("/setup-api/system/hostname"));
+    // The save settles into exactly one of its two messages, and the reboot is
+    // requested in the same synchronous block as the success one — so once a
+    // message is on screen the reboot has either gone out or been skipped.
+    await screen.findByText(/^settings\.hostname(SaveFailed|Restarting)$/);
+    expect(posted).not.toContain("/setup-api/system/power");
+    expect(screen.getByText("settings.hostnameSaveFailed")).toBeInTheDocument();
+  });
+
   it("kicks off the ClawBox AI device-auth handshake when the desktop deep-link event is fired", async () => {
     const pendingWindow = window as Window & {
       __clawboxPendingSettingsSection?: string;
@@ -755,5 +863,100 @@ describe("SettingsApp providers and Local AI pages", () => {
     expect(await screen.findByTestId("local-ai-loading")).toBeInTheDocument();
     const local = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.localAi"))!;
     expect(local.className).toContain("coral-bright");
+  });
+
+  // The dispatcher cannot know whether Settings is up, so it always does both:
+  // leaves the cold-open handoff on `window` AND fires the event. When Settings
+  // IS up this path applies it, and the handoff has to be taken here too —
+  // left behind, the NEXT cold open of Settings silently lands on whatever
+  // section some earlier deep link asked for.
+  it("takes the cold-open handoff when the event path is the one that applied it", async () => {
+    const pending = window as Window & { __clawboxPendingSettingsSection?: string };
+    delete pending.__clawboxPendingSettingsSection;
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    pending.__clawboxPendingSettingsSection = "localModels";
+    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "localModels" } }));
+    expect(await screen.findByTestId("local-ai-loading")).toBeInTheDocument();
+    const local = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.localAi"))!;
+    expect(local.className).toContain("coral-bright");
+    expect(pending.__clawboxPendingSettingsSection).toBeUndefined();
+  });
+});
+
+/**
+ * TASK-608. The Telegram progress-streaming switch keeps its new position when
+ * the route answers "saved, but the gateway is not serving it yet" — which is
+ * right, the setting IS on disk. What was missing is the half that says so: the
+ * client read the status code and never the body, so the toggle moved and
+ * nothing on screen explained that it was not live.
+ */
+describe("SettingsApp Telegram progress streaming — saved but not live yet", () => {
+  function stubFetch(streamingPost: () => Response) {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+      if (url === "/setup-api/telegram/status") {
+        return jsonResponse({ configured: true, username: "clawbot", firstName: "Claw", link: "https://t.me/clawbot" });
+      }
+      if (url === "/setup-api/telegram/streaming") {
+        return init?.method === "POST" ? Promise.resolve(streamingPost()) : jsonResponse({ enabled: true });
+      }
+      return jsonResponse({});
+    }));
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function openTelegramPane() {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const nav = container.querySelector("nav");
+    if (!nav) throw new Error("desktop sidebar nav did not render");
+    const accounts = [...nav.querySelectorAll(":scope > button")].find(
+      (b) => (b.textContent ?? "").includes("settings.channels"),
+    ) as HTMLElement | undefined;
+    if (!accounts) throw new Error("Messaging Channels nav entry did not render");
+    fireEvent.click(accounts);
+    fireEvent.click(await screen.findByTestId("settings-channel-telegram"));
+    return screen.findByRole("switch", { name: "settings.telegramProgress" });
+  }
+
+  it("says the switch is not live yet when the gateway has not finished restarting", async () => {
+    // 200 + warning: the route's answer for a restart that WAS taken and is
+    // still binding. The switch must stay where the owner put it, and the
+    // sentence must reach them.
+    stubFetch(() => jsonResponse({
+      success: true,
+      restarted: false,
+      warning: "Saved, but the gateway has not finished restarting — progress streaming applies once it is serving again.",
+    }) as unknown as Response);
+
+    const toggle = await openTelegramPane();
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+    fireEvent.click(toggle);
+
+    // waitFor on the TEXT: the region is mounted in every state, so finding the
+    // node proves nothing.
+    await waitFor(() =>
+      expect(screen.getByTestId("telegram-streaming-notice")).toHaveTextContent(/has not finished restarting/));
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("does not render a bare proxy 502 as a save", async () => {
+    // cloudflared and nginx both answer 502 with an HTML body, which the
+    // client's `.catch` turns into `{}`. That request may never have reached the
+    // box, so the optimistic switch has to go back — the same guard
+    // /setup-api/providers/default and ChatPopup apply to the same hazard.
+    stubFetch(() => new Response("<html>502 Bad Gateway</html>", { status: 502 }));
+
+    const toggle = await openTelegramPane();
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+    // The region stays mounted; what must be absent is the SENTENCE. A bare
+    // proxy 502 is an error, not a save that landed.
+    expect(screen.getByTestId("telegram-streaming-notice").textContent).toBe("");
   });
 });

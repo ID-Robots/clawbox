@@ -29,7 +29,7 @@ export async function repairOpenclawConfig(repairs: {
   ensureMicrosoftTtsExcluded: () => Promise<boolean>
   /** Seeds `tts.auto` for the spoken-replies switch on a box that predates it. */
   ensureVoiceAutoReplyMode?: () => Promise<boolean>
-  restartGateway: () => Promise<void>
+  restartGateway: (options?: { awaitReady?: boolean }) => Promise<void>
 }): Promise<void> {
   const steps: Array<[label: string, run: () => Promise<boolean>]> = [
     ['migrate Local AI proxy URLs', repairs.ensureLocalAiProxyUrls],
@@ -46,7 +46,11 @@ export async function repairOpenclawConfig(repairs: {
   }
   if (!changed) return
   try {
-    await repairs.restartGateway()
+    // No readiness wait: nothing here reads the answer, and this promise gates
+    // `armUpdateContinuation`, which resumes a half-finished update. Spending
+    // the restart budget at boot would eat the margin the memory-probe delay
+    // is sized against for no information.
+    await repairs.restartGateway({ awaitReady: false })
   } catch (err) {
     console.error('[instrumentation] Gateway restart after config repair failed:', err instanceof Error ? err.message : err)
   }

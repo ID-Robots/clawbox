@@ -1,0 +1,5 @@
+name: clawbox_email_directives
+version: 1.0.0
+description: "Strips ClawBox EMAIL: card directives from replies leaving the box for a channel, where no card can render."
+author: ID-Robots
+kind: standalone

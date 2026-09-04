@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { isPortOpen } from "@/lib/port-probe";
+import { envPort, isPortOpen } from "@/lib/port-probe";
 
 export const dynamic = "force-dynamic";
 
-const GATEWAY_PORT = Number(process.env.GATEWAY_PORT || "18789");
+const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
 
 // Probe with a TCP connect rather than HTTP — the gateway's JS event loop
 // stalls for tens of seconds during agent prep, and an HTTP probe would

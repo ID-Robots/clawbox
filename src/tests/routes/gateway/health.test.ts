@@ -1,9 +1,15 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const isPortOpenMock = vi.fn();
-vi.mock("@/lib/port-probe", () => ({
-  isPortOpen: (...args: unknown[]) => isPortOpenMock(...args),
-}));
+// PARTIAL mock — only the probe is replaceable. A factory mock replaces the
+// whole module, so an export the route imports but the factory omits fails
+// module loading the moment the route reaches it (which is how this suite broke
+// when the route started validating its port). `envPort` stays real, so the
+// port this route probes is the one the guard actually produces.
+vi.mock("@/lib/port-probe", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/port-probe")>("@/lib/port-probe");
+  return { ...actual, isPortOpen: (...args: unknown[]) => isPortOpenMock(...args) };
+});
 
 describe("/setup-api/gateway/health", () => {
   let GET: () => Promise<Response>;

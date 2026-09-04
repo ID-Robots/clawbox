@@ -4178,7 +4178,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         }),
       })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to switch chat model')
+      // 502 WITH a warning = the model IS written and the route returned the new
+      // state; only the gateway has not finished coming back. Throwing there
+      // would revert the dropdown to a model the box is no longer configured
+      // for, skip the reconnect, and print a generic failure over a switch that
+      // succeeded — the exact false failure the route's 502 exists to avoid.
+      // `warning` is required, not just the status, so a 502 from anywhere else
+      // (a proxy, cloudflared) stays the error it is.
+      const gatewayPending = res.status === 502 && typeof data.warning === 'string' && data.warning
+      if (!res.ok && !gatewayPending) throw new Error(data.error || 'Failed to switch chat model')
+      if (gatewayPending) {
+        setMessages(prev => [...prev, {
+          role: 'system',
+          text: data.warning,
+          timestamp: Date.now(),
+        }])
+      }
 
       setChatModelState(data as ChatModelState)
       pendingModelSwitchResetRef.current = target

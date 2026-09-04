@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 import { get, set } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
-import { setTelegramToken, restartGateway, clearTelegramPairingState } from "@/lib/openclaw-config";
+import {
+  clearTelegramPairingState,
+  GatewayNotReadyError,
+  restartGateway,
+  setTelegramToken,
+} from "@/lib/openclaw-config";
 import {
   clearHermesTelegramPairingState,
   ensureHermesGateway,
@@ -9,6 +14,48 @@ import {
 } from "@/lib/hermes-telegram";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * Saved, but nobody is serving it yet — the one answer both editions give.
+ *
+ * The token IS stored, so this is not a failed save and the body keeps
+ * `success: true`; what differs is whether anything is coming back, and that
+ * decides both halves of the answer.
+ *
+ * `pending` — the restart exited 0 and the gateway has not finished binding.
+ * 200, and a sentence that says so. Before TASK-608 this branch could only mean
+ * the restart itself failed, so it borrowed that branch's wording: "will apply
+ * on next gateway restart", over a restart that had already been taken. The
+ * readiness wait widened the branch and left the sentence, which is the same
+ * false failure this task removed from /local-ai/exclusive, /stt and
+ * /telegram/streaming.
+ *
+ * Refused — nothing is coming back on its own. 502, exactly as
+ * /telegram/streaming answers for the same condition; `SettingsApp` and
+ * `TelegramStep` both read a 502 carrying `success` as "saved, not live yet"
+ * rather than a failed save, and the configuring overlay adjudicates either way
+ * by polling gateway health on its own deadline.
+ *
+ * Shared by both editions on purpose. OpenClaw reaches `pending` when the
+ * readiness wait times out; Hermes never does — `ensureHermesGateway()` reports
+ * systemd's service verdict, read right after the restart command, not a socket
+ * probe, so a Hermes answer here is always the refused one. That gap is the
+ * harness's: this repo carries no listen port for Hermes' messaging gateway to
+ * probe.
+ */
+function notServingYet(reset: boolean, pending = false): NextResponse {
+  return NextResponse.json(
+    {
+      success: true,
+      reset,
+      restarted: false,
+      warning: pending
+        ? "Saved, but the gateway has not finished restarting — the bot answers once it is serving again."
+        : "Saved — will apply on next gateway restart",
+    },
+    { status: pending ? 200 : 502 },
+  );
+}
 
 export async function POST(request: Request) {
   try {
@@ -97,21 +144,11 @@ export async function POST(request: Request) {
         // and a refused restart leaves the OLD process up, so `running` alone
         // reported the new token as live when it was not.
         if (!status.running || !status.applied) {
-          return NextResponse.json({
-            success: true,
-            reset: tokenChanged,
-            restarted: false,
-            warning: "Saved — will apply on next gateway restart",
-          });
+          return notServingYet(tokenChanged);
         }
       } catch (gatewayErr) {
         console.error("[telegram/configure] Hermes gateway start failed:", gatewayErr);
-        return NextResponse.json({
-          success: true,
-          reset: tokenChanged,
-          restarted: false,
-          warning: "Saved — will apply on next gateway restart",
-        });
+        return notServingYet(tokenChanged);
       }
 
       return NextResponse.json({ success: true, reset: tokenChanged, restarted: true });
@@ -120,21 +157,19 @@ export async function POST(request: Request) {
     // Register Telegram channel with OpenClaw gateway
     await setTelegramToken(botToken);
 
-    // Restart gateway so it picks up the new channel (and the reset allowlist).
-    // The token is already persisted at this point, so a restart failure must
-    // not fail the whole save — report it as a soft warning that'll apply on
-    // the next gateway restart (mirrors /telegram/streaming). Never surface the
-    // raw exec error.
+    // Restart the gateway so it picks up the new channel (and the reset
+    // allowlist), and wait for it to serve again: on THIS edition
+    // `restartGateway()` resolves only once :18789 is listening, so
+    // `restarted: true` means the bot can answer. (The Hermes branch above
+    // cannot say that as strongly — see `notServingYet`.)
+    //
+    // The token is already persisted at this point, so a restart that does not
+    // come back must not fail the whole save. Never surface the raw exec error.
     try {
       await restartGateway();
     } catch (restartErr) {
       console.error("[telegram/configure] Gateway restart failed:", restartErr);
-      return NextResponse.json({
-        success: true,
-        reset: tokenChanged,
-        restarted: false,
-        warning: "Saved — will apply on next gateway restart",
-      });
+      return notServingYet(tokenChanged, restartErr instanceof GatewayNotReadyError);
     }
 
     return NextResponse.json({ success: true, reset: tokenChanged, restarted: true });

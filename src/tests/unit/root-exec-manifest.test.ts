@@ -27,6 +27,48 @@ const MANIFEST_SRC = path.join(REPO, "config", "clawbox-root-manifest.sh");
 const DISPATCHER_SRC = path.join(REPO, "config", "clawbox-root-step.sh");
 const INSTALL_SH = fs.readFileSync(path.join(REPO, "install.sh"), "utf-8");
 
+/**
+ * The liveness token --selftest prints. Three separately installed root-owned
+ * files carry it as a literal (the helper, the dispatcher, install.sh) because
+ * they cannot share a constant; the last test in this file pins them together.
+ */
+const SELFTEST_TOKEN = "clawbox-root-manifest alive";
+
+/**
+ * A helper cut off where a copy killed part way through would leave it: every
+ * function defined, the verb dispatcher at the bottom gone. It parses, runs to
+ * EOF under `set -euo pipefail` and exits 0 for `--write`, `--verify` and
+ * `--verify-file` alike, without doing any of them.
+ */
+function truncatedHelper(): string {
+  const text = fs.readFileSync(MANIFEST_SRC, "utf-8");
+  const cut = text.indexOf('case "${1:-}" in');
+  if (cut < 0) throw new Error("the shipped helper no longer ends in a verb dispatcher");
+  return text.slice(0, cut);
+}
+
+/**
+ * The same helper as it was before `--selftest` existed: the verb dispatcher
+ * intact, that one arm gone. This is what is INSTALLED on every box updating
+ * across this release — the copy in /usr/local/libexec is always the previous
+ * release's until a step re-installs it — so it is the shape a liveness probe
+ * must not mistake for a stub.
+ */
+function withoutSelftest(text: string): string {
+  const stripped = text.replace(/^ *--selftest\).*\n/m, "");
+  if (stripped === text) throw new Error("the shipped helper no longer has a --selftest arm");
+  return stripped;
+}
+
+/** Lift one function out of install.sh, so the block under test runs the real one. */
+function shellFn(name: string): string {
+  const start = INSTALL_SH.indexOf(`${name}() {`);
+  if (start < 0) throw new Error(`${name} not found in install.sh`);
+  const end = INSTALL_SH.indexOf("\n}", start);
+  if (end < 0) throw new Error(`${name} has no closing brace`);
+  return INSTALL_SH.slice(start, end + 2);
+}
+
 const CAN_RUN =
   process.platform !== "win32"
   && spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0
@@ -223,6 +265,25 @@ d("clawbox-root-manifest.sh", () => {
   it("rejects an unknown mode instead of doing something", () => {
     expect(sh(`"${helper}" --whatever`).status).toBe(64);
   });
+
+  it("proves it is the whole program, which is what its exit status cannot", () => {
+    // Every verb above answers with an exit status, and an exit status is
+    // exactly what a helper that lost its bottom half cannot be trusted for:
+    // it exits 0 for all of them. Only a copy that reaches the verb dispatcher
+    // can print this token.
+    const r = sh(`"${helper}" --selftest`);
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe(SELFTEST_TOKEN);
+
+    for (const [what, text] of [["a 0-byte", ""], ["a truncated", truncatedHelper()]] as const) {
+      fs.writeFileSync(helper, text, { mode: 0o755 });
+      const dead = sh(`"${helper}" --selftest`);
+      expect(dead.stdout.trim(), `${what} helper printed the token`).not.toBe(SELFTEST_TOKEN);
+      // ...while still answering every real verb with a clean success.
+      expect(sh(`"${helper}" --write`).status, `${what} helper refused --write`).toBe(0);
+      expect(sh(`"${helper}" --verify`).status, `${what} helper refused --verify`).toBe(0);
+    }
+  });
 });
 
 d("clawbox-root-step.sh — the gate in front of the exec", () => {
@@ -295,6 +356,52 @@ d("clawbox-root-step.sh — the gate in front of the exec", () => {
     }
   });
 
+  it("fails closed when the verifier is installed but does nothing", () => {
+    // A 0-byte or truncated helper is the missing-verifier case with a worse
+    // ending: it is present and executable, so the `-x` guard passes, and it
+    // answers `--verify` AND the `--verify-file` about the staged copy with 0.
+    // The dispatcher would then exec /home/clawbox/clawbox/install.sh as root
+    // on the word of a program that never hashed anything — and that tree is
+    // writable by the unprivileged user the web server runs as, which is the
+    // whole reason the manifest exists (TASK-445).
+    for (const [what, text] of [["0-byte", ""], ["truncated", truncatedHelper()]] as const) {
+      sh(`"${helper}" --write`);
+      fs.writeFileSync(helper, text, { mode: 0o755 });
+      const r = sh(`"${dispatcher}" chpasswd`);
+      expect(r.status, `a ${what} helper let the step through`).toBe(65);
+      expect(ran(), `a ${what} helper let root exec the tree`).toBe("");
+      // Loudly, and with a repair the operator can actually type — the whole
+      // command, not a fragment. `systemd_services` is the step that re-installs
+      // the helper AND re-records the manifest, and the path has to be the
+      // on-disk entrypoint: a few lines below this check the script repoints
+      // $ENTRYPOINT at a copy under /run that is deleted on reboot and that the
+      // operator cannot execute, so a probe moved after that point would print a
+      // remedy which cannot be run.
+      expect(r.stderr).toContain(`sudo bash ${path.join(project, "install.sh")} --step systemd_services`);
+      fs.rmSync(marker, { force: true });
+      retarget(MANIFEST_SRC, helper, [
+        [/^PROJECT_DIR=.*$/m, `PROJECT_DIR="${project}"`],
+        [/^MANIFEST_DIR=.*$/m, `MANIFEST_DIR="${etc}"`],
+        [/^MANIFEST_FILE=.*$/m, `MANIFEST_FILE="${manifest}"`],
+      ]);
+    }
+  });
+
+  it("still runs the step through a helper from before --selftest existed", () => {
+    // The false failure the probe must not become, and it would be a fleet-wide
+    // one: on EVERY box updating across this release the installed helper is the
+    // previous release's, which does not know `--selftest`. Its 64 is not a
+    // refusal to answer — it is the verb dispatcher at the bottom of the file
+    // running, which is the very thing being asked about, and which a stub
+    // cannot do. So an old helper is live and the step goes through.
+    sh(`"${helper}" --write`);
+    fs.writeFileSync(helper, withoutSelftest(fs.readFileSync(helper, "utf-8")), { mode: 0o755 });
+    expect(sh(`"${helper}" --selftest`).status, "the stand-in must answer 64, not 0").toBe(64);
+    const r = sh(`"${dispatcher}" chpasswd`);
+    expect(r.status, r.stderr).toBe(0);
+    expect(ran()).toContain("--step chpasswd");
+  });
+
   it("fails closed when the verifier itself is missing", () => {
     sh(`"${helper}" --write`);
     fs.rmSync(helper);
@@ -342,10 +449,25 @@ d("install.sh::install_root_libexec", () => {
     return sh([
       "set -uo pipefail",
       `PROJECT_DIR="${project}"`,
-      'record_provision_failure() { echo "provision-failure:$1"; }',
+      'record_provision_failure() { PROVISION_FAILURES+=("$1"); echo "provision-failure:$1"; }',
+      // write_root_exec_manifest now CLEARS what it repaired (TASK-584): a
+      // manifest the bootstrap could not write and a later step did is not a
+      // failure of the run. The real helper is lifted out of install.sh rather
+      // than stubbed, so this block exercises the clearing it actually does.
+      //
+      // Seeded, not empty. With an empty array and a record stub that only
+      // echoed, clear_provision_failure had nothing to remove: the lifted
+      // function proved only that the name resolves, while the line below
+      // reports what it actually removed.
+      "PROVISION_FAILURES=(root_exec_manifest)",
+      shellFn("clear_provision_failure"),
+      // write_root_exec_manifest refuses to read the exit status of a helper
+      // that has not proved it is complete, so the real probe is lifted too.
+      shellFn("root_exec_manifest_helper_alive"),
       block,
       extra,
       "install_root_libexec",
+      'echo "remaining-failures:${PROVISION_FAILURES[*]-}"',
     ].join("\n"));
   }
 
@@ -385,6 +507,66 @@ d("install.sh::install_root_libexec", () => {
     expect(sh(`"${helper}" --verify`).status).toBe(0);
   });
 
+  it("clears a bootstrap failure it has just repaired", () => {
+    // The bootstrap records root_exec_manifest when it cannot re-record the
+    // manifest after the hard reset. This step re-records it half a minute
+    // later, and a run that ends healthy must not still report that failure —
+    // that is a false failure over an install that is fine (TASK-584).
+    const r = runBlock();
+    expect(r.stdout + r.stderr).toMatch(/remaining-failures:\s*$/m);
+  });
+
+  it("clears only the token it repaired", () => {
+    // The control: without this, "clears" would pass over a function that
+    // emptied the whole array and lost every other step's failure.
+    //
+    // Anchored, like the sibling above it. Unanchored, the match only says the
+    // two survivors are adjacent somewhere in the line — which the ORDER
+    // already guarantees is false for a run that cleared nothing
+    // (`openclaw_tts root_exec_manifest hermes_edition`), but says nothing
+    // about a repair that removes the token and then puts it back at the end.
+    // `remaining-failures:openclaw_tts hermes_edition root_exec_manifest` is a
+    // false failure surviving its own repair, and it passed.
+    const r = runBlock("PROVISION_FAILURES=(openclaw_tts root_exec_manifest hermes_edition)");
+    expect(r.stdout + r.stderr).toMatch(/remaining-failures:openclaw_tts hermes_edition\s*$/m);
+  });
+
+  it("does not clear the failure when the manifest does not verify after the write", () => {
+    // `--write` returning 0 says the helper believes it wrote something, not
+    // that the record now matches the tree. Clearing the recorded failure on
+    // the write alone reports a repair that has not been shown to have
+    // happened — and every pinned root step afterwards still fails closed.
+    fs.writeFileSync(
+      path.join(project, "config", "clawbox-root-manifest.sh"),
+      [
+        "#!/usr/bin/env bash",
+        `[ "\${1:-}" = "--selftest" ] && { printf '%s\\n' "${SELFTEST_TOKEN}"; exit 0; }`,
+        '[ "${1:-}" = "--write" ] && exit 0',
+        '[ "${1:-}" = "--verify" ] && exit 65',
+        "exit 64",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(path.join(libexec, "clawbox-root-step.sh"), "#!/bin/sh\n# previous\n", { mode: 0o755 });
+    const r = runBlock();
+    expect(r.stdout + r.stderr).toMatch(/remaining-failures:root_exec_manifest/);
+    expect(r.stdout + r.stderr).toMatch(/leaving the existing root dispatcher in place/);
+    expect(fs.readFileSync(path.join(libexec, "clawbox-root-step.sh"), "utf-8")).toContain("# previous");
+  });
+
+  it("refuses to record anything through a helper that cannot prove it is live", () => {
+    // The same 0-byte helper, one layer up: it exits 0 for `--write`, so the
+    // run would install the dispatcher and clear the failure over a manifest
+    // that was never written. The dispatcher must stay where it is.
+    fs.writeFileSync(path.join(project, "config", "clawbox-root-manifest.sh"), "", { mode: 0o755 });
+    fs.writeFileSync(path.join(libexec, "clawbox-root-step.sh"), "#!/bin/sh\n# previous\n", { mode: 0o755 });
+    const r = runBlock();
+    expect(r.stdout + r.stderr).toMatch(/remaining-failures:root_exec_manifest/);
+    expect(fs.readFileSync(path.join(libexec, "clawbox-root-step.sh"), "utf-8")).toContain("# previous");
+    expect(fs.existsSync(manifest), "no manifest was written, yet one appeared").toBe(false);
+  });
+
   it("keeps the existing dispatcher when the manifest cannot be written", () => {
     // A dispatcher newer than its manifest refuses every root step: no password
     // change, no hostname change, no hotspot restart, on a box with no console.
@@ -394,5 +576,74 @@ d("install.sh::install_root_libexec", () => {
     expect(r.stdout + r.stderr).toMatch(/leaving the existing root dispatcher in place/);
     expect(r.stdout + r.stderr).toMatch(/provision-failure:root_exec_manifest/);
     expect(fs.readFileSync(path.join(libexec, "clawbox-root-step.sh"), "utf-8")).toContain("# previous");
+  });
+});
+
+d("install.sh::install_root_file", () => {
+  it("never leaves a prefix of a root helper where the live one was", () => {
+    // The stub factory, on the path that runs on EVERY install and every
+    // `--step systemd_services` — which is the remedy every refusal in this
+    // chain prints. `install` writes into the destination inode with O_TRUNC,
+    // so a copy killed part way through (a full or read-only /usr) left an
+    // executable PREFIX of the file behind. Every script install_root_libexec
+    // installs dispatches at the BOTTOM, so that prefix is silently PERMISSIVE:
+    // a truncated clawbox-root-manifest.sh exits 0 for --write and --verify
+    // without looking, and a truncated clawbox-root-step.sh reaches EOF and
+    // exits 0 without exec'ing the step at all — which `Type=oneshot` reports
+    // to the updater as a step that succeeded.
+    const dst = path.join(libexec, "victim.sh");
+    const live = "#!/bin/sh\n# the working copy\nexit 0\n";
+    fs.writeFileSync(dst, live, { mode: 0o755 });
+    const src = path.join(tmp, "big.sh");
+    fs.writeFileSync(src, `#!/bin/sh\n${"# pad\n".repeat(30_000)}exit 0\n`);
+
+    // RLIMIT_FSIZE 8 blocks = 4096 bytes, so the source cannot fit and the copy
+    // dies mid-write — the real shape of the failure, not a mocked one.
+    // `ulimit -c 0` first: SIGXFSZ is a dumping signal, and `sh()` inherits the
+    // test runner's working directory, so on a host whose `core_pattern` names
+    // a plain file this would drop a `core` in the repo. Same guard as
+    // install-bootstrap-manifest.test.ts's copy of this setup.
+    const r = sh(
+      [
+        "set -uo pipefail",
+        unroot(shellFn("install_root_file")),
+        "ulimit -c 0",
+        "ulimit -f 8",
+        `if install_root_file "${src}" "${dst}"; then echo RC=ok; else echo RC=fail; fi`,
+        "",
+      ].join("\n"),
+    );
+    expect(r.stdout, r.stderr).toContain("RC=fail");
+    expect(fs.readFileSync(dst, "utf-8"), "a failed copy truncated the live file").toBe(live);
+    expect(fs.existsSync(`${dst}.new`), "a staged copy was left behind").toBe(false);
+  });
+
+  it("installs the whole file when the copy fits", () => {
+    const dst = path.join(libexec, "victim.sh");
+    const src = path.join(tmp, "small.sh");
+    fs.writeFileSync(src, "#!/bin/sh\nexit 7\n");
+    const r = sh(
+      ["set -euo pipefail", unroot(shellFn("install_root_file")), `install_root_file "${src}" "${dst}"`, ""].join("\n"),
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(fs.readFileSync(dst, "utf-8")).toBe("#!/bin/sh\nexit 7\n");
+    expect(fs.statSync(dst).mode & 0o777).toBe(0o755);
+    expect(fs.existsSync(`${dst}.new`)).toBe(false);
+  });
+});
+
+d("the liveness token", () => {
+  it("is the same literal in every file that asks for it", () => {
+    // The helper, the root dispatcher and install.sh are three separately
+    // installed root-owned files, so the token cannot be a shared constant. A
+    // typo in one of them is silent in the direction that matters: the caller
+    // stops believing a healthy helper, or — worse — a caller that never got
+    // updated keeps believing a dead one.
+    const helperText = fs.readFileSync(MANIFEST_SRC, "utf-8");
+    expect(helperText).toContain(`SELFTEST_TOKEN="${SELFTEST_TOKEN}"`);
+    expect(fs.readFileSync(DISPATCHER_SRC, "utf-8")).toContain(SELFTEST_TOKEN);
+    // Twice in install.sh: the bootstrap block runs before any function it
+    // could share, so it carries its own copy of the probe.
+    expect(INSTALL_SH.split(SELFTEST_TOKEN).length - 1).toBeGreaterThanOrEqual(2);
   });
 });

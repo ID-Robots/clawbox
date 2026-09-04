@@ -10,6 +10,7 @@
 import fs from "fs";
 import path from "path";
 import { get, set } from "@/lib/config-store";
+import { envPort } from "@/lib/port-probe";
 import { verifyDualLicense } from "@/lib/edition-license";
 import { readEdition } from "@/lib/edition-source";
 
@@ -95,13 +96,17 @@ export const HARNESSES: Record<Harness, HarnessInfo> = {
   openclaw: {
     id: "openclaw",
     label: "OpenClaw",
-    baseUrl: `http://127.0.0.1:${process.env.GATEWAY_PORT || "18789"}`,
+    baseUrl: `http://127.0.0.1:${envPort(process.env.GATEWAY_PORT, 18789)}`,
   },
   hermes: {
     id: "hermes",
     label: "Hermes",
-    // `hermes serve` defaults to 127.0.0.1:9119.
-    baseUrl: `http://127.0.0.1:${process.env.HERMES_PORT || "9119"}`,
+    // `hermes serve` defaults to 127.0.0.1:9119. Validated, like the gateway's
+    // baseUrl above and hermes-dashboard-auth's DASHBOARD_PORT: `|| "9119"` on
+    // the raw string catches "" and unset, but a malformed or out-of-range
+    // HERMES_PORT would sail through into a baseUrl that fails every call
+    // rather than falling back to the default the line promises.
+    baseUrl: `http://127.0.0.1:${envPort(process.env.HERMES_PORT, 9119)}`,
   },
 };
 

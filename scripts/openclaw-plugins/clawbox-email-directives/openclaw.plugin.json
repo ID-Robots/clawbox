@@ -1,0 +1,7 @@
+{
+  "id": "clawbox-email-directives",
+  "name": "ClawBox email directives",
+  "description": "Removes EMAIL: card directives from replies leaving the box for a channel, where no card can render.",
+  "activation": { "onStartup": true },
+  "configSchema": { "type": "object", "additionalProperties": false }
+}

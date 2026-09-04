@@ -117,6 +117,96 @@ describe("LocalAiPanel", () => {
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "select", choice: "local" } }));
   });
 
+  /**
+   * TASK-608. "Use as fallback" on the on-device row posts
+   * /setup-api/providers/default, which on OpenClaw restarts the gateway. When
+   * the gateway has not bound again inside the route's readiness budget the
+   * change IS written and the route answers `ok` with a `warning`.
+   *
+   * This panel's only feedback channel was the red error box, so that answer
+   * used to paint a failure over a change that went through — and the owner's
+   * next move is to repeat it, paying another restart.
+   */
+  it("shows a gateway that is still coming back as a notice, not as a failed change", async () => {
+    stubFetch({
+      llmDefault: true,
+      post: (url) => (url === "/setup-api/providers/default"
+        ? new Response(JSON.stringify({
+            ok: true,
+            provider: "clawai",
+            model: "deepseek/deepseek-v4-flash",
+            warning: "Saved, but the gateway did not come back — the new model applies once it is serving again.",
+          }), { status: 200, headers: { "content-type": "application/json" } })
+        : undefined),
+    });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => expect(screen.getByTestId("local-model-role-llamacpp")).toHaveTextContent(/primary/i));
+    fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+    fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-fallback"));
+
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/providers/default", body: { provider: "clawai" } }));
+    // waitFor on the TEXT: the region is mounted in every state, so finding the
+    // node proves nothing.
+    await waitFor(() =>
+      expect(screen.getByTestId("local-ai-notice")).toHaveTextContent("the gateway did not come back"));
+    // Back in flow the moment it has something to say — the other half of the
+    // `sr-only` pin below, so neither state can be dropped on its own.
+    expect(screen.getByTestId("local-ai-notice")).not.toHaveClass("sr-only");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  /**
+   * The notice region is mounted in every state so assistive tech is never
+   * asked to catch a node insertion — but its parent is `space-y-4`, whose
+   * `> * + *` rule gives an EMPTY in-flow div a 1 rem margin AND hands the
+   * block after it another. That is a permanent 16 px gap under the intro, on
+   * every visit, in the state the panel is in almost all the time.
+   *
+   * `sr-only` takes it out of flow while keeping the node and its text in the
+   * accessibility tree, which is the only reason it is mounted at all.
+   */
+  it("keeps the empty notice region out of the panel's flow", async () => {
+    stubFetch();
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    const notice = screen.getByTestId("local-ai-notice");
+    expect(notice).toHaveTextContent("");
+    expect(notice).toHaveClass("sr-only");
+  });
+
+  /**
+   * TASK-608, the sibling the round-2 review caught. `/setup-api/stt` answers
+   * with a `warning` and NO `error` key when the transcription engine change
+   * landed but the gateway has not finished restarting. As a 502 that body is
+   * unreachable — `runAction` discards it on `!res.ok` and paints the red
+   * generic "couldn't change that" over a change that went through, sending the
+   * owner to click again and pay a second gateway restart. The route now
+   * answers 200 for that case, so the sentence reaches this panel.
+   */
+  it("shows a transcription change whose gateway is still coming back as a notice", async () => {
+    stubFetch({
+      sttPrimary: "cloud",
+      post: (url) => (url === "/setup-api/stt"
+        ? new Response(JSON.stringify({
+            primary: "local",
+            restarted: false,
+            engines: { cloud: { configured: true, label: "c" }, local: { installed: true, label: "l" } },
+            chain: ["local", "cloud"],
+            warning: "Saved, but the gateway has not finished restarting — channel voice notes switch over once it is serving again.",
+          }), { status: 200, headers: { "content-type": "application/json" } })
+        : undefined),
+    });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-stt");
+    fireEvent.click(screen.getByTestId("local-model-menu-whisper"));
+    fireEvent.click(await screen.findByTestId("local-model-action-whisper-primary"));
+
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/stt", body: { primary: "local" } }));
+    await waitFor(() => expect(screen.getByTestId("local-ai-notice")).toHaveTextContent("has not finished restarting"));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("turns Local AI off through its own route, and sends the memory index to Memory Shard", async () => {
     stubFetch({ llmDefault: true });
     renderPanel();
@@ -445,8 +535,11 @@ describe("LocalAiPanel", () => {
     await screen.findByTestId("local-model-kokoro");
     fireEvent.click(screen.getByTestId("local-model-menu-kokoro"));
     fireEvent.click(await screen.findByTestId("local-model-action-kokoro-primary"));
-    const notice = await screen.findByTestId("local-ai-notice");
-    expect(notice).toHaveTextContent(/default voice/i);
+    // waitFor on the TEXT, like its three siblings above: the region is mounted
+    // in every state, so finding the node proves nothing and would let the text
+    // assertion run before the action's fetch chain has settled.
+    await waitFor(() =>
+      expect(screen.getByTestId("local-ai-notice")).toHaveTextContent(/default voice/i));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 

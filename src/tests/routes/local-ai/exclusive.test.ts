@@ -37,6 +37,16 @@ vi.mock("@/lib/openclaw-session-store", () => ({
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
+  // A REAL class: the route narrows on `instanceof GatewayNotReadyError` to
+  // keep "the gateway has not finished binding" out of a sentence that says the
+  // restart failed, and `instanceof undefined` throws a TypeError the first
+  // time a test makes the mocked restart reject.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
   callGatewayRpc: vi.fn(),
   gatewayIsAbsent: vi.fn(() => false),
   readConfig: vi.fn(async () => ({})),
@@ -46,7 +56,7 @@ vi.mock("@/lib/openclaw-config", () => ({
 }));
 
 import { get, setMany } from "@/lib/config-store";
-import { restartGateway, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { GatewayNotReadyError, restartGateway, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 
 const UNKNOWN_MODEL =
@@ -117,6 +127,31 @@ describe("POST /setup-api/local-ai/exclusive — restoring the saved primary and
       ["agents.defaults.model.primary", JSON.stringify("anthropic/claude-sonnet-5"), "--json"],
     ]);
     expect(orderOf(vi.mocked(runOpenclawConfigSetBatch))).toBeLessThan(orderOf(vi.mocked(restartGateway)));
+  });
+
+  it("does not say the restart failed over a gateway that is still coming back", async () => {
+    // TASK-608. `warning` is rendered by LocalAiPanel in its amber "the change
+    // landed" notice, so the sentence has to be true of a change that landed.
+    // The raw message here was `Gateway restart failed: gateway did not come
+    // back` — a failure claim over a `systemctl restart` that returned 0.
+    vi.mocked(restartGateway).mockRejectedValue(new GatewayNotReadyError());
+
+    const body = await (await turnOff()).json();
+
+    expect(body.enabled).toBe(false);
+    expect(body.warning).toMatch(/has not finished restarting/);
+    expect(body.warning).not.toMatch(/restart failed/i);
+  });
+
+  it("still says so when the restart was refused, without leaking the CLI error", async () => {
+    vi.mocked(restartGateway).mockRejectedValue(new Error("Unit clawbox-gateway.service is masked."));
+
+    const body = await (await turnOff()).json();
+
+    expect(body.enabled).toBe(false);
+    expect(body.warning).toMatch(/restart failed/i);
+    // Owner-facing copy, not systemd's.
+    expect(body.warning).not.toMatch(/masked/i);
   });
 
   it("switches the plugin on for a FALLBACK that names Anthropic, in the same batch as both lists", async () => {

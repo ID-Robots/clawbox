@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   gatewayIsAbsent,
+  GatewayNotReadyError,
   getTelegramProgressStreaming,
   setTelegramProgressStreaming,
   restartGateway,
@@ -82,16 +83,29 @@ export async function POST(request: Request) {
     // The gateway only reads channel config at startup, so restart to apply.
     try {
       await restartGateway();
-    } catch {
-      // Setting is persisted; surface the restart failure so the UI can tell
-      // the user it'll take effect on the next gateway restart.
+    } catch (err) {
+      // The setting is persisted either way; what differs is whether anything
+      // is coming back. Before TASK-608 this branch could only mean
+      // `systemctl restart` itself failed; the readiness wait widened it to
+      // "the port did not open inside the budget", which on a cold box is the
+      // ordinary case — so a slow-but-healthy restart started arriving here as
+      // a 502. It answers 200 now: the switch IS live within seconds, and the
+      // warning says the one thing the owner needs.
+      //
+      // A restart that was REFUSED keeps the 502. Nothing is coming back on
+      // its own there, and `SettingsApp.toggleTelegramStreaming` deliberately
+      // keeps the optimistic switch position on a 502, so the warning below is
+      // the only thing that tells the owner the toggle is not applied yet.
+      const pending = err instanceof GatewayNotReadyError;
       return NextResponse.json(
         {
           success: true,
           restarted: false,
-          warning: "Saved, but the gateway restart failed — it'll apply on next restart.",
+          warning: pending
+            ? "Saved, but the gateway has not finished restarting — progress streaming applies once it is serving again."
+            : "Saved, but the gateway restart failed — it'll apply on next restart.",
         },
-        { status: 502 },
+        { status: pending ? 200 : 502 },
       );
     }
 

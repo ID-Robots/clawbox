@@ -112,6 +112,40 @@ export async function POST(request: Request) {
     }),
   );
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!res.ok) return NextResponse.json(data, { status: res.status });
-  return NextResponse.json({ ok: true, provider, model: option.model });
+  // A 502 CARRYING A WARNING is not a failed default. The model is already on
+  // disk by the time `/setup-api/chat/model` answers that; the body is the new
+  // state plus `warning`, with no `error` key at all. Forwarded verbatim it
+  // reads to every client of THIS route as a failed save over a change that
+  // landed: the star stays on the old provider, nothing tells the chat header
+  // or the capability probe, and the owner's retry pays a second restart.
+  //
+  // TWO causes produce that 502, and both are folded into `ok` here: the
+  // gateway has not finished coming back, and the restart was refused (a unit
+  // masked by an update in flight). The model is written either way, and the
+  // route forwards `chat/model`'s own sentence verbatim, so the owner reads
+  // which one it was. That is deliberately softer than
+  // `/setup-api/ai-models/configure`, which keeps a hard 502 for the refused
+  // case — there the caller is the first-run wizard, which cannot advance past
+  // a failure, while here the caller is a settings panel that can simply say so.
+  //
+  // The warning is REQUIRED, not merely the status, so a 502 from a proxy or
+  // from cloudflared stays the error it is — the same guard `ChatPopup` applies
+  // to the same route's answer, on the same reasoning.
+  //
+  // It becomes a 200 rather than a forwarded 502 because this endpoint's whole
+  // point is one contract for both harnesses: Hermes has no gateway to wait for,
+  // and no caller here should have to learn a status code that only one edition
+  // can produce. `warning` is how "saved, still settling" is said.
+  const gatewayPending =
+    res.status === 502 && typeof data.warning === "string" && data.warning !== "";
+  if (!res.ok && !gatewayPending) return NextResponse.json(data, { status: res.status });
+  // A warning can also arrive on a 200 (`chat/model`'s disarm notice), and it
+  // is the same kind of fact: forward whichever one came back.
+  const warning = typeof data.warning === "string" && data.warning ? data.warning : undefined;
+  return NextResponse.json({
+    ok: true,
+    provider,
+    model: option.model,
+    ...(warning ? { warning } : {}),
+  });
 }

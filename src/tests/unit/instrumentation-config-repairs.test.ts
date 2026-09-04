@@ -39,6 +39,10 @@ describe("repairOpenclawConfig", () => {
       restartGateway,
     });
     expect(restartGateway).toHaveBeenCalledTimes(1);
+    // Not the readiness wait: nothing here reads the answer, and this promise
+    // gates the update continuation, so 30 s spent at boot would only shrink
+    // the margin the memory-probe delay is sized against.
+    expect(restartGateway).toHaveBeenCalledWith({ awaitReady: false });
   });
 
   it("leaves the gateway alone when nothing changed", async () => {

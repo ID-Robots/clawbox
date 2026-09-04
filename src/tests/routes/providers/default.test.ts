@@ -133,6 +133,52 @@ describe("POST /setup-api/providers/default — OpenClaw", () => {
     expect(chatModelPOST).not.toHaveBeenCalled();
   });
 
+  /**
+   * TASK-608. `/setup-api/chat/model` now answers 502 when the model IS written
+   * but the gateway did not bind again inside its readiness budget: the body is
+   * the new state plus a `warning`, and it carries NO `error` key. This route
+   * forwarded that verbatim, so the panel that started the change read a saved
+   * default as a failed one — the exact false failure the 502 exists to avoid,
+   * one route further out.
+   *
+   * `warning` is required, not just the status, so a 502 from a proxy or from
+   * cloudflared stays the error it is.
+   */
+  it("reports a default whose gateway is still coming back as saved, with the warning", async () => {
+    chatModelGET.mockResolvedValue(json({
+      options: [{ id: "b", provider: "anthropic", model: "anthropic/claude-sonnet-4-6", available: true }],
+    }));
+    chatModelPOST.mockResolvedValue(json(
+      {
+        selected: { provider: "anthropic", model: "anthropic/claude-sonnet-4-6" },
+        warning: "Saved, but the gateway did not come back — the new model applies once it is serving again.",
+      },
+      502,
+    ));
+
+    const res = await call({ provider: "anthropic" });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      provider: "anthropic",
+      model: "anthropic/claude-sonnet-4-6",
+      warning: expect.stringContaining("gateway"),
+    });
+  });
+
+  it("still forwards a 502 that carries no warning — that one is not a saved default", async () => {
+    chatModelGET.mockResolvedValue(json({
+      options: [{ id: "b", provider: "anthropic", model: "anthropic/claude-sonnet-4-6", available: true }],
+    }));
+    chatModelPOST.mockResolvedValue(json({ error: "Bad gateway" }, 502));
+
+    const res = await call({ provider: "anthropic" });
+
+    expect(res.status).toBe(502);
+    await expect(res.json()).resolves.toMatchObject({ error: "Bad gateway" });
+  });
+
   it("will not promote a provider whose row is present but unavailable", async () => {
     chatModelGET.mockResolvedValue(json({
       options: [{ id: "x", provider: "ollama", model: null, available: false }],
