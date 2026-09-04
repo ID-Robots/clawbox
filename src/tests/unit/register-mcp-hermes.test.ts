@@ -35,9 +35,11 @@ const CAN_RUN =
 const d = CAN_RUN ? describe : describe.skip;
 
 /**
- * The unreadable-file and failing-chmod cases prove nothing under root, which
- * reads and chmods anything: they would pass by taking the happy path. CI is
- * non-root; a `sudo npm test` on a box is not.
+ * Skip ONLY where root's extra privilege changes which branch the script takes:
+ * it reads a 0000 file and writes into a 0555 directory, so those cases would
+ * pass by taking the happy path and prove nothing. A stubbed `chmod` is NOT
+ * such a case — the stub exits 1 for every user — so the cases that turn on the
+ * minting umask run everywhere. CI is non-root; a `sudo npm test` on a box is not.
  */
 const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
@@ -171,7 +173,7 @@ d("register-mcp.sh — registering on Hermes", () => {
     expect(fs.statSync(tokenPath).mode & 0o777).toBe(0o600);
   });
 
-  it.skipIf(isRoot)("mints the token owner-only without leaning on the chmod that follows", () => {
+  it("mints the token owner-only without leaning on the chmod that follows", () => {
     // A bare `openssl rand -hex 32 > file` creates the file at the umask's
     // mode — 0644 under root's — so the secret is on disk world-readable for
     // the window before the chmod, and STAYS there when the chmod cannot run

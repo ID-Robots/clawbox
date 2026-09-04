@@ -101,9 +101,14 @@ function run(program: string): { status: number | null; out: string; stderr: str
 }
 
 /**
- * The 0000 cases are a no-op for root, which reads anything: they would pass by
- * taking the happy path and prove nothing. CI is non-root; a `sudo npm test` on
- * a box is not.
+ * Skip ONLY where root's extra privilege changes which branch the shipped block
+ * takes, and the rule is narrow: `[ -r "$f" ]` and `[ -w "$dir" ]` answer
+ * differently for root, so a 0000 file (or a 0555 directory) is a no-op for it
+ * and the case would pass by taking the happy path and prove nothing. Nothing
+ * else here is uid-dependent — the mode grading reads `stat -c %a`, the `chmod`
+ * stub fails for every user alike, and `umask 077` yields 0600 for root too —
+ * so a case whose branch turns on the MODE runs everywhere, and skipping it
+ * would only cost coverage on a box (CI is non-root; a `sudo npm test` is not).
  */
 const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
@@ -509,7 +514,7 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
     expect(r.exported).toBe(EXISTING);
   });
 
-  it.skipIf(isRoot)("never exports a token other local users can read", () => {
+  it("never exports a token other local users can read", () => {
     // The file root created at 0644 and clawbox cannot chmod. Warning and
     // carrying on hands the only /setup-api/* credential to every local user.
     const r = token({ contents: EXISTING, mode: 0o644, chmodFails: true });
@@ -528,7 +533,7 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
     expect(r.out).toContain("REACHED_END=1");
   });
 
-  it.skipIf(isRoot)("does not rotate, or warn, over a file that is already 0600", () => {
+  it("does not rotate, or warn, over a file that is already 0600", () => {
     // chmod on a root-owned file fails whatever its mode is. The old warning
     // fired here too, over a box with nothing wrong with it.
     const r = token({ contents: EXISTING, mode: 0o600, chmodFails: true });
@@ -567,7 +572,7 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
     expect(r.out).toMatch(/clawbox-setup/);
   });
 
-  it.skipIf(isRoot)("leaves a readable token no other user can read exactly as it is", () => {
+  it("leaves a readable token no other user can read exactly as it is", () => {
     // 0400 and 0000-that-this-uid-owns are exposed to NOBODY. Grading the mode
     // on the literal "600" rotated both of them, and rotating a credential that
     // was never exposed is pure cost: it invalidates the bearer the web server
