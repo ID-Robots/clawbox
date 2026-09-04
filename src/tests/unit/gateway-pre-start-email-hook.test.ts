@@ -468,7 +468,9 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     // an `openclaw` that ignores SIGTERM keeps this command substitution's pipe
     // open and bash blocks reading it until the survivor dies — an ExecStartPre
     // stalling the gateway's start long past the ceiling it appears to have.
-    expect(block()).toMatch(/timeout -k 5 45 "\$OPENCLAW_BIN" plugins inspect/);
+    // The grace, not the numbers: tuning the ceiling is fine, dropping `-k` is
+    // the regression.
+    expect(block()).toMatch(/timeout -k \d+ \d+ "\$OPENCLAW_BIN" plugins inspect/);
   });
 
   it.skipIf(process.getuid?.() === 0)("leaves the installed plugin ALONE when it is the sources that cannot be read", () => {
