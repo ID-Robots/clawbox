@@ -32,6 +32,7 @@ vi.mock("@/lib/config-store", () => ({
 
 vi.mock("@/lib/openclaw-config", () => ({
   getSkillsDir: vi.fn(() => "/home/clawbox/.openclaw/workspace"),
+  openclawSkillRoot: vi.fn(() => "/home/clawbox/.openclaw/workspace/skills"),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
 }));
 
@@ -105,8 +106,9 @@ describe("/setup-api/apps/install", () => {
     const fsMod = await import("fs/promises");
     vi.mocked(fsMod.default.mkdir).mockResolvedValue(undefined as never);
     writeFile = vi.mocked(fsMod.default.writeFile).mockResolvedValue(undefined);
-    const { getSkillsDir } = await import("@/lib/openclaw-config");
+    const { getSkillsDir, openclawSkillRoot } = await import("@/lib/openclaw-config");
     vi.mocked(getSkillsDir).mockReturnValue("/home/clawbox/.openclaw/workspace");
+    vi.mocked(openclawSkillRoot).mockReturnValue("/home/clawbox/.openclaw/workspace/skills");
     upstream({
       clawhub: jsonResponse(200, { skill: { slug: "test-app" }, owner: { handle: "someone" } }),
       store: jsonResponse(200, { slug: "test-app", name: "Test App", category: "developer", developer: "someone" }),

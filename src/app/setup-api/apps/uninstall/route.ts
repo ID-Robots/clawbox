@@ -28,11 +28,22 @@ export async function POST(req: Request) {
     // falls back to ~/clawd, and this line resolved <appId> under it and
     // answered {ok:true} for the removal it had not made.
     const skillRoot = openclawSkillRoot();
+    // What actually happened to the skill half, so the answer can say it.
+    //   true  — a skill directory was there and is gone
+    //   false — this box has a skills root and nothing of that name was in it
+    //   null  — there is no OpenClaw skills root on this device to look in
+    // `{ok:true}` alone said the same thing for all three, which is the half of
+    // the wrong-directory delete that a guard on its own does not close.
+    let skillRemoved: boolean | null = null;
     if (skillRoot) {
       const skillDir = path.resolve(skillRoot, appId);
       if (!skillDir.startsWith(skillRoot + path.sep)) {
         return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
       }
+      skillRemoved = await fs
+        .stat(skillDir)
+        .then(() => true)
+        .catch(() => false);
       await fs.rm(skillDir, { recursive: true, force: true });
     }
 
@@ -60,8 +71,11 @@ export async function POST(req: Request) {
     // The skill's `skills.entries.<id>` in openclaw.json goes too, or a later
     // install under the same id silently inherits `enabled: false`. Best
     // effort, like the icon: the files are already gone. Same edition
-    // condition as the directory above — `clearSkillEntry` reads and REWRITES
-    // openclaw.json, so on a box that has none it would author one.
+    // condition as the directory above — not because the call would write
+    // anything on a box with no config (it returns early on a missing entry,
+    // before `writeConfig` is reached), but because on the hermes SKU there is
+    // no OpenClaw configuration for this route to own, and a leftover
+    // ~/.openclaw/openclaw.json on that SKU is not ours to rewrite.
     if (skillRoot) {
       await clearSkillEntry(appId).catch((err) => {
         console.warn("[uninstall] Failed to clear the skill's openclaw.json entry:", err instanceof Error ? err.message : err);
@@ -121,7 +135,7 @@ export async function POST(req: Request) {
     // watched skill root, so the agent drops the skill on its next turn. The
     // skill-info cache rescans behind this reply.
     refreshSkillsCache();
-    return NextResponse.json({ ok: true, appId });
+    return NextResponse.json({ ok: true, appId, skillRemoved });
   } catch (err) {
     console.error("[uninstall] Uninstall failed:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Uninstall failed" }, { status: 500 });

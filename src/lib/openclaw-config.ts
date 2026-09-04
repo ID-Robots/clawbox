@@ -2730,6 +2730,19 @@ export function findOpenclawBin(): string {
  */
 export function openclawSkillRoot(): string | null {
   if (openclawIsAbsent()) return null;
+  // ...and null again when openclaw.json EXISTS but cannot be read. That is
+  // not the same as "there is no config": `getSkillsDir()` swallows the parse
+  // error and falls through to a well-known path, which is a good enough guess
+  // for the `stat` its other caller makes and is not a delete target. The
+  // config is rewritten in place by `openclaw config set`, so a half-written
+  // read is a real, documented race (see `readConfigForWrite`) — and on a box
+  // whose workspace is not the well-known one it would redirect the delete.
+  try {
+    const raw = fsSync.readFileSync(path.join(process.env.HOME || "/home/clawbox", ".openclaw", "openclaw.json"), "utf-8");
+    JSON.parse(raw);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") return null;
+  }
   return path.resolve(getSkillsDir(), "skills");
 }
 

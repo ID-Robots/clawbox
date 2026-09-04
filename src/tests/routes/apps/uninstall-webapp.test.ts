@@ -26,7 +26,6 @@ const SKILLS_ROOT = path.join(ROOT, "openclaw-workspace");
 // `mockReset: true` wipes chained values before every test while a vi.fn(impl)
 // keeps its implementation, and this factory only runs once per file.
 vi.mock("@/lib/openclaw-config", () => ({
-  getSkillsDir: vi.fn(() => SKILLS_ROOT),
   // The edition-aware skill root the route deletes under. Non-null here: this
   // file's device is an OpenClaw one. The Hermes half — where it is null and
   // nothing under a workspace this box does not have may be removed — is
@@ -93,7 +92,14 @@ describe("/setup-api/apps/uninstall — the deployed webapp goes with the app", 
     const res = await uninstall("qa-t453a-revalidate");
 
     expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toEqual({ ok: true, appId: "qa-t453a-revalidate" });
+    // `skillRemoved` is false here: this fixture deploys a webapp and no skill
+    // directory, which is exactly the case the field exists to distinguish
+    // from a skill that was removed.
+    await expect(res.json()).resolves.toEqual({
+      ok: true,
+      appId: "qa-t453a-revalidate",
+      skillRemoved: false,
+    });
     expect(fs.existsSync(dir)).toBe(false);
   });
 

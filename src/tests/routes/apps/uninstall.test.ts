@@ -3,11 +3,13 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 vi.mock("fs/promises", () => ({
   default: {
     rm: vi.fn().mockResolvedValue(undefined),
+    // The route stats the skill directory before removing it, so the answer can
+    // say whether a skill was actually there. Default: it was.
+    stat: vi.fn().mockResolvedValue({ isDirectory: () => true }),
   },
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
-  getSkillsDir: vi.fn().mockReturnValue("/home/clawbox/.openclaw/workspace"),
   // See uninstall-edition.test.ts for the null (Hermes) half, tested against
   // the real implementation rather than a mock.
   openclawSkillRoot: vi.fn().mockReturnValue("/home/clawbox/.openclaw/workspace/skills"),
@@ -34,12 +36,12 @@ describe("/setup-api/apps/uninstall", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-    const { getSkillsDir, openclawSkillRoot, clearSkillEntry } = await import("@/lib/openclaw-config");
-    vi.mocked(getSkillsDir).mockReturnValue("/home/clawbox/.openclaw/workspace");
+    const { openclawSkillRoot, clearSkillEntry } = await import("@/lib/openclaw-config");
     vi.mocked(openclawSkillRoot).mockReturnValue("/home/clawbox/.openclaw/workspace/skills");
     vi.mocked(clearSkillEntry).mockResolvedValue(true);
     const fsMod = await import("fs/promises");
     vi.mocked(fsMod.default.rm).mockResolvedValue(undefined);
+    vi.mocked(fsMod.default.stat).mockResolvedValue({ isDirectory: () => true } as never);
     const { getAll, setMany } = await import("@/lib/config-store");
     vi.mocked(getAll).mockResolvedValue({});
     vi.mocked(setMany).mockResolvedValue(undefined);
@@ -57,7 +59,7 @@ describe("/setup-api/apps/uninstall", () => {
   it("uninstalls an app successfully", async () => {
     const res = await uninstall("test-app");
     const body = await res.json();
-    expect(body).toEqual({ ok: true, appId: "test-app" });
+    expect(body).toEqual({ ok: true, appId: "test-app", skillRemoved: true });
   });
 
   it("rejects invalid appId", async () => {
@@ -117,6 +119,6 @@ describe("/setup-api/apps/uninstall", () => {
     const { clearSkillEntry } = await import("@/lib/openclaw-config");
     vi.mocked(clearSkillEntry).mockRejectedValue(new Error("EACCES"));
     const res = await uninstall("test-app");
-    expect(await res.json()).toEqual({ ok: true, appId: "test-app" });
+    expect(await res.json()).toEqual({ ok: true, appId: "test-app", skillRemoved: true });
   });
 });

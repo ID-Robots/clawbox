@@ -104,7 +104,12 @@ describe("POST /setup-api/apps/uninstall on a device with no OpenClaw", () => {
 
     expect(status).toBe(200);
     expect(body.ok).toBe(true);
+    // THE defect: the directory under the workspace this edition does not have
+    // is still there.
     await expect(fs.stat(clawdSkill())).resolves.toBeTruthy();
+    // ...and the answer says the skill half did not happen, rather than
+    // reporting the same `{ok:true}` a real removal reports.
+    expect(body.skillRemoved).toBeNull();
   });
 
   it("still removes the webapp — the reason this route is reachable there at all", async () => {
@@ -123,6 +128,48 @@ describe("POST /setup-api/apps/uninstall on a device with no OpenClaw", () => {
 describe("POST /setup-api/apps/uninstall on an OpenClaw device", () => {
   beforeEach(() => {
     process.env.CLAWBOX_EDITION = "openclaw";
+  });
+
+  it("deletes under the workspace the config names, not the legacy fallback", async () => {
+    // The branch a real device takes. `getSkillsDir()` prefers
+    // `agents.defaults.workspace`, then ~/.openclaw/workspace, then ~/clawd —
+    // and only the last of those was covered, so a helper that resolved the
+    // wrong one of the three, or stopped appending `skills`, was pinned by
+    // nothing.
+    const workspace = path.join(home, "work");
+    await fs.mkdir(path.join(home, ".openclaw"), { recursive: true });
+    await fs.writeFile(
+      path.join(home, ".openclaw", "openclaw.json"),
+      JSON.stringify({ agents: { defaults: { workspace } } }),
+    );
+    const configured = path.join(workspace, "skills", APP);
+    await fs.mkdir(configured, { recursive: true });
+    await fs.writeFile(path.join(configured, "SKILL.md"), "# ours\n");
+
+    const { status, body } = await uninstall(APP);
+
+    expect(status).toBe(200);
+    expect(body.skillRemoved).toBe(true);
+    await expect(fs.stat(configured)).rejects.toThrow();
+    // ...and the legacy path it did NOT resolve is untouched.
+    await expect(fs.stat(clawdSkill())).resolves.toBeTruthy();
+  });
+
+  it("refuses to guess a delete target from a config it could not read", async () => {
+    // `getSkillsDir()` swallows a parse error and falls through to a
+    // well-known path. Good enough for the `stat` its other caller makes, and
+    // not a delete target: openclaw.json is rewritten in place by `openclaw
+    // config set`, so a half-written read is a real race, and on a box whose
+    // workspace is not the well-known one it would redirect the removal.
+    await fs.mkdir(path.join(home, ".openclaw"), { recursive: true });
+    await fs.writeFile(path.join(home, ".openclaw", "openclaw.json"), '{"agents":{"defa');
+
+    const { status, body } = await uninstall(APP);
+
+    expect(status).toBe(200);
+    await expect(fs.stat(clawdSkill())).resolves.toBeTruthy();
+    expect(body.skillRemoved).toBeNull();
+    expect(clearSkillEntry).not.toHaveBeenCalled();
   });
 
   it("removes the skill directory, exactly as before", async () => {

@@ -5,7 +5,7 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR, getAll as configGetAll } from "@/lib/config-store";
-import { getSkillsDir, findOpenclawBin } from "@/lib/openclaw-config";
+import { openclawSkillRoot, findOpenclawBin } from "@/lib/openclaw-config";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR, type InstalledMeta } from "@/lib/store-categories";
 import { boundPreferenceText } from "@/lib/preference-schema";
 import { setPreferences } from "@/lib/preference-store";
@@ -293,9 +293,20 @@ export async function POST(req: Request) {
     let owner = parsed.owner;
 
     const openclawBin = findOpenclawBin();
-    const skillsDir = getSkillsDir();
+    // The SAME expression the uninstall route deletes under. Two spellings of
+    // one path is how a wrong-directory delete comes back: this route is behind
+    // openclawAppsGuard(), so the active harness is `openclaw` and the root is
+    // never null here — but the null still needs a branch, and refusing is the
+    // right thing to do with a workspace that could not be established.
+    const skillRoot = openclawSkillRoot();
+    if (!skillRoot) {
+      return NextResponse.json(
+        { error: "This device has no OpenClaw skills directory to install into." },
+        { status: 409 },
+      );
+    }
     const storeDetail = fetchStoreDetail(appId);
-    await fs.mkdir(path.join(skillsDir, "skills"), { recursive: true });
+    await fs.mkdir(skillRoot, { recursive: true });
 
     // `openclaw skills install` takes `@owner/slug`; handed a bare slug it asks
     // ClawHub the same question and fails with "Skill not found" for every slug
