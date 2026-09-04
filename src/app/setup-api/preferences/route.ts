@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import * as config from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { PREFERENCE_KEY_PREFIX, sanitizePreferences, validatePreference } from "@/lib/preference-schema";
-import { personaFilesFor, writeLanguagePersona } from "@/lib/language-persona";
+import { personaFilesFor, personaWritesAllowed, writeLanguagePersona } from "@/lib/language-persona";
 import { logSafe } from "@/lib/log-safe";
 
 export const dynamic = "force-dynamic";
@@ -103,8 +103,25 @@ export async function POST(req: Request) {
     // When language changes, update the persona files of the harness that is
     // actually running. Validation above already constrained ui_language to a
     // locale we ship, so nothing free-form reaches the agent's system prompt.
+    //
+    // The write is skipped while OpenClaw's first-conversation ritual is
+    // pending or has never started: creating USER.md in a brand-new workspace
+    // is what tells OpenClaw the agent is already configured, and the setup
+    // wizard's language picker fires this route minutes before the owner's
+    // first hello. The preference is stored either way, and
+    // scripts/gateway-pre-start.sh re-applies it to the persona once the
+    // workspace is the agent's own — so a language chosen in the wizard is not
+    // lost, only deferred past the introduction.
+    //
+    // The guard sits here rather than inside writeLanguagePersona because this
+    // route is the single door: the desktop, the setup wizard and the agent's
+    // own `preferences_set` tool all arrive through it, so closing it here
+    // also stops the agent from suppressing its own ritual mid-conversation.
     if (typeof body.ui_language === "string" && body.ui_language) {
-      await writeLanguagePersona(body.ui_language, personaFilesFor(await getActiveHarness()));
+      const harness = await getActiveHarness();
+      if (await personaWritesAllowed(harness)) {
+        await writeLanguagePersona(body.ui_language, personaFilesFor(harness));
+      }
     }
     return NextResponse.json({ ok: true });
   } catch (err) {

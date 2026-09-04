@@ -112,9 +112,25 @@ fi
 # the next OpenClaw start reads current identity; only bounce the running
 # gateway when OpenClaw is actually the harness in play (see above).
 if [ -d "$OC_WS" ]; then
-  for f in SOUL USER MEMORY; do
-    [ -f "$CANON/$f.md" ] && cp "$CANON/$f.md" "$OC_WS/$f.md"
-  done
+  # Held back until OpenClaw's first-conversation ritual is over — the same
+  # test setup-shared-identity.sh applies, and for the same reason: OpenClaw
+  # reads a customised USER.md/SOUL.md, or any MEMORY.md at all, as "this
+  # workspace is already configured" and never introduces the agent. USER.md
+  # present and BOOTSTRAP.md absent means the introduction is behind us; a
+  # BOOTSTRAP.md still on disk means it is armed and unfinished, and a write
+  # now would make the next turn delete it. A switch made before the first
+  # hello therefore waits for the next sync rather than costing the ritual.
+  if [ -f "$OC_WS/USER.md" ] && [ ! -e "$OC_WS/BOOTSTRAP.md" ]; then
+    # `if` rather than the `[ … ] && cp` this used to be: nesting the loop
+    # inside a conditional made the loop's status the branch's status, and a
+    # missing canonical MEMORY.md on the last iteration would then have ended
+    # this script under `set -e` — a sync that reported nothing at all.
+    for f in SOUL USER MEMORY; do
+      if [ -f "$CANON/$f.md" ]; then cp "$CANON/$f.md" "$OC_WS/$f.md"; fi
+    done
+  else
+    echo "[identity-sync] OpenClaw has not been introduced yet; leaving its workspace identity alone"
+  fi
   if should_refresh_openclaw; then
     if restart_openclaw_gateway; then
       echo "[identity-sync] clawbox-gateway restarted; OpenClaw has re-read the identity files"
