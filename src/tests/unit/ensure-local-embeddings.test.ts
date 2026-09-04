@@ -738,8 +738,9 @@ describe("gateway-pre-start.sh local embeddings hand-off", () => {
     const call = (state: string) =>
       spawnSync("bash", ["-c", `${fn}\nremove_stray_state_tree "$1"`, "_", state], { encoding: "utf-8" });
 
-    // The box's case: config, backups, an empty index, no workspace.
-    const stray = path.join(dir, "state-a");
+    // The box's case: a state dir named .openclaw with config, backups, an
+    // empty index and no workspace nested inside it.
+    const stray = path.join(dir, "state-a", ".openclaw");
     mkdirSync(path.join(stray, ".openclaw", "agents", "main", "agent"), { recursive: true });
     writeFileSync(path.join(stray, ".openclaw", "openclaw.json"), "{}");
     let r = call(stray);
@@ -748,7 +749,7 @@ describe("gateway-pre-start.sh local embeddings hand-off", () => {
     expect(existsSync(path.join(stray, ".openclaw"))).toBe(false);
 
     // Something a person could have put there is not ours to delete.
-    const real = path.join(dir, "state-b");
+    const real = path.join(dir, "state-b", ".openclaw");
     mkdirSync(path.join(real, ".openclaw", "workspace"), { recursive: true });
     r = call(real);
     expect(r.status).toBe(0);
@@ -756,7 +757,7 @@ describe("gateway-pre-start.sh local embeddings hand-off", () => {
     expect(existsSync(path.join(real, ".openclaw", "workspace"))).toBe(true);
 
     // Nothing there: nothing said.
-    const clean = path.join(dir, "state-c");
+    const clean = path.join(dir, "state-c", ".openclaw");
     mkdirSync(clean, { recursive: true });
     r = call(clean);
     expect(r.status).toBe(0);
