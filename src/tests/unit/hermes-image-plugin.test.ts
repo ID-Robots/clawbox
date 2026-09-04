@@ -10,6 +10,7 @@ import {
   hermesImagePluginInstalled,
   installHermesImagePlugin,
   mergePluginsEnabled,
+  readPluginsEnabled,
 } from "@/lib/hermes-image-plugin";
 
 /**
@@ -91,35 +92,61 @@ describe("installing the ClawBox AI image backend", () => {
 });
 
 describe("plugins.enabled", () => {
+  /** What `hermes config get plugins.enabled --json` prints for a stored value. */
+  const asJson = (value: unknown) => readPluginsEnabled(JSON.stringify(value));
+
   it("adds ours to a list the customer already has", () => {
     // The list gates EVERY user plugin on the box, so replacing it would
     // unload whatever else is installed — a feature landing by breaking one.
-    expect(mergePluginsEnabled("- weather\n- spotify\n")).toEqual([
+    expect(mergePluginsEnabled(asJson(["weather", "spotify"]))).toEqual([
       "weather",
       "spotify",
       HERMES_IMAGE_PLUGIN_NAME,
     ]);
   });
 
-  it("reads the flow spelling of the same list", () => {
-    expect(mergePluginsEnabled("['weather', \"spotify\"]")).toEqual([
-      "weather",
-      "spotify",
-      HERMES_IMAGE_PLUGIN_NAME,
-    ]);
+  it("reads the YAML spellings too, for a plain `config get`", () => {
+    // Block and flow, both observed on the live box. Kept because a CLI old
+    // enough to reject `--json` still has to be understood.
+    for (const rendering of ["- weather\n- spotify\n", "['weather', \"spotify\"]"]) {
+      expect(mergePluginsEnabled(readPluginsEnabled(rendering))).toEqual([
+        "weather",
+        "spotify",
+        HERMES_IMAGE_PLUGIN_NAME,
+      ]);
+    }
   });
 
   it("starts a list when the key has never been set", () => {
     // What the CLI prints for an unset key, verbatim.
-    expect(mergePluginsEnabled("Config key not set: plugins.enabled")).toEqual([
+    expect(mergePluginsEnabled(readPluginsEnabled("Config key not set: plugins.enabled"))).toEqual([
       HERMES_IMAGE_PLUGIN_NAME,
     ]);
-    expect(mergePluginsEnabled("")).toEqual([HERMES_IMAGE_PLUGIN_NAME]);
+    expect(mergePluginsEnabled(readPluginsEnabled(""))).toEqual([HERMES_IMAGE_PLUGIN_NAME]);
   });
 
   it("writes nothing when ours is already listed", () => {
     // Null, not the same list again: `hermes config set` rewrites config.yaml,
     // and that invalidates the mtime-keyed memo every chat open reads through.
-    expect(mergePluginsEnabled("- clawai\n")).toBeNull();
+    expect(mergePluginsEnabled(asJson([HERMES_IMAGE_PLUGIN_NAME]))).toBeNull();
+  });
+
+  it("treats a value that is not a list as something to repair", () => {
+    // The residue of a `config set` whose coercion missed: our own literal,
+    // stored as TEXT. `_get_enabled_set` reads a non-list as EMPTY, so this box
+    // is loading no plugin at all — and through the plain rendering it looked
+    // like a list that already contained us, which is why it never healed.
+    const residue = asJson(`["weather", "${HERMES_IMAGE_PLUGIN_NAME}"]`);
+    expect(residue.residue).toBe(true);
+    // The names inside it are still recoverable, so the repair keeps them.
+    expect(mergePluginsEnabled(residue)).toEqual(["weather", HERMES_IMAGE_PLUGIN_NAME]);
+  });
+
+  it("repairs a value it cannot read names out of, without inventing any", () => {
+    for (const stored of [{ clawai: true }, 7, null]) {
+      const state = asJson(stored);
+      expect(state.residue, JSON.stringify(stored)).toBe(true);
+      expect(mergePluginsEnabled(state)).toEqual([HERMES_IMAGE_PLUGIN_NAME]);
+    }
   });
 });

@@ -13,6 +13,7 @@ import {
   HERMES_IMAGE_TOKEN_ENV,
   installHermesImagePlugin,
   mergePluginsEnabled,
+  readPluginsEnabled,
 } from "@/lib/hermes-image-plugin";
 import {
   CLAWBOX_AI_CHAT_MODEL_IDS,
@@ -1006,12 +1007,26 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
   // only the "not set" wording proceeds; anything else stops here, and the
   // capability probe reports a box that cannot draw through its agent, which
   // is the truth.
-  const current = await runHermesCli(["config", "get", "plugins.enabled"], { timeoutMs: 15_000 });
+  //
+  // `--json` IS LOAD-BEARING. In the plain rendering a stored LIST and a stored
+  // STRING that spells one are the same characters, and `hermes config set`
+  // stores the literal as TEXT whenever its coercion misses
+  // (hermes_cli/config.py:5514-5527, exit 0 either way). Hermes then loads NO
+  // user plugin at all — `_get_enabled_set` answers `set(enabled) if
+  // isinstance(enabled, list) else set()` — while ClawBox read the residue back
+  // as a real list and concluded there was nothing to do. TASK-701.
+  const current = await runHermesCli(
+    ["config", "get", "plugins.enabled", "--json"],
+    { timeoutMs: 15_000 },
+  );
   const listing = `${current.stdout ?? ""}\n${current.stderr ?? ""}`;
   if (current.code !== 0 && !/config key not set/i.test(listing)) {
     throw new Error(current.stderr?.trim() || "hermes config get plugins.enabled failed");
   }
-  const merged = mergePluginsEnabled(current.code === 0 ? current.stdout : "");
+  const merged = mergePluginsEnabled(
+    readPluginsEnabled(current.code === 0 ? current.stdout : ""),
+  );
+  if (merged) await writePluginsEnabled(merged);
   // `image_gen.provider` LAST, because it is the key `hermesAgentDrawsImages`
   // reads and therefore the key that turns the agent's picture ability on. A
   // provider written first and then a failed `base_url` would leave a box
@@ -1019,7 +1034,6 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
   // request; written last, a failure anywhere above means the claim was never
   // made and the composer button stays.
   const steps: string[][] = [
-    ...(merged ? [["config", "set", "plugins.enabled", JSON.stringify(merged)]] : []),
     ["config", "set", "image_gen.model", CLAWBOX_AI_IMAGE_MODEL_ID],
     ["config", "set", `image_gen.${HERMES_IMAGE_PLUGIN_NAME}.model`, CLAWBOX_AI_IMAGE_MODEL_ID],
     ["config", "set", `image_gen.${HERMES_IMAGE_PLUGIN_NAME}.base_url`, CLAWBOX_AI_PROXY_URL],
@@ -1032,5 +1046,53 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
       // Half-written image config is exactly what the capability probe is for.
       throw new Error(r.stderr?.trim() || `hermes ${args.join(" ")} failed`);
     }
+  }
+}
+
+/**
+ * Write `plugins.enabled` and PROVE it landed as a list.
+ *
+ * AN EXIT CODE IS NOT AN OUTCOME — the same rule `reconcileClawaiModelsWithHermes`
+ * follows for `providers.clawai.models`, and it matters more here. That key
+ * degrades one picker; this one is the opt-in allow-list for every user plugin
+ * on the box, and a value Hermes cannot read as a list disables all of them.
+ *
+ * It THROWS rather than returning a verdict, and the caller's ordering is what
+ * makes that the right shape: `image_gen.provider` — the key
+ * `hermesAgentDrawsImages` reads, and therefore the key that turns the agent's
+ * picture ability on — is written after this. So a plugin that did not land
+ * means the box never claims it can draw. A wrong `false` only hides an
+ * ability; a wrong `true` is an apology.
+ *
+ * Fails closed when the read-back cannot be RUN, for the same reason. There is
+ * no retry loop: this runs once, at link time, and the caller logs the throw
+ * while the link itself still succeeds.
+ */
+async function writePluginsEnabled(names: string[]): Promise<void> {
+  const written = await runHermesCli(
+    ["config", "set", "plugins.enabled", JSON.stringify(names)],
+    { timeoutMs: 15_000 },
+  );
+  if (written.code !== 0) {
+    throw new Error(written.stderr?.trim() || "hermes config set plugins.enabled failed");
+  }
+  // The CLI's own warning when its coercion did not yield a structure. Cheap,
+  // and it names the cause; the read-back below is what covers a build too old
+  // to print it, where the same literal is stored as text with a clean stderr.
+  if (/storing as string/i.test(written.stderr ?? "")) {
+    throw new Error(
+      "hermes stored plugins.enabled as text, so no plugin would load — image generation left off",
+    );
+  }
+  const read = await runHermesCli(
+    ["config", "get", "plugins.enabled", "--json"],
+    { timeoutMs: 15_000 },
+  );
+  if (read.code !== 0) {
+    throw new Error(`could not read plugins.enabled back (exit ${read.code})`);
+  }
+  const state = readPluginsEnabled(read.stdout);
+  if (state.residue || !names.every((name) => state.names.includes(name))) {
+    throw new Error("plugins.enabled did not read back as the list that was written");
   }
 }

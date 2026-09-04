@@ -113,9 +113,57 @@ export async function hermesImagePluginInstalled(): Promise<boolean> {
   }
 }
 
+/** What `plugins.enabled` currently holds, as Hermes would read it. */
+export interface PluginsEnabledState {
+  /** The names Hermes will actually load. Empty unless the key holds a LIST. */
+  names: string[];
+  /**
+   * The key holds something that is not a list — in practice the residue of a
+   * `hermes config set` whose coercion failed and stored our own JSON literal
+   * as text. `_get_enabled_set` (hermes_cli/plugins_cmd.py:1309-1324) answers
+   * `set(enabled) if isinstance(enabled, list) else set()`, so on such a box NO
+   * user plugin loads at all — the customer's included.
+   */
+  residue: boolean;
+}
+
 /**
- * The `plugins.enabled` list with our backend added, or null when it is already
- * there.
+ * Decode what `hermes config get plugins.enabled --json` printed.
+ *
+ * `--json` IS LOAD-BEARING, and it is the whole reason this function exists
+ * rather than the YAML-text parser it replaced. In the plain rendering a stored
+ * LIST and a stored STRING that spells one are the same characters, so the
+ * residue above read back as a real one-element list, the merge answered
+ * "already there, nothing to do", and a box that was loading no plugins at all
+ * could never heal itself (TASK-701).
+ *
+ * The YAML fallback is kept for the plain rendering — a CLI old enough to
+ * reject `--json`, and the block/flow shapes both observed on the live box.
+ * It cannot tell the two apart, which is why the caller asks for `--json`.
+ */
+export function readPluginsEnabled(stdout: string): PluginsEnabledState {
+  const text = (stdout || "").trim();
+  if (!text || /^config key not set/i.test(text)) return { names: [], residue: false };
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return { names: parseYamlList(text), residue: false };
+  }
+  if (Array.isArray(value)) {
+    return { names: value.filter((v): v is string => typeof v === "string"), residue: false };
+  }
+  // A STRING is the residue case. Its content is our own literal, so the names
+  // in it are recoverable and the customer's plugins survive the repair — but
+  // the key is still wrong, and `mergePluginsEnabled` must not read this as
+  // "already correct".
+  if (typeof value === "string") return { names: parseYamlList(value), residue: true };
+  return { names: [], residue: true };
+}
+
+/**
+ * The `plugins.enabled` list with our backend added, or null when there is
+ * nothing to write.
  *
  * MERGED, NEVER REPLACED, and that is the whole reason this is a function with
  * a test rather than a literal in the caller. `plugins.enabled` is opt-in for
@@ -126,16 +174,15 @@ export async function hermesImagePluginInstalled(): Promise<boolean> {
  *
  * Null on "nothing to do" so the caller can skip the write entirely: `hermes
  * config set` rewrites config.yaml, which invalidates the mtime-keyed config
- * memo every chat open reads through.
- *
- * @param current what `hermes config get plugins.enabled` printed — a YAML
- *                list, an empty string on an unset key, or the CLI's
- *                "Config key not set: …" line.
+ * memo every chat open reads through. A `residue` state is never "nothing to
+ * do", however complete its names look: the TYPE is what Hermes gates on.
  */
-export function mergePluginsEnabled(current: string): string[] | null {
-  const existing = parseYamlList(current);
-  if (existing.includes(HERMES_IMAGE_PLUGIN_NAME)) return null;
-  return [...existing, HERMES_IMAGE_PLUGIN_NAME];
+export function mergePluginsEnabled(state: PluginsEnabledState): string[] | null {
+  const withOurs = state.names.includes(HERMES_IMAGE_PLUGIN_NAME)
+    ? [...state.names]
+    : [...state.names, HERMES_IMAGE_PLUGIN_NAME];
+  if (state.residue) return withOurs;
+  return state.names.includes(HERMES_IMAGE_PLUGIN_NAME) ? null : withOurs;
 }
 
 /**
