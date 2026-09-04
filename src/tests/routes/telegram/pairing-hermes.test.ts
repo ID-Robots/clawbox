@@ -15,6 +15,9 @@ vi.mock("@/lib/openclaw-config", () => ({
   readTelegramPairingRequests: vi.fn(),
   approveTelegramPairing: vi.fn(),
 }));
+// Hermes keeps its own bot token in ~/.hermes/.env; the route asks for its
+// PRESENCE, never its value.
+vi.mock("@/lib/hermes-skill-secrets", () => ({ hermesSecretsPresent: vi.fn() }));
 vi.mock("@/lib/hermes-telegram", () => ({
   approveHermesPairing: vi.fn(),
   listHermesPairing: vi.fn(),
@@ -31,6 +34,7 @@ import {
   readTelegramPairingRequests,
   approveTelegramPairing,
 } from "@/lib/openclaw-config";
+import { hermesSecretsPresent } from "@/lib/hermes-skill-secrets";
 import {
   approveHermesPairing,
   listHermesPairing,
@@ -51,6 +55,7 @@ const mockHermesList = vi.mocked(listHermesPairing);
 const mockHermesApproved = vi.mocked(readHermesApprovedUsers);
 const mockHermesRead = vi.mocked(readHermesPairingRequests);
 const mockNotify = vi.mocked(notifyHermesTelegramUser);
+const mockSecrets = vi.mocked(hermesSecretsPresent);
 
 const REQUEST_ID = "a1b2c3d4e5f60718";
 
@@ -89,6 +94,7 @@ describe("/setup-api/telegram/pairing on Hermes", () => {
     });
     mockHermesApprove.mockResolvedValue({ userId: "123456789", userName: "Krasimir Kralev" });
     mockNotify.mockResolvedValue(true);
+    mockSecrets.mockResolvedValue({ TELEGRAM_BOT_TOKEN: true });
 
     const mod = await import("@/app/setup-api/telegram/pairing/route");
     GET = mod.GET;
@@ -104,6 +110,31 @@ describe("/setup-api/telegram/pairing on Hermes", () => {
     ]);
     expect(mockHermesRead).toHaveBeenCalled();
     expect(mockOpenclawRead).not.toHaveBeenCalled();
+  });
+
+  it("answers for a bot ClawBox has no token for — the harness holds its own", async () => {
+    // `hermes config set TELEGRAM_BOT_TOKEN` writes ~/.hermes/.env and nothing
+    // else; ClawBox'"'"'s copy is a side effect of /setup-api/telegram/configure.
+    // Asking for that copy answered `configured: false` for a working bot, and
+    // this GET returns an empty pairing state on that answer — so the desktop
+    // poll that raises the "someone wants to talk to your bot" popup was told
+    // there was nothing to show.
+    mockGet.mockResolvedValue(undefined);
+
+    const body = await (await GET(new Request(`${url}?poll=1`))).json();
+
+    expect(body.configured).toBe(true);
+    expect(body.pending).toHaveLength(1);
+  });
+
+  it("still says not configured when the harness has no bot either", async () => {
+    mockGet.mockResolvedValue(undefined);
+    mockSecrets.mockResolvedValue({ TELEGRAM_BOT_TOKEN: false });
+
+    const body = await (await GET(new Request(`${url}?poll=1`))).json();
+
+    expect(body.configured).toBe(false);
+    expect(body.pending).toEqual([]);
   });
 
   it("uses the authoritative CLI for the Settings check", async () => {

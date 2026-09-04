@@ -13,6 +13,11 @@
  *      has no CLI send path, so it calls the Bot API directly with the stored
  *      token — the same token telegram/status already uses for `getMe`.
  *
+ *      The two editions therefore have DIFFERENT credentials, and the check
+ *      has to sit on the edition's own side of the branch: Hermes' bot token
+ *      lives in ~/.hermes/.env and is never read here, so ClawBox's copy of a
+ *      token says nothing about whether that box can send.
+ *
  * WHAT THE MESSAGE SAYS, AND WHAT IT DELIBERATELY DOES NOT
  *
  * The text is a fixed template: status, run id, a few counts. It never
@@ -129,23 +134,35 @@ async function sendTelegramDirect(token: string, chatId: string, text: string): 
 }
 
 async function notifyTelegram(message: string): Promise<void> {
-  const token = await configGet("telegram_bot_token");
-  if (typeof token !== "string") return;
-  // Rebuild the token from the match rather than testing and reusing the
-  // original. Same value either way, but the one that reaches the URL is now
-  // constructed here out of characters the pattern allows, which is what lets
-  // CodeQL see the check as a sanitizer instead of an unrelated branch.
-  const matched = BOT_TOKEN_RE.exec(token.trim());
-  if (!matched) {
-    if (token.trim()) console.error("[coding-agent] telegram bot token is not a valid token; notice not sent");
-    return;
-  }
-  const botToken = `${matched[1]}:${matched[2]}`;
   const text = message.slice(0, MAX_TELEGRAM_CHARS);
-
+  // WHICH EDITION FIRST, because the two have different credentials — and the
+  // credential is the whole reason this branch exists.
   const harness = await getActiveHarness();
+
   if (harness === "hermes") {
-    const users = (await readHermesApprovedUsers()).slice(0, MAX_TELEGRAM_RECIPIENTS);
+    // The bot is the HARNESS's. `hermes send` reads its own token from
+    // ~/.hermes/.env and the approved senders come from Hermes' pairing store;
+    // nothing on this path can use ClawBox's `telegram_bot_token`, which is
+    // written only as a side effect of /setup-api/telegram/configure.
+    //
+    // Gating on it anyway — which is what this function did, above the harness
+    // branch — silenced the notice on every Hermes box paired another way:
+    // `hermes config set`, or a restore that brought back ~/.hermes without
+    // ClawBox's config.json. A working bot, approved users, and no notice.
+    // Shape-checked before they are counted, the way the OpenClaw leg filters
+    // its ids below. Hermes' store tolerates a legacy layout and merges two
+    // directories, so a key that cannot address anyone is possible — counting
+    // it would report five delivery FAILURES for messages nothing attempted,
+    // which is the ambiguity the log line right below exists to remove.
+    const users = (await readHermesApprovedUsers())
+      .filter((user) => CHAT_ID_RE.test(user.id))
+      .slice(0, MAX_TELEGRAM_RECIPIENTS);
+    if (users.length === 0) {
+      // "No notice arrived" and "no notice was sent" are different problems.
+      // A silent return made them the same one to whoever went looking.
+      console.info("[coding-agent] no approved Telegram users on this device; notice not sent");
+      return;
+    }
     for (const user of users) {
       const ok = await notifyHermesTelegramUser(user.id, text);
       if (!ok) console.error(`[coding-agent] telegram notice to ${user.id} was not delivered`);
@@ -153,9 +170,32 @@ async function notifyTelegram(message: string): Promise<void> {
     return;
   }
 
+  // OpenClaw: the web server has no CLI send path, so it calls the Bot API
+  // itself and the stored token IS the credential — no token, nothing to send
+  // with.
+  const token = await configGet("telegram_bot_token");
+  if (typeof token !== "string" || !token.trim()) {
+    console.info("[coding-agent] no Telegram bot is configured on this device; notice not sent");
+    return;
+  }
+  // Rebuild the token from the match rather than testing and reusing the
+  // original. Same value either way, but the one that reaches the URL is now
+  // constructed here out of characters the pattern allows, which is what lets
+  // CodeQL see the check as a sanitizer instead of an unrelated branch.
+  const matched = BOT_TOKEN_RE.exec(token.trim());
+  if (!matched) {
+    console.error("[coding-agent] telegram bot token is not a valid token; notice not sent");
+    return;
+  }
+  const botToken = `${matched[1]}:${matched[2]}`;
+
   const ids = (await readTelegramAllowFrom())
     .filter((id) => CHAT_ID_RE.test(id))
     .slice(0, MAX_TELEGRAM_RECIPIENTS);
+  if (ids.length === 0) {
+    console.info("[coding-agent] no approved Telegram senders on this device; notice not sent");
+    return;
+  }
   for (const id of ids) {
     const ok = await sendTelegramDirect(botToken, id, text);
     if (!ok) console.error(`[coding-agent] telegram notice to ${id} was not delivered`);
