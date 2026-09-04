@@ -466,6 +466,18 @@ resolve_email_directives_dir() {
 }
 EMAIL_DIRECTIVES_DIR="${EMAIL_DIRECTIVES_DIR:-$(resolve_email_directives_dir)}"
 EMAIL_DIRECTIVES_TIMEOUT="${EMAIL_DIRECTIVES_TIMEOUT:-10}"
+# Validated for the same reason register-mcp.sh validates HERMES_CLI_TIMEOUT,
+# and with a worse consequence here. `${:-10}` substitutes on unset and empty
+# and on nothing else, so a value already in the environment is used as given:
+# `timeout 0` (and "00") means NO timeout, and a non-numeric duration makes
+# `timeout` exit 125 WITHOUT ever running python — the strip then fails open and
+# the box READS THE UID ALOUD, which is the whole defect this file was changed
+# to remove. The glob rejects a non-digit value; the arithmetic test rejects
+# every spelling of zero and a value too large for an integer.
+case "$EMAIL_DIRECTIVES_TIMEOUT" in
+  ''|*[!0-9]*) EMAIL_DIRECTIVES_TIMEOUT=10 ;;
+esac
+[ "$EMAIL_DIRECTIVES_TIMEOUT" -gt 0 ] 2>/dev/null || EMAIL_DIRECTIVES_TIMEOUT=10
 
 strip_email_directives() {
   local text="$1" out
@@ -477,7 +489,13 @@ strip_email_directives() {
   # The reply travels in the environment, never in argv or a shell string: it is
   # model output, it can be long, and this is the same rule kokoro_via_server
   # already follows.
-  if ! out=$(CLAWBOX_TTS_RAW_TEXT="$text" timeout "$EMAIL_DIRECTIVES_TIMEOUT" "$PYTHON_BIN" -c '
+  # `-k 5` for the same reason as the two `hermes` calls in register-mcp.sh:
+  # plain `timeout` sends SIGTERM only, and this is a command substitution, so a
+  # child that ignores it keeps the pipe open and bash blocks reading it until
+  # the survivor dies — the ceiling would not be one. A `python3` started here
+  # dies on SIGTERM, so the grace is a guard against the interpreter wedging
+  # rather than a path anything takes today.
+  if ! out=$(CLAWBOX_TTS_RAW_TEXT="$text" timeout -k 5 "$EMAIL_DIRECTIVES_TIMEOUT" "$PYTHON_BIN" -c '
 import os, sys
 sys.path.insert(0, sys.argv[1])
 from email_directives import strip_email_directives

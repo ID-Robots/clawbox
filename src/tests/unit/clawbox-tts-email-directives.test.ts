@@ -143,6 +143,50 @@ d("clawbox-tts.sh does not speak EMAIL: directives", () => {
     expect(r.stderr).not.toMatch(/EMAIL: directive/);
   });
 
+  it.each([["0"], ["00"], ["000"], ["abc"], ["9".repeat(22)]])(
+    "coerces an EMAIL_DIRECTIVES_TIMEOUT of %s rather than speaking the uid aloud",
+    (value) => {
+      // The sibling of register-mcp.sh's HERMES_CLI_TIMEOUT, with a worse
+      // consequence. `${:-10}` substitutes on unset and empty only, so a value
+      // already in the environment is used as given — and a NON-NUMERIC one
+      // makes `timeout` exit 125 without ever running python. The strip then
+      // fails open and the box reads "EMAIL four four seven one" out loud,
+      // which is the entire defect this file exists to prevent. Every spelling
+      // of zero is the other half: `timeout 0` means no timeout at all, so the
+      // ceiling this knob names would simply not exist.
+      const r = run(["--", "Here are your last two emails.\nEMAIL:4471", outPath], {
+        EMAIL_DIRECTIVES_TIMEOUT: value,
+      });
+      expect(r.status).toBe(0);
+      expect(spoken()).toBe("Here are your last two emails.");
+      expect(spoken()).not.toContain("EMAIL:");
+      expect(spoken()).not.toContain("4471");
+    },
+  );
+
+  it("still has a real ceiling when the knob says zero, rather than hanging the voice", () => {
+    // The other half of the guard, and the half the case above cannot see: with
+    // a python that answers, `timeout 0` looks identical to a working ceiling.
+    // `timeout 0` means NO timeout, so an uncoerced "0" plus a wedged
+    // interpreter is a clawbox-tts that never returns — the owner asks for a
+    // summary with voice on and simply never hears one. Coerced to 10 it fails
+    // open instead, which is this function's contract everywhere else.
+    const wedged = path.join(dir, "wedged-python");
+    writeFileSync(wedged, "#!/usr/bin/env bash\ntrap '' TERM\nexec sleep 120\n");
+    chmodSync(wedged, 0o755);
+    const started = Date.now();
+    const r = run(["--", "Here are your last two emails.\nEMAIL:4471", outPath], {
+      EMAIL_DIRECTIVES_TIMEOUT: "0",
+      PYTHON_BIN: wedged,
+    });
+    // 10s coerced ceiling + the 5s SIGKILL grace, nowhere near the stub's 120s.
+    expect(Date.now() - started).toBeLessThan(45_000);
+    expect(r.status).toBe(0);
+    // Fail-open: the strip could not run, so the reply is spoken as it arrived
+    // and the script says so. That is honest; hanging is not.
+    expect(r.stderr).toContain("could not strip EMAIL: directives");
+  }, 90_000);
+
   it("speaks the reply as it arrived, and says so, when the parser is not there", () => {
     // Fail open, loudly: a directive read aloud is a blemish, a box that goes
     // silent because a helper moved is a broken appliance.
