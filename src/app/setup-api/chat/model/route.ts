@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { getActiveHarness } from "@/lib/harness";
+import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { getAll } from "@/lib/config-store";
 import {
   GatewayNotReadyError,
@@ -716,10 +718,17 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
   // `openai` one first, and the header then rendered the API-key row — with
   // its catalogue — for a model the box routes through the subscription.
   const activeUiProvider = uiProviderForModel(activeModel);
-  const activeOption = options.find(
-    (option) => option.model === activeModel
-      && (!activeUiProvider || option.provider === activeUiProvider),
-  ) ?? options.find((option) => option.model === activeModel) ?? null;
+  // Only ever asked about a model that EXISTS. The Local-AI placeholder row
+  // carries `model: null` when no local model is configured, so a null
+  // activeModel — a box with nothing pinned yet — used to match it and be
+  // reported as the active chat model, complete with the "Local AI" label and
+  // an `available: false` beside it.
+  const activeOption = activeModel
+    ? options.find(
+        (option) => option.model === activeModel
+          && (!activeUiProvider || option.provider === activeUiProvider),
+      ) ?? options.find((option) => option.model === activeModel) ?? null
+    : null;
   const activeLabel = activeOption?.label ?? null;
 
   return {
@@ -770,7 +779,55 @@ function refuseDisabledProvider(
   );
 }
 
+/**
+ * Whether the chat's provider and model live in THIS route's store.
+ *
+ * Everything below reads and writes `agents.defaults.model.primary` in
+ * ~/.openclaw/openclaw.json. On the Hermes SKU that key is never written, and
+ * on the dual SKU `ai-models/configure` does keep it warm for the OpenClaw
+ * half — but while Hermes is the active harness it is not this box's chat
+ * model. That lives in `model.provider` / `model.default` in
+ * ~/.hermes/config.yaml, which the harness's own CLI owns and which
+ * /setup-api/hermes/models already serves — live catalogue, provider scope,
+ * pairing enforcement and all. Answering here from the OpenClaw config would
+ * be a second, thinner source of truth for the same question.
+ *
+ * Asked as a CAPABILITY, the way its sibling `chat/history` asks whether the
+ * transcript lives here: `modelStore` is the box's own statement about which
+ * store holds the answer, so the day a third harness arrives this route needs
+ * no edit — and the two "wrong store" refusals stay on one mechanism instead
+ * of each re-deciding from the harness id.
+ *
+ * Facts do not matter to it (no capability read here depends on a credential),
+ * so the cautious defaults are enough and this stays a cheap call.
+ */
+async function chatModelLivesHere(): Promise<boolean> {
+  const harness = await getActiveHarness();
+  return capabilitiesFor(harness, UNKNOWN_FACTS).modelStore === "openclaw-config";
+}
+
+/**
+ * Mirrors chat/history's refusal, for the same reason: a caller asking the
+ * wrong store is told so, rather than handed a confident answer about a store
+ * that does not hold its subject. Before this, a Hermes box answered
+ * `activeOptionId: "__setup_local__"` / `activeLabel: "Local AI"` — a row the
+ * same payload marks unavailable — while the chat was demonstrably running
+ * turns on a cloud provider.
+ *
+ * The sentence names no endpoint: `switchChatModel` renders a refusal's
+ * `error` straight into a chat bubble, and an internal path is not a sentence
+ * for a customer. The machine-readable half is the `code`, which chat/history
+ * carries too.
+ */
+const WRONG_STORE = {
+  error: "This box's chat provider and model are held by its agent harness, not by this store.",
+  code: "wrong_store",
+} as const;
+
 export async function GET() {
+  if (!(await chatModelLivesHere())) {
+    return NextResponse.json(WRONG_STORE, { status: 409, headers: { "Cache-Control": "no-store" } });
+  }
   try {
     const state = await loadChatModelState();
     return NextResponse.json(state, {
@@ -785,6 +842,11 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  // The write half of the same store. A switch here spends `openclaw config
+  // set` on a key the Hermes agent never reads, and answered 200 for it.
+  if (!(await chatModelLivesHere())) {
+    return NextResponse.json(WRONG_STORE, { status: 409 });
+  }
   try {
     let body: { source?: ChatModelSource; model?: string; provider?: string };
     try {

@@ -25,6 +25,14 @@ export default defineConfig({
     // control; the individual edition tests override this with a real tmp file.
     env: {
       CLAWBOX_EDITION_FILE: "/nonexistent/clawbox-test-edition.env",
+      // ...and the ENV the lookup falls back to when that file is absent
+      // (edition-source.ts reads CLAWBOX_EDITION next). Pointing the file at
+      // nowhere only half-closed the hole: a shell on a Hermes box that
+      // exports CLAWBOX_EDITION still reached every route that asks which
+      // harness is active. Measured 2026-09-04: `CLAWBOX_EDITION=hermes`
+      // turned 76 chat-model assertions into 409s. Tests that mean to be on
+      // another edition set their own value or mock `@/lib/harness`.
+      CLAWBOX_EDITION: "openclaw",
       // The same hermetic principle for device STATE: config-store falls back
       // to the real /home/clawbox/clawbox when CLAWBOX_ROOT is unset, so a
       // test that imports the real modules without re-pointing the root reads

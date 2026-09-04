@@ -47,8 +47,12 @@ async function transcriptLivesHere(): Promise<boolean> {
   return !capabilitiesFor(harness, UNKNOWN_FACTS).hasLiveConnection;
 }
 
+// The same refusal chat/model makes about the chat's model, and it carries the
+// same `code`: two routes that say "you are asking the wrong store" must be one
+// thing a caller can switch on, not two shapes to string-match.
 const WRONG_STORE = {
   error: "This box's chat transcript is held by its agent gateway, not on disk. Ask the gateway.",
+  code: "wrong_store",
 } as const;
 
 const BAD_KEY = { error: "Invalid session key" } as const;

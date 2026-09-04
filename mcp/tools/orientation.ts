@@ -125,9 +125,29 @@ interface ClawaiPayload {
   model?: string;
 }
 
+/**
+ * The shape /setup-api/chat/model actually answers with.
+ *
+ * It never had `selected` or `current`: this tool read two keys the route has
+ * never returned, so `reported()` mapped both to "unknown" and every OpenClaw
+ * box reported `device_default: {provider:"unknown", model:"unknown"}`. The
+ * tests that should have caught it invented the payload themselves.
+ *
+ * `wrong_store` is the route's refusal (409) on a box whose harness keeps its
+ * own model — the same code chat/history uses. It is read here so the two
+ * halves of `ai` cannot contradict each other; see `limits` below.
+ *
+ * `activeModel` is `agents.defaults.model.primary` as the route reports it —
+ * the SAME key `readConfiguredModelLimits()` parses. Everything in `ai` is
+ * derived from it and nothing else: the payload's `primary` object is the
+ * "back to primary" TARGET, which on a box running its local model is a
+ * different row, and mixing the two produced a provider from one model beside
+ * the id and context window of another.
+ */
 interface ChatModelPayload {
-  selected?: { model?: string | null; provider?: string | null; label?: string } | null;
-  current?: string | null;
+  activeModel?: string | null;
+  activeLabel?: string | null;
+  code?: string;
 }
 
 interface ConfiguredModelLimits {
@@ -135,6 +155,25 @@ interface ConfiguredModelLimits {
   context_window_tokens: number | "unknown";
   max_output_tokens: number | "unknown";
   source: "openclaw_config";
+}
+
+/**
+ * `provider/modelId` -> the id half, so the OpenClaw leg reports the same shape
+ * the Hermes one does (`hermesDeviceDefault`): a bare model id beside a
+ * separate provider, not the qualified reference repeated in both fields.
+ * A reference with no namespace is passed through as-is.
+ */
+function bareModelId(ref: string | null | undefined): string | null {
+  if (typeof ref !== "string" || !ref) return null;
+  const slash = ref.indexOf("/");
+  return slash > 0 && slash < ref.length - 1 ? ref.slice(slash + 1) : ref;
+}
+
+/** Its other half: `provider/modelId` -> the namespace the gateway routes through. */
+function providerOf(ref: string | null | undefined): string | null {
+  if (typeof ref !== "string" || !ref) return null;
+  const slash = ref.indexOf("/");
+  return slash > 0 && slash < ref.length - 1 ? ref.slice(0, slash) : null;
 }
 
 /** Keep only positive whole-token counts; invalid config stays visibly unknown. */
@@ -237,13 +276,25 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
                 : "unknown",
             }
           : {
+              // ONE source. Both halves and the limits below come from
+              // `agents.defaults.model.primary`, so the payload can only name a
+              // model the box is actually set to — or nothing, which is the
+              // truthful answer on a box with nothing pinned and the whole
+              // point of the route's own null guard.
               device_default: {
-                provider: reported(chatModel?.selected?.provider),
-                model: reported(chatModel?.selected?.model ?? chatModel?.current),
+                provider: reported(providerOf(chatModel?.activeModel)),
+                model: reported(bareModelId(chatModel?.activeModel)),
                 thinking: "unknown",
               },
               current_chat: ctx.install === "dual" ? UNCONFIRMED_EDITION_CHAT_NOTE : OPENCLAW_CURRENT_CHAT_NOTE,
-              limits: readConfiguredModelLimits(),
+              // Both halves answer from the SAME store or neither does. `ctx.edition`
+              // is resolved once at MCP startup and falls back to "openclaw" when the
+              // web app is not up yet, so on a dual box this branch can run while
+              // Hermes is active — and the route then 409s while this file happily
+              // parses openclaw.json. That produced one payload saying "I do not know
+              // my model" beside a named model with a context window, which the
+              // server's own instructions tell every model to read as authoritative.
+              limits: chatModel ? readConfiguredModelLimits() : "unknown",
             };
 
       return json({

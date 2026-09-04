@@ -5999,16 +5999,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             )
           ) : (<>
           {chatModelState && (() => {
-            // A primary the gateway IS running that matches no row is not the
-            // same as "nothing pinned yet". Defaulting to options[0] there
-            // named the first provider in the list — ClawBox AI on every
-            // paired box — while the box was actually running something else
-            // and every turn failed. It also made the owner's most natural
-            // recovery gesture a no-op: HeaderDropdown fires onChange only
-            // when the pick differs from `value`, so clicking the row the
-            // header was already showing did nothing. Empty `value` keeps
-            // that click live and the label honest.
-            const unselectableActive = !!chatModelState.activeModel && !chatModelState.activeOptionId
+            // No `activeOptionId` means no row on this list is what the box
+            // is running — whether because the primary matches none of them,
+            // or because nothing is pinned at all. Both used to default to
+            // options[0], which named the first provider in the list — ClawBox
+            // AI on every paired box — as the active one. It also made the
+            // owner's most natural recovery gesture a no-op: HeaderDropdown
+            // fires onChange only when the pick differs from `value`, so
+            // clicking the row the header was already showing did nothing.
+            // Empty `value` keeps that click live and the label honest.
+            //
+            // The `activeModel` half of this test was dropped when chat/model
+            // stopped resolving a null primary onto the Local-AI placeholder:
+            // that made "nothing pinned" a null/null state, which this
+            // predicate had been reading as "a row is active".
+            const unselectableActive = !chatModelState.activeOptionId
             const activeId = chatModelState.activeOptionId
               ?? (unselectableActive ? '' : (chatModelState.options[0]?.id ?? ''))
             const activeOption = chatModelState.options.find(o => o.id === activeId)
