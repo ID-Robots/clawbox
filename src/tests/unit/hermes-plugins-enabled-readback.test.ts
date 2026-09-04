@@ -298,11 +298,11 @@ describe("the proof does not accept the ambiguous rendering", () => {
     expect(claimedItCanDraw()).toBe(false);
   });
 
-  it("does not punish a read-back the CLI never answered", async () => {
+  it("makes no claim on a read-back the CLI never answered, and withdraws the old one", async () => {
     // 127 is the shell's code for the `hermes` shim while the venv under it is
-    // being rebuilt: nothing was parsed, and the write above still exited 0
-    // with no coercion warning. Abandoning the feature for the whole link over
-    // that is the false-failure shape.
+    // being rebuilt: nothing was parsed, and the write above still exited 0. So
+    // this is not worth failing the link over — but it is not proof either, and
+    // a box linked once before is still holding the claim from that link.
     let written = false;
     cliMock.mockImplementation(async (args: string[]) => {
       if (args[1] === "set" && args[2] === "plugins.enabled") {
@@ -313,12 +313,59 @@ describe("the proof does not accept the ambiguous rendering", () => {
         if (!written) return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
         return { code: 127, stdout: "", stderr: "hermes: command not found" };
       }
+      if (args[1] === "get" && args[2] === "image_gen.provider") {
+        return { code: 0, stdout: `${HERMES_IMAGE_PLUGIN_NAME}\n`, stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    const result = await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(result.provider).toBe("clawai"); // the link itself still succeeds
+    expect(claimedItCanDraw()).toBe(false);
+    expect(unsets()).toContain("image_gen.provider");
+  });
+
+  it("withdraws the claim when the key holds a shape it cannot read at all", async () => {
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return { code: 0, stdout: "not json and not a list", stderr: "" };
+      }
+      if (args[1] === "get" && args[2] === "image_gen.provider") {
+        return { code: 0, stdout: `${HERMES_IMAGE_PLUGIN_NAME}\n`, stderr: "" };
+      }
       return { code: 0, stdout: "", stderr: "" };
     });
 
     await applyClawaiToHermes("claw_token_abc", "flash");
 
-    expect(claimedItCanDraw()).toBe(true);
-    expect(unsets()).not.toContain("image_gen.provider");
+    expect(wrotePluginsEnabled()).toBe(false); // left alone, not replaced
+    expect(claimedItCanDraw()).toBe(false);
+    expect(unsets()).toContain("image_gen.provider");
+  });
+});
+
+describe("the plain fallback is for one answer only", () => {
+  it("does not downgrade to the ambiguous rendering on a transient typed-read failure", async () => {
+    // A held config lock is not "this build has no --json". Falling back there
+    // would read the residue `["clawai"]` out of the plain rendering as a real
+    // list, conclude there is nothing to do, and go on to claim the box can
+    // draw — the exact defect this file exists to remove.
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return args.includes("--json")
+          ? { code: 1, stdout: "", stderr: "could not acquire config lock" }
+          : { code: 0, stdout: `["${HERMES_IMAGE_PLUGIN_NAME}"]`, stderr: "" };
+      }
+      if (args[1] === "get" && args[2] === "image_gen.provider") {
+        return { code: 0, stdout: `${HERMES_IMAGE_PLUGIN_NAME}\n`, stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(claimedItCanDraw()).toBe(false);
+    expect(unsets()).toContain("image_gen.provider");
   });
 });

@@ -1017,24 +1017,37 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
   // user plugin at all — `_get_enabled_set` answers `set(enabled) if
   // isinstance(enabled, list) else set()` — while ClawBox read the residue back
   // as a real list and concluded there was nothing to do. TASK-701.
-  const { state, typed } = await readPluginsEnabledFromCli();
-  if (state.kind === "unreadable") {
-    throw new Error(
-      "plugins.enabled holds a value this build cannot read — left alone, image generation off",
-    );
-  }
-  const merged = mergePluginsEnabled(state);
+  //
+  // WITHDRAW THE CLAIM on every exit that is not "the plugin is loadable",
+  // don't merely decline to re-make it. Every box that can be in the residue
+  // state has been linked once already, so `image_gen.provider` is on disk
+  // naming us — and that single key is what `hermesAgentDrawsImages` reads.
+  // Skipping the writes below would leave the composer button and the
+  // capability both saying yes over a plugin Hermes does not load.
+  let loadable: boolean;
   try {
-    if (merged) await writePluginsEnabled(merged, typed);
+    const { state, typed } = await readPluginsEnabledFromCli();
+    if (state.kind === "unreadable") {
+      throw new Error(
+        "plugins.enabled holds a value this build cannot read — left alone, image generation off",
+      );
+    }
+    const merged = mergePluginsEnabled(state);
+    loadable = merged ? await writePluginsEnabled(merged, typed) : true;
   } catch (err) {
-    // WITHDRAW THE CLAIM, don't merely decline to re-make it. Every box that
-    // can be in the residue state has been linked once already, so
-    // `image_gen.provider` is on disk naming us — and that single key is what
-    // `hermesAgentDrawsImages` reads. Skipping the writes below would leave the
-    // composer button and the capability both saying yes over a plugin Hermes
-    // does not load.
     await withdrawImageProviderClaim();
     throw err;
+  }
+  if (!loadable) {
+    // The write exited 0 and the CLI never answered the question that would
+    // prove it. Not a failure worth throwing over — but not a licence to claim
+    // the agent can draw either, so the claim is withdrawn and the image keys
+    // below are left unwritten. The next link asks again.
+    await withdrawImageProviderClaim();
+    console.warn(
+      "[hermes/clawai] plugins.enabled could not be proved to hold a list — image generation left off",
+    );
+    return;
   }
   // `image_gen.provider` LAST, because it is the key `hermesAgentDrawsImages`
   // reads and therefore the key that turns the agent's picture ability on. A
@@ -1092,6 +1105,16 @@ async function readPluginsEnabledFromCli(): Promise<{ state: PluginsEnabledState
   // that cannot answer that question has told us nothing about whether the
   // stored value is residue. Losing image generation there would be a false
   // failure, not a conservative one — these boxes draw today.
+  //
+  // ONLY for that answer, though. Any other failure — a held config lock, a
+  // timeout, a wedged shim — must propagate: falling back to the ambiguous
+  // rendering there is how a stored `["clawai"]` string gets read as a list
+  // again, which is the whole defect this function exists to remove.
+  if (!UNSUPPORTED_OPTION_RE.test(`${typedRead.stdout ?? ""}\n${typedRead.stderr ?? ""}`)) {
+    throw new Error(
+      typedRead.stderr?.trim() || `hermes config get plugins.enabled --json failed (exit ${typedRead.code})`,
+    );
+  }
   const plainRead = await runHermesCli(["config", "get", "plugins.enabled"], { timeoutMs: 15_000 });
   const listing = `${plainRead.stdout ?? ""}\n${plainRead.stderr ?? ""}`;
   if (plainRead.code !== 0 && !/config key not set/i.test(listing)) {
@@ -1132,7 +1155,18 @@ async function withdrawImageProviderClaim(): Promise<void> {
   }
 }
 
-async function writePluginsEnabled(names: string[], typed: boolean): Promise<void> {
+/**
+ * Argparse's answers for an option a build does not have. Matched on the
+ * WORDING because the exit code (2) is shared with every other usage error.
+ */
+const UNSUPPORTED_OPTION_RE = /unrecognized arguments?:|no such option|unknown option|invalid choice/i;
+
+/**
+ * @returns true when the plugin is loadable as far as this build can be asked —
+ *          false when the write exited 0 and the read-back that would prove it
+ *          could not be run. Throws when the write, or the proof, said no.
+ */
+async function writePluginsEnabled(names: string[], typed: boolean): Promise<boolean> {
   const written = await runHermesCli(
     ["config", "set", "plugins.enabled", JSON.stringify(names)],
     { timeoutMs: 15_000 },
@@ -1148,7 +1182,10 @@ async function writePluginsEnabled(names: string[], typed: boolean): Promise<voi
       "hermes stored plugins.enabled as text, so no plugin would load — image generation left off",
     );
   }
-  if (!typed) return; // the type cannot be proved on this build; see the read above.
+  // The type cannot be proved on THIS BUILD at all (see the read above), which
+  // is a permanent property rather than a moment. Refusing the feature on those
+  // boxes would take away something that works today.
+  if (!typed) return true;
   const read = await runHermesCli(
     ["config", "get", "plugins.enabled", "--json"],
     { timeoutMs: 15_000 },
@@ -1162,9 +1199,9 @@ async function writePluginsEnabled(names: string[], typed: boolean): Promise<voi
   if (!hermesCliAnswered(read)) {
     console.warn(
       "[hermes/clawai] could not read plugins.enabled back (the CLI did not answer);"
-      + " the write exited 0 and is left as written",
+      + " the write exited 0 and is left as written, unproved",
     );
-    return;
+    return false;
   }
   if (read.code !== 0) {
     throw new Error(`could not read plugins.enabled back (exit ${read.code})`);
@@ -1176,4 +1213,5 @@ async function writePluginsEnabled(names: string[], typed: boolean): Promise<voi
   if (state.kind !== "list" || !names.every((name) => state.names.includes(name))) {
     throw new Error("plugins.enabled did not read back as the list that was written");
   }
+  return true;
 }
