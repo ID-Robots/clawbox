@@ -326,6 +326,9 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       installed: false,
       path: undefined as string | undefined,
       version: undefined as string | undefined,
+      // Whether clawbox-browser.service could start this binary; the app keys
+      // its launch on this rather than on `installed`.
+      serviceSafe: undefined as boolean | undefined,
     },
     browser: {
       running: false,
@@ -334,6 +337,10 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     },
     enabled: false,
     cdpPort: 18800,
+    // A fresh box has not been through the browser wizard.
+    setupComplete: false,
+    autoOpen: true,
+    startUrl: "https://www.google.com",
   };
 
   const buildClawKeepStatus = (sourcePath: string) => {
@@ -905,7 +912,22 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     }
 
     if (path === "/setup-api/vnc") {
-      await fulfillJson(route, { host: "127.0.0.1", wsPort: 6080 });
+      // `available` is what VNCApp keys on; without it every screen it draws —
+      // including the one embedded in the Browser app — is the repair screen.
+      await fulfillJson(route, { host: "127.0.0.1", available: true, vncPort: 5900, wsPort: 6080 });
+      return;
+    }
+
+    if (path === "/setup-api/browser/setup" && method === "POST") {
+      const payload = await readRequestJson<{ setupComplete?: boolean; autoOpen?: boolean; startUrl?: string | null }>(route);
+      if (typeof payload.setupComplete === "boolean") browserStatus.setupComplete = payload.setupComplete;
+      if (typeof payload.autoOpen === "boolean") browserStatus.autoOpen = payload.autoOpen;
+      if (typeof payload.startUrl === "string" && payload.startUrl !== "") browserStatus.startUrl = payload.startUrl;
+      await fulfillJson(route, {
+        setupComplete: browserStatus.setupComplete,
+        autoOpen: browserStatus.autoOpen,
+        startUrl: browserStatus.startUrl,
+      });
       return;
     }
 
@@ -922,6 +944,7 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
             browserStatus.chromium.installed = true;
             browserStatus.chromium.path = "/usr/bin/chromium";
             browserStatus.chromium.version = "Chromium 124.0.0";
+            browserStatus.chromium.serviceSafe = true;
             break;
           case "enable":
             browserStatus.enabled = true;
@@ -936,6 +959,7 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
             browserStatus.chromium.installed = true;
             browserStatus.chromium.path = "/usr/bin/chromium";
             browserStatus.chromium.version = "Chromium 124.0.0";
+            browserStatus.chromium.serviceSafe = true;
             browserStatus.enabled = true;
             browserStatus.browser.running = true;
             browserStatus.browser.pid = 4242;

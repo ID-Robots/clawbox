@@ -497,6 +497,33 @@ h6 {
   .ck-art-shield { animation: ck-art-shield 2.4s ease-in-out infinite; }
 }
 
+/* The Browser app's setup diagram (BrowserDesktopArt): the dashes run both ways
+ * between the window and the agent, the pointer crosses the page, and the whole
+ * window breathes. Guarded exactly like ck-art-*. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes br-art-flow {
+    to { stroke-dashoffset: -22; }
+  }
+  @keyframes br-art-cursor {
+    0%   { opacity: 0; transform: translate(0, 0); }
+    12%  { opacity: 1; }
+    80%  { opacity: 1; transform: translate(84px, 22px); }
+    100% { opacity: 0; transform: translate(84px, 22px); }
+  }
+  @keyframes br-art-window {
+    0%, 100% { opacity: 0.88; }
+    50%      { opacity: 1; }
+  }
+  @keyframes br-art-node {
+    0%, 100% { opacity: 0.8; }
+    50%      { opacity: 1; }
+  }
+  .br-art-flow { animation: br-art-flow 1.8s linear infinite; }
+  .br-art-cursor { animation: br-art-cursor 4s ease-in-out infinite; }
+  .br-art-window { animation: br-art-window 3.2s ease-in-out infinite; }
+  .br-art-node { animation: br-art-node 2.6s ease-in-out infinite; }
+}
+
 /* Native <select> popups.
  *
  * The closed control is styled per component, but the OPEN list is drawn by the

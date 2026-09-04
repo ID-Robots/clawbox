@@ -1,7 +1,7 @@
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks, openLauncher } from "./helpers/clawbox";
 
-test("browser app installs chromium, enables integration, and opens the VNC app", async ({ page }) => {
+test("browser app walks its setup once, then shows the device's screen", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
@@ -27,15 +27,54 @@ test("browser app installs chromium, enables integration, and opens the VNC app"
   const browserWindow = page.getByTestId("chrome-window-browser");
   await expect(browserWindow).toBeVisible({ timeout: 15000 });
 
-  await browserWindow.getByRole("button", { name: "Install Chromium" }).click();
+  // A box that has never been set up gets the wizard, not the browser screen.
+  await expect(browserWindow.getByTestId("browser-wizard")).toBeVisible();
+  await browserWindow.getByTestId("browser-wizard-start").click();
+
+  await browserWindow.getByTestId("browser-wizard-install").click();
   await expect(browserWindow.getByText("Chromium 124.0.0")).toBeVisible();
+  await browserWindow.getByTestId("browser-wizard-next").click();
 
-  await browserWindow.getByRole("button", { name: "Enable" }).click();
-  await expect(browserWindow.getByRole("button", { name: "Disable" })).toBeVisible();
+  await browserWindow.getByTestId("browser-wizard-link").click();
+  await browserWindow.getByTestId("browser-wizard-next-open").click();
 
-  await browserWindow.getByRole("button", { name: "Open Browser" }).click();
-  await expect(browserWindow.getByText("PID 4242")).toBeVisible();
+  // Opening it IS finishing: the wizard hands the owner straight to the screen.
+  await browserWindow.getByTestId("browser-wizard-open").click();
+  await expect(browserWindow.getByTestId("browser-state")).toContainText("4242");
+  await expect(browserWindow.getByTestId("browser-wizard")).toBeHidden();
 
-  await browserWindow.getByRole("button", { name: "Open in VNC" }).click();
+  // The screen also has a window of its own, for a second monitor.
+  await browserWindow.getByTestId("browser-open-vnc").click();
   await expect(page.getByTestId("chrome-window-vnc")).toBeVisible();
+});
+
+test("the browser settings are reachable from inside the app", async ({ page }) => {
+  await installClawboxMocks(page, {
+    initialSetup: {
+      setup_complete: true,
+      wifi_configured: true,
+      update_completed: true,
+      password_configured: true,
+      ai_model_configured: true,
+      telegram_configured: true,
+    },
+  });
+
+  await page.goto("/app/browser");
+
+  const wizard = page.getByTestId("browser-wizard");
+  await expect(wizard).toBeVisible({ timeout: 15000 });
+  // "Not now" finishes setup without touching the device — nobody is trapped
+  // in a front door.
+  await page.getByTestId("browser-wizard-skip").click();
+
+  await page.getByTestId("browser-open-settings").click();
+  await expect(page.getByTestId("browser-settings-panel")).toBeVisible();
+
+  await page.getByTestId("browser-settings-start-url").fill("https://example.com/");
+  await page.getByTestId("browser-settings-start-url-save").click();
+  await expect(page.getByTestId("browser-settings-start-url")).toHaveValue("https://example.com/");
+
+  await page.getByTestId("browser-settings-back").click();
+  await expect(page.getByTestId("browser-state")).toBeVisible();
 });
