@@ -132,6 +132,13 @@ function runTtsOnly(
     mkdirSync(path.join(home, ".cache", "clawbox"), { recursive: true });
     const version = typeof stamped === "string" ? stamped : shellConst("KOKORO_STAMP_VERSION");
     writeFileSync(path.join(home, ".cache", "clawbox", "kokoro-installed"), `${version}\n`);
+    // --tts-only installs both engines now, so "a previous run finished" has to
+    // mean both — otherwise every idempotence assertion below sees Whisper's
+    // first install and reads it as Kokoro doing its work twice.
+    writeFileSync(
+      path.join(home, ".cache", "clawbox", "whisper-installed"),
+      `${shellConst("WHISPER_STAMP_VERSION")}\n`,
+    );
   }
 
   // `su - clawbox -c "<cmd>"` is how every pip/python step runs, so this stub
@@ -727,15 +734,21 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only on a fresh CUDA box", () 
     expect(res.stdout).not.toMatch(/piper/i);
   });
 
-  it("never runs the STT half — it would add about an hour to every update", () => {
-    // This path runs from step_post_update on EVERY in-app update. Pulling
-    // faster-whisper, building CTranslate2 from source with CUDA, and
-    // downloading the Whisper weights is roughly an hour on an Orin.
+  it("runs the STT half too, which it used to exclude over an hour it never measured", () => {
+    // This path runs from step_post_update on EVERY in-app update, and the STT
+    // half was excluded because it was "roughly an hour on an Orin". That
+    // number was never measured, and it was the cost of compiling CTranslate2
+    // for every CUDA architecture nvcc knows. Pinned to the one the board has,
+    // the same build took 255 s of `make -j4` plus a 34 s clone on an Orin Nano
+    // (measured 2026-09-04). So faster-whisper ships now, and no shipped box is
+    // left reporting "Whisper: Not installed" with no route to fixing it.
     const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" });
     const all = res.su.join("\n");
-    for (const forbidden of ["faster-whisper", "CTranslate2", "WhisperModel", "cmake", "git clone"]) {
-      expect(all, `--tts-only ran the STT step: ${forbidden}`).not.toContain(forbidden);
-    }
+    expect(all, "the STT wheels were not installed").toContain("faster-whisper");
+    // Kokoro first, always: a failed pip here must never cost the box its voice.
+    expect(all.indexOf("kokoro")).toBeLessThan(all.indexOf("faster-whisper"));
+    // And the flag that makes it affordable at all.
+    expect(INSTALL_VOICE_SH).toContain("CMAKE_CUDA_ARCHITECTURES");
   });
 });
 
@@ -875,7 +888,15 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only never costs the box its v
     const res = runTtsOnly({ FAKE_ARCH: "x86_64", WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" });
     expect(res.status).toBe(13);
     expect(res.stdout).toContain("CLAWBOX_TTS_KOKORO=skipped:arch-x86_64");
-    expect(res.su.filter((c) => c.includes("pip3 install"))).toEqual([]);
+    // KOKORO's pip work, specifically. faster-whisper does not depend on the
+    // aarch64-only Jetson torch wheel that makes Kokoro decline this board, so
+    // it is still attempted — a board with no voice can still have ears.
+    const kokoroPip = res.su.filter(
+      (c) => c.includes("pip3 install")
+        && !c.includes("faster-whisper")
+        && !c.includes("CTranslate2"),  // its python bindings are STT work too
+    );
+    expect(kokoroPip).toEqual([]);
     expect(res.stderr).toMatch(/Kokoro \(GPU\): SKIPPED \(arch-x86_64\)/);
     // A skip is not the 12 report: nothing was requested, so nothing "did NOT
     // install". The two are kept apart because they lead to different fixes.
