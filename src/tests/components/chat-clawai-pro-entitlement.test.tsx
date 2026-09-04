@@ -76,9 +76,26 @@ const ENTITLED_STATUS = {
   tierSource: "portal",
 };
 
+/** What the route answers once the box has been moved to the Flash tier. */
+const ON_FLASH = {
+  ...ON_PRO,
+  activeModel: "deepseek/deepseek-v4-flash",
+  primary: { available: true, label: "ClawBox AI", model: "deepseek/deepseek-v4-flash" },
+};
+
+/** The same account, on a portal whose list POSITIVELY excludes the Max id. */
+const REFUSED_STATUS = {
+  ...ENTITLED_STATUS,
+  clawaiAllowedModels: ["deepseek-v4-flash"],
+};
+
 type FetchCall = { url: string; init?: RequestInit };
 
-function installFetch(statusResponder: () => Promise<unknown>) {
+function installFetch(
+  statusResponder: () => Promise<unknown>,
+  /** Answer for the model WRITE only; the GET always reports `ON_PRO`. */
+  modelPostResponder?: () => Promise<unknown>,
+) {
   const calls: FetchCall[] = [];
   vi.stubGlobal(
     "fetch",
@@ -92,6 +109,7 @@ function installFetch(statusResponder: () => Promise<unknown>) {
         return statusResponder();
       }
       if (url.includes("/setup-api/chat/model")) {
+        if (init?.method === "POST" && modelPostResponder) return modelPostResponder();
         return { ok: true, json: async () => ON_PRO };
       }
       if (url.includes("/setup-api/chat/history")) {
@@ -107,6 +125,11 @@ function modelWrites(calls: FetchCall[]): string[] {
   return calls
     .filter((call) => call.url.includes("/setup-api/chat/model") && call.init?.method === "POST")
     .map((call) => String(call.init?.body ?? ""));
+}
+
+/** How many times `needle` appears in the rendered transcript. */
+function occurrences(needle: string): number {
+  return (document.body.textContent ?? "").split(needle).length - 1;
 }
 
 /**
@@ -170,13 +193,7 @@ describe("a ClawBox AI Pro model the account is entitled to", () => {
     // answers every turn `400 "Model not allowed: …"` (measured 2026-09-04),
     // which the chat can only render as the opaque "[assistant turn failed]".
     // A NAMED refusal keeps the upgrade prompt and the drop to Flash.
-    const calls = installFetch(async () => ({
-      ok: true,
-      json: async () => ({
-        ...ENTITLED_STATUS,
-        clawaiAllowedModels: ["deepseek-v4-flash"],
-      }),
-    }));
+    const calls = installFetch(async () => ({ ok: true, json: async () => REFUSED_STATUS }));
     render(<ChatPopup isOpen onClose={() => {}} />);
     await settle(calls);
 
@@ -199,5 +216,66 @@ describe("a ClawBox AI Pro model the account is entitled to", () => {
 
     expect(modelWrites(calls)).toEqual([]);
     expect(document.body.textContent).not.toMatch(/Max subscription/i);
+  });
+});
+
+describe("the boot guard when the switch it asks for fails", () => {
+  it("POSTs once, says only what happened, and does not re-arm", async () => {
+    // TWO defects in one path, both of them the guard's failure leg.
+    //
+    // Re-entry: `switchChatModel` writes `switchingModel`, which is one of its
+    // OWN useCallback deps, so calling it changes its identity — and this
+    // effect depends on that identity. The once-only latch is what stops the
+    // guard re-entering; releasing it because the switch FAILED re-arms it
+    // with nothing about the box changed. Every deterministic failure of
+    // `/setup-api/chat/model` (400 "provider is not configured", 400 "invalid
+    // model identifier", 409, 500, a proxy's non-JSON body) then loops: POST,
+    // fail, release, re-enter — hundreds of writes against the box's own setup
+    // server and two system messages per turn of it, for as long as the chat
+    // window is open.
+    //
+    // False success: "switching you to Pro Tier so chat keeps working" was
+    // posted BEFORE the switch was attempted, so a failed one left the
+    // transcript claiming the box had been moved, directly above the `Error:`
+    // line saying it had not, with the box still on the refused model.
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let writes = 0;
+    const calls = installFetch(
+      async () => ({ ok: true, json: async () => REFUSED_STATUS }),
+      async () => {
+        writes += 1;
+        if (writes > 1) {
+          // Reached only by a re-armed guard. Answering the SECOND write
+          // successfully is what lets this test fail with an assertion rather
+          // than a five-second timeout: two failures in a row loop past 250
+          // writes in 200 ms and the renderer never catches up.
+          return { ok: true, json: async () => ON_FLASH };
+        }
+        // The first write is HELD until the test lets it go, and that is what
+        // makes the mock faithful rather than slow. A real POST takes long
+        // enough for React to commit the `switchingModel = true` render (the
+        // one that raises the "Switching AI provider…" overlay); a mock that
+        // settles inside the same microtask never commits it, so the callback
+        // identity never changes and the re-entry above stays invisible.
+        await held;
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ error: "Selected AI provider is not configured" }),
+        };
+      },
+    );
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => { expect(modelWrites(calls)).toHaveLength(1); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    release();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+
+    expect(modelWrites(calls)).toEqual(['{"model":"deepseek/deepseek-v4-flash"}']);
+    // The failure is reported once, as itself…
+    expect(occurrences("Selected AI provider is not configured")).toBe(1);
+    // …and nothing claims the box was moved off the model it is still on.
+    expect(document.body.textContent).not.toMatch(/needs a Max subscription/i);
   });
 });

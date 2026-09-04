@@ -199,6 +199,40 @@ export function portalDeniesClawboxAiModel(
   );
 }
 
+/**
+ * Is `model` the ClawBox AI Max model on a device whose entitlement the portal
+ * has never confirmed?
+ *
+ * True only when all three hold: the pick IS the Max model; `allowedModels` is
+ * unanswered (the portal could not be reached, or answered 401/403 to a revoked
+ * or migrated token, which `fetchPortalTier` maps to `unreachable` on purpose);
+ * and the last portal-confirmed badge is not the Max device tier.
+ *
+ * ONLY THE CLICK GATE MAY READ THIS — never the boot guard, which WRITES.
+ * Declining a click changes nothing and the owner can pick again a moment
+ * later; a write moves the box off a model that may be working perfectly, and
+ * a guess must not drive that. {@link portalDeniesClawboxAiModel} stays false
+ * on any doubt for exactly that reason.
+ *
+ * The badge is a WORSE answer than the list, and this is the one gate where it
+ * is still better than none. Worse: a Max subscriber who deliberately runs
+ * Flash on this box carries a `"flash"` badge (TASK-481) and is declined here
+ * while the portal is down — a state no measured device-info response has ever
+ * shown, and one a retry fixes. Better than none: without it a revoked token
+ * writes the Max model into `agents.defaults.model.primary` — which Telegram
+ * and the coding-agent wrapper run too — and every turn afterwards comes back
+ * as the opaque "[assistant turn failed]" until the portal answers again.
+ */
+export function clawboxAiMaxPickUnconfirmed(
+  model: string | null | undefined,
+  allowedModels: readonly string[] | null | undefined,
+  tier: string | null | undefined,
+): boolean {
+  if (!isClawboxAiProModel(model)) return false;
+  if (Array.isArray(allowedModels) && allowedModels.length > 0) return false;
+  return tier !== "pro";
+}
+
 /* ---------------------------------------------------------------------------
  * ClawBox AI image generation
  * ------------------------------------------------------------------------ */

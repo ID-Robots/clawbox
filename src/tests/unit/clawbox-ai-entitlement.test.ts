@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CLAWBOX_AI_MODEL_BY_TIER,
+  clawboxAiMaxPickUnconfirmed,
   normalizeAllowedModelIds,
   portalDeniesClawboxAiModel,
 } from "@/lib/clawbox-ai-models";
@@ -41,6 +42,43 @@ describe("portalDeniesClawboxAiModel", () => {
     expect(portalDeniesClawboxAiModel("clawai/DeepSeek-V4-Pro", PORTAL_MAX)).toBe(false);
     expect(portalDeniesClawboxAiModel("deepseek/deepseek-v4-pro", ["deepseek/deepseek-v4-pro"]))
       .toBe(false);
+  });
+});
+
+describe("clawboxAiMaxPickUnconfirmed", () => {
+  it("declines the Max pick when nobody answered and the badge is not Max", () => {
+    // Portal unreachable, or a token it answers 401/403 to. Letting this
+    // through writes the Max model into the box's primary — Telegram and the
+    // coding agent run it too — and every turn afterwards fails opaquely.
+    for (const unanswered of [null, undefined, []]) {
+      expect(clawboxAiMaxPickUnconfirmed(CLAWBOX_AI_MODEL_BY_TIER.pro, unanswered, "flash"))
+        .toBe(true);
+      expect(clawboxAiMaxPickUnconfirmed(CLAWBOX_AI_MODEL_BY_TIER.pro, unanswered, null))
+        .toBe(true);
+    }
+  });
+
+  it("lets it through the moment either half of the question is answered", () => {
+    // A list that names the model is the real answer; the last portal-confirmed
+    // Max badge is a weaker one, and both beat declining a paying owner's pick.
+    expect(clawboxAiMaxPickUnconfirmed(CLAWBOX_AI_MODEL_BY_TIER.pro, PORTAL_MAX, "flash"))
+      .toBe(false);
+    expect(clawboxAiMaxPickUnconfirmed(CLAWBOX_AI_MODEL_BY_TIER.pro, null, "pro")).toBe(false);
+  });
+
+  it("says nothing about any other model", () => {
+    // It is the Max pick alone: the Flash tier and every bring-your-own-key
+    // provider are unaffected by a portal that did not answer.
+    expect(clawboxAiMaxPickUnconfirmed(CLAWBOX_AI_MODEL_BY_TIER.flash, null, "flash")).toBe(false);
+    expect(clawboxAiMaxPickUnconfirmed("anthropic/claude-opus-5", null, "flash")).toBe(false);
+    expect(clawboxAiMaxPickUnconfirmed("deepseek-v4-pro", null, "flash")).toBe(false);
+  });
+
+  it("is not the refusal the write guard reads", () => {
+    // The two predicates deliberately disagree on the unanswered case: the
+    // click declines, the boot guard (which WRITES) does not.
+    expect(portalDeniesClawboxAiModel(CLAWBOX_AI_MODEL_BY_TIER.pro, null)).toBe(false);
+    expect(clawboxAiMaxPickUnconfirmed(CLAWBOX_AI_MODEL_BY_TIER.pro, null, "flash")).toBe(true);
   });
 });
 
