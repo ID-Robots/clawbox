@@ -222,13 +222,29 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
           // Read the RESPONSE's own flag, not the substituted scope's:
           // `emptyScope` is `stale: true` by construction, so gating on it would
           // put the provider-mismatch guard below into the retry loop as well.
-          if (isPlaceholder(data) && retryLater()) {
+          const placeholder = isPlaceholder(data);
+          if (placeholder && retryLater()) {
             // Deliberately NOT installed: `loaded` is what makes `loading` go
             // false, and a placeholder is not something to settle on. Holding
             // it keeps the model pill in its place with the loading label
             // instead of collapsing the header, and keeps the send path saying
             // "still loading this provider's models" (`modelsReady`) rather
             // than "this provider has none".
+            return;
+          }
+          if (placeholder) {
+            // The budget is spent and the box is STILL answering with the
+            // manifest: the dashboard is not coming back on its own. Settle —
+            // a box whose harness is gone must not be polled for ever — but
+            // settle honestly. This used to install the placeholder with
+            // `error: null`, which is how a dead dashboard rendered as a
+            // provider that simply has these models; the rejected-request
+            // branch below already reported the same fact. TASK-678.
+            setLoaded({
+              provider,
+              scope: data?.provider === provider ? data : emptyScope(provider),
+              error: "Couldn't load models",
+            });
             return;
           }
           // Guard against a stale/garbled payload naming a different provider.
