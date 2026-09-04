@@ -110,32 +110,60 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
       # root step was refused, and a single line on the stderr of an update
       # nobody watches was the whole trace. TASK-584.
       _mf=/usr/local/libexec/clawbox/clawbox-root-manifest.sh
-      # --write AND --verify, never --write alone: a truncated or empty helper
-      # exits 0 for both verbs without writing anything, so believing the write's
-      # own status is how this failure would go quiet again.
+      _mf_src="$_b/config/clawbox-root-manifest.sh"
+      # Is the installed helper the whole program, or only the first part of it?
+      # Nothing below may read its exit status until this says yes: an empty or
+      # half-copied helper exits 0 for --write, for --verify AND for the
+      # --verify-file the root dispatcher asks about the file it is about to run
+      # as root (see SELFTEST_TOKEN in config/clawbox-root-manifest.sh).
+      # Believing that 0 is worse than the stale manifest this block exists to
+      # fix — it turns the dispatcher from fail-closed into fail-OPEN over a tree
+      # the clawbox user can rewrite. Inlined rather than shared with
+      # root_exec_manifest_helper_alive below, for the same reason the branch
+      # probes above are inlined: this block runs before that function is parsed.
+      _mf_alive() {
+        local out rc=0
+        [ -x "$_mf" ] || return 1
+        out="$("$_mf" --selftest 2>/dev/null)" || rc=$?
+        [ "$out" = "clawbox-root-manifest alive" ] && return 0
+        [ "$rc" -eq 64 ] && return 0
+        return 1
+      }
+      # Replace the installed helper with the one the reset just checked out.
+      # Temp name + rename, NEVER a copy over the live file: a copy that fails
+      # halfway leaves behind exactly the stub described above.
+      _mf_restage() {
+        [ -f "$_mf_src" ] || return 1
+        if ! install -o root -g root -m 0755 "$_mf_src" "$_mf.new"; then
+          echo "[bootstrap] WARN: could not stage a fresh root-exec manifest helper" >&2
+          rm -f "$_mf.new" 2>/dev/null || true
+          return 1
+        fi
+        mv -f "$_mf.new" "$_mf" || { echo "[bootstrap] WARN: could not replace $_mf" >&2; return 1; }
+      }
       if [ "$_b" = "/home/clawbox/clawbox" ] && [ -x "$_mf" ]; then
-        if ! { "$_mf" --write && "$_mf" --verify >/dev/null; }; then
+        # Best-effort throughout: this is the bootstrap of the boot path and it
+        # must never abort. A helper that cannot answer is replaced first, and
+        # only a helper that answers is asked to record anything.
+        _mf_ok=0
+        if _mf_alive; then
+          _mf_ok=1
+        else
+          echo "[bootstrap] WARN: the installed root-exec manifest helper is not answering — replacing it" >&2
+          if _mf_restage && _mf_alive; then _mf_ok=1; fi
+        fi
+        if [ "$_mf_ok" = "0" ]; then
+          echo "[bootstrap] WARN: no working root-exec manifest helper; root steps will refuse until an operator runs 'sudo bash $_b/install.sh --step systemd_services'" >&2
+          CLAWBOX_ROOT_MANIFEST_STALE=1
+        # --write AND --verify, never --write alone: the write's own status says
+        # the helper believes it recorded something, not that the record matches.
+        elif ! { "$_mf" --write && "$_mf" --verify >/dev/null; }; then
           # Repair before reporting. The most likely reason the INSTALLED helper
           # failed is that it is the one from before this reset, so replace it
-          # from the tree we just checked out and try once more. Best-effort:
-          # this is the bootstrap of the boot path and it must never abort.
+          # from the tree we just checked out and try once more.
           echo "[bootstrap] WARN: could not re-record the root-exec manifest — refreshing the helper and retrying" >&2
-          if [ -f "$_b/config/clawbox-root-manifest.sh" ]; then
-            # Temp name + rename, NEVER a copy over the live file. `install`
-            # writes into the existing inode with O_TRUNC, so a copy that fails
-            # halfway (a full or read-only root filesystem — the same condition
-            # that most often fails the write above) would leave a 0-byte
-            # clawbox-root-manifest.sh behind. That is worse than the stale
-            # manifest: an empty helper exits 0 for --verify, which turns the
-            # root dispatcher from fail-closed into fail-open.
-            if install -o root -g root -m 0755 "$_b/config/clawbox-root-manifest.sh" "$_mf.new"; then
-              mv -f "$_mf.new" "$_mf" || echo "[bootstrap] WARN: could not replace $_mf" >&2
-            else
-              echo "[bootstrap] WARN: could not stage a fresh root-exec manifest helper" >&2
-              rm -f "$_mf.new" 2>/dev/null || true
-            fi
-          fi
-          if ! { "$_mf" --write && "$_mf" --verify >/dev/null; }; then
+          _mf_restage || true
+          if ! { _mf_alive && "$_mf" --write && "$_mf" --verify >/dev/null; }; then
             # Carried into the re-exec rather than acted on here: the process
             # that can record it against the run's verdict is the one about to
             # start. It re-checks before believing this.
@@ -215,6 +243,29 @@ provision_repair_step() {
   esac
 }
 
+# Does the root-exec manifest helper at $1 actually run, or is it only present?
+#
+# An empty or half-copied helper exits 0 for every verb without doing any of
+# them (see SELFTEST_TOKEN in config/clawbox-root-manifest.sh), so reading that
+# 0 reports "the tree is recorded and matches" over a tree nobody hashed — and
+# config/clawbox-root-step.sh then execs that tree as root.
+#
+# Two answers count, and both prove the same thing — the verb dispatcher at the
+# bottom of the helper ran: the token from a helper that knows --selftest, or
+# exit 64 from an older one rejecting a verb it does not know. A stub does
+# neither: it prints nothing and exits 0.
+#
+# Takes the path as an argument because the block below runs long before
+# $ROOT_EXEC_MANIFEST_HELPER is defined.
+root_exec_manifest_helper_alive() {
+  local out rc=0
+  [ -x "$1" ] || return 1
+  out="$("$1" --selftest 2>/dev/null)" || rc=$?
+  [ "$out" = "clawbox-root-manifest alive" ] && return 0
+  [ "$rc" -eq 64 ] && return 0
+  return 1
+}
+
 # The bootstrap could not re-record the root-exec manifest before re-exec'ing
 # into this process (TASK-584). The dispatcher fails closed on a stale manifest,
 # so every NON-UPDATE root step — openclaw_install, gateway_setup, and the
@@ -225,7 +276,8 @@ provision_repair_step() {
 # that verifies would be the opposite defect. install_root_libexec re-records it
 # later in a full run and clears this again on success.
 if [ "${CLAWBOX_ROOT_MANIFEST_STALE:-0}" = "1" ]; then
-  if /usr/local/libexec/clawbox/clawbox-root-manifest.sh --verify >/dev/null 2>&1; then
+  if root_exec_manifest_helper_alive /usr/local/libexec/clawbox/clawbox-root-manifest.sh \
+     && /usr/local/libexec/clawbox/clawbox-root-manifest.sh --verify >/dev/null 2>&1; then
     echo "[bootstrap] the root-exec manifest verifies after all — continuing"
   else
     record_provision_failure root_exec_manifest
@@ -3568,8 +3620,16 @@ ROOT_EXEC_MANIFEST_HELPER="$ROOT_LIBEXEC_DIR/clawbox-root-manifest.sh"
 # Record the tree root is allowed to execute. Strict: a non-zero return means
 # the record is NOT current, and the caller must treat that as a failure.
 write_root_exec_manifest() {
-  [ -x "$ROOT_EXEC_MANIFEST_HELPER" ] || return 1
+  root_exec_manifest_helper_alive "$ROOT_EXEC_MANIFEST_HELPER" || return 1
   "$ROOT_EXEC_MANIFEST_HELPER" --write || return 1
+  # VERIFY, then clear — never the other way round. `--write` returning 0 says
+  # the helper believes it wrote a manifest, not that the record now matches the
+  # tree; a write that landed somewhere else, or a tree that moved while it ran,
+  # both end here. And this function's success is read as "the bootstrap's
+  # failure is repaired": install_root_libexec installs the root dispatcher on
+  # it, and that dispatcher refuses every pinned root step while the manifest
+  # does not verify. So prove the record before dropping the failure. TASK-584.
+  "$ROOT_EXEC_MANIFEST_HELPER" --verify >/dev/null || return 1
   # This is exactly the repair for what the bootstrap could not do, so the run's
   # verdict must stop reporting it. TASK-584.
   clear_provision_failure root_exec_manifest

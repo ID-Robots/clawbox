@@ -39,6 +39,14 @@ const REPO = process.cwd();
 const INSTALL_SH = readFileSync(path.join(REPO, "install.sh"), "utf-8");
 const HELPER_PATH = "/usr/local/libexec/clawbox/clawbox-root-manifest.sh";
 const PROJECT_PATH = "/home/clawbox/clawbox";
+/**
+ * The liveness token config/clawbox-root-manifest.sh prints for `--selftest`.
+ * Repeated as a literal in install.sh and config/clawbox-root-step.sh because
+ * those are three separately installed root-owned files that cannot share a
+ * constant; root-exec-manifest.test.ts pins them against each other.
+ */
+const SELFTEST_TOKEN = "clawbox-root-manifest alive";
+const HELPER_SRC = readFileSync(path.join(REPO, "config", "clawbox-root-manifest.sh"), "utf-8");
 
 const canRun =
   process.platform !== "win32" && spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0;
@@ -97,6 +105,8 @@ interface Bootstrap {
   marker: string;
   /** The live helper's bytes as the run found them. */
   helperBefore: string;
+  /** The helper the reset just checked out — what a repair must install. */
+  helperInTree: string;
   /** The live helper's bytes after the run — the thing a bad copy destroys. */
   helperAfter: string;
   /** Whether a staged `<helper>.new` was left behind in libexec. */
@@ -127,6 +137,21 @@ function runBootstrap(opts: {
    * root.
    */
   stagingFails?: "unreadable" | "truncates";
+  /**
+   * What is sitting at the installed helper path when the bootstrap starts.
+   *
+   * "empty" and "truncated" are the same defect from two directions: a copy
+   * that died part way through leaves a helper that RUNS and exits 0 for
+   * `--write`, `--verify` and `--verify-file` without doing any of them —
+   * `install` writes into the existing inode with O_TRUNC, and an interrupted
+   * in-place copy is how one gets there. "truncated" is the shipped helper cut
+   * where its verb dispatcher begins, so every function is defined and nothing
+   * dispatches; "empty" is the 0-byte case. Both must be detected and replaced,
+   * because the exit status of such a helper is what the bootstrap here — and
+   * the root dispatcher afterwards — would otherwise read as "the tree is
+   * recorded and matches".
+   */
+  installed?: "healthy" | "empty" | "truncated";
 }): Bootstrap {
   const helper = path.join(root, "libexec", "clawbox-root-manifest.sh");
   const project = path.join(root, "project");
@@ -140,6 +165,9 @@ function runBootstrap(opts: {
   const stub = [
     "#!/usr/bin/env bash",
     `printf 'installed %s\\n' "$*" >> ${JSON.stringify(callLog)}`,
+    // A stub stands in for a COMPLETE helper, so it answers the liveness verb.
+    // The "empty"/"truncated" modes install one that cannot.
+    `if [ "\${1:-}" = "--selftest" ]; then printf '%s\\n' ${JSON.stringify(SELFTEST_TOKEN)}; exit 0; fi`,
     `n=$(cat ${JSON.stringify(stateFile)} 2>/dev/null || echo 0)`,
     'if [ "${1:-}" = "--write" ]; then',
     `  n=$((n + 1)); printf '%s' "$n" > ${JSON.stringify(stateFile)}`,
@@ -149,17 +177,33 @@ function runBootstrap(opts: {
     "exit 0",
     "",
   ].join("\n");
-  writeFileSync(helper, stub);
+  // The bytes the bootstrap finds installed. A dead helper is executable and
+  // 0755 exactly like a live one — `install` sets the mode when it creates the
+  // file, so an interrupted copy leaves the mode intact and only the content
+  // short. Nothing about the file says it is a stub except that it does nothing.
+  const installedText =
+    opts.installed === "empty"
+      ? ""
+      : opts.installed === "truncated"
+        ? (() => {
+            const cut = HELPER_SRC.indexOf('case "${1:-}" in');
+            if (cut < 0) throw new Error("the shipped helper no longer ends in a verb dispatcher");
+            return HELPER_SRC.slice(0, cut);
+          })()
+        : stub;
+  writeFileSync(helper, installedText);
   chmodSync(helper, 0o755);
 
   // The helper the reset just checked out. Present unless the test says the
   // fresh tree does not carry one.
   const treeHelper = path.join(project, "config", "clawbox-root-manifest.sh");
+  let treeText = "";
   if (opts.helperInTree !== false) {
     // Padded past the size limit the "truncates" run imposes, so the copy dies
     // mid-write rather than before it starts.
     const pad = opts.stagingFails === "truncates" ? `\n${"# pad\n".repeat(30_000)}` : "";
-    writeFileSync(treeHelper, stub.replace("installed %s", "refreshed %s") + pad);
+    treeText = stub.replace("installed %s", "refreshed %s") + pad;
+    writeFileSync(treeHelper, treeText);
     chmodSync(treeHelper, opts.stagingFails === "unreadable" ? 0o000 : 0o755);
   }
 
@@ -206,7 +250,8 @@ function runBootstrap(opts: {
     out,
     calls: existsSync(callLog) ? readFileSync(callLog, "utf-8").trim().split("\n").filter(Boolean) : [],
     marker: /MARKER=(\d)/.exec(run.stdout ?? "")?.[1] ?? "",
-    helperBefore: stub,
+    helperBefore: installedText,
+    helperInTree: treeText,
     helperAfter: existsSync(helper) ? readFileSync(helper, "utf-8") : "",
     stagedLeft: existsSync(`${helper}.new`),
   };
@@ -218,7 +263,17 @@ function runBootstrap(opts: {
  */
 function runVerdict(opts: {
   marker: string;
+  /** What `--verify` answers BEFORE anything has written a manifest. */
   verifies: boolean;
+  /**
+   * What it answers AFTER a `--write` succeeded. Separate because that is the
+   * distinction write_root_exec_manifest turns on: a write can return 0 and
+   * leave a record that still does not verify, and the run must not report a
+   * repair on the strength of the write alone. Defaults to `verifies`.
+   */
+  writeVerifies?: boolean;
+  /** Install a 0-byte helper instead: it exits 0 for --verify without looking. */
+  deadHelper?: boolean;
   alsoWrite?: boolean;
   /** Also call refresh_root_exec_manifest, with a helper whose --write does this. */
   refresh?: "works" | "fails";
@@ -226,18 +281,31 @@ function runVerdict(opts: {
   status: number | null;
   out: string;
   failures: string;
+  /** "ok" / "failed" when alsoWrite ran, "" otherwise. */
+  write: string;
 } {
   const helper = path.join(root, "libexec", "clawbox-root-manifest.sh");
   mkdirSync(path.dirname(helper), { recursive: true });
+  const wrote = path.join(root, "wrote");
   writeFileSync(
     helper,
-    [
-      "#!/usr/bin/env bash",
-      `[ "\${1:-}" = "--verify" ] && exit ${opts.verifies ? 0 : 65}`,
-      `[ "\${1:-}" = "--write" ] && exit ${opts.refresh === "fails" ? 1 : 0}`,
-      "exit 0",
-      "",
-    ].join("\n"),
+    opts.deadHelper
+      ? ""
+      : [
+          "#!/usr/bin/env bash",
+          `[ "\${1:-}" = "--selftest" ] && { printf '%s\\n' ${JSON.stringify(SELFTEST_TOKEN)}; exit 0; }`,
+          'if [ "${1:-}" = "--write" ]; then',
+          ...(opts.refresh === "fails" ? ["  exit 1"] : []),
+          `  : > ${JSON.stringify(wrote)}`,
+          "  exit 0",
+          "fi",
+          'if [ "${1:-}" = "--verify" ]; then',
+          `  [ -e ${JSON.stringify(wrote)} ] && exit ${(opts.writeVerifies ?? opts.verifies) ? 0 : 65}`,
+          `  exit ${opts.verifies ? 0 : 65}`,
+          "fi",
+          "exit 0",
+          "",
+        ].join("\n"),
   );
   chmodSync(helper, 0o755);
 
@@ -270,7 +338,11 @@ function runVerdict(opts: {
     `PROJECT_DIR=${JSON.stringify(path.join(root, "project"))}`,
     block,
     writer,
-    opts.alsoWrite ? "write_root_exec_manifest" : "true",
+    // `if`, not a bare call: write_root_exec_manifest returns non-zero on a
+    // manifest that does not verify, and a bare call would take the whole
+    // script down with `set -e` before the line that reports what is left —
+    // which reads as an empty failure list, i.e. as a success.
+    opts.alsoWrite ? 'if write_root_exec_manifest; then echo "WRITE=ok"; else echo "WRITE=failed"; fi' : "true",
     opts.refresh ? "refresh_root_exec_manifest" : "true",
     'echo "FAILURES=${PROVISION_FAILURES[*]-}"',
     "",
@@ -283,6 +355,7 @@ function runVerdict(opts: {
     status: run.status,
     out: `${run.stdout ?? ""}${run.stderr ?? ""}`,
     failures: /FAILURES=(.*)/.exec(run.stdout ?? "")?.[1] ?? "",
+    write: /WRITE=(\w+)/.exec(run.stdout ?? "")?.[1] ?? "",
   };
 }
 
@@ -290,9 +363,11 @@ describe.runIf(canRun)("the bootstrap's root-exec manifest re-record", () => {
   it("re-records once and carries nothing forward when it works", () => {
     const run = runBootstrap({ failWrites: 0 });
     expect(run.status).toBe(0);
-    // --write AND --verify: a truncated helper exits 0 for the write alone.
-    expect(run.calls).toEqual(["installed --write", "installed --verify"]);
+    // --selftest FIRST, then --write AND --verify: the write's own status is
+    // only worth reading once the helper has proved it is the whole program.
+    expect(run.calls).toEqual(["installed --selftest", "installed --write", "installed --verify"]);
     expect(run.marker).toBe("0");
+    expect(run.helperAfter, "a healthy helper must not be re-staged").toBe(run.helperBefore);
   });
 
   it("refreshes the helper from the reset tree and retries before giving up", () => {
@@ -301,7 +376,13 @@ describe.runIf(canRun)("the bootstrap's root-exec manifest re-record", () => {
     // before reporting anything.
     const run = runBootstrap({ failWrites: 1 });
     expect(run.status).toBe(0);
-    expect(run.calls).toEqual(["installed --write", "refreshed --write", "refreshed --verify"]);
+    expect(run.calls).toEqual([
+      "installed --selftest",
+      "installed --write",
+      "refreshed --selftest",
+      "refreshed --write",
+      "refreshed --verify",
+    ]);
     expect(run.marker, "a manifest that was repaired must not be carried forward").toBe("0");
   });
 
@@ -354,6 +435,47 @@ describe.runIf(canRun)("the bootstrap's root-exec manifest re-record", () => {
     expect(run.marker).toBe("1");
   });
 
+
+  it("replaces a 0-byte helper instead of reading its exit status as an answer", () => {
+    // The fail-OPEN this arm exists to close. An empty executable file runs to
+    // EOF and exits 0 — for `--write`, for `--verify`, and for the
+    // `--verify-file` the root dispatcher asks about the copy it is about to
+    // execute as root. So `--write && --verify` returning 0 proves nothing
+    // here, and the same helper then tells the dispatcher that a tree it never
+    // hashed matches a manifest that may not exist.
+    const run = runBootstrap({ failWrites: 0, installed: "empty" });
+    expect(run.status).toBe(0);
+    expect(run.helperAfter, "the dead helper was left installed").toBe(run.helperInTree);
+    expect(run.out).toContain("[bootstrap] WARN: the installed root-exec manifest helper");
+    // Repaired, so nothing is carried into the re-exec: the replacement wrote
+    // and verified the record.
+    expect(run.calls).toEqual(["refreshed --selftest", "refreshed --write", "refreshed --verify"]);
+    expect(run.marker).toBe("0");
+    expect(run.stagedLeft).toBe(false);
+  });
+
+  it("replaces a helper truncated where a mid-write copy would cut it", () => {
+    // The shipped helper with its verb dispatcher gone: every function defined,
+    // `set -euo pipefail` honoured, and exit 0 for every verb. This is what a
+    // copy killed by a full disk actually leaves behind, and it is
+    // indistinguishable from a working helper by exit status alone.
+    const run = runBootstrap({ failWrites: 0, installed: "truncated" });
+    expect(run.status).toBe(0);
+    expect(run.helperAfter).toBe(run.helperInTree);
+    expect(run.calls).toEqual(["refreshed --selftest", "refreshed --write", "refreshed --verify"]);
+    expect(run.marker).toBe("0");
+  });
+
+  it("carries the failure forward when a dead helper cannot be replaced", () => {
+    // Nothing in the reset tree to repair with, so the run must not pretend the
+    // record is current — the dispatcher refuses every pinned step until it is.
+    const run = runBootstrap({ failWrites: 0, installed: "empty", helperInTree: false });
+    expect(run.status).toBe(0);
+    expect(run.out).toContain("REACHED_EXEC=1");
+    expect(run.marker).toBe("1");
+    expect(run.calls, "a helper that cannot answer must not be asked to record").toEqual([]);
+  });
+
   it("re-execs into the refreshed tree with the bootstrap flag set", () => {
     // The other half of the exec's contract, executed rather than matched.
     const run = runBootstrap({ failWrites: 0 });
@@ -372,6 +494,16 @@ describe.runIf(canRun)("a stale manifest is reported against the run's verdict",
     // re-installs the helper too, not the command that just failed twice.
     expect(run.out).toMatch(/REFUSED \(exit 65\)/);
     expect(run.out).toContain("--step systemd_services");
+  });
+
+  it("does not read a dead helper's 0 as 'it verifies after all'", () => {
+    // The marker is re-checked rather than believed, and the re-check runs the
+    // same helper the bootstrap just failed to use. If that helper is the empty
+    // one, its `--verify` exits 0 and the run clears a failure nobody repaired
+    // — the false success this whole chain is about, one step further along.
+    const run = runVerdict({ marker: "1", verifies: true, deadHelper: true });
+    expect(run.failures).toContain("root_exec_manifest");
+    expect(run.out).not.toContain("verifies after all");
   });
 
   it("records nothing when the manifest verifies after all", () => {
@@ -402,14 +534,34 @@ describe.runIf(canRun)("a stale manifest is reported against the run's verdict",
   });
 
   it("stays quiet when that re-record works", () => {
-    const run = runVerdict({ marker: "0", verifies: false, refresh: "works" });
+    // "Works" now means both halves: the write returned 0 AND the manifest it
+    // wrote verifies. Nothing may be cleared on the write alone.
+    const run = runVerdict({ marker: "0", verifies: false, writeVerifies: true, refresh: "works" });
     expect(run.failures.trim()).toBe("");
+  });
+
+  it("still reports the re-record that wrote a manifest which does not verify", () => {
+    // The write succeeded and the record is still not usable — every pinned
+    // root step keeps failing closed, so the run must keep saying so.
+    const run = runVerdict({ marker: "0", verifies: false, writeVerifies: false, refresh: "works" });
+    expect(run.failures).toContain("root_exec_manifest");
+    expect(run.out).toMatch(/Warning: could not re-record/);
   });
 
   it("clears the recorded failure when a later step re-records the manifest", () => {
     // install_root_libexec re-records it during a full run; that IS the repair,
     // so the run must stop reporting it.
-    const run = runVerdict({ marker: "1", verifies: false, alsoWrite: true });
+    const run = runVerdict({ marker: "1", verifies: false, writeVerifies: true, alsoWrite: true });
+    expect(run.write).toBe("ok");
     expect(run.failures.trim()).toBe("");
+  });
+
+  it("keeps reporting it when the re-record wrote a manifest that does not verify", () => {
+    // The write's own 0 is not the repair. Without this the run reports a
+    // recovery while the root dispatcher still refuses every pinned step —
+    // and install_root_libexec installs that dispatcher on the same answer.
+    const run = runVerdict({ marker: "1", verifies: false, writeVerifies: false, alsoWrite: true });
+    expect(run.write).toBe("failed");
+    expect(run.failures).toContain("root_exec_manifest");
   });
 });

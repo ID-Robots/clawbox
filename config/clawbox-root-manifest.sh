@@ -42,6 +42,8 @@
 # Usage (root only):
 #   clawbox-root-manifest.sh --write     record the tree as it is now
 #   clawbox-root-manifest.sh --verify    exit 0 if it still matches, 65 if not
+#   clawbox-root-manifest.sh --selftest  print SELFTEST_TOKEN — proof this file
+#                                        is complete, which no exit status is
 #
 # Installed by install.sh::install_root_libexec to
 # /usr/local/libexec/clawbox/clawbox-root-manifest.sh, root:root 0755.
@@ -55,6 +57,23 @@ set -euo pipefail
 PROJECT_DIR="/home/clawbox/clawbox"
 MANIFEST_DIR="/etc/clawbox"
 MANIFEST_FILE="/etc/clawbox/root-exec.manifest"
+
+# What --selftest prints, and the only thing that makes the exit statuses of the
+# verbs above worth reading.
+#
+# `install` writes into the destination inode with O_TRUNC, so a copy of this
+# file that dies part way through — a full or read-only root filesystem — leaves
+# an executable helper containing some prefix of it. That prefix has no case
+# statement at the bottom, so it runs to EOF and exits 0 for `--write`, for
+# `--verify` and for `--verify-file` without doing any of them. An empty file
+# does the same. Both callers — install.sh and the root dispatcher — then read
+# "the tree is recorded and matches" out of a program that never looked, and
+# clawbox-root-step.sh execs a clawbox-writable tree as root on the strength of
+# it. So callers ask for this token first; only a copy that reaches the last
+# line of this file can print it. Repeated as a literal in install.sh and
+# config/clawbox-root-step.sh, which are installed separately and cannot share a
+# constant; src/tests/unit/root-exec-manifest.test.ts pins them against this one.
+SELFTEST_TOKEN="clawbox-root-manifest alive"
 
 # Everything the clawbox-root-update@ chain can end up running as root:
 # install.sh, the scripts it hands to bash, and the config/unit files it installs.
@@ -197,8 +216,9 @@ case "${1:-}" in
   --write)  write_manifest ;;
   --verify) verify_manifest ;;
   --verify-file) verify_file "${2:-}" "${3:-}" ;;
+  --selftest) printf '%s\n' "$SELFTEST_TOKEN" ;;
   *)
-    echo "usage: $0 --write|--verify|--verify-file <recorded path> <file>" >&2
+    echo "usage: $0 --write|--verify|--verify-file <recorded path> <file>|--selftest" >&2
     exit 64
     ;;
 esac
