@@ -334,6 +334,37 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
     expect(alive(innocent)).toBe(true);
   });
 
+  it("escalates to SIGKILL only while the pid is still the engine", () => {
+    // A server that ignores SIGTERM: the escalation path, which no other test
+    // reaches. Its argv is the interpreter plus a script whose NAME carries
+    // the identity, so /proc still answers the question the code asks.
+    const script = path.join(tmp, "bin", "llama-server-stubborn");
+    fs.writeFileSync(script, `trap '' TERM${NL}while :; do sleep 1; done${NL}`);
+    const child = spawn("/bin/sh", [script], { detached: true, stdio: "ignore" });
+    child.unref();
+    strays.push(child.pid!);
+    fs.writeFileSync(pidFile(), `${child.pid}${NL}`);
+
+    const r = run();
+
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/did not exit on SIGTERM/);
+    expect(alive(child.pid!)).toBe(false);
+  });
+
+  it("cannot be aborted by a failing sync", () => {
+    // `sync` runs as a bare command under errexit, and free_memory_for_build is
+    // itself called bare from do_rebuild — so an I/O error here would abort the
+    // whole update before the build, which is the opposite of this function's
+    // one promise. Reported by CodeRabbit on #643.
+    fs.writeFileSync(path.join(tmp, "bin", "sync"), `#!/bin/sh${NL}exit 1${NL}`, { mode: 0o755 });
+
+    const r = run();
+
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/Memory available for the build/);
+  });
+
   it("survives a pidfile that is not a pid", () => {
     fs.writeFileSync(pidFile(), `not-a-number${NL}`);
     expect(run().code).toBe(0);

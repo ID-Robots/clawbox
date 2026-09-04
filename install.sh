@@ -1167,7 +1167,7 @@ llamacpp_pid_if_running() {
 # that cannot stop one of its engines should still attempt the build it was
 # asked for, and the log says what happened.
 free_memory_for_build() {
-  local before after uid unit pid waited state
+  local before after uid unit pid waited
   before=$(available_mb)
   echo "Freeing memory for the build (${before} MB available)..."
 
@@ -1204,13 +1204,19 @@ free_memory_for_build() {
       sleep 1
       waited=$((waited + 1))
     done
-    # A process that has exited and not yet been reaped answers kill -0 too,
-    # so ask /proc what state it is really in. SIGKILL to a zombie is harmless;
-    # the log line claiming it refused to go is not, and this runs where the
-    # only account of the update is its journal. `.*)` is greedy, so it ends at
-    # the LAST parenthesis — the comm field may contain one.
-    state=$(sed -n 's/.*) \([A-Z]\).*/\1/p' "/proc/$pid/stat" 2>/dev/null || true)
-    if kill -0 "$pid" 2>/dev/null && [ "$state" != "Z" ]; then
+    # Ask again, with the same question, before escalating.
+    #
+    # Three seconds is long enough for the pid to be freed and handed to
+    # something else, and this is a root SIGKILL — so the identity is
+    # re-established rather than assumed, and the answer also covers a process
+    # that has exited and not yet been reaped (a zombie answers `kill -0`, but
+    # its cmdline is empty, so it cannot pass this check and the log does not
+    # claim it refused to go).
+    #
+    # This narrows the window to the gap between these two lines; it does not
+    # close it. Nothing in bash can: holding a handle across the wait needs a
+    # pidfd, and the shell has no way to open or signal one.
+    if [ "$(llamacpp_pid_if_running || true)" = "$pid" ]; then
       echo "  llama.cpp did not exit on SIGTERM — killing it"
       kill -KILL "$pid" 2>/dev/null || true
     fi
@@ -1222,7 +1228,7 @@ free_memory_for_build() {
   # not have given it anyway — it just means the build starts without first
   # reclaiming a cache full of model weights, and that MemAvailable below is
   # the number a human would recognise.
-  sync
+  sync || echo "  Warning: could not flush filesystems before dropping the cache" >&2
   echo 3 > /proc/sys/vm/drop_caches 2>/dev/null \
     || echo "  Warning: could not drop the page cache" >&2
 
