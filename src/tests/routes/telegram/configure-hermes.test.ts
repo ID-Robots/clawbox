@@ -30,6 +30,7 @@ vi.mock("@/lib/hermes-telegram", () => ({
   setHermesTelegramToken: vi.fn(),
   ensureHermesGateway: vi.fn(),
   clearHermesTelegramPairingState: vi.fn(),
+  readHermesTelegramToken: vi.fn(),
 }));
 
 import { get, set } from "@/lib/config-store";
@@ -39,6 +40,7 @@ import {
   setHermesTelegramToken,
   ensureHermesGateway,
   clearHermesTelegramPairingState,
+  readHermesTelegramToken,
 } from "@/lib/hermes-telegram";
 
 const mockGet = vi.mocked(get);
@@ -50,6 +52,7 @@ const mockClearOpenclawPairing = vi.mocked(clearTelegramPairingState);
 const mockSetHermesToken = vi.mocked(setHermesTelegramToken);
 const mockEnsureGateway = vi.mocked(ensureHermesGateway);
 const mockClearHermesPairing = vi.mocked(clearHermesTelegramPairingState);
+const mockHermesToken = vi.mocked(readHermesTelegramToken);
 
 const TOKEN = "123456789:ABCDefGHIjklMNOpqrsTUVwxyz";
 const NEW_TOKEN = "987654321:ZYXwvuTSRqponMLKjihGFEdcba";
@@ -77,6 +80,7 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
     mockClearOpenclawPairing.mockResolvedValue();
     mockSetHermesToken.mockResolvedValue();
     mockClearHermesPairing.mockResolvedValue();
+    mockHermesToken.mockResolvedValue({ token: null, known: true });
     mockEnsureGateway.mockResolvedValue({ installed: true, running: true, scope: "system", applied: true });
 
     POST = (await import("@/app/setup-api/telegram/configure/route")).POST;
@@ -110,6 +114,7 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
 
     it("clears Hermes' pairing state when the bot token changes", async () => {
       mockGet.mockResolvedValue(TOKEN);
+      mockHermesToken.mockResolvedValue({ token: TOKEN, known: true });
       const res = await POST(req({ botToken: NEW_TOKEN }));
       const body = await res.json();
 
@@ -120,11 +125,27 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
 
     it("keeps approvals when the same token is saved again", async () => {
       mockGet.mockResolvedValue(TOKEN);
+      mockHermesToken.mockResolvedValue({ token: TOKEN, known: true });
       const res = await POST(req({ botToken: TOKEN }));
       const body = await res.json();
 
       expect(body.reset).toBe(false);
       expect(mockClearHermesPairing).not.toHaveBeenCalled();
+    });
+
+    // The approvals in Hermes' pairing store belong to the bot HERMES holds, and
+    // on a box paired out of band ClawBox has no copy of that token at all.
+    // Asking its own store therefore saw no previous bot, skipped the reset, and
+    // left the old bot's approved senders able to talk to the new one.
+    it("clears the old bot's approvals when only Hermes knew the previous token", async () => {
+      mockGet.mockResolvedValue(undefined);
+      mockHermesToken.mockResolvedValue({ token: TOKEN, known: true });
+
+      const body = await (await POST(req({ botToken: NEW_TOKEN }))).json();
+
+      expect(body.reset).toBe(true);
+      expect(mockClearHermesPairing).toHaveBeenCalled();
+      expect(mockSet).toHaveBeenCalledWith("telegram_approved_names", undefined);
     });
 
     it("does not let a browser that walked away cancel the half it has already committed to", async () => {
@@ -158,6 +179,7 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
 
     it("fails the save with the old token in place when the pairing reset throws", async () => {
       mockGet.mockResolvedValue(TOKEN);
+      mockHermesToken.mockResolvedValue({ token: TOKEN, known: true });
       mockClearHermesPairing.mockRejectedValue(new Error("store refused"));
       const res = await POST(req({ botToken: NEW_TOKEN }));
 

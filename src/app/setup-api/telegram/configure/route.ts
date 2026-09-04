@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { get, set } from "@/lib/config-store";
+import { set } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import {
   clearTelegramPairingState,
@@ -12,6 +12,7 @@ import {
   ensureHermesGateway,
   setHermesTelegramToken,
 } from "@/lib/hermes-telegram";
+import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 
 export const dynamic = "force-dynamic";
 
@@ -83,19 +84,24 @@ export async function POST(request: Request) {
       );
     }
 
-    // A different bot means a fresh allowlist — previously-approved senders
-    // belong to the old bot. Detect a real token change (re-saving the same
-    // token keeps approvals) so we can reset the harness's allowlist/pending
-    // stores and our name map.
-    const previousToken = await get("telegram_bot_token");
-    const tokenChanged =
-      typeof previousToken === "string" && previousToken.length > 0 && previousToken !== botToken;
-
     // Hand the token to whichever harness this device actually runs. A Hermes
     // device has no OpenClaw gateway at all (the unit is masked, the port is
     // closed), so the OpenClaw path there stored a token nothing ever read and
     // the bot never answered.
     const harness = await getActiveHarness();
+
+    // A different bot means a fresh allowlist — previously-approved senders
+    // belong to the old bot. Detect a real token change (re-saving the same
+    // token keeps approvals) so we can reset the harness's allowlist/pending
+    // stores and our name map.
+    //
+    // Asked of the store the running edition keeps the credential in. The
+    // approvals in Hermes' pairing store belong to the bot HERMES holds, and
+    // ClawBox's copy is written only by this route — so on a box paired with
+    // `hermes config set` there was none, every save looked like the first one,
+    // and the previous bot's approved senders carried over to the new bot.
+    const previousToken = (await readActiveTelegramBot(harness)).token;
+    const tokenChanged = previousToken !== null && previousToken !== botToken;
 
     // The reset runs BEFORE the new token is persisted, on purpose. A reset
     // that fails then fails the save with nothing changed: the old bot keeps
