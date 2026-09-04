@@ -18,7 +18,7 @@
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { spawnSync } from "child_process";
-import { installEdition } from "./lib/edition";
+import { installEdition, resolveEdition, type Ed } from "./lib/edition";
 import { builtInApps } from "./lib/context";
 import { INSTALLED_APP_ID_RE } from "./lib/schema";
 
@@ -35,7 +35,7 @@ const UI_PICKUP_DELAY_MS = 2500; // Time for the desktop UI to poll and pick up 
 // gateway pre-start script wrote. Loaded lazily so token-free commands like
 // `app list` still work without it.
 let cachedToken: string | null = null;
-function getApiToken(): string {
+function findApiToken(): string | null {
   if (cachedToken) return cachedToken;
   const fromEnv = process.env.CLAWBOX_MCP_TOKEN;
   if (fromEnv && fromEnv.length >= 16) {
@@ -53,10 +53,37 @@ function getApiToken(): string {
       return raw;
     }
   } catch {
-    // fall through to the missing-token error
+    // No token file — the caller decides whether that is fatal.
   }
+  return null;
+}
+
+function getApiToken(): string {
+  const token = findApiToken();
+  if (token) return token;
   console.error("MCP token not found: set CLAWBOX_MCP_TOKEN or ensure data/.mcp-token exists (is the gateway pre-start script running?).");
   process.exit(1);
+}
+
+/**
+ * Which harness's built-in apps this box has.
+ *
+ * NOT `installEdition() === "hermes" ? … : "openclaw"`. That answer has THREE
+ * values — the premium `dual` SKU carries both harnesses — and folding `dual`
+ * into `openclaw` refused `clawbox app open hermes` on a dual box that is
+ * running Hermes, while the desktop opened that dashboard from the ACTIVE
+ * harness and `ui_open_app` allowed it from `resolveEdition`. One question,
+ * three surfaces, and the CLI was the one giving a different answer.
+ *
+ * `resolveEdition` is that same resolution: a locked edition decides on its
+ * own, and only `dual` asks the device which harness is active. The bearer is
+ * OPTIONAL here — `app list` has always worked without a token, and the only
+ * cost of not sending one is that a session-gated device answers the dual
+ * question with the default harness rather than the active one.
+ */
+function openHarness(): Promise<Ed> {
+  const token = findApiToken();
+  return resolveEdition(API_BASE, token ? `Bearer ${token}` : null);
 }
 
 async function api(path: string, options?: RequestInit) {
@@ -194,8 +221,7 @@ async function main() {
     // typo, for an installed id missing its `installed-` prefix, and for the
     // other harness's apps — a false success on the CLI sibling of the list
     // `app list` below prints from.
-    const openHarness = installEdition() === "hermes" ? "hermes" : "openclaw";
-    const openable = builtInApps(openHarness).map((a) => a.id);
+    const openable = builtInApps(await openHarness()).map((a) => a.id);
     const isInstalled = appId.startsWith("installed-");
     if (isInstalled) {
       // The shape check, exactly where ui_open_app applies it: an installed id
@@ -233,12 +259,17 @@ async function main() {
     console.log(`✅ Opening ${appId} on desktop.`);
 
   } else if (cmd === "app" && sub === "list") {
-    // The list is EDITION-dependent: a Hermes device has no OpenClaw chat app
+    // The list is HARNESS-dependent: a Hermes device has no OpenClaw chat app
     // and no app store, and printing them sends the user to a window that
-    // cannot open. Resolved from the root-owned edition lock, same as the app.
+    // cannot open. Same resolution as `app open` above, so the list and the
+    // gate can never name different apps.
     const edition = installEdition();
-    const harness = edition === "hermes" ? "hermes" : "openclaw";
-    console.log(`Built-in apps (${edition} edition):`);
+    const harness = await openHarness();
+    console.log(
+      edition === harness
+        ? `Built-in apps (${edition} edition):`
+        : `Built-in apps (${edition} edition, running ${harness}):`,
+    );
     for (const app of builtInApps(harness)) console.log(`  ${app.id} — ${app.name}`);
 
   } else if (cmd === "edition") {
