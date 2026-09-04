@@ -18,8 +18,8 @@ const SHELF_HEIGHT = 56;
  * The margin a MAXIMIZED window keeps on every side — the same breathing
  * room the docked chat floats in, so a full-screen window sits in the
  * desktop like the chat does rather than against its edges. Beside a docked
- * chat the right-hand margin is the chat's own gap, already inside
- * `rightInset`.
+ * chat the margin is kept between the window and the chat too: `rightInset`
+ * ends at the chat's left edge (the chat's own gap is on its far side).
  */
 export const DOCK_GAP = 10;
 
@@ -389,14 +389,14 @@ export default function ChromeWindow({
 
   if (minimized && !restoring) return null;
 
-  // Maximized: DOCK_GAP on every side (the docked chat's own gap serves as
-  // the right-hand one), corners kept — a full-screen window sits in the
-  // desktop the way the chat does.
+  // Maximized: DOCK_GAP on every side — beside a docked chat, between the
+  // window and the chat as well — corners kept, so a full-screen window sits
+  // in the desktop the way the chat does.
   const windowStyle = maximized
     ? {
       left: DOCK_GAP,
       top: DOCK_GAP,
-      width: `calc(100% - ${DOCK_GAP + (rightInset > 0 ? rightInset : DOCK_GAP)}px)`,
+      width: `calc(100% - ${DOCK_GAP * 2 + rightInset}px)`,
       height: `calc(100vh - ${SHELF_HEIGHT}px - env(safe-area-inset-bottom, 0px) - ${DOCK_GAP * 2}px)`,
     }
       : { left: position.x, top: position.y, width: size.width, height: size.height };
