@@ -156,6 +156,24 @@ describe("plugins.enabled", () => {
     expect(mergePluginsEnabled(asJson("weather"))).toEqual(["weather", HERMES_IMAGE_PLUGIN_NAME]);
   });
 
+  it("keeps a mapping's OFF entries off when it repairs the type", () => {
+    // `enabled: {clawai: true, weather: false}` is how a person writes a
+    // switch table. Taking every key would list `weather` as a real list entry
+    // and start loading, on the next boot, a plugin the owner had switched off
+    // — enabling something as a side effect of repairing a type.
+    expect(mergePluginsEnabled(asJson({ weather: false, spotify: true }))).toEqual([
+      "spotify",
+      HERMES_IMAGE_PLUGIN_NAME,
+    ]);
+    // Only when the mapping really is a switch table, though: mixed values are
+    // not a decision about anything, so every key is still a name.
+    expect(mergePluginsEnabled(asJson({ weather: null, spotify: true }))).toEqual([
+      "weather",
+      "spotify",
+      HERMES_IMAGE_PLUGIN_NAME,
+    ]);
+  });
+
   it("leaves a shape it cannot read names out of alone", () => {
     // Not repaired and not replaced: the caller refuses the feature instead,
     // the same call `scripts/register-mcp.sh` makes on a list it cannot parse.

@@ -105,6 +105,19 @@ function enabledPlugins(): unknown {
   return plugins?.enabled;
 }
 
+/** What `image_gen.provider` holds, if anything. */
+function imageProvider(): unknown {
+  const imageGen = readConfig().image_gen as Record<string, unknown> | undefined;
+  return imageGen?.provider;
+}
+
+/** The ClawAI image backend on disk, where the LINK path would have put it. */
+function installImageBackend(): void {
+  const dir = path.join(pluginsDir, "image_gen", "clawai");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "__init__.py"), "# stand-in for the shipped backend\n");
+}
+
 function installedFiles(): string[] {
   const dir = path.join(pluginsDir, PLUGIN);
   return fs.existsSync(dir) ? fs.readdirSync(dir).sort() : [];
@@ -511,6 +524,46 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     } finally {
       fs.rmSync(bareRoot, { recursive: true, force: true });
     }
+  });
+
+  it("re-arms the image backend the repair just made loadable", () => {
+    // The link path withdraws `image_gen.provider` when Hermes answers that it
+    // will not load the plugin, and it is only reached from Settings → Save.
+    // Repairing the list without putting the claim back would leave a box that
+    // CAN draw reporting that it cannot until somebody opened that page.
+    fs.writeFileSync(configPath, `plugins:\n  enabled: '["clawai"]'\n`);
+    installImageBackend();
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(enabledPlugins()).toEqual(["clawai", PLUGIN]);
+    expect(imageProvider()).toBe("clawai");
+  });
+
+  it("never writes over a backend the customer chose", () => {
+    fs.writeFileSync(
+      configPath,
+      `plugins:\n  enabled: '["clawai"]'\nimage_gen:\n  provider: fal\n`,
+    );
+    installImageBackend();
+    run();
+    expect(imageProvider()).toBe("fal");
+  });
+
+  it("arms nothing when the backend's files are not on the box", () => {
+    // "named in config, nothing to load" is the false success this script
+    // guards against everywhere else.
+    fs.writeFileSync(configPath, `plugins:\n  enabled: '["clawai"]'\n`);
+    run();
+    expect(imageProvider()).toBeUndefined();
+  });
+
+  it("arms nothing on a box whose list needed no repair", () => {
+    // A real list is not the state a withdrawal is paired with, so there is
+    // nothing here to put back — and a first-time opt-in is not this script's.
+    fs.writeFileSync(configPath, "plugins:\n  enabled:\n    - clawai\n");
+    installImageBackend();
+    run();
+    expect(imageProvider()).toBeUndefined();
   });
 
   it("does nothing at all on an OpenClaw box", () => {
