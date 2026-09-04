@@ -22,6 +22,7 @@ vi.mock("@/lib/smtp-client", async () => {
 
 import { get } from "@/lib/config-store";
 import { notifyOwner } from "@/lib/email-notify";
+import { OPEN_EMAIL_SETTINGS } from "@/lib/notify-action";
 import { queuePending } from "@/lib/email-pending";
 import { sendMail, SmtpError } from "@/lib/smtp-client";
 
@@ -235,10 +236,14 @@ describe("ask me before sending", () => {
     });
   });
 
-  it("tells the owner something is waiting", async () => {
+  it("tells the owner something is waiting, and where to go", async () => {
+    // The toast is the owner's way in: clicking its body opens Settings →
+    // Email, where the draft is. Without the destination the bubble is a
+    // dead end that only says the name of a place.
     storeWith(GATED);
     await POST(sendRequest(VALID_BODY));
     expect(mockNotify).toHaveBeenCalledTimes(1);
+    expect(mockNotify).toHaveBeenCalledWith(expect.any(String), OPEN_EMAIL_SETTINGS);
   });
 
   it("says when the queue folded a retry into the draft it already had", async () => {

@@ -13,6 +13,7 @@
 // notification that fails to appear must never turn a successfully-queued draft
 // into a failed send — every caller swallows the error.
 
+import { parseNotifyAction, type NotifyAction } from "@/lib/notify-action";
 import { pushPendingAction } from "@/lib/pending-actions";
 
 const MAX_MESSAGE_CHARS = 280;
@@ -24,7 +25,19 @@ const MAX_MESSAGE_CHARS = 280;
  * carries is untrusted, so nothing from a pending email is interpolated in
  * here. "An email is waiting for you" is the whole payload — the owner reads
  * the actual message in the panel, where it is rendered as text.
+ *
+ * `action` makes the toast's body clickable, taking the owner to the place the
+ * message names. It is re-checked against the allowlist here rather than
+ * trusted from the caller: this function is the one door onto the ring for a
+ * notice with a destination, and the desktop turns a destination into a click
+ * target. A caller asking for one that is not on the list gets a plain notice,
+ * never a broken one.
  */
-export async function notifyOwner(message: string): Promise<void> {
-  await pushPendingAction({ type: "notify", message: message.slice(0, MAX_MESSAGE_CHARS) });
+export async function notifyOwner(message: string, action?: NotifyAction): Promise<void> {
+  const target = action ? parseNotifyAction(action) : null;
+  await pushPendingAction({
+    type: "notify",
+    message: message.slice(0, MAX_MESSAGE_CHARS),
+    ...(target ? { action: target } : {}),
+  });
 }

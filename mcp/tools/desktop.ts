@@ -21,6 +21,13 @@ const UI_PICKUP_DELAY_MS = 2_500;
  * writer is what keeps it consistent), so it posts the action under the
  * legacy single-slot key and /setup-api/kv folds it into the ring, where
  * every open desktop picks it up.
+ *
+ * A notice pushed from here can never be CLICKABLE: that route strips the
+ * `action` field a notice may carry, because `ui_notify`'s text is the
+ * agent's and a click destination would be a target it chose on the owner's
+ * desktop. Only ClawBox's in-process producers attach one, through
+ * notifyOwner() (src/lib/email-notify.ts) and the allowlist in
+ * src/lib/notify-action.ts.
  */
 async function pushUiAction(action: Record<string, unknown>): Promise<void> {
   await apiPost(
