@@ -32,13 +32,31 @@ mkdir -p "$CANON"
 
 # 2. OpenClaw side — REAL copies (scanner ignores symlinks). Back up any
 #    pre-existing real file once.
-if [ -d "$OC_WS" ]; then
+#
+# Held back until OpenClaw's first-conversation ritual is over, which is the
+# same test src/lib/language-persona.ts applies before writing the persona from
+# the app. OpenClaw decides on the agent's first reply whether to run that
+# introduction, and it decides by looking at this directory: a USER.md or
+# SOUL.md that differs from its own template — or a MEMORY.md, whose mere
+# presence counts — means "already configured", so it stamps the workspace
+# complete and the agent never introduces itself. Copying the canonical
+# identity in on a dual box before the first hello suppressed the ritual on
+# that SKU exactly as the app's language write did on every other one.
+#
+# USER.md present and BOOTSTRAP.md absent is "the workspace is the agent's
+# own": creating USER.md is the suppressing act, and a BOOTSTRAP.md still on
+# disk means the ritual is armed and unfinished, where a write now would make
+# the next turn delete it. Nothing is lost by waiting — clawbox-identity-sync.sh
+# runs this again on the next harness switch or canonical change.
+if [ -d "$OC_WS" ] && [ -f "$OC_WS/USER.md" ] && [ ! -e "$OC_WS/BOOTSTRAP.md" ]; then
   for f in SOUL USER MEMORY; do
     t="$OC_WS/$f.md"
     if [ -L "$t" ]; then rm -f "$t"; fi
     if [ -e "$t" ] && [ ! -e "$t.pre-bridge" ]; then cp "$t" "$t.pre-bridge"; fi
     cp "$CANON/$f.md" "$t"
   done
+else
+  echo "[setup-shared-identity] OpenClaw workspace left alone (missing, or not introduced yet)"
 fi
 
 # Move a real (non-symlink) file out of the way before symlinking, without ever
