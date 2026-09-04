@@ -982,9 +982,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       // and starts the gateway clean, so it must still happen — treating that as
       // a failed save would strand the box mid-rename and report a change that
       // in fact went through. `success` is required, not just the status, so a
-      // 502 from anywhere else stays the error it is.
+      // 502 from anywhere else stays the error it is. `=== true`, not a truthy
+      // read: `res.json()` is an open record the assertion does not enforce, so
+      // a body carrying `success` as a string would otherwise buy a reboot over
+      // a rename that never landed. Same strict form as the Telegram saves and
+      // /setup-api/providers/default.
       const data = await res.json().catch(() => ({} as { error?: string; success?: boolean }));
-      if (!res.ok && !(res.status === 502 && data.success)) {
+      if (!res.ok && !(res.status === 502 && data.success === true)) {
         setHostnameStatus({ type: "error", message: data.error || t("settings.hostnameSaveFailed") });
         setHostnameSaving(false);
         setHostnameConfirm(false);

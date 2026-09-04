@@ -445,6 +445,55 @@ describe("SettingsApp factory reset overlay", () => {
     expect(screen.queryByText("settings.telegramConfigured")).not.toBeInTheDocument();
   });
 
+  /**
+   * The hostname save takes a 502 as "renamed, but the gateway has not come
+   * back with the new allowed origins", and goes straight on to the reboot
+   * that completes the rename. That exception belongs to the ROUTE's own
+   * pending answer, which sends `success: true` — and `res.json()` is an open
+   * record, so a body whose `success` is a truthy STRING must not buy the
+   * reboot. Taking it would restart the box over a rename that never landed
+   * and bring it back on a name nothing serves, with a green "restarting"
+   * message in front of the owner. Same strict form the Telegram saves above
+   * and /setup-api/providers/default already use.
+   */
+  it("does not take a 502 whose success is a truthy non-boolean as a rename", async () => {
+    const posted: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (init?.method === "POST") posted.push(url);
+      if (url === "/setup-api/system/hostname" && init?.method === "POST") {
+        return Promise.resolve(new Response(JSON.stringify({ success: "false" }), {
+          status: 502,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+      return defaultFetch(input, init);
+    }));
+
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const nav = container.querySelector("nav");
+    if (!nav) throw new Error("desktop sidebar nav did not render");
+    const network = [...nav.querySelectorAll(":scope > button")]
+      .find((button) => (button.textContent ?? "").includes("settings.network"));
+    if (!network) throw new Error("Network nav entry did not render");
+    fireEvent.click(network);
+
+    const field = await screen.findByPlaceholderText("clawbox");
+    fireEvent.change(field, { target: { value: "newbox" } });
+    const card = field.closest("div.rounded-2xl");
+    if (!card) throw new Error("Local URL card did not render");
+    fireEvent.click(within(card as HTMLElement).getByRole("button", { name: "settings.save" }));
+    fireEvent.click(await screen.findByRole("button", { name: "settings.saveAndRestart" }));
+
+    await waitFor(() => expect(posted).toContain("/setup-api/system/hostname"));
+    // The save settles into exactly one of its two messages, and the reboot is
+    // requested in the same synchronous block as the success one — so once a
+    // message is on screen the reboot has either gone out or been skipped.
+    await screen.findByText(/^settings\.hostname(SaveFailed|Restarting)$/);
+    expect(posted).not.toContain("/setup-api/system/power");
+    expect(screen.getByText("settings.hostnameSaveFailed")).toBeInTheDocument();
+  });
+
   it("kicks off the ClawBox AI device-auth handshake when the desktop deep-link event is fired", async () => {
     const pendingWindow = window as Window & {
       __clawboxPendingSettingsSection?: string;
