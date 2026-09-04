@@ -1554,18 +1554,28 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         configureReject(new Error("aborted"));
         return;
       }
-      // 502 = the token was saved but the gateway is not serving it yet. The
-      // body carries `success: true` and the warning that says so, and it must
-      // not be reported as a failed save — the same split /telegram/streaming
-      // makes for the same condition.
-      if (!res.ok && res.status !== 502) {
-        const data = await res.json().catch(() => ({}));
+      const data = await res.json().catch(() => ({}));
+      // 502 = the token was saved but the gateway is not serving it yet, and
+      // that must not be reported as a failed save — the same split
+      // /telegram/streaming makes for the same condition. The exception is
+      // qualified by the BODY, not by the status alone: the route's own
+      // `success` AND the warning that explains the 502. A cloudflared or nginx
+      // 502 has an HTML body, which the `.catch` above turns into `{}`, and a
+      // request that may never have reached the box must stay the failure it is
+      // — reported in the card's own words rather than as a JSON parse error
+      // from an unguarded `res.json()`. Same guard as /telegram/streaming,
+      // /setup-api/providers/default and ChatPopup apply to the same hazard.
+      const gatewayPending =
+        res.status === 502 &&
+        data.success === true &&
+        typeof data.warning === "string" &&
+        data.warning.length > 0;
+      if (!res.ok && !gatewayPending) {
         configureReject(new Error(data.error || "configure failed"));
         setTgConfiguring(false);
         setTgStatus({ type: "error", message: data.error || t("settings.failedSave") });
         return;
       }
-      const data = await res.json();
       if (controller.signal.aborted) {
         configureReject(new Error("aborted"));
         return;

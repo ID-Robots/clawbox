@@ -386,6 +386,65 @@ describe("SettingsApp factory reset overlay", () => {
     expect(await screen.findByText("settings.connectionFailed")).toBeInTheDocument();
   });
 
+  /** Render, open Messaging Channels → Telegram, type a token, press Connect. */
+  async function submitTelegramToken() {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const nav = container.querySelector("nav");
+    if (!nav) throw new Error("desktop sidebar nav did not render");
+    const channels = [...nav.querySelectorAll(":scope > button")]
+      .find((button) => (button.textContent ?? "").includes("settings.channels"));
+    if (!channels) throw new Error("Messaging Channels nav entry did not render");
+    fireEvent.click(channels);
+    fireEvent.click(await screen.findByTestId("settings-channel-telegram"));
+    const token = await screen.findByLabelText("settings.botToken");
+    fireEvent.change(token, { target: { value: "123456789:test-token" } });
+    fireEvent.click(screen.getByRole("button", { name: /settings\.connect$/ }));
+  }
+
+  /**
+   * The 502 exception this branch gave the token save is for the ROUTE's own
+   * pending answer — `success` plus the warning that explains it. A cloudflared
+   * or nginx 502 has an HTML body and may never have reached the box, so it
+   * stays the failure it is, and says so in the card's own words: an unguarded
+   * `res.json()` used to throw and put its parse error in front of the owner
+   * instead.
+   */
+  it("does not accept a bare proxy 502 as a saved Telegram token", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      if (input.toString() === "/setup-api/telegram/configure") {
+        return Promise.resolve(new Response("<html>502 Bad Gateway</html>", { status: 502 }));
+      }
+      return defaultFetch(input, init);
+    }));
+
+    await submitTelegramToken();
+
+    expect(await screen.findByText("settings.failedSave")).toBeInTheDocument();
+    expect(screen.queryByText("settings.telegramConfigured")).not.toBeInTheDocument();
+    expect(screen.queryByText(/is not valid JSON/)).not.toBeInTheDocument();
+  });
+
+  it("does not accept a 502 that carries no warning as a saved Telegram token", async () => {
+    // A JSON 502 whose body has `success` but no sentence is not the route's
+    // pending answer — it only ever sends that 502 WITH the warning. Taking the
+    // status alone would flip the card to configured and clear the token over a
+    // save nothing has confirmed.
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      if (input.toString() === "/setup-api/telegram/configure") {
+        return Promise.resolve(new Response(JSON.stringify({ success: true }), {
+          status: 502,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+      return defaultFetch(input, init);
+    }));
+
+    await submitTelegramToken();
+
+    expect(await screen.findByText("settings.failedSave")).toBeInTheDocument();
+    expect(screen.queryByText("settings.telegramConfigured")).not.toBeInTheDocument();
+  });
+
   it("kicks off the ClawBox AI device-auth handshake when the desktop deep-link event is fired", async () => {
     const pendingWindow = window as Window & {
       __clawboxPendingSettingsSection?: string;

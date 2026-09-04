@@ -66,10 +66,18 @@ function aliasImports(text: string): string[] {
 /**
  * The body of `vi.mock("<module>", …)`, matched by counting parentheses so a
  * factory containing its own `}))` cannot cut the block short.
+ *
+ * Either quote form, and any whitespace after the paren: nothing in this
+ * repo's eslint config pins a quote style, so a single-quoted mock would
+ * otherwise be INVISIBLE here rather than an offender — the gate would skip it
+ * and stay green, which is the one failure a gate must not have.
  */
 function mockCall(text: string, moduleId: string): string | null {
-  const start = text.indexOf(`vi.mock("${moduleId}"`);
-  if (start === -1) return null;
+  const opening = new RegExp(
+    `vi\\.mock\\(\\s*["']${moduleId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`,
+  ).exec(text);
+  if (!opening) return null;
+  const start = opening.index;
   let depth = 0;
   for (let i = text.indexOf("(", start); i < text.length; i += 1) {
     if (text[i] === "(") depth += 1;
@@ -139,6 +147,18 @@ describe(`every ${MOCKED_MODULE} mock that can reach an ${NARROWED_EXPORT} narro
         `The first test that makes the mocked restart REJECT will get a TypeError and a 500 instead of the pending-gateway answer. ` +
         `Add the real class to the factory (see src/tests/routes/local-ai/exclusive.test.ts), or make it a partial mock over importActual.`,
     ).toEqual([]);
+  });
+
+  it("sees a mock in either quote form", () => {
+    // A mock the scanner cannot SEE is skipped, not reported — the gate stays
+    // green over the exact hole it exists to close, which is worse than an
+    // offender. Nothing in this repo pins a quote style, so both forms are
+    // pinned here rather than left to convention.
+    const single = `vi.mock('${MOCKED_MODULE}', () => ({ restartGateway: vi.fn() }));`;
+    const double = `vi.mock("${MOCKED_MODULE}", () => ({ restartGateway: vi.fn() }));`;
+    expect(mockCall(single, MOCKED_MODULE)).toBe(single.slice(0, -1));
+    expect(mockCall(double, MOCKED_MODULE)).toBe(double.slice(0, -1));
+    expect(mockCall(`vi.mock("@/lib/not-it", () => ({}));`, MOCKED_MODULE)).toBeNull();
   });
 
   it("is actually watching something — the scan found the narrowing routes and the mocks", () => {

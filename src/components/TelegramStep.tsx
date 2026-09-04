@@ -137,10 +137,20 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         configureReject(new Error("aborted"));
         return;
       }
-      // 502 = the token was saved but the gateway is not serving it yet; the
-      // body says `success: true` and carries the warning. Not a failed save.
-      if (!res.ok && res.status !== 502) {
-        const data = await res.json().catch(() => ({}));
+      const data = await res.json().catch(() => ({}));
+      // 502 = the token was saved but the gateway is not serving it yet, and
+      // that is not a failed save. Qualified by the BODY, not by the status
+      // alone: the route's own `success` AND the warning that explains the 502.
+      // A cloudflared or nginx 502 has an HTML body, which the `.catch` above
+      // turns into `{}` — a request that may never have reached the box must
+      // not advance the wizard past the step that was meant to prove the token
+      // works. Same guard as SettingsApp's copy of this save.
+      const gatewayPending =
+        res.status === 502 &&
+        data.success === true &&
+        typeof data.warning === "string" &&
+        data.warning.length > 0;
+      if (!res.ok && !gatewayPending) {
         configureReject(new Error(data.error || "configure failed"));
         setConfiguring(false);
         setStatus({
@@ -149,7 +159,6 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         });
         return;
       }
-      const data = await res.json();
       if (controller.signal.aborted) {
         configureReject(new Error("aborted"));
         return;
