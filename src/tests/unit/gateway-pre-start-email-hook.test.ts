@@ -477,7 +477,11 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     expect(first.stderr).not.toMatch(/WARNING/);
     expect(existsSync(attemptStamp())).toBe(true);
     writeFileSync(path.join(dir, "calls.log"), "");
-    run();
+    // The STATUS is asserted before the call log: a script that aborted before
+    // reaching `plugins inspect` would satisfy `not.toContain` for the wrong
+    // reason, which is the false success this whole file guards against.
+    const second = run();
+    expect(second.status).toBe(0);
     expect(calls()).not.toContain("plugins inspect");
   }, 60_000);
 
@@ -528,7 +532,11 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     expect(existsSync(attemptStamp())).toBe(true);
     // ...and the next start does not pay those seconds again.
     writeFileSync(path.join(dir, "calls.log"), "");
-    run();
+    // The STATUS is asserted before the call log: a script that aborted before
+    // reaching `plugins inspect` would satisfy `not.toContain` for the wrong
+    // reason, which is the false success this whole file guards against.
+    const second = run();
+    expect(second.status).toBe(0);
     expect(calls()).not.toContain("plugins inspect");
   }, 60_000);
 
