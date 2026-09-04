@@ -35,6 +35,15 @@ interface InstalledAppIconProps {
   iconUrl?: string;
   appId?: string;
   name?: string;
+  /**
+   * The FALLBACK GLYPH's size, and only that. The picture itself fills
+   * whatever box the caller puts this in, because every desktop caller is a
+   * colour tile the icon is meant to reach the edge of — the glyph then sits
+   * inset in the middle of it, which is why `size` is about half the tile at
+   * every call site. A caller that hands this component no box of its own
+   * gets a picture as wide as its container; see ProjectIcon in
+   * CodingAgentApp for what that box looks like when there is no tile.
+   */
   size?: string;
 }
 

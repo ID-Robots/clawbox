@@ -806,6 +806,35 @@ describe("CodingAgentApp", () => {
       expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", "run-k3x9q2ab");
     });
 
+    /**
+     * killRunLeftovers refuses a HELD run on purpose: a paused run is still
+     * the owner's to resume, and what it left listening is the very thing the
+     * resume carries on against. The page recorded the leftovers all the same
+     * and offered the button, so the only thing it could ever do was show that
+     * refusal.
+     */
+    it("offers to end a settled run's leftovers, and never a paused run's", async () => {
+      const paused = { ...RUN, id: "run-paused01", status: "paused", completedAt: null, leftover: true };
+      stubFetch({ enabled: true, readiness: READY }, [paused], { projects: [SITE_PROJECT] });
+      const { unmount } = render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-paused01"));
+      await screen.findByTestId("coding-agent-run-page");
+      // Resume and Stop are the ways out of a paused run; "End it" is not one.
+      expect(screen.getByTestId("coding-agent-resume-run-paused01")).toBeInTheDocument();
+      expect(screen.queryByTestId("coding-agent-run-leftover")).toBeNull();
+      expect(screen.queryByTestId("coding-agent-kill-run-paused01")).toBeNull();
+      unmount();
+
+      stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, leftover: true }], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId(`coding-agent-details-${RUN.id}`));
+      await screen.findByTestId("coding-agent-run-page");
+      expect(await screen.findByTestId("coding-agent-run-leftover")).toBeInTheDocument();
+      expect(screen.getByTestId(`coding-agent-kill-${RUN.id}`)).toBeInTheDocument();
+    });
+
     it("says when there is nothing to show yet", async () => {
       stubFetch({ enabled: true, readiness: READY }, [], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
@@ -1064,6 +1093,26 @@ describe("projects", () => {
     expect(rows[1].textContent).toContain("Pomodoro timer");
     expect(rows[1].textContent).toContain(translations.en["codingAgent.codeProject"]);
     expect(rows[0].textContent).not.toContain(translations.en["codingAgent.codeProject"]);
+  });
+
+  it("draws a project's picture at icon size, not at the width of the row", async () => {
+    // InstalledAppIcon's <img> fills whatever box it is handed — it was
+    // written for the desktop's colour tiles, where the picture is meant to
+    // reach the edge — so the box has to come from the caller. Without one the
+    // icon was a bare flex item at 100% of the row, and the name and the chips
+    // were pushed onto the line below it.
+    const withIcon = { ...PROJECT, iconUrl: "/setup-api/apps/icon/site?v=2" };
+    stubFetch({ enabled: true, readiness: READY }, [], { projects: [withIcon] });
+    render(<CodingAgentApp />);
+
+    const icon = await screen.findByAltText(PROJECT.name);
+    expect(icon).toHaveClass("w-full", "h-full");
+    expect(icon.parentElement).toHaveClass("w-6", "h-6");
+
+    // The project's own page shows the same picture, one size up.
+    fireEvent.click(screen.getByTestId("coding-agent-project-site"));
+    await screen.findByTestId("coding-agent-project-page");
+    expect((await screen.findByAltText(PROJECT.name)).parentElement).toHaveClass("w-7", "h-7");
   });
 
   it("copies the folder name — the name a run is given — on one tap", async () => {

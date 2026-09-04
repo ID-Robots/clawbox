@@ -27,6 +27,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
 import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
 import { browserErrorText, runBrowserAction, type BrowserAction } from "@/lib/browser-actions";
+import { autoLaunchSpent, spendAutoLaunch } from "@/lib/browser-auto-launch";
 import ErrorWithFix from "./ErrorWithFix";
 import VNCApp from "./VNCApp";
 import BrowserSetupWizard from "./BrowserSetupWizard";
@@ -129,6 +130,10 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   }, [status, actionLoading]);
 
   const doAction = useCallback(async (action: BrowserAction) => {
+    // The owner's own hand on the browser, whichever way it went: the window
+    // has nothing left to decide after it, and must not re-open on the next
+    // remount what was just closed on purpose.
+    if (action === "open-browser" || action === "close-browser") spendAutoLaunch();
     setActionLoading(action);
     setError(null);
     actionErrorRef.current = false;
@@ -158,33 +163,28 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   // scripts/launch-browser.sh, which is why the route answers `serviceSafe`.
   const canRunBrowser = isEnabled && chromiumInstalled && status?.chromium?.serviceSafe !== false;
 
-  /**
-   * The one automatic launch this window is allowed, per mount.
-   *
-   * A ref rather than state because it must not re-arm on a re-render, and
-   * because "we already tried" has to be true before the request comes back —
-   * the poll would otherwise fire a second launch while the first is still
-   * inside the route's ten-second wait for CDP.
-   */
-  const autoTried = useRef(false);
   const face: "wizard" | "settings" | "home" =
     page === "settings" ? "settings"
       : status?.setupComplete === false ? "wizard"
         : "home";
 
+  // Kept outside React on purpose (see browser-auto-launch.ts): the fact has
+  // to outlive the mount, and "we have already tried" has to be true before
+  // the request comes back — the poll would otherwise fire a second launch
+  // while the first is still inside the route's ten-second wait for CDP.
   useEffect(() => {
-    if (autoTried.current || face !== "home" || !status) return;
+    if (autoLaunchSpent() || face !== "home" || !status) return;
     // The switch is the owner's, and the setup route refuses the MCP bearer,
     // so `ui_open_app("browser")` cannot turn it back on to get itself a
     // window the owner said no to.
     if (status.autoOpen === false) return;
-    if (status.browser?.running) { autoTried.current = true; return; }
+    if (status.browser?.running) { spendAutoLaunch(); return; }
     // Not while the agent is mid-task in its own headless browser: opening
     // ours terminates that one. The notice below offers the same action by
     // hand, which is a person asking rather than a window deciding.
     if (status.browser?.agentBrowsing) return;
     if (!canRunBrowser) return;
-    autoTried.current = true;
+    spendAutoLaunch();
     void doAction("open-browser");
   }, [status, face, canRunBrowser, doAction]);
 
@@ -368,7 +368,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                 // WITHOUT opening the browser spends the automatic launch, so
                 // home does not immediately do the thing they just skipped.
                 onDone={(opened) => {
-                  if (!opened) autoTried.current = true;
+                  if (!opened) spendAutoLaunch();
                   void fetchStatus();
                 }}
               />

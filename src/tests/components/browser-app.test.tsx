@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
 import BrowserApp from "@/components/BrowserApp";
 import { resetHarnessCache } from "@/lib/client-harness";
+import { resetBrowserAutoLaunch } from "@/lib/browser-auto-launch";
 
 /**
  * The Browser app's three faces and its one-click launch.
@@ -99,6 +100,11 @@ describe("BrowserApp", () => {
     // The harness lookup is cached for the document's lifetime; without this a
     // later test would be answered from an earlier test's device.
     resetHarnessCache();
+    // The automatic launch belongs to the desktop session rather than to a
+    // mount (that is what the minimize test below is about), and a fact that
+    // outlives a mount outlives a test too — every test here opens a fresh
+    // desktop.
+    resetBrowserAutoLaunch();
     stubDevice(READY_STATUS);
   });
 
@@ -149,6 +155,64 @@ describe("BrowserApp", () => {
     await waitFor(() => expect(postedActions(fetchMock)).toEqual(["open-browser"]));
     await new Promise((r) => setTimeout(r, 60));
     expect(postedActions(fetchMock)).toEqual(["open-browser"]);
+  });
+
+  /**
+   * A mount is not an opening. ChromeWindow unmounts a minimized window's
+   * children, so the guard that says "this window has had its go" cannot live
+   * on the component: restoring a minimized Browser window used to start
+   * Chromium again on the device's own screen.
+   */
+  it("does not start Chromium again when a minimized window is restored", async () => {
+    const fetchMock = stubDevice({ ...READY_STATUS, browser: { running: false, cdpReady: false } });
+    const first = render(<BrowserApp />);
+    await waitFor(() => expect(postedActions(fetchMock)).toEqual(["open-browser"]));
+
+    // Minimize (the desktop drops the children) and restore (they mount anew).
+    first.unmount();
+    const second = render(<BrowserApp />);
+
+    await second.findByTestId("browser-state");
+    await new Promise((r) => setTimeout(r, 60));
+    expect(postedActions(fetchMock)).toEqual(["open-browser"]);
+  });
+
+  /**
+   * And the case that made it matter: the owner closed the browser by hand.
+   * A window that re-opened it on the next restore would be overruling them
+   * on the appliance's own screen.
+   */
+  it("never re-opens a browser the owner closed, however often the window comes back", async () => {
+    let running = true;
+    const posted: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/setup-api/harness/active")) return json({ active: "openclaw", edition: "openclaw" });
+      if (url.includes("/setup-api/vnc")) return json({ available: true, wsPort: 6080 });
+      if (url.includes("/setup-api/browser/manage") && init?.method === "POST") {
+        const action = String(JSON.parse(String(init.body)).action);
+        posted.push(action);
+        running = action === "open-browser";
+        return json({ ok: true });
+      }
+      if (url.includes("/setup-api/browser/manage")) {
+        return json({ ...READY_STATUS, browser: { running, cdpReady: running, pid: 4242 } });
+      }
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = render(<BrowserApp />);
+    fireEvent.click(await first.findByTestId("browser-close"));
+    await waitFor(() => expect(posted).toEqual(["close-browser"]));
+
+    first.unmount();
+    const second = render(<BrowserApp />);
+
+    // The strip offers the launch by hand, and nothing was posted behind it.
+    await second.findByTestId("browser-open");
+    await new Promise((r) => setTimeout(r, 60));
+    expect(posted).toEqual(["close-browser"]);
   });
 
   it("does not launch when the owner switched that off", async () => {
