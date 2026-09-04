@@ -516,11 +516,19 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
   // that section landed is in the same state, silently. So the top-up appends
   // EVERY `## ` section the file is missing, not one named one.
   describe("tops a guide up to every section the template has", () => {
-    const headings = () =>
-      readFileSync(TEMPLATE, "utf-8")
-        .split("\n")
-        .map((l) => l.replace(/\r$/, ""))
-        .filter((l) => l.startsWith("## "));
+    // Fenced lines excluded, exactly as the script excludes them: the template
+    // documents markdown, so a ``` block containing a `## ` line would make
+    // these cases demand a section the script correctly refuses to enumerate.
+    const headings = () => {
+      const out: string[] = [];
+      let fenced = false;
+      for (const raw of readFileSync(TEMPLATE, "utf-8").split("\n")) {
+        const line = raw.replace(/[ \t\r]+$/, "");
+        if (/^(```|~~~)/.test(line)) { fenced = !fenced; continue; }
+        if (!fenced && /^## +[^ ]/.test(line)) out.push(line);
+      }
+      return out;
+    };
 
     it("gives an old guide every heading the shipped template carries", () => {
       // A real pre-TASK-612 guide: the sections that box was seeded with, and
@@ -692,7 +700,10 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
       const { stdout } = run();
 
       expect(stdout).not.toMatch(/Appended/);
-      expect(readFileSync(guide, "utf-8").match(/^## Skills */gm)).toHaveLength(1);
+      // End-anchored: `/^## Skills */gm` also matches the prefix of
+      // `## Skills and other things`, which is the very heading this case is
+      // about.
+      expect(readFileSync(guide, "utf-8").match(/^## Skills *$/gm)).toHaveLength(1);
     });
   });
 
@@ -826,11 +837,12 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     // Padded past a 1024-byte boundary on purpose: the cap can only be set in
     // whole blocks, so a short file would let the whole rule fit inside the
     // first block and the write would simply succeed, testing nothing.
-    const existing = "# AGENTS\n\nBe helpful.\n\n## ClawBox integration\n\nSee `CLAWBOX.md`.\n"
-      + "Owner note: the printer is on the shelf.\n".repeat(45);
+    const existing = padToJustUnderABlock(
+      "# AGENTS\n\nBe helpful.\n\n## ClawBox integration\n\nSee `CLAWBOX.md`.\n",
+    );
     writeFileSync(agents, existing);
 
-    const res = runCapped(Buffer.byteLength(existing) + 128);
+    const res = runCapped(Buffer.byteLength(existing) + 64);
 
     expect(res.status).toBe(0);
     // Proof the append really did stop part way — without this the case
