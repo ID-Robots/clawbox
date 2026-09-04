@@ -1107,10 +1107,141 @@ ensure_node_pty() {
   echo "  node-pty rebuilt and verified"
 }
 
-# Stop the setup service, clear cache, reinstall, and rebuild
+# ── Memory for the build ─────────────────────────────────────────────────────
+
+# MemAvailable in MiB, or 0 when /proc cannot be read.
+#
+# Zero rather than a guess, on the same reasoning as the memory guard in
+# scripts/openclaw/clawbox-tts.sh: on a Jetson an unreadable /proc means
+# something is wrong, and assuming "plenty" is how the OOM killer gets invited
+# in. Here it only makes the log line honest — nothing below is conditional on
+# the number.
+available_mb() {
+  local kb
+  kb=$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null)
+  [ -n "$kb" ] || { printf '0'; return 0; }
+  printf '%s' "$((kb / 1024))"
+}
+
+# Print the pid of the llama.cpp server named by ClawBox's own pidfile, and
+# nothing at all unless that process is really it.
+#
+# The pid is checked against /proc/<pid>/cmdline before the caller signals it:
+# the pidfile outlives a crash, pids are recycled, and this runs as root — so
+# an unverified kill from a stale file is a root SIGKILL aimed at whatever
+# inherited the number. The TypeScript sibling (stopLlamaCppServer in
+# src/instrumentation-node.ts) can go straight from the file to the signal
+# because it usually still holds the child handle; from bash there is nothing
+# but the file.
+llamacpp_pid_if_running() {
+  local pidfile="$PROJECT_DIR/data/llamacpp/server.pid" pid
+  [ -f "$pidfile" ] || return 1
+  read -r pid < "$pidfile" 2>/dev/null || return 1
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  grep -qa 'llama-server' "/proc/$pid/cmdline" 2>/dev/null || return 1
+  printf '%s' "$pid"
+}
+
+# Give `bun run build` the board to itself.
+#
+# The rebuild is the most memory-hungry thing this appliance ever does, and on
+# an 8 GB Jetson it shares that memory with whatever the box was doing a minute
+# earlier: ollama keeps a model resident for ten idle minutes after the last
+# chat turn, Kokoro holds its voice on the GPU for five, and a llama.cpp server
+# stays up until something stops it. A `next build` starting underneath 4 GB of
+# resident model does not build slowly — it is OOM-killed, and the update ends
+# with the box on a half-written .next and a step painted red.
+#
+# Called from do_rebuild AFTER clawbox-setup.service is stopped, and that order
+# is what makes the free hold: the gateway reaches ollama and llama.cpp through
+# the web server's own proxy (src/lib/local-ai-runtime.ts), so with the web
+# server down nothing can pull a model back in behind us for the length of the
+# build.
+#
+# Stop, never disable — the same rule the idle standby follows, and the reason
+# it is safe: every engine here is meant to come back on demand. An update that
+# quietly un-enabled one would be a box that stopped talking after its next
+# reboot, which is a far worse bug than the one this fixes.
+#
+# Every step is best-effort and this function never fails the update: a box
+# that cannot stop one of its engines should still attempt the build it was
+# asked for, and the log says what happened.
+free_memory_for_build() {
+  local before after uid unit pid waited
+  before=$(available_mb)
+  echo "Freeing memory for the build (${before} MB available)..."
+
+  if systemctl cat ollama.service >/dev/null 2>&1; then
+    echo "  Stopping ollama.service..."
+    systemctl stop ollama.service 2>/dev/null \
+      || echo "  Warning: could not stop ollama.service" >&2
+  fi
+
+  # The voice engines are USER units, so they need the clawbox user's session
+  # bus; with no /run/user/<uid> there is no session and nothing to stop.
+  uid=$(id -u "$CLAWBOX_USER" 2>/dev/null || echo "")
+  if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then
+    for unit in kokoro-server.service whisper-server.service; do
+      sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
+        systemctl --user cat "$unit" >/dev/null 2>&1 || continue
+      echo "  Stopping $unit..."
+      sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
+        systemctl --user stop "$unit" 2>/dev/null \
+        || echo "  Warning: could not stop $unit" >&2
+    done
+  fi
+
+  if pid=$(llamacpp_pid_if_running); then
+    echo "  Stopping llama.cpp server (pid $pid)..."
+    kill -TERM "$pid" 2>/dev/null || true
+    # Three seconds, in the shape of the 1.5 s its TypeScript sibling allows
+    # (stopLlamaCppServer): a server that has not gone by then is not going to,
+    # and the update has a build to get on with. `kill -0` also succeeds for a
+    # process that has died and not yet been reaped, so this loop is written to
+    # fall through rather than to wait for a state it might never observe.
+    waited=0
+    while [ "$waited" -lt 3 ] && kill -0 "$pid" 2>/dev/null; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    # Ask again, with the same question, before escalating.
+    #
+    # Three seconds is long enough for the pid to be freed and handed to
+    # something else, and this is a root SIGKILL — so the identity is
+    # re-established rather than assumed, and the answer also covers a process
+    # that has exited and not yet been reaped (a zombie answers `kill -0`, but
+    # its cmdline is empty, so it cannot pass this check and the log does not
+    # claim it refused to go).
+    #
+    # This narrows the window to the gap between these two lines; it does not
+    # close it. Nothing in bash can: holding a handle across the wait needs a
+    # pidfd, and the shell has no way to open or signal one.
+    if [ "$(llamacpp_pid_if_running || true)" = "$pid" ]; then
+      echo "  llama.cpp did not exit on SIGTERM — killing it"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PROJECT_DIR/data/llamacpp/server.pid"
+  fi
+
+  # Page cache last, once the engines have released their mappings. It is
+  # reclaimable by definition, so this hands the build nothing the kernel would
+  # not have given it anyway — it just means the build starts without first
+  # reclaiming a cache full of model weights, and that MemAvailable below is
+  # the number a human would recognise.
+  sync || echo "  Warning: could not flush filesystems before dropping the cache" >&2
+  echo 3 > /proc/sys/vm/drop_caches 2>/dev/null \
+    || echo "  Warning: could not drop the page cache" >&2
+
+  after=$(available_mb)
+  echo "  Memory available for the build: ${after} MB (was ${before} MB)"
+}
+
+# Stop the setup service, free memory, clear cache, reinstall, and rebuild
 do_rebuild() {
   echo "Stopping clawbox-setup.service for rebuild..."
   systemctl stop clawbox-setup.service 2>/dev/null || true
+  # After the stop, never before it — see free_memory_for_build.
+  free_memory_for_build
   echo "Clearing .next cache..."
   rm -rf "$PROJECT_DIR/.next"
   echo "Running bun install..."
