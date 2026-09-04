@@ -133,7 +133,10 @@ export async function hermesImagePluginInstalled(): Promise<boolean> {
  *                answers `set(enabled) if isinstance(enabled, list) else
  *                set()`, so on such a box NO user plugin loads at all — the
  *                customer's included. `names` is what could be recovered from
- *                it, which is what keeps the repair from destroying their list.
+ *                it, which is what keeps the repair from destroying their list,
+ *                and `shape` is what it looked like — for the caller's journal
+ *                line on the one path where nothing could be recovered and the
+ *                value is replaced rather than merged into.
  *   unreadable — a shape nothing here can take names out of. Left ALONE:
  *                replacing it would discard the only record of what the
  *                customer had enabled, the same way `scripts/register-mcp.sh`
@@ -141,7 +144,7 @@ export async function hermesImagePluginInstalled(): Promise<boolean> {
  */
 export type PluginsEnabledState =
   | { kind: "list"; names: string[] }
-  | { kind: "residue"; names: string[] }
+  | { kind: "residue"; names: string[]; shape: string }
   | { kind: "unreadable" };
 
 /**
@@ -153,8 +156,10 @@ export type PluginsEnabledState =
  * and a box loading no plugins at all could never heal itself (TASK-701).
  *
  * Strict on purpose — stdout that is not JSON is `unreadable`, never a lenient
- * text parse. This function is what PROVES a write landed as a list, and a
- * prover that accepts the ambiguous rendering re-opens the hole it closes.
+ * text parse. This decides whether the value is REPAIRED, and a decoder that
+ * accepts the ambiguous rendering leaves the residue in place. (What Hermes
+ * will actually LOAD is asked of Hermes, not derived here — see
+ * `hermesReportsPluginEnabled` in hermes-clawai.ts.)
  */
 export function decodePluginsEnabledJson(stdout: string): PluginsEnabledState {
   const text = (stdout || "").trim();
@@ -170,7 +175,7 @@ export function decodePluginsEnabledJson(stdout: string): PluginsEnabledState {
     // than carried — but the drop is deliberate, not incidental.
     return { kind: "list", names: value.filter((v): v is string => typeof v === "string") };
   }
-  return { kind: "residue", names: recoverNames(value) };
+  return { kind: "residue", names: recoverNames(value), shape: describeShape(value) };
 }
 
 /**
@@ -187,30 +192,8 @@ export function decodePluginsEnabledPlain(stdout: string): PluginsEnabledState {
   return { kind: "list", names: parseYamlList(stdout) };
 }
 
-/**
- * Names out of a value that is not a list, or [] when there are none.
- *
- * A residue nothing can be recovered from is still REPLACED by the caller —
- * leaving the box loading no plugins at all would be worse — but it is the one
- * place the "merged, never replaced" invariant gives way, so what is being
- * discarded is written to the journal first. `scripts/register-mcp.sh` prints
- * the same kind of line before it declines a list it cannot parse.
- */
+/** Names out of a value that is not a list, or [] when there are none. */
 function recoverNames(value: unknown): string[] {
-  const names = recoverNamesFrom(value);
-  if (!names.length) {
-    // Plugin names only — this key holds no credential — and truncated anyway,
-    // since a hand-edited config can hold anything.
-    const shape = typeof value === "string" ? JSON.stringify(value.slice(0, 120)) : typeof value;
-    console.warn(
-      `[hermes/clawai] plugins.enabled holds ${shape}, which names no plugin;`
-      + " it is being replaced rather than merged into",
-    );
-  }
-  return names;
-}
-
-function recoverNamesFrom(value: unknown): string[] {
   // Our own literal, handed back as text. Its content is the customer's list.
   if (typeof value === "string") {
     const names = parseYamlList(value);
@@ -220,9 +203,29 @@ function recoverNamesFrom(value: unknown): string[] {
     return bare && !bare.startsWith("[") && !bare.includes("\n") ? [bare] : [];
   }
   // A hand-edited mapping (`enabled: {weather: true}`) is a plausible YAML
-  // mistake, and its KEYS are perfectly good plugin names.
-  if (value && typeof value === "object" && !Array.isArray(value)) return Object.keys(value);
+  // mistake, and its KEYS are perfectly good plugin names — but a mapping is
+  // how someone writes an ON/OFF table, so when every value is a boolean the
+  // FALSE ones are a decision, not a name. Turning `weather: false` into a
+  // listed (and therefore loaded) plugin would enable something the owner had
+  // just switched off, as a side effect of repairing a type.
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const entries = Object.entries(value as Record<string, unknown>);
+    return entries.every(([, v]) => typeof v === "boolean")
+      ? entries.filter(([, v]) => v).map(([name]) => name)
+      : entries.map(([name]) => name);
+  }
   return [];
+}
+
+/**
+ * What the value LOOKED like, for the journal line the caller prints before it
+ * replaces a residue no name could be recovered from.
+ *
+ * Plugin names only — this key holds no credential — and truncated anyway,
+ * since a hand-edited config can hold anything.
+ */
+function describeShape(value: unknown): string {
+  return typeof value === "string" ? JSON.stringify(value.slice(0, 120)) : typeof value;
 }
 
 /**

@@ -54,13 +54,16 @@ import { HERMES_IMAGE_PLUGIN_NAME, HERMES_IMAGE_TOKEN_ENV } from "@/lib/hermes-i
 const OK = { code: 0, stdout: "", stderr: "" };
 
 /**
- * A `hermes` that actually STORES what it is told for `plugins.enabled`.
+ * A `hermes` that actually STORES what it is told for `plugins.enabled`, and
+ * REPORTS what it would load from it.
  *
- * That write is verified with a `config get --json` read-back now (TASK-701),
- * so a stub answering "" to every read reports a key that did not land — and
- * the link then correctly refuses to claim the box can draw, which would end
- * every case here in the same place. Modelling the store keeps each case about
- * what it is about. `override` wins where a case needs a specific failure.
+ * The write is proved by asking Hermes now (TASK-701): `plugins list --json`,
+ * whose `status` comes from the loader's own `_get_enabled_set`. A stub
+ * answering "" to every call therefore reports a plugin that is not enabled,
+ * and the link then correctly refuses to claim the box can draw — which would
+ * end every case here in the same place. Modelling the store keeps each case
+ * about what it is about. `override` wins where a case needs a specific
+ * failure.
  */
 function hermesFake(
   override: (args: string[]) => { code: number; stdout: string; stderr: string } | undefined = () => undefined,
@@ -70,6 +73,18 @@ function hermesFake(
   cliMock.mockImplementation(async (args: string[]) => {
     const forced = override(args);
     if (forced) return forced;
+    if (args[0] === "plugins" && args[1] === "list") {
+      // `set(enabled) if isinstance(enabled, list) else set()` — the rule the
+      // real one applies (hermes_cli/plugins_cmd.py:1309-1324).
+      const enabled = Array.isArray(stored) && stored.includes(HERMES_IMAGE_PLUGIN_NAME);
+      return {
+        code: 0,
+        stdout: JSON.stringify([
+          { name: HERMES_IMAGE_PLUGIN_NAME, status: enabled ? "enabled" : "not enabled", version: "1.0.0", description: "", source: "user" },
+        ]),
+        stderr: "",
+      };
+    }
     if (args[1] === "set" && args[2] === "plugins.enabled") {
       stored = JSON.parse(args[3]);
       return OK;

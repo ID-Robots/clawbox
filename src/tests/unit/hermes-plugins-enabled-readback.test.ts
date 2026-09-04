@@ -90,6 +90,38 @@ const STORING_AS_STRING =
 
 interface Reply { code: number; stdout: string; stderr: string }
 
+/**
+ * What `hermes plugins list --json` prints, derived the way Hermes derives it.
+ *
+ * `_plugin_status` reads `_get_enabled_set()`, which is
+ * `set(enabled) if isinstance(enabled, list) else set()`
+ * (hermes_cli/plugins_cmd.py:1309-1324, read on the pinned 0.20.5 build) — so
+ * a value that is not a LIST reports "not enabled" however it is spelled, and
+ * that is the whole reason this listing is the proof rather than a type check
+ * of our own.
+ */
+function pluginsListing(stored: unknown): Reply {
+  const enabled = Array.isArray(stored) && stored.includes(HERMES_IMAGE_PLUGIN_NAME);
+  return {
+    code: 0,
+    stdout: JSON.stringify([
+      {
+        name: HERMES_IMAGE_PLUGIN_NAME,
+        status: enabled ? "enabled" : "not enabled",
+        version: "1.0.0",
+        description: "ClawBox AI image generation backend.",
+        source: "user",
+      },
+    ]),
+    stderr: "",
+  };
+}
+
+/** Is this argv the plugin listing? */
+function isPluginsListing(args: string[]): boolean {
+  return args[0] === "plugins" && args[1] === "list";
+}
+
 /** `hermes config get <key>` with no flag: a YAML block list, or raw text. */
 function renderPlain(value: unknown): string {
   return Array.isArray(value) ? value.map((v) => `- ${v}`).join("\n") + "\n" : String(value);
@@ -111,6 +143,7 @@ function box(opts: { value: unknown; onSet?: Reply }): void {
   // exercises the mismatch branch — the tests would pass for the wrong reason.
   let stored = opts.value;
   cliMock.mockImplementation(async (args: string[]) => {
+    if (isPluginsListing(args)) return pluginsListing(stored);
     if (args[1] === "get" && args[2] === "plugins.enabled") {
       if (stored === undefined) {
         return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
@@ -181,13 +214,16 @@ describe("plugins.enabled is written on a read-back, not on an exit code", () =>
     // read-back is the only witness. It answers with the string it stored.
     let written = false;
     cliMock.mockImplementation(async (args: string[]) => {
+      const residue = `["${HERMES_IMAGE_PLUGIN_NAME}"]`;
+      // A STRING, so `_get_enabled_set` answers empty and Hermes reports the
+      // plugin as not enabled — however that string is spelled.
+      if (isPluginsListing(args)) return pluginsListing(written ? residue : undefined);
       if (args[1] === "set" && args[2] === "plugins.enabled") {
         written = true;
         return { code: 0, stdout: "", stderr: "" };
       }
       if (args[1] === "get" && args[2] === "plugins.enabled") {
         if (!written) return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
-        const residue = `["${HERMES_IMAGE_PLUGIN_NAME}"]`;
         return args.includes("--json")
           ? { code: 0, stdout: JSON.stringify(residue), stderr: "" }
           : { code: 0, stdout: residue, stderr: "" };
@@ -223,6 +259,20 @@ describe("plugins.enabled is written on a read-back, not on an exit code", () =>
     // Nothing to report: assert on the recorded arguments, not on a matcher
     // pair that could never line up with a one-argument console.warn.
     expect(warn.mock.calls.flat().join(" ")).not.toContain("plugins.enabled");
+  });
+
+  it("says what it discarded when a residue names no plugin, and says it once", async () => {
+    // The one place "merged, never replaced" gives way. It is announced at the
+    // moment of the decision — not from inside the decoder, which also runs as
+    // the prover, where nothing is replaced and the same line would report an
+    // overwrite that never happened.
+    box({ value: 7 });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    const journal = warn.mock.calls.flat().join("\n");
+    expect(journal).toContain("names no plugin");
+    expect(journal.match(/names no plugin/g)).toHaveLength(1);
   });
 
   it("keeps the customer's plugins when it adds itself", async () => {
@@ -288,6 +338,11 @@ describe("a hermes whose config get does not take --json", () => {
     // that question has said nothing about whether the value is residue, so
     // withdrawing the feature would be a false failure — these boxes draw today.
     cliMock.mockImplementation(async (args: string[]) => {
+      // A build old enough to lack `--json` on `config get` lacks it on
+      // `plugins list` too, so NEITHER question can be put here.
+      if (isPluginsListing(args)) {
+        return { code: 2, stdout: "", stderr: "usage: hermes plugins list\nunrecognized arguments: --json" };
+      }
       if (args[1] === "get" && args[2] === "plugins.enabled") {
         return args.includes("--json")
           ? { code: 2, stdout: "", stderr: "usage: hermes config get\nunrecognized arguments: --json" }
@@ -307,10 +362,11 @@ describe("a hermes whose config get does not take --json", () => {
 });
 
 describe("the proof does not accept the ambiguous rendering", () => {
-  it("refuses a read-back that is not JSON, even though it spells the right list", async () => {
+  it("refuses a `--json` answer that is not JSON, even though it spells the right list", async () => {
     // A build that takes `--json` but does not honour it in the formatter, or
-    // anything that re-renders on the way back. `- clawai` through a lenient
-    // text parse would have proved nothing and been called landed.
+    // anything that re-renders on the way out. `- clawai` through a lenient
+    // text parse would have looked like a list already holding us and left the
+    // residue in place.
     cliMock.mockImplementation(async (args: string[]) => {
       if (args[1] === "get" && args[2] === "plugins.enabled") {
         return args.includes("--json")
@@ -325,22 +381,17 @@ describe("the proof does not accept the ambiguous rendering", () => {
     expect(claimedItCanDraw()).toBe(false);
   });
 
-  it("makes no claim on a read-back the CLI never answered, and leaves the old one standing", async () => {
+  it("makes no claim when the CLI never answered, and leaves the old one standing", async () => {
     // 127 is the shell's code for the `hermes` shim while the venv under it is
     // being rebuilt: nothing was parsed, and the write above still exited 0.
     // NOTHING WAS ESTABLISHED, so nothing is withdrawn either: unsetting
     // `image_gen.provider` here would take drawing away from a box that has it,
     // and no code path on the device puts it back — this function has no
     // periodic caller and is the only writer of that key.
-    let written = false;
     cliMock.mockImplementation(async (args: string[]) => {
-      if (args[1] === "set" && args[2] === "plugins.enabled") {
-        written = true;
-        return { code: 0, stdout: "", stderr: "" };
-      }
+      if (isPluginsListing(args)) return { code: 127, stdout: "", stderr: "hermes: command not found" };
       if (args[1] === "get" && args[2] === "plugins.enabled") {
-        if (!written) return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
-        return { code: 127, stdout: "", stderr: "hermes: command not found" };
+        return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
       }
       if (args[1] === "get" && args[2] === "image_gen.provider") {
         return { code: 0, stdout: `${HERMES_IMAGE_PLUGIN_NAME}\n`, stderr: "" };
@@ -481,20 +532,72 @@ describe("a failure that establishes nothing takes nothing away", () => {
     expect(unsets()).not.toContain("image_gen.provider");
   });
 
+  it("keeps drawing when hermes' own listing says nothing at all", async () => {
+    // Exit 0 and an empty stdout from `plugins list --json`. A command that
+    // printed nothing has not reported that a plugin is absent, and reading it
+    // as one would take a working box's claim away over silence.
+    boxThatDraws(async (args) => {
+      if (isPluginsListing(args)) return { code: 0, stdout: "", stderr: "" };
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(claimedItCanDraw()).toBe(false);
+    expect(unsets()).not.toContain("image_gen.provider");
+  });
+
+  it("believes hermes over the list when the plugin is explicitly disabled", async () => {
+    // `plugins.disabled` is a deny-list that wins over `plugins.enabled`
+    // (`_plugin_status`, hermes_cli/plugins_cmd.py:1930-1936). The allow-list
+    // here is a perfectly good list naming us, so every type check ClawBox
+    // could make on it says "loadable" — and Hermes still loads nothing. This
+    // is why the proof is Hermes' own answer rather than our reading of a key.
+    boxThatDraws(async (args) => {
+      if (isPluginsListing(args)) {
+        return {
+          code: 0,
+          stdout: JSON.stringify([
+            { name: HERMES_IMAGE_PLUGIN_NAME, status: "disabled", version: "1.0.0", description: "", source: "user" },
+          ]),
+          stderr: "",
+        };
+      }
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return args.includes("--json")
+          ? { code: 0, stdout: JSON.stringify(["weather"]), stderr: "" }
+          : { code: 0, stdout: "- weather\n", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(claimedItCanDraw()).toBe(false);
+    expect(unsets()).toContain("image_gen.provider");
+  });
+
   it("still withdraws on the one answer that establishes the plugin cannot load", async () => {
     // The counterweight, kept in the same block as the cases above so the rule
     // reads as one: a read-back that ANSWERED and did not spell the list is
     // proof, and proof still takes the claim away.
     let written = false;
     boxThatDraws(async (args) => {
+      // The write landed AS TEXT with a clean stderr — an older CLI stores the
+      // literal silently — so Hermes' own listing is the only witness, and it
+      // reports the plugin not enabled because a string is not a list.
+      if (isPluginsListing(args)) {
+        return pluginsListing(written ? `["${HERMES_IMAGE_PLUGIN_NAME}"]` : undefined);
+      }
       if (args[1] === "set" && args[2] === "plugins.enabled") {
         written = true;
         return { code: 0, stdout: "", stderr: "" };
       }
       if (args[1] === "get" && args[2] === "plugins.enabled") {
-        if (!written) return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
-        // The literal, stored as text: JSON of a STRING, not of a list.
-        return { code: 0, stdout: JSON.stringify(`["${HERMES_IMAGE_PLUGIN_NAME}"]`), stderr: "" };
+        return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
       }
       return { code: 0, stdout: "", stderr: "" };
     });
