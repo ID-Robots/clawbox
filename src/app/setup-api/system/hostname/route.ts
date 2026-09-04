@@ -80,20 +80,11 @@ export async function POST(request: Request) {
   // and litter that makes `~/.openclaw` exist is the kind that misleads the
   // next person debugging an edition question.
   //
-  // And Hermes needs no equivalent of its own — TASK-553 asked, and the answer
-  // is written down in src/tests/unit/hermes-dashboard-proxy-renamed-host.test.ts:
-  //   - Hermes 0.20.5 has no allowed-origins list to write. Its dashboard
-  //     guard (`_ws_host_origin_reason`, hermes_cli/web_server.py) compares
-  //     Host and Origin against `app.state.bound_host` and takes no
-  //     configuration. ClawBox binds the dashboard to 127.0.0.2 and
-  //     scripts/hermes-dashboard-proxy.js rewrites Host/Origin/Referer to that
-  //     authority, so the box's LAN name never reaches Hermes.
-  //   - The proxy's own DNS-rebind guard (`isAllowedHostname`) accepts any
-  //     well-formed `<label>.local` and any IP literal, so a renamed box works
-  //     the moment it is renamed — no list, no write, no restart.
-  // Measured read-only on the Hermes box at beta head: `Host: <newname>.local`
-  // answers 302 to the login page on the new name; `Host: evil.example.com`
-  // still answers 403.
+  // Hermes needs no equivalent of its own either — TASK-553 asked, and the
+  // answer is no: neither Hermes nor its ClawBox proxy holds a list a rename
+  // could invalidate. The reasoning and the proof are in
+  // src/tests/unit/hermes-dashboard-proxy-renamed-host.test.ts.
+
   // Which half of the gateway leg failed, if either — the two need different
   // words, and one try around both would have blamed a gateway that was never
   // restarted for a failed origins write. `null` means nothing is outstanding:

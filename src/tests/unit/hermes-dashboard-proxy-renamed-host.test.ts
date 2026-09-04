@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createRequire } from "node:module";
 import http from "node:http";
 import net from "node:net";
+import type { Duplex } from "node:stream";
 import path from "node:path";
 import { createSessionCookie } from "@/lib/auth";
 
@@ -15,20 +16,33 @@ import { createSessionCookie } from "@/lib/auth";
  * equivalent runs on Hermes, and nothing needs to:
  *
  *   - Hermes 0.20.5 has no allowed-origins list to update. Its dashboard guard
- *     (`_ws_host_origin_reason` in hermes_cli/web_server.py) compares Host and
- *     Origin against `app.state.bound_host` — the address the dashboard was
- *     bound to — and takes no configuration. ClawBox binds it to 127.0.0.2 and
- *     the proxy rewrites Host/Origin/Referer to that authority, so the box's
- *     LAN name never reaches Hermes at all.
+ *     (`_ws_host_origin_reason` in hermes_cli/web_server.py, read on a v0.20.5
+ *     device 2026-09-04) compares Host and Origin against
+ *     `app.state.bound_host` — the address the dashboard was bound to — and
+ *     takes no configuration. ClawBox binds it to 127.0.0.2 and the proxy
+ *     rewrites Host/Origin/Referer to that authority, so the box's LAN name
+ *     never reaches Hermes at all.
  *   - The proxy's own guard (scripts/hermes-dashboard-proxy.js,
  *     `isAllowedHostname`) accepts ANY well-formed `<label>.local` and any raw
  *     IP literal, so it needs no list either — a renamed box is accepted the
- *     moment it is renamed, with no restart and no config write.
+ *     moment it is renamed, with no restart and no config write. That generic
+ *     rule also SUBSUMES the cached `systemMdnsHost()` branch above it: every
+ *     non-null value that branch can return is a `<label>.local` the generic
+ *     rule accepts anyway, so the process-lifetime cache decides no request and
+ *     cannot go stale into a lockout. The cache is not a fast path worth
+ *     keeping — deleting the generic rule and keeping it would break every
+ *     renamed box.
  *
  * What is pinned here is that second property, which nothing tested before:
  * `ALLOWED_HOSTS` below deliberately holds neither name used in the requests.
- * The same `checkRequestOrigin` runs on the WS-upgrade path, so tightening it
- * for one leg would break both.
+ * Both legs are covered — HTTP and the WS upgrade share `checkRequestOrigin`
+ * but own separate rejection paths, and the dashboard's live traffic is mostly
+ * WebSocket, so a renamed box could otherwise load and then sit dead.
+ *
+ * The scaffolding below (module-cache bust, env snapshot, session cookie) is
+ * the same shape as hermes-dashboard-proxy-timeouts.test.ts. Kept separate
+ * rather than folded in: that file is about upstream deadlines, this one about
+ * the host guard, and neither wants the other's fixtures.
  */
 
 const require_ = createRequire(import.meta.url);
@@ -95,6 +109,8 @@ let upstream: http.Server;
 let upstreamPort: number;
 let proxy: http.Server | undefined;
 let proxyPort: number;
+/** Upgrade sockets the fixture answered; destroyed in afterAll. */
+const upgraded: Duplex[] = [];
 
 const ENV_KEYS = ["SESSION_SECRET", "ALLOWED_HOSTS", "CLAWBOX_ROOT", "HERMES_DASH_HOST", "HERMES_PORT"] as const;
 const envBefore = new Map<string, string | undefined>();
@@ -105,6 +121,10 @@ beforeAll(async () => {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("dashboard ok");
   });
+  upstream.on("upgrade", (_req, socket) => {
+    upgraded.push(socket);
+    socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+  });
   upstreamPort = await listen(upstream);
 });
 
@@ -113,6 +133,9 @@ afterAll(async () => {
 });
 
 afterEach(async () => {
+  // An UPGRADED socket is detached from the server's connection tracking, so
+  // closeAllConnections() cannot reach it and close() would wait on it forever.
+  while (upgraded.length) upgraded.pop()!.destroy();
   await close(proxy);
   proxy = undefined;
   for (const [key, value] of envBefore) {
@@ -136,6 +159,43 @@ async function startProxy(): Promise<void> {
   const mod = require_(SCRIPT) as { createProxyServer: () => http.Server };
   proxy = mod.createProxyServer();
   proxyPort = await listen(proxy);
+}
+
+/** Drive a raw WebSocket upgrade through the proxy and collect what comes back. */
+function attemptUpgrade(host: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(proxyPort, "127.0.0.1", () => {
+      socket.write(
+        [
+          "GET /ws HTTP/1.1",
+          `Host: ${host}`,
+          "Upgrade: websocket",
+          "Connection: Upgrade",
+          "Sec-WebSocket-Version: 13",
+          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+          `Cookie: ${sessionCookie()}`,
+          "",
+          "",
+        ].join("\r\n"),
+      );
+    });
+    let text = "";
+    socket.on("data", (c) => {
+      text += c.toString();
+      // The proxy answers the handshake before any frame; that status line is
+      // all this asserts on, so stop as soon as the headers are complete.
+      if (text.includes("\r\n\r\n")) {
+        socket.destroy();
+        resolve(text);
+      }
+    });
+    socket.on("close", () => resolve(text));
+    socket.on("error", reject);
+    socket.setTimeout(5_000, () => {
+      socket.destroy();
+      reject(new Error("upgrade hung — proxy never answered or closed"));
+    });
+  });
 }
 
 describe("hermes dashboard proxy — a renamed box needs no allowed-origins update", () => {
@@ -177,6 +237,15 @@ describe("hermes dashboard proxy — a renamed box needs no allowed-origins upda
     await startProxy();
     const res = await request(proxyPort, { host: LAN_IP, cookie: sessionCookie() });
     expect(res.status).toBe(200);
+  });
+
+  it("accepts a WebSocket upgrade on the new name, and refuses a rebind name", async () => {
+    // The leg that matters most in service: the dashboard's live traffic is
+    // WebSocket, and handleUpgrade() owns its own 403 path, so an HTTP-only
+    // assertion would let a renamed box load and then sit dead.
+    await startProxy();
+    expect(await attemptUpgrade(RENAMED)).toContain("101 Switching Protocols");
+    expect(await attemptUpgrade("attacker.example.com")).toContain("403 Forbidden");
   });
 
   it("still refuses a DNS-rebind name, so the guard has not simply been opened", async () => {
