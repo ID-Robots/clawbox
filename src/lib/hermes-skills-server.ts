@@ -28,7 +28,7 @@ import { parseSkillFrontmatter, type SkillFrontmatter } from '@/lib/hermes-skill
 import { removeSkillDir } from '@/lib/hermes-skill-manifest';
 import { getActiveHarness } from '@/lib/harness';
 import { hermesConfigGet } from '@/lib/hermes-config-cache';
-import { isValidSkillName, MAX_FACET_SELECTION } from '@/lib/hermes-skills';
+import { isValidSkillName, MAX_FACET_SELECTION, REQUEST_REFUSAL } from '@/lib/hermes-skills';
 
 /**
  * Defense-in-depth gate for the skills-store routes: the store is a Hermes
@@ -61,7 +61,7 @@ export async function hermesSkillsGuard(): Promise<NextResponse | null> {
  * into the page.
  */
 export function invalidArgument(field: string, error: string): NextResponse {
-  return NextResponse.json({ error, code: 'invalid_argument', field }, { status: 400 });
+  return NextResponse.json({ error, code: REQUEST_REFUSAL.invalidArgument, field }, { status: 400 });
 }
 
 /**
@@ -74,7 +74,7 @@ export function tooManyFacets(field: string): NextResponse {
   return NextResponse.json(
     {
       error: `Too many ${field} filters — at most ${MAX_FACET_SELECTION} at a time.`,
-      code: 'too_many_facets',
+      code: REQUEST_REFUSAL.tooManyFacets,
       field,
       limit: MAX_FACET_SELECTION,
     },
@@ -118,15 +118,51 @@ interface HubLock {
   installed?: Record<string, HubLockEntry>;
 }
 
-/** Read the authoritative hub lock file. Missing/unparsable → empty. */
-export async function readHubLock(): Promise<Record<string, HubLockEntry>> {
+/**
+ * Read the authoritative hub lock file, keeping "could not read it" apart from
+ * "it lists nothing".
+ *
+ * The same distinction `pathState` below makes, for the same reason. A lock
+ * that is missing, truncated, mid-write, EACCES or EIO carries no information
+ * about what is installed, and a caller that reads it as an empty lock
+ * concludes that everything was removed. That is survivable behind a clean
+ * `exit 0`; it is not behind a SIGKILL, where a partial write is exactly what
+ * a deadline lands in the middle of.
+ */
+export async function readHubLockState(): Promise<
+  { ok: true; installed: Record<string, HubLockEntry> } | { ok: false }
+> {
+  let raw: string;
   try {
-    const raw = await fs.readFile(HUB_LOCK_PATH, 'utf8');
-    const parsed = JSON.parse(raw) as HubLock;
-    return parsed && typeof parsed.installed === 'object' && parsed.installed ? parsed.installed : {};
-  } catch {
-    return {};
+    raw = await fs.readFile(HUB_LOCK_PATH, 'utf8');
+  } catch (err) {
+    // ENOENT is the only one that proves a lock does not exist — a device with
+    // no store installs. Everything else is the file refusing to be read.
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { ok: true, installed: {} };
+    return { ok: false };
   }
+  try {
+    const parsed = JSON.parse(raw) as HubLock;
+    if (!parsed || typeof parsed !== 'object') return { ok: false };
+    if (parsed.installed === undefined) return { ok: true, installed: {} };
+    if (typeof parsed.installed !== 'object' || !parsed.installed) return { ok: false };
+    return { ok: true, installed: parsed.installed };
+  } catch {
+    // Truncated or mid-write: the one shape that used to read as "empty".
+    return { ok: false };
+  }
+}
+
+/**
+ * The lenient wrapper every existing caller uses: missing/unparsable → empty.
+ * Correct wherever an unreadable lock and an empty one lead to the same safe
+ * action (listing nothing, or reporting nothing installed) — and NOT correct
+ * where the emptiness is taken as evidence that a removal happened; those
+ * callers ask `readHubLockState` instead.
+ */
+export async function readHubLock(): Promise<Record<string, HubLockEntry>> {
+  const state = await readHubLockState();
+  return state.ok ? state.installed : {};
 }
 
 /**

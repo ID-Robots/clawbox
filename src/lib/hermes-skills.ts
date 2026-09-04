@@ -393,6 +393,16 @@ export const CLI_FAILURE_SENTENCES: Record<CliFailureCode, string> = {
 export const REQUEST_REFUSAL_CODES = ['invalid_argument', 'too_many_facets', 'not_found'] as const;
 export type RequestRefusalCode = (typeof REQUEST_REFUSAL_CODES)[number];
 
+/**
+ * The names the routes emit, so a producer cannot spell one differently from
+ * the vocabulary that documents it.
+ */
+export const REQUEST_REFUSAL = {
+  invalidArgument: 'invalid_argument',
+  tooManyFacets: 'too_many_facets',
+  notFound: 'not_found',
+} as const satisfies Record<string, RequestRefusalCode>;
+
 export function isRequestRefusalCode(value: unknown): value is RequestRefusalCode {
   return typeof value === 'string' && (REQUEST_REFUSAL_CODES as readonly string[]).includes(value);
 }

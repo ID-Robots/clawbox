@@ -28,6 +28,7 @@ export const skillsEn: Record<string, string> = {
   "skills.filtersButton": "Filters",
   "skills.filtersButtonWithCount": "Filters ({n})",
   "skills.filtersClearAll": "Clear all",
+  "skills.facetLimit": "At most {n} at a time.",
   "skills.filtersClose": "Close filters",
   "skills.filtersShowAll": "Show {n} more",
   "skills.filtersShowFewer": "Show fewer",
@@ -95,6 +96,8 @@ export const skillsEn: Record<string, string> = {
   "skills.liveRemoving": "Removing {name}",
   "skills.liveRemoved": "{name} removed",
   "skills.liveRemoveFailed": "Could not remove {name}",
+  "skills.liveInstallUnknown": "Could not tell whether {name} was installed",
+  "skills.liveRemoveUnknown": "Could not tell whether {name} was removed",
   "skills.uninstallFailed": "Uninstall failed",
 
   // === Empty and error states ===

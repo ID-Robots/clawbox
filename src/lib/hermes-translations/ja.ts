@@ -200,6 +200,7 @@ export const ja: Record<string, string> = {
   "skills.filtersButton": "絞り込み",
   "skills.filtersButtonWithCount": "絞り込み ({n})",
   "skills.filtersClearAll": "すべて解除",
+  "skills.facetLimit": "一度に最大 {n} 件までです。",
   "skills.filtersClose": "絞り込みを閉じる",
   "skills.filtersShowAll": "他 {n} 件を表示",
   "skills.filtersShowFewer": "表示を減らす",
@@ -267,6 +268,8 @@ export const ja: Record<string, string> = {
   "skills.liveRemoving": "{name} を削除しています",
   "skills.liveRemoved": "{name} を削除しました",
   "skills.liveRemoveFailed": "{name} を削除できませんでした",
+  "skills.liveInstallUnknown": "{name} がインストールされたかどうか確認できませんでした",
+  "skills.liveRemoveUnknown": "{name} が削除されたかどうか確認できませんでした",
   "skills.uninstallFailed": "アンインストールに失敗しました",
 
   // === Empty and error states ===

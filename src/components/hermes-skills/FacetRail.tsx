@@ -2,6 +2,7 @@
 
 import { type ReactNode, useId, useState } from 'react';
 import { useModalDialog } from '@/hooks/useModalDialog';
+import { MAX_FACET_SELECTION } from '@/lib/hermes-skills';
 import { useCopy } from './copy';
 import { FOCUS_RING, GhostButton } from './primitives';
 
@@ -112,16 +113,23 @@ function FacetGroup({ group }: { group: FacetGroupSpec }) {
       <ul role="list" className="list-none p-0 m-0 space-y-0.5">
         {visible.map((option) => {
           const checked = group.selected.includes(option.id);
+          // At the cap, an unticked box cannot be ticked. Said with `disabled`
+          // rather than by letting the click through: `toggleFacet` returns the
+          // same state, so a controlled checkbox flips in the DOM and React
+          // snaps it back — a control that visibly accepts a click and undoes
+          // it, with no reason given. The group's note below says why.
+          const atLimit = !checked && group.selected.length >= MAX_FACET_SELECTION;
           return (
             <li key={option.id}>
               <label
-                className={`flex items-center gap-2 rounded-md px-1.5 py-1 cursor-pointer transition-colors ${
-                  checked ? 'bg-[var(--coral-bright)]/10' : 'hover:bg-[var(--surface-card)]'
-                }`}
+                className={`flex items-center gap-2 rounded-md px-1.5 py-1 transition-colors ${
+                  atLimit ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'
+                } ${checked ? 'bg-[var(--coral-bright)]/10' : atLimit ? '' : 'hover:bg-[var(--surface-card)]'}`}
               >
                 <input
                   type="checkbox"
                   checked={checked}
+                  disabled={atLimit}
                   data-testid={`hs-facet-${group.id}-${option.id}`}
                   onChange={() => group.onToggle(option.id)}
                   className={`h-3.5 w-3.5 shrink-0 accent-[var(--coral-bright)] rounded ${FOCUS_RING}`}
@@ -146,6 +154,11 @@ function FacetGroup({ group }: { group: FacetGroupSpec }) {
         >
           {expanded ? COPY.filtersShowFewer : COPY.filtersShowAll(hidden)}
         </button>
+      )}
+      {group.selected.length >= MAX_FACET_SELECTION && (
+        <p className="mt-1 px-1.5 text-[10px] leading-snug text-[var(--text-secondary)]" role="status">
+          {COPY.facetLimit(MAX_FACET_SELECTION)}
+        </p>
       )}
       {group.note && (
         <p className="mt-1 px-1.5 text-[10px] leading-snug text-[var(--text-secondary)]">{group.note}</p>

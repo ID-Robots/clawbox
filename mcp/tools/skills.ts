@@ -267,31 +267,21 @@ const uninstallRules = (name: string, shown = ""): ErrorRule[] => [
 ];
 
 const CATALOG_RULES: ErrorRule[] = [
-  // The browse route's 400s. Every one of them is now coded (TASK-658); before
-  // that they were a bare English sentence and fell through to the status-only
-  // 502 rules below, which told the agent to check the network for an argument
-  // it had sent itself.
+  // The browse route's 400s. Both tools that install these rules pre-validate
+  // with the ROUTE's own checks — `skill_search` calls `isValidQuery` and
+  // `skill_info` calls `checkInstallIdentifier` before the request goes out,
+  // and neither has a facet parameter at all — so a 400 from here is a device
+  // whose validation has moved ahead of this build, not an argument the agent
+  // could have got right. Without a rule it lands on the generic
+  // `fromApiError` BAD_ARGUMENT, which tells it to re-read the schema and call
+  // again: exactly the wrong advice for a refusal its schema cannot express.
+  // One rule, and a `next` that does not promise the agent a `field` the error
+  // envelope does not carry.
   {
     status: 400,
-    match: /"code"\s*:\s*"too_many_facets"/,
     code: "BAD_ARGUMENT",
-    message: "Too many filter values were sent at once.",
-    next: "Drop some of the source/trust/category values and call again.",
-  },
-  {
-    status: 400,
-    match: /"code"\s*:\s*"bad_query"/,
-    code: "BAD_ARGUMENT",
-    message: "The device would not run that search text.",
-    next: "Shorten the search and remove any leading '-', then call again.",
-  },
-  {
-    // `invalid_argument` carries a `field`; the sentence names it, so the
-    // agent is told which argument to correct rather than to retry blindly.
-    status: 400,
-    code: "BAD_ARGUMENT",
-    message: "The device refused one of the search arguments.",
-    next: "Check the `field` named in the error against this tool's schema, correct it and call again. Do not retry unchanged.",
+    message: "This device refused one of the search arguments.",
+    next: "Do not call again with the same arguments. Simplify the request — a plain query with no filters — or tell the user this device's skill catalogue would not accept it.",
   },
   // The browse route names its CLI-fallback deadline by code (HERMES-04).
   // Before it did, the status-only rule below sent the agent to wifi_status for

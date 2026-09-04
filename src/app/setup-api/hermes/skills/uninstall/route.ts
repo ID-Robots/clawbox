@@ -11,6 +11,7 @@ import {
   isInHubLock,
   readBundledManifestNames,
   readHubLock,
+  readHubLockState,
   resolveUninstallKey,
   verifySkillRemoval,
   invalidArgument,
@@ -122,8 +123,10 @@ export async function POST(request: Request) {
       });
     } catch (err) {
       // Anything that is not a deadline is still a failure with no verdict —
-      // the outer catch classifies it and answers with its code.
-      if (!(err instanceof Error && /timed out/i.test(err.message))) throw err;
+      // the outer catch classifies it and answers with its code. Classified by
+      // `cliFailureCode`, which owns this mapping, rather than by a second copy
+      // of its regex three lines from a call to it.
+      if (cliFailureCode(err) !== "cli_timeout") throw err;
       timedOut = true;
       r = { code: 0, stdout: "", stderr: "" };
     }
@@ -182,6 +185,22 @@ export async function POST(request: Request) {
     // that survived contradicts anything the output said — and for output this
     // parser does not recognise, only the entry's disappearance proves a
     // removal.
+    //
+    // On the TIMEOUT path the lock is the only evidence there is, so it has to
+    // be evidence: `readHubLock` reads a truncated or unreadable file as an
+    // empty one, and a deadline that SIGKILLs the CLI mid-write is precisely
+    // when that shape occurs. Read as "empty", it would say every entry went —
+    // and this route would then delete the directory too and answer ok, while
+    // the lock listed no skills at all. So an unreadable lock proves nothing
+    // here and the deadline is reported instead.
+    const lockState = await readHubLockState();
+    if (timedOut && !lockState.ok) {
+      console.error("[hermes skills uninstall] timed out and the hub lock could not be read", JSON.stringify(id));
+      return NextResponse.json(
+        { error: CLI_FAILURE_SENTENCES.cli_timeout, code: "cli_timeout" },
+        { status: 502 },
+      );
+    }
     const stillLocked = await isInHubLock(id);
     const removed = !stillLocked && (outcome.kind === "uninstalled" || hadEntry);
     if (!removed) {

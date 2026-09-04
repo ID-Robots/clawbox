@@ -198,6 +198,7 @@ export const nl: Record<string, string> = {
   "skills.filtersButton": "Filteren",
   "skills.filtersButtonWithCount": "Filteren ({n})",
   "skills.filtersClearAll": "Alles wissen",
+  "skills.facetLimit": "Maximaal {n} tegelijk.",
   "skills.filtersClose": "Filters sluiten",
   "skills.filtersShowAll": "Nog {n} tonen",
   "skills.filtersShowFewer": "Minder tonen",
@@ -265,6 +266,8 @@ export const nl: Record<string, string> = {
   "skills.liveRemoving": "{name} verwijderen",
   "skills.liveRemoved": "{name} is verwijderd",
   "skills.liveRemoveFailed": "{name} kon niet worden verwijderd",
+  "skills.liveInstallUnknown": "Kon niet vaststellen of {name} is geïnstalleerd",
+  "skills.liveRemoveUnknown": "Kon niet vaststellen of {name} is verwijderd",
   "skills.uninstallFailed": "Verwijderen mislukt",
 
   // === Empty and error states ===

@@ -73,13 +73,11 @@ function ageHours(iso?: string): number | null {
  * A multi-select facet parameter. Accepts repeats (`?trust=a&trust=b`) and
  * comma lists (`?trust=a,b`) so a bookmarked URL is readable, and de-duplicates
  * so a caller cannot make the filter loop do work by repeating one value.
- * `null` = the value list contained something invalid, which is a 400 rather
- * than a filter silently dropped.
- */
-/**
- * The two refusals are told apart on purpose. Both used to be `null`, so the
- * route answered "Invalid <group>" for a rail full of perfectly valid ticks —
- * a refusal the owner caused by clicking and could undo by unticking, reported
+ * Either refusal is a 400 rather than a filter silently dropped.
+ *
+ * The two are told apart on purpose. Both used to be `null`, so the route
+ * answered "Invalid <group>" for a rail full of perfectly valid ticks — a
+ * refusal the owner caused by clicking and could undo by unticking, reported
  * as if they had typed something malformed.
  */
 type FacetParse =
@@ -210,11 +208,16 @@ export async function GET(request: Request) {
 
   if (page === null) return invalidArgument("page", "Invalid page");
   if (pageSize === null) return invalidArgument("size", "Invalid size");
-  // The one 400 on this route the OWNER can cause and undo: the search box
-  // accepts a leading `-` and any length, and `isValidQuery` refuses both. It
-  // carries a code so the store can say "change the search" rather than the
-  // catalogue's "could not load, retry" — the others below are the rail's own
-  // values and the hook's paging, which no typing can make invalid.
+  // The search box accepts a leading `-` and any length, and `isValidQuery`
+  // refuses both. It carries a code so the store can say "change the search"
+  // rather than the catalogue's "could not load, retry".
+  //
+  // It used to be described here as the ONLY 400 the owner could cause, on the
+  // grounds that the rest are the rail's own values and the hook's paging. That
+  // was wrong, and it is why the rest went uncoded: the rail renders up to
+  // MAX_FACET_VALUES options per group while this route accepts
+  // MAX_FACET_SELECTION, so a thirteenth tick is a refusal reached by clicking
+  // (TASK-658). Every branch below carries a code now.
   if (q && !isValidQuery(q)) {
     return NextResponse.json({ error: "Invalid query", code: "bad_query" }, { status: 400 });
   }

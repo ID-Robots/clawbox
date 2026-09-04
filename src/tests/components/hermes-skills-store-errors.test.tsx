@@ -126,7 +126,7 @@ async function openBrowseTab() {
 }
 
 /** Click Install on the card, then confirm in the dialog. */
-async function installFromBrowse() {
+async function installFromBrowse(announced = "skills.liveInstallFailed") {
   await screen.findByText("PDF Tools");
   const card = await screen.findByTestId("skill-install-btn");
   await act(async () => {
@@ -136,8 +136,10 @@ async function installFromBrowse() {
   await act(async () => {
     fireEvent.click(within(dialog).getByRole("button", { name: bgCopy("skills.install") }));
   });
-  // The polite announcement lands with the card's error state.
-  await screen.findByText(bgCopy("skills.liveInstallFailed", { name: "PDF Tools" }));
+  // The polite announcement lands with the card's error state. `announced` is
+  // the KEY the caller expects: a refusal whose code says the outcome is not
+  // established announces that, not a failure.
+  await screen.findByText(bgCopy(announced, { name: "PDF Tools" }));
 }
 
 /** Click Remove on the Installed row, then confirm in the dialog. */
@@ -513,10 +515,34 @@ describe("TASK-658: a refusal the owner can undo says so", () => {
       action: () => reply(502, { error: "The device's answer was too large to use.", code: "too_large" }),
     });
     await openBrowseTab();
-    await installFromBrowse();
+    // ...including in the live region, which is where a screen-reader owner
+    // would otherwise have heard the failure story the card no longer tells.
+    await installFromBrowse("skills.liveInstallUnknown");
 
     expect(screen.getByText(bgCopy("skills.installUnknownOutcome", { name: "PDF Tools" }))).toBeTruthy();
     expect(screen.queryByText(bgCopy("skills.installFailed"))).toBeNull();
+    expect(screen.queryByText(bgCopy("skills.liveInstallFailed", { name: "PDF Tools" }))).toBeNull();
+    // Amber, not the red failure chrome around a sentence that says the
+    // outcome is not known.
+    const line = screen.getByText(bgCopy("skills.installUnknownOutcome", { name: "PDF Tools" }));
+    expect(line.className).toContain("text-amber-400");
+    expect(line.className).not.toContain("text-red-400");
+  });
+
+  it("an invalid_argument from install keeps the owner's language, not the route's sentence", async () => {
+    // `refusalLine` hands a code this build has no copy for the route's own
+    // English — right for a newer device naming a refusal we do not know, and
+    // wrong for a code added in the same commit as the route. The field these
+    // 400s name is never something the owner typed (the store POSTs the id off
+    // a browse card), so the localised generic is the honest line.
+    mockStore({
+      action: () => reply(400, { error: "Invalid skill id", code: "invalid_argument", field: "id" }),
+    });
+    await openBrowseTab();
+    await installFromBrowse();
+
+    expect(screen.queryByText("Invalid skill id")).toBeNull();
+    expect(screen.getByText(bgCopy("skills.installFailed"))).toBeTruthy();
   });
 
   it("invalid_argument on browse names the filters, and offers to clear them", async () => {

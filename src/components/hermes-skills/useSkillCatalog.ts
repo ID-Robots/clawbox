@@ -292,7 +292,22 @@ export function useSkillCatalog(active: boolean): CatalogController {
   }, [loading, appending, hasMore, page, fetchPage]);
 
   const reload = useCallback(() => setReloadKey((k) => k + 1), []);
-  const clearFilters = useCallback(() => setSelected(EMPTY_SELECTION), []);
+  /**
+   * Put the whole request back to its defaults, and make sure it is re-sent.
+   *
+   * Everything the route can refuse with `invalid_argument` is reset here, not
+   * just the rail: `sort` is one of those branches, and a stale bundle sending
+   * a value a newer route no longer accepts is exactly when the owner presses
+   * this. And `setSelected(EMPTY_SELECTION)` alone is a no-op when nothing is
+   * ticked — same object reference, so React bails out, `queryKey` does not
+   * move and the fetch effect does not run. Bumping `reloadKey` is what turns
+   * "clear" into an action rather than a button that does nothing.
+   */
+  const clearFilters = useCallback(() => {
+    setSelected(EMPTY_SELECTION);
+    setSort('relevance');
+    setReloadKey((k) => k + 1);
+  }, []);
 
   const activeCount =
     selected.trust.length + selected.source.length + selected.category.length + selected.provider.length;

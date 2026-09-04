@@ -49,6 +49,7 @@ export function useCopy() {
       filtersButton: t('skills.filtersButton'),
       filtersButtonWithCount: (n: number) => t('skills.filtersButtonWithCount', { n }),
       filtersClearAll: t('skills.filtersClearAll'),
+      facetLimit: (n: number) => t('skills.facetLimit', { n }),
       filtersClose: t('skills.filtersClose'),
       filtersShowAll: (n: number) => t('skills.filtersShowAll', { n }),
       filtersShowFewer: t('skills.filtersShowFewer'),
@@ -121,6 +122,8 @@ export function useCopy() {
       liveRemoving: (name: string) => t('skills.liveRemoving', { name }),
       liveRemoved: (name: string) => t('skills.liveRemoved', { name }),
       liveRemoveFailed: (name: string) => t('skills.liveRemoveFailed', { name }),
+      liveInstallUnknown: (name: string) => t('skills.liveInstallUnknown', { name }),
+      liveRemoveUnknown: (name: string) => t('skills.liveRemoveUnknown', { name }),
       uninstallFailed: t('skills.uninstallFailed'),
 
       emptySearch: (q: string) => t('skills.emptySearch', { q }),

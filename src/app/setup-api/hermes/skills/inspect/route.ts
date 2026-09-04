@@ -11,6 +11,7 @@ import {
   checkInstallIdentifier,
   cliFailureCode,
   cliInstallIdentifier,
+  REQUEST_REFUSAL,
 } from "@/lib/hermes-skills";
 import { parseAmbiguousSkills } from "@/lib/hermes-skill-cli-outcome";
 import {
@@ -465,7 +466,7 @@ async function remoteDocs(id: string, signal: AbortSignal): Promise<NextResponse
     if (candidates.length) {
       return NextResponse.json({ ambiguous: true, query: id, candidates });
     }
-    return NextResponse.json({ error: "Skill not found", code: "not_found" }, { status: 404 });
+    return NextResponse.json({ error: "Skill not found", code: REQUEST_REFUSAL.notFound }, { status: 404 });
   }
 
   // ONLY prose survives the Rich panel — list fields (platforms/tags) are

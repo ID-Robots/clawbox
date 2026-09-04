@@ -65,7 +65,29 @@ import { useSkillDetail } from './hermes-skills/useSkillDetail';
 // the presentation in ./hermes-skills/*.
 
 type AnySkill = HermesSkill | InstalledHermesSkill;
-type ProgressState = { status: 'working' | 'success' | 'error'; message?: string };
+/**
+ * `unknown` is not a failure. `too_large` means the CLI's own output overran
+ * the read cap AFTER it ran, so whether the skill landed is not established —
+ * red chrome and "could not install" would be the false failure the copy for
+ * that code exists to remove.
+ */
+type ProgressState = { status: 'working' | 'success' | 'error' | 'unknown'; message?: string };
+
+/** A refusal whose CODE says the outcome was not established, not that it failed. */
+const UNKNOWN_OUTCOME_CODES = new Set(['too_large']);
+
+class RefusalError extends Error {
+  readonly outcome: 'failed' | 'unknown';
+  constructor(message: string, code: unknown) {
+    super(message);
+    this.name = 'RefusalError';
+    this.outcome = typeof code === 'string' && UNKNOWN_OUTCOME_CODES.has(code) ? 'unknown' : 'failed';
+  }
+}
+
+function outcomeOf(err: unknown): 'failed' | 'unknown' {
+  return err instanceof RefusalError ? err.outcome : 'failed';
+}
 
 /**
  * What a Remove button needs: the lock.json key the CLI takes, the key this
@@ -132,6 +154,17 @@ function installRefusalCopy(COPY: SkillsCopy, data: RefusalBody, name: string): 
     case 'cli_failed':
     case 'cancelled':
       return COPY.installFailed;
+    // The request itself was refused. On THIS route the offending field is
+    // never something the owner typed — the store POSTs `skill.id` straight
+    // off a browse card — so there is nothing for them to correct and the
+    // generic line is the honest one. (The browse tab is the opposite case:
+    // its 400s name the rail's own values and get their own copy.) Listed
+    // rather than left to `default`, because `refusalLine` hands an unknown
+    // code the route's English sentence, which is what this map exists to
+    // stop.
+    case 'invalid_argument':
+    case 'too_many_facets':
+      return COPY.installFailed;
     default:
       return null;
   }
@@ -161,6 +194,10 @@ function uninstallRefusalCopy(COPY: SkillsCopy, data: RefusalBody, name: string)
     case 'cli_missing':
     case 'cli_failed':
     case 'cancelled':
+    // Same reasoning as the install map: the id came from the row the owner
+    // clicked, not from anything they typed.
+    case 'invalid_argument':
+    case 'too_many_facets':
       return COPY.uninstallFailed;
     default:
       return null;
@@ -351,7 +388,10 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         // has no copy for — still better than "HTTP 502".
         if (!res.ok) {
           const body = data ?? {};
-          throw new Error(refusalLine(installRefusalCopy(COPY, body, skill.name), body, res.status, COPY.installFailed, '[skills install]'));
+          throw new RefusalError(
+            refusalLine(installRefusalCopy(COPY, body, skill.name), body, res.status, COPY.installFailed, '[skills install]'),
+            body.code,
+          );
         }
         setProgressAutoClear(key, { status: 'success' }, 2000);
         // The detail answer changes completely once a skill is on disk (full
@@ -362,12 +402,13 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         setLive(COPY.liveInstalled(skill.name));
         await installed.refresh();
       } catch (err) {
+        const outcome = outcomeOf(err);
         setProgressAutoClear(
           key,
-          { status: 'error', message: err instanceof Error ? err.message : COPY.installFailed },
+          { status: outcome === 'unknown' ? 'unknown' : 'error', message: err instanceof Error ? err.message : COPY.installFailed },
           6000,
         );
-        setLive(COPY.liveInstallFailed(skill.name));
+        setLive(outcome === 'unknown' ? COPY.liveInstallUnknown(skill.name) : COPY.liveInstallFailed(skill.name));
       }
     },
     [COPY, detail, installed, setProgressAutoClear],
@@ -394,7 +435,10 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         }
         if (!res.ok) {
           const body = data ?? {};
-          throw new Error(refusalLine(uninstallRefusalCopy(COPY, body, name), body, res.status, COPY.uninstallFailed, '[skills uninstall]'));
+          throw new RefusalError(
+            refusalLine(uninstallRefusalCopy(COPY, body, name), body, res.status, COPY.uninstallFailed, '[skills uninstall]'),
+            body.code,
+          );
         }
         const timer = timers.current.get(key);
         if (timer) clearTimeout(timer);
@@ -411,12 +455,13 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         setLive(COPY.liveRemoved(name));
         await installed.refresh();
       } catch (err) {
+        const outcome = outcomeOf(err);
         setProgressAutoClear(
           key,
-          { status: 'error', message: err instanceof Error ? err.message : COPY.uninstallFailed },
+          { status: outcome === 'unknown' ? 'unknown' : 'error', message: err instanceof Error ? err.message : COPY.uninstallFailed },
           6000,
         );
-        setLive(COPY.liveRemoveFailed(name));
+        setLive(outcome === 'unknown' ? COPY.liveRemoveUnknown(name) : COPY.liveRemoveFailed(name));
       }
     },
     [COPY, detail, installed, setProgressAutoClear],
@@ -438,10 +483,13 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
           </span>
         );
       }
-      if (state?.status === 'error') {
+      if (state?.status === 'error' || state?.status === 'unknown') {
         return (
           <span className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs text-red-400 line-clamp-1" title={state.message}>
+            <span
+              className={`text-xs line-clamp-1 ${state.status === 'unknown' ? 'text-amber-400' : 'text-red-400'}`}
+              title={state.message}
+            >
               {state.message}
             </span>
             {/*
@@ -501,9 +549,12 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
       if (state?.status === 'working') {
         return <span className="text-xs text-[var(--text-secondary)]">{COPY.removing}</span>;
       }
-      if (state?.status === 'error') {
+      if (state?.status === 'error' || state?.status === 'unknown') {
         return (
-          <span className="text-xs text-red-400 line-clamp-1" title={state.message}>
+          <span
+            className={`text-xs line-clamp-1 ${state.status === 'unknown' ? 'text-amber-400' : 'text-red-400'}`}
+            title={state.message}
+          >
             {state.message}
           </span>
         );

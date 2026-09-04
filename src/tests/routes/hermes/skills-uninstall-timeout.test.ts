@@ -117,6 +117,28 @@ describe("POST …/skills/uninstall — a deadline is not an outcome", () => {
     expect(String(body.error)).not.toMatch(/hermes timed out/i);
   });
 
+  it("does not read a lock it could not parse as proof that everything went", async () => {
+    // The deadline lands in the middle of the lock rewrite. `readHubLock` used
+    // to answer `{}` for truncated JSON exactly as for a lock that lists
+    // nothing — so "the entry is gone" would have been true of every entry,
+    // this route would have deleted the directory as well, and the answer would
+    // have been ok while the device's whole store list vanished.
+    mockCli.mockImplementation(async () => {
+      await fs.writeFile(
+        path.join(skillsDir(), ".hub", "lock.json"),
+        '{"version":1,"installed":{"oo-terr',
+      );
+      throw new Error("hermes timed out");
+    });
+
+    const { status, body } = await uninstall(INSTALLED);
+
+    expect(status).toBe(502);
+    expect(body.code).toBe("cli_timeout");
+    // ...and the files it could not prove were removed are still there.
+    await expect(fs.stat(path.join(skillsDir(), INSTALLED))).resolves.toBeTruthy();
+  });
+
   it("leaves a non-timeout failure exactly as it was", async () => {
     mockCli.mockRejectedValue(new Error("Hermes is not installed on this device"));
 

@@ -209,6 +209,7 @@ export const zh: Record<string, string> = {
   "skills.filtersButton": "筛选",
   "skills.filtersButtonWithCount": "筛选 ({n})",
   "skills.filtersClearAll": "全部清除",
+  "skills.facetLimit": "一次最多 {n} 项。",
   "skills.filtersClose": "关闭筛选",
   "skills.filtersShowAll": "再显示 {n} 项",
   "skills.filtersShowFewer": "收起",
@@ -276,6 +277,8 @@ export const zh: Record<string, string> = {
   "skills.liveRemoving": "正在移除 {name}",
   "skills.liveRemoved": "{name} 已移除",
   "skills.liveRemoveFailed": "无法移除 {name}",
+  "skills.liveInstallUnknown": "无法确定 {name} 是否已安装",
+  "skills.liveRemoveUnknown": "无法确定 {name} 是否已删除",
   "skills.uninstallFailed": "移除失败",
 
   // === Empty and error states ===

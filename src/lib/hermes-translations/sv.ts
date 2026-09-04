@@ -194,6 +194,7 @@ export const sv: Record<string, string> = {
   "skills.filtersButton": "Filter",
   "skills.filtersButtonWithCount": "Filter ({n})",
   "skills.filtersClearAll": "Rensa alla",
+  "skills.facetLimit": "Högst {n} åt gången.",
   "skills.filtersClose": "Stäng filter",
   "skills.filtersShowAll": "Visa {n} till",
   "skills.filtersShowFewer": "Visa färre",
@@ -261,6 +262,8 @@ export const sv: Record<string, string> = {
   "skills.liveRemoving": "Tar bort {name}",
   "skills.liveRemoved": "{name} har tagits bort",
   "skills.liveRemoveFailed": "Det gick inte att ta bort {name}",
+  "skills.liveInstallUnknown": "Kunde inte avgöra om {name} installerades",
+  "skills.liveRemoveUnknown": "Kunde inte avgöra om {name} togs bort",
   "skills.uninstallFailed": "Avinstallationen misslyckades",
 
   // === Empty and error states ===

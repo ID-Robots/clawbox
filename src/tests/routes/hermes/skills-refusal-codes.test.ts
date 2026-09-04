@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { REQUEST_REFUSAL_CODES } from "@/lib/hermes-skills";
+import { isCliFailureCode, isRequestRefusalCode } from "@/lib/hermes-skills";
 
 /**
  * TASK-658 — a rejection with no machine-readable code.
@@ -117,12 +117,20 @@ describe("Hermes skills routes: every refusal carries a code", () => {
     expect(body.field).toBe("provider");
   });
 
-  it("keeps every code it emits inside the shared vocabulary", () => {
-    // A code the store's switch has never heard of falls through to the generic
-    // line, which is the failure this card is about.
-    expect([...REQUEST_REFUSAL_CODES].sort()).toEqual(
-      ["invalid_argument", "not_found", "too_many_facets"].sort(),
-    );
+  it("keeps every code it emits inside the shared vocabulary", async () => {
+    // Not a comparison of the constant with a copy of itself — that passes
+    // whatever the routes do. Every refusal the table above produces, plus the
+    // two the facet cap and the inspect 404 produce, has to answer a code the
+    // vocabularies actually recognise; a code outside them reaches the store's
+    // switch, misses, and is painted as the route's raw English.
+    const bodies: Body[] = [];
+    for (const { run } of OWNER_INPUT) bodies.push((await run()).body);
+    bodies.push((await get("browse", Array.from({ length: 13 }, (_, i) => `provider=p${i}`).join("&"))).body);
+
+    expect(bodies.length).toBeGreaterThan(10);
+    for (const body of bodies) {
+      expect(isRequestRefusalCode(body.code) || isCliFailureCode(body.code)).toBe(true);
+    }
   });
 });
 

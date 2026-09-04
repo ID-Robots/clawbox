@@ -185,6 +185,7 @@ export const bg: Record<string, string> = {
   "skills.filtersButton": "Филтри",
   "skills.filtersButtonWithCount": "Филтри ({n})",
   "skills.filtersClearAll": "Изчисти всички",
+  "skills.facetLimit": "Най-много {n} едновременно.",
   "skills.filtersClose": "Затвори филтрите",
   "skills.filtersShowAll": "Покажи още {n}",
   "skills.filtersShowFewer": "Покажи по-малко",
@@ -252,6 +253,8 @@ export const bg: Record<string, string> = {
   "skills.liveRemoving": "Премахване на {name}",
   "skills.liveRemoved": "{name} е премахнато",
   "skills.liveRemoveFailed": "{name} не можа да бъде премахнато",
+  "skills.liveInstallUnknown": "Не можа да се установи дали {name} е инсталирано",
+  "skills.liveRemoveUnknown": "Не можа да се установи дали {name} е премахнато",
   "skills.uninstallFailed": "Премахването не успя",
 
   // === Empty and error states ===
