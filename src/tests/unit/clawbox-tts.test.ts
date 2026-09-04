@@ -616,23 +616,36 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     expect(providerMs).toBeGreaterThan(budget * 1000);
   });
 
-  it("reports a budget that is really the sum of its engine timeouts", () => {
+  it("reports a budget that is really the sum of EVERY slice handed to timeout", () => {
     // Stops the budget from being a decorative number that drifts away from
     // the timeouts actually handed to `timeout`.
+    //
+    // SWEPT FROM THE SCRIPT, NOT LISTED HERE. A hand-written `parts` array is
+    // blind to a slice added without a budget entry, which is exactly what
+    // happened: the EMAIL: directive strip became a fourth `timeout` — running
+    // before the engine chain, worth up to 15s — and this test could not see
+    // it, so `--provider-timeout-ms` under-reported the worst case that
+    // install.sh bakes into the provider. Ask the script which variables it
+    // actually hands to `timeout` instead.
     const src = readFileSync(SCRIPT, "utf8");
     const slice = (name: string): number => {
       const m = src.match(new RegExp(`^${name}="\\$\\{${name}:-(\\d+)\\}"`, "m"));
       if (!m) throw new Error(`${name} default not found`);
       return Number(m[1]);
     };
-    const parts = ["KOKORO_SERVER_TIMEOUT", "KOKORO_TIMEOUT", "CONVERT_TIMEOUT"];
-    const sum = parts.reduce((acc, n) => acc + slice(n), 0);
+    // `-k N` is part of a slice's worst case, so it is captured and counted too.
+    const enforced = new Map<string, number>();
+    for (const m of src.matchAll(/timeout (?:-k (\d+) )?"\$([A-Z0-9_]+)"/g)) {
+      const name = m[2];
+      enforced.set(name, Math.max(enforced.get(name) ?? 0, m[1] ? Number(m[1]) : 0));
+    }
+    // A sweep that sweeps nothing is a green no-op, which is the failure this
+    // rewrite exists to refuse.
+    expect(enforced.size).toBeGreaterThanOrEqual(4);
+    let sum = 0;
+    for (const [name, grace] of enforced) sum += slice(name) + grace;
     const budget = Number(spawnSync("bash", [SCRIPT, "--budget-seconds"], { encoding: "utf8" }).stdout.trim());
     expect(budget).toBe(sum);
-    // And each slice is actually enforced, not just declared.
-    for (const name of parts) {
-      expect(src).toMatch(new RegExp(`timeout "\\$${name}"`));
-    }
   });
 
   it("pays for no slice an engine no longer uses", () => {
@@ -642,7 +655,50 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     const src = readFileSync(SCRIPT, "utf8");
     expect(src).not.toMatch(/PIPER_TIMEOUT/);
     const budget = Number(spawnSync("bash", [SCRIPT, "--budget-seconds"], { encoding: "utf8" }).stdout.trim());
-    expect(budget).toBe(60);
+    // 10 server + 40 cold start + 10 convert + (10 strip + 5 SIGKILL grace).
+    expect(budget).toBe(75);
+  });
+
+  it.each([
+    ["KOKORO_SERVER_TIMEOUT", "0"],
+    ["KOKORO_SERVER_TIMEOUT", "abc"],
+    ["KOKORO_TIMEOUT", "0"],
+    ["KOKORO_TIMEOUT", "00"],
+    ["KOKORO_TIMEOUT", "abc"],
+    ["CONVERT_TIMEOUT", "0"],
+    ["CONVERT_TIMEOUT", "abc"],
+    ["TTS_BUDGET_MARGIN_SECONDS", "abc"],
+    ["EMAIL_DIRECTIVES_TIMEOUT", "0"],
+    ["EMAIL_DIRECTIVES_TIMEOUT", "abc"],
+  ])("coerces a %s of %s rather than reporting a budget it does not keep", (name, value) => {
+    // Every one of these reaches the script through the service environment,
+    // and `${VAR:-N}` substitutes on unset and empty and on NOTHING else — so a
+    // value already there is used exactly as given. Two spellings undo the
+    // slice they name, silently:
+    //
+    //   `timeout 0` (and "00", "000") is NO timeout, so the step is unbounded
+    //   while `--provider-timeout-ms` still reports a number the caller trusts
+    //   — the script then outlives the timeout it just asked for, OpenClaw
+    //   kills it, and nothing after that point reaches the gateway. That is
+    //   verbatim the "hung GPU was silence with no diagnostic" regression the
+    //   budget section exists to close.
+    //
+    //   a non-numeric duration makes `timeout` exit 125 WITHOUT running the
+    //   command: `KOKORO_TIMEOUT=abc` is a local voice that never works,
+    //   `CONVERT_TIMEOUT=abc` is no audio at all, and `EMAIL_DIRECTIVES_TIMEOUT=abc`
+    //   is the box reading the uid aloud.
+    //
+    // The budget is the only place the script says what it will spend, so it is
+    // where the coercion is read back.
+    const r = spawnSync("bash", [SCRIPT, "--budget-seconds"], {
+      encoding: "utf8",
+      env: { ...process.env, [name]: value },
+    });
+    expect(r.status).toBe(0);
+    expect(Number(r.stdout.trim())).toBe(75);
+    // `set -u` turns an unvalidated non-numeric knob into an arithmetic abort
+    // on the way past, which nothing reads: it must not happen at all.
+    expect(r.stderr).not.toMatch(/unbound variable/);
   });
 
   it("keeps every engine slice short enough to fail over usefully", () => {

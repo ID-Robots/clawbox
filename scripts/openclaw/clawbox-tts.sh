@@ -142,13 +142,45 @@ KOKORO_LD_PATH="${KOKORO_LD_PATH:-$(kokoro_ld_path)}"
 # quietly come back. The budget is the sum of the slices that are actually
 # handed to `timeout` below and nothing else; a slice for an engine that no
 # longer runs would only be rope the caller pays for and nobody uses.
+#
+#   EMAIL_DIRECTIVES     10s (+5s grace)  the directive strip, which runs BEFORE
+#                               the engine chain and is handed to `timeout` like
+#                               any other slice — so it belongs in the sum.
+#
+# EVERY one of these arrives through the service environment, and `${VAR:-N}`
+# substitutes on unset and empty and on NOTHING else — so a value already in the
+# environment is used exactly as given. Two spellings silently undo the slice
+# they name: `timeout 0` (and "00", "000") means NO timeout at all, and a
+# non-numeric duration makes `timeout` exit 125 WITHOUT running the command, so
+# `KOKORO_TIMEOUT=abc` is a local voice that never works and `CONVERT_TIMEOUT=abc`
+# is no audio at all — while `--provider-timeout-ms` still reports a healthy
+# number that install.sh bakes into the provider. Validate all of them, in one
+# place, rather than the one whose failure is mildest.
+positive_seconds() { # $1 = variable name, $2 = default
+  local value="${!1}"
+  case "$value" in ''|*[!0-9]*) value="$2" ;; esac
+  # The glob rejects a value that is not a run of digits; this rejects the ones
+  # that ARE — every spelling of zero, which no `|0)` glob catches — and coerces
+  # a value too large for an integer, where `[` fails rather than compares.
+  [ "$value" -gt 0 ] 2>/dev/null || value="$2"
+  printf -v "$1" '%s' "$value"
+}
 KOKORO_SERVER_TIMEOUT="${KOKORO_SERVER_TIMEOUT:-10}"
 KOKORO_TIMEOUT="${KOKORO_TIMEOUT:-40}"
 CONVERT_TIMEOUT="${CONVERT_TIMEOUT:-10}"
 TTS_BUDGET_MARGIN_SECONDS="${TTS_BUDGET_MARGIN_SECONDS:-25}"
+EMAIL_DIRECTIVES_TIMEOUT="${EMAIL_DIRECTIVES_TIMEOUT:-10}"
+# The SIGKILL grace `timeout -k` is given on the strip. It is part of that
+# slice's worst case, so it is part of the budget too.
+EMAIL_DIRECTIVES_KILL_GRACE=5
+positive_seconds KOKORO_SERVER_TIMEOUT 10
+positive_seconds KOKORO_TIMEOUT 40
+positive_seconds CONVERT_TIMEOUT 10
+positive_seconds TTS_BUDGET_MARGIN_SECONDS 25
+positive_seconds EMAIL_DIRECTIVES_TIMEOUT 10
 
 tts_budget_seconds() {
-  printf '%s' "$((KOKORO_SERVER_TIMEOUT + KOKORO_TIMEOUT + CONVERT_TIMEOUT))"
+  printf '%s' "$((EMAIL_DIRECTIVES_TIMEOUT + EMAIL_DIRECTIVES_KILL_GRACE + KOKORO_SERVER_TIMEOUT + KOKORO_TIMEOUT + CONVERT_TIMEOUT))"
 }
 tts_provider_timeout_ms() {
   printf '%s' "$(( ($(tts_budget_seconds) + TTS_BUDGET_MARGIN_SECONDS) * 1000 ))"
@@ -465,19 +497,13 @@ resolve_email_directives_dir() {
   printf ''
 }
 EMAIL_DIRECTIVES_DIR="${EMAIL_DIRECTIVES_DIR:-$(resolve_email_directives_dir)}"
-EMAIL_DIRECTIVES_TIMEOUT="${EMAIL_DIRECTIVES_TIMEOUT:-10}"
-# Validated for the same reason register-mcp.sh validates HERMES_CLI_TIMEOUT,
-# and with a worse consequence here. `${:-10}` substitutes on unset and empty
-# and on nothing else, so a value already in the environment is used as given:
-# `timeout 0` (and "00") means NO timeout, and a non-numeric duration makes
-# `timeout` exit 125 WITHOUT ever running python — the strip then fails open and
-# the box READS THE UID ALOUD, which is the whole defect this file was changed
-# to remove. The glob rejects a non-digit value; the arithmetic test rejects
-# every spelling of zero and a value too large for an integer.
-case "$EMAIL_DIRECTIVES_TIMEOUT" in
-  ''|*[!0-9]*) EMAIL_DIRECTIVES_TIMEOUT=10 ;;
-esac
-[ "$EMAIL_DIRECTIVES_TIMEOUT" -gt 0 ] 2>/dev/null || EMAIL_DIRECTIVES_TIMEOUT=10
+# EMAIL_DIRECTIVES_TIMEOUT is declared, validated and counted into the budget
+# with the other slices, up in "The time budget" — it is handed to `timeout`
+# exactly like the engine slices, and the worst case the caller is told about
+# has to include it. Its consequence is the one that made the validation
+# non-negotiable: `timeout abc` exits 125 without ever running python, the strip
+# fails open, and the box READS THE UID ALOUD, which is the whole defect this
+# file was changed to remove.
 
 strip_email_directives() {
   local text="$1" out
