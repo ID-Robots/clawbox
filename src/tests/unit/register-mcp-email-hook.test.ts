@@ -146,6 +146,37 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(installed).toContain("transform_llm_output");
   });
 
+  it("declares in the manifest exactly the hooks it registers", () => {
+    // Measured on the Hermes box, read-only, 2026-09-04: with no
+    // `provides_hooks` the shipped plugin.yaml makes `hermes plugins doctor`
+    // print, on every web-server boot,
+    //   WARN: registration adds hook 'transform_llm_output' not listed in provides_hooks
+    // beside its OK line — a permanent warning about a plugin that is working,
+    // in the log where the line that matters has to be readable. The key is the
+    // harness's own manifest field (hermes_cli/plugins.py: the allowed-key list
+    // and `provides_hooks: List[str]`, read at manifest parse), and
+    // `transform_llm_output` is in its VALID_HOOKS, so declaring it cannot turn
+    // the warning into an error.
+    //
+    // Pinned against `register()` rather than restated: the doctor compares the
+    // two sets in both directions (plugin_dev.py warns for a declared hook that
+    // is not registered as well as for a registered one that is not declared),
+    // so a manifest that names the wrong hook is the same defect with the
+    // opposite sign.
+    const dir = path.join(REPO, "scripts/hermes-plugins", PLUGIN);
+    const manifest = execFileSync(
+      "python3",
+      ["-c", "import json,sys,yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1])) or {}))", path.join(dir, "plugin.yaml")],
+      { encoding: "utf-8" },
+    );
+    const declared = (JSON.parse(manifest) as { provides_hooks?: unknown }).provides_hooks;
+    const source = fs.readFileSync(path.join(dir, "__init__.py"), "utf-8");
+    const registered = [...source.matchAll(/register_hook\(\s*["']([a-z_]+)["']/g)].map((m) => m[1]);
+
+    expect(registered.length).toBeGreaterThan(0);
+    expect(declared).toEqual(registered);
+  });
+
   it("MERGES into plugins.enabled — the ClawAI image backend must survive", () => {
     // The same list gates image generation. Writing ours over it would take the
     // customer's picture-drawing away as a side effect of a directive strip.
@@ -290,6 +321,61 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
     expect(r.stdout).toContain("0 hook(s)");
+  });
+
+  it("does not read 11 hook(s) as the one hook it asked for", () => {
+    // `*"1 hook(s)"*` is a substring match, and "11 hook(s)" contains it. The
+    // count IS the evidence here — Hermes' doctor prints counts and never the
+    // hook NAMES (hermes_cli/plugin_dev.py renders "registrations: N tool(s),
+    // M hook(s)"), which is why the OpenClaw twin's name check has no
+    // equivalent on this side — so a pattern that does not pin the number is
+    // the same false success the block exists to catch. Unreachable while the
+    // plugin registers exactly one hook; reachable the moment it registers
+    // eleven, or twenty-one.
+    doctorOutput = "  OK: registration passed\n  registrations: 0 tool(s), 11 hook(s)\n";
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
+    expect(r.stdout).not.toMatch(/loaded and registered its outbound hook/);
+  });
+
+  it("does not call a doctor that reported an ERROR a success", () => {
+    // `registrations:` is printed whatever the verdict — the count line is
+    // unconditional in plugin_dev.py, while the "OK:" line is not. So a plugin
+    // whose hook callback the doctor REFUSES ("must accept **kwargs for forward
+    // compatibility" is an error, not a warning) still prints "1 hook(s)", and
+    // the boot log used to call that a healthy registration.
+    doctorOutput = [
+      "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+      "  ERROR: hook callback 'transform_llm_output' for 'transform_llm_output' must accept **kwargs for forward compatibility",
+      "  registrations: 0 tool(s), 1 hook(s)",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
+    expect(r.stdout).toContain("must accept **kwargs");
+  });
+
+  it("still calls a clean one-hook registration a success", () => {
+    // The other half: the healthy shape must keep reading as healthy, with and
+    // without the manifest WARN that the provides_hooks fix removes.
+    for (const output of [
+      "  OK: registration passed\n  registrations: 0 tool(s), 1 hook(s)\n",
+      [
+        "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+        "  manifest: clawbox_email_directives 1.0.0 (standalone)",
+        "  OK: runtime discovery, manifest parsing, import, and registration passed",
+        "  registrations: 0 tool(s), 1 hook(s)",
+        "",
+      ].join("\n"),
+    ]) {
+      doctorOutput = output;
+      const r = run();
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("loaded and registered its outbound hook");
+      expect(r.stdout).not.toMatch(/WARNING/);
+    }
   });
 
   it("says so when the doctor cannot load the plugin at all, and carries the reason", () => {

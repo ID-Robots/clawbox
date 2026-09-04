@@ -679,9 +679,12 @@ fi
 #
 # `plugins doctor` is the honest one — it really imports the plugin in a
 # sandboxed temporary HERMES_HOME and prints what registered
-# (hermes_cli/plugin_dev.py:84-107). For this plugin the line must read
-# "1 hook(s)"; "0 hook(s)" means the file loaded but the hook did not register,
-# which is precisely the state nothing else on the box would report.
+# (hermes_cli/plugin_dev.py:84-107). For this plugin the count line must read
+# exactly one hook; "0 hook(s)" means the file loaded but the hook did not
+# register, which is precisely the state nothing else on the box would report.
+# The match below anchors the number on both sides — `*"1 hook(s)"*` alone also
+# matched "11 hook(s)" — and reads an `ERROR:` verdict before it, because the
+# count line is printed whatever the doctor concluded.
 #
 # EVERY BOOT, not once behind a marker — the same reasoning as the browser
 # toolset above. The state lives in Hermes' own tree, so a marker in ClawBox's
@@ -733,7 +736,25 @@ if [ "$EMAIL_HOOK_INSTALLED" = "1" ]; then
     log "NOTE: 'hermes plugins doctor' answered $EMAIL_HOOK_DOCTOR_RC — the ${HERMES_CLI_TIMEOUT}s ceiling (SIGTERM, then SIGKILL 5s later), a kill from outside, or the CLI's own exit code — so $EMAIL_HOOK_PLUGIN is installed and enabled but whether its hook registered is unknown here. hermes had printed: $EMAIL_HOOK_DETAIL"
   else
     case "$EMAIL_HOOK_DOCTOR" in
-      *"1 hook(s)"*)
+      *"ERROR:"*)
+        # The count line is printed WHATEVER the verdict — plugin_dev.py appends
+        # `registrations: N tool(s), M hook(s)` unconditionally, while its "OK:"
+        # line is conditional — so a doctor that REFUSED the hook (a callback
+        # without **kwargs is an error, not a warning) still says "1 hook(s)".
+        # Read the verdict before the count, or an error reads as a success.
+        log "WARNING: $EMAIL_HOOK_PLUGIN did not register its hook — EMAIL: directives will still reach channels. hermes plugins doctor said: $EMAIL_HOOK_DETAIL"
+        ;;
+      *"tool(s), 1 hook(s)"*)
+        # Anchored on both sides of the number. `*"1 hook(s)"*` also matched
+        # `11 hook(s)` — and `21`, and `31` — which is the same false-success
+        # class this block exists to catch: the count IS the evidence here.
+        #
+        # The count and not the hook NAME, unlike the OpenClaw twin
+        # (gateway-pre-start.sh parses the JSON and asks whether
+        # "reply_payload_sending" is in the names): Hermes' `plugins doctor` has
+        # no --json and its text output never names a registered hook
+        # (hermes_cli/plugin_dev.py renders counts only), so there is no name to
+        # read on this side. Verified read-only on the Hermes box, 2026-09-04.
         log "$EMAIL_HOOK_PLUGIN loaded and registered its outbound hook"
         ;;
       *"hook(s)"*|*"Plugin Doctor"*|*"registration failed"*)

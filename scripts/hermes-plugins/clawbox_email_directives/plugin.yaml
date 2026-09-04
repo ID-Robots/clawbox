@@ -3,3 +3,11 @@ version: 1.0.0
 description: "Strips ClawBox EMAIL: card directives from replies leaving the box for a channel, where no card can render."
 author: ID-Robots
 kind: standalone
+# Hermes' own manifest field (hermes_cli/plugins.py: allowed manifest keys,
+# `provides_hooks: List[str]`). `hermes plugins doctor` compares it against what
+# register() actually adds, in both directions, and without it every boot's
+# doctor line carried
+#   WARN: registration adds hook 'transform_llm_output' not listed in provides_hooks
+# beside its OK — a permanent warning about a plugin that is working.
+provides_hooks:
+  - transform_llm_output
