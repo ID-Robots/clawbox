@@ -607,7 +607,7 @@ function ChromeDesktopInner() {
   // panel and showing through it. Derived rather than folded into
   // `chatPanelWidth`, because that value is persisted and handed straight back
   // to the chat as `initialPanelWidth` — adding the gap there would widen the
-  // panel by 12px on every reload.
+  // panel by one gap on every reload.
   const chatPanelInset = chatPanelWidth > 0 ? chatPanelWidth + CHAT_PANEL_GAP : 0;
 
   // Open chat on skill-install, fix-error or handed-over-message events so
