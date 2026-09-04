@@ -19,7 +19,8 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 }));
 
 const getActiveHarness = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/harness", () => ({ getActiveHarness }));
+const getEdition = vi.hoisted(() => vi.fn(() => "openclaw"));
+vi.mock("@/lib/harness", () => ({ getActiveHarness, getEdition }));
 
 const readHermesApprovedUsers = vi.hoisted(() => vi.fn());
 const notifyHermesTelegramUser = vi.hoisted(() => vi.fn());

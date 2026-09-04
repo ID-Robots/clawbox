@@ -125,6 +125,22 @@ describe("GET /setup-api/setup/status — unauthenticated payload", () => {
     expect(body.local_ai_provider).toBe("ollama");
     expect(body.telegram_configured).toBe(true);
   });
+
+  // `telegram_configured` ends the setup wizard, so a value that could not
+  // address a bot must not set it. The mirror used to be exempt from the shape
+  // check the harness stores get, which made a truncated paste or a leftover
+  // placeholder in data/config.json enough to complete onboarding.
+  it("does not report a mirror value that could not be a bot token", async () => {
+    await fs.writeFile(CONFIG_PATH, JSON.stringify({
+      password_configured: true,
+      telegram_bot_token: "token123",
+    }), "utf-8");
+
+    const res = await statusGet();
+    const body = await res.json();
+
+    expect(body.telegram_configured).toBe(false);
+  });
 });
 
 describe("GET /setup-api/setup/status", () => {
@@ -354,7 +370,7 @@ describe("GET /setup-api/setup/status", () => {
       local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
       ai_model_configured: true,
       ai_model_provider: "openai",
-      telegram_bot_token: "token123",
+      telegram_bot_token: "123456:MirroredBotSecret_0",
     }), "utf-8");
 
     const res = await statusGet();

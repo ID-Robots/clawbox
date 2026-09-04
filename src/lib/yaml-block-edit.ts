@@ -240,6 +240,46 @@ export function getYamlPath(text: string, path: string[]): string | null {
   return parseYamlScalar(splitTrailingComment(leaf.inline).value);
 }
 
+/** One top-level entry as {@link getTopLevelScalar} reads it. */
+export interface TopLevelScalar {
+  /** A line at column 0 names this key. */
+  present: boolean;
+  /** Its inline scalar, or null when the key opens a block instead. */
+  value: string | null;
+}
+
+/**
+ * Read a TOP-LEVEL scalar without parsing anything else in the file.
+ *
+ * {@link getYamlPath} scans the whole enclosing block and REFUSES any shape the
+ * line editor does not model — a `---` header, a tab at any depth, a sequence,
+ * a duplicate key somewhere else entirely. For an editing pass that refusal is
+ * right (it falls back to the CLI). For a reader answering "does this file
+ * define KEY", it is not: none of those constructs is evidence about KEY, and
+ * treating them as "we could not look" is what a caller then has to turn into a
+ * refusal.
+ *
+ * The question is answerable without them, because a top-level key IS a line at
+ * column 0. Quoted spellings count — PyYAML, which is what Hermes' own env
+ * bridge loads the file with, reads `"KEY":` and `'KEY':` as the same key, and
+ * missing them would answer a confident "not defined" over a defined one. The
+ * LAST occurrence wins, as PyYAML's mapping constructor does. A key that opens
+ * a nested block is `present` with a null value: Hermes' bridge exports only
+ * scalars, so there is nothing there for it to export either.
+ */
+export function getTopLevelScalar(text: string, key: string): TopLevelScalar {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const line = new RegExp(`^(?:"${escaped}"|'${escaped}'|${escaped})[ \\t]*:(.*)$`);
+  let found: TopLevelScalar = { present: false, value: null };
+  for (const raw of text.split(/\r\n|\r|\n/)) {
+    const m = line.exec(raw);
+    if (!m) continue;
+    const inline = splitTrailingComment(m[1].trim()).value;
+    found = { present: true, value: inline === "" ? null : parseYamlScalar(inline) };
+  }
+  return found;
+}
+
 /**
  * Is the key PRESENT, whatever its value?
  *

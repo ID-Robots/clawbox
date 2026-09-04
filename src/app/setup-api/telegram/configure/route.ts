@@ -12,7 +12,8 @@ import {
   ensureHermesGateway,
   setHermesTelegramToken,
 } from "@/lib/hermes-telegram";
-import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
+import { approvalBotToken } from "@/lib/email-approval";
+import { readActiveTelegramBot, telegramBotId } from "@/lib/telegram-bot-identity";
 
 export const dynamic = "force-dynamic";
 
@@ -84,6 +85,26 @@ export async function POST(request: Request) {
       );
     }
 
+    // The same-bot rule, in the direction /setup-api/email/chat-approval does
+    // not cover. That route refuses an approvals bot any harness already polls;
+    // nothing refused the reverse, so pointing the MAIN bot at the approvals
+    // bot's token saved happily and put ClawBox's own approval poller and the
+    // harness gateway on one `getUpdates` stream — "Conflict: terminated by
+    // other getUpdates request", approvals stop arriving, and every queued email
+    // waits on a question nobody is ever asked. By bot id, as next door: a
+    // rotated secret is the same stream.
+    const approvalId = telegramBotId(await approvalBotToken());
+    if (approvalId !== null && approvalId === telegramBotId(botToken)) {
+      return NextResponse.json(
+        {
+          error:
+            "This is the bot that approves your email drafts. It has to stay a bot of its own, so the approval never travels through the same connection as the conversation.",
+          kind: "same_bot",
+        },
+        { status: 400 },
+      );
+    }
+
     // Hand the token to whichever harness this device actually runs. A Hermes
     // device has no OpenClaw gateway at all (the unit is masked, the port is
     // closed), so the OpenClaw path there stored a token nothing ever read and
@@ -102,15 +123,22 @@ export async function POST(request: Request) {
     // like the first one, and the previous bot's approved senders carried over
     // to the new bot.
     //
-    // A store that could not be READ refuses the save, exactly as the approvals
-    // guard one directory over does with the same fact
-    // (email/chat-approval/route.ts). Both readings of an unknown are wrong:
-    // "no previous bot" silently keeps the old bot's approved senders on the new
-    // one under `success: true, reset: false`, and "changed" performs an
-    // IRREVERSIBLE reset — every household member unpaired — on a guess, which
-    // is what a half-written openclaw.json caught mid-`config set` would have
-    // cost an owner who merely re-entered the same token. Refusing changes
-    // nothing and is safe to retry.
+    // A store that could not be READ is neither "no previous bot" nor "the bot
+    // changed", and this route may not answer it by refusing the way the
+    // approvals guard next door does. That gate protects a SECOND bot the owner
+    // has an alternative to; this one is the only path on the device to a
+    // Telegram bot at all (TelegramStep, Settings → Channels), so a refusal is
+    // a permanent, silent lockout of the feature on a fault the owner cannot
+    // reach — including on a box that has never had Telegram configured, where
+    // there is nothing for the reset to protect in the first place.
+    //
+    // So an unknown is decided on the one piece of evidence that survives it:
+    // `readActiveTelegramBot` degrades to ClawBox's own mirror, so `token` is
+    // then the last value THIS route wrote. Matching it is proof enough that
+    // nothing changed (the ordinary "it stopped working, let me re-enter it"
+    // save, which must not cost the household its pairings); anything else is
+    // treated as a change and resets, which costs a re-pair at worst and never
+    // carries the previous bot's approved senders onto a new one.
     //
     // Compared whole, deliberately, and NOT by bot id the way the approvals
     // guard compares: a /revoke-rotated secret for the same bot is exactly the
@@ -119,17 +147,9 @@ export async function POST(request: Request) {
     // asks a different question — "would these two pollers collide" — where the
     // id is the whole point.
     const previous = await readActiveTelegramBot(harness);
-    if (!previous.known) {
-      return NextResponse.json(
-        {
-          error:
-            "Could not read this device's Telegram configuration, so the previously approved senders cannot be checked against this bot. Nothing was changed. See the ClawBox service log.",
-          kind: "bot_unknown",
-        },
-        { status: 503 },
-      );
-    }
-    const tokenChanged = previous.token !== null && previous.token !== botToken;
+    const tokenChanged = previous.known
+      ? previous.token !== null && previous.token !== botToken
+      : previous.token !== botToken;
 
     // The reset runs BEFORE the new token is persisted, on purpose. A reset
     // that fails then fails the save with nothing changed: the old bot keeps

@@ -160,6 +160,28 @@ describe("readActiveTelegramBot", () => {
     expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: MIRROR_BOT, known: false });
   });
 
+  // The mirror goes through the same shape filter as a harness value now. It is
+  // written by the configure route, but data/config.json is writable by the
+  // clawbox user — SSH, the in-UI terminal, the agent's run_command, a partial
+  // restore — so "our writer validates it" is not a property of the file. Two
+  // readers disagreeing about one junk value is what this module exists to stop.
+  it("ignores a mirror value that could not be a bot token", async () => {
+    mockGet.mockResolvedValue("token123");
+
+    expect(await identity.readActiveTelegramBot("openclaw")).toEqual({ token: null, known: true });
+    expect((await identity.readTelegramBotsInUse()).ids).toEqual([]);
+  });
+
+  // On `dual` the mirror is one value for a box with two harnesses, and the
+  // configure route writes it for whichever was active — so after a switch it
+  // names a bot the now-active harness does not hold.
+  it("does not answer for the other harness's bot on a dual box", async () => {
+    process.env.CLAWBOX_EDITION = "dual";
+    mockGet.mockResolvedValue(MIRROR_BOT);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: true });
+  });
+
   it("reports no bot, confidently, when neither store has one", async () => {
     expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: true });
   });
@@ -207,20 +229,29 @@ describe("readActiveTelegramBot", () => {
     expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: HERMES_BOT, known: true });
   });
 
-  // A shape the line reader does not model — here a top-level sequence — is not
-  // evidence about THIS key. Answering "unknown" over it would leave both
-  // Telegram save gates permanently 503 on a box whose config.yaml is merely
-  // unusual, which is the false failure this module exists to remove.
-  it("stays known for a config.yaml it cannot parse that does not name the key", async () => {
-    writeHermesConfigYaml("- one\n- two\n");
+  // The fallback is read off the column-0 lines, not by parsing the document, so
+  // a construct the line editor does not model elsewhere in the file cannot turn
+  // into "we could not look" — which both save gates would then have to act on.
+  it("still reads the key out of a config.yaml it could not parse as a whole", async () => {
+    writeHermesConfigYaml(`---\n- stray\n\tTABBED: x\nTELEGRAM_BOT_TOKEN: ${HERMES_BOT}\n`);
 
-    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: true });
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: HERMES_BOT, known: true });
   });
 
-  it("says known:false when config.yaml names the key and cannot be parsed", async () => {
-    writeHermesConfigYaml(`- one\nTELEGRAM_BOT_TOKEN: ${HERMES_BOT}\n`);
+  // PyYAML — which is what Hermes' own bridge loads this file with — reads a
+  // quoted key as the same key. Missing that spelling would answer a confident
+  // "this box has no bot" over a box that has one: the fail-open the guard
+  // exists to close.
+  it("reads a quoted top-level KEY, as Hermes' own loader does", async () => {
+    writeHermesConfigYaml(`"TELEGRAM_BOT_TOKEN": ${HERMES_BOT}\n`);
 
-    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: false });
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: HERMES_BOT, known: true });
+  });
+
+  it("takes the last of two top-level definitions, as PyYAML does", async () => {
+    writeHermesConfigYaml(`TELEGRAM_BOT_TOKEN: ${MIRROR_BOT}\nTELEGRAM_BOT_TOKEN: ${HERMES_BOT}\n`);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: HERMES_BOT, known: true });
   });
 
   it("says known:false when config.yaml could hold the fallback and cannot be read", async () => {
@@ -303,6 +334,18 @@ describe("readTelegramBotsInUse", () => {
     makeUnreadable(path.join(hermesHome, ".env"));
 
     expect((await identity.readTelegramBotsInUse()).known).toBe(false);
+  });
+
+  // `readEdition()` swallows every failure reading the root-owned lock and falls
+  // through to "openclaw" — a default chosen for "which SKU is this", not for
+  // "which credential stores exist". A Hermes box whose lock file is missing
+  // must not therefore have its bot go uncounted: that is the guard failing open,
+  // reached one layer below the guard. So the stores are always READ, and the
+  // edition decides only which of them may make the answer unknowable.
+  it("counts a bot in a store the edition lock does not admit to", async () => {
+    writeHermesToken(HERMES_BOT);
+
+    expect(await identity.readTelegramBotsInUse()).toEqual({ ids: ["222222"], known: true });
   });
 
   // A single-harness box simply has no second store; absence is a clean answer

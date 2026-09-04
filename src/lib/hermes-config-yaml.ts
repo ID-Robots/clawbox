@@ -44,7 +44,7 @@ import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { invalidateHermesConfigCache } from "@/lib/hermes-config-cache";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { hermesHome } from "@/lib/hermes-env";
-import { getYamlPath, setYamlPath, unsetYamlPath, YamlEditUnsupported } from "@/lib/yaml-block-edit";
+import { getTopLevelScalar, getYamlPath, setYamlPath, unsetYamlPath, YamlEditUnsupported } from "@/lib/yaml-block-edit";
 
 export class HermesConfigWriteError extends Error {}
 
@@ -210,31 +210,27 @@ export async function patchHermesConfig(patch: HermesConfigPatch): Promise<Herme
 }
 
 /**
- * Read one dotted key straight from the file, saying whether we could look.
+ * Read a TOP-LEVEL scalar, saying whether we could look at all.
  *
  * A missing config.yaml is not a failure — `readConfigText` answers `""` for
  * ENOENT, which is a box that has never been configured. Anything else (EACCES
  * after a root-run `hermes config set`, EIO, a directory at the path) is, and a
  * caller deciding whether a credential collides has to be able to tell the two
- * apart: see telegram-bot-identity.ts, where "we could not look" is the only
- * answer allowed to make a save gate refuse.
+ * apart: see telegram-bot-identity.ts, where "we could not find out" is the
+ * only answer allowed to make a save gate refuse.
  *
- * `known: false` is reserved for a file this reader could not get the answer
- * OUT of, not for one it merely dislikes the look of. `getYamlPath` scans the
- * whole enclosing block and throws {@link YamlEditUnsupported} on any shape the
- * line editor does not model — a top-level sequence, a `---` header, a
- * duplicate key elsewhere in the file — none of which is evidence about THIS
- * key. For a top-level key the question is settled without parsing anything: a
- * top-level key is a line at column 0, so if no such line names it, it is
- * absent, and answering "unknown" instead would have left the two Telegram save
- * gates permanently 503 on a box whose config.yaml is merely unusual.
+ * `known: false` therefore means the FILE could not be read, and nothing else.
+ * Reading the value goes through {@link getTopLevelScalar}, which answers from
+ * the column-0 lines alone rather than parsing the document, so a shape the
+ * line editor does not model somewhere else in the file cannot turn into a
+ * refusal here.
  */
-export async function readHermesConfigEntry(
+export async function readHermesConfigTopLevelScalar(
   key: string,
 ): Promise<{ value: string | null; known: boolean }> {
-  let text: string;
   try {
-    ({ text } = await readConfigText(hermesConfigPath()));
+    const { text } = await readConfigText(hermesConfigPath());
+    return { value: getTopLevelScalar(text, key).value, known: true };
   } catch (err) {
     // The message only — this file holds credentials, and Node puts the failing
     // path into the error it hands over.
@@ -244,27 +240,14 @@ export async function readHermesConfigEntry(
     );
     return { value: null, known: false };
   }
-  const path = splitKey(key);
-  if (path.length === 1 && !topLevelKeyPresent(text, path[0])) {
-    return { value: null, known: true };
-  }
-  try {
-    return { value: getYamlPath(text, path), known: true };
-  } catch (err) {
-    console.error(
-      `[hermes-config-yaml] ${key} could not be read out of config.yaml:`,
-      err instanceof Error ? err.message : err,
-    );
-    return { value: null, known: false };
-  }
-}
-
-/** Is `key` written at column 0 anywhere in the file? */
-function topLevelKeyPresent(text: string, key: string): boolean {
-  return new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*:`, "m").test(text);
 }
 
 /** Read one dotted key straight from the file. Returns null when unset. */
 export async function readHermesConfigValue(key: string): Promise<string | null> {
-  return (await readHermesConfigEntry(key)).value;
+  try {
+    const { text } = await readConfigText(hermesConfigPath());
+    return getYamlPath(text, splitKey(key));
+  } catch {
+    return null;
+  }
 }

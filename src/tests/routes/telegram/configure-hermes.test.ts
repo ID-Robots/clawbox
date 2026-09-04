@@ -9,7 +9,10 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
  */
 
 vi.mock("@/lib/config-store", () => ({ get: vi.fn(), set: vi.fn() }));
-vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
+vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(), getEdition: vi.fn(() => "hermes") }));
+// The route also refuses the approvals bot's own token; mocked at the reader so
+// this suite does not drag in the email-approval module's config-store surface.
+vi.mock("@/lib/email-approval", () => ({ approvalBotToken: vi.fn(async () => null) }));
 vi.mock("@/lib/openclaw-config", () => ({
   // A REAL class: the route narrows on `err instanceof GatewayNotReadyError`
   // to tell a gateway that is still binding apart from one that refused the
@@ -155,23 +158,34 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
     // A store that could not be READ is not a box with no previous bot — and it
     // is not a bot change either. Reading only the token treated it as a first
     // save (`{success: true, reset: false}` over a new bot that inherited every
-    // sender approved for the old one); treating it as changed unpairs the whole
-    // household on a guess. Both are answers to a question this route could not
-    // ask, so it refuses — nothing changed, safe to retry — exactly as the
-    // approvals guard does with the same fact.
-    it("refuses the save, changing nothing, when the harness store cannot be read", async () => {
+    // sender approved for the old one). Refusing instead would be worse still:
+    // this route is the only path on the device to a Telegram bot, so a 503 on
+    // an EACCES is a permanent lockout of the feature. It is decided on the one
+    // piece of evidence that survives — ClawBox's own mirror, which is the last
+    // value this route wrote — and resets when nothing proves the bot is the same.
+    it("saves and resets when the harness store cannot be read and nothing matches", async () => {
       mockGet.mockResolvedValue(undefined);
       mockHermesToken.mockResolvedValue({ token: null, known: false });
 
       const res = await POST(req({ botToken: NEW_TOKEN }));
       const body = await res.json();
 
-      expect(res.status).toBe(503);
-      expect(body.kind).toBe("bot_unknown");
+      expect(res.status).toBe(200);
+      expect(body.reset).toBe(true);
+      expect(mockClearHermesPairing).toHaveBeenCalled();
+      expect(mockSet).toHaveBeenCalledWith("telegram_approved_names", undefined);
+    });
+
+    it("keeps the approvals through an unreadable store when the mirror names this exact token", async () => {
+      mockGet.mockResolvedValue(NEW_TOKEN);
+      mockHermesToken.mockResolvedValue({ token: null, known: false });
+
+      const res = await POST(req({ botToken: NEW_TOKEN }));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.reset).toBe(false);
       expect(mockClearHermesPairing).not.toHaveBeenCalled();
-      expect(mockSet).not.toHaveBeenCalledWith("telegram_approved_names", undefined);
-      expect(mockSet).not.toHaveBeenCalledWith("telegram_bot_token", expect.anything());
-      expect(mockSetHermesToken).not.toHaveBeenCalled();
     });
 
     it("does not let a browser that walked away cancel the half it has already committed to", async () => {

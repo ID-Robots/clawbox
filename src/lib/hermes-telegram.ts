@@ -25,7 +25,7 @@ import fs from "fs/promises";
 import path from "path";
 import { promisify } from "util";
 import { runHermesCli } from "@/lib/hermes-cli";
-import { readHermesConfigEntry } from "@/lib/hermes-config-yaml";
+import { readHermesConfigTopLevelScalar } from "@/lib/hermes-config-yaml";
 import { getHermesEnvValue } from "@/lib/hermes-env";
 import { PAIRING_TOKEN_RE, normalizePairingToken } from "@/lib/telegram-pairing-token";
 
@@ -389,14 +389,14 @@ async function envToken(): Promise<HermesTelegramToken> {
  * different answers and only one of them may be acted on.
  */
 export async function readHermesTelegramToken(): Promise<HermesTelegramToken> {
-  const [env, yaml] = await Promise.all([
-    envToken(),
-    readHermesConfigEntry(HERMES_TELEGRAM_TOKEN_KEY),
-  ]);
-  // .env answered with a bot: that is what the bridge puts in the environment,
-  // and config.yaml cannot override it — so an unreadable config.yaml is not a
-  // reason to report the answer we hold as unknown.
+  // Sequential, not concurrent: .env answering ends the question, because that
+  // is what the bridge puts in the environment and config.yaml cannot override
+  // it. Reading the fallback anyway would spend a file read on every panel poll
+  // for a value that is discarded — and log a complaint about a config.yaml
+  // nothing was going to use.
+  const env = await envToken();
   if (env.token !== null) return env;
+  const yaml = await readHermesConfigTopLevelScalar(HERMES_TELEGRAM_TOKEN_KEY);
   return { token: yaml.value, known: env.known && yaml.known };
 }
 

@@ -19,9 +19,10 @@ export async function GET(request: Request) {
 
   try {
     // Awaited first, and not in the Promise.all below, so the Telegram read can
-    // be handed the snapshot this response is already rendering from instead of
-    // making a second synchronous read of the same file on a 3 s poll. It costs
-    // nothing in wall time: `getAll()` wraps a synchronous read.
+    // be handed the snapshot this response is already rendering from rather than
+    // repeating the same synchronous read — and so the two cannot disagree about
+    // one file within one response. It costs nothing in wall time: `getAll()`
+    // wraps a synchronous read.
     const config = await getAll();
     const [openclawConfig, telegramBot] = await Promise.all([
       readOpenClawConfig().catch(() => ({} as OpenClawConfig)),

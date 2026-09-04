@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 vi.mock("@/lib/config-store", () => ({ get: vi.fn() }));
-vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
+vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(), getEdition: vi.fn(() => "hermes") }));
 vi.mock("@/lib/hermes-telegram", () => ({
   hermesTelegramRegistered: vi.fn(),
   hermesGatewayStatus: vi.fn(),
@@ -94,7 +94,20 @@ describe("GET /setup-api/telegram/status on Hermes", () => {
     mockHermesToken.mockResolvedValue({ token: null, known: true });
     const body = await (await GET()).json();
 
-    expect(body).toEqual({ configured: false });
+    // `unknown: false` is the whole point of the pair: this box demonstrably
+    // has no bot, which is a different answer from "we could not read its
+    // Telegram configuration" and the only one a panel may render as an
+    // invitation to set one up.
+    expect(body).toEqual({ configured: false, unknown: false });
+    expect(mockRegistered).not.toHaveBeenCalled();
+  });
+
+  it("says the answer is unknown when Hermes' own store could not be read", async () => {
+    mockGet.mockResolvedValue(undefined);
+    mockHermesToken.mockResolvedValue({ token: null, known: false });
+    const body = await (await GET()).json();
+
+    expect(body).toEqual({ configured: false, unknown: true });
     expect(mockRegistered).not.toHaveBeenCalled();
   });
 

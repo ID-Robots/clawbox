@@ -52,8 +52,16 @@ const APPROVED_NOTICE = "You're approved — send me a message and I'll answer."
  * A plain file read, no CLI: this route is on a 20 s desktop poll, which is why
  * its Hermes paths are deliberately CLI-free.
  */
-async function isConfigured(harness: Harness): Promise<boolean> {
-  return (await readActiveTelegramBot(harness)).token !== null;
+async function isConfigured(harness: Harness): Promise<{ configured: boolean; unknown: boolean }> {
+  const { token, known } = await readActiveTelegramBot(harness);
+  // The third state is carried out rather than collapsed. "This box has no bot"
+  // and "we could not read this device's Telegram configuration" have different
+  // fixes, and this route's empty answer is what the desktop polls for the
+  // pairing popup — so a store it could not read must not read as a box with
+  // nothing to show. Nothing renders `unknown` yet (that needs a UI state and
+  // ten locales); it is here so the panel can, and so the fact is in the
+  // response instead of only in the journal.
+  return { configured: token !== null, unknown: !known && token === null };
 }
 
 async function readApprovedNames(): Promise<Record<string, string>> {
@@ -91,9 +99,10 @@ async function buildApproved(
 export async function GET(request: Request) {
   try {
     const harness = await getActiveHarness();
-    if (!(await isConfigured(harness))) {
+    const state = await isConfigured(harness);
+    if (!state.configured) {
       return NextResponse.json(
-        { configured: false, approved: [], pending: [] },
+        { configured: false, unknown: state.unknown, approved: [], pending: [] },
         { headers: { "Cache-Control": "no-store" } },
       );
     }

@@ -136,6 +136,23 @@ describe("/setup-api/telegram/pairing on Hermes", () => {
     const body = await (await GET(new Request(`${url}?poll=1`))).json();
 
     expect(body.configured).toBe(false);
+    expect(body.unknown).toBe(false);
+    expect(body.pending).toEqual([]);
+  });
+
+  // A store this box could not read is not a box with nothing to show. The
+  // desktop polls this route every 20 s for the pairing popup, so collapsing the
+  // two would hide a household member's request behind the same empty answer a
+  // box with no bot gives — and beta at least said something (a 500 out of
+  // hermesSecretsPresent) where the empty answer says nothing at all.
+  it("marks the empty answer unknown when the harness store could not be read", async () => {
+    mockGet.mockResolvedValue(undefined);
+    mockHermesToken.mockResolvedValue({ token: null, known: false });
+
+    const body = await (await GET(new Request(`${url}?poll=1`))).json();
+
+    expect(body.configured).toBe(false);
+    expect(body.unknown).toBe(true);
     expect(body.pending).toEqual([]);
   });
 

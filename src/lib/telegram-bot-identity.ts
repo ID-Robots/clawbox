@@ -50,7 +50,7 @@ export function telegramBotId(raw: unknown): string | null {
 }
 
 /**
- * A value out of a HARNESS store, accepted only if it could address a bot.
+ * A stored value, accepted only if it could address a bot.
  *
  * Both harness stores hold more than ClawBox put there: ~/.hermes/.env is
  * generated from Hermes' own ~25 KB template of key hints, and openclaw.json is
@@ -58,10 +58,16 @@ export function telegramBotId(raw: unknown): string | null {
  * half-pasted token cannot reach Telegram, so reporting it as a configured bot
  * would end the setup wizard over nothing — and it is this function that keeps
  * every token leaving this module safe to interpolate into an api.telegram.org
- * path. ClawBox's own mirror is deliberately NOT filtered here: it is written
- * only by the configure route, which validates the shape on the way in.
+ * path.
+ *
+ * ClawBox's own mirror goes through it too. The configure route validates the
+ * shape on the way IN, but data/config.json is owned and writable by the
+ * clawbox user — SSH, the in-UI terminal, the agent's run_command, a partial
+ * restore — so "our writer validates it" is not a property of the file. It also
+ * has to: the guard already filtered the mirror and the panels did not, which is
+ * two answers to the one question this module exists to make one.
  */
-function harnessBotToken(raw: unknown): string | null {
+function botTokenOrNull(raw: unknown): string | null {
   return typeof raw === "string" && telegramBotId(raw) !== null ? raw.trim() : null;
 }
 
@@ -83,8 +89,7 @@ export type ActiveTelegramBot = StoredBot;
  * with it.
  */
 async function clawboxMirror(snapshot?: Record<string, unknown>): Promise<string | null> {
-  const token = snapshot ? snapshot.telegram_bot_token : await configGet("telegram_bot_token");
-  return typeof token === "string" && token.length > 0 ? token : null;
+  return botTokenOrNull(snapshot ? snapshot.telegram_bot_token : await configGet("telegram_bot_token"));
 }
 
 type OpenClawChannel = NonNullable<OpenClawConfig["channels"]>[string];
@@ -113,7 +118,7 @@ async function openclawStoredBot(): Promise<StoredBot> {
     );
     return { token: null, known: false };
   }
-  const token = harnessBotToken(channel?.botToken);
+  const token = botTokenOrNull(channel?.botToken);
   if (token !== null) return { token, known: true };
   // A channel can carry its credential as an env REFERENCE instead of a literal
   // — `token: {source:"env", provider, id}`, the form Discord uses (see
@@ -130,7 +135,7 @@ async function openclawStoredBot(): Promise<StoredBot> {
 /** Hermes' own credential, out of the env file the harness itself names. */
 async function hermesStoredBot(): Promise<StoredBot> {
   const hermes = await readHermesTelegramToken();
-  return { token: harnessBotToken(hermes.token), known: hermes.known };
+  return { token: botTokenOrNull(hermes.token), known: hermes.known };
 }
 
 /** The store the given harness keeps its Telegram credential in. */
@@ -139,17 +144,18 @@ function storeFor(harness: Harness): () => Promise<StoredBot> {
 }
 
 /**
- * Which harnesses are INSTALLED on this box — not which one is selected.
- *
- * The edition lock is the authority for that (`/etc/clawbox/edition.env`,
- * root-owned): a single-harness SKU ships one runtime and the other harness's
- * home is not part of the image, so a file sitting at that path is not evidence
- * about anything this box polls. `dual` ships both, licensed switcher or not —
- * the licence gates the SWITCHER, not the install — so both stores count there.
+ * Which harnesses does the edition lock say are INSTALLED — not which one is
+ * selected. `dual` ships both, licensed switcher or not: the licence gates the
+ * SWITCHER, not the install.
  *
  * Read per call, never cached: `readEdition()` keys its own memo on the lock
  * file's mtime, so this is not a capability probed once and believed for the
- * life of the process.
+ * life of the process. It is however allowed to be WRONG — `readEdition()`
+ * swallows every failure reading /etc/clawbox/edition.env and falls through to
+ * "openclaw", a default chosen for "which SKU is this" and not for "which
+ * credential stores exist". So this answer decides one thing only: whether an
+ * UNREADABLE store is allowed to make the whole answer unknown. It never
+ * decides which stores to read — see readTelegramBotsInUse.
  */
 function installedHarnesses(): Harness[] {
   const edition = getEdition();
@@ -174,6 +180,13 @@ export async function readActiveTelegramBot(
   const active = harness ?? (await getActiveHarness());
   const stored = await storeFor(active)();
   if (stored.token) return stored;
+  // The mirror is one value for the whole box, and on `dual` the configure
+  // route writes it for whichever harness was active at the time — so after a
+  // switch it names a bot the now-active harness does not hold, and answering
+  // with it would report a working bot on a harness that has none. There is no
+  // legacy box to protect on that SKU, which is where the fallback earns its
+  // place: an OpenClaw box configured before the channel block existed.
+  if (getEdition() === "dual") return stored;
   return { token: await clawboxMirror(clawboxConfig), known: stored.known };
 }
 
@@ -194,28 +207,35 @@ export interface TelegramBotsInUse {
  * approving the inactive harness's bot as the approvals bot would be a
  * collision that arrives the moment the owner switches back.
  *
- * The edition lock decides WHICH stores those are, and it has to: `known`
- * requires every store consulted to have been readable, and a store belonging
- * to a harness this box does not run is not evidence about anything. A
- * root-owned or otherwise unreadable stray ~/.hermes/.env on an OpenClaw box —
- * from a dual base image, or a provisioning step run as root — would otherwise
- * make `known` false for good, and every approvals-bot save answer 503 on the
- * flagship SKU with no remedy the owner could reach.
+ * The edition lock decides only which of them may make the answer UNKNOWN, and
+ * it has to: a root-owned or otherwise unreadable stray ~/.hermes/.env on an
+ * OpenClaw box — from a dual base image, or a provisioning step run as root —
+ * would otherwise make `known` false for good, and every approvals-bot save
+ * answer 503 on the flagship SKU with no remedy the owner could reach. It does
+ * NOT decide which stores to READ: the lock file can be missing (a pre-3.x
+ * install, a partial image) and `readEdition()` then quietly answers
+ * "openclaw", which would have skipped a real Hermes bot and reopened the very
+ * fail-open this guard exists to close.
  *
  * ClawBox's mirror is included too. It is never the authority, but it costs one
  * read and it is the only trace left of a bot whose harness store this box
  * cannot currently read.
  */
 export async function readTelegramBotsInUse(): Promise<TelegramBotsInUse> {
-  const harnesses = installedHarnesses();
-  const [stores, mirror] = await Promise.all([
-    Promise.all(harnesses.map((harness) => storeFor(harness)())),
+  const [openclaw, hermes, mirror] = await Promise.all([
+    openclawStoredBot(),
+    hermesStoredBot(),
     clawboxMirror(),
   ]);
+  const stores: Record<Harness, StoredBot> = { openclaw, hermes };
   const ids = new Set<string>();
-  for (const token of [...stores.map((store) => store.token), mirror]) {
+  for (const token of [openclaw.token, hermes.token, mirror]) {
     const id = telegramBotId(token);
     if (id !== null) ids.add(id);
   }
-  return { ids: [...ids], known: stores.every((store) => store.known) };
+  // Every store is READ, whatever the edition says, because a token sitting in
+  // one is a bot this device holds and refusing it costs the owner nothing but
+  // a second bot. Only `known` is gated: a store belonging to a harness the
+  // lock says is not installed may not make the answer unknowable.
+  return { ids: [...ids], known: installedHarnesses().every((harness) => stores[harness].known) };
 }

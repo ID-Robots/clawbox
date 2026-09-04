@@ -133,8 +133,13 @@ export async function GET() {
     const harness = await getActiveHarness();
 
     if (harness === "hermes") {
-      const { token } = await readActiveTelegramBot(harness);
-      if (!token) return NextResponse.json({ configured: false });
+      const { token, known } = await readActiveTelegramBot(harness);
+      // `unknown` carries the third state out instead of collapsing it: a store
+      // this box could not read must not render as a box with no bot, which is
+      // the false failure the whole module exists to remove. Nothing draws it
+      // yet — that needs a UI state and ten locales — but the fact belongs in
+      // the response rather than only in the journal.
+      if (!token) return NextResponse.json({ configured: false, unknown: !known });
 
       const { registered, gateway } = await probeHermes(token);
       // `null` = Hermes couldn't be asked; fall back to the token we found
@@ -161,8 +166,8 @@ export async function GET() {
     // only a side effect of the configure route. A box paired with `openclaw
     // config set`, or restored with ~/.openclaw intact and a fresh
     // data/config.json, was told to set up the bot it already answers on.
-    const { token } = await readActiveTelegramBot(harness);
-    if (!token) return NextResponse.json({ configured: false });
+    const { token, known } = await readActiveTelegramBot(harness);
+    if (!token) return NextResponse.json({ configured: false, unknown: !known });
     const info = await fetchBotInfo(token);
     return NextResponse.json({ configured: true, ...info });
   } catch (err) {
