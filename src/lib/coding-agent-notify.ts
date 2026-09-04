@@ -149,7 +149,14 @@ async function notifyTelegram(message: string): Promise<void> {
     // branch — silenced the notice on every Hermes box paired another way:
     // `hermes config set`, or a restore that brought back ~/.hermes without
     // ClawBox's config.json. A working bot, approved users, and no notice.
-    const users = (await readHermesApprovedUsers()).slice(0, MAX_TELEGRAM_RECIPIENTS);
+    // Shape-checked before they are counted, the way the OpenClaw leg filters
+    // its ids below. Hermes' store tolerates a legacy layout and merges two
+    // directories, so a key that cannot address anyone is possible — counting
+    // it would report five delivery FAILURES for messages nothing attempted,
+    // which is the ambiguity the log line right below exists to remove.
+    const users = (await readHermesApprovedUsers())
+      .filter((user) => CHAT_ID_RE.test(user.id))
+      .slice(0, MAX_TELEGRAM_RECIPIENTS);
     if (users.length === 0) {
       // "No notice arrived" and "no notice was sent" are different problems.
       // A silent return made them the same one to whoever went looking.
