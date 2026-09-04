@@ -53,10 +53,14 @@ test.describe("clawbox-cli (MCP user-space wrapper)", () => {
       timeoutMs: 30_000,
     });
 
-    // Header carries the edition, so a reader knows which app set this is.
+    // Header carries the edition, so a reader knows which app set this is —
+    // and, when the two differ, the harness the apps belong to: on the premium
+    // `dual` SKU the list follows the ACTIVE harness, so the line reads
+    // "(dual edition, running hermes)".
     expect(out).toMatch(
-      new RegExp(`^Built-in apps \\(${edition} edition\\):`, "im"),
+      new RegExp(`^Built-in apps \\(${edition} edition[,)]`, "im"),
     );
+    const harness = /^Built-in apps \([^,)]+(?:, running (\w+))?\)/im.exec(out)?.[1] ?? edition;
 
     // Common apps — listed on every edition.
     for (const id of ["settings", "terminal", "files", "browser", "vnc"]) {
@@ -67,9 +71,10 @@ test.describe("clawbox-cli (MCP user-space wrapper)", () => {
 
     // Harness-specific apps. A Hermes box has the skills app and neither the
     // OpenClaw chat app nor the store; listing an app whose backend isn't
-    // installed would point the agent at a window that cannot open. The
-    // premium `dual` edition resolves to the OpenClaw set.
-    if (edition === "hermes") {
+    // installed would point the agent at a window that cannot open. Branch on
+    // the HARNESS the header reports rather than on the edition: a `dual` box
+    // follows whichever harness is running.
+    if (harness === "hermes") {
       expect(out).toMatch(/^\s+hermes-skills — /m);
       expect(out).not.toMatch(/^\s+openclaw — /m);
       expect(out).not.toMatch(/^\s+store — /m);
