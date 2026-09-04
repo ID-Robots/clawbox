@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, symlinkSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, readdirSync, writeFileSync, readFileSync, existsSync, statSync, symlinkSync, chmodSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -170,6 +170,74 @@ function runWithFailingChmod(targetSuffix: string): { stdout: string; stderr: st
     env: { ...process.env, OPENCLAW_STATE_DIR: "", CODEX_AUTH_MIRROR_QUIET: "1" },
   });
   return { stdout: result.stdout, stderr: result.stderr, status: result.status };
+}
+
+/**
+ * The same run again, faulting `fs.mkdirSync` on one exact directory: the shape
+ * an `<agentDir>` the owner cannot write produces when the mirror tries to
+ * create its `codex-home` (EACCES). Faulted rather than chmodded for the same
+ * reason as the chmod fixture — a CI job running as root cannot be denied a
+ * mkdir by any permission bits.
+ */
+function runWithFailingMkdir(target: string): { stdout: string; stderr: string; status: number | null } {
+  const preload = path.join(home, "mkdir-fault.cjs");
+  writeFileSync(
+    preload,
+    [
+      'const fs = require("node:fs");',
+      "const real = fs.mkdirSync;",
+      `const target = ${JSON.stringify(target)};`,
+      "fs.mkdirSync = (dir, options) => {",
+      "  if (String(dir) === target) {",
+      '    const error = new Error("EACCES: permission denied, mkdir");',
+      '    error.code = "EACCES";',
+      "    throw error;",
+      "  }",
+      "  return real(dir, options);",
+      "};",
+      "",
+    ].join("\n"),
+  );
+  const result = spawnSync("node", ["--require", preload, SCRIPT, openclawHome, homeAuthPath], {
+    encoding: "utf-8",
+    env: { ...process.env, OPENCLAW_STATE_DIR: "", CODEX_AUTH_MIRROR_QUIET: "1" },
+  });
+  return { stdout: result.stdout, stderr: result.stderr, status: result.status };
+}
+
+/**
+ * The agents' `codex-home` directories in the order main() will visit them.
+ * Read through the same `readdirSync` the script uses, because that order is
+ * the filesystem's rather than alphabetical: a test that assumed one would only
+ * sometimes put the faulted destination IN FRONT of the survivor, and only then
+ * prove that a failure there does not cost the destinations behind it.
+ */
+function agentCodexHomes(): string[] {
+  const agentsRoot = path.join(openclawHome, "agents");
+  return readdirSync(agentsRoot)
+    .map((id) => path.join(agentsRoot, id, "agent"))
+    .filter((dir) => existsSync(dir))
+    .map((dir) => path.join(dir, "codex-home"));
+}
+
+/**
+ * Every destination main() will visit, in its own order, and the ones a pass
+ * actually left holding the credential. Asserting on the NAMES rather than a
+ * count is the point: what an aborted destinations loop costs is a specific
+ * file the box no longer has, and only the names say which.
+ */
+function allDestinations(): string[] {
+  return [homeAuthPath, ...agentCodexHomes().map((dir) => path.join(dir, "auth.json"))];
+}
+
+function mirrored(refreshToken: string): string[] {
+  return allDestinations().filter((file) => {
+    try {
+      return JSON.parse(readFileSync(file, "utf-8")).tokens.refresh_token === refreshToken;
+    } catch {
+      return false; // Missing, or not a credential file at all.
+    }
+  });
 }
 
 beforeEach(() => {
@@ -1169,10 +1237,11 @@ describe("codex-auth-mirror.js", () => {
   });
 
   it("keeps mirroring, and never says \"already current\", when one destination cannot be written", () => {
-    // The last per-destination operation that could still end the pass. It is
-    // reported on the channel the timer keeps, the later destination is still
-    // written, and the summary line must not answer "credential already
-    // current" on stdout while stderr says the write failed.
+    // The write itself, the second of the two per-destination operations that
+    // can throw (the mkdir above it is the other). It is reported on the
+    // channel the timer keeps, the later destination is still written, and the
+    // summary line must not answer "credential already current" on stdout
+    // while stderr says the write failed.
     seedProfile(accessToken("acct-1"), "refresh-1");
     mkdirSync(path.dirname(homeAuthPath), { recursive: true });
     // A directory, where the credential file has to go: the write fails with
@@ -1188,6 +1257,55 @@ describe("codex-auth-mirror.js", () => {
     expect(status).toBe(0);
     expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.refresh_token)
       .toBe("refresh-1");
+  });
+
+  it("keeps mirroring the LATER destinations when a codex-home cannot be created", () => {
+    // Creating the directory is the other per-destination operation that can
+    // throw, and it runs before the write: an `<agentDir>` the owner cannot
+    // write denies the mkdir, the throw leaves main()'s destinations loop, and
+    // every destination BEHIND it — the other agents' CODEX_HOME copies — is
+    // silently unwritten while the top-level catch prints one raw syscall
+    // message and exits 0. One unwritable agent must cost that agent only.
+    seedProfile(accessToken("acct-1"), "refresh-1");
+    mkdirSync(path.join(openclawHome, "agents", "spare", "agent"), { recursive: true });
+    const failing = agentCodexHomes()[0];
+    const survivors = allDestinations().filter((dest) => dest !== path.join(failing, "auth.json"));
+
+    const { stderr, status } = runWithFailingMkdir(failing);
+
+    // The lost destination, by name: on beta this list is short by every
+    // destination the aborted loop never reached.
+    expect(mirrored("refresh-1")).toEqual(survivors);
+    // Timer conditions (CODEX_AUTH_MIRROR_QUIET=1), so this is the only channel
+    // that carries it, and it names both the destination that was lost and the
+    // directory that blocked it, rather than a bare syscall message.
+    expect(stderr).toContain(`could not write ${path.join(failing, "auth.json")}`);
+    expect(stderr).toContain(`EACCES creating ${failing}`);
+    expect(status).toBe(0);
+  });
+
+  it("keeps mirroring the LATER destinations when a codex-home is a FILE", () => {
+    // The same abort without any permission bits: `codex-home` present as a
+    // regular file makes the recursive mkdir throw EEXIST. (A dangling symlink
+    // aborts the same pass for the same reason, but with ENOENT — a different
+    // errno, one catch.) Nothing filters either out earlier — readJson returns
+    // null on both and fileKey swallows its realpath failure — so it reaches
+    // the mkdir on a box where an operator has put a file in the way.
+    seedProfile(accessToken("acct-1"), "refresh-1");
+    mkdirSync(path.join(openclawHome, "agents", "spare", "agent"), { recursive: true });
+    const failing = agentCodexHomes()[0];
+    const survivors = allDestinations().filter((dest) => dest !== path.join(failing, "auth.json"));
+    writeFileSync(failing, "not a directory");
+
+    const { stderr, status } = runCapturing();
+
+    expect(mirrored("refresh-1")).toEqual(survivors);
+    expect(stderr).toContain(`could not write ${path.join(failing, "auth.json")}`);
+    // ...and it names the path that actually blocked it, not only the
+    // destination: `${dest} (EEXIST)` alone would report "file already exists"
+    // about a file that does not exist.
+    expect(stderr).toContain(`creating ${failing}`);
+    expect(status).toBe(0);
   });
 
   it("fails CLOSED when another writer holds core's store — no adoption, nothing overwritten", () => {

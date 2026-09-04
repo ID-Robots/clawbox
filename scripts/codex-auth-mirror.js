@@ -500,7 +500,54 @@ function writeMirror(dest, credential) {
   const existing = readJson(dest);
   const reason = syncReason(existing, credential);
   const dir = path.dirname(dest);
-  if (reason) fs.mkdirSync(dir, { recursive: true });
+  /**
+   * BOTH per-destination operations that can throw end here. A throw out of
+   * writeMirror leaves main()'s destinations loop, so one unwritable
+   * destination costs every destination behind it — the other agents'
+   * CODEX_HOME copies — silently, with only the top-level catch's raw syscall
+   * line to show for it. One unwritable destination must cost that destination
+   * alone. Never reported as synced either: a mirror counted as written that
+   * was not is the false success this file keeps guarding against.
+   *
+   * console.error, not log(): the timer unit runs with
+   * CODEX_AUTH_MIRROR_QUIET=1, which is exactly the path this can happen on.
+   */
+  const writeFailed = (detail) => {
+    console.error(
+      `  Codex auth.json: could not write ${dest} (${detail}); the remaining mirrors are still being synced.`,
+    );
+    return WRITE_FAILED;
+  };
+  if (reason) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch (error) {
+      // The FIRST of the two, and it throws on shapes a box really has, each
+      // with its own errno (measured, node 22, recursive mkdir): an <agentDir>
+      // the owner cannot write, EACCES; a codex-home that is a regular file,
+      // EEXIST; one that is a dangling symlink, ENOENT; an <agentDir> that is
+      // itself a file, ENOTDIR — main()'s agent filter is existsSync, which a
+      // regular file passes. Nothing filters any of them out earlier, because
+      // readJson returns null on all of them and fileKey() swallows its
+      // realpath failure. An EXISTING codex-home at 0000 or 0500 does NOT
+      // throw — recursive mkdir takes the EEXIST and returns — so the owner-rwx
+      // repair below is still reached on every pass for the locked-directory
+      // shape it was written for.
+      //
+      // The blocked path is `dir`, not `dest`, and `error.code` alone would
+      // drop the only text that names it, so it is named here: an operator
+      // reading one stderr line every ten minutes needs the path to act on.
+      // EACCES in particular does not self-heal — enforceMode repairs the
+      // owner's rwx on `dir`, never on `<agentDir>` above it — so that shape
+      // needs a person, and says so ten minutes apart until it gets one.
+      //
+      // Returning here also keeps the two enforceMode calls below off a path
+      // that is not the kind of thing they expect: a codex-home that is a
+      // regular file would otherwise be chmodded 0700 as if it were a
+      // directory, and a missing one would draw a spurious "could not tighten".
+      return writeFailed(`${error.code || error.message} creating ${dir}`);
+    }
+  }
   // Before the write, so a directory this pass just created is owner-only
   // before a credential lands in it — and before the short-circuit below, so an
   // already-current mirror is repaired too.
@@ -514,15 +561,8 @@ function writeMirror(dest, credential) {
       { mode: 0o600 },
     );
   } catch (error) {
-    // The last per-destination operation that could still end the pass. A
-    // read-only mount, a root-owned file, ENOSPC — one unwritable destination
-    // must cost that destination, not the app-server's CODEX_HOME copy behind
-    // it in the loop. Never reported as synced: a mirror counted as written
-    // that was not is the false success this file keeps guarding against.
-    console.error(
-      `  Codex auth.json: could not write ${dest} (${error.code || error.message}); the remaining mirrors are still being synced.`,
-    );
-    return WRITE_FAILED;
+    // The second: a read-only mount, a root-owned file, ENOSPC, EISDIR.
+    return writeFailed(error.code || error.message);
   }
   return reason;
 }
