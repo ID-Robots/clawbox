@@ -68,9 +68,15 @@ HERMES_CLI_TIMEOUT="${HERMES_CLI_TIMEOUT:-45}"
 # arrives in an environment clawbox-setup.service builds partly from a
 # user-writable .env (the same reason EDITION is read from a root-owned file
 # below), so validate it rather than trust it.
+# The glob rejects a value that is not a run of digits; the arithmetic test then
+# rejects the ones that ARE — "0", but also "00" and "000", which no `|0)` glob
+# catches and which `timeout` reads as zero just the same. `[` fails rather than
+# compares on a value too large for an integer, and a 22-digit ceiling is no
+# ceiling either, so that path coerces too.
 case "$HERMES_CLI_TIMEOUT" in
-  ''|*[!0-9]*|0) HERMES_CLI_TIMEOUT=45 ;;
+  ''|*[!0-9]*) HERMES_CLI_TIMEOUT=45 ;;
 esac
+[ "$HERMES_CLI_TIMEOUT" -gt 0 ] 2>/dev/null || HERMES_CLI_TIMEOUT=45
 # Shared with setup-hermes-dashboard-auth.sh: BOTH scripts read-modify-write
 # ~/.hermes/config.yaml, and at install time they run seconds apart
 # (production-server.js fire-and-forgets this script on the clawbox-setup

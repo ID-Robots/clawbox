@@ -394,6 +394,38 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     // default 5s test budget by design.
   }, 60_000);
 
+  it.each([["0"], ["00"], ["000"], ["abc"], ["9".repeat(22)]])(
+    "coerces a HERMES_CLI_TIMEOUT of %s back to 45 rather than losing the bound",
+    (value) => {
+      // `${VAR:-45}` substitutes on unset and empty and on nothing else, and
+      // this value reaches the script through an environment
+      // clawbox-setup.service builds partly from a user-writable .env. Two ways
+      // it silently undoes the ceiling: `timeout 0` (and `00`, `000`) means NO
+      // timeout, so the wedge above becomes unbounded again; and a non-numeric
+      // duration makes `timeout` exit 125 WITHOUT running the CLI, which at the
+      // `tools disable browser` call is a permanent "could not disable" with
+      // the browser toolset left on — a false failure carrying a functional
+      // regression. The ceiling is read back out of the NOTE, which is the only
+      // place the script says what it used.
+      fs.writeFileSync(
+        hermesBin,
+        [
+          "#!/usr/bin/env bash",
+          'printf "%s\\n" "$*" >> "$HERMES_CALLS"',
+          'if [ "$1" = "plugins" ] && [ "$2" = "doctor" ]; then exit 124; fi',
+          "exit 0",
+        ].join("\n"),
+      );
+      fs.chmodSync(hermesBin, 0o755);
+      const r = run({ HERMES_CLI_TIMEOUT: value });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("answered 124 — the 45s ceiling");
+      // And the CLI really RAN: `timeout abc` would have exited 125 without
+      // invoking it, landing in the "could not verify" arm instead.
+      expect(r.stdout).toContain("built-in browser toolset off");
+    },
+  );
+
   it("reads 124 BEFORE the doctor's words, so a banner is not a defect", () => {
     // By the time `timeout` kills it, the doctor has usually printed its
     // banner — and on the text alone that banner IS the "ran and refused"
