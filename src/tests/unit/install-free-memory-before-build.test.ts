@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync, spawn } from "node:child_process";
 import fs, { readFileSync } from "node:fs";
 import os from "node:os";
@@ -27,6 +27,11 @@ import path from "node:path";
  *  - and it never signals a pid it has not identified, because it runs as root
  *    and pidfiles outlive the processes they name.
  */
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const REPO = process.cwd();
 const INSTALL_SH_PATH = path.join(REPO, "install.sh");
 const INSTALL_SH = readFileSync(INSTALL_SH_PATH, "utf-8");

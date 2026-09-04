@@ -20,6 +20,12 @@ import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
 
+// Starts real processes through @/lib/coding-agent rather than importing
+// child_process itself, and CI has flaked on it both ways in one day — a
+// timed-out case, and a whole run exiting 1 on a teardown error from this
+// file with every test passing. See src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const announce = vi.hoisted(() => vi.fn<(run: unknown) => Promise<undefined>>(async () => undefined));
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: announce }));
 // A roomy box unless a test says otherwise: the team's spawn slot reads it.
