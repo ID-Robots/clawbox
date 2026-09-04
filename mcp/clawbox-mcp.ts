@@ -43,7 +43,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { API_BASE, authHeader } from "./lib/api";
-import { buildContext } from "./lib/context";
+import { buildContext, type McpContext } from "./lib/context";
 import { installEdition, resolveAppHarness, resolveEdition, type Ed } from "./lib/edition";
 import { resolveProfile } from "./lib/profile";
 import { createRegistrar, type Profile } from "./lib/register";
@@ -129,13 +129,31 @@ function instructionsFor(edition: Ed, profile: Profile): string {
  * Build a fully-registered server. Exported so mcp/check-tools.ts can build one
  * per edition and diff the tool lists without connecting a transport.
  */
-export async function buildServer(edition: Ed, profile: Profile, appHarness: Ed | null) {
+/**
+ * `overrides` exists for the surface CHECKER, not for the running server.
+ *
+ * Several tool families register only when a device probe says the box can do
+ * the thing — `du`, `journalctl`, a screen grabber, a readable mailbox, the
+ * coding harness. Off a real box every one of those probes answers false
+ * (mcp/lib/guard.ts spawns in CLAWBOX_ROOT, which does not exist on a CI
+ * runner or a dev PC), so a checker that builds the server the ordinary way
+ * examines a fraction of the surface and reports the whole thing OK. The
+ * checker builds a second, all-capabilities posture with this and checks that
+ * too. Nothing else passes it; the running server always takes the probes.
+ */
+export async function buildServer(
+  edition: Ed,
+  profile: Profile,
+  appHarness: Ed | null,
+  overrides?: Partial<McpContext>,
+) {
   // The app list is a different question from the tool set — see
   // `resolveAppHarness` — but it is answered by the SAME probe, taken once in
   // `main()` and handed down. Asking again here made a dual box put two
   // requests to /setup-api/harness/active at every startup, each with its own
   // 3 s timeout, and let the two collapse a silence in opposite directions.
-  const ctx = await buildContext(edition, installEdition(), profile, appHarness);
+  const probed = await buildContext(edition, installEdition(), profile, appHarness);
+  const ctx: McpContext = overrides ? { ...probed, ...overrides } : probed;
   const server = new McpServer(
     { name: "clawbox", version: VERSION },
     { instructions: instructionsFor(edition, profile) },

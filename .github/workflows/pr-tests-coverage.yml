@@ -46,6 +46,36 @@ jobs:
       - name: Sudoers allow-list coverage
         run: bun run check:sudoers
 
+      # The MCP server's tree is EXCLUDED from the root tsconfig (see its
+      # `exclude`), so `tsc --noEmit` — wherever it runs — has never covered
+      # mcp/**, and no workflow ran this project. Three errors sat on beta
+      # unseen as a result, in src/lib files the MCP tree pulls in
+      # transitively. Fast (one tsc over a small project) and blocking: this is
+      # the only thing that typechecks the stdio process the agent talks to.
+      - name: MCP typecheck
+        run: bun run typecheck:mcp
+
+      # The tool CONTRACT — name and description limits, flat schemas, and which
+      # tools each edition may register. It builds the surface over both
+      # capability postures, so it covers the families a CI runner cannot probe
+      # (see mcp/check-tools.ts); before that it examined a third of the tools
+      # and printed OK over the rest, which is why it could not be a CI job.
+      - name: MCP tool contract
+        run: bun run check:mcp-tools
+
+      # ADVISORY, deliberately, and this is the decision the card asked for:
+      # eslint reports 18 errors and 115 warnings on beta today, so a blocking
+      # step would fail every PR on day one and be switched off again — the same
+      # trap the coverage thresholds below describe. Sixteen of the eighteen are
+      # `no-require-imports` in code that uses `require()` on purpose (keeping
+      # Node APIs out of the Edge bundle); the other two are one `no-explicit-any`
+      # and one react-hooks rule. Making the numbers VISIBLE on every PR is the
+      # first step; ratcheting this to blocking, one rule at a time, is the
+      # second, and it needs those eighteen dealt with first.
+      - name: Lint (advisory)
+        continue-on-error: true
+        run: bun run lint
+
       # CI's variant of `bun run test:coverage`: the same suite, the same
       # thresholds, only the reporters differ. The full set (text, html, clover,
       # json-summary) is for a person looking at a checkout; here nothing reads
