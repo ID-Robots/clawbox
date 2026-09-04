@@ -3,7 +3,7 @@ import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR, getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
 import { setPreferences } from "@/lib/preference-store";
-import { clearSkillEntry, openclawSkillRoot } from "@/lib/openclaw-config";
+import { clearSkillEntry, OpenclawConfigUnreadableError, openclawSkillRoot } from "@/lib/openclaw-config";
 import { refreshSkillsCache } from "@/lib/openclaw-skill-info";
 import { kvDelete } from "@/lib/kv-store";
 import { WEBAPPS_DIR } from "@/lib/code-projects";
@@ -27,11 +27,33 @@ export async function POST(req: Request) {
     // that is a delete under a path the edition does not have: `getSkillsDir()`
     // falls back to ~/clawd, and this line resolved <appId> under it and
     // answered {ok:true} for the removal it had not made.
-    const skillRoot = openclawSkillRoot();
+    //
+    // `null` is the hermes SKU alone. An openclaw.json that EXISTS and cannot
+    // be read is a THROW, and it is answered here — before anything at all is
+    // deleted — because the one thing worse than not removing the skill is
+    // removing the tile, the preferences and the KV while the skill stays on
+    // disk and loaded: the owner is then told the app is gone, and the entry
+    // they would have retried from is gone with it. Nothing is touched, and
+    // the answer says so. Retryable: the file is rewritten in place by
+    // `openclaw config set`, so the next attempt a moment later reads it.
+    let skillRoot: string | null;
+    try {
+      skillRoot = openclawSkillRoot();
+    } catch (err) {
+      if (!(err instanceof OpenclawConfigUnreadableError)) throw err;
+      console.warn("[uninstall] Could not resolve the skills root:", err.message);
+      return NextResponse.json({
+        ok: false,
+        error: "The device's OpenClaw configuration could not be read, so nothing was removed. Try again in a moment.",
+        code: err.code,
+        retryable: true,
+        appId,
+      }, { status: 503 });
+    }
     // What actually happened to the skill half, so the answer can say it.
     //   true  — a skill directory was there and is gone
     //   false — this box has a skills root and nothing of that name was in it
-    //   null  — there is no OpenClaw skills root on this device to look in
+    //   null  — this edition has no OpenClaw skills root to look in (hermes)
     // `{ok:true}` alone said the same thing for all three, which is the half of
     // the wrong-directory delete that a guard on its own does not close.
     let skillRemoved: boolean | null = null;
@@ -40,11 +62,27 @@ export async function POST(req: Request) {
       if (!skillDir.startsWith(skillRoot + path.sep)) {
         return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
       }
-      skillRemoved = await fs
-        .stat(skillDir)
-        .then(() => true)
-        .catch(() => false);
-      await fs.rm(skillDir, { recursive: true, force: true });
+      try {
+        // No `force`, so the removal itself answers the question. A `stat`
+        // ahead of a forced `rm` answered "could I stat it", not "was it
+        // there": an EACCES on the parent or an EIO read as `false`, the one
+        // value the MCP tool states out loud as "there was no skill of that
+        // name on disk" — over a directory that is there and did not go.
+        await fs.rm(skillDir, { recursive: true });
+        skillRemoved = true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+          console.warn("[uninstall] Failed to remove the skill directory:", err instanceof Error ? err.message : err);
+          return NextResponse.json({
+            ok: false,
+            error: "The app's skill folder could not be removed, so nothing was uninstalled. Try again in a moment.",
+            code: "skill_remove_failed",
+            retryable: true,
+            appId,
+          }, { status: 503 });
+        }
+        skillRemoved = false;
+      }
     }
 
     // Remove the deployed webapp, if this app is one. `webapp_create`,

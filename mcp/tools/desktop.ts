@@ -340,13 +340,29 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
       const removed = (await apiPost<{ skillRemoved?: boolean | null }>(
         "/setup-api/apps/uninstall",
         { appId: app_id },
-        { timeoutMs: 60_000 },
+        {
+          timeoutMs: 60_000,
+          // The route refuses rather than half-uninstalling when it cannot
+          // read the device's OpenClaw configuration or remove the skill
+          // folder. Without this the 503 renders as "the service is not
+          // answering", which sends the agent to clawbox_health over a route
+          // that answered precisely and told it to try again.
+          rules: [
+            {
+              status: 503,
+              code: "ENDPOINT_DOWN",
+              message: "The ClawBox could not finish the removal, so nothing was removed and the app is still on the desktop.",
+              next: "Wait a few seconds and call app_uninstall once more. If it refuses again, tell the user the app is still installed and what the device said.",
+            },
+          ],
+        },
       )) as { skillRemoved?: boolean | null } | undefined;
-      // The desktop entry always goes; the SKILL half depends on what was
-      // there. `skillRemoved: false` — the id is in the desktop's list and no
-      // skill of that name was on disk — is the one an agent must not report as
-      // a skill removal, because the next thing it does is tell the user the
-      // skill is gone. `null` is a device with no OpenClaw skills root at all.
+      // Anything but a 2xx has thrown by here, so the desktop entry IS gone.
+      // The SKILL half depends on what was there. `skillRemoved: false` — the
+      // id is in the desktop's list and no skill of that name was on disk — is
+      // the one an agent must not report as a skill removal, because the next
+      // thing it does is tell the user the skill is gone. `null` is a device
+      // with no OpenClaw skills root at all (the hermes SKU).
       if (removed?.skillRemoved === false) {
         return text(
           `Removed "${app_id}" from the desktop. There was no skill of that name on disk, so nothing was removed from the agent's skills.`,

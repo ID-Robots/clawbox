@@ -32,6 +32,9 @@ vi.mock("@/lib/openclaw-config", () => ({
   // pinned in uninstall-edition.test.ts against the real implementation.
   openclawSkillRoot: vi.fn(() => path.join(SKILLS_ROOT, "skills")),
   clearSkillEntry: vi.fn(async () => false),
+  OpenclawConfigUnreadableError: class OpenclawConfigUnreadableError extends Error {
+    readonly code = "config_unreadable";
+  },
 }));
 
 // The rescan behind an uninstall would spawn the real openclaw CLI here.

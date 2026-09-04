@@ -29,8 +29,13 @@ import { saveEnv } from "../../helpers/env";
  */
 
 vi.mock("@/lib/openclaw-skill-info", () => ({ refreshSkillsCache: vi.fn() }));
-vi.mock("@/lib/kv-store", () => ({ kvDelete: vi.fn() }));
-vi.mock("@/lib/preference-store", () => ({ setPreferences: vi.fn().mockResolvedValue(undefined) }));
+
+// Hoisted, like clearSkillEntry below: the module registry is reset before each
+// test, so a factory-local vi.fn() would not be the one the route just called.
+const kvDelete = vi.hoisted(() => vi.fn());
+const setPreferences = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock("@/lib/kv-store", () => ({ kvDelete }));
+vi.mock("@/lib/preference-store", () => ({ setPreferences }));
 
 const clearSkillEntry = vi.hoisted(() => vi.fn().mockResolvedValue(false));
 vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
@@ -77,10 +82,14 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   clearSkillEntry.mockResolvedValue(false);
-  restoreEnv = saveEnv("HOME", "CLAWBOX_EDITION");
+  restoreEnv = saveEnv("HOME", "CLAWBOX_EDITION", "OPENCLAW_HOME");
   home = await fs.mkdtemp(path.join(os.tmpdir(), "clawbox-uninst-"));
   dataDir = path.join(home, "clawbox", "data");
   process.env.HOME = home;
+  // vitest.config.ts floors OPENCLAW_HOME at a tmp path so no test reads a
+  // real box's openclaw.json; a test that needs one points it at its own
+  // fixture, which is what the module's CONFIG_PATH resolves.
+  process.env.OPENCLAW_HOME = path.join(home, ".openclaw");
   // A file nothing on a Hermes box put there, standing in for whatever the
   // agent or an older install left in the legacy workspace.
   await fs.mkdir(clawdSkill(), { recursive: true });
@@ -155,21 +164,40 @@ describe("POST /setup-api/apps/uninstall on an OpenClaw device", () => {
     await expect(fs.stat(clawdSkill())).resolves.toBeTruthy();
   });
 
-  it("refuses to guess a delete target from a config it could not read", async () => {
+  it("refuses the whole uninstall, and drops nothing, when the config cannot be read", async () => {
     // `getSkillsDir()` swallows a parse error and falls through to a
     // well-known path. Good enough for the `stat` its other caller makes, and
     // not a delete target: openclaw.json is rewritten in place by `openclaw
     // config set`, so a half-written read is a real race, and on a box whose
     // workspace is not the well-known one it would redirect the removal.
+    //
+    // But "I could not read the config" is NOT "this device has no OpenClaw",
+    // and answering the first with the second's `null` was a false success on
+    // the edition that HAS the files: the skill and its `skills.entries.<id>`
+    // stayed — still loaded by the gateway — while the tile, the preferences,
+    // the KV and the icon went, and the route answered
+    // `{ok:true, skillRemoved:null}` → "Removed from the desktop". The owner
+    // then has no entry left to retry from. Nothing may be removed here.
     await fs.mkdir(path.join(home, ".openclaw"), { recursive: true });
     await fs.writeFile(path.join(home, ".openclaw", "openclaw.json"), '{"agents":{"defa');
+    const icon = path.join(dataDir, "icons", `${APP}.png`);
+    await fs.mkdir(path.dirname(icon), { recursive: true });
+    await fs.writeFile(icon, "icon");
 
     const { status, body } = await uninstall(APP);
 
-    expect(status).toBe(200);
+    expect(status).toBe(503);
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("config_unreadable");
+    expect(body.retryable).toBe(true);
+    // Nothing was removed, and nothing the desktop needs to offer the retry
+    // was dropped.
     await expect(fs.stat(clawdSkill())).resolves.toBeTruthy();
-    expect(body.skillRemoved).toBeNull();
+    await expect(fs.stat(webappDir())).resolves.toBeTruthy();
+    await expect(fs.stat(icon)).resolves.toBeTruthy();
     expect(clearSkillEntry).not.toHaveBeenCalled();
+    expect(setPreferences).not.toHaveBeenCalled();
+    expect(kvDelete).not.toHaveBeenCalled();
   });
 
   it("removes the skill directory, exactly as before", async () => {

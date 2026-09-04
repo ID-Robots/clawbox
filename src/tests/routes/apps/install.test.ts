@@ -30,10 +30,22 @@ vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(async () => undefined),
 }));
 
+// The real class, stubbed: the route branches on `instanceof`, so the error the
+// mocked openclawSkillRoot() throws must be the one the route imports.
+const { ConfigUnreadable } = vi.hoisted(() => ({
+  ConfigUnreadable: class OpenclawConfigUnreadableError extends Error {
+    readonly code = "config_unreadable";
+    constructor() {
+      super("openclaw.json could not be read");
+      this.name = "OpenclawConfigUnreadableError";
+    }
+  },
+}));
+
 vi.mock("@/lib/openclaw-config", () => ({
-  getSkillsDir: vi.fn(() => "/home/clawbox/.openclaw/workspace"),
   openclawSkillRoot: vi.fn(() => "/home/clawbox/.openclaw/workspace/skills"),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
+  OpenclawConfigUnreadableError: ConfigUnreadable,
 }));
 
 vi.mock("@/lib/openclaw-skill-info", () => ({
@@ -106,8 +118,7 @@ describe("/setup-api/apps/install", () => {
     const fsMod = await import("fs/promises");
     vi.mocked(fsMod.default.mkdir).mockResolvedValue(undefined as never);
     writeFile = vi.mocked(fsMod.default.writeFile).mockResolvedValue(undefined);
-    const { getSkillsDir, openclawSkillRoot } = await import("@/lib/openclaw-config");
-    vi.mocked(getSkillsDir).mockReturnValue("/home/clawbox/.openclaw/workspace");
+    const { openclawSkillRoot } = await import("@/lib/openclaw-config");
     vi.mocked(openclawSkillRoot).mockReturnValue("/home/clawbox/.openclaw/workspace/skills");
     upstream({
       clawhub: jsonResponse(200, { skill: { slug: "test-app" }, owner: { handle: "someone" } }),
@@ -261,6 +272,29 @@ describe("/setup-api/apps/install", () => {
     res = await POST(install({ appId: "test-app" }));
     expect(res.status).toBe(504);
     expect((await res.json()).clawhub).toMatchObject({ code: "timeout", retryable: true });
+  });
+
+  it("refuses a config it could not read as retryable, not as a device without OpenClaw", async () => {
+    // openclawAppsGuard() only proves the ACTIVE HARNESS is openclaw, so a
+    // momentarily unreadable openclaw.json — the in-place `openclaw config
+    // set` rewrite, an EACCES — reaches this route on exactly the boxes that
+    // have skills. It used to answer "This device has no OpenClaw skills
+    // directory to install into": untrue, and without the `ok:false`/`code`/
+    // `retryable` every other failure of this route carries, so the Store
+    // could not tell the owner to try again.
+    const { openclawSkillRoot } = await import("@/lib/openclaw-config");
+    vi.mocked(openclawSkillRoot).mockImplementation(() => { throw new ConfigUnreadable(); });
+
+    const res = await POST(install({ appId: "test-app" }));
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({
+      ok: false,
+      code: "config_unreadable",
+      retryable: true,
+      appId: "test-app",
+    });
+    expect(exec).not.toHaveBeenCalled();
   });
 
   it("downloads the icon only after the install succeeded", async () => {

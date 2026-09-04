@@ -2,18 +2,22 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 vi.mock("fs/promises", () => ({
   default: {
+    // The removal itself says whether a skill was there: it runs without
+    // `force`, so ENOENT means "nothing of that name" and anything else means
+    // "there and not removed". Default: it was there and it went.
     rm: vi.fn().mockResolvedValue(undefined),
-    // The route stats the skill directory before removing it, so the answer can
-    // say whether a skill was actually there. Default: it was.
-    stat: vi.fn().mockResolvedValue({ isDirectory: () => true }),
   },
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
-  // See uninstall-edition.test.ts for the null (Hermes) half, tested against
-  // the real implementation rather than a mock.
+  // See uninstall-edition.test.ts for the other two answers — null (the hermes
+  // SKU) and the throw (a config that exists and cannot be read) — both tested
+  // against the real implementation rather than a mock.
   openclawSkillRoot: vi.fn().mockReturnValue("/home/clawbox/.openclaw/workspace/skills"),
   clearSkillEntry: vi.fn().mockResolvedValue(true),
+  OpenclawConfigUnreadableError: class OpenclawConfigUnreadableError extends Error {
+    readonly code = "config_unreadable";
+  },
 }));
 
 vi.mock("@/lib/openclaw-skill-info", () => ({
@@ -41,7 +45,6 @@ describe("/setup-api/apps/uninstall", () => {
     vi.mocked(clearSkillEntry).mockResolvedValue(true);
     const fsMod = await import("fs/promises");
     vi.mocked(fsMod.default.rm).mockResolvedValue(undefined);
-    vi.mocked(fsMod.default.stat).mockResolvedValue({ isDirectory: () => true } as never);
     const { getAll, setMany } = await import("@/lib/config-store");
     vi.mocked(getAll).mockResolvedValue({});
     vi.mocked(setMany).mockResolvedValue(undefined);
@@ -75,9 +78,38 @@ describe("/setup-api/apps/uninstall", () => {
     expect(res.status).toBe(400);
   });
 
+  it("refuses, and removes nothing else, when the skill folder will not go", async () => {
+    // A skill directory that is THERE and could not be removed used to be
+    // reported as `skillRemoved: false` — the value the MCP tool states out
+    // loud as "there was no skill of that name on disk" — while the tile, the
+    // preferences and the KV went anyway. The removal is refused instead, so
+    // the desktop entry the owner would retry from survives.
+    const fsMod = await import("fs/promises");
+    vi.mocked(fsMod.default.rm).mockRejectedValue(Object.assign(new Error("Permission denied"), { code: "EACCES" }));
+
+    const res = await uninstall("test-app");
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({
+      ok: false,
+      code: "skill_remove_failed",
+      retryable: true,
+      appId: "test-app",
+    });
+    const { clearSkillEntry } = await import("@/lib/openclaw-config");
+    const { kvDelete } = await import("@/lib/kv-store");
+    expect(clearSkillEntry).not.toHaveBeenCalled();
+    expect(kvDelete).not.toHaveBeenCalled();
+  });
+
   it("handles uninstall error gracefully", async () => {
     const fsMod = await import("fs/promises");
-    vi.mocked(fsMod.default.rm).mockRejectedValue(new Error("Permission denied"));
+    // The skill half succeeds; the deployed webapp's removal is what fails.
+    let calls = 0;
+    vi.mocked(fsMod.default.rm).mockImplementation(async () => {
+      if (calls++ === 0) return undefined;
+      throw new Error("Permission denied");
+    });
     expect((await uninstall("test-app")).status).toBe(500);
   });
 

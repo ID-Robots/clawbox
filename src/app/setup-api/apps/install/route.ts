@@ -5,7 +5,7 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR, getAll as configGetAll } from "@/lib/config-store";
-import { openclawSkillRoot, findOpenclawBin } from "@/lib/openclaw-config";
+import { OpenclawConfigUnreadableError, openclawSkillRoot, findOpenclawBin } from "@/lib/openclaw-config";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR, type InstalledMeta } from "@/lib/store-categories";
 import { boundPreferenceText } from "@/lib/preference-schema";
 import { setPreferences } from "@/lib/preference-store";
@@ -294,14 +294,43 @@ export async function POST(req: Request) {
 
     const openclawBin = findOpenclawBin();
     // The SAME expression the uninstall route deletes under. Two spellings of
-    // one path is how a wrong-directory delete comes back: this route is behind
-    // openclawAppsGuard(), so the active harness is `openclaw` and the root is
-    // never null here — but the null still needs a branch, and refusing is the
-    // right thing to do with a workspace that could not be established.
-    const skillRoot = openclawSkillRoot();
+    // one path is how a wrong-directory delete comes back.
+    //
+    // Behind openclawAppsGuard() the active harness is `openclaw`, so the
+    // edition has OpenClaw and `null` is unreachable here; it keeps a branch as
+    // a defensive refusal. What IS reachable behind that guard, on exactly the
+    // boxes that have skills, is the throw: openclaw.json present and
+    // momentarily unreadable (the in-place `openclaw config set` rewrite, an
+    // EACCES). Both refusals carry this route's own failure contract —
+    // `ok:false` with an honest `code` and `retryable` — so the Store shows
+    // Retry on the one that will work on the next try and not on the one that
+    // never will.
+    let skillRoot: string | null;
+    try {
+      skillRoot = openclawSkillRoot();
+    } catch (err) {
+      if (!(err instanceof OpenclawConfigUnreadableError)) throw err;
+      console.warn("[apps/install] Could not resolve the skills root:", err.message);
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "The device's OpenClaw configuration could not be read, so nothing was installed. Try again in a moment.",
+          code: err.code,
+          retryable: true,
+          appId,
+        },
+        { status: 503 },
+      );
+    }
     if (!skillRoot) {
       return NextResponse.json(
-        { error: "This device has no OpenClaw skills directory to install into." },
+        {
+          ok: false,
+          error: "This device has no OpenClaw skills directory to install into.",
+          code: "no_openclaw",
+          retryable: false,
+          appId,
+        },
         { status: 409 },
       );
     }

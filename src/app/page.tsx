@@ -1033,13 +1033,28 @@ function ChromeDesktopInner() {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 10_000);
-      await fetch("/setup-api/apps/uninstall", {
+      const res = await fetch("/setup-api/apps/uninstall", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ appId }),
         signal: controller.signal,
       });
       clearTimeout(timer);
+      // A refusal is the route saying it removed NOTHING — an OpenClaw config
+      // it could not read, a skill folder it could not delete. Taking the app
+      // off the desktop anyway would hide the only thing left to retry from,
+      // and the next reload would put the icon back with no explanation. (A
+      // thrown fetch is different and keeps the old behaviour: an abort at the
+      // deadline says nothing about whether the removal landed.)
+      if (!res.ok) {
+        const failure = await res.json().catch(() => null);
+        const message = typeof failure?.error === "string"
+          ? failure.error
+          : "Couldn't uninstall this app — please try again.";
+        window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message } }));
+        setUninstallConfirm(null);
+        return;
+      }
     } catch (err) {
       console.warn("[uninstall] Failed to uninstall skill:", err);
     }
