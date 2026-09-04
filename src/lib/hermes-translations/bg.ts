@@ -358,7 +358,6 @@ export const bg: Record<string, string> = {
   "localModels.unavailable": "Състоянието на следните не можа да бъде прочетено: {list}.",
   "localModels.disk": "Диск {size}",
   "localModels.memoryInUse": "Използвана памет {size}",
-  "localModels.ollama.title": "Библиотека на Ollama",
   "localModels.footer": "Каквото изключите от менюто, остава изключено и след рестарт.",
   "localModels.group.llm": "Модел на AI агента",
   "localModels.group.tts": "Глас (текст към реч)",

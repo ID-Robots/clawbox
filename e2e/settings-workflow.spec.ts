@@ -61,16 +61,15 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   await expect(settingsWindow.getByRole("radio", { name: /ClawBox AI/ })).toBeChecked();
 
   // ── Local AI: one grouped inventory, friendly names only, the actions
-  // behind a per-row menu. No provider radiogroup lives here any more — the
-  // only radiogroup on the page is the Ollama library's "Download a model"
-  // picker, which moved in from the setup wizard so an owner past setup can
-  // add a model without the Terminal.
+  // behind a per-row menu. No radiogroup lives here at all any more — neither
+  // the provider picker this panel replaced nor the Ollama library, whose
+  // search-and-pull card has gone back to being a Terminal job.
   await section(/Local AI/).click();
   const localAi = settingsWindow.getByTestId("local-ai-panel");
   await expect(localAi).toBeVisible();
   await expect(localAi).toContainText("AI that runs on this box, and what each part is doing right now.");
   await expect(localAi.getByRole("radiogroup", { name: "AI Provider" })).toHaveCount(0);
-  await expect(localAi.getByTestId("local-ai-ollama").getByRole("radiogroup", { name: "Download a model" })).toBeVisible();
+  await expect(localAi.getByTestId("local-ai-ollama")).toHaveCount(0);
   await expect(localAi.getByText("gemma4-e2b-it-q4_0")).toHaveCount(0);
 
   await expect(localAi.getByTestId("local-ai-group-llm").getByRole("heading", { name: "AI agent model" })).toBeVisible();

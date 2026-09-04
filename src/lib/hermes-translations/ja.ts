@@ -373,7 +373,6 @@ export const ja: Record<string, string> = {
   "localModels.unavailable": "{list} の状態を読み取れませんでした。",
   "localModels.disk": "ディスク {size}",
   "localModels.memoryInUse": "使用中のメモリ {size}",
-  "localModels.ollama.title": "Ollama ライブラリ",
   "localModels.footer": "無効にしたものは再起動後もオフのままです。",
   "localModels.group.llm": "AIエージェントのモデル",
   "localModels.group.tts": "音声（読み上げ）",

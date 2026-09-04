@@ -5,8 +5,6 @@ import { useT } from "@/lib/i18n";
 import { formatBytes } from "@/lib/format-bytes";
 import { dispatchOpenApp, onStandaloneAppPage } from "@/lib/ui-events";
 import type { LocalModelEntry, LocalModelsSnapshot, RunState } from "@/lib/local-models";
-import OllamaModelPanel from "./OllamaModelPanel";
-import { useOllamaModels } from "@/hooks/useOllamaModels";
 
 /**
  * Settings → Local AI: everything that runs on the box itself, grouped by
@@ -207,33 +205,6 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   const menuRef = useRef<HTMLDivElement | null>(null);
   // Each row's "more" button, so a closing menu can hand focus back to it.
   const triggerRefs = useRef(new Map<string, HTMLButtonElement>());
-
-  // ── Ollama: search the library and pull a model ──
-  //
-  // The inventory above LISTS what is on the box; it has never been able to add
-  // to it. Until now the only place to search ollama.com and download a model
-  // was the first-boot setup wizard, so an owner past setup had to use the
-  // Terminal. Same panel the wizard uses, same hook, on the settings page where
-  // the models it manages are already listed.
-  const [selectedOllamaModel, setSelectedOllamaModel] = useState("");
-  const ollama = useOllamaModels({
-    onSaveSuccess: (model) => { setSelectedOllamaModel(model); void refresh(); },
-    onSaveError: setError,
-    onPullError: setError,
-    onDeleteError: setError,
-    onClearStatus: () => setError(null),
-  }, "local");
-  const { checkOllamaStatus, ollamaPulling } = ollama;
-
-  // Poll while a pull runs so the row appears in the inventory as it lands, and
-  // re-read the status whenever this page is opened.
-  useEffect(() => {
-    if (!active) return;
-    void checkOllamaStatus();
-  }, [active, checkOllamaStatus]);
-  useEffect(() => {
-    if (!ollamaPulling) { void refresh(); return; }
-  }, [ollamaPulling]); // eslint-disable-line react-hooks/exhaustive-deps -- refresh is re-created per render; this fires on the pull edge only
 
   const applySnapshot = useCallback((next: LocalModelsSnapshot) => {
     snapshotRef.current = next;
@@ -703,37 +674,6 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
           </section>
         );
       })}
-
-      {/* Add a model to the box. */}
-      <section className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="local-ai-ollama">
-        <div className="flex items-center gap-2 mb-3">
-          <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">download</span>
-          <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest m-0">
-            {t("localModels.ollama.title")}
-          </h3>
-        </div>
-        <OllamaModelPanel
-          ollamaRunning={ollama.ollamaRunning}
-          ollamaModels={ollama.ollamaModels}
-          ollamaSaving={ollama.ollamaSaving}
-          ollamaSearch={ollama.ollamaSearch}
-          ollamaSearching={ollama.ollamaSearching}
-          ollamaSearchResults={ollama.ollamaSearchResults}
-          ollamaPulling={ollama.ollamaPulling}
-          ollamaPullProgress={ollama.ollamaPullProgress}
-          selectedOllamaModel={selectedOllamaModel}
-          setSelectedOllamaModel={setSelectedOllamaModel}
-          saveOllamaConfig={ollama.saveOllamaConfig}
-          deleteOllamaModel={ollama.deleteOllamaModel}
-          handleOllamaSearchChange={ollama.handleOllamaSearchChange}
-          clearSearch={ollama.clearSearch}
-          pullOllamaModel={ollama.pullOllamaModel}
-          cancelOllamaPull={ollama.cancelOllamaPull}
-          maxParamBillions={ollama.ollamaMaxParamBillions}
-          formatOllamaBytes={ollama.formatOllamaBytes}
-          radioGroupName="settings-ollama-model"
-        />
-      </section>
 
       <p className="text-xs text-[var(--text-secondary)]">{t("localModels.footer")}</p>
     </div>
