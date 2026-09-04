@@ -2,6 +2,12 @@
 language: en-US
 reviews:
   profile: assertive
+  # Make the CodeRabbit status useful as a required branch check: review
+  # failures must fail the outward status, and blocking findings stay in
+  # "request changes" until the latest revision has been reviewed and the
+  # finding is resolved.
+  request_changes_workflow: true
+  fail_commit_status: true
   auto_review:
     enabled: true
     drafts: false
@@ -12,6 +18,48 @@ reviews:
       - beta
       - "clawbox-*"
   path_instructions:
+    - path: "scripts/*tunnel*.sh"
+      instructions: |
+        Security-critical remote-access transport. Treat a named Cloudflare
+        tunnel token as a per-device production credential. Never print it,
+        return it through an API, copy it into telemetry/heartbeat data, or
+        expose it in a command line or world-readable file. Require strict
+        ownership/permissions, quoted argv (no eval or shell-built command),
+        atomic credential replacement, and fail-closed handling of malformed
+        portal responses. A persistent hostname is only discovery hardening;
+        it must never replace the ClawBox login/authentication boundary.
+    - path: "config/clawbox-tunnel.service"
+      instructions: |
+        Security-critical systemd unit for public remote access. Check that
+        tunnel credentials cannot leak through unit text, logs, process
+        arguments, broad EnvironmentFile permissions, or debug output. Keep
+        least privilege and systemd hardening compatible with cloudflared,
+        avoid shell interpretation, and ensure restart/failure behavior cannot
+        silently start an attacker-controlled endpoint.
+    - path: "src/lib/cloudflared.ts"
+      instructions: |
+        Security-critical tunnel parsing and lifecycle code. Treat all
+        cloudflared output and portal-provided values as untrusted. Validate a
+        hostname as a hostname (no scheme, port, path, whitespace, shell
+        metacharacters, or suffix confusion), require the expected
+        clawbox.tech suffix/box-handle contract, never log credentials, and do
+        not weaken login, origin, session, or WebSocket authorization because
+        a hostname is stable.
+    - path: "src/lib/tunnel.ts"
+      instructions: |
+        Security-critical public endpoint discovery. Reject malformed or
+        non-HTTPS tunnel URLs, userinfo, unexpected ports, suffix confusion,
+        and untrusted hostname changes. Never expose named-tunnel credentials
+        or treat hostname entropy as authentication. Preserve the device login
+        and authorization checks for HTTP and WebSocket access.
+    - path: "src/app/setup-api/portal/**/*.ts"
+      instructions: |
+        Portal/device trust boundary. Authenticate every provisioning and
+        heartbeat operation; validate persistent tunnel hostnames and
+        credential payloads strictly; prevent replay, cross-device assignment,
+        and attacker-controlled endpoint replacement. Responses, errors, and
+        logs must redact tunnel tokens. Do not accept a stable hostname as
+        proof of device identity.
     - path: "src/app/**/*.ts*"
       instructions: |
         Next.js 16 App Router (TypeScript) running on an embedded NVIDIA Jetson device with bun runtime.
@@ -35,5 +83,33 @@ reviews:
   tools:
     gitleaks:
       enabled: true
+    semgrep:
+      enabled: true
+  pre_merge_checks:
+    custom_checks:
+      - name: "Persistent tunnel security"
+        mode: error
+        instructions: |
+          Pass when the pull request does not change persistent Cloudflare
+          tunnel provisioning, tunnel startup, public-hostname handling, or
+          remote-access authentication. Otherwise fail if any of these are
+          true:
+          1. A tunnel token can reach source control, an HTTP response, UI,
+             heartbeat/telemetry payload, logs, process arguments, or a file
+             readable by users other than the tunnel service owner/root.
+          2. Portal, cloudflared, DNS, URL, or hostname input reaches a shell,
+             systemd command, redirect, or connection target without strict
+             validation and argv-safe execution.
+          3. Hostname validation permits schemes, userinfo, ports, paths,
+             whitespace, suffix confusion, or names outside the assigned
+             clawbox.tech device-host contract.
+          4. A device can claim, replace, replay, or receive another device's
+             tunnel assignment without authenticated device binding.
+          5. Credential writes/rotation are non-atomic, retain broader than
+             owner-only permissions, or leave stale credentials active after
+             unpair/reset.
+          6. The stable/unguessable hostname is treated as authentication, or
+             existing login, session, origin, CSRF, rate-limit, HTTP, or
+             WebSocket protections are bypassed or weakened.
 chat:
   auto_reply: true
