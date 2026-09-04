@@ -152,6 +152,7 @@ export function useCopy() {
       docsFull: t('skills.docsFull'),
       docsPreview: t('skills.docsPreview'),
       docsLoading: t('skills.docsLoading'),
+      docsLoadingElapsed: (s: number) => t('skills.docsLoadingElapsed', { s }),
       docsUnavailable: t('skills.docsUnavailable'),
 
       reqCommands: t('skills.reqCommands'),

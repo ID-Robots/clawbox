@@ -301,6 +301,7 @@ export const nl: Record<string, string> = {
   "skills.docsFull": "Volledige SKILL.md",
   "skills.docsPreview": "Voorbeeld van de documentatie — de volledige tekst is beschikbaar na installatie",
   "skills.docsLoading": "Documentatie laden…",
+  "skills.docsLoadingElapsed": "Documentatie laden… ({s} s)",
   "skills.docsUnavailable": "Voor deze skill is nog geen documentatie beschikbaar.",
 
   // === Requirements card ===

@@ -300,6 +300,7 @@ export const de: Record<string, string> = {
   "skills.docsFull": "Vollständige SKILL.md",
   "skills.docsPreview": "Vorschau der Dokumentation — der vollständige Text ist nach der Installation verfügbar",
   "skills.docsLoading": "Dokumentation wird geladen…",
+  "skills.docsLoadingElapsed": "Dokumentation wird geladen… ({s} s)",
   "skills.docsUnavailable": "Für diesen Skill gibt es noch keine Dokumentation.",
 
   // === Requirements card ===

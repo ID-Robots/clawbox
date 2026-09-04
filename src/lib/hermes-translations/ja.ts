@@ -303,6 +303,7 @@ export const ja: Record<string, string> = {
   "skills.docsFull": "SKILL.md 全文",
   "skills.docsPreview": "ドキュメントのプレビュー — 全文はインストール後に読めます",
   "skills.docsLoading": "ドキュメントを読み込み中…",
+  "skills.docsLoadingElapsed": "ドキュメントを読み込み中… ({s}秒)",
   "skills.docsUnavailable": "このスキルにはまだドキュメントがありません。",
 
   // === Requirements card ===

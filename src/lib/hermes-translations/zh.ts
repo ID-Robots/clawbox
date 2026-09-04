@@ -312,6 +312,7 @@ export const zh: Record<string, string> = {
   "skills.docsFull": "完整 SKILL.md",
   "skills.docsPreview": "文档预览 — 完整内容在安装后可见",
   "skills.docsLoading": "正在加载文档…",
+  "skills.docsLoadingElapsed": "正在加载文档…（{s} 秒）",
   "skills.docsUnavailable": "此技能暂无可用文档。",
 
   // === Requirements card ===
