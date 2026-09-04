@@ -39,13 +39,13 @@ describe("a window beside a docked chat", () => {
     expect(screen.getByRole("button", { name: "window.maximize" })).toBeInTheDocument();
   });
 
-  it("sits a margin inside the desktop when maximized, the chat's gap on the right", () => {
+  it("sits a margin inside the desktop when maximized, the same margin between it and the chat", () => {
     win(412);
     fireEvent.click(screen.getByRole("button", { name: "window.maximize" }));
     const el = screen.getByTestId("chrome-window-terminal");
     expect(el.style.left).toBe(`${DOCK_GAP}px`);
     expect(el.style.top).toBe(`${DOCK_GAP}px`);
-    expect(el.style.width).toBe(`calc(100% - ${DOCK_GAP + 412}px)`);
+    expect(el.style.width).toBe(`calc(100% - ${DOCK_GAP * 2 + 412}px)`);
     expect(el.style.height).toContain(`${DOCK_GAP * 2}px`);
     // Corners kept, like the chat's.
     expect(el.style.borderRadius).toBe("8px");
