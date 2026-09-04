@@ -62,9 +62,10 @@ All dynamic API routes use `export const dynamic = "force-dynamic"` to prevent c
 
 ### Middleware (`src/middleware.ts`)
 
-Handles two concerns:
+Handles three concerns:
 1. **Captive portal detection** — intercepts OS-specific detection URLs (Android, Apple, Windows, Firefox) and redirects to `http://10.42.0.1/`
 2. **Authentication** — enforces session cookie auth, redirects unauthenticated users to `/login`
+3. **The update lock** — while an update owns the box, desktop page navigations (`/` and `/app/*`) are redirected to `/updating`. An update runs `git reset --hard` and `git clean -fd` over the project while the desktop is still on screen and every app on it can write through `/setup-api`, so a window left open can save into a tree being rewritten underneath it. The flag is on DISK (`update_in_progress`, `src/lib/update-lock.ts`) rather than in the updater's memory, because middleware answers before any route handler is entered — it reads the same mtime-cached `data/config.json` snapshot it already reads for `setup_complete`, so the lock costs no extra I/O. `/setup-api` is deliberately NOT redirected (the updating page polls the status route, and an API answering a navigation redirect with HTML is the defect #304 fixed), nor is the gateway (the assistant keeps answering on it throughout). The check sits after the session check, so an expired session still gets `/login`. The flag OUTLIVES the reboot on purpose — the release is in `launchUpdate`'s `finally`, which does not run when `do_rebuild` kills the server, so the desktop stays locked through `post_update`, `gateway_verify` and `verify_build_identity` — and cannot outlive a dead update, because `resumeContinuation` releases it at boot when there is nothing to resume. That boot release is also the only escape that works, so `/updating`'s stuck panel names a restart rather than offering a link back to the desktop, which the middleware would redirect straight back. The page gives every string an English floor (`tr(key, english)`): `I18nProvider` loads translations in an effect through a dynamic import, and this is the one screen guaranteed to be open while the box is offline — raw keys for the length of an outage is not an acceptable answer.
 
 ### Server Libraries (`src/lib/`)
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useT } from "@/lib/i18n";
+import { I18nProvider, useT } from "@/lib/i18n";
 
 /**
  * The screen the owner sees while an update owns the box.
@@ -38,8 +38,24 @@ function clock(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-export default function UpdatingPage() {
+function UpdatingScreen() {
   const { t } = useT();
+  /**
+   * Translated when the catalogue is there, English when it is not — never the
+   * raw key.
+   *
+   * I18nProvider loads translations in an effect, through a dynamic import, so
+   * the server always renders keys and the client fills them in. Every other
+   * page can rely on that. This one cannot: it is the ONE screen guaranteed to
+   * be open while the box is offline, and i18n.tsx says so itself — "a chunk
+   * load can fail ... the device is offline mid-update ... keep whatever copy is
+   * already in state (English, or the raw keys on a first load)". Raw keys for
+   * the length of an outage is not an acceptable answer here.
+   */
+  const tr = (key: string, english: string) => {
+    const value = t(key);
+    return value === key ? english : value;
+  };
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [offline, setOffline] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -93,15 +109,15 @@ export default function UpdatingPage() {
           className="mx-auto mb-6 h-14 w-14 rounded-full border-2 border-white/15 border-t-white/70 animate-spin"
           aria-hidden="true"
         />
-        <h1 className="text-xl font-semibold text-[var(--text-primary,#fff)]">{t("update.title")}</h1>
+        <h1 className="text-xl font-semibold text-[var(--text-primary,#fff)]">{tr("update.title", "System Update")}</h1>
         <p className="mt-2 text-sm text-[var(--text-secondary,#9aa4b2)]">
-          {t("update.updatingDescription")}
+          {tr("update.updatingDescription", "Updating your ClawBox with the latest software...")}
         </p>
 
         {/* What the box last told us. A step count, never a percentage of time. */}
         {total > 0 && (
           <p className="mt-4 text-xs font-mono text-[var(--text-muted,#6b7280)]" data-testid="updating-step">
-            {running?.label ?? t("update.preparingUpdate")} · {done}/{total}
+            {running?.label ?? tr("update.preparingUpdate", "Preparing update...")} · {done}/{total}
           </p>
         )}
 
@@ -137,5 +153,21 @@ export default function UpdatingPage() {
         )}
       </div>
     </main>
+  );
+}
+
+/**
+ * The provider is mounted HERE, not inherited.
+ *
+ * The root layout is a server component and mounts no I18nProvider, and
+ * `useT()` without one returns a fallback that renders the KEY — this screen
+ * would have shown a literal "update.title" to the owner. /login and
+ * /app/[id] each mount their own for exactly this reason; this is the third.
+ */
+export default function UpdatingPage() {
+  return (
+    <I18nProvider>
+      <UpdatingScreen />
+    </I18nProvider>
   );
 }

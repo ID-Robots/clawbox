@@ -92,6 +92,15 @@ describe("the updating screen tells the truth about escaping", () => {
     expect(PAGE).toMatch(/restart it/i);
   });
 
+  it("mounts its own I18nProvider, or it would render raw keys", () => {
+    // The root layout is a server component and mounts none, and useT() without
+    // a provider returns a fallback that renders the KEY — this screen would
+    // have shown a literal "update.title" to the owner. tsc cannot see it.
+    // /login and /app/[id] each mount their own for the same reason.
+    expect(PAGE).toContain("I18nProvider");
+    expect(PAGE.indexOf("<I18nProvider>")).toBeLessThan(PAGE.indexOf("<UpdatingScreen />"));
+  });
+
   it("holds the screen when a poll fails, instead of taking it down", () => {
     // The inverse of the usual rule. do_rebuild stops the web server for
     // minutes; a failed poll is the normal course of an update, not evidence
