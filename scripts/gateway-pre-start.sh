@@ -37,7 +37,22 @@ OPENCLAW_PIN_FILE="${OPENCLAW_PIN_FILE:-$CLAWBOX_ROOT/config/openclaw-target.txt
 if [ -n "${OPENCLAW_PIN_VERSION:-}" ]; then
   OPENCLAW_TARGET="${OPENCLAW_PIN_VERSION}"
 elif [ -f "$OPENCLAW_PIN_FILE" ]; then
-  OPENCLAW_TARGET=$(head -1 "$OPENCLAW_PIN_FILE" | awk '{print $1}')
+  # `|| true`: the file exists, but a read can still fail (permissions, a
+  # truncated mount), and under `set -euo pipefail` a failed pipeline in an
+  # assignment aborts this ExecStartPre — which means no gateway at all. An
+  # empty target is already a defined state here (see above); an aborted boot
+  # is not. TASK-657.
+  OPENCLAW_TARGET=$(head -1 "$OPENCLAW_PIN_FILE" 2>/dev/null | awk '{print $1}' || true)
+  if [ -z "$OPENCLAW_TARGET" ]; then
+    # Say it, for the same reason the two installer copies of this read do — and
+    # here the empty value is not merely a missing pin. It also switches OFF the
+    # codex version-skew guard below and turns CODEX_SPEC into the bare `codex`
+    # alias, which this file's own comment says makes every Codex chat crash
+    # with `createDiagnosticTraceContextFromActiveScope is not a function`.
+    # Reaching a defined-but-costly state through a NEW silent route is what
+    # needs the line.
+    echo "  WARN: $OPENCLAW_PIN_FILE is empty or could not be read — continuing with no pinned OpenClaw target" >&2
+  fi
 fi
 
 if [ ! -x "$OPENCLAW_BIN" ]; then
@@ -52,24 +67,103 @@ fi
 # v2 also REFUSES a config carrying the legacy keys once its own loader
 # migration has produced the new ones, so writing the old names against a
 # v2 gateway does not degrade politely — it kept this gateway from ever
-# reporting ready. Decided from the pinned target (the fleet's source of
-# truth), falling back to the installed binary when the pin is unknown.
-# The INSTALLED binary is the authority: it is the process that will parse
-# what this script writes. A partially failed update (repo synced, npm
-# install not yet done) leaves pin=2026.8.1 with a 2026.7 binary — deciding
-# from the pin there would write v2 keys a v1 gateway refuses AND delete the
-# controlUi auth switches v1 still needs. The pin only fills in when the
-# binary cannot be asked.
-CLAWBOX_OPENCLAW_EFFECTIVE="$("$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1)"
+# reporting ready. The INSTALLED core is the authority and the ONLY source:
+# it is the process that will parse what this script writes. The pinned
+# target is deliberately NOT a fallback — a partially failed update (repo
+# synced, npm install not yet done) leaves pin=2026.8.1 with a 2026.7 core,
+# and that is exactly the state in which the core cannot be read, so a pin
+# fallback would fire precisely when it is wrong: v2 keys a v1 gateway
+# refuses, and the controlUi auth switches v1 still needs deleted.
+#
+# Read from the core's own package.json -- the file the binary IS -- rather than
+# by RUNNING it. Two reasons, and the second is TASK-657:
+#
+#   1. `openclaw --version` costs ~10 s on a Jetson (measured on a shipped Orin:
+#      7904 ms and 8044 ms; the package.json read is 53 ms) and this is a
+#      BLOCKING ExecStartPre. Both siblings that ask this same question already
+#      refuse the CLI for exactly that reason and say so in writing --
+#      scripts/ensure-local-embeddings.sh and src/lib/memory-shard.ts.
+#   2. The old pipeline FAILED whenever the CLI could not answer: `grep -oE`
+#      exits 1 on no match, a crashed binary or a node engine mismatch exits
+#      non-zero, and `pipefail` carried either into the assignment, which under
+#      `set -e` aborted the WHOLE pre-start. That box got no gateway and no chat
+#      at all, with the only trace in the unit's failure -- while the paragraph
+#      above was already written as though an empty result was what happened.
+CLAWBOX_OPENCLAW_PKG="$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/package.json"
+CLAWBOX_OPENCLAW_EFFECTIVE="$(python3 - "$CLAWBOX_OPENCLAW_PKG" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    v = json.load(open(sys.argv[1])).get("version")
+except Exception:
+    v = None
+print(v if isinstance(v, str) else "")
+PY
+)"
+# The manifest read accepted any non-empty string while the fallback below
+# applied this regex, so the stricter of the two was the one almost never
+# reached: a core whose version is not 20YY.M.P -- a dev or nightly build, a
+# fork, an `npm i -g <git url>` install, a vendor rebuild -- yielded a non-empty
+# value that sailed past the "write nothing" guard and picked v1 semantics for a
+# core that may well be v2, whose loader then refuses the legacy names this
+# script would write. A version that is not a date says nothing about the
+# generation, so it must read as "unknown".
+#
+# ANCHORED, and the two sources are deliberately NOT graded alike. This one is
+# a version FIELD, so the whole string has to be the version. The CLI fallback
+# below reads a BANNER, where the version is one token among words this script
+# does not control, so it can only extract -- which means a `--version` that
+# happens to mention any other 20YY.M.P (a "built from" note, a schema warning
+# on its own line) is taken at face value there. Tightening that arm needs the
+# real banner of a shipped core measured on a box, not a guess: an anchor that
+# is wrong by one space turns every healthy fallback into "cannot identify the
+# core" and skips the whole pre-start fleet-wide, which is worse than the state
+# it would close. Recorded rather than guessed at; the manifest is the source
+# that answers on every ordinary box, and it is the one that is strict.
+CLAWBOX_OPENCLAW_EFFECTIVE="$(printf '%s' "$CLAWBOX_OPENCLAW_EFFECTIVE" | grep -oE '^20[0-9]{2}\.[0-9]+\.[0-9]+' || true)"
+# Second source, and time-boxed. `|| true` only rescues a CLI that RETURNS: a
+# wedged `--version` (an import that never resolves, an fs stall, a SQLite lock)
+# would hold ExecStartPre until TimeoutStartSec killed the unit, and
+# Restart=always would then spend StartLimitBurst on a box that never comes up.
+# 45 s, justified on this call's OWN measurement rather than on any precedent:
+# `openclaw --version` costs 7.9-8.0 s on a shipped Orin, a cold first boot is
+# the slow case, so the bound has to leave several multiples of that as headroom
+# or it cuts off a HEALTHY core and makes the fallback useless exactly when it is
+# needed. It also has to stay far inside the unit's own TimeoutStartSec=600, and
+# running out of time here means skipping the whole pre-start (below), not
+# aborting. `-k 5` because plain `timeout` sends SIGTERM only: a `--version` that
+# ignores it would hold this ExecStartPre for the unit's entire start budget,
+# which is precisely the outcome the bound exists to prevent.
 if [ -z "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
-  CLAWBOX_OPENCLAW_EFFECTIVE="${OPENCLAW_TARGET}"
+  CLAWBOX_OPENCLAW_EFFECTIVE="$(timeout -k 5 45 "$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)"
 fi
+# And if the installed core cannot be identified at all, WRITE NOTHING. The pin
+# is deliberately not a fallback here: a partially failed update (repo synced,
+# npm install unfinished) is precisely the state in which the core cannot answer,
+# and it is also the state in which the pin is ahead of the binary -- so guessing
+# from it would write v2 keys a v1 gateway refuses AND permanently delete
+# commands.ownerDisplay, gateway.tailscale.resetOnExit and
+# agents.defaults.compaction.reserveTokensFloor, which nothing on the boot path
+# re-adds. The config on disk booted this box before; leaving it alone is the
+# only option here that cannot make a working box stop working. A box with no
+# core at all already exited 0 a few lines above.
 # An explicit CLAWBOX_OPENCLAW_V2 in the environment wins — the unit tests
 # pin BOTH generations of this script against fixture configs, and they must
-# not follow whatever the box's own pin file happens to say.
+# not follow whatever the box's own pin file happens to say. It has to be
+# checked BEFORE the give-up below, not after: with the `exit 0` above it, a
+# pinned generation became a silent no-op on any box whose core could not be
+# identified, while the comment here still said it wins.
 if [ -z "${CLAWBOX_OPENCLAW_V2:-}" ]; then
+  if [ -z "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
+    # Not a small skip. Everything below this line is skipped, and most of it is
+    # not generation-sensitive at all, so the WARN has to name what this boot
+    # does NOT re-apply rather than sound like "one rewrite was left out".
+    echo "  WARN: cannot tell which OpenClaw generation is installed ($CLAWBOX_OPENCLAW_PKG carries no usable version and $OPENCLAW_BIN did not answer)." >&2
+    echo "  WARN: leaving openclaw.json exactly as it is and starting the gateway on it." >&2
+    echo "  WARN: this boot therefore does NOT re-apply the gateway auth token, the messaging-channel security pass, the gateway.controlUi.allowedOrigins rebuild (a changed LAN IP is not picked up), the @openclaw/codex plugin install and repair, the deepseek catalog patch, the CLAWBOX.md workspace guide, the MCP token seeding or the MCP registration reconcile." >&2
+    exit 0
+  fi
   CLAWBOX_OPENCLAW_V2=0
-  if [ -n "$CLAWBOX_OPENCLAW_EFFECTIVE" ] && [ "$(printf '%s\n' 2026.8 "$CLAWBOX_OPENCLAW_EFFECTIVE" | sort -V | head -1)" = "2026.8" ]; then
+  if [ "$(printf '%s\n' 2026.8 "$CLAWBOX_OPENCLAW_EFFECTIVE" | sort -V | head -1)" = "2026.8" ]; then
     CLAWBOX_OPENCLAW_V2=1
   fi
 fi
@@ -79,11 +173,21 @@ export CLAWBOX_OPENCLAW_V2
 CONFIGURED_HOSTNAME="clawbox"
 if [ -f "$HOSTNAME_ENV" ]; then
   # Parse HOSTNAME=... without executing the file (avoid arbitrary code execution).
-  _h=$(sed -n 's/^[[:space:]]*HOSTNAME[[:space:]]*=[[:space:]]*//p' "$HOSTNAME_ENV" | head -n1)
+  # `|| true` for the same reason as the pin read above: `sed` exits non-zero on
+  # a file it cannot open, and an unreadable hostname file must cost this box its
+  # configured mDNS name, never its gateway. The regex below already rejects the
+  # empty result and keeps the "clawbox" default. TASK-657.
+  _h=$(sed -n 's/^[[:space:]]*HOSTNAME[[:space:]]*=[[:space:]]*//p' "$HOSTNAME_ENV" | head -n1 || true)
   _h="${_h%\"}"; _h="${_h#\"}"
   _h="${_h%\'}"; _h="${_h#\'}"
   if [[ "$_h" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
     CONFIGURED_HOSTNAME="$_h"
+  else
+    # Not silent: this name feeds gateway.controlUi.allowedOrigins below, so a
+    # boot that falls back here rebuilds that list around "clawbox.local" and
+    # drops the configured one — which is the "origin not allowed" failure the
+    # comment further down exists to prevent.
+    echo "  WARN: no usable HOSTNAME in $HOSTNAME_ENV — using the default mDNS name \"clawbox\"" >&2
   fi
 fi
 
@@ -241,7 +345,55 @@ try:
         cfg = json.load(f)
 except FileNotFoundError:
     cfg = {}
-except json.JSONDecodeError as err:
+except OSError as err:
+    # The file EXISTS and could not be opened (a mode, an ACL, an I/O error).
+    # Neither of the two obvious answers is safe here. Letting it escape aborts
+    # this ExecStartPre under `set -e`, so the box gets no gateway at all, on
+    # every boot, until someone with shell access fixes the mode -- and
+    # openclaw.json is clawbox-owned, so an agent can reach that from a chat
+    # turn. Answering {} is worse: that object is written back below, and a
+    # config that merely could not be READ would lose every provider, auth
+    # profile and channel. PermissionError is not a FileNotFoundError, so the
+    # arm above never covered this. Leave the file alone and boot on it, the
+    # same policy the generation probe settles on further up.
+    # `err.strerror` rather than `err`: str(OSError) carries the full path, which
+    # the basename above was chosen to keep out of the line.
+    print(
+        f"  WARN: {os.path.basename(cfg_path)} could not be read "
+        f"({err.strerror or type(err).__name__}); leaving it exactly as it is "
+        f"and starting the gateway on it",
+        file=sys.stderr,
+    )
+    # Not a small skip, and the same understatement the generation give-up was
+    # corrected for further up: SystemExit ends this whole program, so this boot
+    # also does NOT re-apply the gateway auth token, the messaging-channel
+    # security pass, the gateway.controlUi.allowedOrigins rebuild (a changed LAN
+    # IP is not picked up), the model catalog or the provider blocks.
+    #
+    # The MCP registration reconcile is named too, and it is the one that is
+    # SILENT rather than skipped: the shell carries on past this program and runs
+    # it, but that block's own `except (OSError, json.JSONDecodeError)` exits 0
+    # on the same unreadable file, so its `if !` guard prints nothing and the
+    # registration no-ops without a word. Say it here, where the cause is known.
+    print(
+        "  WARN: this boot therefore does NOT re-apply the gateway auth token, "
+        "the messaging-channel security pass, the gateway.controlUi.allowedOrigins "
+        "rebuild (a changed LAN IP is not picked up), the model catalog, the "
+        "provider blocks or the MCP server registration.",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
+except (json.JSONDecodeError, UnicodeDecodeError) as err:
+    # UnicodeDecodeError is a ValueError, NOT a JSONDecodeError and NOT an
+    # OSError, so a config holding bytes that are not valid UTF-8 escaped all
+    # three arms and took the ExecStartPre down with a traceback -- on every
+    # boot, until someone with shell access fixed the file. That is the same
+    # class as the arm above, one exception type over, and it is reached by the
+    # same event this backup exists for: a power loss mid-write on a Jetson
+    # leaves arbitrary bytes here, not a truncated but decodable string.
+    # "Corrupt" is the right verdict for both, and the .corrupt-<utc> copy below
+    # preserves the bytes either way.
+    #
     # Corrupt file — start from an empty object and let the gateway re-seed on
     # first write; the alternative is refusing to boot. But that {} is written
     # back below, and until it was copied first the write replaced every
@@ -1652,18 +1804,40 @@ if isinstance(ds_models, list):
 if changed:
     # Atomic write so a crash mid-rewrite can't leave a half-written
     # file where the gateway would refuse to boot.
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
+    #
+    # WARN and carry on, never raise. This heredoc is invoked bare, and the
+    # script runs under `set -euo pipefail` as the gateway unit's
+    # ExecStartPre= with no `-` prefix (config/clawbox-gateway.service) -- so
+    # an exception here fails the unit, and Restart=always then spends
+    # StartLimitBurst: no gateway and no chat, on every boot. An unwritable
+    # ~/.openclaw or a full disk must cost this boot its config migration, not
+    # the box its gateway; the gateway starts on the config already on disk,
+    # which is the state it was in a moment ago. Same call as the deepseek
+    # plugin patch and the MCP registration further down, both already guarded
+    # this way. TASK-657.
+    #
+    # `mkstemp` is INSIDE the guard, and that is the half that was missing: it
+    # is the call that raises PermissionError on a directory this uid cannot
+    # write and OSError on ENOSPC, and it sat outside the `try` that existed
+    # to contain exactly those.
+    tmp_path = None
     try:
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
         with os.fdopen(tmp_fd, "w") as f:
             json.dump(cfg, f, indent=2)
         os.replace(tmp_path, cfg_path)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
-        raise
-    print("  Updated gateway config")
+        print("  Updated gateway config")
+    except Exception as exc:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+        print(
+            "  WARN: could not write the gateway config (%s: %s); the gateway starts on the config already on disk"
+            % (type(exc).__name__, exc),
+            file=sys.stderr,
+        )
 else:
     print("  Gateway config already correct, skipping write")
 PY
@@ -1711,7 +1885,11 @@ if [ ! -f "$DEEPSEEK_PLUGIN_JSON" ]; then
   DEEPSEEK_PLUGIN_JSON="$(dirname "$OPENCLAW_CONFIG")/extensions/deepseek/openclaw.plugin.json"
 fi
 if [ -f "$DEEPSEEK_PLUGIN_JSON" ]; then
-  python3 - "$DEEPSEEK_PLUGIN_JSON" <<'PY'
+  # Guarded, like the guide seeding further down and for the same reason: this
+  # is a bare top-level command in a script under `set -e`, its write `raise`s
+  # on failure, and a read-only rootfs or a full disk would turn a cosmetic
+  # "declare xhigh reasoning effort" patch into a box with no gateway.
+  if ! python3 - "$DEEPSEEK_PLUGIN_JSON" <<'PY'
 import json, os, sys, tempfile
 
 path = sys.argv[1]
@@ -1719,7 +1897,7 @@ target = ["off", "high", "xhigh"]
 try:
     with open(path) as f:
         cfg = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
+except (OSError, json.JSONDecodeError):
     sys.exit(0)
 
 models = cfg.get("modelCatalog", {}).get("providers", {}).get("deepseek", {}).get("models", [])
@@ -1750,6 +1928,9 @@ if changed:
 else:
     print("  Deepseek plugin JSON already declares xhigh, skipping write")
 PY
+  then
+    echo "  WARN: could not patch the deepseek plugin JSON with xhigh reasoning effort; the gateway starts without it" >&2
+  fi
 fi
 
 # One-time config migration for devices updating from OpenClaw <=2026.5.x:
@@ -1772,7 +1953,7 @@ LEGACY_CODEX_PRIMARY="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, sys
 try:
     cfg = json.load(open(sys.argv[1]))
-except (FileNotFoundError, json.JSONDecodeError):
+except (OSError, json.JSONDecodeError):
     print(""); sys.exit(0)
 primary = (((cfg.get("agents") or {}).get("defaults") or {}).get("model") or {}).get("primary") or ""
 print(primary if isinstance(primary, str) and primary.lower().startswith("openai-codex/") else "")
@@ -1898,7 +2079,7 @@ import json, sys
 try:
     with open(sys.argv[1]) as f:
         cfg = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
+except (OSError, json.JSONDecodeError):
     print("0"); sys.exit(0)
 agents = cfg.get("agents")
 defaults = agents.get("defaults", {}) if isinstance(agents, dict) else {}
@@ -1942,7 +2123,7 @@ import json, sys
 try:
     with open(sys.argv[1]) as f:
         cfg = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
+except (OSError, json.JSONDecodeError):
     print("1"); sys.exit(0)
 plugins = cfg.get("plugins")
 entries = plugins.get("entries", {}) if isinstance(plugins, dict) else {}
@@ -2145,19 +2326,115 @@ fi
 # we mirror that here so the gateway can register the MCP server even
 # if it comes up before clawbox-setup on a fresh boot.
 MCP_TOKEN_FILE="$CLAWBOX_ROOT/data/.mcp-token"
-if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$(wc -c < "$MCP_TOKEN_FILE" 2>/dev/null || echo 0)" -lt 32 ]; then
-  mkdir -p "$(dirname "$MCP_TOKEN_FILE")"
+# One writer, used by the seed below and by the re-harden beneath it, so the two
+# cannot drift on entropy source or on mode. `umask 077` rather than a chmod
+# afterwards: the file must never exist readable, and on the re-harden path
+# chmod is precisely what has just failed.
+mcp_write_token() {
   if command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex 32 > "$MCP_TOKEN_FILE"
+    ( umask 077; openssl rand -hex 32 > "$1" ) 2>/dev/null
   else
-    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MCP_TOKEN_FILE"
+    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$1" ) 2>/dev/null
   fi
+}
+# `{ ...; } 2>/dev/null` rather than `wc ... 2>/dev/null`: a failed INPUT
+# redirect is reported by the shell, not by wc, so the narrower form printed a
+# bare "Permission denied" into the journal for a token this uid cannot read --
+# a line that reads like the boot failing, immediately before the block below
+# repairs it.
+if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$( { wc -c < "$MCP_TOKEN_FILE"; } 2>/dev/null || echo 0 )" -lt 32 ]; then
+  # Every write here is guarded so a full or read-only filesystem cannot abort
+  # the boot. Nothing is lost by falling through: the token's readability and
+  # length are checked below, and that check is the deliberate hard failure.
+  mkdir -p "$(dirname "$MCP_TOKEN_FILE")" 2>/dev/null || true
+  mcp_write_token "$MCP_TOKEN_FILE" || true
 fi
 # Re-harden mode unconditionally: chmod only ran on the regeneration
 # path before, so a file with drifted permissions (manual edit, upgrade
 # from a pre-0600 build) would keep being trusted as-is. The bearer
 # is the sole /setup-api/* credential.
-chmod 600 "$MCP_TOKEN_FILE"
+# Guarded: this runs on EVERY boot, and the file is also seeded by
+# production-server.js. One created under another uid (a root update step, a
+# manual repair) makes chmod return EPERM, and an unguarded failure here cost
+# the box its gateway on every boot from then on. TASK-657.
+chmod 600 "$MCP_TOKEN_FILE" 2>/dev/null || true
+# But the MODE is the outcome, not chmod's exit code -- and the outcome has two
+# halves, both of which grading the literal string "600" got wrong:
+#
+#   * can anyone ELSE read it? A file this uid cannot chmod whose mode carries
+#     group/other bits hands the sole /setup-api/* credential to every local
+#     user on the box. 0644 is what root's umask gives a bare
+#     `openssl rand > file`.
+#   * can THIS uid read it? Every shipped writer that can create the file as
+#     root leaves it 0600 -- scripts/register-mcp.sh mints under `umask 077`,
+#     production-server.js writes `{ mode: 0o600 }` -- so root:root 0600 is the
+#     state the fleet actually produces, and it is unreadable to
+#     User=clawbox. A `case` keyed on "600"
+#     declined to touch exactly that file, and the `[ ! -r ]` check below then
+#     exited 1: ExecStartPre fails, no gateway, on every boot.
+#
+# So grade on `-r` plus the permission bits, never on a literal. The corollary
+# matters as much: a mode with no group/other bits that this uid CAN read (0400,
+# 0600) is exposed to nobody, and rotating it would be pure cost -- see the
+# second WARN below for what a rotation costs.
+#
+# Replacing it is the only remedy available here that is neither exposure nor a
+# brick. The DIRECTORY is clawbox's own (install.sh chowns $PROJECT_DIR/data),
+# and a rename is governed by the directory, not by the file's owner -- so a
+# file this uid can neither chmod nor read can still be swapped for one it owns
+# at 0600. One boot rotates; every boot after it the file is ours and chmod
+# succeeds.
+MCP_TOKEN_MODE="$(stat -c '%a' "$MCP_TOKEN_FILE" 2>/dev/null || echo unknown)"
+# `stat -c %a` prints three or four octal digits (setuid/setgid/sticky make it
+# four). Anything else is a box that cannot report a mode at all -- not a reason
+# to rotate a working token on its own. `-r` backstops the UNREADABLE half of
+# that state; there is no backstop for the exposed half, so say so rather than
+# be silent about a bearer nothing could grade.
+mcp_mode_is_exposed() {
+  case "${1:-}" in
+    ''|*[!0-7]*) return 1 ;;
+  esac
+  [ "$(( 8#$1 & 8#077 ))" -ne 0 ]
+}
+# `unknown` is never "exposed", so this needs no second call to say so: a mode
+# that could not be read on a file that CAN be read is the one state nothing
+# below grades, and it passes through silently unless it is said here.
+if [ "$MCP_TOKEN_MODE" = unknown ] && [ -r "$MCP_TOKEN_FILE" ]; then
+  echo "  WARN: could not read the mode of $MCP_TOKEN_FILE; using it as it stands without checking whether other local users can read it" >&2
+fi
+if [ ! -r "$MCP_TOKEN_FILE" ] || mcp_mode_is_exposed "$MCP_TOKEN_MODE"; then
+  # State the STATE, never a cause this shell cannot establish. The earlier
+  # wording asserted "it belongs to another user" for a file that does not exist
+  # (the seeding above could not create it, because data/ is not writable) and
+  # for a 0644 file this uid owns perfectly well -- the same "a message
+  # asserting a cause it cannot know" the pin WARN was corrected for. The
+  # outcome sentences below carry the verbs; this carries the fact.
+  if [ ! -e "$MCP_TOKEN_FILE" ]; then
+    MCP_TOKEN_WHY="does not exist and could not be created"
+  elif [ ! -r "$MCP_TOKEN_FILE" ]; then
+    MCP_TOKEN_WHY="is mode $MCP_TOKEN_MODE, which this gateway cannot read"
+  else
+    MCP_TOKEN_WHY="is mode $MCP_TOKEN_MODE, which other local users can read"
+  fi
+  MCP_TOKEN_TMP="$(mktemp "$(dirname "$MCP_TOKEN_FILE")/.mcp-token.XXXXXX" 2>/dev/null || true)"
+  if [ -n "$MCP_TOKEN_TMP" ] && mcp_write_token "$MCP_TOKEN_TMP" \
+    && mv -f "$MCP_TOKEN_TMP" "$MCP_TOKEN_FILE" 2>/dev/null; then
+    echo "  WARN: $MCP_TOKEN_FILE $MCP_TOKEN_WHY; replaced it with a fresh 0600 token this boot owns." >&2
+    # What a rotation costs, and who pays it. The reconcile below republishes
+    # the new bearer to the MCP SUBPROCESS only -- it rewrites openclaw.json
+    # from whatever the file now holds. It does NOT reach the VERIFIER:
+    # src/lib/mcp-token.ts caches in module state and production-server.js pins
+    # the value into CLAWBOX_MCP_TOKEN at Next.js boot, and nothing orders
+    # clawbox-setup.service against this unit. The verifier now re-reads the
+    # file when a bearer check fails, so this heals itself on the next call --
+    # but say it, because a device tool that 401s once after a rotation should
+    # have a line in the journal explaining itself.
+    echo "  WARN: the web server re-reads the rotated bearer on its next /setup-api/* check; restart clawbox-setup.service if device tools keep answering 401." >&2
+  else
+    if [ -n "$MCP_TOKEN_TMP" ]; then rm -f "$MCP_TOKEN_TMP" 2>/dev/null || true; fi
+    echo "  WARN: $MCP_TOKEN_FILE $MCP_TOKEN_WHY, and could be neither re-hardened nor replaced (is $(dirname "$MCP_TOKEN_FILE") writable?) — the MCP bearer for /setup-api/* is left exactly as it stands" >&2
+  fi
+fi
 
 # Always reconcile the MCP server registration in openclaw.json with
 # the current token. Done in Python so the atomic-rename pattern used
@@ -2173,20 +2450,64 @@ chmod 600 "$MCP_TOKEN_FILE"
 # skip the openclaw.json reconcile — leaving the MCP subprocess
 # with a stale or missing CLAWBOX_MCP_TOKEN and every tool call
 # 307'd to /login again.
+#
+# WARN and skip, never `exit 1`. This was the last unguarded step in the block,
+# and it made every guard above it decorative: when the seeding AND the
+# replacement both fail -- `data/` not writable, or ENOSPC on a box whose token
+# was never seeded -- control fell out of the "left exactly as it stands" WARN
+# straight into an `exit 1` here. `ExecStartPre=` carries no `-` prefix
+# (config/clawbox-gateway.service), so that fails the unit, and Restart=always
+# then spends StartLimitBurst: no gateway and no chat, on every boot. It is not
+# even privileged: `data/` is clawbox-owned at 0755, so any process running as
+# clawbox -- a coding-agent run, the in-UI terminal, an ssh session -- reaches it
+# by removing the token and chmod-ing the directory. TASK-657, and the same
+# outcome the block was rewritten to remove.
+#
+# A missing bearer costs this boot its MCP tools, exactly like a failed
+# registration write below, which has always been a WARN. It must not also cost
+# the box its gateway, its chat, the CLAWBOX.md seeding or the deepseek catalog
+# pass that follow. The empty value is carried deliberately: the reconcile's
+# python `sys.exit(0)`s on it, so openclaw.json keeps whatever it already had.
+CLAWBOX_MCP_TOKEN_VAL=""
 if [ ! -r "$MCP_TOKEN_FILE" ]; then
-  echo "  ERROR: MCP token file is not readable: $MCP_TOKEN_FILE" >&2
-  exit 1
-fi
-CLAWBOX_MCP_TOKEN_VAL="$(cat "$MCP_TOKEN_FILE")"
-if [ -z "$CLAWBOX_MCP_TOKEN_VAL" ]; then
-  echo "  ERROR: MCP token file is empty: $MCP_TOKEN_FILE" >&2
-  exit 1
+  echo "  WARN: MCP token file is not readable ($MCP_TOKEN_FILE); skipping the MCP server registration — the ClawBox MCP tools are unavailable this boot" >&2
+else
+  CLAWBOX_MCP_TOKEN_VAL="$(cat "$MCP_TOKEN_FILE" 2>/dev/null || true)"
+  if [ -z "$CLAWBOX_MCP_TOKEN_VAL" ]; then
+    echo "  WARN: MCP token file is empty ($MCP_TOKEN_FILE); skipping the MCP server registration — the ClawBox MCP tools are unavailable this boot" >&2
+  elif [ "${#CLAWBOX_MCP_TOKEN_VAL}" -lt 32 ]; then
+    # The same threshold the seeding gate above uses, and for the same reason.
+    # That gate re-seeds anything under 32 bytes, so a shorter file can only be
+    # one whose write did not finish -- an ENOSPC part way through `openssl rand
+    # -hex 32 > "$1"`, on the boot where the seed itself failed and `|| true`
+    # swallowed it. The length check ran BEFORE that write, so nothing between
+    # there and here looks at the value again, and a truncated bearer would be
+    # published to openclaw.json as if it were a token this box generated.
+    #
+    # Refusing it costs the same as an empty one: the MCP tools, for this boot,
+    # and the file is re-seeded on the next. Keeping it costs more than it
+    # looks. Under 16 characters src/lib/mcp-token.ts's readTokenFile() rejects
+    # it outright, the verifier mints its own value instead, and every tool call
+    # 307s to /login with nothing in the journal to say why. Between 16 and 31
+    # it WORKS -- and that is the bad case, because the box then runs on a
+    # bearer with a fraction of the intended entropy and nothing ever says so.
+    #
+    # 32 rather than a 64-hex literal on purpose: three writers seed this file
+    # (mcp_write_token's two branches and production-server.js) and all three
+    # produce 64 hex characters today, but the gate above is the one that
+    # decides what counts as seeded, and the two must not be able to disagree.
+    echo "  WARN: MCP token file holds only ${#CLAWBOX_MCP_TOKEN_VAL} characters ($MCP_TOKEN_FILE), too short to be a token this box wrote; skipping the MCP server registration — the ClawBox MCP tools are unavailable this boot" >&2
+    CLAWBOX_MCP_TOKEN_VAL=""
+  fi
 fi
 export CLAWBOX_MCP_TOKEN_VAL
 export CLAWBOX_BUN_BIN="${CLAWBOX_BUN_BIN:-$CLAWBOX_HOME_DIR/.bun/bin/bun}"
 export CLAWBOX_MCP_ENTRY="${CLAWBOX_MCP_ENTRY:-$CLAWBOX_ROOT/mcp/clawbox-mcp.ts}"
 export CLAWBOX_API_BASE="${CLAWBOX_API_BASE:-http://127.0.0.1:$CLAWBOX_PORT}"
-python3 - "$OPENCLAW_CONFIG" <<'PY'
+# Guarded for the same reason as the deepseek patch above: a bare heredoc whose
+# write `raise`s, in a script under `set -e`. A full disk must cost this boot
+# its MCP registration, never its gateway.
+if ! python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile
 
 cfg_path = sys.argv[1]
@@ -2196,7 +2517,7 @@ if not token:
 try:
     with open(cfg_path) as f:
         cfg = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
+except (OSError, json.JSONDecodeError):
     sys.exit(0)
 
 desired = {
@@ -2225,6 +2546,9 @@ except Exception:
     raise
 print("  Updated MCP server registration with bearer token")
 PY
+then
+  echo "  WARN: could not write the MCP server registration; the ClawBox MCP tools are unavailable this boot" >&2
+fi
 unset CLAWBOX_MCP_TOKEN_VAL
 
 # ── The outbound EMAIL:-directive hook plugin ───────────────────────────────
@@ -2723,7 +3047,7 @@ if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ ! -f "$OPENCLAW_HOME_DIR/extensions/dee
 import json, sys
 try:
     cfg = json.load(open(sys.argv[1]))
-except (FileNotFoundError, json.JSONDecodeError):
+except (OSError, json.JSONDecodeError):
     print("0"); sys.exit(0)
 providers = ((cfg.get("models") or {}).get("providers") or {})
 deepseek = providers.get("deepseek")
@@ -2770,7 +3094,7 @@ try:
     with open(sys.argv[1]) as f:
         cfg = json.load(f)
     ws = cfg.get("agents", {}).get("defaults", {}).get("workspace")
-except (FileNotFoundError, json.JSONDecodeError, KeyError):
+except (OSError, json.JSONDecodeError, KeyError):
     ws = None
 if isinstance(ws, str) and ws.strip():
     ws = os.path.expanduser(ws.strip())

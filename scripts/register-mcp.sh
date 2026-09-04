@@ -152,14 +152,48 @@ fi
 # Same file, same semantics as src/lib/mcp-token.ts and gateway-pre-start.sh.
 # Minted here too so a Hermes box — which has no gateway pre-start hook — is
 # never left without one.
-if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$(wc -c < "$MCP_TOKEN_FILE" 2>/dev/null || echo 0)" -lt 32 ]; then
-  mkdir -p "$(dirname "$MCP_TOKEN_FILE")"
+# `{ ...; } 2>/dev/null` rather than `wc ... 2>/dev/null`: a failed INPUT
+# redirect is reported by the shell, not by wc, so the narrower form prints a
+# bare "Permission denied" for a token this uid cannot read. Same correction as
+# gateway-pre-start.sh's copy of this line.
+if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$( { wc -c < "$MCP_TOKEN_FILE"; } 2>/dev/null || echo 0 )" -lt 32 ]; then
+  # Guarded like its sibling in gateway-pre-start.sh: in plain command position a
+  # `data/` that cannot be CREATED (a read-only $PROJECT_DIR, ENOSPC) exits
+  # non-zero and `set -e` kills the run before the reconcile — which is the same
+  # "no device tools at all on the hermes SKU" outcome the mint guard below
+  # exists to prevent, one line earlier. TASK-657.
+  mkdir -p "$(dirname "$MCP_TOKEN_FILE")" 2>/dev/null || true
+  # `umask 077` in the subshell, not a chmod afterwards: a bare redirect creates
+  # the file at the umask's mode — 0644 under root's — and the chmod below only
+  # closes that window AFTER the secret is already on disk and world-readable.
+  # It also cannot close it at all when the chmod fails (a file this uid does
+  # not own), which is the state gateway-pre-start.sh's `mcp_write_token` was
+  # written for. TASK-657.
+  # Guarded, because REGISTERING the MCP server is this script's job and minting
+  # the bearer is a convenience it does on the way past. In plain command
+  # position a failed redirect (a root-owned token, a read-only data/) exits the
+  # subshell 1 and `set -e` kills the run — and on the hermes SKU nothing else
+  # writes mcp_servers.clawbox, so `hermes mcp list` stays "No MCP servers
+  # configured" and the agent has NO device tools at all, on every web-server
+  # boot. The token is not lost by carrying on: production-server.js seeds the
+  # same file at every clawbox-setup boot, and mcp/lib/api.ts reads it directly.
+  # TASK-657.
   if command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex 32 > "$MCP_TOKEN_FILE"
+    ( umask 077; openssl rand -hex 32 > "$MCP_TOKEN_FILE" ) 2>/dev/null || MCP_TOKEN_MINTED=no
   else
-    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MCP_TOKEN_FILE"
+    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MCP_TOKEN_FILE" ) 2>/dev/null || MCP_TOKEN_MINTED=no
   fi
-  log "minted $MCP_TOKEN_FILE"
+  if [ "${MCP_TOKEN_MINTED:-yes}" = no ]; then
+    # State what is true, not a repair that cannot happen. production-server.js
+    # seeds the same path as the same uid, so every state that fails this mint
+    # fails that one too, and on the hermes SKU clawbox-gateway.service is masked
+    # so gateway-pre-start.sh's replacement never runs either. The registration
+    # is still worth writing — it is what puts the tools in `hermes mcp list` —
+    # but they will 401 until the directory is writable.
+    log "WARN: could not write $MCP_TOKEN_FILE — registering the MCP server anyway, but it has no bearer: /setup-api/* tool calls will answer 401 until $(dirname "$MCP_TOKEN_FILE") is writable"
+  else
+    log "minted $MCP_TOKEN_FILE"
+  fi
 fi
 chmod 600 "$MCP_TOKEN_FILE" 2>/dev/null || true
 
@@ -310,6 +344,19 @@ except FileNotFoundError:
     # valid — Hermes merges its own defaults over it — so register now rather
     # than leave the device tool-less until someone finishes onboarding.
     cfg = {}
+except OSError as err:
+    # The file is THERE and cannot be read (permissions, a truncated mount).
+    # Deliberately NOT the `cfg = {}` above: that arm's premise is "no config
+    # exists yet", and taking it here would write a file holding only
+    # mcp_servers over a config whose contents we never saw. Same verdict as
+    # invalid YAML below — refuse, and say why, instead of the traceback this
+    # top-level `python3` under `set -euo pipefail` produced. TASK-657.
+    # The full path, matching the YAML arm two lines down rather than the
+    # basename: there is no secret in a config path and the operator has to know
+    # WHICH file to fix.
+    print(f"[register-mcp] ERROR: {cfg_path} could not be read "
+          f"({err.strerror or type(err).__name__}); refusing to overwrite it.", file=sys.stderr)
+    sys.exit(1)
 except yaml.YAMLError as exc:
     print(f"[register-mcp] ERROR: {cfg_path} is not valid YAML ({type(exc).__name__}); "
           "refusing to overwrite it.", file=sys.stderr)

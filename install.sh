@@ -2237,8 +2237,24 @@ step_openclaw_install() {
     # would concat tokens on a hypothetical multi-field line — keeping the
     # two parsers identical avoids subtle UI ↔ install.sh desync if the file
     # format ever grows.
-    PINNED=$(head -1 "$PIN_FILE" | awk '{print $1}')
-    echo "  Pinned OpenClaw target from $PIN_FILE: $PINNED"
+    # `|| true`: this step is dispatched with errexit deliberately ON, so an
+    # unreadable pin file (permissions, a truncated mount) would abort the
+    # installer here. The `else` branch below already reports an unknown pin and
+    # falls back to the hardcoded version — that is the defined answer, and an
+    # aborted update is not. TASK-657, same shape as gateway-pre-start.sh:45.
+    PINNED=$(head -1 "$PIN_FILE" 2>/dev/null | awk '{print $1}' || true)
+    if [ -n "$PINNED" ]; then
+      echo "  Pinned OpenClaw target from $PIN_FILE: $PINNED"
+    else
+      # The `|| true` above turns an unreadable pin file into an empty PINNED,
+      # and a file that is empty (or whose first line is blank) gets there with
+      # `head` and `awk` both SUCCEEDING -- so this arm cannot claim the file
+      # could not be read. The fallback below is correct either way, but the
+      # unconditional line printed "Pinned OpenClaw target from ...: " and
+      # asserted a pin had been read when none had. The `else` branch's WARN is
+      # not reached from here, so say it here.
+      echo "  WARN: $PIN_FILE is empty or could not be read — falling back to hardcoded $OPENCLAW_VERSION" >&2
+    fi
   else
     echo "  WARN: $PIN_FILE not found — falling back to hardcoded $OPENCLAW_VERSION" >&2
   fi

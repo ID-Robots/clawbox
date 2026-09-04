@@ -440,7 +440,20 @@ step_openclaw_install() {
   local PIN_FILE="$PROJECT_DIR/config/openclaw-target.txt"
   local TARGET="${OPENCLAW_PIN_VERSION:-}"
   if [ -z "$TARGET" ] && [ -f "$PIN_FILE" ]; then
-    TARGET=$(head -1 "$PIN_FILE" | awk '{print $1}')
+    # `|| true`: step_openclaw_install is called plainly from
+    # step_openclaw_setup, which is itself called in plain command position, so
+    # errexit is NOT suppressed here. Under `set -euo pipefail` (:16) an
+    # unreadable pin file (permissions, a truncated mount) makes `head` fail,
+    # pipefail carries it into the assignment, and the whole installer aborts.
+    # An unknown pin is already a defined state -- the fallback on the next line
+    # -- and an aborted install is not. TASK-657, the third copy of the read
+    # install.sh:2245 and gateway-pre-start.sh:45 already guard.
+    TARGET=$(head -1 "$PIN_FILE" 2>/dev/null | awk '{print $1}' || true)
+    if [ -z "$TARGET" ]; then
+      # Say it: the fallback is silently a DIFFERENT core version from the one
+      # the repo pinned, and external plugins are locked to whatever wins here.
+      echo "  WARN: $PIN_FILE is empty or could not be read — falling back to hardcoded $OPENCLAW_VERSION" >&2
+    fi
   fi
   TARGET="${TARGET:-$OPENCLAW_VERSION}"
   OPENCLAW_TARGET="$TARGET"
