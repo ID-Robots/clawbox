@@ -198,7 +198,13 @@ async function readCapped(res: Response, maxBytes: number): Promise<string> {
 }
 
 export function registerCodingTools(reg: Registrar): void {
-  const both: ("openclaw" | "hermes")[] =
+  // The editions this family registers on: OpenClaw ONLY, for the three
+  // reasons at the top of this file. CLAWBOX_MCP_CODING_TOOLS=1 widens it to
+  // Hermes for debugging and is set nowhere in the repo — no unit, no install
+  // step, no package script — so every shipped device takes the first branch.
+  // It used to be called `both`, which read as "both editions" at all twelve
+  // registration sites while meaning the opposite (TASK-549).
+  const codingEditions: ("openclaw" | "hermes")[] =
     process.env.CLAWBOX_MCP_CODING_TOOLS === "1" ? ["openclaw", "hermes"] : ["openclaw"];
 
   // ── bash ─────────────────────────────────────────────────────────────────
@@ -214,7 +220,7 @@ export function registerCodingTools(reg: Registrar): void {
       cwd: zOptText(300, "Folder to run in. Defaults to the ClawBox home folder."),
       allow_dangerous: zBool(false, "Override the block on destructive commands. Only set it when the user asked for exactly this."),
     },
-    { editions: both, readOnly: false, destructive: true, maxChars: BIG_OUTPUT },
+    { editions: codingEditions, readOnly: false, destructive: true, maxChars: BIG_OUTPUT },
     async ({
       command,
       description,
@@ -282,7 +288,7 @@ export function registerCodingTools(reg: Registrar): void {
       // Floor 1: "just show me the last line" must not be a schema rejection.
       tail: zInt(1, 500, 100, "How many of the most recent output lines to return."),
     },
-    { editions: both, readOnly: true, maxChars: BIG_OUTPUT },
+    { editions: codingEditions, readOnly: true, maxChars: BIG_OUTPUT },
     async ({ job_id, tail }: { job_id: string; tail: number }) => {
       const job = getJob(job_id);
       if (!job) {
@@ -307,7 +313,7 @@ export function registerCodingTools(reg: Registrar): void {
     "job_stop",
     "Stop a background job that bash started and that is still running. Its output up to that point stays readable with job_status.",
     { job_id: zText(40, "The job id bash returned, e.g. \"job-1\".") },
-    { editions: both, readOnly: false },
+    { editions: codingEditions, readOnly: false },
     async ({ job_id }: { job_id: string }) => {
       const job = getJob(job_id);
       if (!job) {
@@ -332,7 +338,7 @@ export function registerCodingTools(reg: Registrar): void {
       offset: zInt(0, 1_000_000, 0, "First line to return, counting from 0."),
       limit: zInt(1, 5_000, 2_000, "How many lines to return."),
     },
-    { editions: both, readOnly: true, maxChars: BIG_OUTPUT },
+    { editions: codingEditions, readOnly: true, maxChars: BIG_OUTPUT },
     async ({ file_path, offset, limit }: { file_path: string; offset: number; limit: number }) => {
       const abs = resolveUserPath(file_path);
       assertPathAllowed(abs);
@@ -435,7 +441,7 @@ export function registerCodingTools(reg: Registrar): void {
       file_path: zText(4_000, "Path to the file. Absolute, starting with ~, or relative to the ClawBox project folder."),
       content: zText(2_000_000, "The complete new contents of the file."),
     },
-    { editions: both, readOnly: false, destructive: true },
+    { editions: codingEditions, readOnly: false, destructive: true },
     async ({ file_path, content }: { file_path: string; content: string }) => {
       const abs = resolveUserPath(file_path);
       assertPathAllowed(abs);
@@ -480,7 +486,7 @@ export function registerCodingTools(reg: Registrar): void {
       new_text: zMaybeEmptyText(100_000, "The replacement text. Use an empty string to delete the old text."),
       replace_all: zBool(false, "Replace every occurrence instead of requiring exactly one."),
     },
-    { editions: both, readOnly: false },
+    { editions: codingEditions, readOnly: false },
     async ({
       file_path,
       old_text,
@@ -542,7 +548,7 @@ export function registerCodingTools(reg: Registrar): void {
     "list_directory",
     "List what is inside a folder on the ClawBox: folders first, then files. Use glob when you are looking for files by name across many folders. Folders holding device credentials are not listed.",
     { path: zOptText(4_000, "Folder to list. Defaults to the ClawBox project folder.") },
-    { editions: both, readOnly: true, maxChars: 8_000 },
+    { editions: codingEditions, readOnly: true, maxChars: 8_000 },
     async ({ path }: { path?: string }) => {
       const abs = path ? resolveUserPath(path) : DEFAULT_CWD;
       assertPathAllowed(abs);
@@ -570,7 +576,7 @@ export function registerCodingTools(reg: Registrar): void {
       pattern: zText(200, "Name pattern, e.g. \"**/*.ts\"."),
       path: zOptText(4_000, "Folder to search under. Defaults to the ClawBox project folder."),
     },
-    { editions: both, readOnly: true, maxChars: 8_000 },
+    { editions: codingEditions, readOnly: true, maxChars: 8_000 },
     async ({ pattern, path }: { pattern: string; path?: string }) => {
       const dir = path ? resolveUserPath(path) : DEFAULT_CWD;
       assertPathAllowed(dir);
@@ -613,7 +619,7 @@ export function registerCodingTools(reg: Registrar): void {
       max_results: zInt(1, 500, GREP_LIMIT, "Most output lines to return."),
       offset: zInt(0, 10_000, 0, "Skip this many results before returning any."),
     },
-    { editions: both, readOnly: true, maxChars: BIG_OUTPUT },
+    { editions: codingEditions, readOnly: true, maxChars: BIG_OUTPUT },
     async ({
       pattern,
       path,
@@ -716,7 +722,7 @@ export function registerCodingTools(reg: Registrar): void {
       new_source: zOptText(200_000, "The new cell contents. Required for replace and insert."),
       cell_type: zEnumOf(["code", "markdown"], "Type of the cell to insert.").default("code"),
     },
-    { editions: both, readOnly: false },
+    { editions: codingEditions, readOnly: false },
     async ({
       notebook_path,
       cell_index,
@@ -786,7 +792,7 @@ export function registerCodingTools(reg: Registrar): void {
       accept: zOptText(200, "Optional Accept header, e.g. \"application/json\"."),
       accept_language: zOptText(100, "Optional Accept-Language header, e.g. \"en\"."),
     },
-    { editions: both, readOnly: true, openWorld: true, maxChars: BIG_OUTPUT },
+    { editions: codingEditions, readOnly: true, openWorld: true, maxChars: BIG_OUTPUT },
     async ({
       url,
       max_length,
@@ -855,7 +861,7 @@ export function registerCodingTools(reg: Registrar): void {
       max_results: zInt(1, 20, 10, "How many results to return."),
       allowed_domains: zOptText(300, "Comma-separated list of domains to restrict results to, e.g. \"github.com,python.org\"."),
     },
-    { editions: both, readOnly: true, openWorld: true, maxChars: 8_000 },
+    { editions: codingEditions, readOnly: true, openWorld: true, maxChars: 8_000 },
     async ({ query, max_results, allowed_domains }: { query: string; max_results: number; allowed_domains?: string }) => {
       let res: Response;
       try {
