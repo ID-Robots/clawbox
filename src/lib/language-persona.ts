@@ -10,8 +10,9 @@
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
-import type { Harness } from "@/lib/harness";
-import { isPreferenceLanguage } from "@/lib/preference-schema";
+import * as config from "@/lib/config-store";
+import { getActiveHarness, type Harness } from "@/lib/harness";
+import { isPreferenceLanguage, PREFERENCE_KEY_PREFIX } from "@/lib/preference-schema";
 
 export interface PersonaFiles {
   userFile: string;
@@ -90,6 +91,14 @@ export async function personaWritesAllowed(harness: Harness): Promise<boolean> {
   if (!(await fileExists(path.join(workspace, "USER.md")))) return false;
   return !(await fileExists(path.join(workspace, BOOTSTRAP_FILENAME)));
 }
+
+/**
+ * The device-store key that records a language pick the guard above sent away.
+ *
+ * Deliberately not a `pref:` key: it is not the owner's preference, it is a
+ * debt this box owes its own persona, and `preferences_get` must not serve it.
+ */
+export const DEFERRED_LANGUAGE_KEY = "ui_language_persona_pending";
 
 // Where the RUNNING agent reads its persona from. Writing the language
 // preference into the other harness's files is a silent no-op: OpenClaw scans
@@ -178,4 +187,59 @@ export async function writeLanguagePersona(lang: string, files: PersonaFiles): P
     }
   }
   return true;
+}
+
+/**
+ * Pay back a language pick the ritual made us defer.
+ *
+ * The deferral has to be repaid by something that happens on a box nobody is
+ * touching, because that is exactly the box the defect lives on: the owner
+ * chooses Bulgarian in the setup wizard, the introduction runs minutes later,
+ * and from then until an unrelated restart the desktop is in Bulgarian while
+ * the agent's persona carries no language directive at all. The gateway's
+ * ExecStartPre re-applies the same pick, but nothing restarts the gateway when
+ * the introduction ends, so on its own it is a repayment with no due date.
+ *
+ * So this is called from the five-minute portal heartbeat — the one tick every
+ * installed box already runs whether or not a desktop is open — and the
+ * ExecStartPre stays as the path for a box that reboots first. The flag is what
+ * keeps the tick cheap and keeps it quiet: without a deferral on record there
+ * is nothing to do, and once the write lands the flag is cleared so a persona
+ * the agent may since have edited is not rewritten every five minutes (OpenClaw
+ * revalidates workspace files by mtime, so an identical rewrite is not free).
+ *
+ * Returns true only when the persona was actually written. Never throws: the
+ * caller is a timer-driven route whose whole contract is to answer 200.
+ */
+export async function applyDeferredLanguagePersona(): Promise<boolean> {
+  try {
+    // One read of the store for both the flag and the pick — config.get()
+    // re-reads and re-parses the whole file on every call.
+    const store = await config.getAll();
+    if (store[DEFERRED_LANGUAGE_KEY] !== true) return false;
+
+    const harness = await getActiveHarness();
+    // The same guard the route applies, asked again here rather than assumed:
+    // the deferral was recorded while the ritual was armed or unstarted, and
+    // this runs on a schedule, so most ticks find it still armed.
+    if (!(await personaWritesAllowed(harness))) return false;
+
+    const lang = store[`${PREFERENCE_KEY_PREFIX}ui_language`];
+    const written =
+      typeof lang === "string" && (await writeLanguagePersona(lang, personaFilesFor(harness)));
+    // The debt is cleared either way. A stored value outside the shipped set
+    // can never be paid back, and a box with no pick at all owes nothing, so
+    // leaving the flag up would re-ask the same question every five minutes
+    // for the life of the device.
+    await config.set(DEFERRED_LANGUAGE_KEY, false);
+    return written;
+  } catch (err) {
+    // Worth a line in the journal, never worth a failed tick: the next one is
+    // five minutes away and the persona is not urgent.
+    console.error(
+      "[preferences] Could not apply the deferred language persona:",
+      err instanceof Error ? err.message : err,
+    );
+    return false;
+  }
 }

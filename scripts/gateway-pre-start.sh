@@ -2529,9 +2529,15 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   # in the setup wizard: doing so before the agent's first reply is what told
   # OpenClaw the workspace was already configured and cost every box its
   # introduction (src/lib/language-persona.ts, personaWritesAllowed). The pick
-  # is still stored, in `pref:ui_language` in the device store, so this is
-  # where it is paid back — at the first gateway start after the introduction
-  # is over, which is the first moment writing the persona is harmless.
+  # is still stored, in `pref:ui_language` in the device store, and this is one
+  # of the two places it is paid back.
+  #
+  # This one is the BOOT path, not the only one. Nothing restarts the gateway
+  # when the introduction ends, so a box left running would wait here for days;
+  # the five-minute portal heartbeat drains the same debt through
+  # applyDeferredLanguagePersona() (src/lib/language-persona.ts). This block
+  # stays because it costs nothing and it covers the box that reboots, or
+  # updates, before its first tick lands.
   #
   # Same two conditions the route applies, for the same reasons: USER.md must
   # already exist (creating it is the suppressing act) and BOOTSTRAP.md must

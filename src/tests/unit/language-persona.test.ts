@@ -1,10 +1,30 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// The device store and the harness router are the only two things this module
+// reaches for beyond the filesystem, and both are read by the deferred-payback
+// path alone; everything else here runs against real files in a temp dir.
+vi.mock("@/lib/config-store", () => ({
+  get: vi.fn(),
+  set: vi.fn().mockResolvedValue(undefined),
+  getAll: vi.fn().mockResolvedValue({}),
+  setMany: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn().mockResolvedValue("openclaw") }));
+
+import * as config from "@/lib/config-store";
+import { getActiveHarness } from "@/lib/harness";
 import { PREFERENCE_LANGUAGES } from "@/lib/preference-schema";
-import { openclawWorkspaceDir, personaFilesFor, personaWritesAllowed, writeLanguagePersona } from "@/lib/language-persona";
+import {
+  applyDeferredLanguagePersona,
+  DEFERRED_LANGUAGE_KEY,
+  openclawWorkspaceDir,
+  personaFilesFor,
+  personaWritesAllowed,
+  writeLanguagePersona,
+} from "@/lib/language-persona";
 
 /**
  * `ui_language` is the one preference that gets interpolated into the agent's
@@ -226,5 +246,119 @@ describe("personaWritesAllowed", () => {
 
   it("never defers on Hermes, which has no such ritual", async () => {
     expect(await personaWritesAllowed("hermes")).toBe(true);
+  });
+});
+
+
+/**
+ * Paying back a pick the ritual made us defer.
+ *
+ * Deferring the write was the fix; leaving it deferred forever was the hole in
+ * it. Nothing restarts the gateway when the agent finishes its introduction, so
+ * the ExecStartPre that re-applies the pick has no due date on a box that stays
+ * up — the owner picks Bulgarian in the wizard, says hello, and the desktop is
+ * in Bulgarian while the agent's persona carries no language directive at all.
+ * This is what the five-minute portal heartbeat calls to close that gap.
+ */
+describe("applyDeferredLanguagePersona", () => {
+  let home: string;
+  let workspace: string;
+  const originalHome = process.env.HOME;
+  const mockGetAll = vi.mocked(config.getAll);
+  const mockSet = vi.mocked(config.set);
+  const mockHarness = vi.mocked(getActiveHarness);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-defer-"));
+    workspace = path.join(home, ".openclaw", "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
+    process.env.HOME = home;
+    mockSet.mockResolvedValue(undefined);
+    mockHarness.mockResolvedValue("openclaw");
+    mockGetAll.mockResolvedValue({ [DEFERRED_LANGUAGE_KEY]: true, "pref:ui_language": "bg" });
+  });
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  /** The workspace of a box whose agent has finished introducing itself. */
+  const introduced = () =>
+    fs.writeFileSync(path.join(workspace, "USER.md"), "# USER.md - About Your Human\n", "utf-8");
+
+  it("writes the deferred pick into the persona once the ritual is over", async () => {
+    introduced();
+    expect(await applyDeferredLanguagePersona()).toBe(true);
+    expect(read(path.join(workspace, "USER.md"))).toContain("- **Language:** Български (bg)");
+    expect(read(path.join(workspace, "SOUL.md"))).toContain("You MUST respond in Български");
+  });
+
+  it("clears the debt so the next tick is a no-op", async () => {
+    // OpenClaw revalidates workspace files by mtime, so rewriting the persona
+    // with identical bytes every five minutes is not free — and the agent may
+    // have edited those files itself since.
+    introduced();
+    await applyDeferredLanguagePersona();
+    expect(mockSet).toHaveBeenCalledWith(DEFERRED_LANGUAGE_KEY, false);
+
+    mockGetAll.mockResolvedValue({ [DEFERRED_LANGUAGE_KEY]: false, "pref:ui_language": "bg" });
+    const stamp = fs.statSync(path.join(workspace, "USER.md")).mtimeMs;
+    expect(await applyDeferredLanguagePersona()).toBe(false);
+    expect(fs.statSync(path.join(workspace, "USER.md")).mtimeMs).toBe(stamp);
+  });
+
+  it("does nothing at all when no pick was ever deferred", async () => {
+    introduced();
+    mockGetAll.mockResolvedValue({ "pref:ui_language": "bg" });
+    expect(await applyDeferredLanguagePersona()).toBe(false);
+    expect(read(path.join(workspace, "USER.md"))).toBe("# USER.md - About Your Human\n");
+    expect(mockSet).not.toHaveBeenCalled();
+  });
+
+  it("waits while the ritual is still armed, and keeps the debt on the books", async () => {
+    introduced();
+    fs.writeFileSync(path.join(workspace, "BOOTSTRAP.md"), "# ritual\n", "utf-8");
+    expect(await applyDeferredLanguagePersona()).toBe(false);
+    expect(read(path.join(workspace, "USER.md"))).toBe("# USER.md - About Your Human\n");
+    // Not cleared: the pick is still owed, and the tick after the introduction
+    // is the one that pays it.
+    expect(mockSet).not.toHaveBeenCalled();
+  });
+
+  it("waits while the workspace has no USER.md — the introduction has not started", async () => {
+    expect(await applyDeferredLanguagePersona()).toBe(false);
+    expect(fs.existsSync(path.join(workspace, "USER.md"))).toBe(false);
+    expect(mockSet).not.toHaveBeenCalled();
+  });
+
+  it("writes the Hermes persona when Hermes is the harness in play", async () => {
+    // Hermes has no ritual, so a deferral can only be on record there after a
+    // harness switch — but the debt is still the box's, and the files it owes
+    // are Hermes' own.
+    mockHarness.mockResolvedValue("hermes");
+    expect(await applyDeferredLanguagePersona()).toBe(true);
+    expect(read(path.join(home, ".hermes", "memories", "USER.md"))).toContain("Български (bg)");
+    expect(fs.existsSync(path.join(workspace, "USER.md"))).toBe(false);
+  });
+
+  it("drops a debt it can never pay, rather than re-asking every five minutes", async () => {
+    // A stored value outside the shipped set is interpolated into nothing: the
+    // domain check in writeLanguagePersona refuses it, and it will refuse it
+    // again on every tick for the life of the device.
+    introduced();
+    mockGetAll.mockResolvedValue({ [DEFERRED_LANGUAGE_KEY]: true, "pref:ui_language": "klingon" });
+    expect(await applyDeferredLanguagePersona()).toBe(false);
+    expect(read(path.join(workspace, "USER.md"))).toBe("# USER.md - About Your Human\n");
+    expect(mockSet).toHaveBeenCalledWith(DEFERRED_LANGUAGE_KEY, false);
+  });
+
+  it("answers false instead of throwing when the store cannot be read", async () => {
+    // Its caller is a timer-driven route whose whole contract is to answer 200;
+    // a rejection here would make the systemd unit flap.
+    introduced();
+    mockGetAll.mockRejectedValue(new Error("EIO"));
+    await expect(applyDeferredLanguagePersona()).resolves.toBe(false);
   });
 });

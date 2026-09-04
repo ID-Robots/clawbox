@@ -25,6 +25,14 @@ import { describe, expect, it } from "vitest";
 const GUIDE_PATH = path.join(process.cwd(), "config/clawbox-workspace-guide.md");
 const GUIDE = readFileSync(GUIDE_PATH, "utf-8");
 
+/**
+ * The OTHER guide the model is handed: `clawbox_context` reads Clawbox.md from
+ * the repo root and pastes it into the session verbatim
+ * (mcp/tools/orientation.ts). Two guides, both loaded, so a rule changed in one
+ * and not the other reaches the agent as a contradiction.
+ */
+const FIELD_GUIDE = readFileSync(path.join(process.cwd(), "Clawbox.md"), "utf-8");
+
 /** The `## System actions and restarts` section, without its neighbours. */
 function systemActionsSection(): string {
   const start = GUIDE.search(/^## .*\bSystem actions\b/im);
@@ -108,4 +116,44 @@ describe("the ClawBox workspace guide (CLAWBOX.md)", () => {
     // desktop ships a Terminal app.
     expect(section).toContain("openclaw approvals");
   });
+});
+
+/**
+ * Where the owner's name comes from.
+ *
+ * Settings → Appearance used to carry a "Your name" field that wrote
+ * `ui_user_name`; this batch deleted it, leaving the agent as the ONLY writer
+ * of that preference — which is also why ClawBox now ships its own
+ * first-conversation ritual (config/clawbox-bootstrap.md) that asks. A guide
+ * still pointing the owner at that field sends them to a screen that no longer
+ * has it, and tells the agent someone else will collect the name.
+ */
+describe("the two guides the agent loads — the owner's name", () => {
+  const nameSection = (guide: string) => {
+    const start = guide.search(/Remember the user's name/i);
+    if (start < 0) return "";
+    const rest = guide.slice(start);
+    const next = rest.slice(1).search(/^#{2,3} |^- \*\*/m);
+    return next < 0 ? rest : rest.slice(0, next + 1);
+  };
+
+  for (const [label, guide] of [
+    ["CLAWBOX.md (config/clawbox-workspace-guide.md)", GUIDE],
+    ["the field guide (Clawbox.md)", FIELD_GUIDE],
+  ] as const) {
+    it(`tells the agent to persist the name, in ${label}`, () => {
+      expect(nameSection(guide)).toContain('preferences_set(\'{"ui_user_name": "<name>"}\')');
+    });
+
+    it(`does not send the owner to a "Your name" field, in ${label}`, () => {
+      // SettingsApp.tsx's Appearance section is Language, Wallpaper and the pet
+      // picker; grepping it for ui_user_name returns nothing.
+      expect(guide).not.toMatch(/"Your name"/);
+      expect(guide).not.toMatch(/Your name.{0,40}field/i);
+    });
+
+    it(`says the agent is the only writer, in ${label}`, () => {
+      expect(nameSection(guide)).toMatch(/only writer/i);
+    });
+  }
 });
