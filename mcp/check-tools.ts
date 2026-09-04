@@ -111,12 +111,23 @@ async function main(): Promise<void> {
     const { reg: probedReg, ctx } = await buildServer(edition, "full", edition);
     const probed = probedReg.list();
     const caps = ctx.capabilities;
-    if (caps.du || caps.journal || caps.screenGrabber || ctx.emailCanRead || ctx.codingAgent) {
+    if (caps.du || caps.journal || caps.screenGrabber || caps.imageConvert
+      || ctx.emailCanRead || ctx.codingAgent || ctx.canGenerateImages) {
       probedAnything = true;
     }
 
     const { reg: fullReg } = await buildServer(edition, "full", edition, { ...ALL_CAPABILITIES });
     const enabled = fullReg.list();
+
+    // A THIRD posture, for the one gate that points the other way.
+    // `image_generate` registers only where the box CANNOT draw, so on a box
+    // whose probe says it can — a linked device — it would be in none of the
+    // postures above and the assertion below would fail on a healthy box.
+    const { reg: mutedReg } = await buildServer(edition, "full", {
+      ...ALL_CAPABILITIES,
+      canGenerateImages: false,
+    });
+    const inverted = mutedReg.list();
 
     // The UNION, not either posture. A capability gate can point either way:
     // most families register only when the box CAN do the thing, while
@@ -124,7 +135,7 @@ async function main(): Promise<void> {
     // model why, and would contradict the harness's own image tool on a linked
     // box). Both halves ship, so both halves are checked.
     const tools = [...enabled];
-    for (const tool of probed) {
+    for (const tool of [...probed, ...inverted]) {
       if (!tools.some((t) => t.name === tool.name)) tools.push(tool);
     }
     byEdition[edition] = tools;
@@ -146,7 +157,7 @@ async function main(): Promise<void> {
     }
     // …and the all-off posture's own gate, which points the other way.
     if (!registered.has("image_generate")) {
-      problems.push(`${edition}: "image_generate" is in neither posture — the probed build is not being read`);
+      problems.push(`${edition}: "image_generate" is in no posture — the inverse gate is not being read`);
     }
 
     const names = new Set(tools.map((t) => t.name));
