@@ -117,6 +117,23 @@ export interface HarnessCapabilities {
   readonly canAbortTurn: boolean;
   /** There is a socket that can be down — i.e. a connection banner is honest. */
   readonly hasLiveConnection: boolean;
+  /**
+   * WHERE this box's chat provider and model are configured:
+   *
+   *   `'openclaw-config'`  `agents.defaults.model.primary` in
+   *                        ~/.openclaw/openclaw.json, which
+   *                        /setup-api/chat/model reads and writes.
+   *   `'harness'`          the harness keeps its own — Hermes' `model.provider`
+   *                        / `model.default` in ~/.hermes/config.yaml, served
+   *                        by /setup-api/hermes/models.
+   *
+   * The sibling of `canListHistory`'s reasoning, and here for the same reason:
+   * a route whose whole subject lives in ONE harness's store has to be able to
+   * ask whether this is that harness, rather than each such route re-deciding
+   * from the harness id. chat/model answered a confident 200 about the
+   * OpenClaw config on every edition until it could ask this.
+   */
+  readonly modelStore: "openclaw-config" | "harness";
 }
 
 /**

@@ -59,6 +59,25 @@ const ctx = (edition: "openclaw" | "hermes", install: McpContext["install"] = ed
 });
 
 const DEFAULT = { provider: "openai", current: "gpt-5.6-sol", reasoning: "medium" };
+
+/**
+ * The shape /setup-api/chat/model REALLY answers with.
+ *
+ * These two cases used to invent `{selected: {...}, current: ""}` — keys the
+ * route has never returned — and then assert `device_default` matched them, so
+ * they passed on their own fixture while every real box reported
+ * `{provider: "unknown", model: "unknown"}`. Restated from the route's own
+ * payload (`loadChatModelState`), which is what the tool now reads.
+ */
+const CHAT_MODEL_STATE = {
+  activeOptionId: "anthropic/claude-fable-5",
+  activeSource: "primary",
+  activeLabel: "Anthropic",
+  activeModel: "anthropic/claude-fable-5",
+  options: [],
+  primary: { available: true, label: "Anthropic", model: "anthropic/claude-fable-5", provider: "anthropic" },
+  local: { available: false, label: null, model: null },
+};
 const CATALOGUE = {
   ...DEFAULT,
   models: [{ id: "gpt-5.6-sol" }],
@@ -196,7 +215,7 @@ describe("device_status — the same honesty on the orientation tool", () => {
     // every agent session, and OpenClaw has neither the reply label nor the
     // Hermes instruction — so telling this edition "not visible" would turn a
     // right answer into a shrug.
-    routes({ "/setup-api/chat/model": { selected: { provider: "anthropic", model: "claude-fable-5" }, current: "" } });
+    routes({ "/setup-api/chat/model": CHAT_MODEL_STATE });
     const { ai: report } = (await parsed(status("openclaw"), "device_status")) as { ai: Record<string, unknown> };
 
     expect(report).not.toHaveProperty("model");
@@ -219,7 +238,7 @@ describe("device_status — the same honesty on the orientation tool", () => {
     // cannot be wrong; on dual it can, and the affirmative note would tell a
     // HERMES chat to answer "which model are you" from the device default,
     // which is the whole defect TASK-648 opened for.
-    routes({ "/setup-api/chat/model": { selected: { provider: "anthropic", model: "claude-fable-5" }, current: "" } });
+    routes({ "/setup-api/chat/model": CHAT_MODEL_STATE });
     const { ai: report } = (await parsed(status("openclaw", "dual"), "device_status")) as {
       ai: Record<string, unknown>;
     };

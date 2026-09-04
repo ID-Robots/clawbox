@@ -169,7 +169,18 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
         };
       }
       if (url.includes("/setup-api/chat/model")) {
-        return { ok: true, json: async () => ({ options: [], activeOptionId: "" }) };
+        // What the route really answers on a Hermes box: it reads the OpenClaw
+        // config, which is not this box's chat model, and says so. Stubbing a
+        // 200 here would keep a contract the server no longer offers alive in
+        // the only place 40-odd Hermes chat suites could notice.
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            error: "This box's chat provider and model are held by its agent harness, not by this store.",
+            code: "wrong_store",
+          }),
+        };
       }
       if (url.includes("/setup-api/chat/spoken-history")) {
         return { ok: true, json: async () => ({ items: [] }) };

@@ -64,7 +64,23 @@ const RECOVERED = {
   activeLabel: "ClawBox AI",
 };
 
-function installFetch() {
+/**
+ * The other way to have no chat model: nothing is pinned at all.
+ *
+ * `agents.defaults.model.primary` is absent — a box with a credential the owner
+ * has not chosen a model on yet — so the route answers `activeModel: null` as
+ * well as `activeOptionId: null`. The header owes the same two things here as
+ * above, and for the same reason: no row is running, so naming one is a lie and
+ * clicking it must still post.
+ */
+const NOTHING_PINNED = {
+  ...MIS_PINNED,
+  activeOptionId: null,
+  activeModel: null,
+  activeSource: null,
+};
+
+function installFetch(state: object = MIS_PINNED) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -78,7 +94,7 @@ function installFetch() {
         // returned `{ success: true }` left `options` undefined and crashed
         // the header's `options.find` — the mock has to answer like the route.
         if (init?.method === "POST") return { ok: true, json: async () => RECOVERED };
-        return { ok: true, json: async () => MIS_PINNED };
+        return { ok: true, json: async () => state };
       }
       if (url.includes("/setup-api/chat/history")) {
         return { ok: true, json: async () => ({ messages: [] }) };
@@ -135,6 +151,39 @@ describe("the chat header on a box pinned to a model no row carries", () => {
     // owner's most natural recovery gesture — was swallowed and the box
     // stayed mute.
     installFetch();
+    render(<ChatPopup isOpen onClose={() => {}} />);
+
+    const trigger = await screen.findByRole("button", { name: /Chat provider/i });
+    fireEvent.click(trigger);
+    const rows = await screen.findAllByRole("option");
+    const clawai = rows.find((row) => (row.textContent ?? "").includes("ClawBox AI"));
+    expect(clawai).toBeDefined();
+    fireEvent.click(clawai!);
+
+    await waitFor(() => {
+      const posted = vi.mocked(fetch).mock.calls.some(([url, init]) =>
+        String(url).includes("/setup-api/chat/model")
+        && (init as RequestInit | undefined)?.method === "POST");
+      expect(posted).toBe(true);
+    });
+  });
+});
+
+describe("the chat header on a box with nothing pinned at all", () => {
+  it("does not claim the first provider in the list is the active one", async () => {
+    installFetch(NOTHING_PINNED);
+    render(<ChatPopup isOpen onClose={() => {}} />);
+
+    const trigger = await screen.findByRole("button", { name: /Chat provider/i });
+    await waitFor(() => {
+      expect(trigger.textContent).toContain(translations.en["chat.noChatModel"]);
+    });
+    expect(trigger.textContent).not.toContain("ClawBox");
+    expect(trigger.textContent).not.toContain("OpenAI");
+  });
+
+  it("posts when the owner picks a provider row, even the one shown", async () => {
+    installFetch(NOTHING_PINNED);
     render(<ChatPopup isOpen onClose={() => {}} />);
 
     const trigger = await screen.findByRole("button", { name: /Chat provider/i });

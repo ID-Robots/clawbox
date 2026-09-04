@@ -132,6 +132,12 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
       // `sessions.patch` is a gateway call. There is no session on the box to
       // patch — see `reasoningScope` for what Hermes has instead.
       canPatchSessionDefaults: false,
+      // The chat's provider and model are `model.provider` / `model.default` in
+      // ~/.hermes/config.yaml — the harness's own store, served by
+      // /setup-api/hermes/models. `agents.defaults.model.primary` is not this
+      // box's answer even on the dual SKU, where the OpenClaw half keeps it
+      // warm for the edition that is not running.
+      modelStore: "harness",
       reasoningScope: "per-turn",
       // BOTH halves, because a picture needs both to be answered about: a turn
       // that CARRIES it (`chat --image`) and something that LOOKS at it
@@ -247,6 +253,7 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
     spokenReplyTrigger: "harness",
     canAbortTurn: true,
     hasLiveConnection: true,
+    modelStore: "openclaw-config",
   };
 }
 
