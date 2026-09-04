@@ -555,11 +555,19 @@ describe("codex-auth-mirror.js", () => {
       },
     });
 
+    chmodSync(codexHomeAuthPath, 0o644);
+    const skippedMtime = statSync(codexHomeAuthPath).mtimeMs;
+
     run();
 
     // The app-server's file is untouched...
     expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.refresh_token)
       .toBe("refresh-rotated-by-appserver");
+    expect(statSync(codexHomeAuthPath).mtimeMs).toBe(skippedMtime);
+    // ...but "left alone" is about its CONTENT. On a 2026.8 box this file keeps
+    // that refresh token for the life of the box, so a mode nobody enforces is
+    // a mode that never gets fixed — and a chmod overwrites no credential.
+    expect(statSync(codexHomeAuthPath).mode & 0o777).toBe(0o600);
     // ...core's gateway-wide row is not rewritten from a timer...
     expect(readSharedStore().profiles["openai:chatgpt"].refresh).toBe("refresh-core");
     // ...and the plugin still gets a credential.
@@ -1087,6 +1095,43 @@ describe("codex-auth-mirror.js", () => {
     expect(statSync(homeAuthPath).mode & 0o777).toBe(0o600);
   });
 
+  it("tightens a world-readable mirror on the IDEMPOTENT pass, without rewriting it", () => {
+    // The pass that runs 144 times a day finds no drift and returns before the
+    // write. Binding the permission repair to the rewrite path leaves a mirror
+    // that is already current but 0644 — from an older mirror, or from a tool
+    // that created it — world-readable for the life of the box while it holds
+    // an OAuth refresh token, because "credential already current" is the
+    // answer forever after.
+    //
+    // Nothing else repairs these two files: core's own permission repair
+    // (`openclaw doctor --fix`, the state-integrity check) looks at the state
+    // dir, the config file and the runtime dirs, and never at ~/.codex or an
+    // agent's codex-home; core's Codex reader only reads them. This script is
+    // the sole writer, so it is the only place the mode can be enforced.
+    seedProfile(accessToken("acct-1"), "refresh-1");
+    run();
+    for (const file of [homeAuthPath, codexHomeAuthPath]) {
+      chmodSync(file, 0o644);
+      chmodSync(path.dirname(file), 0o755);
+    }
+    const mtimes = [homeAuthPath, codexHomeAuthPath].map((f) => statSync(f).mtimeMs);
+
+    const stdout = run();
+
+    // The chmod ran on a pass that wrote nothing...
+    for (const file of [homeAuthPath, codexHomeAuthPath]) {
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      expect(statSync(path.dirname(file)).mode & 0o777).toBe(0o700);
+    }
+    // ...and it is a chmod, not a rewrite: chmod moves ctime only, a write
+    // moves mtime. Both assertions are needed — tightening the mode by
+    // rewriting the credential on every tick would pass the one above while
+    // reintroducing the write this branch's short-circuit exists to avoid.
+    expect([homeAuthPath, codexHomeAuthPath].map((f) => statSync(f).mtimeMs)).toEqual(mtimes);
+    expect(stdout).toContain("credential already current");
+    expect(stdout).not.toMatch(/Codex auth\.json (created|refreshed|realigned):/);
+  });
+
   it("fails CLOSED when another writer holds core's store — no adoption, nothing overwritten", () => {
     // The write-back is one transaction, and a rotation may only be reported as
     // recorded once it has COMMITTED. Here a second connection holds the write
@@ -1152,8 +1197,19 @@ describe("codex-auth-mirror.js", () => {
     // through log() is silent on the path that runs 144 times a day — a mirror
     // that stays world-readable while holding an OAuth refresh token would say
     // nothing at all. Both credential files are faulted, because both are
-    // written by the same helper.
+    // tightened by the same helper.
+    //
+    // Both mirrors are seeded 0644 first, because a chmod is only attempted on
+    // a path that actually needs one: a freshly created mirror is already
+    // 0600 (`writeFileSync`'s `mode` can only lose bits to the umask, never
+    // gain them), so faulting the syscall there would fault a call the script
+    // is right not to make. The rotated token then puts this on the REWRITE
+    // path, where a failure costs the most.
     seedProfile(accessToken("acct-1"));
+    run();
+    chmodSync(homeAuthPath, 0o644);
+    chmodSync(codexHomeAuthPath, 0o644);
+    seedProfile(accessToken("acct-1", "rotated"));
 
     const { stdout, stderr, status } = runWithFailingChmod("auth.json");
 
