@@ -27,6 +27,11 @@ const SKILLS_ROOT = path.join(ROOT, "openclaw-workspace");
 // keeps its implementation, and this factory only runs once per file.
 vi.mock("@/lib/openclaw-config", () => ({
   getSkillsDir: vi.fn(() => SKILLS_ROOT),
+  // The edition-aware skill root the route deletes under. Non-null here: this
+  // file's device is an OpenClaw one. The Hermes half — where it is null and
+  // nothing under a workspace this box does not have may be removed — is
+  // pinned in uninstall-edition.test.ts against the real implementation.
+  openclawSkillRoot: vi.fn(() => path.join(SKILLS_ROOT, "skills")),
   clearSkillEntry: vi.fn(async () => false),
 }));
 

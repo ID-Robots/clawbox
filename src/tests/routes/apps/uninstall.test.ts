@@ -8,6 +8,9 @@ vi.mock("fs/promises", () => ({
 
 vi.mock("@/lib/openclaw-config", () => ({
   getSkillsDir: vi.fn().mockReturnValue("/home/clawbox/.openclaw/workspace"),
+  // See uninstall-edition.test.ts for the null (Hermes) half, tested against
+  // the real implementation rather than a mock.
+  openclawSkillRoot: vi.fn().mockReturnValue("/home/clawbox/.openclaw/workspace/skills"),
   clearSkillEntry: vi.fn().mockResolvedValue(true),
 }));
 
@@ -31,8 +34,9 @@ describe("/setup-api/apps/uninstall", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-    const { getSkillsDir, clearSkillEntry } = await import("@/lib/openclaw-config");
+    const { getSkillsDir, openclawSkillRoot, clearSkillEntry } = await import("@/lib/openclaw-config");
     vi.mocked(getSkillsDir).mockReturnValue("/home/clawbox/.openclaw/workspace");
+    vi.mocked(openclawSkillRoot).mockReturnValue("/home/clawbox/.openclaw/workspace/skills");
     vi.mocked(clearSkillEntry).mockResolvedValue(true);
     const fsMod = await import("fs/promises");
     vi.mocked(fsMod.default.rm).mockResolvedValue(undefined);

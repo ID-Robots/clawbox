@@ -3,7 +3,7 @@ import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR, getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
 import { setPreferences } from "@/lib/preference-store";
-import { clearSkillEntry, getSkillsDir } from "@/lib/openclaw-config";
+import { clearSkillEntry, openclawSkillRoot } from "@/lib/openclaw-config";
 import { refreshSkillsCache } from "@/lib/openclaw-skill-info";
 import { kvDelete } from "@/lib/kv-store";
 import { WEBAPPS_DIR } from "@/lib/code-projects";
@@ -17,13 +17,24 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
     }
 
-    // Remove the skill directory (with path traversal guard)
-    const skillRoot = path.resolve(getSkillsDir(), "skills");
-    const skillDir = path.resolve(skillRoot, appId);
-    if (!skillDir.startsWith(skillRoot + path.sep)) {
-      return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
+    // Remove the skill directory (with path traversal guard).
+    //
+    // ONLY where there is an OpenClaw to have one. This route is deliberately
+    // reachable on Hermes — openclaw-apps-server.ts records why: the MCP
+    // `app_uninstall` tool posts here, so the agent can still remove a webapp
+    // whose store the UI has hidden, and refusing would strand those apps in
+    // the prefs with nothing able to delete them. What must not follow from
+    // that is a delete under a path the edition does not have: `getSkillsDir()`
+    // falls back to ~/clawd, and this line resolved <appId> under it and
+    // answered {ok:true} for the removal it had not made.
+    const skillRoot = openclawSkillRoot();
+    if (skillRoot) {
+      const skillDir = path.resolve(skillRoot, appId);
+      if (!skillDir.startsWith(skillRoot + path.sep)) {
+        return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
+      }
+      await fs.rm(skillDir, { recursive: true, force: true });
     }
-    await fs.rm(skillDir, { recursive: true, force: true });
 
     // Remove the deployed webapp, if this app is one. `webapp_create`,
     // `webapp_update` and `code_project_build` all deploy to
@@ -48,10 +59,14 @@ export async function POST(req: Request) {
 
     // The skill's `skills.entries.<id>` in openclaw.json goes too, or a later
     // install under the same id silently inherits `enabled: false`. Best
-    // effort, like the icon: the files are already gone.
-    await clearSkillEntry(appId).catch((err) => {
-      console.warn("[uninstall] Failed to clear the skill's openclaw.json entry:", err instanceof Error ? err.message : err);
-    });
+    // effort, like the icon: the files are already gone. Same edition
+    // condition as the directory above — `clearSkillEntry` reads and REWRITES
+    // openclaw.json, so on a box that has none it would author one.
+    if (skillRoot) {
+      await clearSkillEntry(appId).catch((err) => {
+        console.warn("[uninstall] Failed to clear the skill's openclaw.json entry:", err instanceof Error ? err.message : err);
+      });
+    }
 
     // Keep the desktop's `installed_apps` and `installed_meta` preferences
     // in sync — same reason as the install route: MCP / CLI uninstalls would

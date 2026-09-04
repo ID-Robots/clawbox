@@ -2712,6 +2712,27 @@ export function findOpenclawBin(): string {
   return "openclaw";
 }
 
+/**
+ * The OpenClaw skills root — or `null` when this device has no OpenClaw for it
+ * to be under.
+ *
+ * `getSkillsDir()` below answers unconditionally, and its last resort is
+ * `~/clawd`: the legacy workspace, a path that on the Hermes SKU nothing
+ * created and nothing reads. That is harmless for a READ — a stat that misses,
+ * which is all `openclaw-skill-info` does with it — and wrong for a DELETE.
+ * `apps/uninstall` resolved `<appId>` under it, `rm -rf`'d that, and answered
+ * `{ok:true}`: a wrong-directory delete reported as a success (TASK-551).
+ *
+ * Keyed on the EDITION rather than the active harness, deliberately. On `dual`
+ * the OpenClaw workspace exists and its skills are real whichever harness is
+ * running, so an app installed there stays removable; only the `hermes` SKU
+ * genuinely has no OpenClaw.
+ */
+export function openclawSkillRoot(): string | null {
+  if (openclawIsAbsent()) return null;
+  return path.resolve(getSkillsDir(), "skills");
+}
+
 /** Resolve the OpenClaw workspace/skills directory from config or well-known paths. */
 export function getSkillsDir(): string {
   const home = process.env.HOME || "/home/clawbox";
