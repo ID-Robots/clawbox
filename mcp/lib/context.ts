@@ -6,6 +6,7 @@
 // registered at all, rather than registered and failing.
 
 import { capabilitiesFor, type HarnessFacts } from "../../src/lib/harness/capabilities";
+import { appExistsOnEdition } from "../../src/lib/desktop-app-editions";
 import type { HarnessId } from "../../src/lib/harness/transport";
 import { hasBinary, spawnArgv } from "./guard";
 import { apiTry } from "./api";
@@ -17,29 +18,38 @@ export interface DesktopApp {
   description: string;
 }
 
-// Apps that exist on only one harness. Advertising the other harness's apps
-// would have the agent open a window onto a backend that isn't installed.
-const OPENCLAW_ONLY_APPS: DesktopApp[] = [
-  { id: "openclaw", name: "OpenClaw", description: "AI chat" },
-  { id: "store", name: "Store", description: "App store" },
-  // OpenClaw's memory index. Listed here and not in COMMON_APPS for the same
-  // reason the desktop hides it on Hermes: there is no index to show there.
-  { id: "memory-shard", name: "Memory Shard", description: "The memory index: embedding health, reindex, schedule" },
-];
-const HERMES_ONLY_APPS: DesktopApp[] = [
-  { id: "hermes-skills", name: "Hermes Skills", description: "Install skills for the agent" },
-];
-const COMMON_APPS: DesktopApp[] = [
-  { id: "settings", name: "Settings", description: "Device settings, AI provider, backup" },
-  { id: "terminal", name: "Terminal", description: "Shell" },
-  { id: "files", name: "Files", description: "File manager" },
-  { id: "browser", name: "Browser Setup", description: "Browser integration panel, not the browsing window" },
-  { id: "vnc", name: "Remote Desktop", description: "VNC viewer" },
-  { id: "coding", name: "Coding Agent", description: "The owner's switch for delegated coding runs, what a run needs, and recent runs" },
-];
+// Every built-in desktop app, in the order src/lib/desktop-apps.ts declares
+// them, with the sentence the agent needs to pick the right window. The
+// registry cannot be imported here — it reaches React through the `@/` alias,
+// which mcp/tsconfig.json exists to keep out of this stdio process — so
+// src/tests/unit/mcp-desktop-apps.test.ts holds this table against it: adding
+// an app to the desktop without a line here fails CI (TASK-541, where four
+// apps the desktop shows had gone missing from this list and `ui_open_app`
+// answered "there is no such app" for the box's own Hermes dashboard).
+//
+// The EDITION gate is not repeated here: src/lib/desktop-app-editions.ts is
+// the one copy, shared with the desktop grid and the standalone window.
+const APP_DESCRIPTIONS: Record<string, { name: string; description: string }> = {
+  settings: { name: "Settings", description: "Device settings, AI provider, backup" },
+  clawbox: { name: "Chat", description: "The ClawBox chat window on the desktop — this conversation, where the user can see it" },
+  openclaw: { name: "OpenClaw", description: "OpenClaw's own Control UI chat, in a browser tab" },
+  hermes: { name: "Hermes", description: "The Hermes dashboard, in a browser tab" },
+  "hermes-skills": { name: "Hermes Skills", description: "Install skills for the agent" },
+  terminal: { name: "Terminal", description: "Shell" },
+  coding: { name: "Coding Agent", description: "The owner's switch for delegated coding runs, what a run needs, and recent runs" },
+  files: { name: "Files", description: "File manager" },
+  clawkeep: { name: "ClawKeep", description: "Backups: what is protected, run one now, restore" },
+  "memory-shard": { name: "Memory Shard", description: "The memory index: embedding health, reindex, schedule" },
+  system_update: { name: "System Update", description: "The installed ClawBox version and the update button" },
+  store: { name: "Store", description: "App store" },
+  browser: { name: "Browser Setup", description: "Browser integration panel, not the browsing window" },
+  vnc: { name: "Remote Desktop", description: "VNC viewer" },
+};
 
 export function builtInApps(edition: Ed): DesktopApp[] {
-  return [...COMMON_APPS, ...(edition === "hermes" ? HERMES_ONLY_APPS : OPENCLAW_ONLY_APPS)];
+  return Object.entries(APP_DESCRIPTIONS)
+    .filter(([id]) => appExistsOnEdition(id, edition))
+    .map(([id, def]) => ({ id, ...def }));
 }
 
 export interface Capabilities {

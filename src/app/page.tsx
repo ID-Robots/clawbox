@@ -42,6 +42,7 @@ import { fetchHarness } from "@/lib/client-harness";
 import { samePairingToken } from "@/lib/telegram-pairing-token";
 import type { InstalledMeta } from "@/lib/store-categories";
 import { apps, type AppDef } from "@/lib/desktop-apps";
+import { hiddenAppIdsForHarness } from "@/lib/desktop-app-editions";
 import {
   layoutIcons,
   layoutsEqual,
@@ -92,21 +93,6 @@ const TASKBAR_RESERVE = 72; // px kept clear at the bottom for the taskbar
 function canonicalIconOrder(installedAppIds: readonly string[]): string[] {
   return [...installedAppIds, ...BUILT_IN_APP_IDS.map((id) => `desktop-${id}`)];
 }
-
-// Apps that only make sense on ONE harness. The other harness's backend isn't
-// installed, so its app would open onto errors:
-//   - "openclaw" is the OpenClaw gateway Control UI.
-//   - "store" is the OpenClaw App Store — it installs OpenClaw desktop apps via
-//     the openclaw binary and reloads the OpenClaw gateway. On Hermes the Skills
-//     app ("hermes-skills") is the equivalent surface.
-//   - "memory-shard" is OpenClaw's memory index (`openclaw memory status`);
-//     Hermes has no equivalent, and ClawKeep hid the same panel on that box.
-//   - "hermes" / "hermes-skills" are the Hermes dashboard and skills store.
-// BOTH the icon-layout filter (harnessHiddenAppIds) and getAllApps read THESE
-// lists — keep them the single source of the policy so a hidden app can never be
-// visible in one surface and hidden in another.
-const OPENCLAW_ONLY_APP_IDS = ["openclaw", "store", "memory-shard"] as const;
-const HERMES_ONLY_APP_IDS = ["hermes", "hermes-skills"] as const;
 
 /**
  * Should an app the user installed from the OpenClaw store still be shown?
@@ -405,15 +391,12 @@ function ChromeDesktopInner() {
 
   // The harness-specific apps hidden on this edition (OpenClaw Control-UI +
   // App Store on Hermes; the Hermes dashboard + Hermes Skills Store on
-  // OpenClaw). See OPENCLAW_ONLY_APP_IDS / HERMES_ONLY_APP_IDS. Until the
+  // OpenClaw). The policy lives in src/lib/desktop-app-editions.ts, which the
+  // standalone /app/<id> window and the MCP server read too — so a hidden app
+  // can never be visible in one surface and hidden in another. Until the
   // harness is known BOTH sets are hidden — fail closed.
   const harnessHiddenAppIds = useMemo<string[]>(
-    () =>
-      activeHarness === "hermes"
-        ? [...OPENCLAW_ONLY_APP_IDS]
-        : activeHarness === "openclaw"
-          ? [...HERMES_ONLY_APP_IDS]
-          : [...OPENCLAW_ONLY_APP_IDS, ...HERMES_ONLY_APP_IDS],
+    () => hiddenAppIdsForHarness(activeHarness),
     [activeHarness],
   );
 

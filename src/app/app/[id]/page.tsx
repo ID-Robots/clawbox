@@ -12,6 +12,11 @@ import { handoffSettingsSection, STANDALONE_SETTINGS_SECTION_PARAM } from "@/lib
 import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import type { InstalledMeta } from "@/lib/store-categories";
+import {
+  hiddenAppIdsForHarness,
+  HERMES_ONLY_APP_IDS,
+  OPENCLAW_ONLY_APP_IDS,
+} from "@/lib/desktop-app-editions";
 import type { StoreApp } from "@/components/AppStore";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 
@@ -32,9 +37,9 @@ const MemoryShardApp = dynamic(() => import("@/components/MemoryShardApp"), { ss
 
 // Apps that exist on only ONE harness. This page is reachable directly
 // ("Open in new tab"), so without the same gate the desktop applies, /app/store
-// would render the whole OpenClaw App Store on a Hermes device.
-const OPENCLAW_ONLY_APP_IDS = ["store", "openclaw", "memory-shard"];
-const HERMES_ONLY_APP_IDS = ["hermes", "hermes-skills"];
+// would render the whole OpenClaw App Store on a Hermes device. The lists are
+// the desktop's own (src/lib/desktop-app-editions.ts), not a second copy.
+const HARNESS_ONLY_APP_IDS: readonly string[] = [...OPENCLAW_ONLY_APP_IDS, ...HERMES_ONLY_APP_IDS];
 
 // This window is the same app the desktop shows, so its title comes from the
 // SAME registry rather than a second table of names — which is what it used to
@@ -177,16 +182,10 @@ export default function StandaloneAppPage() {
 
   const renderApp = () => {
     const appId = id ?? "";
-    if (OPENCLAW_ONLY_APP_IDS.includes(appId) || HERMES_ONLY_APP_IDS.includes(appId)) {
+    if (HARNESS_ONLY_APP_IDS.includes(appId)) {
       if (!harness) return loading;
       // An unknown harness hides BOTH sets — fail closed.
-      const hidden =
-        harness === "hermes"
-          ? OPENCLAW_ONLY_APP_IDS
-          : harness === "openclaw"
-            ? HERMES_ONLY_APP_IDS
-            : [...OPENCLAW_ONLY_APP_IDS, ...HERMES_ONLY_APP_IDS];
-      if (hidden.includes(appId)) {
+      if (hiddenAppIdsForHarness(harness).includes(appId)) {
         return (
           <div className="h-full flex items-center justify-center text-white/50 text-sm">
             App not found: {appId}
