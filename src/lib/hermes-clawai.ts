@@ -2,7 +2,7 @@ import { setMany } from "@/lib/config-store";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
 import { runHermesCli, type HermesCliResult } from "@/lib/hermes-cli";
-import { hermesCliAnswered } from "@/lib/hermes-cli-answered";
+import { hermesCliAnswered, hermesStoredValueAsText } from "@/lib/hermes-cli-answered";
 import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { refreshHermesImageTools } from "@/lib/hermes-image-refresh";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
@@ -511,7 +511,7 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
     // this repair would have latched "done" over it. Not reachable on the build
     // `HERMES_PIN_COMMIT` installs — the coercion chain there yields a real
     // list — which is exactly why it is worth a guard rather than a comment.
-    const storedAsText = /storing as string/i.test(written.stderr ?? "");
+    const storedAsText = hermesStoredValueAsText(written);
     // AND NEITHER IS A CLEAN STDERR. That warning only exists on a CLI whose
     // coercion block prints it, so it cannot speak for one old enough to lack
     // the block — where the same literal is stored as text with an EMPTY stderr
@@ -1018,34 +1018,45 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
   // isinstance(enabled, list) else set()` — while ClawBox read the residue back
   // as a real list and concluded there was nothing to do. TASK-701.
   //
-  // WITHDRAW THE CLAIM on every exit that is not "the plugin is loadable",
-  // don't merely decline to re-make it. Every box that can be in the residue
-  // state has been linked once already, so `image_gen.provider` is on disk
-  // naming us — and that single key is what `hermesAgentDrawsImages` reads.
-  // Skipping the writes below would leave the composer button and the
-  // capability both saying yes over a plugin Hermes does not load.
+  // WITHDRAW THE CLAIM ON AN ANSWER, NEVER ON A FAILED QUESTION. Every box
+  // that can be in the residue state has been linked once already, so
+  // `image_gen.provider` is on disk naming us — and that single key is what
+  // `hermesAgentDrawsImages` reads — so an answer that PROVES the plugin
+  // cannot load has to take it back down; declining to re-make the claim would
+  // leave the composer button and the capability both saying yes over a plugin
+  // Hermes does not load.
+  //
+  // But only such an answer. This function runs on every AI-Models save and
+  // every re-link, it has no periodic or boot-time caller, and it is the only
+  // writer of `image_gen.provider` in the repo — so a withdrawal made over a
+  // held config lock, a timeout, a shim exiting 127 or a rendering that is not
+  // machine-readable is not caution: it is image generation gone from a
+  // working box until the owner happens to save Settings again. Those failures
+  // establish NOTHING about what is on disk; they are reported, and what the
+  // box holds is left exactly as it was (which is what beta did).
   let loadable: boolean;
   try {
     const { state, typed } = await readPluginsEnabledFromCli();
     if (state.kind === "unreadable") {
+      // Not a proof of anything: a build that takes `--json` without honouring
+      // it renders the same ambiguous text here as a healthy list would.
       throw new Error(
-        "plugins.enabled holds a value this build cannot read — left alone, image generation off",
+        "plugins.enabled holds a value this build cannot read — left alone, image generation not re-armed",
       );
     }
     const merged = mergePluginsEnabled(state);
     loadable = merged ? await writePluginsEnabled(merged, typed) : true;
   } catch (err) {
-    await withdrawImageProviderClaim();
+    if (err instanceof PluginsEnabledDisproved) await withdrawImageProviderClaim();
     throw err;
   }
   if (!loadable) {
     // The write exited 0 and the CLI never answered the question that would
-    // prove it. Not a failure worth throwing over — but not a licence to claim
-    // the agent can draw either, so the claim is withdrawn and the image keys
-    // below are left unwritten. The next link asks again.
-    await withdrawImageProviderClaim();
+    // prove it. Not a failure worth throwing over, and not proof either — so
+    // no new claim is made, no old one is taken away, and the next link asks
+    // again.
     console.warn(
-      "[hermes/clawai] plugins.enabled could not be proved to hold a list — image generation left off",
+      "[hermes/clawai] plugins.enabled could not be proved to hold a list — image generation left as it was",
     );
     return;
   }
@@ -1146,10 +1157,29 @@ async function withdrawImageProviderClaim(): Promise<void> {
 }
 
 /**
- * Argparse's answers for an option a build does not have. Matched on the
- * WORDING because the exit code (2) is shared with every other usage error.
+ * Argparse's (and Click's) answers for an option a build does not have.
+ * Matched on the WORDING because the exit code (2) is shared with every other
+ * usage error. Both spellings of "unrecognised" are listed: the population this
+ * fallback exists for is boxes moved off `HERMES_PIN_COMMIT` by a hand-run
+ * `hermes update`, which is precisely where the wording can differ. A miss only
+ * costs the plain fallback — the type is then simply not proved, and nothing is
+ * withdrawn over it.
  */
-const UNSUPPORTED_OPTION_RE = /unrecognized arguments?:|no such option|unknown option|invalid choice/i;
+const UNSUPPORTED_OPTION_RE =
+  /unrecogni[sz]ed arguments?:|no such option|unknown option|invalid choice|got unexpected extra argument/i;
+
+/**
+ * The stored value was ASKED ABOUT AND ANSWERED, and the answer establishes
+ * that no plugin can load from it: the CLI's own "storing as string", or a
+ * strict read-back that is not the list just written.
+ *
+ * The one error that withdraws `image_gen.provider`. Everything else that can
+ * go wrong around this key — a held config lock, a timeout, 126/127 from the
+ * shim, stdout that is not JSON, a write that never landed — leaves the box
+ * holding whatever it held, because none of it says the plugin is absent and
+ * nothing on the device would put the claim back (see the caller).
+ */
+class PluginsEnabledDisproved extends Error {}
 
 /**
  * Write `plugins.enabled` and PROVE it landed as a list.
@@ -1170,7 +1200,10 @@ const UNSUPPORTED_OPTION_RE = /unrecognized arguments?:|no such option|unknown o
  *
  * @returns true when the plugin is loadable as far as this build can be asked —
  *          false when the write exited 0 and the read-back that would prove it
- *          could not be run. Throws when the write, or the proof, said no.
+ *          could not be run. Throws when the write could not be made (a plain
+ *          Error: nothing was established, and the box is no worse off than
+ *          before the save) and `PluginsEnabledDisproved` when the CLI's answer
+ *          establishes that no plugin can load from what is stored.
  */
 async function writePluginsEnabled(names: string[], typed: boolean): Promise<boolean> {
   const written = await runHermesCli(
@@ -1183,8 +1216,8 @@ async function writePluginsEnabled(names: string[], typed: boolean): Promise<boo
   // The CLI's own warning when its coercion did not yield a structure. Cheap,
   // and it names the cause; the read-back below is what covers a build too old
   // to print it, where the same literal is stored as text with a clean stderr.
-  if (/storing as string/i.test(written.stderr ?? "")) {
-    throw new Error(
+  if (hermesStoredValueAsText(written)) {
+    throw new PluginsEnabledDisproved(
       "hermes stored plugins.enabled as text, so no plugin would load — image generation left off",
     );
   }
@@ -1210,14 +1243,25 @@ async function writePluginsEnabled(names: string[], typed: boolean): Promise<boo
     return false;
   }
   if (read.code !== 0) {
+    // The CLI ran and refused the question — a held lock, a usage error. That
+    // is a proof that could not be obtained, not a proof of the negative.
     throw new Error(`could not read plugins.enabled back (exit ${read.code})`);
   }
   // STRICT: `decodePluginsEnabledJson` never falls back to a text parse. A
   // prover that accepts the ambiguous plain rendering would re-open the exact
   // hole this function closes.
   const state = decodePluginsEnabledJson(read.stdout);
+  if (state.kind === "unreadable") {
+    // `--json` answered with something that is not JSON: the RENDERING is
+    // unreadable, which says nothing about the stored type.
+    throw new Error("plugins.enabled did not read back as JSON, so the write is unproved");
+  }
   if (state.kind !== "list" || !names.every((name) => state.names.includes(name))) {
-    throw new Error("plugins.enabled did not read back as the list that was written");
+    // ANSWERED, and the answer is the residue (or a list without us). This is
+    // the proof, and the only shape of it the read-back can produce.
+    throw new PluginsEnabledDisproved(
+      "plugins.enabled did not read back as the list that was written",
+    );
   }
   return true;
 }

@@ -56,6 +56,7 @@ vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   installHermesImagePlugin: installMock,
 }));
 
+import { CLAWBOX_AI_VISION_MODEL_ID } from "@/lib/clawbox-ai-models";
 import { applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { HERMES_IMAGE_PLUGIN_NAME } from "@/lib/hermes-image-plugin";
 
@@ -141,7 +142,15 @@ beforeEach(() => {
   refreshMock.mockReset();
   cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
   drawsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
-  resolveVisionMock.mockResolvedValue({ model: "", reason: "probe stubbed" });
+  // The resolver's own shape (`id`, not `model`), so the vision write below it
+  // is issued with a real id rather than `undefined`: a stub whose field name
+  // is wrong makes every case in this file exercise a path the file is not
+  // about. Same value the vision suite stubs with.
+  resolveVisionMock.mockResolvedValue({
+    id: CLAWBOX_AI_VISION_MODEL_ID,
+    verified: true,
+    reason: "proxy-allows",
+  });
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 
@@ -316,11 +325,13 @@ describe("the proof does not accept the ambiguous rendering", () => {
     expect(claimedItCanDraw()).toBe(false);
   });
 
-  it("makes no claim on a read-back the CLI never answered, and withdraws the old one", async () => {
+  it("makes no claim on a read-back the CLI never answered, and leaves the old one standing", async () => {
     // 127 is the shell's code for the `hermes` shim while the venv under it is
-    // being rebuilt: nothing was parsed, and the write above still exited 0. So
-    // this is not worth failing the link over — but it is not proof either, and
-    // a box linked once before is still holding the claim from that link.
+    // being rebuilt: nothing was parsed, and the write above still exited 0.
+    // NOTHING WAS ESTABLISHED, so nothing is withdrawn either: unsetting
+    // `image_gen.provider` here would take drawing away from a box that has it,
+    // and no code path on the device puts it back — this function has no
+    // periodic caller and is the only writer of that key.
     let written = false;
     cliMock.mockImplementation(async (args: string[]) => {
       if (args[1] === "set" && args[2] === "plugins.enabled") {
@@ -341,10 +352,15 @@ describe("the proof does not accept the ambiguous rendering", () => {
 
     expect(result.provider).toBe("clawai"); // the link itself still succeeds
     expect(claimedItCanDraw()).toBe(false);
-    expect(unsets()).toContain("image_gen.provider");
+    expect(unsets()).not.toContain("image_gen.provider");
   });
 
-  it("withdraws the claim when the key holds a shape it cannot read at all", async () => {
+  it("makes no claim on a shape it cannot read, and leaves the old one standing", async () => {
+    // Stdout that is not JSON from a read that exited 0 says the RENDERING was
+    // not machine-readable — a build that takes `--json` without honouring it,
+    // a wrapper that re-renders, a deprecation line ahead of the value. It says
+    // nothing about the stored type, so it is not a licence to make the claim
+    // and not grounds to take an existing one away.
     cliMock.mockImplementation(async (args: string[]) => {
       if (args[1] === "get" && args[2] === "plugins.enabled") {
         return { code: 0, stdout: "not json and not a list", stderr: "" };
@@ -359,7 +375,7 @@ describe("the proof does not accept the ambiguous rendering", () => {
 
     expect(wrotePluginsEnabled()).toBe(false); // left alone, not replaced
     expect(claimedItCanDraw()).toBe(false);
-    expect(unsets()).toContain("image_gen.provider");
+    expect(unsets()).not.toContain("image_gen.provider");
   });
 });
 
@@ -377,6 +393,108 @@ describe("the plain fallback is for one answer only", () => {
       }
       if (args[1] === "get" && args[2] === "image_gen.provider") {
         return { code: 0, stdout: `${HERMES_IMAGE_PLUGIN_NAME}\n`, stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(claimedItCanDraw()).toBe(false);
+    expect(unsets()).not.toContain("image_gen.provider");
+  });
+});
+
+describe("a failure that establishes nothing takes nothing away", () => {
+  /**
+   * The other half of the withdrawal rule, and the one that decides what a
+   * WORKING box does on a bad day.
+   *
+   * `enableHermesImageGeneration` runs on every AI-Models save and every
+   * re-link, it is the only writer of `image_gen.provider`, and nothing on the
+   * device re-runs it on its own. So a withdrawal made on a failure that
+   * proved nothing is not a moment of caution — it is image generation gone
+   * from a customer's box until they happen to open Settings and save again.
+   * Only an ANSWER that establishes the plugin cannot load may withdraw the
+   * claim: the CLI's own "storing as string", or a strict read-back that is
+   * not the list that was just written.
+   */
+  function boxThatDraws(reply: (args: string[]) => Promise<Reply>): void {
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (args[1] === "get" && args[2] === "image_gen.provider") {
+        return { code: 0, stdout: `${HERMES_IMAGE_PLUGIN_NAME}\n`, stderr: "" };
+      }
+      return reply(args);
+    });
+  }
+
+  it("keeps drawing when the typed read cannot be run at all", async () => {
+    // `runHermesCli` REJECTS for a missing binary, a timeout and its own
+    // SIGKILL. A 15 s timeout on one `config get` is not evidence about
+    // anything on disk.
+    boxThatDraws(async (args) => {
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        throw new Error("hermes config get plugins.enabled --json timed out after 15000ms");
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    const result = await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(result.provider).toBe("clawai"); // the link itself still succeeds
+    expect(unsets()).not.toContain("image_gen.provider");
+  });
+
+  it("keeps drawing when the config lock is held", async () => {
+    // The scenario the fleet actually meets: a second `hermes` holding the
+    // config lock while the owner saves Settings → AI Models.
+    boxThatDraws(async (args) => {
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return { code: 1, stdout: "", stderr: "could not acquire config lock" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(unsets()).not.toContain("image_gen.provider");
+  });
+
+  it("keeps drawing when the write itself could not be made", async () => {
+    // The read answered and the list needs us added; the WRITE is what failed.
+    // The box is no worse off than before the save, and what it holds now is
+    // what it held then.
+    boxThatDraws(async (args) => {
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return args.includes("--json")
+          ? { code: 0, stdout: JSON.stringify(["weather"]), stderr: "" }
+          : { code: 0, stdout: "- weather\n", stderr: "" };
+      }
+      if (args[1] === "set" && args[2] === "plugins.enabled") {
+        return { code: 1, stdout: "", stderr: "could not acquire config lock" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(claimedItCanDraw()).toBe(false);
+    expect(unsets()).not.toContain("image_gen.provider");
+  });
+
+  it("still withdraws on the one answer that establishes the plugin cannot load", async () => {
+    // The counterweight, kept in the same block as the cases above so the rule
+    // reads as one: a read-back that ANSWERED and did not spell the list is
+    // proof, and proof still takes the claim away.
+    let written = false;
+    boxThatDraws(async (args) => {
+      if (args[1] === "set" && args[2] === "plugins.enabled") {
+        written = true;
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        if (!written) return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
+        // The literal, stored as text: JSON of a STRING, not of a list.
+        return { code: 0, stdout: JSON.stringify(`["${HERMES_IMAGE_PLUGIN_NAME}"]`), stderr: "" };
       }
       return { code: 0, stdout: "", stderr: "" };
     });
