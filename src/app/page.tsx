@@ -542,6 +542,10 @@ function ChromeDesktopInner() {
   // Mirrored so the two writers below can compute the next list without a
   // functional updater. Both used to do their localStorage write and their
   // sibling `setWallpaperId` from INSIDE one, which React may run twice.
+  //
+  // Each writer advances the ref itself before its state update, so two
+  // callbacks that run before React commits do not both read the same list; the
+  // effect only re-syncs it against whatever state actually settled.
   const customWallpapersRef = useRef<string[]>([]);
   useEffect(() => { customWallpapersRef.current = customWallpapers; }, [customWallpapers]);
   // Wallpapers are large base64 blobs — keep in localStorage to avoid
@@ -565,6 +569,11 @@ function ChromeDesktopInner() {
       // shape TASK-703 removes from the chat surfaces. Idempotent today, which
       // is exactly why it would go unnoticed.
       const next = [...customWallpapersRef.current, dataUrl];
+      // The ref is advanced HERE, not by the mirroring effect: two uploads (or
+      // an upload and a delete) can both run before React commits, and both
+      // would otherwise read the same list and the second would discard the
+      // first — from the state AND from localStorage.
+      customWallpapersRef.current = next;
       try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
       setCustomWallpapers(next);
       setWallpaperId(`custom-${next.length - 1}`);
@@ -1764,6 +1773,7 @@ function ChromeDesktopInner() {
                 // Same as the upload above: outside the updater, and off the
                 // ref rather than off `prev`.
                 const next = customWallpapersRef.current.filter((_, i) => i !== idx);
+                customWallpapersRef.current = next;
                 try { localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(next)); } catch {}
                 setCustomWallpapers(next);
                 if (wallpaperId === `custom-${idx}`) setWallpaperId("clawbox");
