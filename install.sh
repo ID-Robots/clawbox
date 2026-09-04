@@ -3821,8 +3821,32 @@ step_openclaw_tts() {
             # install — so that choice belongs to the link path
             # (src/lib/hermes-clawai.ts), which owns the credential and makes
             # it the moment there is one. TASK-699.
-            if [ "$KOKORO_READY" != true ]; then
-              echo "  Hermes TTS provider left unset — this box has no on-device engine (Kokoro: ${KOKORO_VERDICT:-no verdict published}). The $HERMES_TTS_PROVIDER definition is in place, and ClawBox AI cloud speech is selected when the box is linked." >&2
+            if [ "$KOKORO_HAVE" != true ]; then
+              # KOKORO_HAVE, never KOKORO_READY. The first is the reconciled
+              # fact — the verdict the run PUBLISHED, with the exit code as its
+              # fallback; the second is the inference from the exit code alone,
+              # and reading one off the other is the defect this step was built
+              # around. VOICE_RC=1 with `KOKORO=ready` on file is a working
+              # engine (the OpenClaw arm below says so too), and VOICE_RC=0 with
+              # any other verdict is not one.
+              #
+              # A box already POINTED at the engine it does not have is the
+              # state the measurement found, and it is in this same `case` arm.
+              # Leaving it alone would preserve the defect for every shipped
+              # box: an update is the only thing that reaches them, and the
+              # link path is not re-run once a box is linked. The definition
+              # stays; only the selection goes, so the Voice panel and
+              # hermesSpeaksReplies start telling the truth and the owner can
+              # pick the cloud voice.
+              if [ "$CURRENT_HERMES_TTS" = "$HERMES_TTS_PROVIDER" ]; then
+                if hermes_tts_cli config unset tts.provider; then
+                  echo "  Hermes TTS provider cleared — it named $HERMES_TTS_PROVIDER and this box has no on-device engine ($KOKORO_REASON)" >&2
+                else
+                  echo "  Warning: could not clear tts.provider, which names $HERMES_TTS_PROVIDER on a box with no on-device engine ($KOKORO_REASON)" >&2
+                fi
+              else
+                echo "  Hermes TTS provider left unset — this box has no on-device engine ($KOKORO_REASON). The $HERMES_TTS_PROVIDER definition is in place, and ClawBox AI cloud speech is selected when an entitled box is linked." >&2
+              fi
             elif hermes_tts_cli config set tts.provider "$HERMES_TTS_PROVIDER"; then
               if [ "$CURRENT_HERMES_TTS" = "edge" ]; then
                 echo "  Hermes TTS provider set to $HERMES_TTS_PROVIDER (replacing Hermes' factory 'edge' cloud default)"

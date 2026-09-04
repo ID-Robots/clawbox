@@ -346,7 +346,7 @@ export async function applyClawaiToHermes(
   // Hermes' factory `edge` cloud is still selected, or where the on-device
   // provider is selected with no engine behind it, which is the state the
   // measured box was left in.
-  await selectHermesCloudVoiceIfUnvoiced(trimmed);
+  await selectHermesCloudVoiceIfUnvoiced(trimmed, tier);
 
   // Everything above wrote to DISK. The agent that will serve the next turn is
   // a process that has been running since long before any of it, and two of the
@@ -1504,8 +1504,29 @@ async function readPluginsDisabledFromCli(): Promise<Set<string> | null> {
 /**
  * Point Hermes at the ClawBox cloud voice when nothing else can speak.
  *
- * Reads before it writes and writes only in the three states that are not an
- * owner's choice:
+ * Two questions before it writes anything, and each has a writer on the other
+ * edition that already asks it.
+ *
+ * ENTITLEMENT. Cloud speech is served only to the device tier
+ * `CLAWBOX_AI_SPEECH_TIER`; the proxy answers 403 to anything below it. The
+ * Voice route refuses the pick on an unentitled box, and
+ * `gateway-pre-start.sh` says why in as many words: pointing an unentitled box
+ * at it "would be worse than leaving it alone — the panel would call the cloud
+ * voice configured … and every spoken reply would pay a failed round trip". A
+ * box that is honestly mute is better than one aimed at a route it may not
+ * call, and nothing would ever move it back: install.sh then sees `openai` and
+ * preserves it as an owner's choice.
+ *
+ * A READ THAT FAILED IS NOT AN ANSWER. `readHermesVoice` returns `null` for
+ * both "unset" and "the `hermes config get` never completed" — its own
+ * docstring says so — and one OOM-killed Python start on a loaded Jetson would
+ * otherwise replace an owner's ElevenLabs with the cloud, silently, on a
+ * re-link. The shell half of this same change refuses to make that mistake at
+ * length (install.sh, "AN UNSET KEY IS NOT A FAILED READ"), so this half asks
+ * `hermesVoiceProbePending()` — the module's own accessor for exactly this —
+ * and leaves the selection alone when the question did not get an answer.
+ *
+ * Then it writes only in the three states that are not an owner's choice:
  *
  *   unset            — install.sh left it alone because there is no engine.
  *   `edge`           — Hermes' factory Microsoft cloud, which a ClawBox must
@@ -1521,14 +1542,41 @@ async function readPluginsDisabledFromCli(): Promise<Set<string> | null> {
  * Never throws: a link that worked must not report failure because the voice
  * could not be pointed. The Voice panel remains the place to set it by hand.
  */
-async function selectHermesCloudVoiceIfUnvoiced(token: string): Promise<void> {
+async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTier): Promise<void> {
   try {
-    const [{ readHermesVoice, selectHermesEngine, HERMES_LOCAL_TTS_PROVIDER, HERMES_FACTORY_TTS_PROVIDER },
-           { hasLocalTtsEngine }] = await Promise.all([
+    const [
+      {
+        readHermesVoice,
+        selectHermesEngine,
+        hermesVoiceProbePending,
+        HERMES_LOCAL_TTS_PROVIDER,
+        HERMES_FACTORY_TTS_PROVIDER,
+        CLAWBOX_AI_SPEECH_TIER,
+      },
+      { hasLocalTtsEngine },
+    ] = await Promise.all([
       import("@/lib/hermes-tts"),
       import("@/lib/local-tts-engine"),
     ]);
+    // The tier just linked, not a re-read: `setMany` wrote `clawai_tier` a
+    // moment ago, but the argument is the same fact without a second round trip
+    // and without a window where the store has not settled. It is already the
+    // DEVICE tier — the same value `speechEntitledTier()` reads back — so it is
+    // compared with the constant directly.
+    if (tier !== CLAWBOX_AI_SPEECH_TIER) {
+      console.log(
+        `[hermes-clawai] this plan does not include the cloud voice — leaving tts.provider alone`,
+      );
+      return;
+    }
     const voice = await readHermesVoice();
+    if (hermesVoiceProbePending()) {
+      console.warn(
+        "[hermes-clawai] could not read this box's voice selection — leaving it alone rather than"
+        + " replacing a choice we could not read",
+      );
+      return;
+    }
     const current = voice.provider;
     const unchosen = current === null
       || current === HERMES_FACTORY_TTS_PROVIDER

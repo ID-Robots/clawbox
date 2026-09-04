@@ -321,6 +321,44 @@ describe.skipIf(!hasBash)("the on-device voice is registered with Hermes nativel
         .toContain(`config set tts.provider ${HERMES_PROVIDER}`);
     });
 
+    it("reads the published verdict, not the exit code", () => {
+      // VOICE_RC=1 with `KOKORO=ready` on file is a working engine — the
+      // OpenClaw arm of this same step says so in as many words. Gating on the
+      // exit code alone would leave a box that CAN speak with no selection, and
+      // the link path would then move it to the cloud permanently.
+      const res = runStep("hermes", { voiceExit: 1, ttsStatus: "KOKORO=ready\n" });
+
+      expect(res.hermesCalls.join("\n"), `a working engine was not selected:\n${res.out}`)
+        .toContain(`config set tts.provider ${HERMES_PROVIDER}`);
+    });
+
+    it("does not select on a clean exit whose verdict says there is no engine", () => {
+      // The other direction: "the file says the engine is not there" beats
+      // "the status code implied it was".
+      const res = runStep("hermes", { voiceExit: 0, ttsStatus: "KOKORO=failed:build\n" });
+
+      expect(res.hermesCalls.join("\n"), `a missing engine was selected:\n${res.out}`)
+        .not.toContain(`config set tts.provider ${HERMES_PROVIDER}`);
+    });
+
+    it("clears a selection that already names an engine the box does not have", () => {
+      // The measured state, and the population this PR was written from: an
+      // update is the only thing that reaches those boxes, and the link path is
+      // not re-run once a box is linked. The DEFINITION stays; only the
+      // selection goes, so the Voice panel starts telling the truth.
+      const res = runStep("hermes", {
+        voiceExit: 13,
+        ttsStatus: "KOKORO=skipped:no-cuda\n",
+        hermesProvider: HERMES_PROVIDER,
+      });
+      const calls = res.hermesCalls.join("\n");
+
+      expect(calls, `the broken selection was left in place:\n${res.out}`)
+        .toContain("config unset tts.provider");
+      expect(calls).toContain(`config set tts.providers.${HERMES_PROVIDER}.type command`);
+      expect(res.out).not.toMatch(/provider left unset/);
+    });
+
     it("still leaves an owner's own provider alone when there is no engine", () => {
       const res = runStep("hermes", {
         voiceExit: 13,
