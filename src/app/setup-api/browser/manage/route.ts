@@ -95,17 +95,25 @@ interface ChromiumInfo {
  */
 async function isServiceSafeChromium(bin: string): Promise<boolean> {
   if (bin.startsWith("/snap/")) return false;
+  let handle;
   try {
-    const info = await fs.stat(bin);
+    // One open handle for both the size and the bytes, rather than a stat
+    // followed by a read of the same name: between the two calls the name can
+    // come to mean a different file, and the size that said "small enough to
+    // read" would then be vouching for something else entirely.
+    handle = await fs.open(bin, "r");
+    const info = await handle.stat();
     // Only a wrapper SCRIPT is small enough to be worth reading; a real
     // Chromium is a hundred megabytes and cannot be a snap shim.
     if (info.size > 64 * 1024) return true;
-    const text = await fs.readFile(bin, "utf-8");
+    const text = await handle.readFile("utf-8");
     return !/\/snap\/bin\/chromium|snap run chromium/.test(text);
   } catch {
     // Unreadable says nothing about snap either way; let the launch script
     // have the last word rather than refuse a browser that may be fine.
     return true;
+  } finally {
+    await handle?.close().catch(() => {});
   }
 }
 
