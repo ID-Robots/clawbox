@@ -150,7 +150,29 @@ describe("LocalAiPanel", () => {
     // node proves nothing.
     await waitFor(() =>
       expect(screen.getByTestId("local-ai-notice")).toHaveTextContent("the gateway did not come back"));
+    // Back in flow the moment it has something to say — the other half of the
+    // `sr-only` pin below, so neither state can be dropped on its own.
+    expect(screen.getByTestId("local-ai-notice")).not.toHaveClass("sr-only");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  /**
+   * The notice region is mounted in every state so assistive tech is never
+   * asked to catch a node insertion — but its parent is `space-y-4`, whose
+   * `> * + *` rule gives an EMPTY in-flow div a 1 rem margin AND hands the
+   * block after it another. That is a permanent 16 px gap under the intro, on
+   * every visit, in the state the panel is in almost all the time.
+   *
+   * `sr-only` takes it out of flow while keeping the node and its text in the
+   * accessibility tree, which is the only reason it is mounted at all.
+   */
+  it("keeps the empty notice region out of the panel's flow", async () => {
+    stubFetch();
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    const notice = screen.getByTestId("local-ai-notice");
+    expect(notice).toHaveTextContent("");
+    expect(notice).toHaveClass("sr-only");
   });
 
   /**
