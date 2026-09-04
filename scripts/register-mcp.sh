@@ -119,12 +119,22 @@ fi
 # Same file, same semantics as src/lib/mcp-token.ts and gateway-pre-start.sh.
 # Minted here too so a Hermes box — which has no gateway pre-start hook — is
 # never left without one.
-if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$(wc -c < "$MCP_TOKEN_FILE" 2>/dev/null || echo 0)" -lt 32 ]; then
+# `{ ...; } 2>/dev/null` rather than `wc ... 2>/dev/null`: a failed INPUT
+# redirect is reported by the shell, not by wc, so the narrower form prints a
+# bare "Permission denied" for a token this uid cannot read. Same correction as
+# gateway-pre-start.sh's copy of this line.
+if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$( { wc -c < "$MCP_TOKEN_FILE"; } 2>/dev/null || echo 0 )" -lt 32 ]; then
   mkdir -p "$(dirname "$MCP_TOKEN_FILE")"
+  # `umask 077` in the subshell, not a chmod afterwards: a bare redirect creates
+  # the file at the umask's mode — 0644 under root's — and the chmod below only
+  # closes that window AFTER the secret is already on disk and world-readable.
+  # It also cannot close it at all when the chmod fails (a file this uid does
+  # not own), which is the state gateway-pre-start.sh's `mcp_write_token` was
+  # written for. TASK-657.
   if command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex 32 > "$MCP_TOKEN_FILE"
+    ( umask 077; openssl rand -hex 32 > "$MCP_TOKEN_FILE" )
   else
-    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MCP_TOKEN_FILE"
+    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MCP_TOKEN_FILE" )
   fi
   log "minted $MCP_TOKEN_FILE"
 fi
@@ -192,6 +202,16 @@ except FileNotFoundError:
     # valid — Hermes merges its own defaults over it — so register now rather
     # than leave the device tool-less until someone finishes onboarding.
     cfg = {}
+except OSError as err:
+    # The file is THERE and cannot be read (permissions, a truncated mount).
+    # Deliberately NOT the `cfg = {}` above: that arm's premise is "no config
+    # exists yet", and taking it here would write a file holding only
+    # mcp_servers over a config whose contents we never saw. Same verdict as
+    # invalid YAML below — refuse, and say why, instead of the traceback this
+    # top-level `python3` under `set -euo pipefail` produced. TASK-657.
+    print(f"[register-mcp] ERROR: {os.path.basename(cfg_path)} could not be read "
+          f"({err.strerror or type(err).__name__}); refusing to overwrite it.", file=sys.stderr)
+    sys.exit(1)
 except yaml.YAMLError as exc:
     print(f"[register-mcp] ERROR: {cfg_path} is not valid YAML ({type(exc).__name__}); "
           "refusing to overwrite it.", file=sys.stderr)

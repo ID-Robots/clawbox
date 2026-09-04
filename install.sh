@@ -2246,12 +2246,14 @@ step_openclaw_install() {
     if [ -n "$PINNED" ]; then
       echo "  Pinned OpenClaw target from $PIN_FILE: $PINNED"
     else
-      # The `|| true` above turns an unreadable or empty pin file into an empty
-      # PINNED, and the fallback below is then correct -- but the unconditional
-      # line printed "Pinned OpenClaw target from ...: " and asserted a pin had
-      # been read when none had. The `else` branch's WARN is not reached from
-      # here, so say it here.
-      echo "  WARN: $PIN_FILE could not be read — falling back to hardcoded $OPENCLAW_VERSION" >&2
+      # The `|| true` above turns an unreadable pin file into an empty PINNED,
+      # and a file that is empty (or whose first line is blank) gets there with
+      # `head` and `awk` both SUCCEEDING -- so this arm cannot claim the file
+      # could not be read. The fallback below is correct either way, but the
+      # unconditional line printed "Pinned OpenClaw target from ...: " and
+      # asserted a pin had been read when none had. The `else` branch's WARN is
+      # not reached from here, so say it here.
+      echo "  WARN: $PIN_FILE is empty or could not be read — falling back to hardcoded $OPENCLAW_VERSION" >&2
     fi
   else
     echo "  WARN: $PIN_FILE not found — falling back to hardcoded $OPENCLAW_VERSION" >&2

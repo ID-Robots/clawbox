@@ -88,6 +88,52 @@ describe("mcp-token", () => {
       expect(verifyMcpBearer("Bearer wrong-token-value-here-do-not-match")).toBe(false);
     });
 
+    it("picks up a token rotated on disk under a running web server", async () => {
+      // gateway-pre-start.sh replaces the token file whenever this uid cannot
+      // read it or other local users can, and only the MCP SUBPROCESS gets the
+      // new value (the reconcile rewrites openclaw.json). The verifier lives
+      // here, caches in module state and prefers CLAWBOX_MCP_TOKEN, which
+      // production-server.js pins at Next boot — and nothing orders
+      // clawbox-setup.service against clawbox-gateway.service. So a gateway
+      // restart mid-uptime (a model/config change, or Restart=always after a
+      // crash) left every /setup-api/* call from the agent's device tools
+      // 401'ing until clawbox-setup happened to restart. TASK-657.
+      const { getMcpToken, verifyMcpBearer } = await loadModule(tmpDir);
+      const before = getMcpToken();
+      expect(verifyMcpBearer(`Bearer ${before}`)).toBe(true);
+
+      const rotated = "b".repeat(64);
+      fs.writeFileSync(path.join(tmpDir, "data", ".mcp-token"), `${rotated}\n`, { mode: 0o600 });
+
+      expect(verifyMcpBearer(`Bearer ${rotated}`)).toBe(true);
+      // And the superseded one stops working, rather than both being valid for
+      // the life of the process.
+      expect(verifyMcpBearer(`Bearer ${before}`)).toBe(false);
+    });
+
+    it("does not re-read the file for every rejected bearer", async () => {
+      // The re-read above is on the failure path, which is the path an
+      // unauthenticated caller controls. Rate-limited so a bad-bearer flood
+      // cannot turn into one disk read per request.
+      const { getMcpToken, verifyMcpBearer } = await loadModule(tmpDir);
+      getMcpToken();
+      const tokenPath = path.join(tmpDir, "data", ".mcp-token");
+      let reads = 0;
+      const realRead = fs.readFileSync;
+      const spy = vi.spyOn(fs, "readFileSync").mockImplementation(((f: never, ...rest: never[]) => {
+        if (f === tokenPath) reads += 1;
+        return (realRead as never as (...a: never[]) => never)(f, ...rest);
+      }) as never);
+      try {
+        for (let i = 0; i < 50; i += 1) {
+          expect(verifyMcpBearer(`Bearer ${"c".repeat(64)}`)).toBe(false);
+        }
+      } finally {
+        spy.mockRestore();
+      }
+      expect(reads).toBeLessThanOrEqual(1);
+    });
+
     it("rejects a token that's a prefix of the real one", async () => {
       // Guard against any accidental startsWith comparison — timingSafeEqual
       // requires equal lengths so this should be a fast reject.

@@ -102,11 +102,17 @@ CLAWBOX_OPENCLAW_EFFECTIVE="$(printf '%s' "$CLAWBOX_OPENCLAW_EFFECTIVE" | grep -
 # wedged `--version` (an import that never resolves, an fs stall, a SQLite lock)
 # would hold ExecStartPre until TimeoutStartSec killed the unit, and
 # Restart=always would then spend StartLimitBurst on a box that never comes up.
-# 45 s, matching the CLI call PR #614 added to this same script: the measured
-# cost is 7.9-8.0 s on an Orin, a cold first boot is the slow case, and running
-# out of time here now means skipping the whole pre-start (below), not aborting.
+# 45 s, justified on this call's OWN measurement rather than on any precedent:
+# `openclaw --version` costs 7.9-8.0 s on a shipped Orin, a cold first boot is
+# the slow case, so the bound has to leave several multiples of that as headroom
+# or it cuts off a HEALTHY core and makes the fallback useless exactly when it is
+# needed. It also has to stay far inside the unit's own TimeoutStartSec=600, and
+# running out of time here means skipping the whole pre-start (below), not
+# aborting. `-k 5` because plain `timeout` sends SIGTERM only: a `--version` that
+# ignores it would hold this ExecStartPre for the unit's entire start budget,
+# which is precisely the outcome the bound exists to prevent.
 if [ -z "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
-  CLAWBOX_OPENCLAW_EFFECTIVE="$(timeout 45 "$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)"
+  CLAWBOX_OPENCLAW_EFFECTIVE="$(timeout -k 5 45 "$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)"
 fi
 # And if the installed core cannot be identified at all, WRITE NOTHING. The pin
 # is deliberately not a fallback here: a partially failed update (repo synced,
@@ -328,9 +334,24 @@ except OSError as err:
     # profile and channel. PermissionError is not a FileNotFoundError, so the
     # arm above never covered this. Leave the file alone and boot on it, the
     # same policy the generation probe settles on further up.
+    # `err.strerror` rather than `err`: str(OSError) carries the full path, which
+    # the basename above was chosen to keep out of the line.
     print(
-        f"  WARN: {os.path.basename(cfg_path)} could not be read ({err}); "
-        f"leaving it exactly as it is and starting the gateway on it",
+        f"  WARN: {os.path.basename(cfg_path)} could not be read "
+        f"({err.strerror or type(err).__name__}); leaving it exactly as it is "
+        f"and starting the gateway on it",
+        file=sys.stderr,
+    )
+    # Not a small skip, and the same understatement the generation give-up was
+    # corrected for further up: SystemExit ends this whole program, so this boot
+    # also does NOT re-apply the gateway auth token, the messaging-channel
+    # security pass, the gateway.controlUi.allowedOrigins rebuild (a changed LAN
+    # IP is not picked up), the model catalog or the provider blocks.
+    print(
+        "  WARN: this boot therefore does NOT re-apply the gateway auth token, "
+        "the messaging-channel security pass, the gateway.controlUi.allowedOrigins "
+        "rebuild (a changed LAN IP is not picked up), the model catalog or the "
+        "provider blocks.",
         file=sys.stderr,
     )
     raise SystemExit(0)
@@ -2245,7 +2266,12 @@ mcp_write_token() {
     ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$1" ) 2>/dev/null
   fi
 }
-if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$(wc -c < "$MCP_TOKEN_FILE" 2>/dev/null || echo 0)" -lt 32 ]; then
+# `{ ...; } 2>/dev/null` rather than `wc ... 2>/dev/null`: a failed INPUT
+# redirect is reported by the shell, not by wc, so the narrower form printed a
+# bare "Permission denied" into the journal for a token this uid cannot read --
+# a line that reads like the boot failing, immediately before the block below
+# repairs it.
+if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$( { wc -c < "$MCP_TOKEN_FILE"; } 2>/dev/null || echo 0 )" -lt 32 ]; then
   # Every write here is guarded so a full or read-only filesystem cannot abort
   # the boot. Nothing is lost by falling through: the token's readability and
   # length are checked below, and that check is the deliberate hard failure.
@@ -2261,38 +2287,67 @@ fi
 # manual repair) makes chmod return EPERM, and an unguarded failure here cost
 # the box its gateway on every boot from then on. TASK-657.
 chmod 600 "$MCP_TOKEN_FILE" 2>/dev/null || true
-# But the MODE is the outcome, not chmod's exit code, and grading the call was
-# wrong in both directions: it warned over a root-owned file that was ALREADY
-# 0600, and it stayed quiet about the case that matters -- a file this uid
-# cannot chmod whose mode is 0644, which is what root's umask gives
-# `openssl rand > file`. The bearer then reaches every local user on the box.
+# But the MODE is the outcome, not chmod's exit code -- and the outcome has two
+# halves, both of which grading the literal string "600" got wrong:
+#
+#   * can anyone ELSE read it? A file this uid cannot chmod whose mode carries
+#     group/other bits hands the sole /setup-api/* credential to every local
+#     user on the box. 0644 is what root's umask gives a bare
+#     `openssl rand > file`.
+#   * can THIS uid read it? Every shipped writer that can create the file as
+#     root leaves it 0600 -- scripts/register-mcp.sh mints under `umask 077`,
+#     production-server.js writes `{ mode: 0o600 }` -- so root:root 0600 is the
+#     state the fleet actually produces, and it is unreadable to
+#     User=clawbox. A `case` keyed on "600"
+#     declined to touch exactly that file, and the `[ ! -r ]` check below then
+#     exited 1: ExecStartPre fails, no gateway, on every boot.
+#
+# So grade on `-r` plus the permission bits, never on a literal. The corollary
+# matters as much: a mode with no group/other bits that this uid CAN read (0400,
+# 0600) is exposed to nobody, and rotating it would be pure cost -- see the
+# second WARN below for what a rotation costs.
 #
 # Replacing it is the only remedy available here that is neither exposure nor a
 # brick. The DIRECTORY is clawbox's own (install.sh chowns $PROJECT_DIR/data),
 # and a rename is governed by the directory, not by the file's owner -- so a
-# file this uid cannot chmod can still be swapped for one it owns at 0600. That
-# rotates the token, which the reconcile immediately below already handles: it
-# rewrites openclaw.json from whatever the file now holds, exactly as it does
-# for the seeding path above. One boot rotates; every boot after it the file is
-# ours and chmod succeeds.
+# file this uid can neither chmod nor read can still be swapped for one it owns
+# at 0600. One boot rotates; every boot after it the file is ours and chmod
+# succeeds.
 MCP_TOKEN_MODE="$(stat -c '%a' "$MCP_TOKEN_FILE" 2>/dev/null || echo unknown)"
-case "$MCP_TOKEN_MODE" in
-  600|unknown)
-    # 0600, or a box that cannot report a mode at all -- for the latter the
-    # readability and length checks below stay the backstop. Neither is a
-    # reason to rotate a working token.
-    ;;
-  *)
-    MCP_TOKEN_TMP="$(mktemp "$(dirname "$MCP_TOKEN_FILE")/.mcp-token.XXXXXX" 2>/dev/null || true)"
-    if [ -n "$MCP_TOKEN_TMP" ] && mcp_write_token "$MCP_TOKEN_TMP" \
-      && mv -f "$MCP_TOKEN_TMP" "$MCP_TOKEN_FILE" 2>/dev/null; then
-      echo "  WARN: $MCP_TOKEN_FILE was mode $MCP_TOKEN_MODE and could not be re-hardened (it belongs to another user); replaced it with a fresh 0600 token this boot owns" >&2
-    else
-      if [ -n "$MCP_TOKEN_TMP" ]; then rm -f "$MCP_TOKEN_TMP" 2>/dev/null || true; fi
-      echo "  WARN: $MCP_TOKEN_FILE is mode $MCP_TOKEN_MODE and could be neither re-hardened nor replaced — the MCP bearer for /setup-api/* is readable by other local users on this box" >&2
-    fi
-    ;;
-esac
+# `stat -c %a` prints three or four octal digits (setuid/setgid/sticky make it
+# four). Anything else is a box that cannot report a mode at all -- not a reason
+# to rotate a working token on its own, and `-r` above stays the backstop.
+mcp_mode_is_exposed() {
+  case "${1:-}" in
+    ''|*[!0-7]*) return 1 ;;
+  esac
+  [ "$(( 8#$1 & 8#077 ))" -ne 0 ]
+}
+if [ ! -r "$MCP_TOKEN_FILE" ] || mcp_mode_is_exposed "$MCP_TOKEN_MODE"; then
+  if [ ! -r "$MCP_TOKEN_FILE" ]; then
+    MCP_TOKEN_WHY="is mode $MCP_TOKEN_MODE and unreadable to this gateway (it belongs to another user)"
+  else
+    MCP_TOKEN_WHY="was mode $MCP_TOKEN_MODE and could not be re-hardened (it belongs to another user)"
+  fi
+  MCP_TOKEN_TMP="$(mktemp "$(dirname "$MCP_TOKEN_FILE")/.mcp-token.XXXXXX" 2>/dev/null || true)"
+  if [ -n "$MCP_TOKEN_TMP" ] && mcp_write_token "$MCP_TOKEN_TMP" \
+    && mv -f "$MCP_TOKEN_TMP" "$MCP_TOKEN_FILE" 2>/dev/null; then
+    echo "  WARN: $MCP_TOKEN_FILE $MCP_TOKEN_WHY; replaced it with a fresh 0600 token this boot owns." >&2
+    # What a rotation costs, and who pays it. The reconcile below republishes
+    # the new bearer to the MCP SUBPROCESS only -- it rewrites openclaw.json
+    # from whatever the file now holds. It does NOT reach the VERIFIER:
+    # src/lib/mcp-token.ts caches in module state and production-server.js pins
+    # the value into CLAWBOX_MCP_TOKEN at Next.js boot, and nothing orders
+    # clawbox-setup.service against this unit. The verifier now re-reads the
+    # file when a bearer check fails, so this heals itself on the next call --
+    # but say it, because a device tool that 401s once after a rotation should
+    # have a line in the journal explaining itself.
+    echo "  WARN: the web server re-reads the rotated bearer on its next /setup-api/* check; restart clawbox-setup.service if device tools keep answering 401." >&2
+  else
+    if [ -n "$MCP_TOKEN_TMP" ]; then rm -f "$MCP_TOKEN_TMP" 2>/dev/null || true; fi
+    echo "  WARN: $MCP_TOKEN_FILE $MCP_TOKEN_WHY, and could be neither re-hardened nor replaced (is $(dirname "$MCP_TOKEN_FILE") writable?) — the MCP bearer for /setup-api/* is left exactly as it stands" >&2
+  fi
+fi
 
 # Always reconcile the MCP server registration in openclaw.json with
 # the current token. Done in Python so the atomic-rename pattern used

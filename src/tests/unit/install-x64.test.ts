@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -13,6 +13,19 @@ function v2SeedProgram(): string {
   const end = SOURCE.indexOf("\nPY", start);
   if (start < 0 || end < 0) throw new Error("OpenClaw 2 seed block not found");
   return SOURCE.slice(start, end);
+}
+
+/**
+ * `step_openclaw_install`'s pin read, from its `local PIN_FILE=` line down to
+ * the fallback that defines the empty case. Sliced rather than retyped so the
+ * test cannot drift from the shipped line.
+ */
+function pinReadBlock(): string {
+  const start = SOURCE.indexOf('  local PIN_FILE="$PROJECT_DIR/config/openclaw-target.txt"');
+  const marker = 'TARGET="${TARGET:-$OPENCLAW_VERSION}"';
+  const end = SOURCE.indexOf(marker, start);
+  if (start < 0 || end < 0) throw new Error("OpenClaw pin read not found");
+  return SOURCE.slice(start, end + marker.length);
 }
 
 function openclawPatchFunction(): string {
@@ -78,6 +91,81 @@ describe("install-x64.sh safety contracts", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("install-x64.sh pinned-target read", () => {
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(path.join(tmpdir(), "clawbox-x64-pin-"));
+  });
+  afterEach(() => {
+    try {
+      chmodSync(path.join(root, "config", "openclaw-target.txt"), 0o644);
+    } catch {
+      /* not every case writes one */
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  /** Run the shipped slice under the installer's own `set -euo pipefail`. */
+  function readPin(): { status: number | null; out: string } {
+    const file = path.join(root, "pin-block.sh");
+    writeFileSync(
+      file,
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "step_openclaw_install() {",
+        pinReadBlock(),
+        '  echo "TARGET=$TARGET"',
+        "}",
+        "step_openclaw_install",
+        'echo "REACHED_END=1"',
+      ].join("\n"),
+    );
+    const r = spawnSync("bash", [file], {
+      encoding: "utf-8",
+      timeout: 30_000,
+      env: {
+        ...process.env,
+        PROJECT_DIR: root,
+        OPENCLAW_VERSION: "2026.8.1",
+        OPENCLAW_PIN_VERSION: "",
+      },
+    });
+    return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  }
+
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
+  it("reads the pin when it can", () => {
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    writeFileSync(path.join(root, "config", "openclaw-target.txt"), "2026.7.4\n");
+    const r = readPin();
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("TARGET=2026.7.4");
+  });
+
+  it.skipIf(isRoot)("carries on when the pin file exists but cannot be read", () => {
+    // The third copy of the read `install.sh:2245` and `gateway-pre-start.sh:45`
+    // both guard. Under `set -euo pipefail` (install-x64.sh:16) an unreadable
+    // pin file makes `head` fail, pipefail carries it into the assignment, and
+    // the installer aborts — from `step_openclaw_setup`, which is called in
+    // plain command position, so errexit is NOT suppressed. An unknown pin is
+    // already a defined state here (the fallback on the next line); an aborted
+    // install is not.
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    const pin = path.join(root, "config", "openclaw-target.txt");
+    writeFileSync(pin, "2026.7.4\n");
+    chmodSync(pin, 0o000);
+    const r = readPin();
+    expect(r.status, `the installer aborted:\n${r.out}`).toBe(0);
+    expect(r.out).toContain("REACHED_END=1");
+    // And it falls back to the hardcoded version rather than an empty target.
+    expect(r.out).toContain("TARGET=2026.8.1");
+    // Not silently: the operator is told the pin did not apply.
+    expect(r.out).toMatch(/WARN/);
   });
 });
 

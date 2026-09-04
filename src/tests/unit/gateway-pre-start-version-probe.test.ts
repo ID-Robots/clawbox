@@ -88,9 +88,11 @@ function run(program: string): { status: number | null; out: string; stderr: str
   chmodSync(file, 0o755);
   // `spawnSync` inherits process.env, and an explicit CLAWBOX_OPENCLAW_V2 WINS
   // over everything the probe derives — by design, and the shipped script says
-  // so. A runner (or a shell on a box) that exports it would make every derived
-  // generation here read back as the override instead, so the tests that pin
-  // v1 and the ones that pin "wrote nothing" would pass on any script at all.
+  // so. Nothing in this repo exports it today, so this is future-proofing
+  // against a runner (or a shell on a box) that does, and it is not symmetric:
+  // an ambient `=0` makes the v1-pinning assertions pass against ANY block,
+  // including beta's, which is the case that would hide a regression; an
+  // ambient `=1` makes the "writes NOTHING" case fail loudly instead.
   // Deleted rather than emptied: "unset" is the state a device is in.
   const env = { ...process.env };
   delete env.CLAWBOX_OPENCLAW_V2;
@@ -168,11 +170,16 @@ function probe(opts: {
 describe.runIf(canRun)("gateway-pre-start's OpenClaw generation probe", () => {
   it("reads the installed core's own manifest, without running it", () => {
     // ~10 s on a Jetson vs 53 ms for the manifest, in a BLOCKING ExecStartPre.
-    const r = probe({ cli: 'echo "openclaw 2026.9.9"; echo RAN >&2', pkg: "2026.8.1" });
+    // The stub leaves a FILE behind rather than a line on a stream: the shipped
+    // call is `--version 2>/dev/null` and the command substitution swallows its
+    // stdout, so neither stream can carry the marker out and an assertion on
+    // `r.out` would pass against a block that ran the CLI every time.
+    const ranMarker = path.join(root, "cli-was-run");
+    const r = probe({ cli: `: > ${JSON.stringify(ranMarker)}\necho "openclaw 2026.9.9"`, pkg: "2026.8.1" });
     expect(r.status).toBe(0);
     expect(r.effective).toBe("2026.8.1");
     expect(r.v2).toBe("1");
-    expect(r.out, "the CLI was run even though the manifest answered").not.toContain("RAN");
+    expect(existsSync(ranMarker), "the CLI was run even though the manifest answered").toBe(false);
   });
 
   it("asks the binary when there is no manifest to read", () => {
@@ -182,23 +189,45 @@ describe.runIf(canRun)("gateway-pre-start's OpenClaw generation probe", () => {
     expect(r.v2).toBe("1");
   });
 
+  /**
+   * What `openclaw --version` costs on a HEALTHY shipped Orin, measured on a
+   * box: 7.9-8.0 s, and a cold first boot is the slow case. Rounded up, and
+   * stated here rather than in a bare number below, because both bounds are
+   * derived from it.
+   */
+  const MEASURED_VERSION_SECONDS = 8;
+
   it("time-boxes that call with a value the boot can actually afford", () => {
-    const m = /timeout (\d+) "\$OPENCLAW_BIN" --version/.exec(block('OPENCLAW_TARGET=""', "export CLAWBOX_OPENCLAW_V2"));
+    const probeBlock = block('OPENCLAW_TARGET=""', "export CLAWBOX_OPENCLAW_V2");
+    const m = /timeout (?:-k (\d+) )?(\d+) "\$OPENCLAW_BIN" --version/.exec(probeBlock);
     expect(m, "the version probe is no longer time-boxed at all").not.toBeNull();
-    const seconds = Number(m![1]);
-    // 45, matching the other bounded `openclaw` CLI call this script makes.
-    // `\d+` alone accepted `timeout 1` — which cuts off the healthy 7.9-8.0 s
-    // this call measures on a shipped Orin, making the fallback useless exactly
-    // when it is needed — and `timeout 600`, which would spend the unit's whole
-    // start budget inside one optional probe.
-    expect(seconds).toBe(45);
-    // And it has to stay inside the unit's own ceiling, read from the shipped
-    // unit rather than repeated here: ExecStartPre running out of time is a
-    // gateway that never starts, so a lowered TimeoutStartSec has to fail here.
+    // Plain `timeout` sends SIGTERM only. A `--version` that ignores it would
+    // hold this ExecStartPre for the unit's whole start budget — precisely the
+    // outcome the bound exists to prevent — so the SIGKILL escalation is part
+    // of the behaviour, not a stylistic choice.
+    expect(m![1], "the bound sends SIGTERM only, so a wedged --version outlives it").toBeDefined();
+    expect(Number(m![1])).toBeGreaterThan(0);
+    const seconds = Number(m![2]);
+    // The bound is asserted against what it has to survive and what it has to
+    // stay inside, not against a literal: a number pinned to a precedent goes
+    // stale the moment the precedent moves.
+    //
+    // Floor — it must leave several multiples of the measured healthy cost as
+    // headroom, or it cuts off a WORKING core and makes the fallback fire
+    // exactly when it is not needed. `\d+` alone accepted `timeout 1`.
+    expect(
+      seconds,
+      `a healthy --version measures ~${MEASURED_VERSION_SECONDS}s on a shipped Orin; this bound cuts it off`,
+    ).toBeGreaterThanOrEqual(3 * MEASURED_VERSION_SECONDS);
+    // Ceiling — it has to stay well inside the unit's own budget, read from the
+    // shipped unit rather than repeated here: ExecStartPre running out of time
+    // is a gateway that never starts, so a lowered TimeoutStartSec has to fail
+    // here. Half the budget, not merely under it: this is one OPTIONAL probe
+    // and the rest of the pre-start still has to run after it.
     const unit = readFileSync(path.join(REPO, "config", "clawbox-gateway.service"), "utf-8");
     const budget = Number(/^TimeoutStartSec=(\d+)$/m.exec(unit)?.[1]);
     expect(budget, "clawbox-gateway.service no longer states TimeoutStartSec in seconds").toBeGreaterThan(0);
-    expect(seconds).toBeLessThan(budget);
+    expect(seconds, "one optional probe may not claim half the unit's start budget").toBeLessThanOrEqual(budget / 2);
   });
 
   it("still calls a v1 core v1, whatever the pin says", () => {
@@ -385,7 +414,13 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
   /** 64 hex chars: long enough that the seeding branch above leaves it alone. */
   const EXISTING = "a".repeat(64);
 
-  function token(opts: { contents?: string; mode?: number; chmodFails?: boolean }): {
+  function token(opts: {
+    contents?: string;
+    mode?: number;
+    chmodFails?: boolean;
+    /** What a stubbed `stat -c %a` reports, for a mode this uid cannot produce. */
+    statSays?: string;
+  }): {
     status: number | null;
     out: string;
     /** The file's permission bits after the block ran, or null if it is gone. */
@@ -412,6 +447,13 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
       writeFileSync(stub, "#!/bin/sh\necho \"chmod: changing permissions: Operation not permitted\" >&2\nexit 1\n");
       chmodSync(stub, 0o755);
     }
+    // The one mode this uid cannot actually create: another user's 0600, which
+    // `stat` reports as 600 while every read of it is denied.
+    if (opts.statSays !== undefined) {
+      const stub = path.join(stubBin, "stat");
+      writeFileSync(stub, `#!/bin/sh\necho ${opts.statSays}\n`);
+      chmodSync(stub, 0o755);
+    }
     const r = run(
       [
         `CLAWBOX_ROOT=${JSON.stringify(clawboxRoot)}`,
@@ -421,10 +463,19 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
         'echo "REACHED_END=1"',
       ].join("\n"),
     );
+    const mode = existsSync(file) ? statSync(file).mode & 0o777 : null;
+    // A case that leaves the token unreadable to this uid must still be
+    // reportable: the mode is already captured, so open it up for the
+    // contents read and for the tmpdir cleanup.
+    try {
+      chmodSync(file, 0o600);
+    } catch {
+      /* the block may have removed it */
+    }
     return {
       status: r.status,
       out: r.out,
-      mode: existsSync(file) ? statSync(file).mode & 0o777 : null,
+      mode,
       contents: existsSync(file) ? readFileSync(file, "utf-8") : null,
       exported: /EXPORTED=(.*)/.exec(r.out)?.[1] ?? null,
     };
@@ -466,6 +517,35 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
     expect(r.mode).toBe(0o600);
     expect(r.contents).toBe(EXISTING);
     expect(r.out).not.toMatch(/WARN/);
+  });
+
+  it.skipIf(isRoot)("replaces a token this gateway cannot read, instead of refusing to boot", () => {
+    // The state the fleet's writers ACTUALLY produce when they run as root is
+    // root:root 0600, not 0644: scripts/register-mcp.sh chmods 600 on the line
+    // after its redirect, and production-server.js writes { mode: 0o600 }. That
+    // file is unreadable to User=clawbox and unchmoddable by it — and grading
+    // the mode on the literal string "600" declined to touch it, so the
+    // `[ ! -r "$MCP_TOKEN_FILE" ] → exit 1` three lines below fired: ExecStartPre
+    // fails, no gateway, on every boot until someone with shell access fixes
+    // the mode. That is TASK-657's own headline defect, standing inside the one
+    // block that carries the remedy for it.
+    //
+    // Reproduced without being two users: the file is 0000 (every read denied,
+    // exactly as another user's 0600 is), `chmod` fails the way it does on
+    // another user's file, and `stat` reports the 600 those writers leave.
+    const r = token({ contents: EXISTING, mode: 0o000, chmodFails: true, statSays: "600" });
+    expect(r.status, `the pre-start aborted, so the box gets no gateway:\n${r.out}`).toBe(0);
+    expect(r.out).toContain("REACHED_END=1");
+    // Replaced, and the replacement is this uid's own 0600 token.
+    expect(r.mode! & 0o077).toBe(0);
+    expect(r.exported).toHaveLength(64);
+    expect(r.exported).not.toBe(EXISTING);
+    expect(r.out).toMatch(/WARN/);
+    // A rotation reaches the MCP subprocess (the reconcile below rewrites
+    // openclaw.json) but NOT the verifier in the web server, which holds its
+    // own copy — so the WARN has to name the unit that must pick the new
+    // bearer up. See src/lib/mcp-token.ts.
+    expect(r.out).toMatch(/clawbox-setup/);
   });
 
   it("seeds a missing token at 0600 without a chmod to do it", () => {

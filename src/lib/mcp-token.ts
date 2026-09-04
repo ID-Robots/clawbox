@@ -31,17 +31,31 @@ const DATA_ROOT = process.env.CLAWBOX_ROOT
 const TOKEN_PATH = path.join(DATA_ROOT, "data", ".mcp-token");
 
 let cached: string | null = null;
+/** Epoch ms of the last disk re-read triggered by a FAILED bearer check. */
+let lastRecheck = 0;
+/**
+ * The failure path is the one an unauthenticated caller controls, so the
+ * re-read below is rate-limited: a bad-bearer flood must not become one disk
+ * read per request. A second is well under a restart and well over a flood.
+ */
+const RECHECK_INTERVAL_MS = 1000;
+
+function readTokenFile(): string | null {
+  try {
+    const raw = fs.readFileSync(TOKEN_PATH, "utf-8").trim();
+    if (raw && raw.length >= 16) return raw;
+  } catch {
+    // absent, or unreadable to this uid
+  }
+  return null;
+}
 
 function readOrCreateToken(): string {
   const fromEnv = process.env.CLAWBOX_MCP_TOKEN;
   if (fromEnv && fromEnv.length >= 16) return fromEnv;
 
-  try {
-    const raw = fs.readFileSync(TOKEN_PATH, "utf-8").trim();
-    if (raw && raw.length >= 16) return raw;
-  } catch {
-    // fall through to mint a fresh token
-  }
+  const onDisk = readTokenFile();
+  if (onDisk) return onDisk;
 
   const fresh = crypto.randomBytes(32).toString("hex");
   try {
@@ -61,14 +75,7 @@ export function getMcpToken(): string {
   return cached;
 }
 
-export function verifyMcpBearer(headerValue: string | null): boolean {
-  if (!headerValue) return false;
-  const match = headerValue.match(/^Bearer\s+(.+)$/i);
-  if (!match) return false;
-  const presented = match[1].trim();
-  if (!presented) return false;
-
-  const expected = getMcpToken();
+function matches(presented: string, expected: string): boolean {
   const presentedBuf = Buffer.from(presented);
   const expectedBuf = Buffer.from(expected);
   return (
@@ -77,6 +84,45 @@ export function verifyMcpBearer(headerValue: string | null): boolean {
   );
 }
 
+export function verifyMcpBearer(headerValue: string | null): boolean {
+  if (!headerValue) return false;
+  const match = headerValue.match(/^Bearer\s+(.+)$/i);
+  if (!match) return false;
+  const presented = match[1].trim();
+  if (!presented) return false;
+
+  if (matches(presented, getMcpToken())) return true;
+
+  // The token on disk can be ROTATED under a running web server:
+  // scripts/gateway-pre-start.sh replaces it when the gateway can neither read
+  // nor re-harden it, and the reconcile it runs afterwards reaches the MCP
+  // subprocess only. This process is the verifier, and it holds its own copy —
+  // `cached` above, seeded from CLAWBOX_MCP_TOKEN which production-server.js
+  // pins at Next.js boot. Nothing orders clawbox-setup.service against
+  // clawbox-gateway.service, so a gateway restart mid-uptime (a model/config
+  // change, or Restart=always after a crash) used to 401 every /setup-api/*
+  // call from the agent's device tools until clawbox-setup happened to restart.
+  //
+  // Re-read the file once, rate-limited, and only on a check that already
+  // failed. This widens nothing: data/.mcp-token is 0600 under a directory this
+  // uid owns and it is the source `cached` was read from in the first place —
+  // the stale value is what has no authority, not the file. TASK-657.
+  const now = Date.now();
+  if (now - lastRecheck < RECHECK_INTERVAL_MS) return false;
+  lastRecheck = now;
+
+  const onDisk = readTokenFile();
+  if (!onDisk || onDisk === cached) return false;
+  if (!matches(presented, onDisk)) return false;
+
+  // Adopt it, so the superseded value stops being accepted and the MCP
+  // subprocess's env copy agrees with ours.
+  cached = onDisk;
+  process.env.CLAWBOX_MCP_TOKEN = onDisk;
+  return true;
+}
+
 export function _resetMcpTokenCacheForTests(): void {
   cached = null;
+  lastRecheck = 0;
 }
