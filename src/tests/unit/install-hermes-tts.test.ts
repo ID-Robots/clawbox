@@ -88,6 +88,8 @@ interface StepOpts {
   openclawProvider?: string;
   /** A `hermes config set` key prefix that must fail, to test the write gate. */
   hermesFailKey?: string;
+  /** Make `hermes config unset tts.provider` fail. */
+  hermesUnsetFails?: boolean;
   /** Leave ~/.local/bin/hermes out, to test the "no CLI to write to" guard. */
   omitHermesCli?: boolean;
   /**
@@ -111,6 +113,7 @@ function runStep(edition: string, opts: StepOpts = {}) {
     hermesProvider = "",
     openclawProvider = "",
     hermesFailKey = "",
+    hermesUnsetFails = false,
     omitHermesCli = false,
     hermesReadFails = false,
     ttsStatus = "KOKORO=ready\n",
@@ -172,6 +175,9 @@ function runStep(edition: string, opts: StepOpts = {}) {
         '  echo "Config key not set: $3" >&2',
         "  exit 1",
         "fi",
+        ...(hermesUnsetFails
+          ? ['if [ "$1" = "config" ] && [ "$2" = "unset" ]; then exit 1; fi']
+          : []),
         'if [ "$1" = "config" ] && [ "$2" = "set" ]; then',
         ...(hermesFailKey ? [`  case "$3" in ${hermesFailKey}*) exit 1 ;; esac`] : []),
         "  exit 0",
@@ -357,6 +363,26 @@ describe.skipIf(!hasBash)("the on-device voice is registered with Hermes nativel
         .toContain("config unset tts.provider");
       expect(calls).toContain(`config set tts.providers.${HERMES_PROVIDER}.type command`);
       expect(res.out).not.toMatch(/provider left unset/);
+    });
+
+    it("records a clear that did not land, rather than only warning", () => {
+      // A clear that failed leaves the box pointing at an engine it does not
+      // have — the state the branch exists to end — and the link path does not
+      // re-run for an already-linked box, so nothing else will reach it. The
+      // step's own verdict has to carry it.
+      const res = runStep("hermes", {
+        voiceExit: 13,
+        ttsStatus: "KOKORO=skipped:no-cuda\n",
+        hermesProvider: HERMES_PROVIDER,
+        hermesUnsetFails: true,
+      });
+
+      // The step's own ERROR summary, which only HERMES_TTS_FAIL produces —
+      // `openclaw_tts` is already in the provision failures for the missing
+      // engine, so asserting on that alone would pass either way.
+      expect(res.out, `the failed clear was only warned about:\n${res.out}`)
+        .toMatch(/ERROR: the on-device voice was NOT registered with Hermes/);
+      expect(res.out).toMatch(/could not clear tts\.provider/);
     });
 
     it("still leaves an owner's own provider alone when there is no engine", () => {

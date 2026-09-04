@@ -3842,7 +3842,13 @@ step_openclaw_tts() {
                 if hermes_tts_cli config unset tts.provider; then
                   echo "  Hermes TTS provider cleared — it named $HERMES_TTS_PROVIDER and this box has no on-device engine ($KOKORO_REASON)" >&2
                 else
-                  echo "  Warning: could not clear tts.provider, which names $HERMES_TTS_PROVIDER on a box with no on-device engine ($KOKORO_REASON)" >&2
+                  # RECORDED, not merely warned. A clear that did not land
+                  # leaves the box pointing at an engine it does not have, which
+                  # is the state this whole branch exists to end — and the link
+                  # path does not re-run for an already-linked box, so nothing
+                  # else will reach it. The step's own verdict has to carry it.
+                  HERMES_TTS_FAIL="could not clear tts.provider, which names $HERMES_TTS_PROVIDER on a box with no on-device engine"
+                  echo "  Warning: $HERMES_TTS_FAIL ($KOKORO_REASON)" >&2
                 fi
               else
                 echo "  Hermes TTS provider left unset — this box has no on-device engine ($KOKORO_REASON). The $HERMES_TTS_PROVIDER definition is in place, and ClawBox AI cloud speech is selected when an entitled box is linked." >&2
