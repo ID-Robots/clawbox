@@ -153,7 +153,7 @@ describe("ui_open_app accepts every id it advertises", () => {
     // store's SLUG both take upper case and underscores, so a webapp called
     // `Foo_Bar` exists on boxes today. Refusing it would be the tool calling an
     // id the device itself minted invalid.
-    for (const id of ["Foo_Bar", "weather", "a", "A1_b-c", "x".repeat(64)]) {
+    for (const id of ["Foo_Bar", "weather", "a", "A1_b-c", "_drafts", "x".repeat(64)]) {
       expect(APP_ID_RE.test(id), `${id} must be creatable`).toBe(true);
       expect(INSTALLED_APP_ID_RE.test(`installed-${id}`), `${id} must be openable`).toBe(true);
     }

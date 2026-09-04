@@ -67,8 +67,17 @@ export function zOptText(max: number, description: string) {
  *
  * Deliberately still a closed alphabet: no dots, no slashes, no whitespace, so
  * the value cannot become a path or a second field on its way to the desktop.
+ * The FIRST character carries the same alphabet bar the hyphen, because both
+ * producers accept a leading `_` (`_drafts`) and only the store's SLUG refuses
+ * a leading `-`.
+ *
+ * One shape the producers allow and this still refuses: an id longer than 64
+ * characters, which `SLUG` does not bound. That cap is the guard doing its job
+ * — an unbounded id in an injection check is not a guard — and no such app has
+ * ever been installed, so the trade is a 65-character webapp nobody can open
+ * from a tool against a rule that cannot be walked past.
  */
-export const INSTALLED_APP_ID_RE = /^installed-[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+export const INSTALLED_APP_ID_RE = /^installed-[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/;
 
 export function zSlug(description: string) {
   return z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, "lowercase letters, digits and hyphens only").describe(description);
