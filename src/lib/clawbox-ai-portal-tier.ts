@@ -1,4 +1,5 @@
 import {
+  normalizeAllowedModelIds,
   normalizeClawboxAiTier,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
@@ -120,19 +121,11 @@ function rememberTier(
 
 /**
  * The entitlement list out of a device-info body, or null when the portal
- * published none.
- *
- * Null and an empty list mean the same thing downstream — "not answered" —
- * so an all-blank list is normalised to null here rather than travelling as
- * a list that refuses everything.
+ * published none. Normalised through the one shared rule so the server and
+ * the client cannot disagree about what an empty list means.
  */
 export function mapPortalAllowedModels(body: DeviceInfoResponse): string[] | null {
-  if (!Array.isArray(body.allowedModels)) return null;
-  const ids = body.allowedModels
-    .filter((id): id is string => typeof id === "string")
-    .map((id) => id.trim())
-    .filter((id) => id.length > 0);
-  return ids.length > 0 ? ids : null;
+  return normalizeAllowedModelIds(body.allowedModels);
 }
 
 /**

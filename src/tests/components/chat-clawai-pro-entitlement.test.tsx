@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, waitFor } from "@/tests/helpers/test-utils";
+import { act, render, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { translations } from "@/lib/translations";
@@ -50,16 +50,18 @@ const ON_PRO = {
 };
 
 /**
- * The portal's answer for the paired token, as `/api/clawbox-ai/device-info`
- * really serves it (measured on a Max box, 2026-09-04):
+ * A status answer whose BADGE and ENTITLEMENT disagree.
+ *
+ * CONSTRUCTED, and say so: the only device-info response measured on hardware
+ * (2026-09-04, Max box) has them agreeing —
  *   {"tier":"max","deviceTier":"pro",
  *    "allowedModels":["deepseek-v4-flash","deepseek-v4-pro",…],
  *    "defaultModel":"deepseek-v4-pro", …}
- *
- * `deviceTier` is the model the device currently defaults to, NOT what the
- * plan entitles — a Max account whose box was paired while it was on the Pro
- * plan is still stamped `flash`, so the badge tier reads "flash" while the
- * entitlement list still carries the Pro id.
+ * The disagreement is what the gate exists to get right: `deviceTier` is the
+ * tier this DEVICE defaults to (the configure route keeps "a Max subscriber
+ * who runs Flash on this box" working on purpose, TASK-481), so a badge of
+ * "flash" beside an entitlement list carrying the Pro id is a device default
+ * next to an account permission — and only the second one may refuse a pick.
  */
 const ENTITLED_STATUS = {
   connected: true,
@@ -107,7 +109,15 @@ function modelWrites(calls: FetchCall[]): string[] {
     .map((call) => String(call.init?.body ?? ""));
 }
 
-/** Let every effect chain the status poll can start run to completion. */
+/**
+ * Wait until the guard has had its chance.
+ *
+ * A "no POST happened" assertion is only worth anything against a window a
+ * POST demonstrably fits inside — so the refusal case below asserts its POST
+ * has ALREADY landed after this same helper, with no waitFor of its own. That
+ * is the positive control: one settle, one POST when the portal refuses, none
+ * when it does not.
+ */
 async function settle(calls: FetchCall[]) {
   await waitFor(() => {
     expect(calls.some((call) => call.url.includes("/setup-api/ai-models/status"))).toBe(true);
@@ -115,9 +125,11 @@ async function settle(calls: FetchCall[]) {
   await waitFor(() => {
     expect(calls.some((call) => call.url.includes("/setup-api/chat/model"))).toBe(true);
   });
-  // Two macrotask turns: the guard's own effect, then the POST it would fire.
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  // Generous next to the guard's chain (one effect turn, then the fetch): the
+  // point of the window is that it cannot be the reason a POST is missing.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
 }
 
 beforeEach(() => {
@@ -142,9 +154,9 @@ afterEach(() => {
 
 describe("a ClawBox AI Pro model the account is entitled to", () => {
   it("is left running when the portal lists it, whatever the device-tier badge says", async () => {
-    // The badge tier is the device-pair stamp, not the entitlement. Reading it
-    // as one told a paying Max owner he needed a Max subscription and moved
-    // his box off the model he had just picked in Telegram.
+    // Reading the device default as an entitlement told a paying Max owner he
+    // needed a Max subscription and moved his box off the model he had just
+    // picked in Telegram.
     const calls = installFetch(async () => ({ ok: true, json: async () => ENTITLED_STATUS }));
     render(<ChatPopup isOpen onClose={() => {}} />);
     await settle(calls);
@@ -154,10 +166,10 @@ describe("a ClawBox AI Pro model the account is entitled to", () => {
   });
 
   it("still drops to Flash when the portal really does refuse it", async () => {
-    // The protection this replaces is real: an unentitled Pro pick is
-    // downgraded to flash by the proxy's live-tier reconcile, so every reply
-    // comes from a model the header does not name. A NAMED refusal keeps the
-    // upgrade prompt and the switch.
+    // The protection this replaces is real: on an unentitled account the proxy
+    // answers every turn `400 "Model not allowed: …"` (measured 2026-09-04),
+    // which the chat can only render as the opaque "[assistant turn failed]".
+    // A NAMED refusal keeps the upgrade prompt and the drop to Flash.
     const calls = installFetch(async () => ({
       ok: true,
       json: async () => ({
@@ -168,12 +180,11 @@ describe("a ClawBox AI Pro model the account is entitled to", () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await settle(calls);
 
-    // The switch itself is the assertion: the upgrade message is posted into
-    // the transcript, which the "Switching AI provider…" overlay covers for
-    // the whole of the switch it just started.
-    await waitFor(() => {
-      expect(modelWrites(calls)).toEqual(['{"model":"deepseek/deepseek-v4-flash"}']);
-    });
+    // No waitFor: this is the positive control for the two negative tests —
+    // the POST is already there after the same settle() they assert emptiness
+    // after. (The upgrade message itself goes into the transcript, which the
+    // "Switching AI provider…" overlay covers for the whole of the switch.)
+    expect(modelWrites(calls)).toEqual(['{"model":"deepseek/deepseek-v4-flash"}']);
   });
 
   it("is left running when the entitlement could not be read at all", async () => {

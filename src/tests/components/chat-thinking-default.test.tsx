@@ -88,7 +88,17 @@ function installFetch(model: string) {
       return { ok: true, json: async () => ({ harness: "openclaw", facts: { hasClawaiToken: true, hermesSupportsImages: false } }) };
     }
     if (url.includes("/setup-api/ai-models/status")) {
-      return { ok: true, json: async () => ({ clawaiAccountTier: "pro", clawaiTier: "pro", clawaiLoggedIn: true }) };
+      // `clawaiAllowedModels` is what the entitlement guard reads — without it
+      // the guard is quiet because the question was unanswered, not because
+      // this account is entitled, and the fixture would stop meaning what its
+      // comment says.
+      return { ok: true, json: async () => ({
+        clawaiAccountTier: "pro",
+        clawaiTier: "pro",
+        clawaiAllowedModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
+        clawaiConfigured: true,
+        clawaiLoggedIn: true,
+      }) };
     }
     if (url.includes("/setup-api/chat/model")) {
       return {

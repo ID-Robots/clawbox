@@ -322,6 +322,23 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
     });
 
+    it("fills the list from the badge when the portal answered without one", async () => {
+      // An older portal build publishes no `allowedModels`. There the badge is
+      // all the entitlement there has ever been, so nothing that used to be
+      // refused may quietly become allowed — but this is the ANSWERED branch
+      // only; an unreachable portal still yields null.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("flash");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "pro", deviceTier: "flash" }),
+        { status: 200 },
+      ));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash"]);
+    });
+
     it("says null — not an empty list — when the portal could not be asked", async () => {
       // Null is "not answered". An empty list would read as "nothing is
       // allowed" and lock the box out of its own models.

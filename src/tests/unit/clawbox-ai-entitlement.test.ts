@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CLAWBOX_AI_MODEL_BY_TIER,
+  normalizeAllowedModelIds,
   portalDeniesClawboxAiModel,
 } from "@/lib/clawbox-ai-models";
 
@@ -40,5 +41,24 @@ describe("portalDeniesClawboxAiModel", () => {
     expect(portalDeniesClawboxAiModel("clawai/DeepSeek-V4-Pro", PORTAL_MAX)).toBe(false);
     expect(portalDeniesClawboxAiModel("deepseek/deepseek-v4-pro", ["deepseek/deepseek-v4-pro"]))
       .toBe(false);
+  });
+});
+
+describe("normalizeAllowedModelIds", () => {
+  it("keeps a real list, trimmed", () => {
+    expect(normalizeAllowedModelIds([" deepseek-v4-pro ", "deepseek-v4-flash"]))
+      .toEqual(["deepseek-v4-pro", "deepseek-v4-flash"]);
+  });
+
+  it("answers null for everything that is not one", () => {
+    // null and [] are the same answer downstream — "not answered" — and this
+    // is the one place that rule is written, for the server and the client.
+    for (const value of [undefined, null, [], ["", "  "], "deepseek-v4-pro", 7, {}]) {
+      expect(normalizeAllowedModelIds(value)).toBeNull();
+    }
+  });
+
+  it("drops non-string entries rather than the whole list", () => {
+    expect(normalizeAllowedModelIds(["deepseek-v4-pro", 1, null])).toEqual(["deepseek-v4-pro"]);
   });
 });

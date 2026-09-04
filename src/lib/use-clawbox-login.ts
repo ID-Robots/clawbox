@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { normalizeAllowedModelIds } from "@/lib/clawbox-ai-models";
 
 // Lightweight client hook for "is the device signed in to a ClawBox AI
 // account, and what does that account entitle?". Backed by
@@ -122,11 +123,9 @@ export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS): Clawb
         // Older responses without `clawaiConfigured` fall back to the
         // pre-rollout `provider === "clawai"` heuristic.
         const loggedIn = data.clawaiConfigured ?? (data.provider === "clawai");
-        // Anything that is not a non-empty list of strings is "not answered".
-        const parsed = Array.isArray(data.clawaiAllowedModels)
-          ? data.clawaiAllowedModels.filter((id): id is string => typeof id === "string")
-          : [];
-        const allowedModels = parsed.length > 0 ? parsed : null;
+        // One normaliser, shared with the server that produced the field, so
+        // the two cannot disagree about what an empty list means.
+        const allowedModels = normalizeAllowedModelIds(data.clawaiAllowedModels);
         // Keep the previous array when the poll brought the same ids back.
         // A fresh array every 30 s would be a new identity for every consumer
         // that memoises on it — see the same-ref rule in preserveOnTransient.
