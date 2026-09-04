@@ -56,16 +56,49 @@ const IMPORT_MISSING_TTL_MS = 60_000;
 const IMPORT_OK_TTL_MS = 6 * 60 * 60 * 1000;
 
 /**
+ * Where the CUDA CTranslate2 build puts its shared library, and the CUDA
+ * runtime beside it.
+ *
+ * `install-voice.sh` builds CTranslate2 with `-DCMAKE_INSTALL_PREFIX=~/.local`,
+ * so `libctranslate2.so.4` lands somewhere the dynamic linker does not search:
+ * `ldconfig -p` has no entry for it. `import faster_whisper` therefore fails
+ * with "libctranslate2.so.4: cannot open shared object file" in any process
+ * that does not name the directory itself.
+ *
+ * The whisper-server unit sets exactly this, which is why TRANSCRIPTION works.
+ * The probe below did not, so Settings reported "faster-whisper is not
+ * installed for python3" on a box where it was installed, working and serving
+ * — measured on hardware 2026-09-04, minutes after the install succeeded.
+ *
+ * Kept identical to the unit's own Environment= line and to stt-client.py's
+ * fallback, because three readers disagreeing about where the library lives is
+ * how this went unnoticed in the first place.
+ */
+function ldLibraryPath(): string {
+  const h = home();
+  return [
+    `${h}/.local/lib`,
+    `${h}/.local/lib/python3.10/site-packages/nvidia/cusparselt/lib`,
+    "/usr/local/cuda/lib64",
+  ].join(":");
+}
+
+/**
  * The whole environment the script gets. `systemctl --user` needs
  * XDG_RUNTIME_DIR to find the user bus — from a system service there is none
  * inherited, and without it every start attempt answers "Failed to connect"
  * and the client falls through to the slow in-process decode.
+ *
+ * LD_LIBRARY_PATH is here for the reason above: without it the import probe
+ * cannot load the library the install just built, and answers "not installed"
+ * about an engine that is running.
  */
 function childEnv(): Record<string, string> {
   return {
     HOME: home(),
     PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin",
     XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 1000}`,
+    LD_LIBRARY_PATH: ldLibraryPath(),
   };
 }
 
