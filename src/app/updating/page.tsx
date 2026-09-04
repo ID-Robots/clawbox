@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { I18nProvider, useT } from "@/lib/i18n";
+import ReconnectStage from "@/components/ReconnectStage";
 
 /**
  * The screen the owner sees while an update owns the box.
@@ -12,6 +13,12 @@ import { I18nProvider, useT } from "@/lib/i18n";
  * over the project, and an app left open on the desktop can write through
  * /setup-api into the tree being rewritten underneath it.
  *
+ * It is drawn with ReconnectStage — the same crab, pulse rings, orbiting dots
+ * and step checklist the setup wizard uses for its own restart overlay — rather
+ * than a bespoke spinner. That component already IS the device's wait screen;
+ * a second one styled by hand would be a second answer to a settled question,
+ * and it would drift.
+ *
  * Three things it must get right, in order of how badly each one bites:
  *
  *  1. FAIL CLOSED. Partway through, do_rebuild stops the web server and the box
@@ -20,10 +27,15 @@ import { I18nProvider, useT } from "@/lib/i18n";
  *     screen down. It is the exact inverse of the usual rule.
  *  2. NEVER TRAP THE OWNER. If the update dies, "no answer" would hold this
  *     screen for ever with no way back to Settings. After the rebuild's own
- *     budget plus a margin, it says so and offers the way out.
+ *     budget plus a margin, it says so — and names the escape that actually
+ *     works, which is a restart: at boot the updater finds no update to resume
+ *     and releases the lock (resumeContinuation in src/lib/updater.ts). It does
+ *     NOT offer a link to the desktop, because the middleware would redirect
+ *     such a navigation straight back here.
  *  3. SAY WHAT IS TRUE. While the box answers, it names the step the server
- *     reports. While it does not, it says the device is restarting — and does
- *     not pretend to know how far along it is, because nothing is reporting.
+ *     reports and the line that step last logged. While it does not, it says
+ *     the device is restarting — and claims nothing about progress, because
+ *     nothing is reporting.
  */
 
 /** The rebuild's own budget (REBUILD_TAKEOVER_TIMEOUT_MS) plus room to reboot. */
@@ -31,7 +43,14 @@ const STUCK_AFTER_MS = 20 * 60 * 1000;
 const POLL_MS = 2000;
 
 interface Step { id: string; label: string; status: string }
-interface UpdateStatus { phase?: string; steps?: Step[]; error?: string }
+interface UpdateStatus {
+  phase?: string;
+  steps?: Step[];
+  currentStepIndex?: number;
+  error?: string;
+  /** The last line the running step logged, already redacted by the server. */
+  log?: string;
+}
 
 function clock(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -56,6 +75,7 @@ function UpdatingScreen() {
     const value = t(key);
     return value === key ? english : value;
   };
+
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [offline, setOffline] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -93,66 +113,82 @@ function UpdatingScreen() {
     return () => { stop = true; window.clearInterval(id); };
   }, []);
 
-  const running = status?.steps?.find((s) => s.status === "running");
-  const done = status?.steps?.filter((s) => s.status === "completed").length ?? 0;
-  const total = status?.steps?.length ?? 0;
+  const steps = status?.steps ?? [];
+  const labels = steps.map((s) => s.label);
+  // The server's own index when it has one. It sets -1 the moment a run ends,
+  // which must not be read as "step 0 is running".
+  const reported = status?.currentStepIndex ?? -1;
+  const running = steps.findIndex((s) => s.status === "running");
+  const done = steps.filter((s) => s.status === "completed").length;
+  const phaseIndex = running >= 0 ? running : (reported >= 0 ? reported : done);
   const stuck = elapsed > STUCK_AFTER_MS;
 
+  // The amber callout: the one thing the owner may need to ACT on.
+  const instruction = stuck
+    ? tr(
+        "update.stuckHint",
+        "This is taking longer than an update usually does. Nothing has been lost. "
+          + "If the device does not come back on its own, restart it — the desktop "
+          + "unlocks by itself on the next start.",
+      )
+    : offline
+      ? tr(
+          "update.offlineHint",
+          "The device is restarting and is not answering yet. This screen will return "
+            + "to the desktop on its own.",
+        )
+      : undefined;
+
+  // The muted callout underneath: what the running step is actually doing.
+  // Absent while offline, because nothing is reporting and a stale line would
+  // read as live.
+  const detail = !offline && status?.log ? status.log : undefined;
+
   return (
-    <main
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--bg-base,#0b1220)] px-6"
-      data-testid="updating-page"
-      aria-live="polite"
-    >
-      <div className="w-full max-w-md text-center">
-        <div
-          className="mx-auto mb-6 h-14 w-14 rounded-full border-2 border-white/15 border-t-white/70 animate-spin"
-          aria-hidden="true"
-        />
-        <h1 className="text-xl font-semibold text-[var(--text-primary,#fff)]">{tr("update.title", "System Update")}</h1>
-        <p className="mt-2 text-sm text-[var(--text-secondary,#9aa4b2)]">
+    <>
+      {/*
+        A server-rendered floor, underneath the overlay.
+
+        ReconnectStage draws through createPortal and returns null when there is
+        no document, so on its own this page is BLANK until the client bundle
+        runs. Every other page can live with that. This one cannot: the owner
+        arrives here by a middleware redirect at the exact moment the update is
+        about to stop the web server, and a chunk request that loses that race
+        would leave them staring at nothing for the length of the outage — worse
+        than the plain screen this styling replaced.
+        So the same two sentences are emitted server-side, in the page's own
+        ground, and the portal (z-index max, fixed inset-0) covers them the
+        instant it mounts.
+      */}
+      <div
+        className="fixed inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center"
+        style={{ background: "var(--ground, #0a0f1a)" }}
+        data-testid="updating-ssr-floor"
+      >
+        <h1 className="text-xl font-semibold text-[var(--text-primary,#fff)]">
+          {tr("update.title", "System Update")}
+        </h1>
+        <p className="text-sm text-[var(--text-secondary,#9aa4b2)]">
           {tr("update.updatingDescription", "Updating your ClawBox with the latest software...")}
         </p>
-
-        {/* What the box last told us. A step count, never a percentage of time. */}
-        {total > 0 && (
-          <p className="mt-4 text-xs font-mono text-[var(--text-muted,#6b7280)]" data-testid="updating-step">
-            {running?.label ?? tr("update.preparingUpdate", "Preparing update...")} · {done}/{total}
-          </p>
-        )}
-
-        {offline && !stuck && (
-          <p className="mt-4 text-xs text-[var(--text-muted,#6b7280)]" data-testid="updating-offline">
-            {/* Deliberately not a claim about progress: nothing is reporting. */}
-            The device is restarting and is not answering yet. This screen will
-            return to the desktop on its own.
-          </p>
-        )}
-
-        <p className="mt-4 text-xs tabular-nums text-[var(--text-muted,#6b7280)]" data-testid="updating-elapsed">
-          {clock(elapsed)}
-        </p>
-
-        {stuck && (
-          <div className="mt-6 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-left">
-            <p className="text-xs text-amber-200" data-testid="updating-stuck">
-              {/*
-                Deliberately NOT a link back to the desktop. While the lock is
-                set the middleware would redirect any such navigation straight
-                back here, so a button offering escape would simply not work.
-                The real way out is a restart: at boot the updater looks for an
-                update to resume, finds none, and releases the lock
-                (resumeContinuation in src/lib/updater.ts) — so this says the
-                thing that is actually true.
-              */}
-              This is taking longer than an update usually does. Nothing has been
-              lost. If the device does not come back on its own, restart it — the
-              desktop unlocks by itself on the next start.
-            </p>
-          </div>
-        )}
       </div>
-    </main>
+
+      <ReconnectStage
+      steps={labels.length ? labels : [tr("update.preparingUpdate", "Preparing update...")]}
+      phaseIndex={Math.max(0, phaseIndex)}
+      completed={false}
+      title={tr("update.title", "System Update")}
+      description={tr("update.updatingDescription", "Updating your ClawBox with the latest software...")}
+      instruction={instruction}
+      secondaryInstruction={
+        detail
+          ? `${detail}${labels.length ? ` · ${done}/${labels.length} · ${clock(elapsed)}` : ""}`
+          : labels.length
+            ? `${done}/${labels.length} · ${clock(elapsed)}`
+            : clock(elapsed)
+      }
+      />
+    </>
   );
 }
 
