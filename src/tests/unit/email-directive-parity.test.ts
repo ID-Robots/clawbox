@@ -274,6 +274,58 @@ describe("EMAIL: directive grammar — one rule, three implementations", () => {
       ["JavaScript (the OpenClaw plugin)", (raw) => stripEmailDirectives(raw)],
     ];
 
+    /**
+     * The THIRD parser's cost — and it needs its OWN pathological input, which
+     * is the point of this block.
+     *
+     * `pathological()` above holds a `\r` back from the end of the line. That
+     * pegs JavaScript and TypeScript because ECMAScript's `.` excludes `\r`,
+     * `\n`, ` ` and ` ` — so `.*` cannot reach the end and the engine
+     * tries every split of the spaces against `\s*`. **Python's `.` excludes
+     * only `\n`**, so it crosses that `\r` on the first attempt and the same
+     * input costs it nothing: measured on the pre-fix pattern, the `\r` shape
+     * is 0.072 ms at 32k while the `\n` shape is 2,862 ms. Reusing one engine's
+     * pathological input across all three would therefore have been a test that
+     * cannot fail — a green no-op, which is exactly what this suite exists to
+     * refuse.
+     *
+     * So this measures the compiled pattern against the shape PYTHON's engine
+     * cannot cross. It is deliberately the pattern and not
+     * `strip_email_directives`: the shipped function is safe today for a
+     * structural reason rather than the pattern's — it splits on `\n` (so no
+     * line can hold one) and matches the TRIMMED line (so the line ends in a
+     * non-whitespace character and `.*` always reaches it). That safety is two
+     * edits away from being lost, and this is what would notice.
+     *
+     * Timed inside python so the interpreter's start-up is not read as the
+     * parser's cost, best-of-five for the same reason `bestMs` is, and behind
+     * an `execFileSync` timeout so a regression fails this test instead of
+     * hanging the suite.
+     */
+    const pythonPatternBestMs = (inputs: string[]): number[] => {
+      const program = [
+        "import json, sys, time",
+        "sys.path.insert(0, sys.argv[1])",
+        "from email_directives import _EMAIL_LINE_RE",
+        "out = []",
+        "for raw in json.loads(sys.stdin.read()):",
+        "    best = float('inf')",
+        "    for _ in range(5):",
+        "        t = time.perf_counter()",
+        "        _EMAIL_LINE_RE.match(raw)",
+        "        best = min(best, (time.perf_counter() - t) * 1000.0)",
+        "    out.append(best)",
+        "print(json.dumps(out))",
+      ].join("\n");
+      const out = execFileSync("python3", ["-c", program, PY_PLUGIN_DIR], {
+        input: JSON.stringify(inputs),
+        encoding: "utf-8",
+        timeout: 60_000,
+        maxBuffer: 8 * 1024 * 1024,
+      });
+      return JSON.parse(out) as number[];
+    };
+
     it.each(PARSERS)("%s does not blow up on a long run of spaces", (_name, strip) => {
       // Linear needs well under a millisecond for 100k characters; the old
       // pattern needs ~19 s here and ~5 s on a fast machine, so 2 s sits
@@ -305,6 +357,28 @@ describe("EMAIL: directive grammar — one rule, three implementations", () => {
       // `expected false to be true`.
       expect({ backtracking, flat, ratio: backtracking / flat, linear }).toMatchObject({ linear: true });
     }, 60_000);
+
+    it("Python (the Hermes plugin) is linear on the shape ITS engine cannot cross", () => {
+      // `\n`, not `\r` — see the comment on the bridge. One interpreter start
+      // for all three inputs, and the same two assertions the other two parsers
+      // get: an absolute bound, and a same-length ratio that reads the
+      // algorithm rather than the machine.
+      const pyPathological = (n: number) => `email:${" ".repeat(n)}x\ny`;
+      const benign = (n: number) => `email:${" ".repeat(n)}xy`;
+      const [big, flatRaw, backtracking] = pythonPatternBestMs([
+        pyPathological(100_000),
+        benign(32_000),
+        pyPathological(32_000),
+      ]);
+      // Linear needs well under a millisecond for 100k characters; the pre-fix
+      // pattern needs ~11.7 s at 64k, so 2 s sits far between the two.
+      expect(big).toBeLessThan(2_000);
+      const flat = Math.max(flatRaw, 0.05);
+      const linear = backtracking < 25 || backtracking / flat < 50;
+      // Measured: 0.05 ms and a ratio of ~1 here; 2,862 ms with the pre-fix
+      // `^email:\s*(.*)$`, a 57,000x separation.
+      expect({ big, backtracking, flat, ratio: backtracking / flat, linear }).toMatchObject({ linear: true });
+    }, 90_000);
   });
 
   it("a non-string is not a crash in either plugin — a hook must never break delivery", () => {
