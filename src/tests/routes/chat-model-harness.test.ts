@@ -31,7 +31,12 @@ vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
   notifyProviderSetChanged: vi.fn(),
   refreshInBackground: vi.fn(),
 }));
-vi.mock("@/lib/openclaw-config", () => ({
+vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
+  // The REAL class. A factory replaces the whole module, and the configure
+  // path narrows on `instanceof GatewayNotReadyError` — `instanceof undefined`
+  // throws a TypeError the first time a mocked restart rejects, which is what
+  // `openclaw-config-mock-completeness.test.ts` exists to stop shipping.
+  GatewayNotReadyError: (await importOriginal<typeof import("@/lib/openclaw-config")>()).GatewayNotReadyError,
   inferConfiguredLocalModel: vi.fn(),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
   readConfigStrict: vi.fn(async () => ({})),
