@@ -10,7 +10,8 @@ import {
   hermesImagePluginInstalled,
   installHermesImagePlugin,
   mergePluginsEnabled,
-  readPluginsEnabled,
+  decodePluginsEnabledJson,
+  decodePluginsEnabledPlain,
 } from "@/lib/hermes-image-plugin";
 
 /**
@@ -93,7 +94,7 @@ describe("installing the ClawBox AI image backend", () => {
 
 describe("plugins.enabled", () => {
   /** What `hermes config get plugins.enabled --json` prints for a stored value. */
-  const asJson = (value: unknown) => readPluginsEnabled(JSON.stringify(value));
+  const asJson = (value: unknown) => decodePluginsEnabledJson(JSON.stringify(value));
 
   it("adds ours to a list the customer already has", () => {
     // The list gates EVERY user plugin on the box, so replacing it would
@@ -109,7 +110,7 @@ describe("plugins.enabled", () => {
     // Block and flow, both observed on the live box. Kept because a CLI old
     // enough to reject `--json` still has to be understood.
     for (const rendering of ["- weather\n- spotify\n", "['weather', \"spotify\"]"]) {
-      expect(mergePluginsEnabled(readPluginsEnabled(rendering))).toEqual([
+      expect(mergePluginsEnabled(decodePluginsEnabledPlain(rendering))).toEqual([
         "weather",
         "spotify",
         HERMES_IMAGE_PLUGIN_NAME,
@@ -119,10 +120,10 @@ describe("plugins.enabled", () => {
 
   it("starts a list when the key has never been set", () => {
     // What the CLI prints for an unset key, verbatim.
-    expect(mergePluginsEnabled(readPluginsEnabled("Config key not set: plugins.enabled"))).toEqual([
+    expect(mergePluginsEnabled(decodePluginsEnabledJson("Config key not set: plugins.enabled"))).toEqual([
       HERMES_IMAGE_PLUGIN_NAME,
     ]);
-    expect(mergePluginsEnabled(readPluginsEnabled(""))).toEqual([HERMES_IMAGE_PLUGIN_NAME]);
+    expect(mergePluginsEnabled(decodePluginsEnabledJson(""))).toEqual([HERMES_IMAGE_PLUGIN_NAME]);
   });
 
   it("writes nothing when ours is already listed", () => {
@@ -137,16 +138,32 @@ describe("plugins.enabled", () => {
     // is loading no plugin at all — and through the plain rendering it looked
     // like a list that already contained us, which is why it never healed.
     const residue = asJson(`["weather", "${HERMES_IMAGE_PLUGIN_NAME}"]`);
-    expect(residue.residue).toBe(true);
+    expect(residue.kind).toBe("residue");
     // The names inside it are still recoverable, so the repair keeps them.
     expect(mergePluginsEnabled(residue)).toEqual(["weather", HERMES_IMAGE_PLUGIN_NAME]);
   });
 
-  it("repairs a value it cannot read names out of, without inventing any", () => {
-    for (const stored of [{ clawai: true }, 7, null]) {
-      const state = asJson(stored);
-      expect(state.residue, JSON.stringify(stored)).toBe(true);
-      expect(mergePluginsEnabled(state)).toEqual([HERMES_IMAGE_PLUGIN_NAME]);
+  it("recovers a customer's names out of a residue it did not write", () => {
+    // A hand-edited mapping is a plausible YAML mistake and its KEYS are good
+    // plugin names; a bare scalar is one name. Both were loading nothing, and
+    // replacing them with `["clawai"]` would have destroyed the only record of
+    // what the owner had enabled.
+    expect(mergePluginsEnabled(asJson({ weather: true, spotify: true }))).toEqual([
+      "weather",
+      "spotify",
+      HERMES_IMAGE_PLUGIN_NAME,
+    ]);
+    expect(mergePluginsEnabled(asJson("weather"))).toEqual(["weather", HERMES_IMAGE_PLUGIN_NAME]);
+  });
+
+  it("leaves a shape it cannot read names out of alone", () => {
+    // Not repaired and not replaced: the caller refuses the feature instead,
+    // the same call `scripts/register-mcp.sh` makes on a list it cannot parse.
+    for (const stored of [7, null, true]) {
+      expect(asJson(stored).kind, JSON.stringify(stored)).toBe("residue");
+      expect(mergePluginsEnabled(asJson(stored))).toEqual([HERMES_IMAGE_PLUGIN_NAME]);
     }
+    expect(decodePluginsEnabledJson("not json at all").kind).toBe("unreadable");
+    expect(mergePluginsEnabled(decodePluginsEnabledJson("not json at all"))).toBeNull();
   });
 });

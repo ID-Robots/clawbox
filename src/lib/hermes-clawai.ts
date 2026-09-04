@@ -13,7 +13,9 @@ import {
   HERMES_IMAGE_TOKEN_ENV,
   installHermesImagePlugin,
   mergePluginsEnabled,
-  readPluginsEnabled,
+  decodePluginsEnabledJson,
+  decodePluginsEnabledPlain,
+  type PluginsEnabledState,
 } from "@/lib/hermes-image-plugin";
 import {
   CLAWBOX_AI_CHAT_MODEL_IDS,
@@ -1015,18 +1017,25 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
   // user plugin at all — `_get_enabled_set` answers `set(enabled) if
   // isinstance(enabled, list) else set()` — while ClawBox read the residue back
   // as a real list and concluded there was nothing to do. TASK-701.
-  const current = await runHermesCli(
-    ["config", "get", "plugins.enabled", "--json"],
-    { timeoutMs: 15_000 },
-  );
-  const listing = `${current.stdout ?? ""}\n${current.stderr ?? ""}`;
-  if (current.code !== 0 && !/config key not set/i.test(listing)) {
-    throw new Error(current.stderr?.trim() || "hermes config get plugins.enabled failed");
+  const { state, typed } = await readPluginsEnabledFromCli();
+  if (state.kind === "unreadable") {
+    throw new Error(
+      "plugins.enabled holds a value this build cannot read — left alone, image generation off",
+    );
   }
-  const merged = mergePluginsEnabled(
-    readPluginsEnabled(current.code === 0 ? current.stdout : ""),
-  );
-  if (merged) await writePluginsEnabled(merged);
+  const merged = mergePluginsEnabled(state);
+  try {
+    if (merged) await writePluginsEnabled(merged, typed);
+  } catch (err) {
+    // WITHDRAW THE CLAIM, don't merely decline to re-make it. Every box that
+    // can be in the residue state has been linked once already, so
+    // `image_gen.provider` is on disk naming us — and that single key is what
+    // `hermesAgentDrawsImages` reads. Skipping the writes below would leave the
+    // composer button and the capability both saying yes over a plugin Hermes
+    // does not load.
+    await withdrawImageProviderClaim();
+    throw err;
+  }
   // `image_gen.provider` LAST, because it is the key `hermesAgentDrawsImages`
   // reads and therefore the key that turns the agent's picture ability on. A
   // provider written first and then a failed `base_url` would leave a box
@@ -1068,7 +1077,62 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
  * no retry loop: this runs once, at link time, and the caller logs the throw
  * while the link itself still succeeds.
  */
-async function writePluginsEnabled(names: string[]): Promise<void> {
+async function readPluginsEnabledFromCli(): Promise<{ state: PluginsEnabledState; typed: boolean }> {
+  const typedRead = await runHermesCli(
+    ["config", "get", "plugins.enabled", "--json"],
+    { timeoutMs: 15_000 },
+  );
+  if (typedRead.code === 0) return { state: decodePluginsEnabledJson(typedRead.stdout), typed: true };
+  if (/config key not set/i.test(`${typedRead.stdout ?? ""}\n${typedRead.stderr ?? ""}`)) {
+    return { state: { kind: "list", names: [] }, typed: true };
+  }
+  // A CLI whose `config get` does not take the flag answers argparse's
+  // "unrecognized arguments: --json". Ask again PLAINLY rather than refusing
+  // the feature: `--json` is only what lets the type be PROVED, and a build
+  // that cannot answer that question has told us nothing about whether the
+  // stored value is residue. Losing image generation there would be a false
+  // failure, not a conservative one — these boxes draw today.
+  const plainRead = await runHermesCli(["config", "get", "plugins.enabled"], { timeoutMs: 15_000 });
+  const listing = `${plainRead.stdout ?? ""}\n${plainRead.stderr ?? ""}`;
+  if (plainRead.code !== 0 && !/config key not set/i.test(listing)) {
+    throw new Error(plainRead.stderr?.trim() || "hermes config get plugins.enabled failed");
+  }
+  console.warn(
+    "[hermes/clawai] this hermes does not answer `config get --json`;"
+    + " plugins.enabled is merged from the plain rendering and its type is not proved",
+  );
+  return {
+    state: decodePluginsEnabledPlain(plainRead.code === 0 ? plainRead.stdout : ""),
+    typed: false,
+  };
+}
+
+/**
+ * Stop claiming the agent can draw.
+ *
+ * `hermesAgentDrawsImages` reads `image_gen.provider` and nothing else, and
+ * this function is its only writer — so on a box linked once before, declining
+ * to re-write the key leaves the old claim standing. Only OUR selection is
+ * withdrawn: a customer who chose FAL by hand keeps it (the "known and accepted
+ * false positive" hermes-features.ts documents is their choice, not ours).
+ *
+ * Best effort, and never throws: it runs on the way out of a failure that is
+ * already being reported, and a second error here would replace the first.
+ */
+async function withdrawImageProviderClaim(): Promise<void> {
+  try {
+    const read = await runHermesCli(["config", "get", "image_gen.provider"], { timeoutMs: 15_000 });
+    if (read.code !== 0 || read.stdout.trim() !== HERMES_IMAGE_PLUGIN_NAME) return;
+    await runHermesCli(["config", "unset", "image_gen.provider"], { timeoutMs: 15_000 });
+    console.warn(
+      "[hermes/clawai] withdrew image_gen.provider — the ClawBox AI backend is not loadable here",
+    );
+  } catch {
+    // Nothing to add: the caller is already reporting why we got here.
+  }
+}
+
+async function writePluginsEnabled(names: string[], typed: boolean): Promise<void> {
   const written = await runHermesCli(
     ["config", "set", "plugins.enabled", JSON.stringify(names)],
     { timeoutMs: 15_000 },
@@ -1084,15 +1148,32 @@ async function writePluginsEnabled(names: string[]): Promise<void> {
       "hermes stored plugins.enabled as text, so no plugin would load — image generation left off",
     );
   }
+  if (!typed) return; // the type cannot be proved on this build; see the read above.
   const read = await runHermesCli(
     ["config", "get", "plugins.enabled", "--json"],
     { timeoutMs: 15_000 },
   );
+  // A QUESTION THAT COULD NOT BE ASKED IS NOT A WRITE THAT FAILED. 126, 127 and
+  // a signalled `null` are the shell's codes for the `hermes` shim while
+  // `step_hermes_install` rebuilds the venv under it — nothing was parsed, and
+  // the write above still exited 0 with no coercion warning. Suppressing image
+  // generation for the whole link over that is the false-failure shape; the
+  // sibling repair answers `unverified` and tries again for the same reason.
+  if (!hermesCliAnswered(read)) {
+    console.warn(
+      "[hermes/clawai] could not read plugins.enabled back (the CLI did not answer);"
+      + " the write exited 0 and is left as written",
+    );
+    return;
+  }
   if (read.code !== 0) {
     throw new Error(`could not read plugins.enabled back (exit ${read.code})`);
   }
-  const state = readPluginsEnabled(read.stdout);
-  if (state.residue || !names.every((name) => state.names.includes(name))) {
+  // STRICT: `decodePluginsEnabledJson` never falls back to a text parse. A
+  // prover that accepts the ambiguous plain rendering would re-open the exact
+  // hole this function closes.
+  const state = decodePluginsEnabledJson(read.stdout);
+  if (state.kind !== "list" || !names.every((name) => state.names.includes(name))) {
     throw new Error("plugins.enabled did not read back as the list that was written");
   }
 }

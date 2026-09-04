@@ -68,6 +68,14 @@ function claimedItCanDraw(): boolean {
   return sets().some((s) => s.startsWith("image_gen.provider="));
 }
 
+/** Every `config unset`, by key. */
+function unsets(): string[] {
+  return cliMock.mock.calls
+    .map((c) => c[0] as string[])
+    .filter((a) => a[1] === "unset")
+    .map((a) => a[2]);
+}
+
 /** The CLI's own warning when a JSON literal did not coerce to a structure. */
 const STORING_AS_STRING =
   "Warning: value for 'plugins.enabled' looks like a list/mapping but parsed as str; storing as string.";
@@ -198,5 +206,119 @@ describe("plugins.enabled is written on a read-back, not on an exit code", () =>
     expect(sets()).toContain(
       `plugins.enabled=${JSON.stringify(["weather", "spotify", HERMES_IMAGE_PLUGIN_NAME])}`,
     );
+  });
+});
+
+describe("a box that was linked before the guard existed", () => {
+  it("withdraws the claim it can draw, rather than leaving the old one standing", async () => {
+    // Every box that CAN be in the residue state has been linked once already,
+    // so `image_gen.provider` is on disk naming us — and that one key is what
+    // `hermesAgentDrawsImages` reads. Declining to re-write it would leave the
+    // composer button and the capability both saying yes over a plugin Hermes
+    // does not load: the same false success, one link later.
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (args[1] === "set" && args[2] === "plugins.enabled") {
+        return { code: 0, stdout: "", stderr: STORING_AS_STRING };
+      }
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
+      }
+      if (args[1] === "get" && args[2] === "image_gen.provider") {
+        return { code: 0, stdout: `${HERMES_IMAGE_PLUGIN_NAME}\n`, stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(unsets()).toContain("image_gen.provider");
+  });
+
+  it("leaves a backend the customer chose by hand alone", async () => {
+    // The "known and accepted false positive" is their choice, not ours.
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (args[1] === "set" && args[2] === "plugins.enabled") {
+        return { code: 0, stdout: "", stderr: STORING_AS_STRING };
+      }
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
+      }
+      if (args[1] === "get" && args[2] === "image_gen.provider") {
+        return { code: 0, stdout: "fal\n", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(unsets()).not.toContain("image_gen.provider");
+  });
+});
+
+describe("a hermes whose config get does not take --json", () => {
+  it("keeps drawing, merging from the plain rendering instead of refusing", async () => {
+    // `--json` is only what lets the TYPE be proved. A build that cannot answer
+    // that question has said nothing about whether the value is residue, so
+    // withdrawing the feature would be a false failure — these boxes draw today.
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return args.includes("--json")
+          ? { code: 2, stdout: "", stderr: "usage: hermes config get\nunrecognized arguments: --json" }
+          : { code: 0, stdout: "- weather\n", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(sets()).toContain(
+      `plugins.enabled=${JSON.stringify(["weather", HERMES_IMAGE_PLUGIN_NAME])}`,
+    );
+    expect(claimedItCanDraw()).toBe(true);
+    expect(unsets()).not.toContain("image_gen.provider");
+  });
+});
+
+describe("the proof does not accept the ambiguous rendering", () => {
+  it("refuses a read-back that is not JSON, even though it spells the right list", async () => {
+    // A build that takes `--json` but does not honour it in the formatter, or
+    // anything that re-renders on the way back. `- clawai` through a lenient
+    // text parse would have proved nothing and been called landed.
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return args.includes("--json")
+          ? { code: 0, stdout: `- ${HERMES_IMAGE_PLUGIN_NAME}\n`, stderr: "" }
+          : { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(claimedItCanDraw()).toBe(false);
+  });
+
+  it("does not punish a read-back the CLI never answered", async () => {
+    // 127 is the shell's code for the `hermes` shim while the venv under it is
+    // being rebuilt: nothing was parsed, and the write above still exited 0
+    // with no coercion warning. Abandoning the feature for the whole link over
+    // that is the false-failure shape.
+    let written = false;
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (args[1] === "set" && args[2] === "plugins.enabled") {
+        written = true;
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        if (!written) return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
+        return { code: 127, stdout: "", stderr: "hermes: command not found" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(claimedItCanDraw()).toBe(true);
+    expect(unsets()).not.toContain("image_gen.provider");
   });
 });

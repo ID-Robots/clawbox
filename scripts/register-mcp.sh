@@ -568,6 +568,19 @@ if hook_plugin:
             changed = True
             print("[register-mcp] enabled the " + hook_plugin
                   + " plugin — EMAIL: card directives are stripped on the way to a channel")
+        elif names is not None and isinstance(raw_enabled, str):
+            # NORMALISE THE TYPE even when there is no name to add. A string
+            # here is the residue of a `hermes config set` that exited 0 and
+            # stored its literal as text; `_get_enabled_set` reads a non-list
+            # as EMPTY, so the box loads NO user plugin at all — ours, the
+            # customer's and this hook included. The branch above healed it
+            # only as a side effect of having a name to append, so a box whose
+            # residue already spelled the hook stayed broken indefinitely.
+            # `yaml.safe_dump` writes it back as a real sequence. TASK-701.
+            plugins_cfg["enabled"] = names
+            changed = True
+            print("[register-mcp] rewrote plugins.enabled as a list — it was stored as text, "
+                  "which loads no plugins at all")
     else:
         print("[register-mcp] WARNING: plugins is not a mapping; "
               "leaving the EMAIL: directive hook disabled.", file=sys.stderr)
