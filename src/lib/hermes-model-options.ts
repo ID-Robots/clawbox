@@ -176,6 +176,13 @@ export interface ProviderScope {
   warning?: string;
   source: ModelOptionsSource;
   stale: boolean;
+  /**
+   * Carried through from {@link ModelOptionsPayload.degraded}, because `stale`
+   * alone cannot say which of two very different boxes this is: one that has
+   * never reached its dashboard, and one that had a full catalogue a moment ago
+   * and lost it to a blip. The panel says different things about them.
+   */
+  degraded?: "dashboard-unreachable";
   fetchedAt: number;
 }
 
@@ -389,6 +396,17 @@ let lastExplicitRefreshAt = 0;
 // clearing `cached` alone loses that race and resurrects the old selection for
 // a full FRESH_MS.
 let generation = 0;
+// How good the last installed answer was, and when — NOT the answer itself.
+//
+// `invalidateModelOptions()` drops `cached`, and every route that changes a
+// credential or the selection calls it. That used to take the downgrade guard's
+// only baseline with it, so a dashboard blip landing in that window installed
+// the 2-provider disk manifest over a 48-provider catalogue with nothing to
+// compare against and nothing said about it (TASK-678). This survives the
+// invalidation because it is quality and time, never data: it cannot resurrect
+// a pre-write selection, and it ages out on the same STALE_MS bound the guard
+// already uses.
+let lastGoodBaseline: DowngradeBaseline | null = null;
 // Memoised `/api/model/recommended-default` answers, keyed by provider and
 // pinned to the payload they were computed for. Without this every provider
 // click cost an uncached dashboard round-trip even on a warm catalogue — the
@@ -400,6 +418,9 @@ const recommendedCache = new Map<string, { model: string; forFetchedAt: number }
  *  provider's `authenticated` flag and unlocks its model list). */
 export function invalidateModelOptions(): void {
   cached = null;
+  // `lastGoodBaseline` deliberately SURVIVES: it is how good the answer was,
+  // not the answer, so it cannot resurrect a pre-write selection — and dropping
+  // it is what left the downgrade guard disarmed for the next read.
   generation += 1;
   recommendedCache.clear();
   // The `hermes config get` memo keys on config.yaml's mtime, so a `config set`
@@ -773,17 +794,23 @@ async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
   };
 }
 
+/** How good an answer was, and when — everything the downgrade guard reads. */
+interface DowngradeBaseline {
+  source: ModelOptionsSource;
+  fetchedAt: number;
+}
+
 /**
- * True when `next` is a worse answer than the `previous` one still in cache and
- * that cached answer has not aged out.
+ * True when `next` is a worse answer than the `baseline` this process last had,
+ * and that baseline has not aged out.
  *
  * Only downgrades are refused. An equal-or-better source always installs, so a
  * dashboard read that legitimately returns fewer providers (a key was removed)
  * still lands, and a stale-but-good cache still expires on its own schedule.
  */
-function isDowngrade(next: ModelOptionsPayload, previous: ModelOptionsPayload): boolean {
-  if (SOURCE_RANK[next.source] >= SOURCE_RANK[previous.source]) return false;
-  return Date.now() - previous.fetchedAt < STALE_MS;
+function isDowngrade(next: ModelOptionsPayload, baseline: DowngradeBaseline): boolean {
+  if (SOURCE_RANK[next.source] >= SOURCE_RANK[baseline.source]) return false;
+  return Date.now() - baseline.fetchedAt < STALE_MS;
 }
 
 function load(refresh: boolean): Promise<ModelOptionsPayload> {
@@ -798,6 +825,11 @@ function load(refresh: boolean): Promise<ModelOptionsPayload> {
 
   const gen = generation;
   const previous = cached;
+  // `lastGoodBaseline` alone, not the cache: it is never worse than `cached`
+  // (it is raised by every payload the cache accepts and never lowered), and it
+  // is the half that survives a credential write — without it the guard below
+  // is disarmed by every one of them.
+  const baseline = lastGoodBaseline;
   const run = buildPayload(refresh)
     .then((payload) => {
       // A dashboard timeout makes buildPayload fall back to the 2-provider disk
@@ -807,10 +839,36 @@ function load(refresh: boolean): Promise<ModelOptionsPayload> {
       // an anonymous caller could trigger into a catalogue-poisoning primitive.
       // Serve the better payload we already have and SAY that the refresh
       // failed. TASK-446.
-      if (previous && isDowngrade(payload, previous)) {
-        const kept: ModelOptionsPayload = { ...previous, degraded: "dashboard-unreachable" };
-        if (gen === generation) cached = kept;
-        return kept;
+      if (baseline && isDowngrade(payload, baseline)) {
+        // `previous` was read when this load STARTED. If an invalidation landed
+        // since, its `current` is the selection that write replaced, and
+        // handing it back — not merely caching it — would paint the pre-write
+        // pairing. The generation check is what separates the two cases, and it
+        // has to gate the RETURN, not just the cache.
+        if (previous && gen === generation) {
+          const kept: ModelOptionsPayload = { ...previous, degraded: "dashboard-unreachable" };
+          cached = kept;
+          return kept;
+        }
+        // The better payload is GONE — an invalidation dropped it, so its
+        // `current` is pre-write and serving it back would be wrong at exactly
+        // the moment this guard fires. Serve the thin one, whose selection IS
+        // post-write, and mark it: two providers where forty-eight were a
+        // moment ago is news, not a catalogue. TASK-678.
+        const marked: ModelOptionsPayload = { ...payload, degraded: "dashboard-unreachable" };
+        if (gen === generation) cached = marked;
+        return marked;
+      }
+      // Raise the baseline, never lower it. Recorded BEFORE the generation
+      // check, because the baseline is quality and time rather than data: a
+      // payload too old to serve is still evidence of how good the dashboard
+      // was. And only upwards, or the fallback this branch caches becomes the
+      // baseline on the very next refresh and disarms the guard again a second
+      // after it fired — which is the shape a second credential write in the
+      // same outage hits.
+      const aged = !lastGoodBaseline || Date.now() - lastGoodBaseline.fetchedAt >= STALE_MS;
+      if (aged || SOURCE_RANK[payload.source] >= SOURCE_RANK[lastGoodBaseline!.source]) {
+        lastGoodBaseline = { source: payload.source, fetchedAt: payload.fetchedAt };
       }
       // A config write landed while we were reading, so this payload's
       // `current` is pre-write. Hand it to the caller that asked for it, but
@@ -1027,6 +1085,7 @@ export async function scopeFromPayload(
     ...(row?.warning ? { warning: row.warning } : {}),
     source: payload.source,
     stale: payload.stale,
+    ...(payload.degraded ? { degraded: payload.degraded } : {}),
     fetchedAt: payload.fetchedAt,
   };
 }
