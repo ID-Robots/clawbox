@@ -164,7 +164,16 @@ beforeEach(async () => {
 afterEach(() => {
   lib._resetCodingAgentStateForTests();
   restore();
-  fs.rmSync(base, { recursive: true, force: true });
+  // maxRetries, because this suite has twice failed CI with
+  // `ENOTEMPTY: directory not empty, rmdir '.../code-projects/site/.git'`
+  // (PRs #643 and #648, both on changes that touch none of this code).
+  //
+  // The test never creates that .git — the code under test does, through a
+  // spawned `git init` — so the directory can still be gaining files at the
+  // moment this line runs. Node's rm retries precisely this set of errors
+  // (EBUSY/EMFILE/ENFILE/ENOTEMPTY/EPERM) with a linear backoff, and defaults
+  // to not retrying at all.
+  fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 async function finished(id: string) {

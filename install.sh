@@ -4902,15 +4902,25 @@ ollama_wait_ready() {
   local limit="${1:-30}" waited=0
   local url="${OLLAMA_TAGS_URL:-http://localhost:11434/api/tags}"
   systemctl cat ollama.service >/dev/null 2>&1 || return 1
-  # 2, not 1: "the owner switched it off" is not "it is unreachable", and the
-  # callers below print a connectivity diagnostic that would be a lie on a box
-  # whose Ollama is off on purpose — it would follow the line directly above it,
-  # contradicting it.
-  if ! systemctl is-enabled --quiet ollama.service 2>/dev/null; then
-    echo "  Ollama is switched off on this box - leaving it that way."
-    return 2
+  # Activity FIRST, and the boot setting only if it is down.
+  #
+  # The rule this enforces is "never START an engine the owner switched off" —
+  # not "never use one". `systemctl disable` without --now leaves the service
+  # RUNNING until the next boot, so asking is-enabled first refused a reachable
+  # Ollama and skipped a repair that would have started nothing.
+  if ! systemctl is-active --quiet ollama.service 2>/dev/null; then
+    # Down, so waking it is a decision — and the boot setting is the only thing
+    # that can tell the idle standby (`stop`, never `disable`) apart from the
+    # owner's switch (`disable --now`).
+    #
+    # 2, not 1: "switched off" is not "unreachable", and the callers print a
+    # connectivity diagnostic on 1 that would contradict the line above it.
+    if ! systemctl is-enabled --quiet ollama.service 2>/dev/null; then
+      echo "  Ollama is switched off on this box - leaving it that way."
+      return 2
+    fi
+    systemctl start ollama.service >/dev/null 2>&1 || true
   fi
-  systemctl is-active --quiet ollama.service || systemctl start ollama.service >/dev/null 2>&1 || true
   while :; do
     curl -fsS --max-time 2 "$url" >/dev/null 2>&1 && return 0
     [ "$waited" -ge "$limit" ] && return 1

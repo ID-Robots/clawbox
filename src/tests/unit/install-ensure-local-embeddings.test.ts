@@ -190,6 +190,16 @@ describe("ollama_wait_ready — behaviour, driven against stubs", () => {
     expect(r.calls.some((c) => c.startsWith("start ollama.service"))).toBe(false);
   });
 
+  it("uses a daemon that is running even though it is disabled", () => {
+    // `systemctl disable` without --now leaves the service RUNNING until the
+    // next boot. The rule is "never START an engine the owner switched off",
+    // not "never use one" — refusing here skipped a repair that would have
+    // started nothing. Reported by CodeRabbit on #648.
+    const r = run({ enabled: "disabled", active: true, answers: true });
+    expect(r.out).toContain("RC=0");
+    expect(r.calls.some((c) => c.startsWith("start ollama.service"))).toBe(false);
+  });
+
   it("does not re-start a daemon that is already up", () => {
     const r = run({ enabled: "enabled", active: true, answers: true });
     expect(r.out).toContain("READY");
