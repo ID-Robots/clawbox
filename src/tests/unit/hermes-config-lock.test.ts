@@ -72,7 +72,7 @@ describe("both writers share ONE lock file", () => {
     expect(REGISTER_SRC).toContain("flock -w 120 9");
   });
 
-  it("bounds both in-lock hermes calls with a SIGKILL grace, so no survivor keeps fd 9", () => {
+  it("bounds EVERY hermes invocation with a SIGKILL grace, so no survivor keeps fd 9", () => {
     // This is a LOCK invariant, which is why it lives here. Both `hermes` calls
     // run inside the fd-9 critical section, and a child inherits that fd: a
     // `hermes` that ignores SIGTERM outlives `timeout` and goes on holding
@@ -81,14 +81,20 @@ describe("both writers share ONE lock file", () => {
     // UNLOCKED — the lost update this whole file exists to prevent, with the
     // lock in place and doing nothing. Plain `timeout` sends SIGTERM only, so
     // the `-k` grace is what actually ends such a child.
-    // An INVOCATION is `"$HERMES_BIN" <subcommand>`; the `[ ! -x "$HERMES_BIN" ]`
-    // guard and the `HERMES_BIN=` assignment are not, and must not be demanded
-    // to carry a timeout.
-    const inLockCalls = REGISTER_SRC.split("\n").filter(
-      (line) => /"\$HERMES_BIN"\s+[a-z]/.test(line) && !/^\s*#/.test(line),
+    //
+    // The sweep is over the WHOLE file rather than the critical section, which
+    // is the stronger rule and the one worth keeping: a `hermes` call added
+    // outside the lock inherits fd 9 just the same, because the `exec 9>` that
+    // opens it is inherited by every later child.
+    //
+    // An INVOCATION is `"$HERMES_BIN" <word>` — a subcommand or a flag; the
+    // `[ ! -x "$HERMES_BIN" ]` guard and the `HERMES_BIN=` assignment are not,
+    // and must not be demanded to carry a timeout.
+    const calls = REGISTER_SRC.split("\n").filter(
+      (line) => /"\$HERMES_BIN"\s+[a-z-]/.test(line) && !/^\s*#/.test(line),
     );
-    expect(inLockCalls.length).toBeGreaterThan(0);
-    for (const line of inLockCalls) {
+    expect(calls.length).toBeGreaterThan(0);
+    for (const line of calls) {
       expect(line, `unbounded hermes call: ${line.trim()}`).toMatch(/timeout -k \d+ /);
     }
   });
