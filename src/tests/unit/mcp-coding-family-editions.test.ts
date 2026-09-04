@@ -6,12 +6,17 @@
  * "both editions" at every site while the value is OpenClaw-only on every
  * shipped device. The rename is cosmetic; what was NOT pinned anywhere in the
  * unit suite is the behaviour behind it, which is why a rename could have
- * changed it silently. `mcp/check-tools.ts` asserts a handful of these names
- * are absent on Hermes, but that checker runs off no CI job (TASK-708) and
- * needs a real device to probe.
+ * changed it silently.
+ *
+ * `mcp/check-tools.ts` does cover it — `OPENCLAW_ONLY` there lists all twelve
+ * and asserts both directions — but no CI workflow runs `check:mcp-tools`
+ * (TASK-708) and the checker needs a real device to probe. The twelve names
+ * below are therefore a deliberate second copy: keep them in step with
+ * `mcp/check-tools.ts` when a coding tool is added.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { saveEnv } from "../helpers/env";
 import { captureRegistrar } from "../helpers/mcp-registrar";
 import { registerCodingTools } from "../../../mcp/tools/coding";
 
@@ -36,11 +41,19 @@ function namesOn(edition: "openclaw" | "hermes"): string[] {
   return h.names();
 }
 
+let restoreEnv: () => void;
+
 beforeEach(() => {
+  restoreEnv = saveEnv("CLAWBOX_MCP_CODING_TOOLS");
   delete process.env.CLAWBOX_MCP_CODING_TOOLS;
 });
 
+afterEach(() => restoreEnv());
+
 describe("the coding family is OpenClaw-only", () => {
+  // The `full` profile throughout: none of the twelve declares a profile, so
+  // `CLAWBOX_MCP_PROFILE=core` drops them on OpenClaw too. captureRegistrar
+  // models the edition axis only, which is the axis this card is about.
   it("registers every tool on OpenClaw", () => {
     expect(namesOn("openclaw").sort()).toEqual([...CODING_TOOLS].sort());
   });

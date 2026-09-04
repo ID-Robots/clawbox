@@ -198,12 +198,9 @@ async function readCapped(res: Response, maxBytes: number): Promise<string> {
 }
 
 export function registerCodingTools(reg: Registrar): void {
-  // The editions this family registers on: OpenClaw ONLY, for the three
-  // reasons at the top of this file. CLAWBOX_MCP_CODING_TOOLS=1 widens it to
-  // Hermes for debugging and is set nowhere in the repo — no unit, no install
-  // step, no package script — so every shipped device takes the first branch.
-  // It used to be called `both`, which read as "both editions" at all twelve
-  // registration sites while meaning the opposite (TASK-549).
+  // OpenClaw only — the three reasons are at the top of this file.
+  // CLAWBOX_MCP_CODING_TOOLS=1 widens it to Hermes for debugging, and is set on
+  // no shipped device.
   const codingEditions: ("openclaw" | "hermes")[] =
     process.env.CLAWBOX_MCP_CODING_TOOLS === "1" ? ["openclaw", "hermes"] : ["openclaw"];
 
