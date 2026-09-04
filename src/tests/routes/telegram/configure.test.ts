@@ -19,6 +19,10 @@ vi.mock("@/lib/openclaw-config", () => ({
   setTelegramToken: vi.fn(),
   restartGateway: vi.fn(),
   clearTelegramPairingState: vi.fn(),
+  // The Telegram bot the OpenClaw gateway actually polls lives in the harness's
+  // own config, and the route now reads it through the STRICT reader so an
+  // unreadable openclaw.json cannot pass for "no bot configured".
+  readConfigStrict: vi.fn(async () => ({})),
 }));
 
 import { get, set } from "@/lib/config-store";

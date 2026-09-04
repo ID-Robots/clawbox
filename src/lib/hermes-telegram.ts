@@ -358,10 +358,14 @@ export async function readHermesTelegramToken(): Promise<HermesTelegramToken> {
   try {
     const token = await getHermesEnvValue(HERMES_TELEGRAM_TOKEN_KEY);
     return { token: token || null, known: true };
-  } catch {
+  } catch (err) {
     // An unreadable .env — EACCES after a root-owned write, EIO on a failing
     // eMMC, a directory where the file should be. Reporting "no bot" here is
-    // what let the approvals guard wave through the harness's own bot.
+    // what let the approvals guard wave through the harness's own bot, so the
+    // caller gets `known: false` instead. Logged rather than swallowed: this is
+    // a real fault, the routes above it answer a permanent 503, and without
+    // this line the service log holds nothing to explain either.
+    console.error("[telegram] ~/.hermes/.env could not be read; Hermes' bot is unknown:", err);
     return { token: null, known: false };
   }
 }

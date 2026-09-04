@@ -25,6 +25,10 @@ vi.mock("@/lib/openclaw-config", () => ({
   setTelegramToken: vi.fn(),
   restartGateway: vi.fn(),
   clearTelegramPairingState: vi.fn(),
+  // The Telegram bot the OpenClaw gateway actually polls lives in the harness's
+  // own config, and the route now reads it through the STRICT reader so an
+  // unreadable openclaw.json cannot pass for "no bot configured".
+  readConfigStrict: vi.fn(async () => ({})),
 }));
 vi.mock("@/lib/hermes-telegram", () => ({
   setHermesTelegramToken: vi.fn(),
@@ -140,6 +144,21 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
     it("clears the old bot's approvals when only Hermes knew the previous token", async () => {
       mockGet.mockResolvedValue(undefined);
       mockHermesToken.mockResolvedValue({ token: TOKEN, known: true });
+
+      const body = await (await POST(req({ botToken: NEW_TOKEN }))).json();
+
+      expect(body.reset).toBe(true);
+      expect(mockClearHermesPairing).toHaveBeenCalled();
+      expect(mockSet).toHaveBeenCalledWith("telegram_approved_names", undefined);
+    });
+
+    // A store that could not be READ is not a box with no previous bot. Reading
+    // only the token treated it as a first save: no reset, no cleared name map,
+    // and `{success: true, reset: false}` over a new bot that inherited every
+    // sender approved for the old one.
+    it("resets rather than assuming a first save when the harness store cannot be read", async () => {
+      mockGet.mockResolvedValue(undefined);
+      mockHermesToken.mockResolvedValue({ token: null, known: false });
 
       const body = await (await POST(req({ botToken: NEW_TOKEN }))).json();
 

@@ -23,8 +23,17 @@ vi.mock("@/lib/email-approval-telegram", async (importOriginal) => ({
   fetchApprovalBotInfo: vi.fn(),
 }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "openclaw") }));
-vi.mock("@/lib/openclaw-config", () => ({ readTelegramAllowFrom: vi.fn(async () => ["6001"]) }));
-vi.mock("@/lib/hermes-telegram", () => ({ readHermesApprovedUsers: vi.fn(async () => []) }));
+vi.mock("@/lib/openclaw-config", () => ({
+  readTelegramAllowFrom: vi.fn(async () => ["6001"]),
+  // The same-bot guard asks the HARNESS which bot it polls. Empty here, so this
+  // suite keeps testing exactly what it tested before: the guard answering from
+  // ClawBox's own stored copy.
+  readConfigStrict: vi.fn(async () => ({})),
+}));
+vi.mock("@/lib/hermes-telegram", () => ({
+  readHermesApprovedUsers: vi.fn(async () => []),
+  readHermesTelegramToken: vi.fn(async () => ({ token: null, known: true })),
+}));
 
 const SESSION_SECRET = "a".repeat(64);
 const APPROVAL_TOKEN = "777777:ZZaabbCCddEEffgg_hh-ii";
@@ -36,6 +45,7 @@ let POST: typeof import("@/app/setup-api/email/chat-approval/route").POST;
 let DELETE: typeof import("@/app/setup-api/email/chat-approval/route").DELETE;
 let configStore: typeof import("@/lib/config-store");
 let telegram: typeof import("@/lib/email-approval-telegram");
+let openclawConfig: typeof import("@/lib/openclaw-config");
 let auth: typeof import("@/lib/auth");
 
 let stored: Record<string, unknown>;
@@ -67,6 +77,7 @@ beforeEach(async () => {
   auth = await import("@/lib/auth");
   configStore = await import("@/lib/config-store");
   telegram = await import("@/lib/email-approval-telegram");
+  openclawConfig = await import("@/lib/openclaw-config");
 
   stored = {};
   vi.mocked(configStore.get).mockImplementation(async (key: string) => stored[key]);
@@ -147,6 +158,52 @@ describe("connecting the approvals bot", () => {
 
     expect(res.status).toBe(400);
     expect(telegram.fetchApprovalBotInfo).not.toHaveBeenCalled();
+  });
+
+  // OpenClaw keeps its OWN copy of the credential — `setTelegramToken()` writes
+  // `channels.telegram.botToken` into openclaw.json, and the gateway polls from
+  // there. ClawBox's `telegram_bot_token` is a mirror its configure route
+  // happens to write, so a box set up through the `openclaw` CLI or restored
+  // with ~/.openclaw intact and a fresh data/config.json has the bot and no
+  // mirror — and the guard, asking only the mirror, waved it straight through.
+  it("REFUSES a bot only OpenClaw's own config knows about", async () => {
+    vi.mocked(openclawConfig.readConfigStrict).mockResolvedValue({
+      channels: { telegram: { enabled: true, botToken: MAIN_BOT_TOKEN } },
+    });
+
+    const res = await POST(request({ cookie: ownerCookie(), body: { botToken: MAIN_BOT_TOKEN } }));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ kind: "same_bot" });
+    expect(stored.email_approval_bot_token).toBeUndefined();
+  });
+
+  // Telegram's /revoke issues a new secret for the SAME bot. Both tokens drive
+  // the same getUpdates stream, so whole-token equality is not identity.
+  it("REFUSES a rotated secret for the bot the harness polls", async () => {
+    stored.telegram_bot_token = MAIN_BOT_TOKEN;
+
+    const rotated = "111111:MainBotSecretValue_11";
+    const res = await POST(request({ cookie: ownerCookie(), body: { botToken: rotated } }));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ kind: "same_bot" });
+    expect(stored.email_approval_bot_token).toBeUndefined();
+  });
+
+  // FAIL CLOSED. An openclaw.json that exists but cannot be read is not
+  // evidence that this is a second bot.
+  it("refuses the save when the harness config cannot be read", async () => {
+    vi.mocked(openclawConfig.readConfigStrict).mockRejectedValue(
+      Object.assign(new Error("EACCES"), { code: "EACCES" }),
+    );
+
+    const res = await POST(request({ cookie: ownerCookie(), body: { botToken: APPROVAL_TOKEN } }));
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ kind: "bot_unknown" });
+    expect(telegram.fetchApprovalBotInfo).not.toHaveBeenCalled();
+    expect(stored.email_approval_bot_token).toBeUndefined();
   });
 
   it("REFUSES the bot the harness is already long-polling", async () => {

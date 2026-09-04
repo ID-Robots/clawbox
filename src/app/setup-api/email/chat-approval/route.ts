@@ -34,7 +34,7 @@ import {
   TelegramUnavailableError,
 } from "@/lib/email-approval-telegram";
 import { hasOwnerSession } from "@/lib/owner-session";
-import { readActiveTelegramBot, telegramBotId } from "@/lib/telegram-bot-identity";
+import { readTelegramBotsInUse, telegramBotId } from "@/lib/telegram-bot-identity";
 
 export const dynamic = "force-dynamic";
 
@@ -99,16 +99,19 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "That is not a Telegram bot token" }, { status: 400 });
     }
 
-    // Which bot is the HARNESS already long-polling? Asked of the store the
-    // running edition actually keeps it in — ClawBox's on OpenClaw, Hermes' own
-    // ~/.hermes/.env on Hermes, where ClawBox may hold no copy at all.
+    // Which bots is a harness on this box ALREADY long-polling? Asked of the
+    // harness stores themselves — openclaw.json's channel block and
+    // ~/.hermes/.env — because ClawBox's own copy is a mirror its configure
+    // route happens to write, and a box paired through the harness's own CLI
+    // has none. Both stores, not just the active harness's: on the dual SKU the
+    // inactive harness's bot becomes a collision the moment the owner switches.
     //
     // Compared by BOT ID, not by the whole token: Telegram's /revoke issues a
     // fresh secret for the same bot, and two tokens that differ only there feed
     // the same getUpdates stream.
-    const mainBot = await readActiveTelegramBot();
-    const mainBotId = telegramBotId(mainBot.token);
-    if (mainBotId !== null && mainBotId === telegramBotId(token)) {
+    const inUse = await readTelegramBotsInUse();
+    const approvalBotId = telegramBotId(token);
+    if (approvalBotId !== null && inUse.ids.includes(approvalBotId)) {
       // The whole design rests on this bot's updates being ours alone. Handing
       // it the token the harness is already long-polling would make both
       // pollers fight ("Conflict: terminated by other getUpdates request") and
@@ -122,20 +125,24 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
-    if (!mainBot.known) {
+    if (!inUse.known) {
       // FAIL CLOSED — and after the check above, so a store we could not read
-      // still gets the specific "this is the same bot" answer whenever the
-      // fallback copy happens to prove it.
+      // still gets the specific "this is the same bot" answer whenever another
+      // store happens to prove it.
       //
       // The old guard reached this state by simply finding nothing in ClawBox's
-      // store, which on a Hermes box was the ORDINARY state — and it waved the
-      // save through. "We could not check" is not evidence that this is a
-      // second bot, and the cost of being wrong is the owner's own Telegram
-      // chat going deaf.
+      // mirror, which on a box paired through the harness was the ORDINARY
+      // state — and it waved the save through. "We could not check" is not
+      // evidence that this is a second bot, and the cost of being wrong is the
+      // owner's own Telegram chat going deaf.
+      //
+      // The message names the fault rather than promising it will pass: an
+      // EACCES on the harness's config does not clear up on a retry, and the
+      // service log carries the reason (see telegram-bot-identity.ts).
       return NextResponse.json(
         {
           error:
-            "Could not read which Telegram bot this ClawBox already chats with, so a second bot cannot be confirmed as different. Try again in a moment.",
+            "Could not read this device's Telegram configuration, so a second bot cannot be confirmed as different from the one ClawBox already chats with. See the ClawBox service log.",
           kind: "bot_unknown",
         },
         { status: 503 },

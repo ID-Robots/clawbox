@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAll } from "@/lib/config-store";
 import { inferConfiguredLocalModel, readConfig as readOpenClawConfig, type OpenClawConfig } from "@/lib/openclaw-config";
+import { getActiveHarness } from "@/lib/harness";
 import { hasValidSession, readSetupGateFacts } from "@/lib/route-auth";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 
@@ -29,7 +30,9 @@ export async function GET(request: Request) {
       // public and on a 3 s tray poll, and an anonymous poller must not pay for
       // a read whose answer it never receives. It stays a plain file read
       // either way: no probe belongs on this route.
-      authenticated ? readActiveTelegramBot() : Promise.resolve(null),
+      authenticated
+        ? getActiveHarness().then((harness) => readActiveTelegramBot(harness))
+        : Promise.resolve(null),
     ]);
     const hasExplicitLocalAiFlag = Object.prototype.hasOwnProperty.call(config, "local_ai_configured");
     const inferredLocal = inferConfiguredLocalModel(openclawConfig);

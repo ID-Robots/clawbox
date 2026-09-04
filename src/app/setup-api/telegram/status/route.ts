@@ -139,11 +139,11 @@ export async function GET() {
 
       const { registered, gateway } = await probeHermes(token);
       // `null` = Hermes couldn't be asked; fall back to the token we found
-      // rather than reporting a working bot as gone. Tied to `token` and not
-      // written as a bare `true`, so the fallback carries its own reason: a
-      // plain `true` is right only while the guard above stands, and this
-      // branch's guard has already moved once.
-      const configured = registered ?? Boolean(token);
+      // rather than reporting a working bot as gone. `true` is correct here
+      // only because the early return above has already established that a bot
+      // token exists — before that guard was hoisted, this line could have
+      // turned "could not ask" into "a bot is configured" on a box with none.
+      const configured = registered ?? true;
       const info = configured ? await fetchBotInfo(token) : null;
       return NextResponse.json({
         configured,

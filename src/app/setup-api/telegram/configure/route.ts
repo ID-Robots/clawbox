@@ -96,12 +96,26 @@ export async function POST(request: Request) {
     // stores and our name map.
     //
     // Asked of the store the running edition keeps the credential in. The
-    // approvals in Hermes' pairing store belong to the bot HERMES holds, and
-    // ClawBox's copy is written only by this route — so on a box paired with
-    // `hermes config set` there was none, every save looked like the first one,
-    // and the previous bot's approved senders carried over to the new bot.
-    const previousToken = (await readActiveTelegramBot(harness)).token;
-    const tokenChanged = previousToken !== null && previousToken !== botToken;
+    // approvals in the harness's pairing store belong to the bot the HARNESS
+    // holds, and ClawBox's copy is a mirror written only by this route — so on
+    // a box paired with `hermes config set` there was none, every save looked
+    // like the first one, and the previous bot's approved senders carried over
+    // to the new bot.
+    //
+    // A store that could not be READ counts as changed. The reset runs before
+    // the persist (see below), so treating the unknown as a bot change costs a
+    // re-pair at worst; treating it as "no previous bot" — which is what
+    // reading only `.token` would do — silently keeps the old bot's approved
+    // senders on the new bot and answers `success: true, reset: false`.
+    //
+    // Compared whole, deliberately, and NOT by bot id the way the approvals
+    // guard compares: a /revoke-rotated secret for the same bot is exactly the
+    // case where the owner has reason to believe the old credential leaked, and
+    // clearing the allowlist is the safe reading of that. The guard next door
+    // asks a different question — "would these two pollers collide" — where the
+    // id is the whole point.
+    const previous = await readActiveTelegramBot(harness);
+    const tokenChanged = !previous.known || (previous.token !== null && previous.token !== botToken);
 
     // The reset runs BEFORE the new token is persisted, on purpose. A reset
     // that fails then fails the save with nothing changed: the old bot keeps
