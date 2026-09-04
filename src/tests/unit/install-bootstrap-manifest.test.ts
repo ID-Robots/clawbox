@@ -150,8 +150,14 @@ function runBootstrap(opts: {
    * because the exit status of such a helper is what the bootstrap here — and
    * the root dispatcher afterwards — would otherwise read as "the tree is
    * recorded and matches".
+   *
+   * "legacy" is the opposite risk, and the more likely one: the helper from
+   * BEFORE `--selftest` existed, which is what sits in libexec on every box
+   * updating across this release. It rejects the verb with 64 — from the very
+   * verb dispatcher a stub does not have — so it is live, and must be neither
+   * replaced nor reported.
    */
-  installed?: "healthy" | "empty" | "truncated";
+  installed?: "healthy" | "empty" | "truncated" | "legacy";
 }): Bootstrap {
   const helper = path.join(root, "libexec", "clawbox-root-manifest.sh");
   const project = path.join(root, "project");
@@ -165,9 +171,13 @@ function runBootstrap(opts: {
   const stub = [
     "#!/usr/bin/env bash",
     `printf 'installed %s\\n' "$*" >> ${JSON.stringify(callLog)}`,
-    // A stub stands in for a COMPLETE helper, so it answers the liveness verb.
-    // The "empty"/"truncated" modes install one that cannot.
-    `if [ "\${1:-}" = "--selftest" ]; then printf '%s\\n' ${JSON.stringify(SELFTEST_TOKEN)}; exit 0; fi`,
+    // A stub stands in for a COMPLETE helper, so it answers the liveness verb —
+    // as the token, or, in "legacy" mode, the way a release that predates the
+    // verb answers it: 64 from the same dispatcher. The "empty"/"truncated"
+    // modes install one that can do neither.
+    opts.installed === "legacy"
+      ? 'if [ "${1:-}" = "--selftest" ]; then echo "usage: ..." >&2; exit 64; fi'
+      : `if [ "\${1:-}" = "--selftest" ]; then printf '%s\\n' ${JSON.stringify(SELFTEST_TOKEN)}; exit 0; fi`,
     `n=$(cat ${JSON.stringify(stateFile)} 2>/dev/null || echo 0)`,
     'if [ "${1:-}" = "--write" ]; then',
     `  n=$((n + 1)); printf '%s' "$n" > ${JSON.stringify(stateFile)}`,
@@ -435,7 +445,6 @@ describe.runIf(canRun)("the bootstrap's root-exec manifest re-record", () => {
     expect(run.marker).toBe("1");
   });
 
-
   it("replaces a 0-byte helper instead of reading its exit status as an answer", () => {
     // The fail-OPEN this arm exists to close. An empty executable file runs to
     // EOF and exits 0 — for `--write`, for `--verify`, and for the
@@ -463,6 +472,22 @@ describe.runIf(canRun)("the bootstrap's root-exec manifest re-record", () => {
     expect(run.status).toBe(0);
     expect(run.helperAfter).toBe(run.helperInTree);
     expect(run.calls).toEqual(["refreshed --selftest", "refreshed --write", "refreshed --verify"]);
+    expect(run.marker).toBe("0");
+  });
+
+  it("leaves a helper from before --selftest alone, on its exit 64", () => {
+    // The false failure this probe must not become. Every box updating ACROSS
+    // this release runs this block with the PREVIOUS release's helper installed
+    // — that is the whole point of the block, it re-records before re-exec'ing
+    // into the new tree — and that helper rejects `--selftest` with 64. Reading
+    // 64 as "dead" would restage the helper on every box in the fleet, and on
+    // any box where the restage could not run it would record a provisioning
+    // failure over a manifest that was written and verified perfectly well.
+    const run = runBootstrap({ failWrites: 0, installed: "legacy" });
+    expect(run.status).toBe(0);
+    expect(run.helperAfter, "a live older helper was replaced anyway").toBe(run.helperBefore);
+    expect(run.out).not.toContain("is not answering");
+    expect(run.calls).toEqual(["installed --selftest", "installed --write", "installed --verify"]);
     expect(run.marker).toBe("0");
   });
 

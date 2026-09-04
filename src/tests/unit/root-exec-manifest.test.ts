@@ -47,6 +47,19 @@ function truncatedHelper(): string {
   return text.slice(0, cut);
 }
 
+/**
+ * The same helper as it was before `--selftest` existed: the verb dispatcher
+ * intact, that one arm gone. This is what is INSTALLED on every box updating
+ * across this release — the copy in /usr/local/libexec is always the previous
+ * release's until a step re-installs it — so it is the shape a liveness probe
+ * must not mistake for a stub.
+ */
+function withoutSelftest(text: string): string {
+  const stripped = text.replace(/^ *--selftest\).*\n/m, "");
+  if (stripped === text) throw new Error("the shipped helper no longer has a --selftest arm");
+  return stripped;
+}
+
 /** Lift one function out of install.sh, so the block under test runs the real one. */
 function shellFn(name: string): string {
   const start = INSTALL_SH.indexOf(`${name}() {`);
@@ -367,6 +380,21 @@ d("clawbox-root-step.sh — the gate in front of the exec", () => {
         [/^MANIFEST_FILE=.*$/m, `MANIFEST_FILE="${manifest}"`],
       ]);
     }
+  });
+
+  it("still runs the step through a helper from before --selftest existed", () => {
+    // The false failure the probe must not become, and it would be a fleet-wide
+    // one: on EVERY box updating across this release the installed helper is the
+    // previous release's, which does not know `--selftest`. Its 64 is not a
+    // refusal to answer — it is the verb dispatcher at the bottom of the file
+    // running, which is the very thing being asked about, and which a stub
+    // cannot do. So an old helper is live and the step goes through.
+    sh(`"${helper}" --write`);
+    fs.writeFileSync(helper, withoutSelftest(fs.readFileSync(helper, "utf-8")), { mode: 0o755 });
+    expect(sh(`"${helper}" --selftest`).status, "the stand-in must answer 64, not 0").toBe(64);
+    const r = sh(`"${dispatcher}" chpasswd`);
+    expect(r.status, r.stderr).toBe(0);
+    expect(ran()).toContain("--step chpasswd");
   });
 
   it("fails closed when the verifier itself is missing", () => {
