@@ -17,5 +17,5 @@
     "paths": { "@/*": ["./src/*"] }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts", ".next/dev/types/**/*.ts", "**/*.mts", "scripts/terminal-server.mjs"],
-  "exclude": ["node_modules", "mcp", "code-source-code", "bench"]
+  "exclude": ["node_modules", "mcp", "code-source-code", "bench", "data"]
 }
