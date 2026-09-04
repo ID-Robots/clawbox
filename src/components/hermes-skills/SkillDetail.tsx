@@ -54,6 +54,67 @@ function docsCollapsible(body: string): boolean {
   return body.length > COLLAPSE_ABOVE;
 }
 
+/**
+ * The Documentation section while the phase-2 fetch is still running.
+ *
+ * Phase 2 shells out to `hermes skills inspect`, which takes 9.5-14.6 s on a
+ * Hermes box (measured read-only, 2026-09-04); the CLI cost is paid once per
+ * skill per store session, since `useSkillDetail` serves a reopen from its
+ * 50-entry cache and only a remount of the store pays it again. For all of
+ * that the section was five grey bars carrying `aria-hidden` with the only
+ * words in an `sr-only` paragraph: a sighted owner had nothing on screen to
+ * distinguish a slow fetch from a dead panel. Say what is being fetched, and
+ * count the seconds so a long wait reads as progressing rather than stuck.
+ *
+ * Entirely `aria-hidden`, and deliberately: `role="status"` is implicitly
+ * atomic, so a number ticking inside one makes a screen reader re-read the
+ * whole line every second for the length of the fetch — the same trap
+ * `ChatPopup`'s voice clock and `CodingAgentActivityPill` each had to close.
+ * What IS announced is the persistently-mounted region in `SkillDetail`, whose
+ * text changes at most twice per skill.
+ *
+ * The counter runs only in `docs`, the phase that shells out. Phase 1 never
+ * spawns the CLI, and `useSkillDetail` reports `meta` for a frame on every
+ * selection change, so counting there would put a stopwatch on a request that
+ * is usually sub-second and is not what the label names.
+ *
+ * The counter is not a timeout and never fails the section: the fetch's own
+ * outcome — body, or the `docs` failure note the panel already renders — is
+ * what ends this.
+ */
+function DocsPending({ fetching }: { fetching: boolean }) {
+  const COPY = useCopy();
+  const [elapsed, setElapsed] = useState(0);
+
+  // No reset here, and none needed: the caller keys this component on the
+  // identity the FETCH uses — `identifier || id` plus the tab the pick came
+  // from — and on whether the docs phase is running, so a new fetch is a new
+  // mount and `elapsed` starts at 0 by construction. Resetting it in the
+  // effect instead is a setState in an effect body, which cascades a render
+  // and which `react-hooks/set-state-in-effect` refuses.
+  useEffect(() => {
+    if (!fetching) return;
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [fetching]);
+
+  return (
+    <div aria-hidden="true">
+      <p className="text-xs text-[var(--text-secondary)] mb-2">
+        {fetching && elapsed >= 2 ? COPY.docsLoadingElapsed(elapsed) : COPY.docsLoading}
+      </p>
+      <div className="space-y-2 motion-safe:animate-pulse">
+        {[...Array(5)].map((_, i) => (
+          <div key={i} className="h-3 rounded bg-[var(--surface-card)]" style={{ width: `${90 - i * 8}%` }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DocumentBody({
   detail,
   expanded,
@@ -630,6 +691,23 @@ export function SkillDetail({
   const platforms = detail?.platforms || ('platforms' in skill ? skill.platforms : undefined);
   const incompatible = detail?.incompatible ?? ('incompatible' in skill ? skill.incompatible : false);
 
+  // The documentation is still on its way: no body yet, and the fetch that
+  // would bring one has not finished. The SKELETON covers every pre-`done`
+  // phase, because during `meta` the panel has nothing else in it — every card
+  // below is gated on `detail` — and removing it would replace a placeholder
+  // with a blank body.
+  const docsPending = phase !== 'done' && !detail?.body;
+  // What is ANNOUNCED, and what the stopwatch times, is narrower: only the
+  // phase that shells out to `hermes skills inspect`. Phase 1 never spawns the
+  // CLI, and `useSkillDetail` reports `meta` for a frame on every selection
+  // change, so saying "loading documentation" there would announce a fetch
+  // that has not started and time a request that is usually sub-second.
+  const docsFetching = phase === 'docs';
+  // The identity `useSkillDetail` fetches and caches on — `detailKey()` there.
+  const fetchKey = `${'origin' in skill ? 'i' : 'b'}:${
+    ('identifier' in skill && skill.identifier) || skill.id
+  }`;
+
   const copyId = async () => {
     try {
       await navigator.clipboard.writeText(identifier);
@@ -661,6 +739,16 @@ export function SkillDetail({
 
       <div className="flex-1 overflow-y-auto @container">
         <div className="p-6 max-w-3xl w-full mx-auto">
+          {/* MOUNTED IN EVERY STATE, empty when there is nothing to say. A live
+              region that appears together with its text announces a node
+              insertion, which assistive tech may drop; one that is already
+              there announces a text CHANGE, which it will not — and the same
+              applies on the way out, where the emptying is what says the wait
+              is over. So it sits outside the branch below, which unmounts.
+              (The same reasoning, and the same shape, as AiProviderList's.) */}
+          <p className="sr-only" role="status" aria-live="polite">
+            {docsFetching ? COPY.docsLoading : ''}
+          </p>
           {/* Header */}
           <div className="flex gap-4 mb-5 flex-col @sm:flex-row">
             <SkillTile name={skill.name} category={detail?.category || skill.category} tags={tags} large />
@@ -744,18 +832,9 @@ export function SkillDetail({
                 />
               ) : null}
 
-              {phase !== 'done' && !detail?.body && (
+              {docsPending && (
                 <Section title={COPY.sectionDocs}>
-                  <div className="space-y-2 animate-pulse" aria-hidden="true">
-                    {[...Array(5)].map((_, i) => (
-                      <div
-                        key={i}
-                        className="h-3 rounded bg-[var(--surface-card)]"
-                        style={{ width: `${90 - i * 8}%` }}
-                      />
-                    ))}
-                  </div>
-                  <p className="sr-only">{COPY.docsLoading}</p>
+                  <DocsPending key={`${fetchKey}:${docsFetching}`} fetching={docsFetching} />
                 </Section>
               )}
 

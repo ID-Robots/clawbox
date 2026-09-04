@@ -288,6 +288,7 @@ export const bg: Record<string, string> = {
   "skills.docsFull": "Пълен SKILL.md",
   "skills.docsPreview": "Преглед на документацията — пълният текст е достъпен след инсталиране",
   "skills.docsLoading": "Зареждане на документацията…",
+  "skills.docsLoadingElapsed": "Зареждане на документацията… ({s} с)",
   "skills.docsUnavailable": "За това умение още няма документация.",
 
   // === Requirements card ===

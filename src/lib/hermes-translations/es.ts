@@ -296,6 +296,7 @@ export const es: Record<string, string> = {
   "skills.docsFull": "SKILL.md completo",
   "skills.docsPreview": "Vista previa de la documentación — el texto completo está disponible tras la instalación",
   "skills.docsLoading": "Cargando la documentación…",
+  "skills.docsLoadingElapsed": "Cargando la documentación… ({s} s)",
   "skills.docsUnavailable": "Todavía no hay documentación para esta habilidad.",
 
   // === Requirements card ===

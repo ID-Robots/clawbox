@@ -297,6 +297,7 @@ export const sv: Record<string, string> = {
   "skills.docsFull": "Fullständig SKILL.md",
   "skills.docsPreview": "Förhandsvisning av dokumentationen — hela texten finns efter installationen",
   "skills.docsLoading": "Laddar dokumentation…",
+  "skills.docsLoadingElapsed": "Laddar dokumentation… ({s} s)",
   "skills.docsUnavailable": "Det finns ingen dokumentation för den här skillen än.",
 
   // === Requirements card ===
