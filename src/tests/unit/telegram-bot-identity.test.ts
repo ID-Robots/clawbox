@@ -193,6 +193,36 @@ describe("readActiveTelegramBot", () => {
     expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: HERMES_BOT, known: true });
   });
 
+  // The bridge reads TOP-LEVEL scalars only, so a same-named key nested inside
+  // some other block is not a credential this box would ever poll with.
+  it("does not mistake a nested key for the top-level scalar the bridge reads", async () => {
+    writeHermesConfigYaml(`skills:\n  config:\n    TELEGRAM_BOT_TOKEN: ${HERMES_BOT}\n`);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: true });
+  });
+
+  it("reads a quoted top-level value", async () => {
+    writeHermesConfigYaml(`TELEGRAM_BOT_TOKEN: "${HERMES_BOT}"\n`);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: HERMES_BOT, known: true });
+  });
+
+  // A shape the line reader does not model — here a top-level sequence — is not
+  // evidence about THIS key. Answering "unknown" over it would leave both
+  // Telegram save gates permanently 503 on a box whose config.yaml is merely
+  // unusual, which is the false failure this module exists to remove.
+  it("stays known for a config.yaml it cannot parse that does not name the key", async () => {
+    writeHermesConfigYaml("- one\n- two\n");
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: true });
+  });
+
+  it("says known:false when config.yaml names the key and cannot be parsed", async () => {
+    writeHermesConfigYaml(`- one\nTELEGRAM_BOT_TOKEN: ${HERMES_BOT}\n`);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: false });
+  });
+
   it("says known:false when config.yaml could hold the fallback and cannot be read", async () => {
     makeUnreadable(path.join(hermesHome, "config.yaml"));
     mockGet.mockResolvedValue(MIRROR_BOT);

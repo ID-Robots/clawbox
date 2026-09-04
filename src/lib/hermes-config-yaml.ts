@@ -218,22 +218,50 @@ export async function patchHermesConfig(patch: HermesConfigPatch): Promise<Herme
  * caller deciding whether a credential collides has to be able to tell the two
  * apart: see telegram-bot-identity.ts, where "we could not look" is the only
  * answer allowed to make a save gate refuse.
+ *
+ * `known: false` is reserved for a file this reader could not get the answer
+ * OUT of, not for one it merely dislikes the look of. `getYamlPath` scans the
+ * whole enclosing block and throws {@link YamlEditUnsupported} on any shape the
+ * line editor does not model — a top-level sequence, a `---` header, a
+ * duplicate key elsewhere in the file — none of which is evidence about THIS
+ * key. For a top-level key the question is settled without parsing anything: a
+ * top-level key is a line at column 0, so if no such line names it, it is
+ * absent, and answering "unknown" instead would have left the two Telegram save
+ * gates permanently 503 on a box whose config.yaml is merely unusual.
  */
 export async function readHermesConfigEntry(
   key: string,
 ): Promise<{ value: string | null; known: boolean }> {
+  let text: string;
   try {
-    const { text } = await readConfigText(hermesConfigPath());
-    return { value: getYamlPath(text, splitKey(key)), known: true };
+    ({ text } = await readConfigText(hermesConfigPath()));
   } catch (err) {
     // The message only — this file holds credentials, and Node puts the failing
-    // path (and a YAML reader its input) into the error it hands over.
+    // path into the error it hands over.
     console.error(
       "[hermes-config-yaml] config.yaml could not be read:",
       err instanceof Error ? err.message : err,
     );
     return { value: null, known: false };
   }
+  const path = splitKey(key);
+  if (path.length === 1 && !topLevelKeyPresent(text, path[0])) {
+    return { value: null, known: true };
+  }
+  try {
+    return { value: getYamlPath(text, path), known: true };
+  } catch (err) {
+    console.error(
+      `[hermes-config-yaml] ${key} could not be read out of config.yaml:`,
+      err instanceof Error ? err.message : err,
+    );
+    return { value: null, known: false };
+  }
+}
+
+/** Is `key` written at column 0 anywhere in the file? */
+function topLevelKeyPresent(text: string, key: string): boolean {
+  return new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*:`, "m").test(text);
 }
 
 /** Read one dotted key straight from the file. Returns null when unset. */
