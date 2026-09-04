@@ -283,7 +283,7 @@ describe("the pull request across the owner's gestures", () => {
     fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
     fs.writeFileSync(
       path.join(root, "data", "config.json"),
-      JSON.stringify({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_auto_pr: true }),
+      JSON.stringify({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_generate_images: false, coding_agent_auto_pr: true }),
     );
     const project = path.join(root, "data", "code-projects", "site");
     fs.mkdirSync(project, { recursive: true });

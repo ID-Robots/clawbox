@@ -325,6 +325,13 @@ const MAX_STDOUT_LINE_CHARS = 1_000_000;
 const STOP_GRACE_MS = 3_000;
 /** How often progress is flushed to disk while a run is busy. */
 const FLUSH_INTERVAL_MS = 1_000;
+/**
+ * How long a settling run waits for its project picture. The generation itself
+ * is allowed two minutes upstream, which is the right budget while a run works
+ * and far too long once it has finished: past this the run settles and the
+ * picture, if it arrives at all, arrives uncommitted.
+ */
+const SETTLE_ICON_BUDGET_MS = 20_000;
 
 /**
  * The run is spawned through this, not directly, so it starts with an empty
@@ -3300,13 +3307,21 @@ async function recordAndReview(run: CodingRun, ended: "stop" | "pause" | null): 
  * that landed after it would sit uncommitted in the folder and the review pass
  * and the pull request would both go out without it.
  *
- * Never throws, like everything else on the settle path.
+ * Never throws, like everything else on the settle path, and never waits on the
+ * picture for longer than the picture is worth: the upstream call has a
+ * two-minute budget of its own, and a slow image endpoint must not be able to
+ * hold a finished run's review pass and pull request behind it. When the budget
+ * runs out the generation is left running — it still lands the icon, just in a
+ * later commit or none — and the run settles.
  */
 async function commitProjectAssets(run: CodingRun): Promise<void> {
   if (!run.media.images || run.reviewOf) return;
   try {
-    const drawn = await drawProjectIcon(run);
-    if (!drawn.favicon) return;
+    const drawn = await Promise.race([
+      drawProjectIcon(run),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), SETTLE_ICON_BUDGET_MS).unref?.()),
+    ]);
+    if (!drawn?.favicon) return;
     const outcome = await commitRunWork({
       directory: run.directory,
       runId: run.id,
