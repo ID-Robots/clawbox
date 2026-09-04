@@ -68,7 +68,20 @@ function loadedInspection(hookNames: string[]) {
   })}\nJSON`;
 }
 
-function run(root = REPO, coreTarget = "2026.8.1", extraEnv: Record<string, string> = {}) {
+/**
+ * The shipped block with its ceiling turned down, so a test can drive a REAL
+ * timeout in seconds instead of fifty. The substitution is ASSERTED: a renamed
+ * or re-spelled constant fails loudly here rather than silently leaving the
+ * test running the 45 s path and passing on a stub that answers instantly.
+ */
+function blockWithCeiling(seconds: number): string {
+  const src = block();
+  const swapped = src.replace("CLAWBOX_HOOK_CEILING=45", `CLAWBOX_HOOK_CEILING=${seconds}`);
+  if (swapped === src) throw new Error("CLAWBOX_HOOK_CEILING=45 is no longer in the block");
+  return swapped;
+}
+
+function runProgram(body: string, root: string, coreTarget: string, extraEnv: Record<string, string>) {
   const program = [
     "set -euo pipefail",
     `CLAWBOX_ROOT=${JSON.stringify(root)}`,
@@ -76,7 +89,7 @@ function run(root = REPO, coreTarget = "2026.8.1", extraEnv: Record<string, stri
     `OPENCLAW_HOME_DIR=${JSON.stringify(openclawHome)}`,
     `OPENCLAW_BIN=${JSON.stringify(path.join(binDir, "openclaw"))}`,
     `OPENCLAW_TARGET=${JSON.stringify(coreTarget)}`,
-    block(),
+    body,
   ].join("\n");
   const r = spawnSync("bash", ["-c", program], {
     encoding: "utf-8",
@@ -84,6 +97,10 @@ function run(root = REPO, coreTarget = "2026.8.1", extraEnv: Record<string, stri
     timeout: 60_000,
   });
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
+
+function run(root = REPO, coreTarget = "2026.8.1", extraEnv: Record<string, string> = {}) {
+  return runProgram(block(), root, coreTarget, extraEnv);
 }
 
 /** The gateway config as JSON. `entries` is indexed by plugin id in the tests. */
@@ -428,50 +445,66 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     expect(second.stderr).not.toMatch(/WARNING/);
   });
 
-  it("DOES back off the 45 s timeout, which is the expensive unknown", () => {
-    // 124 is `timeout` killing it. Also an unknown, but a box that cannot
-    // module-load its plugins inside 45 s will usually not manage it on the
-    // next restart either — and that one costs the boot 45 seconds.
-    stubOpenclaw("exit 124");
-    const first = run();
-    expect(first.stderr).toMatch(/NOTE: the openclaw CLI could not be run/);
-    expect(existsSync(attemptStamp())).toBe(true);
-    writeFileSync(path.join(dir, "calls.log"), "");
-    run();
-    expect(calls()).not.toContain("plugins inspect");
-  });
-
-  it("backs off 137 the same as 124 — the SIGKILL `-k 5` sends, and the OOM killer", () => {
-    // `timeout -k 5 45` does NOT answer 124 for the case `-k` was added for: it
-    // signals its own process group, SIGKILL cannot be ignored, so it kills
-    // itself alongside the child that rode out the SIGTERM and the caller reads
-    // 128+9 = 137. A classifier that knows only 124 would drop that into the
-    // `*)` arm — a cli-unavailable verdict that is never stamped, so the box
-    // pays the full 45 s ceiling again on EVERY gateway restart. 137 is also
-    // what an OOM-killed `plugins inspect` answers with no `timeout` involved.
-    stubOpenclaw("exit 137");
-    const first = run();
+  it("bounds a CLI that IGNORES SIGTERM, and backs off the ceiling it burned", () => {
+    // The case `-k 5` exists for, driven against the real block with its
+    // ceiling turned down. Two defects in one input:
+    //
+    //   the BOUND — plain `timeout` sends SIGTERM only, and an `openclaw` that
+    //   ignores it keeps this command substitution's pipe open, so bash blocks
+    //   reading that pipe until the SURVIVOR dies, not until `timeout` returns.
+    //   This block is an ExecStartPre with no leading `-`: that stall is the
+    //   gateway's start time and then the unit's failure, over a diagnostic.
+    //
+    //   the CODE — `timeout` signals its whole process group and SIGKILL cannot
+    //   be ignored, so it kills ITSELF too and the caller reads 128+9 = 137,
+    //   never 124. A classifier that knows only 124 drops exactly this input
+    //   into the `*)` arm: "did not register reply_payload_sending — EMAIL:
+    //   directives will still reach channels", about a hook that is very
+    //   probably registered and working.
+    //
+    // And this one IS stamped: it burned the whole ceiling, and a box that
+    // cannot module-load its plugins in that time will usually not manage it on
+    // the next restart either.
+    stubOpenclaw("trap '' TERM\nexec sleep 30");
+    const started = Date.now();
+    const first = runProgram(blockWithCeiling(1), REPO, "2026.8.1", {});
+    // 1 s ceiling + the 5 s grace — nowhere near the stub's 30 s, which is what
+    // an unbounded run would cost.
+    expect(Date.now() - started).toBeLessThan(20_000);
+    expect(first.status).toBe(0);
     expect(first.stderr).toMatch(/NOTE: the openclaw CLI could not be run/);
     expect(first.stderr).toContain("cli-unavailable exit 137");
+    expect(first.stderr).not.toMatch(/WARNING/);
     expect(existsSync(attemptStamp())).toBe(true);
     writeFileSync(path.join(dir, "calls.log"), "");
     run();
     expect(calls()).not.toContain("plugins inspect");
-  });
+  }, 60_000);
 
-  it("bounds the inspect with a SIGKILL grace, not SIGTERM alone", () => {
-    // Static, and deliberately so: unlike the Hermes twin the ceiling here is a
-    // literal 45, with no env knob to turn down, so a real wedge would cost this
-    // suite 50 s of wall clock. What `-k` actually DOES is proven dynamically
-    // against the real script in register-mcp-email-hook.test.ts ("a CLI that
-    // IGNORES SIGTERM…"); this pins that the twin still carries it. Without it,
-    // an `openclaw` that ignores SIGTERM keeps this command substitution's pipe
-    // open and bash blocks reading it until the survivor dies — an ExecStartPre
-    // stalling the gateway's start long past the ceiling it appears to have.
-    // The grace, not the numbers: tuning the ceiling is fine, dropping `-k` is
-    // the regression.
-    expect(block()).toMatch(/timeout -k \d+ \d+ "\$OPENCLAW_BIN" plugins inspect/);
-  });
+  it.each([["124"], ["137"]])(
+    "asks again next boot when the CLI ended early with %s, rather than backing off a day",
+    (code) => {
+      // The other way both codes arrive, with this script's `timeout` nowhere
+      // near it: an OOM-killed `plugins inspect` (it loads the whole core) is
+      // 137 in three seconds, and a CLI that chose 124 as its own exit code is
+      // 124 immediately. Stamping either buys a day of "not repeating the check
+      // this boot" — a day of warning noise AND a day in which a hook that
+      // genuinely stopped registering goes unreported — over one transient
+      // spike. The evidence that tells them apart is the elapsed time, not the
+      // exit code, so this is classified like 126/127: a NOTE, and no stamp.
+      stubOpenclaw(`exit ${code}`);
+      const first = run();
+      expect(first.status).toBe(0);
+      expect(first.stderr).toContain(`cli-killed exit ${code}`);
+      expect(first.stderr).toMatch(/ended inside the 45s ceiling/);
+      expect(first.stderr).not.toMatch(/WARNING/);
+      expect(existsSync(attemptStamp())).toBe(false);
+      writeFileSync(path.join(dir, "calls.log"), "");
+      const second = run();
+      expect(calls()).toContain("plugins inspect");
+      expect(second.stderr).not.toMatch(/WARNING/);
+    },
+  );
 
   it.skipIf(process.getuid?.() === 0)("leaves the installed plugin ALONE when it is the sources that cannot be read", () => {
     // `cp` opens its source first and never touches the destination when that

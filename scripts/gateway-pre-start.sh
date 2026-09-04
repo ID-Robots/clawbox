@@ -2509,8 +2509,19 @@ PY
     # against a 2 s ceiling. This block is an ExecStartPre with no leading `-`,
     # so that stall is the gateway's start time and then the unit's failure,
     # over a diagnostic this block itself calls advisory.
-    CLAWBOX_HOOK_JSON="$(timeout -k 5 45 "$OPENCLAW_BIN" plugins inspect "$CLAWBOX_HOOK_PLUGIN_ID" --runtime --json 2>"$CLAWBOX_HOOK_ERR_FILE")" \
+    # ONE constant, because the classifier below compares the elapsed time
+    # against it: two copies of 45 that drift would mis-classify every timeout.
+    # Deliberately not an environment knob — the Hermes twin's
+    # HERMES_CLI_TIMEOUT has to be validated precisely because a user-writable
+    # .env can reach it, and `timeout 0` means no timeout at all.
+    CLAWBOX_HOOK_CEILING=45
+    # Wall clock either side of the call, so the arm below can tell "our ceiling
+    # fired" from "something killed it early". `SECONDS` is bash's own counter:
+    # no fork, and no `date`-not-on-PATH case to reason about.
+    CLAWBOX_HOOK_BEGAN=$SECONDS
+    CLAWBOX_HOOK_JSON="$(timeout -k 5 "$CLAWBOX_HOOK_CEILING" "$OPENCLAW_BIN" plugins inspect "$CLAWBOX_HOOK_PLUGIN_ID" --runtime --json 2>"$CLAWBOX_HOOK_ERR_FILE")" \
       || CLAWBOX_HOOK_RC=$?
+    CLAWBOX_HOOK_ELAPSED=$(( SECONDS - CLAWBOX_HOOK_BEGAN ))
     CLAWBOX_HOOK_ERR="$(tr '\n\r' '  ' < "$CLAWBOX_HOOK_ERR_FILE" 2>/dev/null | cut -c1-200 || true)"
     # Never `rm` the fallback.
     [ "$CLAWBOX_HOOK_ERR_FILE" = "/dev/null" ] || rm -f "$CLAWBOX_HOOK_ERR_FILE" 2>/dev/null || true
@@ -2528,15 +2539,28 @@ PY
       126|127)
         CLAWBOX_HOOK_VERDICT="cli-missing exit $CLAWBOX_HOOK_RC${CLAWBOX_HOOK_ERR:+: $CLAWBOX_HOOK_ERR}"
         ;;
-      # 124 is `timeout` killing it at 45 s; 137 is the SIGKILL `-k 5` sends five
-      # seconds later when SIGTERM did not move it — `timeout` signals its whole
-      # process group and SIGKILL cannot be ignored, so it kills itself too and
-      # the caller reads 128+9. 137 also arrives with no `timeout` involved at
-      # all, from the OOM killer. Also an unknown — but an EXPENSIVE one, and a
-      # box that cannot module-load its plugins inside 45 s will usually not
-      # manage it on the next restart either. This one is stamped.
+      # 124 is `timeout` killing it at the ceiling; 137 is the SIGKILL `-k 5`
+      # sends five seconds later when SIGTERM did not move it — `timeout`
+      # signals its whole process group and SIGKILL cannot be ignored, so it
+      # kills itself too and the caller reads 128+9.
+      #
+      # STAMPED ON THE EVIDENCE, NOT ON THE EXIT CODE. Backing a box off for a
+      # day is justified by COST: the box burned the whole ceiling, and one
+      # that cannot module-load its plugins in that time will usually not
+      # manage it on the next restart either. That holds for a run that reached
+      # the ceiling. It is false for the OTHER way 137 arrives — the OOM killer
+      # on a loaded box, with no `timeout` involved, which can answer in three
+      # seconds — and for a CLI that chose 124 as its own exit code. Stamping
+      # those buys a day of warning noise AND a day in which a hook that
+      # genuinely stopped registering goes unreported, over one transient
+      # spike. So a run that ended well inside the ceiling is classified like
+      # 126/127, which are deliberately not stamped for exactly this reason.
       124|137)
-        CLAWBOX_HOOK_VERDICT="cli-unavailable exit $CLAWBOX_HOOK_RC${CLAWBOX_HOOK_ERR:+: $CLAWBOX_HOOK_ERR}"
+        if [ "$CLAWBOX_HOOK_ELAPSED" -ge "$CLAWBOX_HOOK_CEILING" ]; then
+          CLAWBOX_HOOK_VERDICT="cli-unavailable exit $CLAWBOX_HOOK_RC after ${CLAWBOX_HOOK_ELAPSED}s${CLAWBOX_HOOK_ERR:+: $CLAWBOX_HOOK_ERR}"
+        else
+          CLAWBOX_HOOK_VERDICT="cli-killed exit $CLAWBOX_HOOK_RC after ${CLAWBOX_HOOK_ELAPSED}s${CLAWBOX_HOOK_ERR:+: $CLAWBOX_HOOK_ERR}"
+        fi
         ;;
       0)
         # The answer travels in the environment rather than down a pipe, because
@@ -2590,6 +2614,13 @@ PY
       cli-missing*)
         # UNKNOWN, not a defect, and free to ask again next boot — so no stamp.
         echo "  NOTE: the openclaw CLI could not be run ($CLAWBOX_HOOK_VERDICT), so whether the $CLAWBOX_HOOK_PLUGIN_ID plugin registered its hook is unknown here — it is installed and enabled, and this will be re-checked on the next start" >&2
+        ;;
+      cli-killed*)
+        # It ended well inside the ceiling, so this script's `timeout` is NOT
+        # what stopped it: a kill from outside (the OOM killer on a loaded box,
+        # an operator, a restart) or the CLI's own exit code. UNKNOWN either
+        # way, and cheap to ask again — so no stamp, exactly like 126/127.
+        echo "  NOTE: 'openclaw plugins inspect $CLAWBOX_HOOK_PLUGIN_ID --runtime' ended inside the ${CLAWBOX_HOOK_CEILING}s ceiling ($CLAWBOX_HOOK_VERDICT) — a kill from outside or the CLI's own exit code, not this script's timeout — so whether the plugin registered its hook is unknown here; it is installed and enabled, and this will be re-checked on the next start" >&2
         ;;
       cli-unavailable*)
         # UNKNOWN, not a defect: telling an operator "directives will still
