@@ -21,6 +21,19 @@ export const dynamic = "force-dynamic";
  * that re-embeds everything. Reading the status stays open; starting work does
  * not.
  */
+/**
+ * The owner's switch is off. 409 rather than 403, because nothing is wrong
+ * with WHO asked — the box is simply not indexing at the moment, and the app
+ * says so with `kind`. Written once because two places answer it now: before
+ * the work, and again for the switch startMemoryIndex read inside its lock.
+ */
+function switchedOff() {
+  return NextResponse.json(
+    { error: "Memory Shard is switched off. Switch it on in its settings to index.", kind: "disabled" },
+    { status: 409, headers: { "Cache-Control": "no-store" } },
+  );
+}
+
 export async function POST(request: NextRequest) {
   if (!(await hasOwnerSession(request))) {
     return NextResponse.json(
@@ -31,14 +44,10 @@ export async function POST(request: NextRequest) {
   // The owner's switch, not a preference: switching Memory Shard off has to
   // stop the passes ClawBox starts, or "off" is a word on a screen. The
   // scheduler disarms itself for the same reason; this is the by-hand half.
-  // 409 rather than 403, because nothing is wrong with WHO asked — the box is
-  // simply not indexing at the moment, and the app says so with `kind`.
-  if (!(await getMemoryShardEnabled())) {
-    return NextResponse.json(
-      { error: "Memory Shard is switched off. Switch it on in its settings to index.", kind: "disabled" },
-      { status: 409, headers: { "Cache-Control": "no-store" } },
-    );
-  }
+  // Cheap and early so a switched-off box is refused before the CLI probe;
+  // startMemoryIndex reads the same switch inside its lock, which is where the
+  // decision is actually made.
+  if (!(await getMemoryShardEnabled())) return switchedOff();
   const body = await request.json().catch(() => ({}));
   // `request.json()` resolves a literal `null` body to null, which the cast
   // does not change — reading `.mode` off it threw and the outer catch turned
@@ -50,7 +59,13 @@ export async function POST(request: NextRequest) {
     // AFTER declining a caller that overlaps a run — resolving it here first
     // made that caller wait on the CLI probe and then start a second run.
     // The run reports the mode it actually used.
-    const { accepted, run } = await startMemoryIndex(requested, "manual");
+    const { accepted, run, declined } = await startMemoryIndex(requested, "manual");
+    // The switch again, as startMemoryIndex saw it from inside its own lock —
+    // the reading above is only the fast, well-worded refusal. Between the two
+    // sits a probe that can take a minute on a cold box, and an owner who
+    // switched the feature off in that minute must be told that, not that a
+    // run they cannot see is already going.
+    if (declined === "disabled") return switchedOff();
     // The run state only. The panel adopts it at once and refetches the status
     // straight after this resolves anyway.
     return NextResponse.json(

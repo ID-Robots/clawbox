@@ -31,6 +31,21 @@ vi.mock("@/lib/owner-session", () => ({
   hasOwnerSession: vi.fn(async () => ownerSession.value),
 }));
 
+// The one write in a reset that a full or read-only disk can refuse. Faked
+// rather than provoked, because what is under test is the ORDER the reset
+// writes in, not what ENOSPC looks like.
+const { scheduleWrite } = vi.hoisted(() => ({ scheduleWrite: { fail: false } }));
+vi.mock("@/lib/clawkeep-memory", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/clawkeep-memory")>();
+  return {
+    ...actual,
+    writeMemorySchedule: async (value: unknown) => {
+      if (scheduleWrite.fail) throw new Error("ENOSPC");
+      return actual.writeMemorySchedule(value);
+    },
+  };
+});
+
 let enablePOST: typeof import("@/app/setup-api/clawkeep/memory/enable/route").POST;
 let resetPOST: typeof import("@/app/setup-api/clawkeep/memory/reset/route").POST;
 let scheduler: typeof import("@/lib/clawkeep-memory-scheduler");
@@ -62,6 +77,7 @@ afterAll(async () => {
 beforeEach(async () => {
   vi.clearAllMocks();
   ownerSession.value = true;
+  scheduleWrite.fail = false;
   await fs.rm(path.join(TEST_ROOT, "data", "config.json"), { force: true });
   await fs.rm(SCHEDULE_PATH, { force: true });
 });
@@ -118,6 +134,31 @@ describe("POST /setup-api/clawkeep/memory/reset", () => {
     expect(await shard.getMemoryShardSetupComplete()).toBe(false);
     expect(await shard.getMemoryShardEnabled()).toBe(false);
     expect(JSON.parse(await fs.readFile(SCHEDULE_PATH, "utf8")).enabled).toBe(false);
+    expect(scheduler.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the box as it was, and says so, when the schedule cannot be written", async () => {
+    await shard.setMemoryShardEnabled(true);
+    await shard.setMemoryShardSetupComplete(true);
+    await fs.writeFile(SCHEDULE_PATH, JSON.stringify({
+      enabled: true, frequency: "daily", timeOfDay: "03:00", weekday: 0,
+    }));
+    scheduleWrite.fail = true;
+
+    const res = await resetPOST(post("reset"));
+    expect(res.status).toBe(500);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect((await res.json()).kind).toBe("write_failed");
+
+    // The schedule is written FIRST because it is the one that outlives a
+    // failure: with the flags cleared first, a reset that failed here would
+    // look finished and still re-arm the owner's old hour the moment the
+    // feature went back on. Nothing moved, so "Start over" is simply pressed
+    // again.
+    expect(JSON.parse(await fs.readFile(SCHEDULE_PATH, "utf8")).enabled).toBe(true);
+    expect(await shard.getMemoryShardEnabled()).toBe(true);
+    expect(await shard.getMemoryShardSetupComplete()).toBe(true);
+    // Whatever landed, the armed timer follows it.
     expect(scheduler.refresh).toHaveBeenCalledTimes(1);
   });
 

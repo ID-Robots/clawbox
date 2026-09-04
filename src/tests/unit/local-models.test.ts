@@ -356,6 +356,16 @@ describe("whether the box can encode a voice note", () => {
     await fs.writeFile(path.join(bin, "ffmpeg"), "", { mode: 0o644 });
     await withPath([bin], async () => expect(await ffmpegPresent()).toBe(false));
   });
+
+  it("is not fooled by a DIRECTORY called ffmpeg", async () => {
+    // A searchable directory answers X_OK on POSIX exactly as an executable
+    // does, so the probe used to report an encoder the box cannot start — and
+    // the Voice tab said voice notes were ready.
+    const bin = path.join(tmpHome, "dir-on-path");
+    await fs.mkdir(path.join(bin, "ffmpeg"), { recursive: true });
+    const { ffmpegPresent } = await lib();
+    await withPath([bin], async () => expect(await ffmpegPresent()).toBe(false));
+  });
 });
 
 describe("unit lookup", () => {

@@ -63,6 +63,7 @@ describe("/setup-api/preferences — language", () => {
   let readFile: ReturnType<typeof vi.fn>;
   let access: ReturnType<typeof vi.fn>;
   const originalHome = process.env.HOME;
+  const originalOpenclawHome = process.env.OPENCLAW_HOME;
   const originalHermesHome = process.env.HERMES_HOME;
 
   // path.join yields backslashes on a Windows dev box; the assertions care
@@ -85,6 +86,11 @@ describe("/setup-api/preferences — language", () => {
     HOME_DIR = fsSync.mkdtempSync(nodePath.join(os.tmpdir(), "clawbox-prefs-"));
     OPENCLAW_WS = norm(nodePath.join(HOME_DIR, ".openclaw", "workspace"));
     process.env.HOME = HOME_DIR;
+    // The OpenClaw home with it: `openclawWorkspaceDir()` honours the variable
+    // the way every other openclaw-path module does, and the suite floors it at
+    // a scratch dir of its own (vitest.config.ts) — so a test that staged only
+    // $HOME would be describing a box nobody runs.
+    process.env.OPENCLAW_HOME = nodePath.join(HOME_DIR, ".openclaw");
     delete process.env.HERMES_HOME;
     mockGetAll.mockResolvedValue({});
     mockSet.mockResolvedValue(undefined);
@@ -106,6 +112,8 @@ describe("/setup-api/preferences — language", () => {
   afterEach(() => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalOpenclawHome === undefined) delete process.env.OPENCLAW_HOME;
+    else process.env.OPENCLAW_HOME = originalOpenclawHome;
     if (originalHermesHome === undefined) delete process.env.HERMES_HOME;
     else process.env.HERMES_HOME = originalHermesHome;
     fsSync.rmSync(HOME_DIR, { recursive: true, force: true });

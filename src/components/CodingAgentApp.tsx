@@ -1762,8 +1762,12 @@ export default function CodingAgentApp() {
                           <span className="text-[11px] text-[var(--text-secondary)] break-all">{a.name}</span>
                           {formatBytes(a.bytes) && <span className="text-[11px] text-[var(--text-muted)]">· {formatBytes(a.bytes)}</span>}
                           {/* No track: the clip is speech the run generated, and
-                              the text it was made from is in the run's report. */}
-                          <audio controls preload="none" src={artifactUrl(run.id, a.name)} className="h-8 max-w-full" />
+                              the text it was made from is in the run's report.
+                              The file name IS the label — several players can
+                              sit in this list, and "audio" three times over
+                              tells a screen-reader user nothing about which
+                              is which (the same fix ChatPopup's audioLabel is). */}
+                          <audio controls preload="none" aria-label={a.name} src={artifactUrl(run.id, a.name)} className="h-8 max-w-full" />
                         </div>
                       ))}
                     </div>

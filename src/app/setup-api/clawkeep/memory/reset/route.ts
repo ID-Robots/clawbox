@@ -28,18 +28,37 @@ export async function POST(request: Request) {
     );
   }
 
-  // An EXPLICIT false for both, never a deleted key: an absent completion flag
-  // falls back to the switch (see getMemoryShardSetupComplete), so a reset that
-  // merely removed it would leave a box that had been switched on believing it
-  // had finished setup, and the wizard would never come back.
-  await setMemoryShardEnabled(false);
-  await setMemoryShardSetupComplete(false);
-  // The schedule goes with it. Off already disarms the timer, but a schedule
-  // left on disk would re-arm itself the moment the wizard switched the feature
-  // back on, at an hour chosen for a setup that no longer exists.
-  await writeMemorySchedule({ ...DEFAULT_MEMORY_SCHEDULE });
-  await refreshMemoryScheduler();
+  try {
+    // The schedule goes FIRST, because it is the write that outlives a
+    // failure. Off already disarms the timer, but a schedule left on disk
+    // re-arms itself the moment the feature is switched back on, at an hour
+    // chosen for a setup that no longer exists — so a reset that had cleared
+    // the flags and then failed here would look finished and still be armed.
+    // In this order a failure leaves the box exactly as it was, and the owner
+    // presses Start over again.
+    await writeMemorySchedule({ ...DEFAULT_MEMORY_SCHEDULE });
+    // An EXPLICIT false for both, never a deleted key: an absent completion flag
+    // falls back to the switch (see getMemoryShardSetupComplete), so a reset that
+    // merely removed it would leave a box that had been switched on believing it
+    // had finished setup, and the wizard would never come back.
+    await setMemoryShardEnabled(false);
+    await setMemoryShardSetupComplete(false);
+  } catch (err) {
+    console.error("[memory-shard] reset could not be completed:", err instanceof Error ? err.message : err);
+    return NextResponse.json(
+      { error: "Memory Shard could not be reset. Try again.", kind: "write_failed" },
+      { status: 500, headers: { "Cache-Control": "no-store" } },
+    );
+  } finally {
+    // In a finally on purpose: whatever landed, the armed timer has to follow
+    // it. A half-applied reset that left the old slot armed would go on
+    // indexing at an hour the owner had just tried to forget.
+    await refreshMemoryScheduler().catch(() => {});
+  }
   console.error("[memory-shard] reset by the owner; the setup wizard will run again");
 
-  return NextResponse.json({ enabled: false, setupComplete: false });
+  return NextResponse.json(
+    { enabled: false, setupComplete: false },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 }

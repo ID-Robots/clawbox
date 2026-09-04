@@ -87,6 +87,8 @@ interface MediaReply {
   used?: number;
   cap?: number;
   engine?: string | null;
+  /** The size the device actually produced — absent when it could not resize. */
+  size?: number | null;
 }
 
 /** Kilobytes, so a reply says something a person and a model both read at a glance. */
@@ -148,7 +150,11 @@ export function registerMediaTools(reg: Registrar): void {
           { path: abs, prompt, size },
           { timeoutMs: IMAGE_CALL_TIMEOUT_MS, rules: MEDIA_RULES },
         );
-        return text(wrote("pictures", given, reply, `, ${size}x${size}`));
+        // The DEVICE's size, not the argument: a box whose sharp will not load
+        // writes the picture at whatever the proxy drew, and a run told
+        // "256x256" would lay its page out around a number nothing produced.
+        const drawn = typeof reply.size === "number" ? `, ${reply.size}x${reply.size}` : "";
+        return text(wrote("pictures", given, reply, drawn));
       },
     );
   }

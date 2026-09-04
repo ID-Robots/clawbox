@@ -20,7 +20,19 @@ const REAL_STATUS = JSON.parse(
 
 let tmpDir = "";
 
+// The owner's switch, which `startMemoryIndex` reads INSIDE its own lock: the
+// box does not index while Memory Shard is off, so a suite that drives the
+// real start path has to say the box is switched on. Mocked rather than
+// written to the config store, whose file is shared with every other test in
+// the worker.
+const { shard } = vi.hoisted(() => ({ shard: { enabled: true } }));
+vi.mock("@/lib/memory-shard", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/memory-shard")>(),
+  getMemoryShardEnabled: async () => shard.enabled,
+}));
+
 beforeEach(async () => {
+  shard.enabled = true;
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawkeep-memory-"));
   process.env.CLAWKEEP_DATA_DIR = tmpDir;
   // CLAWKEEP_DATA_DIR is read once at module load, so each test needs a fresh
@@ -344,6 +356,25 @@ describe("the status cache", () => {
       startedAtMs: Date.now() - 9_000, finishedAtMs: Date.now(), durationMs: 9_000, error: "", childPid: 0,
     }));
     expect((await pending).run.status).toBe("succeeded");
+  });
+});
+
+describe("the switch, read where the run actually starts", () => {
+  it("refuses a start while Memory Shard is off, and leaves no lock behind", async () => {
+    // Both callers check the switch before they get here, and neither check is
+    // the authorisation: resolveIndexMode can wait seconds on a cold CLI probe,
+    // and a switch flipped inside that window would otherwise start the very
+    // pass it forbids. Read inside the lock, the two are on one side of it.
+    shard.enabled = false;
+    const { startMemoryIndex } = await lib();
+    const { accepted, declined } = await startMemoryIndex("full", "manual");
+    expect(accepted).toBe(false);
+    expect(declined).toBe("disabled");
+    // The lock is handed back rather than left for the next caller to trip on,
+    // and nothing was written that would show as a run in the panel.
+    for (const left of ["memory-index.lock", "memory-index-state.json"]) {
+      expect(await fs.access(path.join(tmpDir, left)).then(() => true, () => false)).toBe(false);
+    }
   });
 });
 

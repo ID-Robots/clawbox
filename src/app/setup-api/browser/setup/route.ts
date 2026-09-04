@@ -42,12 +42,20 @@ export async function POST(request: Request) {
     );
   }
 
-  let body: { setupComplete?: unknown; autoOpen?: unknown; startUrl?: unknown };
+  let parsed: unknown;
   try {
-    body = await request.json();
+    parsed = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid request body", code: "bad_body" }, { status: 400 });
   }
+  // A literal `null` body — and an array, and a number — parses without going
+  // near the catch above, so reading a field off one of them threw outside
+  // this route's own error handling and the caller got a framework 500 where
+  // the 400 it defines was already promised.
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return NextResponse.json({ error: "Invalid request body", code: "bad_body" }, { status: 400 });
+  }
+  const body = parsed as { setupComplete?: unknown; autoOpen?: unknown; startUrl?: unknown };
 
   if (body.setupComplete !== undefined && typeof body.setupComplete !== "boolean") {
     return NextResponse.json({ error: "Expected setupComplete to be true or false.", code: "bad_body" }, { status: 400 });

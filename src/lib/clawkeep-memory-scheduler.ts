@@ -84,8 +84,16 @@ async function runSlot(): Promise<void> {
   // is single-flight, and declines this slot before it asks anything of the
   // CLI, so a manual run already in progress keeps its record; the one log
   // line is the only trace a declined slot leaves.
-  const { accepted } = await startMemoryIndex("incremental", "schedule");
-  if (!accepted) console.log("[clawkeep-memory-scheduler] skipped: an index run is in progress");
+  //
+  // It also re-reads the switch inside its own lock, and says so. The reading
+  // above is minutes old by the time the CLI probe has answered, and a slot
+  // that started indexing on it would be spending the night on documents the
+  // owner had already withdrawn.
+  const { accepted, declined } = await startMemoryIndex("incremental", "schedule");
+  if (accepted) return;
+  console.log(declined === "disabled"
+    ? "[clawkeep-memory-scheduler] skipped: Memory Shard was switched off before the run started"
+    : "[clawkeep-memory-scheduler] skipped: an index run is in progress");
 }
 
 async function rearm(): Promise<void> {

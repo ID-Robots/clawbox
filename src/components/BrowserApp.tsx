@@ -41,6 +41,10 @@ const BRAND_ORANGE = "#fe6e00";
  *  follow it, but a browser that is simply up does not need that attention. */
 const POLL_IDLE_MS = 5000;
 const POLL_BUSY_MS = 1500;
+/** For how long a launch earns the fast poll. Comfortably past the route's own
+ *  ten readiness probes, and short enough that a Chromium which came up but
+ *  never bound its port drops back to the idle rate instead of holding it. */
+const POLL_BUSY_WINDOW_MS = 45_000;
 
 interface BrowserAppProps {
   onOpenApp?: (appId: string) => void;
@@ -107,11 +111,30 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   // poll and the pill over the screen.
   const starting = actionLoading === "open-browser" || (browserRunning && !cdpReady);
 
+  // One read on mount. Its own effect so that a change of cadence below does
+  // not fire a second one milliseconds after the first.
+  useEffect(() => { void fetchStatus(); }, [fetchStatus]);
+
+  // The fast poll FOLLOWS a launch; it must never become the standing rate.
+  // `starting` also covers "a process exists that has not bound its port", and
+  // a Chromium that never binds one would otherwise keep this window reading
+  // the manage route every 1.5 s for as long as it is open — a route that runs
+  // `chromium --version` and walks the process table on every read.
+  const [fastPoll, setFastPoll] = useState(false);
   useEffect(() => {
-    void fetchStatus();
-    const id = setInterval(() => { void fetchStatus(); }, starting ? POLL_BUSY_MS : POLL_IDLE_MS);
+    if (!starting) {
+      setFastPoll(false);
+      return;
+    }
+    setFastPoll(true);
+    const id = setTimeout(() => setFastPoll(false), POLL_BUSY_WINDOW_MS);
+    return () => clearTimeout(id);
+  }, [starting]);
+
+  useEffect(() => {
+    const id = setInterval(() => { void fetchStatus(); }, fastPoll ? POLL_BUSY_MS : POLL_IDLE_MS);
     return () => clearInterval(id);
-  }, [fetchStatus, starting]);
+  }, [fetchStatus, fastPoll]);
 
   // Clear actionLoading once polling sees the requested end-state. Some
   // actions (enable/disable restart the gateway) can outlast or hang the

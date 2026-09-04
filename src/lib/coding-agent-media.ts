@@ -39,6 +39,8 @@ import {
   MAX_AUDIO_PER_RUN,
   MAX_IMAGES_PER_RUN,
   noteRunMedia,
+  releaseRunMedia,
+  reserveRunMedia,
   type RunMedia,
 } from "@/lib/coding-agent";
 import { artifactsDir } from "@/lib/coding-agent-artifacts";
@@ -62,6 +64,9 @@ export type MediaErrorCode =
   // next thing to open the file would trust the name over its contents.
   | "format"
   | "write_failed"
+  // The box is already generating as much as it can queue at once. Not the
+  // allowance and not a fault — the one refusal here worth asking about again.
+  | "busy"
   // What the far side answered, when the refusal was not this box's. The MCP
   // rules branch on the HTTP status, but the code is what a person reading the
   // JSON needs, and "bad_request" over a 429 would be a lie in the one place
@@ -75,12 +80,14 @@ export function mediaError(error: string, code: MediaErrorCode, status: number, 
   return NextResponse.json({ error, code, ...extra }, { status, headers: NO_STORE });
 }
 
-/** The run a media call belongs to, and where it may write. */
+/** The run a media call belongs to, where it may write, and the slot it holds. */
 export interface MediaTarget {
   runId: string;
+  /** Which switch and which counter this call spends. */
+  kind: keyof RunMedia;
   /** The absolute file the bytes will be written to. */
   file: string;
-  /** How many of this kind the run has already had. */
+  /** How many of this kind the run has had, this call's own slot included. */
   used: number;
   /** The cap that applies to this kind. */
   cap: number;
@@ -104,6 +111,11 @@ interface MediaRequest {
  * different and a caller that cannot tell them apart retries the wrong thing:
  * no run live (403), the owner's switch off (409), the per-run cap (409), a
  * path outside the fence (403), a name whose extension is not ours (400).
+ *
+ * A granted target HOLDS one of the run's slots. The caller either spends it
+ * — writeMediaFile — or hands it back with releaseMediaTarget; there is no
+ * third way out, because the slot is taken before the generator is called and
+ * a failure that kept it would cost the run a picture it never got.
  */
 export async function resolveMediaTarget(request: MediaRequest): Promise<
   { ok: true; target: MediaTarget } | { ok: false; response: NextResponse }
@@ -131,18 +143,13 @@ export async function resolveMediaTarget(request: MediaRequest): Promise<
       ),
     };
   }
+  // The cheap read first, so a run that is plainly out of pictures is told so
+  // before anything touches the disk. It is not the authority — the
+  // reservation at the bottom is — but it carries the same numbers and saves
+  // the path work.
   const cap = request.kind === "images" ? MAX_IMAGES_PER_RUN : MAX_AUDIO_PER_RUN;
-  const used = run.generated[request.kind];
-  if (used >= cap) {
-    return {
-      ok: false,
-      response: mediaError(
-        `This run has already had its ${cap} ${request.kind === "images" ? "pictures" : "clips"}.`,
-        "cap",
-        409,
-        { used, cap },
-      ),
-    };
+  if (run.generated[request.kind] >= cap) {
+    return { ok: false, response: capReached(request.kind, run.generated[request.kind], cap) };
   }
 
   const given = typeof request.path === "string" ? request.path.trim() : "";
@@ -184,7 +191,38 @@ export async function resolveMediaTarget(request: MediaRequest): Promise<
       response: mediaError("There is already a file with that name; pick another.", "exists", 409),
     };
   }
-  return { ok: true, target: { runId: run.id, file, used, cap } };
+
+  // Last, and only once everything else has passed: the slot is spent from
+  // here on, and a refusal after it was taken would have to give it back.
+  const slot = reserveRunMedia(run.id, request.kind);
+  if (!slot.ok) {
+    return {
+      ok: false,
+      response: slot.reason === "cap"
+        ? capReached(request.kind, slot.used, slot.cap)
+        : mediaError(
+          "The coding run this call belongs to has finished.",
+          "no_run",
+          403,
+        ),
+    };
+  }
+  return { ok: true, target: { runId: run.id, kind: request.kind, file, used: slot.used, cap: slot.cap } };
+}
+
+/** Give a granted target's slot back. Idempotent per target: call it once,
+ *  from the one place that knows nothing was written. */
+export function releaseMediaTarget(target: MediaTarget): void {
+  releaseRunMedia(target.runId, target.kind);
+}
+
+function capReached(kind: keyof RunMedia, used: number, cap: number): NextResponse {
+  return mediaError(
+    `This run has already had its ${cap} ${kind === "images" ? "pictures" : "clips"}.`,
+    "cap",
+    409,
+    { used, cap },
+  );
 }
 
 function outside(): NextResponse {
@@ -220,11 +258,12 @@ async function mediaRoots(runId: string, directory: string): Promise<string[]> {
  * raced this write inside the evidence folder must not show the scratch file.
  *
  * Records the file against the run on success, and answers how many of this
- * kind the run has had.
+ * kind the run has had — the count the slot was taken at, not a fresh read,
+ * because a run that settled while the voice was speaking no longer counts
+ * anything and the caller still deserves the number it spent.
  */
 export async function writeMediaFile(
   target: MediaTarget,
-  kind: keyof RunMedia,
   bytes: Buffer,
 ): Promise<{ ok: true; used: number } | { ok: false; response: NextResponse }> {
   const tmp = path.join(path.dirname(target.file), `.${path.basename(target.file)}.${randomUUID()}.tmp`);
@@ -236,7 +275,8 @@ export async function writeMediaFile(
     console.warn("[coding-agent-media] write failed:", err instanceof Error ? err.message : err);
     return { ok: false, response: mediaError("The file could not be written.", "write_failed", 500) };
   }
-  return { ok: true, used: noteRunMedia(target.runId, kind, target.file) };
+  noteRunMedia(target.runId, target.file);
+  return { ok: true, used: target.used };
 }
 
 async function exists(file: string): Promise<boolean> {

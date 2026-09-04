@@ -38,10 +38,12 @@ vi.mock("@/lib/owner-session", () => ({
 // Starting a run also needs Memory Shard to be switched ON: the switch is the
 // owner's consent for this box to index at all. Mocked rather than written to
 // the config store, whose file is shared with every other test in the worker.
-const { shard } = vi.hoisted(() => ({ shard: { enabled: true } }));
+// `answers` is how a test makes the switch CHANGE between two reads, which is
+// the whole reason startMemoryIndex reads it again inside its own lock.
+const { shard } = vi.hoisted(() => ({ shard: { enabled: true, answers: [] as boolean[] } }));
 vi.mock("@/lib/memory-shard", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/memory-shard")>(),
-  getMemoryShardEnabled: async () => shard.enabled,
+  getMemoryShardEnabled: async () => (shard.answers.length ? shard.answers.shift()! : shard.enabled),
 }));
 
 let statusGET: typeof import("@/app/setup-api/clawkeep/memory/route").GET;
@@ -74,6 +76,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   ownerSession.value = true;
   shard.enabled = true;
+  shard.answers = [];
   await fs.rm(path.join(DATA_DIR, "memory-index-schedule.json"), { force: true });
   await fs.rm(path.join(DATA_DIR, "memory-index-state.json"), { force: true });
   await fs.rm(path.join(DATA_DIR, "memory-index.lock"), { recursive: true, force: true });
@@ -213,6 +216,26 @@ describe("POST /setup-api/clawkeep/memory/index", () => {
     expect(
       await fs.access(path.join(DATA_DIR, "memory-index-state.json")).then(() => true, () => false),
     ).toBe(false);
+  });
+
+  it("refuses a run whose switch went off between the route's look and the lock", async () => {
+    // The route's own check can be a minute old by the time the work starts —
+    // resolveIndexMode waits on a CLI probe on a cold box. The reading that
+    // decides is the one startMemoryIndex takes inside its lock, so the two
+    // are on the same side of it: an "off" either prevents the run or lands
+    // after one had already begun.
+    shard.answers = [true];
+    shard.enabled = false;
+    const res = await indexPOST(new NextRequest("http://localhost/x", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "full" }),
+    }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).kind).toBe("disabled");
+    // Nothing started, and the lock is handed back rather than left for the
+    // next caller to trip over.
+    for (const left of ["memory-index.lock", "memory-index-state.json"]) {
+      expect(await fs.access(path.join(DATA_DIR, left)).then(() => true, () => false)).toBe(false);
+    }
   });
 
   it("never returns the pid it is running under", async () => {

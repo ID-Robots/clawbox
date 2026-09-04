@@ -39,7 +39,14 @@ const BOOTSTRAP_FILENAME = "BOOTSTRAP.md";
 // into would create exactly the "already configured" evidence we are avoiding.
 export function openclawWorkspaceDir(): string {
   const home = process.env.HOME || "/home/clawbox";
-  const openclawHome = path.join(home, ".openclaw");
+  // The same resolution openclaw-config.ts performs, spelled out rather than
+  // imported for the reason above — and gateway-pre-start.sh honours
+  // OPENCLAW_HOME too. A box that moved its OpenClaw home would otherwise have
+  // this guard reading one openclaw.json while the gateway ran from another,
+  // which is the exact disagreement the comment above says must not happen.
+  const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
+    || process.env.OPENCLAW_HOME
+    || path.join(home, ".openclaw");
   try {
     const cfg = JSON.parse(fsSync.readFileSync(path.join(openclawHome, "openclaw.json"), "utf-8"));
     const configured = cfg?.agents?.defaults?.workspace;

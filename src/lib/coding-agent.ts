@@ -2591,13 +2591,20 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
     run.leftover = groupAlive(run.pgid);
     if (run.leftover) {
       pushProgress(run, "Something this run started is still running — a server it left listening? The run's page can end it.");
+      return;
     }
+    // The group is gone, and the number that named it is now the kernel's to
+    // hand to anybody. Forget it here for the same reason reconcileAfterRestart
+    // forgets it across a restart: a record that keeps a recycled pid would let
+    // the Kill button signal a stranger's process group in this run's name.
+    run.pgid = null;
     return;
   }
   run.leftover = false;
   if (killRunGroup(run.pgid)) {
     pushProgress(run, "Ended what the run had left running");
   }
+  run.pgid = null;
 }
 
 /**
@@ -2621,6 +2628,10 @@ export function killRunLeftovers(id: string): CodingRun {
   }
   if (killRunGroup(run.pgid)) pushProgress(run, "The owner ended what the run had left running");
   run.leftover = false;
+  // Signalled or already gone, the group this record named is finished with.
+  // Keeping the number would leave a Kill button aimed at whatever the kernel
+  // gives that pid to next.
+  run.pgid = null;
   persist(true);
   return cloneRun(run);
 }
@@ -2643,27 +2654,71 @@ function noteFile(run: CodingRun, file: string | null): void {
   run.filesTouched.push(file);
 }
 
+/** What a media route learns when it asks for one of the run's slots. */
+export type MediaReservation =
+  | { ok: true; used: number; cap: number }
+  | { ok: false; reason: "no_run" | "cap"; used: number; cap: number };
+
 /**
- * Record one picture or clip the media routes wrote for the LIVE run, and the
- * file it landed in.
+ * Take one of the LIVE run's slots for `kind`, or refuse because they are all
+ * spent — or because there is no longer a run to spend them.
+ *
+ * The counter moves HERE, before the generator is called, and not once the
+ * bytes come back. The routes spend the owner's ClawBox AI allowance and the
+ * box's voice between the two moments — seconds of it, when a clip waits in
+ * withSpeechQueue — so a cap read from a snapshot and incremented afterwards
+ * let two overlapping calls both pass a gate that had room for one. This
+ * function is synchronous from the read to the write, which is what makes
+ * "both passed" impossible; releaseRunMedia hands the slot back when nothing
+ * was produced with it.
+ */
+export function reserveRunMedia(runId: string, kind: keyof RunMedia): MediaReservation {
+  const cap = kind === "images" ? MAX_IMAGES_PER_RUN : MAX_AUDIO_PER_RUN;
+  const run = loadRuns().find((r) => r.id === runId);
+  // A stale bearer must not spend a settled record's allowance, and a run that
+  // ended between the route's first look and this one is the same case.
+  if (!run || !isLive(run.status)) return { ok: false, reason: "no_run", used: 0, cap };
+  const used = run.mediaGenerated[kind];
+  if (used >= cap) return { ok: false, reason: "cap", used, cap };
+  run.mediaGenerated[kind] = used + 1;
+  persist(true);
+  return { ok: true, used: used + 1, cap };
+}
+
+/**
+ * Hand back a slot the caller took and did not spend.
+ *
+ * Deliberately NOT live-gated, unlike the reservation: this only returns what
+ * reserveRunMedia took while the run was live, and a run that settled while
+ * its generator was working must not be left recorded as having used a
+ * picture nobody ever drew.
+ */
+export function releaseRunMedia(runId: string, kind: keyof RunMedia): void {
+  const run = loadRuns().find((r) => r.id === runId);
+  if (!run || run.mediaGenerated[kind] <= 0) return;
+  run.mediaGenerated[kind] -= 1;
+  persist(true);
+}
+
+/**
+ * Record the file a media route just wrote for the LIVE run.
  *
  * The routes write it themselves, so nothing in the stream ever mentions it:
  * without this the run's changed-files list would omit the very assets the
- * owner is about to look at, and the per-run cap would count nothing. Answers
- * how many of that kind the run has now had, which is what the tool reply says
- * back to the model. Silent for anything that is not the live run — a stale
- * bearer must not move a settled record's counters.
+ * owner is about to look at. The COUNTER is not touched here — reserveRunMedia
+ * moved it before anything was spent, which is the only point at which two
+ * overlapping calls cannot both pass one cap. Silent for anything that is not
+ * the live run: a write that lands after the run settled — the audio route can
+ * wait seconds in withSpeechQueue — must not edit a finished record.
  */
-export function noteRunMedia(runId: string, kind: keyof RunMedia, file: string | null): number {
+export function noteRunMedia(runId: string, file: string | null): void {
   const run = loadRuns().find((r) => r.id === runId);
-  if (!run) return 0;
-  run.mediaGenerated[kind] += 1;
+  if (!run || !isLive(run.status)) return;
   // Evidence is listed with the run in its own right, and counting it as work
   // made a review pass that changed nothing report a changed file and arm a
   // review of no work — the same reason the stream parser skips it.
   if (file && !isEvidencePath(run, file)) noteFile(run, relativeToRun(run, file));
   persist(true);
-  return run.mediaGenerated[kind];
 }
 
 /** What a media route needs to know before it spends anything. Null when no run is live. */

@@ -766,7 +766,11 @@ describe("CodingAgentApp", () => {
         modelsUsed: ["deepseek-v4-pro[1m]", "deepseek-v4-flash"], commit: "caea00d",
         deniedActions: ["Bash: curl http://example"],
         todos: [{ content: "Wire the toggle", status: "completed" }, { content: "Test it", status: "in_progress", activeForm: "Testing it" }],
-        artifacts: [{ name: "after.png", bytes: 100, kind: "image" }, { name: "report.md", bytes: 20, kind: "markdown" }],
+        artifacts: [
+          { name: "after.png", bytes: 100, kind: "image" },
+          { name: "report.md", bytes: 20, kind: "markdown" },
+          { name: "intro.wav", bytes: 4096, kind: "audio" },
+        ],
       };
       stubFetch({ enabled: true, readiness: READY }, [run], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
@@ -785,6 +789,10 @@ describe("CodingAgentApp", () => {
       expect(screen.getByTestId("coding-agent-run-plan").textContent).toContain("Testing it");
       expect(screen.getByTestId("coding-agent-denied").textContent).toContain("curl http://example");
       expect(screen.getByRole("link", { name: "after.png" })).toHaveAttribute("href", expect.stringContaining("file=after.png"));
+      // A clip the run spoke, named by its file: several players can sit in
+      // this list, and three unlabelled ones tell a screen-reader user nothing
+      // about which is which.
+      expect(within(screen.getByTestId("coding-agent-artifact-audio")).getByLabelText("intro.wav")).toBeInTheDocument();
       expect(screen.getByTestId("coding-agent-run-report")).toBeInTheDocument();
       // The project it belongs to is one tap away, and Back is the way out.
       expect(screen.getByTestId("coding-agent-run-project").textContent).toContain(SITE_PROJECT.name);

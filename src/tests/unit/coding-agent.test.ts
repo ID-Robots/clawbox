@@ -1680,6 +1680,75 @@ describe("after a restart", () => {
   });
 });
 
+/**
+ * The two counters the media routes spend, and the one property that is not
+ * visible from either route: the slot is taken BEFORE the money is, so two
+ * calls that overlap cannot both pass a cap with room for one.
+ */
+describe("the media a run generates", () => {
+  const ID = "run-med00001";
+
+  /** A record as the runner keeps it while a run is in flight. */
+  async function writeRun(over: Record<string, unknown> = {}): Promise<void> {
+    fs.writeFileSync(runsFile(), JSON.stringify([{
+      id: ID,
+      task: "draw something",
+      directory: home,
+      projectId: null,
+      source: "owner",
+      status: "running",
+      startedAt: Date.now(),
+      completedAt: null,
+      sessionId: "sess-media",
+      model: null,
+      summary: null,
+      error: null,
+      numTurns: 0,
+      filesTouched: [],
+      commandsRun: 0,
+      permissionDenials: 0,
+      progress: [],
+      exitCode: null,
+      mediaGenerated: { images: 0, audio: 0 },
+      ...over,
+    }]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+  }
+
+  it("lets only one of two callers take the last slot", async () => {
+    await writeRun({ mediaGenerated: { images: lib.MAX_IMAGES_PER_RUN - 1, audio: 0 } });
+    const first = lib.reserveRunMedia(ID, "images");
+    const second = lib.reserveRunMedia(ID, "images");
+    expect(first).toMatchObject({ ok: true, used: lib.MAX_IMAGES_PER_RUN });
+    expect(second).toMatchObject({ ok: false, reason: "cap", used: lib.MAX_IMAGES_PER_RUN });
+  });
+
+  it("gives a slot back, so a refused generator costs the run nothing", async () => {
+    await writeRun();
+    expect(lib.reserveRunMedia(ID, "audio")).toMatchObject({ ok: true, used: 1 });
+    lib.releaseRunMedia(ID, "audio");
+    expect(lib.reserveRunMedia(ID, "audio")).toMatchObject({ ok: true, used: 1 });
+  });
+
+  it("spends nothing on a record that is no longer live", async () => {
+    // The bearer a run holds outlives the run, and the audio route can be
+    // waiting in the speech queue when it settles.
+    await writeRun({ status: "completed", completedAt: Date.now() });
+    expect(lib.reserveRunMedia(ID, "images")).toMatchObject({ ok: false, reason: "no_run" });
+    expect(lib.getRun(ID)?.mediaGenerated.images).toBe(0);
+  });
+
+  it("records the file against the live run and nothing against a settled one", async () => {
+    await writeRun();
+    lib.noteRunMedia(ID, path.join(home, "hero.png"));
+    expect(lib.getRun(ID)?.filesTouched).toEqual(["hero.png"]);
+    await writeRun({ status: "stopped", completedAt: Date.now() });
+    lib.noteRunMedia(ID, path.join(home, "late.png"));
+    expect(lib.getRun(ID)?.filesTouched).toEqual([]);
+  });
+});
+
 describe("the pull request on disk", () => {
   /** A finished record, as an older server wrote it, carrying the `pr` blob under test. */
   function writeRunWithPr(pr: Record<string, unknown>): void {

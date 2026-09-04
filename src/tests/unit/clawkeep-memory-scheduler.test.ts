@@ -185,6 +185,29 @@ describe("the memory index scheduler", () => {
     log.mockRestore();
   });
 
+  it("tells the log apart a busy box from a switch that went off under the slot", async () => {
+    // startMemoryIndex reads the owner's switch inside its own lock, because
+    // the reading the slot made minutes earlier is not the one that should
+    // decide. When that late reading is what refuses, the journal must not
+    // report a run in progress that nobody started.
+    const startMemoryIndex = vi.fn(async () => ({
+      accepted: false, declined: "disabled" as const, run: { status: "idle" } as never,
+    }));
+    vi.doMock("@/lib/updater", () => ({ updateInFlight: vi.fn(async () => false) }));
+    vi.doMock("@/lib/clawkeep-memory", async () => {
+      const actual = await vi.importActual<typeof import("@/lib/clawkeep-memory")>("@/lib/clawkeep-memory");
+      return { ...actual, startMemoryIndex };
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await writeSchedule({ enabled: true, frequency: "daily", timeOfDay: "06:00", weekday: 0 });
+    const sched = await import("@/lib/clawkeep-memory-scheduler");
+    await sched.start();
+
+    await vi.advanceTimersByTimeAsync(61 * 60_000);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("switched off before the run started"));
+    log.mockRestore();
+  });
+
   it("stands down for the slot while an update is in flight, and re-arms", async () => {
     // post_update repairs the OpenClaw store with the gateway masked so there
     // is one writer; `openclaw memory index` would be a second. A slot that

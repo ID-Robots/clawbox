@@ -14,6 +14,7 @@ vi.mock("@/lib/config-store", () => ({
 }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn().mockResolvedValue("openclaw") }));
 
+import { saveEnv } from "@/tests/helpers/env";
 import * as config from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { PREFERENCE_LANGUAGES } from "@/lib/preference-schema";
@@ -111,7 +112,18 @@ describe("writeLanguagePersona content", () => {
 
 describe("personaFilesFor", () => {
   it("points at each harness's own persona location", () => {
-    expect(personaFilesFor("openclaw").soulFile).toContain(".openclaw/workspace");
+    // OPENCLAW_HOME is staged rather than left to the suite's floor: this
+    // function honours it the way every other openclaw-path module does, and
+    // the floor points somewhere with no `.openclaw` in its name.
+    const restore = saveEnv("OPENCLAW_HOME", "CLAWBOX_OPENCLAW_HOME");
+    try {
+      const box = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-persona-"));
+      process.env.OPENCLAW_HOME = path.join(box, ".openclaw");
+      expect(personaFilesFor("openclaw").soulFile).toContain(".openclaw/workspace");
+      fs.rmSync(box, { recursive: true, force: true });
+    } finally {
+      restore();
+    }
     expect(personaFilesFor("hermes").userFile).toContain("memories");
   });
 });
@@ -132,16 +144,21 @@ describe("personaFilesFor", () => {
  */
 describe("openclawWorkspaceDir", () => {
   let home: string;
-  const originalHome = process.env.HOME;
+  let restoreEnv: () => void;
 
   beforeEach(() => {
+    // HOME and the OpenClaw home together: the suite floors OPENCLAW_HOME at a
+    // scratch dir of its own (vitest.config.ts), and this function honours it
+    // the way the rest of the box does, so a test that staged only $HOME would
+    // be describing a box nobody runs.
+    restoreEnv = saveEnv("HOME", "OPENCLAW_HOME", "CLAWBOX_OPENCLAW_HOME");
     home = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-ws-"));
     fs.mkdirSync(path.join(home, ".openclaw"), { recursive: true });
     process.env.HOME = home;
+    process.env.OPENCLAW_HOME = path.join(home, ".openclaw");
   });
   afterEach(() => {
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    restoreEnv();
     fs.rmSync(home, { recursive: true, force: true });
   });
 
@@ -179,6 +196,30 @@ describe("openclawWorkspaceDir", () => {
     expect(openclawWorkspaceDir()).toBe(path.join(home, ".openclaw", "workspace"));
   });
 
+  it("follows a moved OpenClaw home, because the gateway does", () => {
+    // gateway-pre-start.sh resolves its config from OPENCLAW_HOME and
+    // openclaw-config.ts from CLAWBOX_OPENCLAW_HOME first. Reading $HOME
+    // alone would have this guard inspecting one openclaw.json while the
+    // gateway ran from another.
+    const moved = path.join(home, "moved-openclaw");
+    fs.mkdirSync(moved, { recursive: true });
+    fs.writeFileSync(
+      path.join(moved, "openclaw.json"),
+      JSON.stringify({ agents: { defaults: { workspace: "clawd" } } }),
+      "utf-8",
+    );
+    const restore = saveEnv("OPENCLAW_HOME", "CLAWBOX_OPENCLAW_HOME");
+    try {
+      process.env.OPENCLAW_HOME = moved;
+      expect(openclawWorkspaceDir()).toBe(path.join(moved, "clawd"));
+      process.env.CLAWBOX_OPENCLAW_HOME = home;
+      // The ClawBox override wins, the way openclaw-config.ts orders them.
+      expect(openclawWorkspaceDir()).toBe(path.join(home, "workspace"));
+    } finally {
+      restore();
+    }
+  });
+
   it("is the directory personaFilesFor writes into", () => {
     // The guard and the write have to be talking about one directory.
     writeConfig({ agents: { defaults: { workspace: "/srv/agent-space" } } });
@@ -192,17 +233,18 @@ describe("openclawWorkspaceDir", () => {
 describe("personaWritesAllowed", () => {
   let home: string;
   let workspace: string;
-  const originalHome = process.env.HOME;
+  let restoreEnv: () => void;
 
   beforeEach(() => {
+    restoreEnv = saveEnv("HOME", "OPENCLAW_HOME", "CLAWBOX_OPENCLAW_HOME");
     home = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-guard-"));
     workspace = path.join(home, ".openclaw", "workspace");
     fs.mkdirSync(workspace, { recursive: true });
     process.env.HOME = home;
+    process.env.OPENCLAW_HOME = path.join(home, ".openclaw");
   });
   afterEach(() => {
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    restoreEnv();
     fs.rmSync(home, { recursive: true, force: true });
   });
 
@@ -263,24 +305,25 @@ describe("personaWritesAllowed", () => {
 describe("applyDeferredLanguagePersona", () => {
   let home: string;
   let workspace: string;
-  const originalHome = process.env.HOME;
+  let restoreEnv: () => void;
   const mockGetAll = vi.mocked(config.getAll);
   const mockSet = vi.mocked(config.set);
   const mockHarness = vi.mocked(getActiveHarness);
 
   beforeEach(() => {
     vi.clearAllMocks();
+    restoreEnv = saveEnv("HOME", "OPENCLAW_HOME", "CLAWBOX_OPENCLAW_HOME");
     home = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-defer-"));
     workspace = path.join(home, ".openclaw", "workspace");
     fs.mkdirSync(workspace, { recursive: true });
     process.env.HOME = home;
+    process.env.OPENCLAW_HOME = path.join(home, ".openclaw");
     mockSet.mockResolvedValue(undefined);
     mockHarness.mockResolvedValue("openclaw");
     mockGetAll.mockResolvedValue({ [DEFERRED_LANGUAGE_KEY]: true, "pref:ui_language": "bg" });
   });
   afterEach(() => {
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    restoreEnv();
     fs.rmSync(home, { recursive: true, force: true });
   });
 

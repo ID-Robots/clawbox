@@ -278,6 +278,36 @@ describe("BrowserApp", () => {
     expect(queryByTestId("browser-wizard")).toBeNull();
   });
 
+  it("stops polling fast for a Chromium that came up but never bound its port", async () => {
+    // "Starting" also means "a process exists that has not bound its port",
+    // and that state can last for the life of the window. The manage route
+    // spawns `chromium --version` and walks the process table on every read,
+    // so the launch cadence must expire rather than become the standing one.
+    const fetchMock = stubDevice({ ...READY_STATUS, browser: { running: true, pid: 4242, cdpReady: false } });
+    const reads = () => fetchMock.mock.calls.filter(
+      ([url, init]) => String(url).includes("/setup-api/browser/manage")
+        && (init as RequestInit | undefined)?.method !== "POST",
+    ).length;
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<BrowserApp />);
+      await vi.waitFor(() => expect(reads()).toBeGreaterThan(0));
+      await vi.advanceTimersByTimeAsync(30_000);
+      // 1.5 s apart while the launch is being followed.
+      expect(reads()).toBeGreaterThan(10);
+
+      // Past the window the launch earns, the cadence is the idle one: five
+      // seconds, so half a minute is a handful of reads rather than twenty.
+      await vi.advanceTimersByTimeAsync(30_000);
+      const settled = reads();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(reads() - settled).toBeLessThan(10);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("switches to the settings page and back", async () => {
     const { findByTestId, queryByTestId } = render(<BrowserApp />);
 

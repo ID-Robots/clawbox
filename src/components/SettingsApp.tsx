@@ -2960,15 +2960,26 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>translate</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.language")}</label>
+                {/* A <label> named this card and pointed at nothing: htmlFor
+                    only binds to form controls, and the control here is a
+                    button. A span the button names itself after is what
+                    actually reaches the accessibility tree. */}
+                <span id="settings-language-label" className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.language")}</span>
               </div>
               <div className="relative" ref={langRef}>
                 <button
                   type="button"
+                  id="settings-language-button"
                   onClick={() => setLangOpen(v => !v)}
+                  // Both ids: the heading says WHAT this control is, the
+                  // button's own text says which language is on it, and naming
+                  // it after the heading alone would take that answer away.
+                  aria-labelledby="settings-language-label settings-language-button"
+                  aria-haspopup="listbox"
+                  aria-expanded={langOpen}
                   className="w-full flex items-center gap-2.5 px-3.5 py-2.5 bg-white/[0.04] border border-[var(--border-subtle)] rounded-lg text-sm text-[var(--text-primary)] hover:border-white/20 transition-colors cursor-pointer"
                 >
-                  <span className="text-base leading-none">{currentLang.flag}</span>
+                  <span className="text-base leading-none" aria-hidden="true">{currentLang.flag}</span>
                   <span className="flex-1 text-left">{currentLang.label}</span>
                   <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }}>
                     {langOpen ? "expand_less" : "expand_more"}

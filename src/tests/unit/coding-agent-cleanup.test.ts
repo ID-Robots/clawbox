@@ -193,8 +193,24 @@ describe("what a run left running", () => {
     const settled = await finished(run.id);
     expect(settled.status).toBe("stopped");
     expect(settled.leftover).toBe(false);
+    // And the number goes with it: Linux is free to hand that pid to anything
+    // once the group is gone, and a record that kept it would leave the Kill
+    // button aimed at a stranger's process group in this run's name.
+    expect(settled.pgid).toBeNull();
     await vi.waitFor(() => expect(groupAlive(pgid as number)).toBe(false), { timeout: 8_000 });
   }, 20_000);
+
+  it("is forgotten when the run finished having left nothing behind", async () => {
+    readyDevice(`echo '${RESULT}'\nexit 0`);
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const settled = await finished(run.id);
+    expect(settled.status).toBe("completed");
+    expect(settled.leftover).toBe(false);
+    // Same reason as above, on the path where there was nothing to kill: the
+    // pid was observed gone, and from that moment it names nothing of ours.
+    expect(settled.pgid).toBeNull();
+  });
 
   it("refuses the Kill gesture on a run that is still going — that is Stop's job", async () => {
     readyDevice(["sleep 30", "exit 0"].join("\n"));

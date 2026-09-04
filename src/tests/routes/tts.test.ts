@@ -14,6 +14,9 @@ const readConfigMock = vi.fn();
 const configSetMock = vi.fn();
 const ttsInventoryMock = vi.fn();
 const accessMock = vi.fn();
+/** `access` decides which paths this fake box HAS; `stat` only says what kind
+ *  they are, because `executable()` refuses a directory that answers X_OK. */
+const statMock = vi.fn();
 const readStateMock = vi.fn();
 const writeStateMock = vi.fn();
 const preferenceMock = vi.fn();
@@ -70,7 +73,11 @@ vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>();
   return {
     ...actual,
-    promises: { ...actual.promises, access: (...a: unknown[]) => accessMock(...a) },
+    promises: {
+      ...actual.promises,
+      access: (...a: unknown[]) => accessMock(...a),
+      stat: (...a: unknown[]) => statMock(...a),
+    },
   };
 });
 
@@ -111,6 +118,7 @@ beforeEach(() => {
   ttsInventoryMock.mockReset().mockResolvedValue(piperInstalled);
   ffmpegMock.mockReset().mockResolvedValue(true);
   accessMock.mockReset().mockResolvedValue(undefined);
+  statMock.mockReset().mockResolvedValue({ isFile: () => true });
   readStateMock.mockReset().mockResolvedValue({ choice: "auto" });
   writeStateMock.mockReset().mockResolvedValue(undefined);
   preferenceMock.mockReset().mockResolvedValue(undefined);

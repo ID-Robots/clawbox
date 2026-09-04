@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { speechTextFor, SPEECH_MAX_CHARS } from "@/lib/speech-text";
 import { speakReply, withSpeechQueue } from "@/lib/voice-speak";
-import { mediaError, resolveMediaTarget, writeMediaFile } from "@/lib/coding-agent-media";
+import { mediaError, releaseMediaTarget, resolveMediaTarget, writeMediaFile } from "@/lib/coding-agent-media";
 
 export const dynamic = "force-dynamic";
 
@@ -55,12 +55,19 @@ export async function POST(request: Request) {
   const unauthorized = await requireSession(request);
   if (unauthorized) return unauthorized;
 
-  let body: { path?: unknown; text?: unknown; overwrite?: unknown };
+  let parsed: unknown;
   try {
-    body = await request.json();
+    parsed = await request.json();
   } catch {
     return mediaError("Invalid request body", "bad_request", 400);
   }
+  // A literal `null` body parses cleanly, so the catch never runs and reading
+  // `.text` off it threw where this route had already promised a 400 — the one
+  // answer a model can act on. Same for an array or a bare number.
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return mediaError("Invalid request body", "bad_request", 400);
+  }
+  const body = parsed as { path?: unknown; text?: unknown; overwrite?: unknown };
   // The same cap and the same Markdown stripping the chat's spoken replies
   // get: the cloud voice is billed per character, and a run that sent its
   // report verbatim would pay for every asterisk in it.
@@ -78,36 +85,45 @@ export async function POST(request: Request) {
   if (!resolved.ok) return resolved.response;
   const { target } = resolved;
 
-  // Waits its turn rather than refusing outright: the queue is box-wide and
-  // shared with the chat's spoken replies, and a run's clip that arrives a few
-  // seconds late is still the clip it asked for. A queue that is already
-  // several deep answers 429 `busy`, which the tool relays as "try later".
-  const spoken = await withSpeechQueue(() => speakReply(text));
-  if (!spoken.ok) return relay(spoken);
+  let kept = false;
+  try {
+    // Waits its turn rather than refusing outright: the queue is box-wide and
+    // shared with the chat's spoken replies, and a run's clip that arrives a few
+    // seconds late is still the clip it asked for. A queue that is already
+    // several deep answers 429 `busy`, which the tool relays as "try later".
+    const spoken = await withSpeechQueue(() => speakReply(text));
+    if (!spoken.ok) return relay(spoken);
 
-  const audio = Buffer.from(await spoken.arrayBuffer());
-  if (audio.byteLength < MIN_AUDIO_BYTES) {
-    return mediaError("The voice produced no audio.", "write_failed", 502, { reason: "empty" });
-  }
-  const engine = spoken.headers.get("X-ClawBox-Voice-Engine");
-  const mime = spoken.headers.get("content-type")?.split(";")[0].trim() ?? "audio/wav";
-  if (!wanted.matches(audio)) {
-    const actual = AUDIO_FORMATS.find((f) => f.matches(audio));
-    return mediaError(
-      actual
-        ? `This box's voice answered ${actual.extension.slice(1).toUpperCase()}, not ${wanted.extension.slice(1).toUpperCase()}. Ask again for a file ending in ${actual.extension}.`
-        : "This box's voice answered in a format this tool cannot name.",
-      "format",
-      409,
-      actual ? { extension: actual.extension, mime } : { mime },
+    const audio = Buffer.from(await spoken.arrayBuffer());
+    if (audio.byteLength < MIN_AUDIO_BYTES) {
+      return mediaError("The voice produced no audio.", "write_failed", 502, { reason: "empty" });
+    }
+    const engine = spoken.headers.get("X-ClawBox-Voice-Engine");
+    const mime = spoken.headers.get("content-type")?.split(";")[0].trim() ?? "audio/wav";
+    if (!wanted.matches(audio)) {
+      const actual = AUDIO_FORMATS.find((f) => f.matches(audio));
+      return mediaError(
+        actual
+          ? `This box's voice answered ${actual.extension.slice(1).toUpperCase()}, not ${wanted.extension.slice(1).toUpperCase()}. Ask again for a file ending in ${actual.extension}.`
+          : "This box's voice answered in a format this tool cannot name.",
+        "format",
+        409,
+        actual ? { extension: actual.extension, mime } : { mime },
+      );
+    }
+    const written = await writeMediaFile(target, audio);
+    if (!written.ok) return written.response;
+    kept = true;
+    return NextResponse.json(
+      { path: target.file, bytes: audio.byteLength, mime, engine, used: written.used, cap: target.cap },
+      { headers: { "Cache-Control": "no-store" } },
     );
+  } finally {
+    // The slot is taken before the voice is asked for, so a refusal, a silent
+    // engine or a container that did not match the name has to give it back —
+    // a run must not lose one of its clips to something it never heard.
+    if (!kept) releaseMediaTarget(target);
   }
-  const written = await writeMediaFile(target, "audio", audio);
-  if (!written.ok) return written.response;
-  return NextResponse.json(
-    { path: target.file, bytes: audio.byteLength, mime, engine, used: written.used, cap: target.cap },
-    { headers: { "Cache-Control": "no-store" } },
-  );
 }
 
 /**

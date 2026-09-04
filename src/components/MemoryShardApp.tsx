@@ -641,7 +641,16 @@ export default function MemoryShardApp() {
               // so the panel is given the off state and its own write is what
               // settles it — the route answers with the box's own truth.
               state={state ?? { enabled: false, setupComplete: false }}
-              onChanged={setState}
+              onChanged={(next) => {
+                setState(next);
+                // The index card is REMOUNTED when Back brings the home face
+                // up, and it seeds itself from `firstStatus` — so the switch
+                // just flipped here has to reach that copy now. The status
+                // re-read this change also triggers is CLI-backed and can take
+                // a minute; until it lands, the card would go on offering
+                // "Index now" over a route that refuses it.
+                setFirstStatus((prev) => (prev ? { ...prev, enabled: next.enabled } : prev));
+              }}
               // Start over lands on the front door, which for a box that has
               // just forgotten its setup is the wizard.
               onReset={() => { setPage("home"); void loadState(); }}

@@ -731,17 +731,29 @@ function fixedFailureMessage(timedOut: boolean, code: number | null, signal: Nod
  * took, then start a second run over the first one's record instead of
  * answering 409. The lock afterwards is the authoritative single-flight for
  * the few milliseconds two callers can both pass the read.
+ *
+ * The owner's switch is read inside that lock, and `declined` says which of
+ * the two refusals happened. Both callers check it before they get here, but
+ * neither check is the authorisation: the work between it and this point can
+ * take seconds — resolveIndexMode may wait on a cold CLI probe — and a switch
+ * flipped inside that window would otherwise start the very pass it forbids.
+ * Here the read and the start are on the same side of the lock, so an "off"
+ * either prevents a run or lands after one had already begun.
  */
 export async function startMemoryIndex(
   requested: MemoryIndexMode,
   trigger: MemoryIndexTrigger = "manual",
-): Promise<{ accepted: boolean; run: MemoryRunState }> {
+): Promise<{ accepted: boolean; run: MemoryRunState; declined?: "running" | "disabled" }> {
   const current = await readMemoryRunState();
-  if (current.status === "running") return { accepted: false, run: current };
+  if (current.status === "running") return { accepted: false, declined: "running", run: current };
 
   const mode = await resolveIndexMode(requested);
   if (!await acquireRunLock()) {
-    return { accepted: false, run: await readMemoryRunState() };
+    return { accepted: false, declined: "running", run: await readMemoryRunState() };
+  }
+  if (!(await getMemoryShardEnabled())) {
+    await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
+    return { accepted: false, declined: "disabled", run: await readMemoryRunState() };
   }
 
   const startedAtMs = Date.now();

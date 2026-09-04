@@ -139,6 +139,11 @@ async function exists(p: string): Promise<boolean> {
 
 async function executable(bin: string): Promise<boolean> {
   try {
+    // X_OK on its own is not "can be run": on POSIX it is also what a
+    // SEARCHABLE directory answers, so a folder called `ffmpeg` on the PATH
+    // had this box reporting an encoder it could never start. `stat` follows
+    // the link, which is right — a symlink to a real binary is a real binary.
+    if (!(await fs.stat(bin)).isFile()) return false;
     await fs.access(bin, fsConstants.X_OK);
     return true;
   } catch {

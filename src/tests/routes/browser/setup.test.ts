@@ -96,4 +96,21 @@ describe("/setup-api/browser/setup", () => {
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe("bad_body");
   });
+
+  it("refuses a body that is not an object with the 400 it promises", async () => {
+    // `null`, `[]` and `7` all PARSE, so the catch never ran and reading a
+    // field off one of them threw outside this route's own handling — the
+    // caller got a framework 500 where a stable `bad_body` was promised.
+    const { POST } = await import("@/app/setup-api/browser/setup/route");
+    for (const raw of ["null", "[]", "7", '"a string"']) {
+      const res = await POST(new Request("http://localhost/setup-api/browser/setup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: raw,
+      }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("bad_body");
+    }
+    expect(writeFile).not.toHaveBeenCalled();
+  });
 });

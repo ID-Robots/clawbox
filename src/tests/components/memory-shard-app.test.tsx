@@ -387,6 +387,26 @@ describe("the Memory Shard app", () => {
     expect(indexCalls).toEqual([]);
   });
 
+  it("carries the switch it just flipped back to the index card, without waiting on the status probe", async () => {
+    mount();
+    await screen.findByRole("button", { name: "Index now" });
+    // Every status read from here on hangs, the way a cold box's does: the
+    // route shells out to the OpenClaw CLI and can take a minute and a half.
+    statusGate = new Promise<void>(() => {});
+
+    fireEvent.click(screen.getByTestId("memory-shard-open-settings"));
+    fireEvent.click(await screen.findByTestId("memory-shard-switch"));
+    await waitFor(() => expect(enableCalls).toEqual([{ enabled: false }]));
+
+    // Back REMOUNTS the card, which seeds itself from the status the window is
+    // holding. Without the switch reaching that copy the card kept its live
+    // buttons over a route that refuses them, for as long as the probe took.
+    fireEvent.click(screen.getByTestId("memory-shard-settings-back"));
+    const indexNow = await screen.findByRole("button", { name: "Index now" });
+    expect((indexNow as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("memory-shard-paused")).toBeTruthy();
+  });
+
   it("says the shard is off when that is why a run was declined, not that one is already going", async () => {
     // Both refusals are 409. Telling the owner a run is in progress when the
     // switch is simply off sends them looking for something nobody started.

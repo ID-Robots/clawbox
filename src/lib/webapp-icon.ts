@@ -157,6 +157,10 @@ const inFlight = new Map<string, Promise<WebappIconOutcome>>();
 /** The one generation slot: the tail of a chain every generation waits on. */
 let generationSlot: Promise<void> = Promise.resolve();
 
+/** Every generation admitted and not yet finished — the one running and the
+ *  ones behind it. What a bounded caller is judged against. */
+let generationsAdmitted = 0;
+
 /** App ids whose last generation failed, and until when they are left alone. */
 const appCooldownUntil = new Map<string, number>();
 
@@ -426,6 +430,14 @@ export async function ensureIconFile(id: string, hints: WebappIconHints, hooks: 
 }
 
 /**
+ * Refused before it joined the queue, because the queue was already as deep as
+ * this caller said it could stand. Its own class so a caller can tell "the box
+ * is busy drawing" — which is not a fault and must not be retried at once —
+ * from a generator that actually failed.
+ */
+export class GenerationSlotBusy extends Error {}
+
+/**
  * Run `fn` when no other generation is running.
  *
  * A promise chain rather than a counter: each caller waits on the previous
@@ -435,8 +447,25 @@ export async function ensureIconFile(id: string, hints: WebappIconHints, hooks: 
  * Exported because the ONE slot has to cover every generation this box pays
  * for — icons, project favicons and a run's own pictures alike — or N callers
  * open N upstream requests against one daily allowance.
+ *
+ * `maxWaiting` is for callers that hold something while they wait. The icon
+ * pipeline passes none: it is fire-and-forget background work, and an icon
+ * that waits its turn costs nobody anything. A REQUEST thread is the other
+ * case — see the media image route — and one of those queued behind a
+ * two-minute upstream budget is a connection and a promise the box cannot
+ * reclaim for an answer the caller has already given up on.
  */
-export async function withGenerationSlot<T>(fn: () => Promise<T>): Promise<T> {
+export async function withGenerationSlot<T>(
+  fn: () => Promise<T>,
+  opts: { maxWaiting?: number } = {},
+): Promise<T> {
+  // Counted at ADMISSION rather than from an in-flight flag, exactly as the
+  // speech queue counts its own: a burst that arrives together has set no
+  // flags yet, and would all be admitted by a test of "is one running".
+  if (opts.maxWaiting !== undefined && generationsAdmitted > opts.maxWaiting) {
+    throw new GenerationSlotBusy("This box is already generating as much as it can queue.");
+  }
+  generationsAdmitted += 1;
   const previous = generationSlot;
   let release!: () => void;
   generationSlot = new Promise<void>((resolve) => {
@@ -446,8 +475,14 @@ export async function withGenerationSlot<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } finally {
+    generationsAdmitted -= 1;
     release();
   }
+}
+
+/** For tests: how many generations hold or wait for the slot right now. */
+export function admittedGenerations(): number {
+  return generationsAdmitted;
 }
 
 /** Is this app, or the whole box, inside a failure pause? */
