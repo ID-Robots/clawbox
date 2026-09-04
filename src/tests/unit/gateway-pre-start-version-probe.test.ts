@@ -450,6 +450,13 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
      * both fail, and nothing downstream may turn that into a failed unit.
      */
     dataMode?: number;
+    /**
+     * What a stubbed `openssl rand -hex 32` writes. The seeding branch's own
+     * length check runs BEFORE the write, so a write that returns 0 having
+     * emitted only part of the token is the one way a short file survives to
+     * the registration below.
+     */
+    opensslWrites?: string;
   }): {
     status: number | null;
     out: string;
@@ -482,6 +489,14 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
     if (opts.statSays !== undefined) {
       const stub = path.join(stubBin, "stat");
       writeFileSync(stub, `#!/bin/sh\necho ${opts.statSays}\n`);
+      chmodSync(stub, 0o755);
+    }
+    // A truncated write that reports success: `openssl` exits 0 having emitted
+    // less than the token it was asked for, which is what an ENOSPC part way
+    // through the redirect leaves behind.
+    if (opts.opensslWrites !== undefined) {
+      const stub = path.join(stubBin, "openssl");
+      writeFileSync(stub, `#!/bin/sh\nprintf %s ${JSON.stringify(opts.opensslWrites)}\n`);
       chmodSync(stub, 0o755);
     }
     if (opts.dataMode !== undefined) chmodSync(path.join(clawboxRoot, "data"), opts.dataMode);
@@ -617,6 +632,31 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
     // openclaw.json keeps whatever it already had rather than being rewritten
     // with a token this boot never read.
     expect(r.exported).toBe("");
+  });
+
+  it("does not register a bearer a truncated write left too short to be one", () => {
+    // The seeding gate re-seeds anything under 32 bytes, so a shorter file can
+    // only be one whose own write did not finish — ENOSPC part way through
+    // `openssl rand -hex 32 > "$1"`, on the boot where the seed failed and
+    // `|| true` swallowed it. That length check ran BEFORE the write, and
+    // nothing between it and the registration looked at the value again: the
+    // block exported a truncated bearer and the reconcile published it to
+    // openclaw.json as if the box had generated it.
+    //
+    // The window that matters is 16–31 characters, because it WORKS:
+    // src/lib/mcp-token.ts's readTokenFile() accepts 16 and up, so the box runs
+    // on a bearer with a fraction of the intended entropy and nothing says so.
+    // (Under 16 the verifier mints its own value instead and every tool call
+    // 307s to /login — broken, but at least loudly.)
+    const r = token({ opensslWrites: "a".repeat(20) });
+    expect(r.status, `the pre-start aborted, so the box gets no gateway:\n${r.out}`).toBe(0);
+    expect(r.out).toContain("REACHED_END=1");
+    expect(r.contents, "the fixture never produced a short token").toBe("a".repeat(20));
+    // Refused, and said as what it costs — the same shape as the empty case.
+    expect(r.exported).toBe("");
+    expect(r.out).toMatch(/WARN: MCP token file holds only 20 characters/);
+    expect(r.out).toMatch(/MCP tools are unavailable this boot/);
+    expect(r.out).not.toMatch(/ERROR/);
   });
 
   it("seeds a missing token at 0600 without a chmod to do it", () => {

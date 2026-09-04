@@ -31,7 +31,7 @@ import crypto from "crypto";
  * that fails against it: that check re-reads the file and adopts what
  * it finds, whether or not anything rotated, and the env value stops
  * being accepted from then on. Said plainly because it is easy to read
- * the rate limit as "only on a rotation" — `lastReadMtimeMs` starts
+ * the rate limit as "only on a rotation" — `lastReadFileId` starts
  * null, so the first failed check of the process always reads.
  *
  * In production that is inert: the only setter of the variable is
@@ -49,18 +49,30 @@ const TOKEN_PATH = path.join(DATA_ROOT, "data", ".mcp-token");
 
 let cached: string | null = null;
 /**
- * `mtimeMs` of the token file the last time a FAILED bearer check re-read it.
+ * Identity of the token file the last time a FAILED bearer check re-read it:
+ * `dev:ino:mtimeMs`.
  *
  * The failure path is the one an unauthenticated caller controls, so the
  * re-read has to be bounded — but NOT by a wall clock. A time slot is a shared
  * resource an attacker can consume: at more than one bad bearer per interval,
  * the flood takes every slot and the legitimate rotated bearer keeps being
  * rejected, which re-opens the very defect the re-read closes. Gating on the
- * file's mtime instead makes the bound exact: a rotation always changes it, so
- * the file is read at most ONCE per rotation no matter how many checks fail,
- * and a flood costs one `statSync` per request rather than one read.
+ * file itself makes the bound exact: the file is read at most ONCE per
+ * rotation no matter how many checks fail, and a flood costs one `statSync`
+ * per request rather than one read.
+ *
+ * `mtimeMs` alone is not that identity, and the two rotation shapes are why
+ * both halves are needed. `scripts/gateway-pre-start.sh` REPLACES the file
+ * (`mv` over it), so the inode changes and the timestamp need not: `mtimeMs`
+ * resolution is the filesystem's, and two replacements inside one tick report
+ * the same value — the second is then never read, and the bearer the MCP
+ * subprocess is now sending stays rejected until something rotates the file a
+ * third time. `production-server.js` and `readOrCreateToken` below instead
+ * rewrite it IN PLACE, keeping the inode and moving the mtime. Neither field
+ * covers both, and together they cost nothing: the `statSync` was already
+ * being made.
  */
-let lastReadMtimeMs: number | null = null;
+let lastReadFileId: string | null = null;
 
 function readTokenFile(): string | null {
   try {
@@ -129,14 +141,15 @@ export function verifyMcpBearer(headerValue: string | null): boolean {
   // failed. This widens nothing: data/.mcp-token is 0600 under a directory this
   // uid owns and it is the source `cached` was read from in the first place —
   // the stale value is what has no authority, not the file. TASK-657.
-  let mtimeMs: number;
+  let fileId: string;
   try {
-    mtimeMs = fs.statSync(TOKEN_PATH).mtimeMs;
+    const st = fs.statSync(TOKEN_PATH);
+    fileId = `${st.dev}:${st.ino}:${st.mtimeMs}`;
   } catch {
     // No file to reconcile against; the cached value is all there is.
     return false;
   }
-  if (mtimeMs === lastReadMtimeMs) return false;
+  if (fileId === lastReadFileId) return false;
 
   const onDisk = readTokenFile();
   // Spend the rotation's one allowed read only on a read that RETURNED. Stamping
@@ -147,7 +160,7 @@ export function verifyMcpBearer(headerValue: string | null): boolean {
   // one unlucky syscall. A file that is genuinely unreadable now costs one failed
   // `open()` per bad bearer, the same order as the `statSync` above it.
   if (!onDisk) return false;
-  lastReadMtimeMs = mtimeMs;
+  lastReadFileId = fileId;
   if (onDisk === cached) return false;
 
   // Adopt on the ROTATION, not on a caller presenting the new value. Making the
@@ -169,5 +182,5 @@ export function verifyMcpBearer(headerValue: string | null): boolean {
 
 export function _resetMcpTokenCacheForTests(): void {
   cached = null;
-  lastReadMtimeMs = null;
+  lastReadFileId = null;
 }

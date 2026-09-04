@@ -158,11 +158,11 @@ describe("mcp-token", () => {
     });
 
     it("does not let one transient read error consume the rotation's re-read", async () => {
-      // The mtime is the budget for the re-read, so it must be spent on a read
-      // that RETURNED. Stamped on the ATTEMPT, a single transient failure — an
-      // EMFILE or ENOMEM on a loaded server, a momentary EACCES inside the
-      // rotation window — recorded that mtime forever: every later check saw
-      // `mtimeMs === lastReadMtimeMs` and returned early, so the rotated token
+      // The file's identity is the budget for the re-read, so it must be spent
+      // on a read that RETURNED. Stamped on the ATTEMPT, a single transient
+      // failure — an EMFILE or ENOMEM on a loaded server, a momentary EACCES
+      // inside the rotation window — recorded that identity forever: every later
+      // check saw `fileId === lastReadFileId` and returned early, so the rotated
       // was never adopted until the file changed AGAIN. One unlucky syscall
       // re-opened the 401s this re-read exists to end, permanently.
       const { getMcpToken, verifyMcpBearer } = await loadModule(tmpDir);
@@ -194,6 +194,48 @@ describe("mcp-token", () => {
       // The rotation is still picked up on the next call, with no further write
       // to the file — the transient did not spend its budget.
       expect(verifyMcpBearer(`Bearer ${rotated}`)).toBe(true);
+    });
+
+    it("adopts a second rotation that reports the same mtime as the first", async () => {
+      // The re-read is bounded by the file's identity so a bad-bearer flood
+      // costs one `statSync` rather than one read per request. `mtimeMs` alone
+      // is not that identity. `scripts/gateway-pre-start.sh` rotates by
+      // REPLACING the file (`mv` over it), and `mtimeMs` resolution belongs to
+      // the filesystem — so two replacements landing inside one timestamp tick
+      // report the same value, the second is never read, and the bearer the MCP
+      // subprocess is now sending is rejected until something rotates the file a
+      // THIRD time. That is the permanent 401 this whole re-read exists to end,
+      // reached through a different door.
+      const { getMcpToken, verifyMcpBearer } = await loadModule(tmpDir);
+      const tokenPath = path.join(tmpDir, "data", ".mcp-token");
+      const before = getMcpToken();
+      expect(verifyMcpBearer(`Bearer ${before}`)).toBe(true);
+
+      // One fixed timestamp on every rotation: what a coarse-granularity
+      // filesystem reports for replacements inside a single tick.
+      const pinned = new Date(1_700_000_000_000);
+      const rotate = (value: string) => {
+        // Staged and renamed, the way the shipped script does it, so each
+        // rotation is a new inode rather than a rewrite in place.
+        const staged = path.join(tmpDir, "data", ".mcp-token.new");
+        fs.writeFileSync(staged, `${value}\n`, { mode: 0o600 });
+        fs.renameSync(staged, tokenPath);
+        fs.utimesSync(tokenPath, pinned, pinned);
+      };
+
+      const first = "b".repeat(64);
+      rotate(first);
+      expect(verifyMcpBearer(`Bearer ${first}`)).toBe(true);
+
+      const second = "c".repeat(64);
+      rotate(second);
+      expect(
+        fs.statSync(tokenPath).mtimeMs,
+        "both rotations must report one mtime or this test proves nothing",
+      ).toBe(pinned.getTime());
+
+      expect(verifyMcpBearer(`Bearer ${second}`)).toBe(true);
+      expect(verifyMcpBearer(`Bearer ${first}`)).toBe(false);
     });
 
     it("rejects a token that's a prefix of the real one", async () => {

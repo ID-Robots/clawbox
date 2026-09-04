@@ -167,3 +167,100 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh config load block", () => {
     expect(src).toMatch(/^import json, os, sys, tempfile, secrets, shutil, time$/m);
   });
 });
+
+/**
+ * The other half of the same file, and the one that can still fail the unit.
+ * The loader above was made unable to take the boot down; the WRITE it feeds
+ * was not. `tempfile.mkstemp` sat OUTSIDE the `try` that existed to contain a
+ * failed write, so a `~/.openclaw` this uid cannot write — or a full disk —
+ * raised PermissionError/OSError straight out of a bare top-level heredoc in a
+ * script under `set -euo pipefail`. `ExecStartPre=` carries no `-` prefix
+ * (config/clawbox-gateway.service), so that fails the unit and Restart=always
+ * spends StartLimitBurst: no gateway and no chat, on every boot.
+ *
+ * A config migration that cannot be written costs this boot the migration. The
+ * gateway then starts on the config already on disk — the state it was in a
+ * moment earlier — exactly as the deepseek plugin patch and the MCP
+ * registration in the same script already do.
+ */
+function extractWriter(): string {
+  const src = readFileSync(SCRIPT, "utf-8");
+  const head = "\nif changed:\n    # Atomic write";
+  const tail = '\n    print("  Gateway config already correct, skipping write")\n';
+  const start = src.indexOf(head);
+  const end = src.indexOf(tail, start);
+  if (start < 0 || end < 0) {
+    throw new Error("config write block not found in gateway-pre-start.sh");
+  }
+  return src.slice(start, end + tail.length);
+}
+
+const WRITER = hasPython3 ? extractWriter() : "";
+
+/** Run the write block over `cfgPath` with `cfg` as the object to persist. */
+function write(cfgPath: string, cfg: unknown): { status: number | null; stdout: string; stderr: string } {
+  const proc = spawnSync(
+    "python3",
+    [
+      "-c",
+      "import json, os, sys, tempfile, secrets, shutil, time\n"
+        + "cfg_path = sys.argv[1]\ncfg = json.loads(sys.argv[2])\nchanged = True"
+        + WRITER,
+      cfgPath,
+      JSON.stringify(cfg),
+    ],
+    { encoding: "utf-8" },
+  );
+  return { status: proc.status, stdout: proc.stdout ?? "", stderr: proc.stderr ?? "" };
+}
+
+describe.skipIf(!hasPython3)("gateway-pre-start.sh config write block", () => {
+  let dir: string;
+  let cfgPath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(os.tmpdir(), "clawbox-prestart-write-"));
+    cfgPath = path.join(dir, "openclaw.json");
+  });
+
+  afterEach(() => {
+    try {
+      chmodSync(dir, 0o755);
+    } catch { /* the unwritable-dir case is the only one that changes it */ }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("writes the migrated config and says so", () => {
+    writeFileSync(cfgPath, JSON.stringify({ gateway: { port: 1 } }));
+
+    const r = write(cfgPath, { gateway: { port: 18789 } });
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/Updated gateway config/);
+    expect(JSON.parse(readFileSync(cfgPath, "utf-8"))).toEqual({ gateway: { port: 18789 } });
+    // Nothing staged left behind.
+    expect(readdirSync(dir)).toEqual(["openclaw.json"]);
+  });
+
+  it.skipIf(isRoot)("does not fail the unit when the config directory cannot be written", () => {
+    // The reproduction is `mkstemp`, not the write: on a directory this uid
+    // cannot write it raises PermissionError before the `try` was ever entered.
+    // ENOSPC reaches the same call the same way.
+    const original = JSON.stringify({ gateway: { port: 18789 }, models: { providers: { openai: {} } } });
+    writeFileSync(cfgPath, original);
+    chmodSync(dir, 0o500);
+
+    const r = write(cfgPath, { gateway: { port: 18789 }, migrated: true });
+
+    expect(r.status, `the pre-start aborted, so the box gets no gateway:\n${r.stderr}`).toBe(0);
+    // Said as what it costs, not as an error, and not silently.
+    expect(r.stderr).toMatch(/WARN: could not write the gateway config/);
+    expect(r.stderr).toMatch(/PermissionError/);
+    expect(r.stderr).toMatch(/starts on the config already on disk/);
+    expect(r.stderr).not.toMatch(/Traceback/);
+    // And the config it starts on is the one that was already there, untouched.
+    chmodSync(dir, 0o755);
+    expect(readFileSync(cfgPath, "utf-8")).toBe(original);
+    expect(readdirSync(dir)).toEqual(["openclaw.json"]);
+  });
+});

@@ -1804,18 +1804,40 @@ if isinstance(ds_models, list):
 if changed:
     # Atomic write so a crash mid-rewrite can't leave a half-written
     # file where the gateway would refuse to boot.
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
+    #
+    # WARN and carry on, never raise. This heredoc is invoked bare, and the
+    # script runs under `set -euo pipefail` as the gateway unit's
+    # ExecStartPre= with no `-` prefix (config/clawbox-gateway.service) -- so
+    # an exception here fails the unit, and Restart=always then spends
+    # StartLimitBurst: no gateway and no chat, on every boot. An unwritable
+    # ~/.openclaw or a full disk must cost this boot its config migration, not
+    # the box its gateway; the gateway starts on the config already on disk,
+    # which is the state it was in a moment ago. Same call as the deepseek
+    # plugin patch and the MCP registration further down, both already guarded
+    # this way. TASK-657.
+    #
+    # `mkstemp` is INSIDE the guard, and that is the half that was missing: it
+    # is the call that raises PermissionError on a directory this uid cannot
+    # write and OSError on ENOSPC, and it sat outside the `try` that existed
+    # to contain exactly those.
+    tmp_path = None
     try:
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
         with os.fdopen(tmp_fd, "w") as f:
             json.dump(cfg, f, indent=2)
         os.replace(tmp_path, cfg_path)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
-        raise
-    print("  Updated gateway config")
+        print("  Updated gateway config")
+    except Exception as exc:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+        print(
+            "  WARN: could not write the gateway config (%s: %s); the gateway starts on the config already on disk"
+            % (type(exc).__name__, exc),
+            file=sys.stderr,
+        )
 else:
     print("  Gateway config already correct, skipping write")
 PY
@@ -2442,6 +2464,29 @@ else
   CLAWBOX_MCP_TOKEN_VAL="$(cat "$MCP_TOKEN_FILE" 2>/dev/null || true)"
   if [ -z "$CLAWBOX_MCP_TOKEN_VAL" ]; then
     echo "  WARN: MCP token file is empty ($MCP_TOKEN_FILE); skipping the MCP server registration — the ClawBox MCP tools are unavailable this boot" >&2
+  elif [ "${#CLAWBOX_MCP_TOKEN_VAL}" -lt 32 ]; then
+    # The same threshold the seeding gate above uses, and for the same reason.
+    # That gate re-seeds anything under 32 bytes, so a shorter file can only be
+    # one whose write did not finish -- an ENOSPC part way through `openssl rand
+    # -hex 32 > "$1"`, on the boot where the seed itself failed and `|| true`
+    # swallowed it. The length check ran BEFORE that write, so nothing between
+    # there and here looks at the value again, and a truncated bearer would be
+    # published to openclaw.json as if it were a token this box generated.
+    #
+    # Refusing it costs the same as an empty one: the MCP tools, for this boot,
+    # and the file is re-seeded on the next. Keeping it costs more than it
+    # looks. Under 16 characters src/lib/mcp-token.ts's readTokenFile() rejects
+    # it outright, the verifier mints its own value instead, and every tool call
+    # 307s to /login with nothing in the journal to say why. Between 16 and 31
+    # it WORKS -- and that is the bad case, because the box then runs on a
+    # bearer with a fraction of the intended entropy and nothing ever says so.
+    #
+    # 32 rather than a 64-hex literal on purpose: three writers seed this file
+    # (mcp_write_token's two branches and production-server.js) and all three
+    # produce 64 hex characters today, but the gate above is the one that
+    # decides what counts as seeded, and the two must not be able to disagree.
+    echo "  WARN: MCP token file holds only ${#CLAWBOX_MCP_TOKEN_VAL} characters ($MCP_TOKEN_FILE), too short to be a token this box wrote; skipping the MCP server registration — the ClawBox MCP tools are unavailable this boot" >&2
+    CLAWBOX_MCP_TOKEN_VAL=""
   fi
 fi
 export CLAWBOX_MCP_TOKEN_VAL
