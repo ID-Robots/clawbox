@@ -344,9 +344,11 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
           timeoutMs: 60_000,
           // The route refuses rather than half-uninstalling when it cannot
           // read the device's OpenClaw configuration or remove the skill
-          // folder. Without this the 503 renders as "the service is not
-          // answering", which sends the agent to clawbox_health over a route
-          // that answered precisely and told it to try again.
+          // folder. Unmapped, a 503 falls through to the generic
+          // ENDPOINT_DOWN — "the ClawBox service did not complete this
+          // request. Call clawbox_health, then retry once" — which sends the
+          // agent to a health check over a route that answered precisely, and
+          // says nothing about the app still being installed.
           rules: [
             {
               status: 503,
@@ -361,8 +363,11 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
       // The SKILL half depends on what was there. `skillRemoved: false` — the
       // id is in the desktop's list and no skill of that name was on disk — is
       // the one an agent must not report as a skill removal, because the next
-      // thing it does is tell the user the skill is gone. `null` is a device
-      // with no OpenClaw skills root at all (the hermes SKU).
+      // thing it does is tell the user the skill is gone. `null` is an
+      // uninstall with no skill half to report on at all (the hermes SKU, or a
+      // web app), and says nothing about skills for the same reason: an
+      // absence report about something that never existed reads as a partial
+      // failure.
       if (removed?.skillRemoved === false) {
         return text(
           `Removed "${app_id}" from the desktop. There was no skill of that name on disk, so nothing was removed from the agent's skills.`,

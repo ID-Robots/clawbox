@@ -10,6 +10,32 @@ import { WEBAPPS_DIR } from "@/lib/code-projects";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Does the desktop know this id as a WEB APP?
+ *
+ * `webapp_create` and `code_project_build` register one in `installed_meta`
+ * with a `webappUrl`; a store skill never has one. It decides whether this
+ * uninstall has a skill half at all — and therefore whether OpenClaw's
+ * configuration has anything to say about it.
+ *
+ * Cautious by construction: only a meta entry that NAMES a webappUrl answers
+ * true. An id with no meta, or a preference file that could not be read, is
+ * treated as something that may have a skill.
+ */
+async function isRegisteredWebapp(appId: string): Promise<boolean> {
+  try {
+    const meta = (await configGetAll())?.["pref:installed_meta"];
+    if (!meta || typeof meta !== "object") return false;
+    const entry = (meta as Record<string, unknown>)[appId];
+    if (!entry || typeof entry !== "object") return false;
+    const url = (entry as { webappUrl?: unknown }).webappUrl;
+    return typeof url === "string" && url.length > 0;
+  } catch (err) {
+    console.warn("[uninstall] Could not read the installed-app meta:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const { appId } = await req.json();
@@ -36,24 +62,35 @@ export async function POST(req: Request) {
     // they would have retried from is gone with it. Nothing is touched, and
     // the answer says so. Retryable: the file is rewritten in place by
     // `openclaw config set`, so the next attempt a moment later reads it.
-    let skillRoot: string | null;
-    try {
-      skillRoot = openclawSkillRoot();
-    } catch (err) {
-      if (!(err instanceof OpenclawConfigUnreadableError)) throw err;
-      console.warn("[uninstall] Could not resolve the skills root:", err.message);
-      return NextResponse.json({
-        ok: false,
-        error: "The device's OpenClaw configuration could not be read, so nothing was removed. Try again in a moment.",
-        code: err.code,
-        retryable: true,
-        appId,
-      }, { status: 503 });
+    //
+    // A WEB APP is asked about first, and never reaches that refusal: it has no
+    // skill half, so the OpenClaw configuration has nothing to say about
+    // removing it. Without that, an openclaw.json this box cannot read — on a
+    // licensed `dual` box, one belonging to a harness that is not even running
+    // — would block the removal of the agent's own web app, permanently if the
+    // file is invalid rather than half-written, where beta removed it.
+    const isWebapp = await isRegisteredWebapp(appId);
+    let skillRoot: string | null = null;
+    if (!isWebapp) {
+      try {
+        skillRoot = openclawSkillRoot();
+      } catch (err) {
+        if (!(err instanceof OpenclawConfigUnreadableError)) throw err;
+        console.warn("[uninstall] Could not resolve the skills root:", err.message);
+        return NextResponse.json({
+          ok: false,
+          error: "The device's OpenClaw configuration could not be read, so nothing was removed. Try again in a moment.",
+          code: err.code,
+          retryable: true,
+          appId,
+        }, { status: 503 });
+      }
     }
     // What actually happened to the skill half, so the answer can say it.
     //   true  — a skill directory was there and is gone
     //   false — this box has a skills root and nothing of that name was in it
-    //   null  — this edition has no OpenClaw skills root to look in (hermes)
+    //   null  — there is no skill half here to report on: the hermes SKU, or a
+    //           web app, which never had a skill of its own
     // `{ok:true}` alone said the same thing for all three, which is the half of
     // the wrong-directory delete that a guard on its own does not close.
     let skillRemoved: boolean | null = null;
@@ -72,10 +109,18 @@ export async function POST(req: Request) {
         skillRemoved = true;
       } catch (err) {
         if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+          // `fs.rm` deletes as it WALKS and throws on the first entry it
+          // cannot remove, so by here the folder is in an unknown state —
+          // possibly part-deleted. The message says that rather than "nothing
+          // was removed", which would be the same false report in the other
+          // direction. The uninstall stops all the same (beta stopped too,
+          // as an opaque 500): the desktop entry is what the owner retries
+          // and reports from, and dropping it over a skill still on disk is
+          // the failure this route exists to stop making.
           console.warn("[uninstall] Failed to remove the skill directory:", err instanceof Error ? err.message : err);
           return NextResponse.json({
             ok: false,
-            error: "The app's skill folder could not be removed, so nothing was uninstalled. Try again in a moment.",
+            error: "The app's skill folder could not be fully removed, so the uninstall was stopped and part of the folder may already be gone. Try again; if it keeps failing, remove the folder from the Terminal.",
             code: "skill_remove_failed",
             retryable: true,
             appId,

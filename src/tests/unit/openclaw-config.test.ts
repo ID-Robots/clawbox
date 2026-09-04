@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
 import fs from "fs/promises";
 import fsSync from "fs";
+import { saveEnv } from "../helpers/env";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
@@ -585,13 +586,25 @@ describe("openclaw-config", () => {
       expect(result).toBe("/custom/workspace");
     });
 
-    it("falls back to .openclaw/workspace when it exists", () => {
-      mockFsSync.readFileSync.mockReturnValue(JSON.stringify({}));
-      mockFsSync.existsSync.mockReturnValue(true);
+    it("falls back to <OpenClaw home>/workspace when it exists", () => {
+      // Named explicitly rather than matched as `/\.openclaw\/workspace$/`:
+      // the well-known workspace is a child of the home the CONFIG was read
+      // from (`CLAWBOX_OPENCLAW_HOME` / `OPENCLAW_HOME` / `$HOME/.openclaw`),
+      // and a `$HOME`-shaped assertion passed whichever of the two the code
+      // used. This is the delete target `openclawSkillRoot()` appends `skills`
+      // to, so the two spellings must not be interchangeable here.
+      const restore = saveEnv("OPENCLAW_HOME");
+      process.env.OPENCLAW_HOME = "/custom/openclaw-home";
+      try {
+        mockFsSync.readFileSync.mockReturnValue(JSON.stringify({}));
+        mockFsSync.existsSync.mockReturnValue(true);
 
-      const result = openclawConfig.getSkillsDir();
+        const result = openclawConfig.getSkillsDir();
 
-      expect(result).toMatch(/\.openclaw\/workspace$/);
+        expect(result).toBe("/custom/openclaw-home/workspace");
+      } finally {
+        restore();
+      }
     });
 
     it("falls back to ~/clawd when workspace dir does not exist", () => {

@@ -46,13 +46,18 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
 let home: string;
 let dataDir: string;
 let restoreEnv: () => void;
+/** The config store's contents for one test — `installed_meta` is read from it. */
+let stored: Record<string, unknown> = {};
 
+// `vi.fn(impl)`, not a chained `.mockResolvedValue`: the vitest config's
+// `mockReset: true` wipes a chained value before every test (this factory runs
+// once) and `getAll` would then answer undefined.
 vi.mock("@/lib/config-store", () => ({
   get DATA_DIR() {
     return dataDir;
   },
-  getAll: vi.fn().mockResolvedValue({}),
-  setMany: vi.fn().mockResolvedValue(undefined),
+  getAll: vi.fn(async () => stored),
+  setMany: vi.fn(async () => undefined),
 }));
 
 vi.mock("@/lib/code-projects", () => ({
@@ -82,6 +87,7 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   clearSkillEntry.mockResolvedValue(false);
+  stored = {};
   restoreEnv = saveEnv("HOME", "CLAWBOX_EDITION", "OPENCLAW_HOME");
   home = await fs.mkdtemp(path.join(os.tmpdir(), "clawbox-uninst-"));
   dataDir = path.join(home, "clawbox", "data");
@@ -199,6 +205,122 @@ describe("POST /setup-api/apps/uninstall on an OpenClaw device", () => {
     expect(setPreferences).not.toHaveBeenCalled();
     expect(kvDelete).not.toHaveBeenCalled();
   });
+
+  it("still removes a WEB APP while that config is unreadable — it has no skill half", async () => {
+    // The refusal above must not spread to an app the OpenClaw config has
+    // nothing to do with. On a licensed `dual` box running Hermes the idle
+    // harness's openclaw.json can be invalid for good, and every uninstall on
+    // the box — including the agent's own web apps, which beta removed — would
+    // then need a terminal to recover.
+    await fs.mkdir(path.join(home, ".openclaw"), { recursive: true });
+    await fs.writeFile(path.join(home, ".openclaw", "openclaw.json"), '{"agents":{"defa');
+    stored = { "pref:installed_meta": { [APP]: { name: "Notes", webappUrl: `/setup-api/webapps?app=${APP}` } } };
+
+    const { status, body } = await uninstall(APP);
+
+    expect(status).toBe(200);
+    expect(body.ok).toBe(true);
+    // No skill half to report on, so nothing is claimed about one.
+    expect(body.skillRemoved).toBeNull();
+    await expect(fs.stat(webappDir())).rejects.toThrow();
+    // ...and the skills root was never resolved, so nothing under it was
+    // touched and the OpenClaw config was left alone.
+    await expect(fs.stat(clawdSkill())).resolves.toBeTruthy();
+    expect(clearSkillEntry).not.toHaveBeenCalled();
+  });
+
+  it("follows OPENCLAW_HOME, not $HOME, to the config that names the workspace", async () => {
+    // install.sh sets HOME and CLAWBOX_OPENCLAW_HOME side by side, so the two
+    // agree on a shipped box by convention only. A helper that reads
+    // $HOME/.openclaw while the module's own CONFIG_PATH honours the override
+    // resolves the DELETE target from a file that is not this box's config —
+    // TASK-551's shape, one level down.
+    const overrideHome = path.join(home, "oc-home");
+    process.env.OPENCLAW_HOME = overrideHome;
+    const workspace = path.join(home, "work");
+    await fs.mkdir(overrideHome, { recursive: true });
+    await fs.writeFile(
+      path.join(overrideHome, "openclaw.json"),
+      JSON.stringify({ agents: { defaults: { workspace } } }),
+    );
+    // A DIFFERENT config in the place $HOME alone would look, naming a
+    // workspace nothing may be deleted under.
+    await fs.mkdir(path.join(home, ".openclaw"), { recursive: true });
+    await fs.writeFile(
+      path.join(home, ".openclaw", "openclaw.json"),
+      JSON.stringify({ agents: { defaults: { workspace: path.join(home, "decoy") } } }),
+    );
+    const configured = path.join(workspace, "skills", APP);
+    const decoy = path.join(home, "decoy", "skills", APP);
+    await fs.mkdir(configured, { recursive: true });
+    await fs.mkdir(decoy, { recursive: true });
+
+    const { status, body } = await uninstall(APP);
+
+    expect(status).toBe(200);
+    expect(body.skillRemoved).toBe(true);
+    await expect(fs.stat(configured)).rejects.toThrow();
+    await expect(fs.stat(decoy)).resolves.toBeTruthy();
+  });
+
+  it("falls back to the workspace under OPENCLAW_HOME, not the one under $HOME", async () => {
+    // The other half of the same rule: when the config names no workspace, the
+    // well-known one is OpenClaw's own `<home>/workspace`. Keyed on $HOME it
+    // would find a directory belonging to no configuration this box reads —
+    // and delete under it.
+    const overrideHome = path.join(home, "oc-home");
+    process.env.OPENCLAW_HOME = overrideHome;
+    await fs.mkdir(overrideHome, { recursive: true });
+    await fs.writeFile(path.join(overrideHome, "openclaw.json"), JSON.stringify({ agents: {} }));
+    const real = path.join(overrideHome, "workspace", "skills", APP);
+    const decoy = path.join(home, ".openclaw", "workspace", "skills", APP);
+    await fs.mkdir(real, { recursive: true });
+    await fs.mkdir(decoy, { recursive: true });
+
+    const { body } = await uninstall(APP);
+
+    expect(body.skillRemoved).toBe(true);
+    await expect(fs.stat(real)).rejects.toThrow();
+    await expect(fs.stat(decoy)).resolves.toBeTruthy();
+  });
+
+  // Root ignores the mode bits, so the unremovable child is removable there and
+  // the case cannot be staged.
+  it.skipIf(process.getuid?.() === 0)(
+    "does not claim nothing happened when the folder was PART-removed",
+    async () => {
+      // `fs.rm` deletes as it walks and throws on the first entry it cannot
+      // remove, so an EACCES deep in the folder leaves everything above it
+      // already deleted. Reporting that as "nothing was removed" is the same
+      // false report as reporting a non-removal as a removal, and the owner
+      // acts on it — the tile stays, the retry fails the same way, and the
+      // skill they were told is untouched is in pieces.
+      const locked = path.join(home, "clawd", "skills", APP, "locked");
+      await fs.mkdir(locked, { recursive: true });
+      await fs.writeFile(path.join(locked, "inner.txt"), "pinned");
+      await fs.chmod(locked, 0o500);
+      try {
+        const { status, body } = await uninstall(APP);
+
+        expect(status).toBe(503);
+        expect(body.code).toBe("skill_remove_failed");
+        expect(body.retryable).toBe(true);
+        // The folder really is part-gone: SKILL.md went before the throw.
+        await expect(fs.stat(path.join(home, "clawd", "skills", APP, "SKILL.md"))).rejects.toThrow();
+        await expect(fs.stat(locked)).resolves.toBeTruthy();
+        // ...so the answer must not say the removal did not happen at all.
+        expect(String(body.error)).not.toMatch(/nothing was (uninstalled|removed)/i);
+        // And the rest of the uninstall did not run: the desktop entry is what
+        // the owner retries and reports from.
+        await expect(fs.stat(webappDir())).resolves.toBeTruthy();
+        expect(clearSkillEntry).not.toHaveBeenCalled();
+        expect(setPreferences).not.toHaveBeenCalled();
+        expect(kvDelete).not.toHaveBeenCalled();
+      } finally {
+        await fs.chmod(locked, 0o700);
+      }
+    },
+  );
 
   it("removes the skill directory, exactly as before", async () => {
     const { status, body } = await uninstall(APP);

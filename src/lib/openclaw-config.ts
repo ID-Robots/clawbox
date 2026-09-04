@@ -2793,10 +2793,16 @@ function readConfiguredWorkspace(): string | undefined {
 
 /** The workspace when the config names none: the current path, else the legacy one. */
 function wellKnownWorkspace(): string {
-  const home = process.env.HOME || "/home/clawbox";
-  const openclawWorkspace = path.join(home, ".openclaw", "workspace");
+  // Under OpenClaw's home, the same one the config was read from — not a
+  // second `$HOME/.openclaw` spelling. install.sh sets `HOME` and
+  // `CLAWBOX_OPENCLAW_HOME` side by side, so the two agree on a shipped box by
+  // convention only; keyed on `$HOME` this line would resolve a DELETE target
+  // from a directory the box's own config does not live in.
+  const openclawWorkspace = path.join(openclawHome(), "workspace");
   if (fsSync.existsSync(openclawWorkspace)) return openclawWorkspace;
-  return path.join(home, "clawd");
+  // The legacy workspace is a HOME-relative path in its own right, never a
+  // child of OpenClaw's home.
+  return path.join(process.env.HOME || "/home/clawbox", "clawd");
 }
 
 /**
