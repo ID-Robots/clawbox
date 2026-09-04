@@ -661,7 +661,6 @@ export const de: Record<string, string> = {
   "codingAgent.summaryTitle": "Zusammenfassung",
   "codingAgent.noSummaryYet": "Noch keine Zusammenfassung — der Lauf arbeitet noch.",
   "codingAgent.noSummary": "Dieser Lauf hat keine Zusammenfassung hinterlassen.",
-  "codingAgent.filesTitle": "Geänderte Dateien",
   "codingAgent.activityTitle": "Aktivität",
   "codingAgent.loadFailed": "Die Einstellungen des Coding-Agenten konnten nicht gelesen werden.",
   "codingAgent.toggleFailed": "Die Einstellung des Coding-Agenten konnte nicht geändert werden.",

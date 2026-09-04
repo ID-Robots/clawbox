@@ -649,7 +649,6 @@ export const bg: Record<string, string> = {
   "codingAgent.summaryTitle": "Обобщение",
   "codingAgent.noSummaryYet": "Още няма обобщение — изпълнението продължава.",
   "codingAgent.noSummary": "Това изпълнение не остави обобщение.",
-  "codingAgent.filesTitle": "Променени файлове",
   "codingAgent.activityTitle": "Активност",
   "codingAgent.loadFailed": "Настройките на кодиращия агент не можаха да бъдат прочетени.",
   "codingAgent.toggleFailed": "Настройката на кодиращия агент не можа да бъде променена.",

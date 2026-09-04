@@ -662,7 +662,6 @@ export const fr: Record<string, string> = {
   "codingAgent.summaryTitle": "Résumé",
   "codingAgent.noSummaryYet": "Pas encore de résumé — l'exécution est en cours.",
   "codingAgent.noSummary": "Cette exécution n'a laissé aucun résumé.",
-  "codingAgent.filesTitle": "Fichiers modifiés",
   "codingAgent.activityTitle": "Activité",
   "codingAgent.loadFailed": "Impossible de lire les réglages de l'agent de code.",
   "codingAgent.toggleFailed": "Impossible de modifier le réglage de l'agent de code.",

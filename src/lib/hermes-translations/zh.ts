@@ -673,7 +673,6 @@ export const zh: Record<string, string> = {
   "codingAgent.summaryTitle": "摘要",
   "codingAgent.noSummaryYet": "尚无摘要——运行仍在进行中。",
   "codingAgent.noSummary": "此运行未留下摘要。",
-  "codingAgent.filesTitle": "更改的文件",
   "codingAgent.activityTitle": "活动记录",
   "codingAgent.loadFailed": "无法读取编程助手的设置。",
   "codingAgent.toggleFailed": "无法更改编程助手的设置。",
