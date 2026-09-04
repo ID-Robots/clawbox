@@ -493,3 +493,55 @@ describe("the detail panel says its failures in the owner's language too", () =>
     expect(screen.queryByText(bgCopy("skills.detailFailed"))).toBeNull();
   });
 });
+
+/**
+ * TASK-658. Three refusals the store told the wrong story about.
+ *
+ * `too_large` is not a failure — the CLI's own output overran the read cap
+ * AFTER it ran, so the outcome is unknown. The MCP tool has always told the
+ * agent so ("call skill_list and look for it before deciding anything") while
+ * the store said "Install failed": one device state, two contradictory stories,
+ * and the one shown to the owner is the one that invites a second install.
+ *
+ * The rail's two refusals used to arrive with no code at all and landed on the
+ * catalogue's "couldn't load, retry" — a device-failure card for a checkbox,
+ * with a button whose only effect is to resend what was just rejected.
+ */
+describe("TASK-658: a refusal the owner can undo says so", () => {
+  it("too_large on install says the outcome is unknown, not that it failed", async () => {
+    mockStore({
+      action: () => reply(502, { error: "The device's answer was too large to use.", code: "too_large" }),
+    });
+    await openBrowseTab();
+    await installFromBrowse();
+
+    expect(screen.getByText(bgCopy("skills.installUnknownOutcome", { name: "PDF Tools" }))).toBeTruthy();
+    expect(screen.queryByText(bgCopy("skills.installFailed"))).toBeNull();
+  });
+
+  it("invalid_argument on browse names the filters, and offers to clear them", async () => {
+    mockStore({ browse: reply(400, { error: "Invalid trust", code: "invalid_argument", field: "trust" }) });
+    await openBrowseTab();
+
+    expect(await screen.findByText(bgCopy("skills.browseBadFilter"))).toBeTruthy();
+    expect(screen.queryByText(bgCopy("skills.browseFailed"))).toBeNull();
+    // Retry would resend exactly what was refused.
+    expect(screen.queryByRole("button", { name: bgCopy("skills.retry") })).toBeNull();
+    expect(screen.getByRole("button", { name: bgCopy("skills.filtersClearAll") })).toBeTruthy();
+  });
+
+  it("too_many_facets says there are too many, not that one is invalid", async () => {
+    mockStore({
+      browse: reply(400, {
+        error: "Too many trust filters — at most 12 at a time.",
+        code: "too_many_facets",
+        field: "trust",
+        limit: 12,
+      }),
+    });
+    await openBrowseTab();
+
+    expect(await screen.findByText(bgCopy("skills.browseTooManyFilters"))).toBeTruthy();
+    expect(screen.queryByText(bgCopy("skills.browseBadFilter"))).toBeNull();
+  });
+});

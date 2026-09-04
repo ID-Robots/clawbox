@@ -30,7 +30,7 @@ import {
   rankFacets,
   trustBucket,
 } from "@/lib/hermes-skill-facets";
-import { hermesSkillsGuard } from "@/lib/hermes-skills-server";
+import { hermesSkillsGuard, invalidArgument, tooManyFacets } from "@/lib/hermes-skills-server";
 import {
   cliBrowse,
   cliSearch,
@@ -76,21 +76,42 @@ function ageHours(iso?: string): number | null {
  * `null` = the value list contained something invalid, which is a 400 rather
  * than a filter silently dropped.
  */
-function facetParam(
-  values: string[],
-  valid: (value: string) => boolean,
-): string[] | null {
+/**
+ * The two refusals are told apart on purpose. Both used to be `null`, so the
+ * route answered "Invalid <group>" for a rail full of perfectly valid ticks —
+ * a refusal the owner caused by clicking and could undo by unticking, reported
+ * as if they had typed something malformed.
+ */
+type FacetParse =
+  | { ok: true; values: string[] }
+  | { ok: false; reason: "invalid" | "too_many" };
+
+function facetParam(values: string[], valid: (value: string) => boolean): FacetParse {
   const out: string[] = [];
   for (const raw of values) {
     for (const part of raw.split(",")) {
       const v = part.trim();
       if (!v) continue;
-      if (!valid(v)) return null;
+      if (!valid(v)) return { ok: false, reason: "invalid" };
       if (!out.includes(v)) out.push(v);
-      if (out.length > MAX_FACET_SELECTION) return null;
+      if (out.length > MAX_FACET_SELECTION) return { ok: false, reason: "too_many" };
     }
   }
-  return out;
+  return { ok: true, values: out };
+}
+
+/** One line per facet group: the parse, or the refusal that names the group. */
+function facetOrRefusal(
+  parsed: FacetParse,
+  field: string,
+  invalidSentence: string,
+): { values: string[]; refusal: null } | { values: null; refusal: NextResponse } {
+  if (parsed.ok) return { values: parsed.values, refusal: null };
+  return {
+    values: null,
+    refusal:
+      parsed.reason === "too_many" ? tooManyFacets(field) : invalidArgument(field, invalidSentence),
+  };
 }
 
 interface FacetSelection {
@@ -187,8 +208,8 @@ export async function GET(request: Request) {
   const page = clampInt(params.get("page"), 1, MAX_BROWSE_PAGE, 1);
   const pageSize = clampInt(params.get("size"), 1, 48, 24);
 
-  if (page === null) return NextResponse.json({ error: "Invalid page" }, { status: 400 });
-  if (pageSize === null) return NextResponse.json({ error: "Invalid size" }, { status: 400 });
+  if (page === null) return invalidArgument("page", "Invalid page");
+  if (pageSize === null) return invalidArgument("size", "Invalid size");
   // The one 400 on this route the OWNER can cause and undo: the search box
   // accepts a leading `-` and any length, and `isValidQuery` refuses both. It
   // carries a code so the store can say "change the search" rather than the
@@ -202,17 +223,37 @@ export async function GET(request: Request) {
   // CLI fallback is restricted to the flag allowlist (see below). `?source=`
   // stays single-valued for the MCP tool and any bookmarked link; the rail
   // sends the same name repeated.
-  const sources = facetParam(params.getAll("source"), isBrowsableSource);
-  if (sources === null) return NextResponse.json({ error: "Unknown source" }, { status: 400 });
-  const providers = facetParam(params.getAll("provider"), (v) => isValidMeta(v));
-  if (providers === null) return NextResponse.json({ error: "Invalid provider" }, { status: 400 });
-  const trust = facetParam(params.getAll("trust"), isTrustBucket);
-  if (trust === null) return NextResponse.json({ error: "Invalid trust" }, { status: 400 });
-  const categories = facetParam(params.getAll("category"), isValidCategoryKey);
-  if (categories === null) return NextResponse.json({ error: "Invalid category" }, { status: 400 });
+  const sourceParse = facetOrRefusal(
+    facetParam(params.getAll("source"), isBrowsableSource),
+    "source",
+    "Unknown source",
+  );
+  if (sourceParse.refusal) return sourceParse.refusal;
+  const sources = sourceParse.values;
+  const providerParse = facetOrRefusal(
+    facetParam(params.getAll("provider"), (v) => isValidMeta(v)),
+    "provider",
+    "Invalid provider",
+  );
+  if (providerParse.refusal) return providerParse.refusal;
+  const providers = providerParse.values;
+  const trustParse = facetOrRefusal(
+    facetParam(params.getAll("trust"), isTrustBucket),
+    "trust",
+    "Invalid trust",
+  );
+  if (trustParse.refusal) return trustParse.refusal;
+  const trust = trustParse.values;
+  const categoryParse = facetOrRefusal(
+    facetParam(params.getAll("category"), isValidCategoryKey),
+    "category",
+    "Invalid category",
+  );
+  if (categoryParse.refusal) return categoryParse.refusal;
+  const categories = categoryParse.values;
 
   if (sortRaw && !isValidSort(sortRaw)) {
-    return NextResponse.json({ error: "Invalid sort" }, { status: 400 });
+    return invalidArgument("sort", "Invalid sort");
   }
   // Without a query "relevance" is meaningless, so the default listing is
   // ordered by trust — the most useful thing to show a customer first.

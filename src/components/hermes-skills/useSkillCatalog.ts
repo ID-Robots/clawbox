@@ -10,6 +10,7 @@ import {
   type HermesSkill,
   type SortOption,
   isBrowseFailureCode,
+  MAX_FACET_SELECTION,
 } from '@/lib/hermes-skills';
 
 // Browse-tab data: one endpoint (/browse) serves listing, search, the facet rail
@@ -146,10 +147,16 @@ export function useSkillCatalog(active: boolean): CatalogController {
     (group: BrowseFacetGroup, id: string) => {
       applySelection((prev) => {
         const current = prev[group];
-        return {
-          ...prev,
-          [group]: current.includes(id) ? current.filter((v) => v !== id) : [...current, id],
-        };
+        if (current.includes(id)) {
+          return { ...prev, [group]: current.filter((v) => v !== id) };
+        }
+        // The rail renders up to MAX_FACET_VALUES options per group and the
+        // route accepts MAX_FACET_SELECTION, so a group with more than twelve
+        // values let the owner CLICK their way into a 400. Untickable is the
+        // honest state for a cap — the alternative was a full grid replaced by
+        // a device-failure card because of one checkbox.
+        if (current.length >= MAX_FACET_SELECTION) return prev;
+        return { ...prev, [group]: [...current, id] };
       });
     },
     [applySelection],

@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { hermesSkillsGuard } from "@/lib/hermes-skills-server";
+import { hermesSkillsGuard, invalidArgument } from "@/lib/hermes-skills-server";
 import {
   HermesEnvUnreadableError,
   clearHermesSecret,
@@ -46,7 +46,7 @@ export async function GET(request: Request) {
   // key that happens to be unset, so it is refused rather than reported false.
   const invalid = keys.filter((k) => !isValidEnvKey(k));
   if (invalid.length) {
-    return NextResponse.json({ error: "Invalid secret name" }, { status: 400 });
+    return invalidArgument("keys", "Invalid secret name");
   }
   try {
     return NextResponse.json({ secrets: await hermesSecretsPresent(keys) });

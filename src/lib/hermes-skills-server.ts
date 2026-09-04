@@ -28,7 +28,7 @@ import { parseSkillFrontmatter, type SkillFrontmatter } from '@/lib/hermes-skill
 import { removeSkillDir } from '@/lib/hermes-skill-manifest';
 import { getActiveHarness } from '@/lib/harness';
 import { hermesConfigGet } from '@/lib/hermes-config-cache';
-import { isValidSkillName } from '@/lib/hermes-skills';
+import { isValidSkillName, MAX_FACET_SELECTION } from '@/lib/hermes-skills';
 
 /**
  * Defense-in-depth gate for the skills-store routes: the store is a Hermes
@@ -49,6 +49,37 @@ export async function hermesSkillsGuard(): Promise<NextResponse | null> {
     return NextResponse.json({ error: 'Not found', code: 'not_hermes' }, { status: 404 });
   }
   return null;
+}
+
+/**
+ * The refusal a skills route answers when the CALLER's input is wrong.
+ *
+ * One shape for all of them, so a client can branch on the code and name the
+ * field instead of string-matching the sentence. The sentence itself stays
+ * exactly what it was — the browser's fallback, and the log's — and never
+ * carries a value the caller sent, so a rejected input cannot be echoed back
+ * into the page.
+ */
+export function invalidArgument(field: string, error: string): NextResponse {
+  return NextResponse.json({ error, code: 'invalid_argument', field }, { status: 400 });
+}
+
+/**
+ * Its sibling for the one refusal that is not a bad value but too many good
+ * ones. Separate because the remedy is: untick one, not correct one — and
+ * because the rail renders up to MAX_FACET_VALUES options per group while the
+ * route accepts MAX_FACET_SELECTION, so the owner can reach it by clicking.
+ */
+export function tooManyFacets(field: string): NextResponse {
+  return NextResponse.json(
+    {
+      error: `Too many ${field} filters — at most ${MAX_FACET_SELECTION} at a time.`,
+      code: 'too_many_facets',
+      field,
+      limit: MAX_FACET_SELECTION,
+    },
+    { status: 400 },
+  );
 }
 
 export const HERMES_HOME =

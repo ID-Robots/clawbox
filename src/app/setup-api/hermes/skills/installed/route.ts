@@ -36,8 +36,13 @@ export async function GET() {
         .sort((a, b) => b.count - a.count || a.id.localeCompare(b.id)),
     });
   } catch (err) {
+    // The try covers the SKILL.md walk, the lock read and a `hermes config get`
+    // — an I/O failure here names absolute device paths, and the raw message
+    // was painted as the Installed tab's hint. Same rule as every other route
+    // in this family: fixed sentence and a code out, the reason to the log.
+    console.error("[hermes skills installed] read failed", err instanceof Error ? err.message : err);
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Could not read installed skills" },
+      { error: "Could not read the installed skills on this device.", code: "cli_failed" },
       { status: 500 },
     );
   }

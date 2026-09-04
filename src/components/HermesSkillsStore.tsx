@@ -121,9 +121,15 @@ function installRefusalCopy(COPY: SkillsCopy, data: RefusalBody, name: string): 
     // case with its own line; the rest are one failure to the owner.
     case 'cli_timeout':
       return COPY.installTimeout(name);
+    // ...except `too_large`, which is not a failure: the installer's output
+    // overran the read cap AFTER it ran, so whether the skill landed is not
+    // known. The MCP tool has always told the agent exactly that ("call
+    // skill_list and look for it before deciding anything"); the store said
+    // "Install failed", so one device state had two contradictory stories.
+    case 'too_large':
+      return COPY.installUnknownOutcome(name);
     case 'cli_missing':
     case 'cli_failed':
-    case 'too_large':
     case 'cancelled':
       return COPY.installFailed;
     default:
@@ -148,11 +154,12 @@ function uninstallRefusalCopy(COPY: SkillsCopy, data: RefusalBody, name: string)
         : [];
       return candidates.length ? COPY.ambiguousName(name, candidates) : null;
     }
+    case 'too_large':
+      return COPY.uninstallUnknownOutcome(name);
     case 'uninstall_failed':
     case 'cli_timeout':
     case 'cli_missing':
     case 'cli_failed':
-    case 'too_large':
     case 'cancelled':
       return COPY.uninstallFailed;
     default:
@@ -903,6 +910,9 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
   const q = catalog.query.trim();
   /** The one browse refusal the owner caused, and the only one Retry cannot fix. */
   const badQuery = catalog.error === 'bad_query';
+  // A refusal the owner can undo by unticking, not by retrying: the rail's own
+  // values, refused by the route. Retry resends exactly what was rejected.
+  const badFilter = catalog.error === 'invalid_argument' || catalog.error === 'too_many_facets';
   const rangeFrom = catalog.results.length ? 1 : 0;
   // Two ways to earn the first-run panel: the device says it is still building
   // the index (`preparing` — true even though the request has COMPLETED, which
@@ -1080,12 +1090,14 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
               // device's: Retry re-sends the same rejected text, so that case
               // gets the search's own icon and the button that empties it.
               <EmptyState
-                icon={badQuery ? 'search_off' : 'error'}
-                tone={badQuery ? 'muted' : 'danger'}
+                icon={badQuery || badFilter ? 'search_off' : 'error'}
+                tone={badQuery || badFilter ? 'muted' : 'danger'}
                 title={COPY.browseError(catalog.error)}
                 action={
                   badQuery ? (
                     <PrimaryButton onClick={() => catalog.setQuery('')}>{COPY.clearSearch}</PrimaryButton>
+                  ) : badFilter ? (
+                    <PrimaryButton onClick={catalog.clearFilters}>{COPY.filtersClearAll}</PrimaryButton>
                   ) : (
                     <PrimaryButton onClick={catalog.reload}>{COPY.retry}</PrimaryButton>
                   )
@@ -1152,7 +1164,11 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
                 icon="error"
                 tone="danger"
                 title={COPY.installedError}
-                hint={installed.error}
+                // No hint: the route used to answer the raw exception here — an
+                // absolute device path under a localised header — and now
+                // answers one fixed English sentence that says exactly what the
+                // localised title above already says. A second line in a
+                // language the owner may not read adds nothing.
                 action={<PrimaryButton onClick={() => installed.refresh()}>{COPY.retry}</PrimaryButton>}
               />
             )}

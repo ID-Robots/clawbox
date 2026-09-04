@@ -111,6 +111,13 @@ export function useCopy() {
       liveInstalled: (name: string) => t('skills.liveInstalled', { name }),
       liveInstallFailed: (name: string) => t('skills.liveInstallFailed', { name }),
       installFailed: t('skills.installFailed'),
+      /**
+       * `too_large` is not a failure: the installer's own output overran the read
+       * cap, so the OUTCOME is unknown — the MCP tool has always said so and the
+       * store said "Install failed", which is one device state told two ways.
+       */
+      installUnknownOutcome: (name: string) => t('skills.installUnknownOutcome', { name }),
+      uninstallUnknownOutcome: (name: string) => t('skills.uninstallUnknownOutcome', { name }),
       liveRemoving: (name: string) => t('skills.liveRemoving', { name }),
       liveRemoved: (name: string) => t('skills.liveRemoved', { name }),
       liveRemoveFailed: (name: string) => t('skills.liveRemoveFailed', { name }),
@@ -352,6 +359,10 @@ const BROWSE_ERROR_KEYS: Record<string, string> = {
   // Not a device failure at all: the search itself is one the route will not
   // run, so the line says what to change and the button clears it.
   bad_query: 'browseBadQuery',
+  // Nor are these two: the rail's own values, refused by the route. Retrying
+  // resends them, so both get a line that names the remedy — untick.
+  invalid_argument: 'browseBadFilter',
+  too_many_facets: 'browseTooManyFilters',
 };
 
 // The capability ids hermes-skill-capabilities.ts can emit. Kept as a set so a
