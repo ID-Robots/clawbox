@@ -22,6 +22,11 @@ process.env.CLAWBOX_MCP_NO_AUTOSTART = "1";
 
 import { z } from "zod";
 import { contractViolations, type RegisteredToolInfo } from "./lib/register";
+// The TYPE, so the posture below is checked against the interface it overrides.
+// Without the annotation `Partial<McpContext>` accepts any object at all —
+// every key optional, no excess-property check through a variable — so a
+// renamed or misspelt field type-checks clean and the override goes inert.
+import type { McpContext } from "./lib/context";
 
 const HERMES_ONLY = ["skill_search", "skill_list", "skill_info", "skill_install", "skill_uninstall", "ai_list_models", "ai_set_provider", "ai_set_model"];
 // backup_list / backup_now are here because ClawKeep archives the OpenClaw
@@ -69,13 +74,29 @@ function schemaShapeViolations(tool: RegisteredToolInfo): string[] {
  * probe, and the full surface a real box registers — exactly as the unit guard
  * in src/tests/unit/mcp-tool-honesty.test.ts does.
  */
-const ALL_CAPABILITIES = {
+const ALL_CAPABILITIES: Partial<McpContext> = {
   capabilities: { screenGrabber: "scrot", imageConvert: true, journal: true, du: true },
   emailCanRead: true,
   codingAgent: true,
   canGenerateImages: true,
   providers: ["anthropic", "openai"],
 };
+
+/**
+ * Tools that register ONLY when a device probe says the box can do the thing.
+ *
+ * Named rather than counted, and asserted on every host: these are what the
+ * all-capabilities posture exists to reach, so if one is missing from BOTH
+ * postures the override plumbing has broken and the run is examining a fraction
+ * of the surface again. A length comparison could not see a family that
+ * vanished while another was added — measured: with one context field renamed
+ * away, three coding_agent tools disappeared and the count went UP.
+ */
+const PROBE_GATED_TOOLS = [
+  "disk_usage", "disk_cleanup", "logs_tail", "screen_capture",
+  "email_list", "email_read",
+  "coding_agent_run", "coding_agent_status", "coding_agent_stop",
+];
 
 async function main(): Promise<void> {
   const { buildServer } = await import("./clawbox-mcp");
@@ -109,13 +130,23 @@ async function main(): Promise<void> {
     byEdition[edition] = tools;
     for (const tool of tools) problems.push(...contractViolations(tool), ...schemaShapeViolations(tool));
 
-    // The posture switch has to be doing something, or this narrows back to
-    // whatever the host could probe and the two runs are the same run.
-    if (enabled.length <= probed.length && !probedAnything) {
-      problems.push(
-        `${edition}: the all-capabilities posture registered ${enabled.length} tools against `
-        + `${probed.length} probed — the capability overrides are not reaching the registrars`,
-      );
+    // The posture switch has to be doing something, and a COUNT cannot say so:
+    // a family that vanished because its context field was renamed is invisible
+    // as long as another one was added. These names are the contract — every
+    // one of them registers only behind a probe — so they are what is asserted,
+    // on every host including a device where the probes answer true.
+    const registered = new Set(tools.map((t) => t.name));
+    for (const name of PROBE_GATED_TOOLS) {
+      if (!registered.has(name)) {
+        problems.push(
+          `${edition}: "${name}" registers only behind a device probe and is in NEITHER posture `
+          + "— the capability overrides are not reaching the registrars",
+        );
+      }
+    }
+    // …and the all-off posture's own gate, which points the other way.
+    if (!registered.has("image_generate")) {
+      problems.push(`${edition}: "image_generate" is in neither posture — the probed build is not being read`);
     }
 
     const names = new Set(tools.map((t) => t.name));

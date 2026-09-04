@@ -74,7 +74,24 @@ jobs:
       # second, and it needs those eighteen dealt with first.
       - name: Lint (advisory)
         continue-on-error: true
-        run: bun run lint
+        run: |
+          rc=0
+          bun run lint > lint.out 2>&1 || rc=$?
+          cat lint.out
+          # The counts go to the RUN SUMMARY, not only into a collapsed step
+          # log. `continue-on-error` alone makes the job green and the PR
+          # comment says "Tests passed" — so without this the 18 errors and 115
+          # warnings exist nowhere anyone looks, and the ratchet plan above has
+          # no baseline to ratchet against. A run where eslint CRASHED prints
+          # the fallback line rather than nothing, which is the difference
+          # between advisory and `|| true`.
+          {
+            echo "### Lint (advisory — not blocking)"
+            echo
+            grep -E '[0-9]+ problems? \([0-9]+ errors?, [0-9]+ warnings?\)' lint.out \
+              || echo "eslint produced no summary line (exit $rc) — see the step log"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
 
       # CI's variant of `bun run test:coverage`: the same suite, the same
       # thresholds, only the reporters differ. The full set (text, html, clover,

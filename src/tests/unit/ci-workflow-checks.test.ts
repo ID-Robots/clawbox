@@ -23,12 +23,22 @@ function workflow(name: string): string {
   return fs.readFileSync(path.join(WORKFLOWS, name), "utf-8");
 }
 
-/** Every `run:` line in a workflow, block scalars included. */
-function runLines(source: string): string {
-  return source
-    .split("\n")
-    .filter((line) => /^\s+(run:|[^\s#-].*)/.test(line) || line.trim().length > 0)
-    .join("\n");
+/**
+ * An anchored `run:` line, the idiom src/tests/unit/ci-workflows.test.ts
+ * already uses.
+ *
+ * `toContain("bun run typecheck:mcp")` matches the workflow's own COMMENTS,
+ * which name every one of these commands — so commenting a step out leaves the
+ * assertion green. Measured: `# run: bun run typecheck:mcp  # TEMPORARILY OFF`
+ * passes a substring check and fails this one.
+ */
+function runsCommand(source: string, command: string): boolean {
+  const escaped = command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Either form: a one-line `run: <cmd>`, or the command on its own line inside
+  // a `run: |` block. Both are real ways to run it; a COMMENTED one is not, and
+  // neither anchor matches `# run: …` or `#   <cmd>`.
+  return new RegExp(`^\\s+run: ${escaped}(\\s|$)`, "m").test(source)
+    || new RegExp(`^\\s+${escaped}(\\s|$)`, "m").test(source);
 }
 
 describe("the checks CI runs", () => {
@@ -37,15 +47,15 @@ describe("the checks CI runs", () => {
   it("typechecks the MCP tree", () => {
     // `mcp/**` is excluded from the root tsconfig on purpose, so `tsc --noEmit`
     // — wherever it runs — never covers it. This is the only job that can.
-    expect(runLines(tests)).toMatch(/bun run typecheck:mcp/);
+    expect(runsCommand(tests, "bun run typecheck:mcp")).toBe(true);
   });
 
   it("checks the MCP tool contract", () => {
-    expect(runLines(tests)).toMatch(/bun run check:mcp-tools/);
+    expect(runsCommand(tests, "bun run check:mcp-tools")).toBe(true);
   });
 
   it("runs eslint", () => {
-    expect(runLines(tests)).toMatch(/bun run lint/);
+    expect(runsCommand(tests, "bun run lint")).toBe(true);
   });
 
   it("declares whether lint is advisory, rather than leaving it implied", () => {
@@ -53,8 +63,14 @@ describe("the checks CI runs", () => {
     // being fixed first. `continue-on-error` is the mechanism that says so out
     // loud; a step that is neither blocking nor marked advisory is a check
     // whose failures nobody can interpret.
-    const lintStep = tests.slice(tests.lastIndexOf("- name:", tests.indexOf("bun run lint")));
+    // Bounded at the NEXT step, or the slice runs to end-of-file and the
+    // assertion is satisfied by a `continue-on-error` on some other step —
+    // measured: moving it to the Test step left this green.
+    const start = tests.lastIndexOf("- name:", tests.indexOf("bun run lint >"));
+    const next = tests.indexOf("- name:", start + 1);
+    const lintStep = tests.slice(start, next === -1 ? undefined : next);
     expect(lintStep).toMatch(/continue-on-error:\s*true/);
+    expect(lintStep).toContain("bun run lint");
   });
 
   it("keeps every check in the same job as the tests", () => {
@@ -72,7 +88,7 @@ describe("the checks CI runs", () => {
     const testJob = tests.slice(jobsAt, end);
 
     for (const command of ["bun run typecheck:mcp", "bun run check:mcp-tools", "bun run lint"]) {
-      expect(testJob, `${command} is not in the test job`).toContain(command);
+      expect(runsCommand(testJob, command), `${command} is not RUN in the test job`).toBe(true);
     }
   });
 });
