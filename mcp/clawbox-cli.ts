@@ -195,7 +195,16 @@ async function main() {
     // `app list` below prints from.
     const openHarness = installEdition() === "hermes" ? "hermes" : "openclaw";
     const openable = builtInApps(openHarness).map((a) => a.id);
-    if (!appId.startsWith("installed-") && !openable.includes(appId)) {
+    const isInstalled = appId.startsWith("installed-");
+    if (isInstalled) {
+      // The shape check, exactly where ui_open_app applies it: an installed id
+      // is caller-supplied, and `installed-../etc` would otherwise be posted as
+      // a pending action with a tick printed over it.
+      if (!/^installed-[a-z0-9][a-z0-9-]{0,63}$/.test(appId)) {
+        console.error(`"${appId}" is not a valid installed-app id.`);
+        process.exit(1);
+      }
+    } else if (!openable.includes(appId)) {
       console.error(`No built-in app "${appId}" on this ClawBox. Try: ${openable.join(", ")}`);
       process.exit(1);
     }
