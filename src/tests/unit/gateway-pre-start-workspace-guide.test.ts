@@ -16,9 +16,11 @@ import path from "node:path";
  * shipped to new boxes only — including not to the box whose agent produced the
  * incident.
  *
- * So an existing file is TOPPED UP with the one missing section, and never
- * overwritten. These run the block out of the shipped `.sh` rather than a copy,
- * so the test fails if the real script drifts.
+ * So an existing file is TOPPED UP with EVERY section it is missing, and never
+ * overwritten — one hand-added marker per section did not scale, and the box
+ * that proved it had never received the Coding agent section at all (TASK-706).
+ * These run the block out of the shipped `.sh` rather than a copy, so the test
+ * fails if the real script drifts.
  */
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
@@ -259,7 +261,7 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
 
     const { stdout } = run();
 
-    expect(stdout).toContain("Appended the system-actions section");
+    expect(stdout).toMatch(/Appended to CLAWBOX\.md:.*System actions and restarts/);
     const after = readFileSync(guide, "utf-8");
     // The rule arrived...
     expect(after).toContain(HEADING);
@@ -278,43 +280,50 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     const afterFirst = readFileSync(guide, "utf-8");
     const second = run();
 
-    expect(second.stdout).not.toContain("Appended the system-actions section");
+    expect(second.stdout).not.toMatch(/Appended to CLAWBOX\.md/);
     expect(readFileSync(guide, "utf-8")).toBe(afterFirst);
     expect(afterFirst.split(HEADING)).toHaveLength(2);
   });
 
-  it("takes only that section, not the ones that follow it in the template", () => {
+  it("appends each section on its own, bounded by the next heading", () => {
+    // The extraction is bounded by the NEXT `## ` heading, so every missing
+    // section arrives as its own block behind its own separator — never one
+    // heading carrying the body of the ones after it. With a multi-section
+    // top-up that invariant is what keeps the file readable rather than one
+    // run-on tail.
     const older = readFileSync(TEMPLATE, "utf-8").split(`\n---\n\n${HEADING}`)[0];
     writeFileSync(guide, older);
 
     run();
 
     const appended = readFileSync(guide, "utf-8").slice(older.length);
-    expect(appended).toContain(HEADING);
-    // The template's next heading must not have been dragged along.
-    expect(appended).not.toContain("## Coding agent");
-    expect(appended).not.toContain("## Remember the user's name");
-    // Nor the `---` rule that closes the section in the template: the append
-    // supplies its own leading separator, so carrying that one too ends the
+    for (const heading of ["## System actions and restarts", "## Coding agent (delegate a whole task)"]) {
+      expect(appended).toContain(`\n---\n\n${heading}\n`);
+    }
+    // And the template's own closing rule is not carried with them: the append
+    // supplies its own leading separator, so carrying that one too would end the
     // topped-up guide on a dangling horizontal rule.
     expect(appended.trimEnd().endsWith("---")).toBe(false);
   });
 
-  it("warns instead of appending an empty section when the template loses the heading", () => {
-    // The marker and the heading are two strings that have to stay in step. If
-    // the heading is renamed and the marker is not, the extraction comes back
-    // empty — appending the separator alone would report a success that added
-    // nothing, and would do it again on every gateway start.
+  it("follows a heading the template renames, instead of losing the section", () => {
+    // The old top-up matched ONE marker string that had to stay in step with the
+    // template's heading; a rename in the template silently stopped delivering
+    // the section, with a warning nobody sees. The headings now come out of the
+    // template itself, so a rename is simply a different heading to deliver —
+    // and the old name, which no template carries any more, is not invented.
     const older = readFileSync(TEMPLATE, "utf-8").split(`\n---\n\n${HEADING}`)[0];
     writeFileSync(guide, older);
     const renamed = path.join(dir, "renamed-template.md");
     writeFileSync(renamed, readFileSync(TEMPLATE, "utf-8").replace(HEADING, "## Restarts, renamed"));
 
-    const { stdout, stderr } = run(renamed);
+    const { stdout } = run(renamed);
 
-    expect(stdout).not.toContain("Appended the system-actions section");
-    expect(stderr).toContain("no longer carries");
-    expect(readFileSync(guide, "utf-8")).toBe(older);
+    const after = readFileSync(guide, "utf-8");
+    expect(stdout).toMatch(/Appended to CLAWBOX\.md:.*Restarts, renamed/);
+    expect(after).toContain("## Restarts, renamed");
+    expect(after).toContain("operator_approval");
+    expect(after).not.toContain(HEADING);
   });
 
   // `skipIf`, not an early return: a root container would otherwise report this
@@ -329,7 +338,7 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     // that pre-start survived.
     const { stdout, stderr } = run();
 
-    expect(stdout).not.toContain("Appended the system-actions section");
+    expect(stdout).not.toMatch(/Appended to CLAWBOX\.md/);
     expect(stderr).toContain("could not append");
     // ...and nothing about a rollback. A write that failed at OPEN wrote
     // nothing, so warning that the file "may be cut mid-section" sends an
@@ -405,7 +414,7 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     // runs it as ExecStartPre with no leading `-`).
     expect(res.status).toBe(0);
     expect(res.stderr).toContain("could not append");
-    expect(res.stdout).not.toContain("Appended the system-actions section");
+    expect(res.stdout).not.toMatch(/Appended to CLAWBOX\.md/);
     // ...and the file is back to what it was, marker and fragment both gone.
     expect(readFileSync(guide, "utf-8")).toBe(older);
   });
@@ -489,7 +498,7 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     runCapped(Buffer.byteLength(older) + 64);
     const second = run();
 
-    expect(second.stdout).toContain("Appended the system-actions section");
+    expect(second.stdout).toMatch(/Appended to CLAWBOX\.md:.*System actions and restarts/);
     const after = readFileSync(guide, "utf-8");
     expect(after.startsWith(older)).toBe(true);
     // The paragraph that used to be the casualty.
@@ -498,16 +507,195 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     expect(after.split(HEADING)).toHaveLength(2);
   });
 
-  it("leaves a guide that already carries the section untouched", () => {
-    const current = readFileSync(TEMPLATE, "utf-8");
-    writeFileSync(guide, current);
+  // TASK-706. Seed-if-missing plus one hand-added marker per section does not
+  // scale, and the cost was measured: the OpenClaw dev box's CLAWBOX.md is
+  // dated Aug 13 and carries five headings, so it has NEVER received the
+  // "## Coding agent (delegate a whole task)" section — which is how the agent
+  // learns that coding_agent_run / coding_agent_status / coding_agent_stop
+  // exist and what to say when they are not offered. Every box set up before
+  // that section landed is in the same state, silently. So the top-up appends
+  // EVERY `## ` section the file is missing, not one named one.
+  describe("tops a guide up to every section the template has", () => {
+    const headings = () =>
+      readFileSync(TEMPLATE, "utf-8")
+        .split("\n")
+        .map((l) => l.replace(/\r$/, ""))
+        .filter((l) => l.startsWith("## "));
 
-    const { stdout } = run();
+    it("gives an old guide every heading the shipped template carries", () => {
+      // A real pre-TASK-612 guide: the sections that box was seeded with, and
+      // nothing added since.
+      const older = readFileSync(TEMPLATE, "utf-8").split(`\n---\n\n${HEADING}`)[0];
+      writeFileSync(guide, older);
 
-    expect(stdout).not.toContain("Appended the system-actions section");
-    expect(stdout).not.toContain("Seeded CLAWBOX.md");
-    expect(readFileSync(guide, "utf-8")).toBe(current);
+      run();
+
+      const after = readFileSync(guide, "utf-8")
+        .split("\n")
+        .map((l) => l.replace(/\r$/, ""));
+      for (const heading of headings()) {
+        expect(after).toContain(heading);
+      }
+    });
+
+    it("names the Coding agent section specifically", () => {
+      // The one the measurement was about, and the one a per-section marker
+      // would still be missing today.
+      const older = readFileSync(TEMPLATE, "utf-8").split(`\n---\n\n${HEADING}`)[0];
+      writeFileSync(guide, older);
+
+      const { stdout } = run();
+
+      const after = readFileSync(guide, "utf-8");
+      expect(after).toContain("## Coding agent");
+      expect(after).toContain("coding_agent_run");
+      expect(stdout).toMatch(/Coding agent/);
+    });
+
+    it("adds each missing section exactly once, however many times the gateway starts", () => {
+      const older = readFileSync(TEMPLATE, "utf-8").split(`\n---\n\n${HEADING}`)[0];
+      writeFileSync(guide, older);
+
+      run();
+      const afterFirst = readFileSync(guide, "utf-8");
+      const second = run();
+
+      expect(readFileSync(guide, "utf-8")).toBe(afterFirst);
+      expect(second.stdout).not.toMatch(/Appended/);
+      for (const heading of headings()) {
+        expect(afterFirst.split(heading)).toHaveLength(2);
+      }
+    });
+
+    it("keeps the owner's own sections and their text", () => {
+      const older = readFileSync(TEMPLATE, "utf-8").split(`\n---\n\n${HEADING}`)[0];
+      writeFileSync(guide, `${older}\n\n## Owner's notes\n\nThe printer is on the shelf.\n`);
+
+      run();
+
+      const after = readFileSync(guide, "utf-8");
+      expect(after).toContain("The printer is on the shelf.");
+      expect(after).toContain("## Owner's notes");
+      expect(after.startsWith(older)).toBe(true);
+    });
+
+    it("does not accept a longer heading of the owner's as the template's section", () => {
+      // The marker is a WHOLE line, not a prefix. The discriminating fixture
+      // REPLACES the template's `## Skills` with a longer heading of the
+      // owner's: a substring match would call the section present and the box
+      // would never receive it. Adding the longer heading BESIDE the real one
+      // proves nothing — `## Skills` is a whole line either way.
+      const current = readFileSync(TEMPLATE, "utf-8");
+      writeFileSync(guide, current.replace("\n## Skills\n", "\n## Skills and other things\n"));
+
+      const { stdout } = run();
+
+      expect(stdout).toMatch(/Appended to CLAWBOX\.md:.*Skills/);
+      const after = readFileSync(guide, "utf-8");
+      expect(after).toContain("## Skills and other things");
+      expect(after.match(/^## Skills$/gm)).toHaveLength(1);
+    });
+
+    it("leaves a guide that already carries every section alone", () => {
+      const current = readFileSync(TEMPLATE, "utf-8");
+      writeFileSync(guide, `${current}\n\n## Skills and other things\n\nMine.\n`);
+
+      const { stdout } = run();
+
+      expect(stdout).not.toMatch(/Appended/);
+      expect(readFileSync(guide, "utf-8").match(/^## Skills$/gm)).toHaveLength(1);
+    });
+
+    it("says nothing about a guide that is already complete", () => {
+      const current = readFileSync(TEMPLATE, "utf-8");
+      writeFileSync(guide, current);
+
+      const { stdout } = run();
+
+      expect(stdout).not.toMatch(/Appended/);
+      // Nor re-seeded: a complete guide takes neither path.
+      expect(stdout).not.toContain("Seeded CLAWBOX.md");
+      expect(readFileSync(guide, "utf-8")).toBe(current);
+    });
+
+    // `skipIf`, like every other chmod case in this file: root ignores the mode
+    // bits, so `[ -r ]` is true, the file reads fine and there is nothing to
+    // assert. A root container would otherwise report this as a pass.
+    it.skipIf(process.getuid?.() === 0)("warns and changes nothing when the guide cannot be read", () => {
+      // `grep`/`awk` answer exit 2 on an unreadable file, which reads as
+      // "the heading is not there" — so a 0200 CLAWBOX.md was re-appended to on
+      // EVERY boot, growing without bound, while the file itself could never be
+      // checked. A file this block cannot read is a file it must not top up.
+      const older = readFileSync(TEMPLATE, "utf-8").split(`\n---\n\n${HEADING}`)[0];
+      writeFileSync(guide, older);
+      chmodSync(guide, 0o200);
+      let res: { status: number | null; stdout: string; stderr: string };
+      try {
+        res = runRaw();
+      } finally {
+        chmodSync(guide, 0o644);
+      }
+      expect(res.status).toBe(0);
+      // Anchored on the DESTINATION: `/could not read/` alone also matches the
+      // warning about an unreadable TEMPLATE, which is a different fault.
+      expect(res.stderr).toMatch(/could not read .*CLAWBOX\.md/);
+      expect(res.stdout).not.toMatch(/Appended/);
+      // The point of the guard: the file is untouched, not merely unreported.
+      expect(readFileSync(guide, "utf-8")).toBe(older);
+    });
+
+    it("says so when the shipped template carries no sections at all", () => {
+      // A truncated or zero-byte template from a half-finished deploy is
+      // readable, so the guard above passes and the loop runs zero times.
+      // Silence there is indistinguishable from "already complete" — the same
+      // shape as the defect this card exists to fix.
+      const older = readFileSync(TEMPLATE, "utf-8").split(`\n---\n\n${HEADING}`)[0];
+      writeFileSync(guide, older);
+      const empty = path.join(dir, "empty-template.md");
+      writeFileSync(empty, "# ClawBox Integration Guide\n\nNo sections here.\n");
+
+      const res = runRaw(empty);
+
+      expect(res.status).toBe(0);
+      expect(res.stderr).toMatch(/carries no '## ' headings/);
+      expect(res.stdout).not.toMatch(/Appended/);
+      expect(readFileSync(guide, "utf-8")).toBe(older);
+    });
+
+    it("does not enumerate a heading that lives inside a fenced block", () => {
+      // The template is markdown that documents markdown and shell. A `## ` line
+      // inside a ``` fence was harmless while one heading was named by hand;
+      // enumerated, it would become a phantom section appended to every box.
+      const fenced = path.join(dir, "fenced-template.md");
+      writeFileSync(
+        fenced,
+        [
+          "# Guide", "", "## Real section", "", "Body.", "",
+          "```markdown", "## Not a heading", "```", "",
+        ].join("\n"),
+      );
+      writeFileSync(guide, "# Guide\n\n## Real section\n\nBody.\n");
+
+      const { stdout } = runRaw(fenced);
+
+      expect(stdout).not.toMatch(/Appended/);
+      expect(readFileSync(guide, "utf-8")).not.toContain("Not a heading");
+    });
+
+    it("does not add a second copy of a section whose heading has trailing whitespace", () => {
+      // What a markdown hard line break, a prettier pass or a hand edit leaves.
+      // The old substring match tolerated it; a whole-line match must normalise
+      // what it now compares, or the box gains a permanent duplicate.
+      const current = readFileSync(TEMPLATE, "utf-8");
+      writeFileSync(guide, current.replace("\n## Skills\n", "\n## Skills \n"));
+
+      const { stdout } = run();
+
+      expect(stdout).not.toMatch(/Appended/);
+      expect(readFileSync(guide, "utf-8").match(/^## Skills */gm)).toHaveLength(1);
+    });
   });
+
 });
 
 /**
@@ -656,6 +844,48 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     expect(after).toContain(RULE);
     expect(after).toContain("operator_approval");
     expect(after.split(RULE)).toHaveLength(2);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("does not grow an AGENTS.md it cannot read", () => {
+    // The same exit-2 conflation the CLAWBOX.md loop guards against, and worse
+    // here: mode 0200 denies the READ while permitting the WRITE, so `grep`
+    // answered "marker absent", both appends succeeded, and the file grew by
+    // ~1 KB on every boot — each one reported on stdout as a success. AGENTS.md
+    // is what the harness injects into every session, under a bootstrap
+    // character budget.
+    const existing = "# AGENTS\n\nBe helpful.\n";
+    writeFileSync(agents, existing);
+    chmodSync(agents, 0o200);
+    let first: { status: number | null; stdout: string; stderr: string };
+    let second: { status: number | null; stdout: string; stderr: string };
+    try {
+      first = runRaw();
+      second = runRaw();
+    } finally {
+      chmodSync(agents, 0o644);
+    }
+
+    expect(first.status).toBe(0);
+    expect(second.status).toBe(0);
+    expect(first.stdout).not.toMatch(/Appended/);
+    expect(second.stdout).not.toMatch(/Appended/);
+    expect(first.stderr).toMatch(/could not read .*AGENTS\.md/);
+    expect(readFileSync(agents, "utf-8")).toBe(existing);
+  });
+
+  it("does not take a longer heading of the owner's as its own marker", () => {
+    // Whole-line, not substring: an AGENTS.md that says "## ClawBox integration
+    // notes" is not carrying ClawBox's pointer, and a substring guard would
+    // withhold it forever.
+    const existing = "# AGENTS\n\n## ClawBox integration notes\n\nMine.\n";
+    writeFileSync(agents, existing);
+
+    const { stdout } = run();
+
+    expect(stdout).toContain("Appended CLAWBOX.md reference to AGENTS.md");
+    const after = readFileSync(agents, "utf-8");
+    expect(after.startsWith(existing)).toBe(true);
+    expect(after.match(/^## ClawBox integration$/gm)).toHaveLength(1);
   });
 
   it.skipIf(process.getuid?.() === 0)("does not stop the gateway when AGENTS.md cannot be written", () => {
