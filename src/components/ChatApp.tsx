@@ -23,7 +23,6 @@ import { prettifyAssistantText, isSentinel, isInterSessionEnvelope } from '@/lib
 // apart again.
 import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective } from '@/lib/chat-email-refs'
 import { EmailCard, EmailFullView } from '@/lib/chat-email'
-import { CloudTtsWarning } from '@/components/CloudTtsWarning'
 
 
 function extractText(msg: unknown): string {
@@ -611,8 +610,6 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         scrollbarColor: 'rgba(255,255,255,0.1) transparent',
       }}>
         <style>{`@keyframes chatapp-spin { to { transform: rotate(360deg) } } @keyframes chatapp-blink { 50% { opacity: 0 } } @keyframes chatapp-bounce-dot { 0%, 80%, 100% { transform: translateY(0) } 40% { transform: translateY(-5px) } }`}</style>
-
-        <CloudTtsWarning connected={status === 'connected'} request={wsRequest} />
 
         {status === 'connecting' && messages.length === 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.4)', fontSize: 13 }}>

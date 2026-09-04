@@ -94,6 +94,42 @@ function channelsUnavailable(value: unknown): boolean {
 }
 
 /**
+ * The box HAS channels and cannot speak on them in its own voice.
+ *
+ * A voice note is Opus and Kokoro speaks WAV, so the encoder — ffmpeg — is
+ * what stands between the two. Without it every Telegram voice note is
+ * answered by the CLOUD voice while this page, the Local AI tab and the
+ * gateway's own status all say the box speaks for itself. That is the one
+ * state in this feature nothing on the box could see, which is why it is said
+ * in amber here rather than left to a line in the gateway log.
+ *
+ * Asked as its own question (`voiceNoteReady === false`, never a falsy test):
+ * a status from a server that predates the field says nothing about ffmpeg,
+ * and a warning invented out of `undefined` would be worse than silence.
+ */
+function channelVoiceNotesMissing(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const channels = (value as { channels?: unknown }).channels;
+  if (!channels || typeof channels !== "object") return false;
+  const c = channels as { supportedOnEdition?: unknown; voiceNoteReady?: unknown };
+  return c.supportedOnEdition === true && c.voiceNoteReady === false;
+}
+
+/**
+ * Wake the engine on the box, without waiting for it.
+ *
+ * The Kokoro server keeps the model on the GPU and stops itself after five
+ * idle minutes; the first utterance after that pays a 13-19 s cold start. An
+ * owner who has just picked "This box" is usually about to press Play, so the
+ * model is asked for at the moment of the pick and is resident by then. Fire
+ * and forget in both directions: a box with no engine of its own answers 409,
+ * and that refusal must not colour a selection that worked.
+ */
+function warmLocalVoice() {
+  void fetch("/setup-api/tts/warm", { method: "POST" }).catch(() => { /* the next utterance cold-starts */ });
+}
+
+/**
  * The refusal codes the tts routes answer with, and the key that says each in
  * the owner's language. A code not listed here (or a refusal from an older
  * server with no code at all) shows the box's English sentence instead — a
@@ -127,6 +163,13 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const { t } = useT();
   const [status, setStatus] = useState<VoiceStatusAnswer | null>(null);
   const [noChannelSpeech, setNoChannelSpeech] = useState(false);
+  // Channels this box has, in a voice that is not its own — see
+  // channelVoiceNotesMissing. `installing` counts the seconds, like the sample
+  // player, because the repair is an apt transaction on an Orin.
+  const [noVoiceNotes, setNoVoiceNotes] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [installFailed, setInstallFailed] = useState(false);
+  const [installingFor, setInstallingFor] = useState(0);
   const [error, setError] = useState<string | null>(null);
   // The box settled on the default instead of the pick, and said so (the
   // tts route's `fallback`). Amber, not red: nothing is broken, the owner's
@@ -154,6 +197,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       // had already given us, while `status` correctly kept its last value.
       if (!isVoiceStatus(data)) return;
       setNoChannelSpeech(channelsUnavailable(data));
+      setNoVoiceNotes(channelVoiceNotesMissing(data));
       setStatus(data);
     } catch {
       /* keep the last good reading rather than blanking the panel */
@@ -201,6 +245,58 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     const timer = window.setInterval(() => setSpeakingFor(Math.floor((Date.now() - startedAt) / 1000)), 1000);
     return () => window.clearInterval(timer);
   }, [busy]);
+
+  // Same counter for the ffmpeg repair below, and for the same reason: it is
+  // an apt transaction on an Orin, minutes rather than seconds, and a button
+  // that only says "Installing…" for that long reads as a button that failed.
+  useEffect(() => {
+    if (!installing) return;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => setInstallingFor(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [installing]);
+
+  /**
+   * Repair the channel voice, from the page that says it is broken.
+   *
+   * The work is install.sh's own `openclaw_tts` step — the same one the Local
+   * AI tab's Kokoro install runs, which now asks apt for ffmpeg — started as
+   * root through /setup-api/tts/install. The route STREAMS NDJSON: `status`
+   * lines while it works, then one closing `success` or `error`. The lines are
+   * not rendered here (a repair is one fact, not a build log), so the whole
+   * body is read and only its last decision is kept; the panel then re-reads
+   * the box, which is what makes the amber block disappear.
+   */
+  const installVoiceNotes = useCallback(async () => {
+    setInstallingFor(0);
+    setInstalling(true);
+    setInstallFailed(false);
+    try {
+      const res = await fetch("/setup-api/tts/install", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const lines = (await res.text()).split("\n").map((l) => l.trim()).filter(Boolean);
+      let ok = false;
+      for (const line of lines) {
+        try {
+          const payload = JSON.parse(line) as { success?: unknown; error?: unknown };
+          if (payload.success === true) ok = true;
+          if (typeof payload.error === "string") ok = false;
+        } catch {
+          // A torn write: the stream is read for its verdict, and a line that
+          // is not JSON carries none.
+        }
+      }
+      setInstallFailed(!ok);
+      await load();
+    } catch {
+      setInstallFailed(true);
+    } finally {
+      setInstalling(false);
+    }
+  }, [load]);
 
   /**
    * A refusal in the owner's language when the box sent a code for it, its
@@ -356,6 +452,10 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const chooseSource = (next: VoiceEngineId) => {
     const choice: VoiceChoice = next === "local" ? "local" : "auto";
     clearClip();
+    // Ahead of the write, not after it: the write is the openclaw CLI's 8-12 s
+    // cold start, and the model load this asks for runs in that time instead
+    // of after the owner has already pressed Play.
+    if (next === "local") warmLocalVoice();
     void post({ action: "select", choice });
   };
 
@@ -517,6 +617,38 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
           <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${status.autoReply !== false ? "translate-x-6" : "translate-x-1"}`} />
         </button>
       </div>
+
+      {/* Which VOICE the channels will use, when the box's own cannot reach
+          them. Under the switch it qualifies, and only while that switch is on
+          — with spoken replies off nothing speaks on a channel at all, and an
+          amber line about the voice of a reply that is never made is noise.
+          The button repairs it from here, because a shipped box whose Kokoro
+          is already installed has no other route to the fix: the Local AI
+          tab's Install only appears on a Kokoro that is missing. */}
+      {noVoiceNotes && status.autoReply !== false && (
+        <div
+          role="status"
+          data-testid="voice-channel-voice-notes"
+          className="rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200 space-y-2"
+        >
+          <p>{t("settings.voice.channelVoiceNotes")}</p>
+          {installFailed && (
+            <p data-testid="voice-channel-voice-notes-failed">{t("settings.voice.channelVoiceNotesFailed")}</p>
+          )}
+          <button
+            type="button"
+            data-testid="voice-channel-voice-notes-fix"
+            disabled={installing}
+            aria-busy={installing}
+            onClick={() => void installVoiceNotes()}
+            className="rounded-lg border border-amber-500/30 px-3 py-1.5 text-xs font-semibold text-amber-100 cursor-pointer disabled:opacity-50"
+          >
+            {installing
+              ? t("settings.voice.channelVoiceNotesInstalling", { seconds: installingFor })
+              : t("settings.voice.channelVoiceNotesFix")}
+          </button>
+        </div>
+      )}
 
       {/* The one half of speech that really is the gateway's. Said once, at the
           bottom, so the controls above are not framed as unavailable: this box

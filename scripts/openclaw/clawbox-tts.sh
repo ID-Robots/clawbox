@@ -41,6 +41,15 @@
 # the measured 2636 MB peak rounded up, plus room for the CUDA context and
 # allocator fragmentation.
 #
+# The guard belongs to the COLD path alone. A resident kokoro-server already
+# holds the model on the GPU: its synthesis allocates nothing like 2.6 GB, so
+# a guard in front of it refuses a request the box could have answered in two
+# seconds. That is not hypothetical — on this board ollama keeps the memory
+# model resident for five minutes after every agent turn, which leaves ~2.8 GB
+# and made the guard refuse EVERY spoken reply that followed a chat message,
+# server up or not. So the headroom is read where the allocation is about to
+# happen, immediately before the cold start, and the socket is tried first.
+#
 # NOT `set -e`: a failed engine call has to reach the reasons list and the
 # exit-1 report at the bottom, not kill the script mid-way with nothing said.
 set -uo pipefail
@@ -54,6 +63,10 @@ CLAWBOX_TTS_MEMINFO="${CLAWBOX_TTS_MEMINFO:-/proc/meminfo}"
 CLAWBOX_TTS_MIN_AUDIO_BYTES="${CLAWBOX_TTS_MIN_AUDIO_BYTES:-1024}"
 
 KOKORO_SOCKET="${KOKORO_SOCKET:-/tmp/kokoro-server.sock}"
+# The user unit install-voice.sh writes for that socket, so a cold start can
+# ask for it (see warm_kokoro_server). Overridable the way KOKORO_BIN is —
+# a box whose unit is named differently, and the tests' stub systemctl.
+KOKORO_UNIT="${KOKORO_UNIT:-kokoro-server.service}"
 
 # ── Finding the Kokoro CLI ──────────────────────────────────────────────────
 # `pip install --user kokoro` puts the CLI at ~/.local/bin/kokoro, and that
@@ -381,17 +394,43 @@ kokoro_cold_start() {
   return 0
 }
 
+# Ask systemd to bring the persistent server up, once this run has already
+# paid for a cold start.
+#
+# Every cold start is 13-19 s of torch CUDA init and model load on an Orin
+# Nano, and nothing on the box brings the server up by itself: it is started
+# by the Local AI switch and stops itself after five idle minutes, so a
+# conversation paid that cold start on EVERY reply. The model this run loaded
+# has already been freed by the time we get here (the CLI ran to completion
+# under `timeout`), so what this asks for is the same allocation the guard
+# above just approved, made once and kept for the next few minutes.
+#
+# Asked for unconditionally rather than after a `[ -S "$KOKORO_SOCKET" ]`
+# test, and this is the non-obvious part: the socket FILE outlives the server
+# on this box, because kokoro-server.py's idle shutdown used to os._exit
+# without unlinking it, so the test says "already up" on boxes whose server
+# died days ago. This is only ever reached when the server did not speak, and
+# `start` on a unit that is already running is a no-op — so the honest test is
+# no test at all.
+#
+# Best-effort in every direction: `--no-block` so systemd owns the wait, all
+# output discarded, and the exit status thrown away — this runs AFTER the
+# audio the caller asked for is on disk, and must not be able to turn a
+# successful utterance into a failed one. A gateway exec with no user bus
+# (no XDG_RUNTIME_DIR) simply fails here and the next reply cold-starts again.
+warm_kokoro_server() {
+  [ "${CLAWBOX_TTS_WARM_SERVER:-1}" = "1" ] || return 0
+  command -v systemctl >/dev/null 2>&1 || return 0
+  XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
+    timeout 5 systemctl --user start --no-block "$KOKORO_UNIT" >/dev/null 2>&1 || true
+  return 0
+}
+
 try_kokoro() {
   local text="$1" wav="$2" voice="$3" kvoice avail
   kvoice="$(kokoro_voice_for "$voice")"
   if [ -z "$kvoice" ]; then
     note "kokoro: no Kokoro voice is mapped for '$voice'"
-    return 1
-  fi
-
-  avail="$(available_mb)"
-  if [ "$avail" -lt "$CLAWBOX_TTS_MIN_FREE_MB" ]; then
-    note "kokoro: skipped, ${avail}MB available and the CUDA path peaks at ~2.6GB (need >=${CLAWBOX_TTS_MIN_FREE_MB}MB)"
     return 1
   fi
 
@@ -406,9 +445,19 @@ try_kokoro() {
     note "kokoro: persistent server at $KOKORO_SOCKET refused the request"
   fi
 
+  # Only now, with the resident model out of the running and a full CUDA load
+  # about to be asked for, is the headroom the guard's business — see the
+  # header note on why it is not asked any earlier.
+  avail="$(available_mb)"
+  if [ "$avail" -lt "$CLAWBOX_TTS_MIN_FREE_MB" ]; then
+    note "kokoro: skipped, ${avail}MB available and the CUDA path peaks at ~2.6GB (need >=${CLAWBOX_TTS_MIN_FREE_MB}MB)"
+    return 1
+  fi
+
   if kokoro_cold_start "$text" "$wav" "$kvoice"; then
     if audio_ok "$wav"; then
       ENGINE_USED="kokoro-cold"
+      warm_kokoro_server
       return 0
     fi
     note "kokoro: cold start produced no audio"

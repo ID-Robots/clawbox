@@ -178,6 +178,32 @@ export async function localTtsCommandRunnable(command: string): Promise<boolean>
   return (await executable(line)) || (first !== line && (await executable(first)));
 }
 
+/**
+ * Can this box turn its own speech into a voice note?
+ *
+ * Kokoro emits WAV and the desktop chat plays WAV, so the box's voice works
+ * perfectly well without ffmpeg — but a voice note on a CHANNEL is Opus, and
+ * the encoder is ffmpeg: OpenClaw's Local CLI provider forces the `opus`
+ * format for that target and converts our WAV with `ffmpeg -c:a libopus`.
+ * Without it the local attempt throws for every Telegram voice note and the
+ * gateway falls through to the cloud voice — which the owner has no way to
+ * see, because every screen and every `capability tts status` still says the
+ * box speaks for itself.
+ *
+ * The PATH is walked rather than a shell asked, because this is read on the
+ * Voice tab's status: a spawn per panel load, for a question that is three
+ * stat calls, is not a trade worth making. Fails CLOSED like every other fact
+ * behind a capability, and the answer is never cached — the whole point is
+ * that it flips to true the moment the voice install has run.
+ */
+export async function ffmpegPresent(): Promise<boolean> {
+  const dirs = (process.env.PATH || "/usr/local/bin:/usr/bin:/bin").split(path.delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    if (await executable(path.join(dir, "ffmpeg"))) return true;
+  }
+  return false;
+}
+
 async function run(cmd: string, args: string[], timeout = 5000): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(cmd, args, { timeout });
@@ -728,6 +754,37 @@ export async function setEngineEnabled(
         ? "This box does not allow the web interface to change that service."
         : `Could not ${verb} the service.`,
     };
+  }
+}
+
+/**
+ * Bring a user engine up NOW, and leave the boot setting alone.
+ *
+ * `setEngineEnabled` is the owner's standing decision — it enables the unit so
+ * the engine also comes back after a reboot. This is the other thing entirely:
+ * a warm-up. The Kokoro server holds the model on the GPU and stops itself
+ * after five idle minutes, so the first utterance after a quiet spell pays a
+ * 13-19 s cold start; whoever knows a spoken reply is coming (the chat's
+ * microphone, the Voice tab's own engine pick) starts it here a few seconds
+ * ahead and the reply is spoken in two. Nothing about the box's configuration
+ * changes, so this must never reach `enable`: an engine the owner switched off
+ * for good would come back at the next boot because a chat turn warmed it.
+ *
+ * `--no-block` because the caller is waiting on a person, not on systemd, and
+ * a model load is not something to hold an HTTP request open for.
+ */
+export async function startUserEngine(unit: string): Promise<ToggleResult> {
+  if (!USER_UNITS.has(unit)) return { ok: false, error: "Unknown service." };
+  try {
+    await execFileAsync("/usr/bin/systemctl", ["--user", "start", "--no-block", unit], {
+      timeout: 10_000,
+      env: userSystemctlEnv(),
+    });
+    return { ok: true };
+  } catch {
+    // Never the command line, and never a reason worth acting on: a warm-up
+    // that failed costs the next reply a cold start and nothing else.
+    return { ok: false, error: "Could not start the service." };
   }
 }
 

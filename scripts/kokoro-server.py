@@ -30,6 +30,15 @@ def _idle_watchdog():
         idle = time.monotonic() - _last_activity
         if idle >= IDLE_TIMEOUT:
             print(f"Idle for {int(idle)}s, shutting down.", flush=True)
+            # Take the socket with us. os._exit runs no cleanup, so the file
+            # outlived every idle shutdown and `[ -S … ]` — the cheap "is the
+            # server up?" test the callers make — kept answering yes for a
+            # socket nothing was listening on. Best effort: a socket we cannot
+            # unlink is still no reason to stay resident.
+            try:
+                os.unlink(SOCKET_PATH)
+            except OSError:
+                pass
             os._exit(0)
 
 # Voice mapping: OpenAI voice names -> Kokoro voices

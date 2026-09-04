@@ -278,7 +278,6 @@ import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS } from '@/components/NewAppWizardCard' 
-import { CloudTtsWarning } from '@/components/CloudTtsWarning'
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
 import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
 
@@ -710,6 +709,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     replyPlayerRef.current = null
     for (const url of spokenUrlsRef.current) { try { URL.revokeObjectURL(url) } catch { /* jsdom */ } }
     spokenUrlsRef.current = []
+    // The notes those URLs carried go with them: a released clip has no player
+    // left to say "cloud voice" or "press play" about.
+    setCloudSpoken([])
+    setAutoplayBlocked([])
   }, [])
   // Debounce for the pushed-append reconcile, and a stable handle on it — the
   // socket handler is built once and must not close over a stale callback.
@@ -2934,17 +2937,40 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Spoken replies are asked for one after another: the box speaks one at a
   // time, and two replies landing seconds apart must both be heard.
   const speakChainRef = useRef<Promise<void>>(Promise.resolve())
+  // Whether the box is making the sound right now, and for how long. A cold
+  // Kokoro is 13-19 s on an Orin and the reply is already on screen by then,
+  // so with nothing said the chat looked finished and simply spoke half a
+  // minute later; the seconds are what tells a wait from a hang.
+  const [speakingReply, setSpeakingReply] = useState(false)
+  const [speakingFor, setSpeakingFor] = useState(0)
+  // The two things a player cannot say for itself, by the object URL they
+  // belong to: which replies the CLOUD voice spoke (the owner picked the box's
+  // own voice and is owed the fact when it could not answer), and which ones
+  // the browser refused to start on its own — iOS Safari wants the gesture and
+  // the sound in the same tick, which an await for the audio cannot give it.
+  const [cloudSpoken, setCloudSpoken] = useState<string[]>([])
+  const [autoplayBlocked, setAutoplayBlocked] = useState<string[]>([])
   useEffect(() => () => releaseSpokenReplies(), [releaseSpokenReplies])
+  useEffect(() => {
+    if (!speakingReply) return
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => setSpeakingFor(Math.floor((Date.now() - startedAt) / 1000)), 1000)
+    return () => window.clearInterval(timer)
+  }, [speakingReply])
   useEffect(() => {
     if (!isOpen) return
     let active = true
-    // The switch, read when the panel opens. A box with no voice at all (the
-    // Hermes edition) reads as off: there is nothing to ask for the audio.
+    // The switch, read when the panel opens — and ONLY the switch. This also
+    // read a top-level `supportedOnEdition`, which the route has never sent
+    // (it nests that fact under `channels`), so the test was inert; worse, it
+    // named the wrong fact: channels are the gateway's half, while a spoken
+    // reply HERE is made by /setup-api/tts/speak, which a Hermes box answers
+    // through its own harness. `autoReply` alone decides.
     fetch('/setup-api/tts', { cache: 'no-store' })
       .then(res => res.json())
-      .then((data: { supportedOnEdition?: unknown; autoReply?: unknown } | null) => {
+      .then((data: { autoReply?: unknown } | null) => {
         if (!active) return
-        setVoiceAutoReply(data?.supportedOnEdition !== false && data?.autoReply !== false)
+        setVoiceAutoReply(data?.autoReply !== false)
       })
       .catch(() => { /* keep the last reading */ })
     const onChanged = (e: Event) => {
@@ -2973,8 +2999,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       player.addEventListener('pause', done, { once: true })
       const started = player.play()
       // A browser that wants the gesture and the sound in the same tick
-      // refuses; the bubble's own player is there for exactly that case.
-      if (started && typeof started.catch === 'function') started.catch(done)
+      // refuses; the bubble's own player is there for exactly that case — and
+      // it is now SAID so, because the refusal used to be swallowed whole and
+      // the box simply appeared to answer a spoken question in silence (iOS
+      // Safari, every time). The reply is on screen either way; the line under
+      // the player is what tells the owner there is something to press.
+      if (started && typeof started.catch === 'function') {
+        started.catch(() => {
+          setAutoplayBlocked(prev => (prev.includes(src) ? prev : [...prev, src]))
+          done()
+        })
+      }
       window.setTimeout(done, PLAYBACK_MAX_MS)
     } catch { done() /* no Audio here (jsdom) — the bubble's player remains */ }
   }), [])
@@ -3004,26 +3039,44 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (speechGenerationRef.current !== generation) return
       if (audio.length > 0) { await playReply(audio[0]); return }
       let res: Response | null = null
-      for (let attempt = 0; attempt < 3; attempt++) {
-        res = await fetch('/setup-api/tts/speak', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: words }),
-          // A deadline, so a stalled synthesis cannot hold the chain of
-          // spoken replies forever: the box's own budget is a cold Kokoro
-          // (up to 40 s) behind up to three queued replies.
-          signal: AbortSignal.timeout(SPEAK_REPLY_TIMEOUT_MS),
-        })
-        if (res.status !== 429) break
-        await new Promise((resolve) => setTimeout(resolve, 3000 * (attempt + 1)))
+      // From here until the bytes are in hand the box is working on the sound,
+      // and the wait is on screen. Set after the queue has let this reply
+      // through, so "Speaking…" never counts the seconds an EARLIER reply was
+      // taking; cleared in the same breath as the response, so the line goes
+      // the moment the player takes over.
+      setSpeakingFor(0)
+      setSpeakingReply(true)
+      try {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          res = await fetch('/setup-api/tts/speak', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: words }),
+            // A deadline, so a stalled synthesis cannot hold the chain of
+            // spoken replies forever: the box's own budget is a cold Kokoro
+            // (up to 40 s) behind up to three queued replies.
+            signal: AbortSignal.timeout(SPEAK_REPLY_TIMEOUT_MS),
+          })
+          if (res.status !== 429) break
+          await new Promise((resolve) => setTimeout(resolve, 3000 * (attempt + 1)))
+        }
+      } finally {
+        setSpeakingReply(false)
       }
       if (!res || !res.ok) return
+      // WHICH voice spoke. The chain falls through to the cloud whenever the
+      // box's own engine cannot answer (no headroom, no engine, a wedged
+      // server), and an owner who chose "This box" has no other way to learn
+      // that the words went off the box for this reply — the sound is the same
+      // either way. Absent on an older server: then nothing is claimed.
+      const engine = res.headers.get('X-ClawBox-Voice-Engine')
       const blob = await res.blob()
       // The transcript this reply belonged to may have gone while the box
       // was speaking: then nothing is created, stored or played.
       if (speechGenerationRef.current !== generation) return
       const url = URL.createObjectURL(blob)
       spokenUrlsRef.current.push(url)
+      if (engine === 'cloud') setCloudSpoken(prev => (prev.includes(url) ? prev : [...prev, url]))
       // A bounded ring: the oldest spoken replies are released once a dozen
       // are held, even before the transcript is cleared.
       // …but never one a bubble still plays: a URL still on a message stays
@@ -3174,6 +3227,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       return
     }
     setVoice({ state: 'requesting', error: null, message: null, canRetry: false })
+    // The earliest moment the box can know a spoken reply is coming. Kokoro's
+    // server stops itself after five idle minutes, so without this the reply
+    // to the first voice message of a conversation waits out a 13-19 s model
+    // load — usually long enough for the chain to give up on the box and
+    // answer in the cloud voice instead. The recording, the transcription and
+    // the agent's own turn all happen while the model loads. Fire and forget:
+    // a box with no engine of its own answers 409 and nothing here changes.
+    if (voiceAutoReplyRef.current) {
+      void fetch('/setup-api/tts/warm', { method: 'POST' }).catch(() => { /* the reply cold-starts */ })
+    }
     const generation = captureGenerationRef.current
     let stream: MediaStream
     try {
@@ -5001,8 +5064,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         scrollbarWidth: 'thin',
         scrollbarColor: 'rgba(255,255,255,0.1) transparent',
       }}>
-        <CloudTtsWarning connected={status === 'connected'} request={wsRequest} />
-
         {(status === 'connecting' || reloadingSkill) && (reloadingSkill || messages.length === 0) && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 14, color: 'rgba(255,255,255,0.5)', fontSize: 13 }}>
             <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes dots { 0%,20% { content: '' } 40% { content: '.' } 60% { content: '..' } 80%,100% { content: '...' } } @keyframes clawReloadFill { from { transform: scaleX(0.04) } to { transform: scaleX(0.9) } }`}</style>
@@ -5202,20 +5263,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 {msg.audio && msg.audio.length > 0 && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0 }}>
                     {msg.audio.map((src) => (
-                      // The browser's own player, not a bespoke one: play,
-                      // pause, scrub and duration are what "a normal playable
-                      // message" means, and every one of them already works
-                      // here and is reachable from the keyboard.
-                      //
-                      // `preload="metadata"` so the duration is on screen
-                      // before anything is played, without pulling the whole
-                      // file down for a reply nobody listens to. The src is
-                      // this box's own media route, which answers Range
-                      // requests — without that the scrubber does not move.
-                      //
-                      // Keyed by the URL: the harness names every file with a
-                      // uuid, so re-rendering a transcript cannot hand one
-                      // player another player's audio.
+                      // The player and, under it, the two things a player
+                      // cannot say for itself: which voice spoke, when it was
+                      // not the one the owner picked, and that the browser
+                      // would not start it.
+                      <div key={src} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      {/* The browser's own player, not a bespoke one: play,
+                          pause, scrub and duration are what "a normal playable
+                          message" means, and every one of them already works
+                          here and is reachable from the keyboard.
+
+                          `preload="metadata"` so the duration is on screen
+                          before anything is played, without pulling the whole
+                          file down for a reply nobody listens to. The src is
+                          this box's own media route, which answers Range
+                          requests — without that the scrubber does not move.
+
+                          Keyed by the URL: the harness names every file with a
+                          uuid, so re-rendering a transcript cannot hand one
+                          player another player's audio. */}
                       <audio
                         key={src}
                         data-testid="chat-audio"
@@ -5246,6 +5312,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       >
                         <a href={src} download={mediaFileName(src)}>{t("chat.downloadAudio")}</a>
                       </audio>
+                      {cloudSpoken.includes(src) && (
+                        <span data-testid="chat-audio-cloud" style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)' }}>
+                          {t("chat.spokenByCloud")}
+                        </span>
+                      )}
+                      {autoplayBlocked.includes(src) && (
+                        <span data-testid="chat-audio-blocked" style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)' }}>
+                          {t("chat.tapToHearReply")}
+                        </span>
+                      )}
+                      </div>
                     ))}
                   </div>
                 )}
@@ -5409,6 +5486,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 })()}
               </span>
             )}
+          </div>
+        )}
+
+        {/* The box is making the sound. Under the newest bubble, where the
+            reply it belongs to already is: the words land first and the voice
+            follows a cold Kokoro 13-19 s later, and with nothing on screen for
+            that gap the chat looked finished and then spoke out of nowhere.
+            The seconds are what tells a wait from a hang — the same counter
+            Settings → Voice runs while it auditions a voice. */}
+        {speakingReply && (
+          <div
+            data-testid="chat-speaking-reply"
+            role="status"
+            style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 2px', fontSize: 12, color: 'rgba(255,255,255,0.5)' }}
+          >
+            <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 15 }}>graphic_eq</span>
+            <span>{t("chat.speakingReply", { seconds: speakingFor })}</span>
           </div>
         )}
 

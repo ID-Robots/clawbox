@@ -593,6 +593,10 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
           : "Privacy notice: If On this box is unavailable, voice may use ClawBox AI cloud TTS. Text sent for speech may leave this ClawBox.",
       language: voiceLanguage,
       voice: { ...voiceVoices },
+      // The gateway's half of speech, in the shape the real route answers it:
+      // this fixture is an OpenClaw box, and it has the ffmpeg a channel voice
+      // note is encoded with — so the Voice tab draws no amber repair line.
+      channels: { supportedOnEdition: true, voiceNoteReady: true },
     };
   };
 

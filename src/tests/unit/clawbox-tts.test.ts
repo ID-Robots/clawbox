@@ -225,6 +225,12 @@ beforeEach(() => {
       "w.close()",
     ].join("\n"),
   );
+  // The stub systemctl is not optional. After a cold start the script asks
+  // systemd to bring the persistent server up, and $binDir is first on the
+  // PATH these runs get — without a stub here that call would reach the REAL
+  // /usr/bin/systemctl on whatever machine runs the suite and start a 2.5 GB
+  // Kokoro server behind every cold-start test.
+  writeStub("systemctl", 'echo "systemctl $*" >> "$CALLS_LOG"');
   writeMeminfo(6000);
 });
 
@@ -285,7 +291,7 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     expect(r.stderr).toContain("produced no audio");
   });
 
-  it("skips the GPU entirely when the board has no memory headroom, and says so", () => {
+  it("skips the COLD START entirely when the board has no memory headroom, and says so", () => {
     // kokoro-torch peaks at 2259-2636 MB (TASK-382) on a board whose 7607 MB
     // is shared with the GPU. Attempting it at 900 MB free does not fail
     // politely, it OOM-kills something else — so kokoro must never be
@@ -297,6 +303,24 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     expectReportedFailure(r);
     expect(calls()).not.toContain("kokoro ");
     expect(r.stderr).toMatch(/kokoro: skipped, 900MB available/);
+  });
+
+  it("still speaks through the resident server on a board with no headroom left", () => {
+    // The other half of the same guard, and the reason it moved: the server
+    // is holding the model already, so its synthesis allocates nothing the
+    // guard is protecting. Applied to this path too, the guard refused every
+    // reply that followed an agent turn (ollama keeps its embedding model
+    // resident for five minutes, which leaves ~2.8 GB) and the cloud voice
+    // answered instead — on a box whose own voice was up and idle.
+    const sock = startServer("ok");
+    stubKokoro();
+    writeMeminfo(900);
+    const r = synth([], { KOKORO_SOCKET: sock });
+    expect(r.status).toBe(0);
+    expect(calls()).toContain("server voice=af_heart");
+    // And the cold path is still refused: no CLI ran, no 2.6 GB was asked for.
+    expect(calls()).not.toContain("kokoro ");
+    expect(outputBytes()).toBeGreaterThan(1024);
   });
 
   it("uses the GPU again once the headroom is back", () => {
@@ -541,6 +565,50 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     const r = synth([], { KOKORO_SOCKET: path.join(dir, "absent.sock") });
     expect(r.status).toBe(0);
     expect(calls()).toContain("kokoro ");
+  });
+
+  it("asks systemd for the persistent server once it has paid for a cold start", () => {
+    // Nothing else on the box starts kokoro-server: the Local AI switch does,
+    // and the server stops itself after five idle minutes. Without this every
+    // reply of a conversation paid the full 13-19 s model load again.
+    stubKokoro();
+    const r = synth([], { KOKORO_SOCKET: path.join(dir, "absent.sock") });
+    expect(r.status).toBe(0);
+    expect(calls()).toContain("systemctl --user start --no-block kokoro-server.service");
+  });
+
+  it("warms the server even when a dead one left its socket file behind", () => {
+    // The shape on a real box: kokoro-server.py's idle shutdown used to
+    // os._exit without unlinking, so `[ -S … ]` answers yes for a socket
+    // nothing is listening on. A warm-up that trusted that test would never
+    // fire on exactly the boxes that need it.
+    const sock = startServer("ok");
+    for (const s of servers) s.kill("SIGKILL");
+    stubKokoro();
+    const r = synth([], { KOKORO_SOCKET: sock });
+    expect(r.status).toBe(0);
+    expect(calls()).toContain("kokoro ");
+    expect(calls()).toContain("systemctl --user start --no-block kokoro-server.service");
+  });
+
+  it("does not ask for the server it just spoke through", () => {
+    const sock = startServer("ok");
+    stubKokoro();
+    const r = synth([], { KOKORO_SOCKET: sock });
+    expect(r.status).toBe(0);
+    expect(calls()).not.toContain("systemctl ");
+  });
+
+  it("keeps the audio when systemd refuses to start the server", () => {
+    // The warm-up runs AFTER the caller's audio is on disk, so nothing it does
+    // may change the outcome of the utterance.
+    writeStub("systemctl", 'echo "systemctl $*" >> "$CALLS_LOG"\nexit 1');
+    stubKokoro();
+    const r = synth([]);
+    expect(r.status).toBe(0);
+    expect(calls()).toContain("systemctl ");
+    expect(outputBytes()).toBeGreaterThan(1024);
+    expect(r.stdout.trim()).toBe(outPath);
   });
 
   it("cold-starts when the server refuses, and still speaks", () => {

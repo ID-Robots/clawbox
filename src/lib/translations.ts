@@ -727,6 +727,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.fallback": "The voice on this box could not be selected, so the default voice stays. Settings → Local AI shows what the box has.",
     "settings.voice.autoReply": "Reply with voice to voice messages",
     "settings.voice.autoReplyHint": "A voice message, in Telegram, another channel or the chat here, gets a spoken reply that plays on its own. Typed messages are still answered in text.",
+    "settings.voice.channelVoiceNotes": "Voice messages in Telegram and the other channels are answered with the cloud voice: this box is missing the encoder (ffmpeg) that packs its own voice into a voice note.",
+    "settings.voice.channelVoiceNotesFix": "Install the encoder",
+    "settings.voice.channelVoiceNotesInstalling": "Installing… {seconds}s",
+    "settings.voice.channelVoiceNotesFailed": "The install did not finish. Check this box's internet connection and try again.",
   },
 
   bg: {
@@ -1424,6 +1428,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.fallback": "Гласът на това устройство не можа да бъде избран, затова остава гласът по подразбиране. В Настройки → Локален AI се вижда какво има устройството.",
     "settings.voice.autoReply": "Отговаряй с глас на гласови съобщения",
     "settings.voice.autoReplyHint": "Гласово съобщение в Telegram, друг канал или в чата тук получава изговорен отговор, който се пуска сам. На писмените съобщения се отговаря с текст.",
+    "settings.voice.channelVoiceNotes": "Гласовите съобщения в Telegram и другите канали получават отговор с облачния глас: на тази кутия ѝ липсва кодерът (ffmpeg), който превръща собствения ѝ глас в гласово съобщение.",
+    "settings.voice.channelVoiceNotesFix": "Инсталирай кодера",
+    "settings.voice.channelVoiceNotesInstalling": "Инсталиране… {seconds} с",
+    "settings.voice.channelVoiceNotesFailed": "Инсталацията не завърши. Провери интернет връзката на кутията и опитай отново.",
   },
 
   de: {
@@ -2121,6 +2129,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.fallback": "Die Stimme auf dieser Box konnte nicht ausgewählt werden, daher bleibt die Standardstimme. Einstellungen → Lokale KI zeigt, was die Box hat.",
     "settings.voice.autoReply": "Auf Sprachnachrichten mit Stimme antworten",
     "settings.voice.autoReplyHint": "Eine Sprachnachricht in Telegram, einem anderen Kanal oder im Chat hier bekommt eine gesprochene Antwort, die von selbst abspielt. Getippte Nachrichten werden weiter als Text beantwortet.",
+    "settings.voice.channelVoiceNotes": "Sprachnachrichten in Telegram und den anderen Kanälen werden mit der Cloud-Stimme beantwortet: dieser Box fehlt der Encoder (ffmpeg), der ihre eigene Stimme in eine Sprachnachricht verpackt.",
+    "settings.voice.channelVoiceNotesFix": "Encoder installieren",
+    "settings.voice.channelVoiceNotesInstalling": "Wird installiert… {seconds} s",
+    "settings.voice.channelVoiceNotesFailed": "Die Installation wurde nicht abgeschlossen. Prüfen Sie die Internetverbindung dieser Box und versuchen Sie es erneut.",
   },
 
   es: {
@@ -2818,6 +2830,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.fallback": "No se pudo seleccionar la voz de este dispositivo, así que se mantiene la voz predeterminada. Ajustes → IA local muestra lo que tiene el dispositivo.",
     "settings.voice.autoReply": "Responder con voz a los mensajes de voz",
     "settings.voice.autoReplyHint": "Un mensaje de voz en Telegram, otro canal o el chat de aquí recibe una respuesta hablada que se reproduce sola. Los mensajes escritos se siguen respondiendo en texto.",
+    "settings.voice.channelVoiceNotes": "Los mensajes de voz en Telegram y los demás canales se responden con la voz en la nube: a este dispositivo le falta el codificador (ffmpeg) que convierte su propia voz en un mensaje de voz.",
+    "settings.voice.channelVoiceNotesFix": "Instalar el codificador",
+    "settings.voice.channelVoiceNotesInstalling": "Instalando… {seconds} s",
+    "settings.voice.channelVoiceNotesFailed": "La instalación no terminó. Comprueba la conexión a internet del dispositivo e inténtalo de nuevo.",
   },
 
   fr: {
@@ -3515,6 +3531,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.fallback": "La voix de cette box n'a pas pu être sélectionnée ; la voix par défaut est conservée. Réglages → IA locale montre ce que la box possède.",
     "settings.voice.autoReply": "Répondre par la voix aux messages vocaux",
     "settings.voice.autoReplyHint": "Un message vocal sur Telegram, un autre canal ou le chat ici reçoit une réponse parlée qui se lance toute seule. Les messages écrits reçoivent toujours une réponse en texte.",
+    "settings.voice.channelVoiceNotes": "Les messages vocaux sur Telegram et les autres canaux reçoivent une réponse avec la voix du cloud : il manque à cette box l'encodeur (ffmpeg) qui transforme sa propre voix en message vocal.",
+    "settings.voice.channelVoiceNotesFix": "Installer l'encodeur",
+    "settings.voice.channelVoiceNotesInstalling": "Installation… {seconds} s",
+    "settings.voice.channelVoiceNotesFailed": "L'installation n'est pas allée au bout. Vérifiez la connexion internet de la box et réessayez.",
   },
 
   it: {
@@ -4212,6 +4232,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.fallback": "La voce di questo dispositivo non è stata selezionabile, quindi resta la voce predefinita. Impostazioni → IA locale mostra cosa ha il dispositivo.",
     "settings.voice.autoReply": "Rispondere con la voce ai messaggi vocali",
     "settings.voice.autoReplyHint": "Un messaggio vocale su Telegram, un altro canale o la chat qui riceve una risposta parlata che parte da sola. I messaggi scritti ricevono ancora una risposta in testo.",
+    "settings.voice.channelVoiceNotes": "I messaggi vocali su Telegram e sugli altri canali ricevono una risposta con la voce nel cloud: a questo dispositivo manca il codificatore (ffmpeg) che trasforma la sua voce in un messaggio vocale.",
+    "settings.voice.channelVoiceNotesFix": "Installa il codificatore",
+    "settings.voice.channelVoiceNotesInstalling": "Installazione… {seconds} s",
+    "settings.voice.channelVoiceNotesFailed": "L'installazione non è arrivata in fondo. Controlla la connessione a internet del dispositivo e riprova.",
   },
 
   ja: {
@@ -4909,6 +4933,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.fallback": "この本体の声を選択できなかったため、既定の声のままです。設定 → ローカル AI で本体の状態を確認できます。",
     "settings.voice.autoReply": "音声メッセージには音声で返答",
     "settings.voice.autoReplyHint": "Telegram や他のチャンネル、ここでのチャットの音声メッセージには、自動で再生される音声の返答が届きます。文字のメッセージには引き続き文字で返答します。",
+    "settings.voice.channelVoiceNotes": "Telegram やほかのチャンネルの音声メッセージには、いまはクラウドの声で返答しています。本体の声を音声メッセージに変換するエンコーダー（ffmpeg）が入っていません。",
+    "settings.voice.channelVoiceNotesFix": "エンコーダーをインストール",
+    "settings.voice.channelVoiceNotesInstalling": "インストール中… {seconds} 秒",
+    "settings.voice.channelVoiceNotesFailed": "インストールが完了しませんでした。本体のインターネット接続を確認して、もう一度お試しください。",
   },
 
   nl: {
@@ -5606,6 +5634,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.fallback": "De stem op deze box kon niet worden gekozen, dus de standaardstem blijft. Instellingen → Lokale AI laat zien wat de box heeft.",
     "settings.voice.autoReply": "Spraakberichten met spraak beantwoorden",
     "settings.voice.autoReplyHint": "Een spraakbericht in Telegram, een ander kanaal of de chat hier krijgt een gesproken antwoord dat vanzelf afspeelt. Getypte berichten worden nog steeds in tekst beantwoord.",
+    "settings.voice.channelVoiceNotes": "Spraakberichten in Telegram en de andere kanalen worden beantwoord met de cloudstem: op deze box ontbreekt de encoder (ffmpeg) die zijn eigen stem in een spraakbericht verpakt.",
+    "settings.voice.channelVoiceNotesFix": "Encoder installeren",
+    "settings.voice.channelVoiceNotesInstalling": "Bezig met installeren… {seconds} s",
+    "settings.voice.channelVoiceNotesFailed": "De installatie is niet afgerond. Controleer de internetverbinding van de box en probeer het opnieuw.",
   },
 
   sv: {
@@ -6303,6 +6335,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.fallback": "Rösten på den här boxen kunde inte väljas, så standardrösten behålls. Inställningar → Lokal AI visar vad boxen har.",
     "settings.voice.autoReply": "Svara med röst på röstmeddelanden",
     "settings.voice.autoReplyHint": "Ett röstmeddelande i Telegram, en annan kanal eller chatten här får ett talat svar som spelas upp av sig självt. Skrivna meddelanden besvaras fortfarande i text.",
+    "settings.voice.channelVoiceNotes": "Röstmeddelanden i Telegram och de andra kanalerna besvaras med molnrösten: den här boxen saknar kodaren (ffmpeg) som gör om dess egen röst till ett röstmeddelande.",
+    "settings.voice.channelVoiceNotesFix": "Installera kodaren",
+    "settings.voice.channelVoiceNotesInstalling": "Installerar… {seconds} s",
+    "settings.voice.channelVoiceNotesFailed": "Installationen blev inte klar. Kontrollera boxens internetanslutning och försök igen.",
   },
 
   zh: {
@@ -7000,6 +7036,10 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.fallback": "无法选择本机的声音，因此仍使用默认声音。在“设置 → 本地 AI”中可查看本机的情况。",
     "settings.voice.autoReply": "用语音回复语音消息",
     "settings.voice.autoReplyHint": "在 Telegram、其他渠道或此处聊天中发来的语音消息，会收到自动播放的语音回复。文字消息仍以文字回复。",
+    "settings.voice.channelVoiceNotes": "Telegram 和其他渠道里的语音消息目前由云端声音回复：本机缺少把自己的声音打包成语音消息的编码器（ffmpeg）。",
+    "settings.voice.channelVoiceNotesFix": "安装编码器",
+    "settings.voice.channelVoiceNotesInstalling": "正在安装… {seconds} 秒",
+    "settings.voice.channelVoiceNotesFailed": "安装未完成。请检查本机的网络连接后重试。",
   },
 };
 

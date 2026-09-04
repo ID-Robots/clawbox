@@ -19,6 +19,10 @@ type Frame = Record<string, unknown>;
 
 const sentFrames: Frame[] = [];
 const speakBodies: string[] = [];
+/** Every warm-up the chat asked for (the microphone's pre-load of Kokoro). */
+const warmCalls: string[] = [];
+/** Which engine the box says spoke, as the speak route's header names it. */
+let speakEngine = "local";
 let autoReplyAnswer = true;
 let replyText = "**Fine**, thanks.";
 /** When set, a turn is acked with "Sent." and the reply arrives from history instead. */
@@ -139,9 +143,20 @@ function installFetch() {
       if (url.includes("/setup-api/chat/transcribe")) {
         return { ok: true, json: async () => ({ ok: true, text: "how are you" }) };
       }
+      if (url.includes("/setup-api/tts/warm")) {
+        warmCalls.push(url);
+        return { ok: true, status: 202, headers: new Headers(), json: async () => ({ warming: true }) };
+      }
       if (url.includes("/setup-api/tts/speak")) {
         speakBodies.push(String(init?.body ?? ""));
-        return { ok: true, blob: async () => new Blob([new Uint8Array(2048)], { type: "audio/wav" }) };
+        // The real answer names the engine that spoke and the chat reads it
+        // off the response, so a fake with no headers is not this route's
+        // shape.
+        return {
+          ok: true,
+          headers: new Headers({ "X-ClawBox-Voice-Engine": speakEngine }),
+          blob: async () => new Blob([new Uint8Array(2048)], { type: "audio/wav" }),
+        };
       }
       if (url.includes("/setup-api/tts")) {
         return { ok: true, json: async () => ({ choice: "auto", autoReply: autoReplyAnswer }) };
@@ -181,6 +196,8 @@ describe("spoken replies in the desktop chat", () => {
   beforeEach(() => {
     sentFrames.length = 0;
     speakBodies.length = 0;
+    warmCalls.length = 0;
+    speakEngine = "local";
     FakeMediaRecorder.instances.length = 0;
     autoReplyAnswer = true;
     replyText = "**Fine**, thanks.";
@@ -247,6 +264,76 @@ describe("spoken replies in the desktop chat", () => {
     act(() => { window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: true } })); });
     await speakIntoTheChat();
     await waitFor(() => expect(speakBodies.length).toBe(1));
+  });
+
+  it("warms the box's own voice the moment the microphone is pressed", async () => {
+    // Kokoro's server stops itself after five idle minutes, so the first
+    // spoken reply of a conversation would wait out a 13-19 s model load —
+    // usually long enough for the chain to give up on the box and answer in
+    // the cloud voice. The recording and the agent's turn cover that load.
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    const record = await screen.findByTestId("voice-record");
+    await waitFor(() => expect(record).not.toBeDisabled());
+    fireEvent.click(record);
+    await screen.findByTestId("voice-stop");
+    await waitFor(() => expect(warmCalls.length).toBe(1));
+  });
+
+  it("asks for no warm-up when the owner has switched spoken replies off", async () => {
+    autoReplyAnswer = false;
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    const record = await screen.findByTestId("voice-record");
+    await waitFor(() => expect(record).not.toBeDisabled());
+    // The switch is read when the panel opens; the mic must see the answer.
+    await waitFor(() => expect(screen.queryByTestId("voice-stop")).toBeNull());
+    fireEvent.click(record);
+    await screen.findByTestId("voice-stop");
+    expect(warmCalls).toEqual([]);
+  });
+
+  it("says the box is speaking while it makes the sound, and stops saying it", async () => {
+    // The words are on screen the moment the turn ends and the voice follows
+    // seconds later; with nothing said in between the chat looked finished and
+    // then spoke out of nowhere.
+    let releaseSpeak: () => void = () => {};
+    const held = new Promise<void>((resolve) => { releaseSpeak = resolve; });
+    const inner = globalThis.fetch as unknown as (i: unknown, init?: RequestInit) => Promise<unknown>;
+    vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
+      if (String(input).includes("/setup-api/tts/speak")) await held;
+      return inner(input, init);
+    }));
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await screen.findByTestId("chat-speaking-reply");
+    releaseSpeak();
+    await waitFor(() => expect(screen.queryByTestId("chat-speaking-reply")).toBeNull());
+  });
+
+  it("says which voice spoke when it was not the box's own", async () => {
+    // The owner picked the box's own voice; the chain falls through to the
+    // cloud whenever it cannot answer, and the sound alone does not say so.
+    speakEngine = "cloud";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await screen.findByTestId("chat-audio-cloud");
+  });
+
+  it("claims nothing about the engine when the box spoke for itself", async () => {
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await screen.findByTestId("chat-audio");
+    expect(screen.queryByTestId("chat-audio-cloud")).toBeNull();
+  });
+
+  it("tells the owner to press play when the browser refuses to start the reply", async () => {
+    // iOS Safari wants the gesture and the sound in the same tick, which an
+    // await for the audio cannot give it. The refusal used to be swallowed
+    // whole: a spoken question was answered in silence, with a player nobody
+    // knew to press.
+    play.mockImplementation(async () => { throw new DOMException("blocked", "NotAllowedError"); });
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await screen.findByTestId("chat-audio-blocked");
   });
 
   it("still speaks a reply that only arrived through the history refetch after an ack-only final", async () => {

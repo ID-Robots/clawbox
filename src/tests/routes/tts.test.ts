@@ -24,9 +24,16 @@ vi.mock("@/lib/openclaw-config", () => ({
   openclawIsAbsent: () => false,
 }));
 
+const ffmpegMock = vi.fn();
 vi.mock("@/lib/local-models", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/local-models")>();
-  return { ...actual, buildTtsInventory: (...a: unknown[]) => ttsInventoryMock(...a) };
+  return {
+    ...actual,
+    buildTtsInventory: (...a: unknown[]) => ttsInventoryMock(...a),
+    // Stubbed rather than measured: the real probe walks the PATH of whatever
+    // machine runs the suite, which is not the subject of these tests.
+    ffmpegPresent: (...a: unknown[]) => ffmpegMock(...a),
+  };
 });
 
 vi.mock("@/lib/voice-output-store", () => ({
@@ -102,6 +109,7 @@ beforeEach(() => {
   readConfigMock.mockReset().mockResolvedValue(config());
   configSetMock.mockReset().mockResolvedValue(undefined);
   ttsInventoryMock.mockReset().mockResolvedValue(piperInstalled);
+  ffmpegMock.mockReset().mockResolvedValue(true);
   accessMock.mockReset().mockResolvedValue(undefined);
   readStateMock.mockReset().mockResolvedValue({ choice: "auto" });
   writeStateMock.mockReset().mockResolvedValue(undefined);
@@ -146,6 +154,29 @@ describe("spoken replies", () => {
     const res = await POST(post({ action: "autoReply", enabled: false }));
     expect(res.status).toBe(500);
     expect(setAutoReplyMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("whether a channel reply can be spoken by the box itself", () => {
+  it("says a voice note is ready when the box can encode one", async () => {
+    const { GET } = await route();
+    expect((await (await GET()).json()).channels).toEqual({ supportedOnEdition: true, voiceNoteReady: true });
+  });
+
+  it("says it is not, without claiming the edition has no channels", async () => {
+    // The two facts have different fixes: an edition with no gateway can never
+    // speak on a channel, while this box only needs ffmpeg. Collapsing them
+    // would send the owner looking for the wrong thing — and the state it
+    // reports is the one nothing else on the box can see: every Telegram voice
+    // note is answered in the CLOUD voice until ffmpeg is there.
+    ffmpegMock.mockResolvedValue(false);
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body.channels.supportedOnEdition).toBe(true);
+    expect(body.channels.voiceNoteReady).toBe(false);
+    // And it says nothing about the engines: the box's own voice is fine, it
+    // simply cannot be packed into a voice note.
+    expect(body.engines.some((e: { id: string; configured: boolean }) => e.id === "local" && e.configured)).toBe(true);
   });
 });
 
