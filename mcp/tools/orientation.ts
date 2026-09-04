@@ -136,11 +136,17 @@ interface ClawaiPayload {
  * `wrong_store` is the route's refusal (409) on a box whose harness keeps its
  * own model — the same code chat/history uses. It is read here so the two
  * halves of `ai` cannot contradict each other; see `limits` below.
+ *
+ * `activeModel` is `agents.defaults.model.primary` as the route reports it —
+ * the SAME key `readConfiguredModelLimits()` parses. Everything in `ai` is
+ * derived from it and nothing else: the payload's `primary` object is the
+ * "back to primary" TARGET, which on a box running its local model is a
+ * different row, and mixing the two produced a provider from one model beside
+ * the id and context window of another.
  */
 interface ChatModelPayload {
   activeModel?: string | null;
   activeLabel?: string | null;
-  primary?: { provider?: string | null; model?: string | null; label?: string | null } | null;
   code?: string;
 }
 
@@ -161,6 +167,13 @@ function bareModelId(ref: string | null | undefined): string | null {
   if (typeof ref !== "string" || !ref) return null;
   const slash = ref.indexOf("/");
   return slash > 0 && slash < ref.length - 1 ? ref.slice(slash + 1) : ref;
+}
+
+/** Its other half: `provider/modelId` -> the namespace the gateway routes through. */
+function providerOf(ref: string | null | undefined): string | null {
+  if (typeof ref !== "string" || !ref) return null;
+  const slash = ref.indexOf("/");
+  return slash > 0 && slash < ref.length - 1 ? ref.slice(0, slash) : null;
 }
 
 /** Keep only positive whole-token counts; invalid config stays visibly unknown. */
@@ -263,9 +276,14 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
                 : "unknown",
             }
           : {
+              // ONE source. Both halves and the limits below come from
+              // `agents.defaults.model.primary`, so the payload can only name a
+              // model the box is actually set to — or nothing, which is the
+              // truthful answer on a box with nothing pinned and the whole
+              // point of the route's own null guard.
               device_default: {
-                provider: reported(chatModel?.primary?.provider),
-                model: reported(bareModelId(chatModel?.activeModel ?? chatModel?.primary?.model)),
+                provider: reported(providerOf(chatModel?.activeModel)),
+                model: reported(bareModelId(chatModel?.activeModel)),
                 thinking: "unknown",
               },
               current_chat: ctx.install === "dual" ? UNCONFIRMED_EDITION_CHAT_NOTE : OPENCLAW_CURRENT_CHAT_NOTE,

@@ -78,6 +78,20 @@ const CHAT_MODEL_STATE = {
   primary: { available: true, label: "Anthropic", model: "anthropic/claude-fable-5", provider: "anthropic" },
   local: { available: false, label: null, model: null },
 };
+
+/**
+ * The box is running its LOCAL model; `primary` is the cloud row the "back to
+ * primary" gesture would return to. Two different models in one payload, and
+ * the tool must not compose an answer out of both.
+ */
+const ON_LOCAL_MODEL = {
+  ...CHAT_MODEL_STATE,
+  activeOptionId: "llamacpp/gemma4-e2b-it-q4_0",
+  activeSource: "local",
+  activeLabel: "Gemma 4 Local",
+  activeModel: "llamacpp/gemma4-e2b-it-q4_0",
+  local: { available: true, label: "Gemma 4 Local", model: "llamacpp/gemma4-e2b-it-q4_0" },
+};
 const CATALOGUE = {
   ...DEFAULT,
   models: [{ id: "gpt-5.6-sol" }],
@@ -222,6 +236,28 @@ describe("device_status — the same honesty on the orientation tool", () => {
     expect(report.device_default).toMatchObject({ provider: "anthropic", model: "claude-fable-5" });
     expect(String(report.current_chat)).toMatch(/what this chat runs/);
     expect(String(report.current_chat)).not.toMatch(/not visible/);
+  });
+
+  it("does not compose the default out of two different models", async () => {
+    // `device_default.provider` used to come from the payload's `primary` row
+    // while the model came from `activeModel`. On a box running its local model
+    // those are different models, so the answer named a cloud provider beside a
+    // local model id — and `ai.limits` describes `agents.defaults.model.primary`,
+    // which is the second of the two. One key, or nothing.
+    routes({ "/setup-api/chat/model": ON_LOCAL_MODEL });
+    const { ai: report } = (await parsed(status("openclaw"), "device_status")) as { ai: Record<string, unknown> };
+
+    expect(report.device_default).toMatchObject({
+      provider: "llamacpp",
+      model: "gemma4-e2b-it-q4_0",
+    });
+  });
+
+  it("says it does not know the default when nothing is pinned, rather than naming a fallback row", async () => {
+    routes({ "/setup-api/chat/model": { ...CHAT_MODEL_STATE, activeOptionId: null, activeModel: null } });
+    const { ai: report } = (await parsed(status("openclaw"), "device_status")) as { ai: Record<string, unknown> };
+
+    expect(report.device_default).toMatchObject({ provider: "unknown", model: "unknown" });
   });
 
   it("qualifies the default per edition in the description", () => {
