@@ -54,7 +54,11 @@ describe("both writers share ONE lock file", () => {
     // before BOTH — "before the CLI call" alone was satisfied by taking it one
     // line above, leaving the reconcile unprotected.
     const reconcile = REGISTER_SRC.search(/^export CLAWBOX_MCP_HERMES_CONFIG=/m);
-    const cliCall = REGISTER_SRC.search(/^if "\$HERMES_BIN" tools disable browser/m);
+    // Anchored at column 0 and on the binary, but NOT on what wraps the call:
+    // it is `if timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools disable
+    // browser` today, and pinning that wrapper here made this marker miss the
+    // moment the call was bounded — which is what the -1 guard below caught.
+    const cliCall = REGISTER_SRC.search(/^if .*"\$HERMES_BIN" tools disable browser/m);
     // Every marker must have been FOUND before their order means anything: a
     // `search` miss returns -1, and -1 < anything, so an ordering assertion over
     // a moved marker passes while checking nothing.
@@ -66,6 +70,27 @@ describe("both writers share ONE lock file", () => {
 
     expect(AUTH_SRC).toContain("flock -w 120 9");
     expect(REGISTER_SRC).toContain("flock -w 120 9");
+  });
+
+  it("bounds both in-lock hermes calls with a SIGKILL grace, so no survivor keeps fd 9", () => {
+    // This is a LOCK invariant, which is why it lives here. Both `hermes` calls
+    // run inside the fd-9 critical section, and a child inherits that fd: a
+    // `hermes` that ignores SIGTERM outlives `timeout` and goes on holding
+    // ~/.hermes/config.yaml.lock after this script has exited, leaving
+    // setup-hermes-dashboard-auth.sh to burn its 120 s wait and then write
+    // UNLOCKED — the lost update this whole file exists to prevent, with the
+    // lock in place and doing nothing. Plain `timeout` sends SIGTERM only, so
+    // the `-k` grace is what actually ends such a child.
+    // An INVOCATION is `"$HERMES_BIN" <subcommand>`; the `[ ! -x "$HERMES_BIN" ]`
+    // guard and the `HERMES_BIN=` assignment are not, and must not be demanded
+    // to carry a timeout.
+    const inLockCalls = REGISTER_SRC.split("\n").filter(
+      (line) => /"\$HERMES_BIN"\s+[a-z]/.test(line) && !/^\s*#/.test(line),
+    );
+    expect(inLockCalls.length).toBeGreaterThan(0);
+    for (const line of inLockCalls) {
+      expect(line, `unbounded hermes call: ${line.trim()}`).toMatch(/timeout -k \d+ /);
+    }
   });
 
   it("keeps the exec that opens the lock fd free of a stderr redirect", () => {
