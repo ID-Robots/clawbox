@@ -93,6 +93,34 @@ contains() {
   return 1
 }
 
+# Does the manifest helper actually run, or is it only present?
+#
+# An empty or half-copied helper exits 0 for every verb without doing any of
+# them — see SELFTEST_TOKEN in clawbox-root-manifest.sh for how one gets there.
+# Reading that 0 turns this gate from fail-closed into fail-OPEN: the exec below
+# would run /home/clawbox/clawbox as root on the word of a program that hashed
+# nothing, and that tree is writable by the unprivileged user the web server
+# runs as. Which is the whole of TASK-445.
+#
+# Two answers count, and both prove the same thing — the verb dispatcher at the
+# bottom of the helper ran: the token from a helper that knows --selftest, or
+# exit 64 from an older one rejecting a verb it does not know. A stub does
+# neither: it prints nothing and exits 0.
+#
+# This file is the side of that comparison that can be OLDER than the helper:
+# install_root_libexec installs the helper unconditionally and this dispatcher
+# only if the manifest write succeeded. So the token below is a wire format —
+# see SELFTEST_TOKEN in clawbox-root-manifest.sh. Changing it there without
+# adding the old value as a second accepted answer here would make this refuse a
+# healthy helper, fleet-wide.
+manifest_helper_alive() {
+  local out rc=0
+  out="$("$MANIFEST_HELPER" --selftest 2>/dev/null)" || rc=$?
+  [ "$out" = "clawbox-root-manifest alive" ] && return 0
+  [ "$rc" -eq 64 ] && return 0
+  return 1
+}
+
 if ! contains "$step" "$ALLOWED_STEPS"; then
   echo "clawbox-root-step: step not permitted: $step" >&2
   exit 64
@@ -135,6 +163,11 @@ else
   #     through sudo without moving the git work itself to the root side.
   if [ ! -x "$MANIFEST_HELPER" ]; then
     echo "clawbox-root-step: $MANIFEST_HELPER is missing — cannot tell what root is about to run" >&2
+    echo "clawbox-root-step: recover with: sudo bash $ENTRYPOINT --step systemd_services" >&2
+    exit 65
+  fi
+  if ! manifest_helper_alive; then
+    echo "clawbox-root-step: $MANIFEST_HELPER is installed but does nothing — it cannot tell what root is about to run" >&2
     echo "clawbox-root-step: recover with: sudo bash $ENTRYPOINT --step systemd_services" >&2
     exit 65
   fi
