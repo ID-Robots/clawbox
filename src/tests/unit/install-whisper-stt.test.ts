@@ -249,6 +249,9 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
     expect(r.out).toContain("RC=12");
     expect(r.stamped, "a failed install must not be stamped").toBe(false);
     expect(r.out).toMatch(/could not write whisper-server\.service/);
+    // …and says nothing about readiness: a regression that printed this before
+    // returning 12 would otherwise satisfy every assertion above.
+    expect(r.out).not.toContain("faster-whisper ready");
   });
 
   it("is stamp-gated: an installed box pays one import check, not a build", () => {

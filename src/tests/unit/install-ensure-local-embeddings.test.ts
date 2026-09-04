@@ -139,7 +139,7 @@ describe("ollama_wait_ready — behaviour, driven against stubs", () => {
       `export PATH="${tmp}/bin:$PATH"`,
       `sed -n '/^ollama_wait_ready() {/,/^}/p' "$1" > "${tmp}/fn.sh"`,
       `. "${tmp}/fn.sh"`,
-      "if ollama_wait_ready 4; then echo READY; else echo NOTREADY; fi",
+      "rc=0; ollama_wait_ready 4 || rc=$?; echo \"RC=$rc\"; [ $rc -eq 0 ] && echo READY || echo NOTREADY",
     ].join(NL);
     let out: string;
     let code = 0;
@@ -170,6 +170,15 @@ describe("ollama_wait_ready — behaviour, driven against stubs", () => {
     const r = run({ enabled: "enabled", active: false, answers: true });
     expect(r.out).toContain("READY");
     expect(r.calls.some((c) => c.startsWith("start ollama.service"))).toBe(true);
+  });
+
+  it("reports a switched-off engine apart from an unreachable one", () => {
+    // Both are "not ready", but only one is a connectivity problem. Sharing a
+    // code made the callers print "Ollama is not reachable" directly under
+    // "Ollama is switched off on this box", contradicting it. Reported by
+    // CodeRabbit on #648.
+    expect(run({ enabled: "disabled" }).out).toContain("RC=2");
+    expect(run({ enabled: "enabled", active: true, answers: false }).out).toContain("RC=1");
   });
 
   it("NEVER starts a daemon the owner switched off", () => {

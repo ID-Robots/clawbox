@@ -4902,9 +4902,13 @@ ollama_wait_ready() {
   local limit="${1:-30}" waited=0
   local url="${OLLAMA_TAGS_URL:-http://localhost:11434/api/tags}"
   systemctl cat ollama.service >/dev/null 2>&1 || return 1
+  # 2, not 1: "the owner switched it off" is not "it is unreachable", and the
+  # callers below print a connectivity diagnostic that would be a lie on a box
+  # whose Ollama is off on purpose — it would follow the line directly above it,
+  # contradicting it.
   if ! systemctl is-enabled --quiet ollama.service 2>/dev/null; then
     echo "  Ollama is switched off on this box - leaving it that way."
-    return 1
+    return 2
   fi
   systemctl is-active --quiet ollama.service || systemctl start ollama.service >/dev/null 2>&1 || true
   while :; do
@@ -4947,8 +4951,14 @@ ensure_local_embeddings() {
     echo "  Warning: $helper is missing or not executable - semantic memory stays on lexical FTS" >&2
     return 0
   fi
-  if ! ollama_wait_ready 30; then
-    echo "  Ollama is not reachable - semantic memory stays on lexical FTS for now"
+  local ready_rc=0
+  ollama_wait_ready 30 || ready_rc=$?
+  if [ "$ready_rc" -ne 0 ]; then
+    # Only rc 1 is a connectivity problem; rc 2 has already said, accurately,
+    # that the owner switched the engine off.
+    if [ "$ready_rc" -eq 1 ]; then
+      echo "  Ollama is not reachable - semantic memory stays on lexical FTS for now"
+    fi
     return 0
   fi
   as_clawbox_login "timeout -k 10 600 $helper" || true
@@ -4986,7 +4996,7 @@ step_ollama_install() {
   # script on every boot so a box that misses this pull still self-heals.
   # Best-effort: a failure must not abort the install (memory falls back to
   # lexical FTS).
-  local ENSURE_EMBEDDINGS="$PROJECT_DIR/scripts/ensure-local-embeddings.sh"
+  local ENSURE_EMBEDDINGS="$PROJECT_DIR/scripts/ensure-local-embeddings.sh" ready_rc=0
   if ! has_openclaw_harness; then
     # Above the helper, not below it. A hermes box has no core and no
     # openclaw.json, so ensure-local-embeddings.sh finds no provider anywhere,
@@ -5007,7 +5017,11 @@ step_ollama_install() {
     # second phrase for a DIFFERENT failure — a core that answered and could not
     # be parsed — and two unrelated "did not answer" sentences in one run send
     # the operator to the wrong box. Same vocabulary the helper itself uses.
-    ollama_wait_ready 30 || echo "  Ollama is not reachable yet; the helper below will report what it found"
+    ready_rc=0
+    ollama_wait_ready 30 || ready_rc=$?
+    if [ "$ready_rc" -eq 1 ]; then
+      echo "  Ollama is not reachable yet; the helper below will report what it found"
+    fi
     as_clawbox_login "$ENSURE_EMBEDDINGS" || true
     # The helper exits 0 on every soft failure by design (a missing Ollama must
     # not abort an install), so its exit code says nothing about the outcome.
