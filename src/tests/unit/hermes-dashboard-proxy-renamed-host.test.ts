@@ -173,6 +173,10 @@ function attemptUpgrade(host: string): Promise<string> {
           "Connection: Upgrade",
           "Sec-WebSocket-Version: 13",
           "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+          // A browser always sends one on a WS handshake, and without it
+          // `checkRequestOrigin` takes its bare-navigation branch — so the
+          // upgrade would pass without the peer check ever running.
+          `Origin: http://${host}`,
           `Cookie: ${sessionCookie()}`,
           "",
           "",
