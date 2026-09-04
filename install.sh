@@ -4524,6 +4524,10 @@ step_post_update() {
   # the voice registration writes through the Hermes CLI — see the comment
   # there. It is idempotent, so the move is a reordering and not a second run.
   # step_llamacpp_model deliberately does not self-gate (see its comment).
+  # Without this the embedding model is fresh-install-only: nothing in the
+  # update path pulls it, so a box that missed it when it was built stayed on
+  # lexical FTS. Non-fatal in the register of its neighbours.
+  ensure_local_embeddings || echo "  Warning: local embeddings check failed (non-fatal)"
   step_llamacpp_model || echo "  Warning: llamacpp_model step failed (non-fatal)"
   # Hermes re-provisioning is deliberately NOT called here. The in-app updater
   # dispatches `hermes_edition` as its own step immediately after this one, so a
@@ -4878,6 +4882,79 @@ step_jtop_install() {
   echo "  jtop installed"
 }
 
+# ── Local embedding model ────────────────────────────────────────────────────
+
+# Is the Ollama API answering? Waits up to $1 seconds (default 30).
+#
+# NEVER starts a daemon the owner switched OFF. Local AI's off switch is
+# `systemctl disable --now ollama.service` (src/lib/local-models.ts), while the
+# runtime's idle standby is `stop` and deliberately never `disable`
+# (src/lib/local-ai-runtime.ts). So `is-active` alone cannot tell "asleep" from
+# "switched off for good", and `is-enabled` is the only thing that can —
+# starting on is-active would quietly reverse the owner's own decision, which is
+# the one thing a "install what is missing" pass must never do.
+#
+# The URL is the one ensure-local-embeddings.sh itself probes, read from the
+# same variable, so this can never certify a daemon the helper then cannot
+# reach — `localhost` and `127.0.0.1` are not the same address on a box whose
+# resolver answers ::1 first.
+ollama_wait_ready() {
+  local limit="${1:-30}" waited=0
+  local url="${OLLAMA_TAGS_URL:-http://localhost:11434/api/tags}"
+  systemctl cat ollama.service >/dev/null 2>&1 || return 1
+  if ! systemctl is-enabled --quiet ollama.service 2>/dev/null; then
+    echo "  Ollama is switched off on this box - leaving it that way."
+    return 1
+  fi
+  systemctl is-active --quiet ollama.service || systemctl start ollama.service >/dev/null 2>&1 || true
+  while :; do
+    curl -fsS --max-time 2 "$url" >/dev/null 2>&1 && return 0
+    [ "$waited" -ge "$limit" ] && return 1
+    sleep 2
+    waited=$((waited + 2))
+  done
+}
+
+# Make sure this box has its local embedding model, on an UPDATE as well as on a
+# fresh install.
+#
+# step_ollama_install pulls it when the box is first built, and
+# gateway-pre-start.sh re-checks it detached on every gateway start — but
+# nothing ran it on an update, and the boot check only helps if it happens to
+# find ollama awake. A box that was offline when it was flashed, or whose ollama
+# was still binding its port in the seconds after `systemctl restart ollama`,
+# therefore kept semantic memory on lexical FTS for ever with no route back.
+#
+# Bounded and non-fatal by construction. post_update holds the gateway quiesced
+# and carries a 900 s budget of its own, so a first-time ~639 MB pull gets ten
+# minutes here and no more; the helper's 6 h backoff and the detached run at
+# gateway start remain the long tail. It returns 0 on every path — it is called
+# bare under `set -euo pipefail`, and a missing embedding model must never be
+# the reason an update stops.
+ensure_local_embeddings() {
+  local helper="$PROJECT_DIR/scripts/ensure-local-embeddings.sh"
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping the local embedding model"
+    return 0
+  fi
+  # Same answer, and the same reasoning, as the guard inside step_ollama_install:
+  # a hermes box has no core to point at the model it would spend 639 MB on.
+  if ! has_openclaw_harness; then
+    echo "  Memory search is an OpenClaw feature; this edition does not include it."
+    return 0
+  fi
+  if [ ! -x "$helper" ]; then
+    echo "  Warning: $helper is missing or not executable - semantic memory stays on lexical FTS" >&2
+    return 0
+  fi
+  if ! ollama_wait_ready 30; then
+    echo "  Ollama is not answering - semantic memory stays on lexical FTS for now"
+    return 0
+  fi
+  as_clawbox_login "timeout -k 10 600 $helper" || true
+  return 0
+}
+
 step_ollama_install() {
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping Ollama install (400MB+ download, not needed for install flow tests)"
@@ -4921,6 +4998,12 @@ step_ollama_install() {
     # Same answer src/app/setup-api/local-models/route.ts gives the UI.
     echo "  Memory search is an OpenClaw feature; this edition does not include it."
   elif [ -x "$ENSURE_EMBEDDINGS" ]; then
+    # Wait for the daemon the lines above just restarted. Without this the
+    # helper's single 5-second curl could arrive while ollama was still binding
+    # its port, and its "not reachable" branch is a silent no-op: no state
+    # written, no retry, no provisioning failure recorded — a box that simply
+    # lost a race kept lexical FTS and looked healthy doing it.
+    ollama_wait_ready 30 || echo "  Ollama did not answer in time; the helper below will report what it found"
     as_clawbox_login "$ENSURE_EMBEDDINGS" || true
     # The helper exits 0 on every soft failure by design (a missing Ollama must
     # not abort an install), so its exit code says nothing about the outcome.
