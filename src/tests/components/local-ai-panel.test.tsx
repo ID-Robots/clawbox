@@ -513,8 +513,11 @@ describe("LocalAiPanel", () => {
     await screen.findByTestId("local-model-kokoro");
     fireEvent.click(screen.getByTestId("local-model-menu-kokoro"));
     fireEvent.click(await screen.findByTestId("local-model-action-kokoro-primary"));
-    const notice = await screen.findByTestId("local-ai-notice");
-    expect(notice).toHaveTextContent(/default voice/i);
+    // waitFor on the TEXT, like its three siblings above: the region is mounted
+    // in every state, so finding the node proves nothing and would let the text
+    // assertion run before the action's fetch chain has settled.
+    await waitFor(() =>
+      expect(screen.getByTestId("local-ai-notice")).toHaveTextContent(/default voice/i));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 

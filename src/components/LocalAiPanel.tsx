@@ -541,14 +541,19 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       {/* Mounted in every state: a live region that appears along with its text
           announces a node insertion, which assistive tech may drop — and this
           sentence is the only thing saying the change landed. Chrome is
-          conditional, the node is not. */}
+          conditional, the node is not.
+          `sr-only` when empty, not "": this parent is `space-y-4`, whose
+          `> * + *` gives an empty in-flow div a 1 rem margin AND another to the
+          block after it — a permanent gap on every visit in the normal state.
+          Out of flow it costs nothing, and the node and its text stay in the
+          accessibility tree, which is the whole point of mounting it. */}
       <div
         role="status"
         aria-live="polite"
         data-testid="local-ai-notice"
         className={notice
           ? "rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200"
-          : ""}
+          : "sr-only"}
       >
         {notice ?? ""}
       </div>
