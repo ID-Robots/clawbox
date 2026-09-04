@@ -25,6 +25,7 @@ import fs from "fs/promises";
 import path from "path";
 import { promisify } from "util";
 import { runHermesCli } from "@/lib/hermes-cli";
+import { getHermesEnvValue } from "@/lib/hermes-env";
 import { PAIRING_TOKEN_RE, normalizePairingToken } from "@/lib/telegram-pairing-token";
 
 const execFileAsync = promisify(execFile);
@@ -325,6 +326,45 @@ export async function clearHermesTelegramPairingState(): Promise<void> {
 }
 
 // ── Token + gateway service ─────────────────────────────────────────────────
+
+/** The env key Hermes' own `config set` routes to ~/.hermes/.env. */
+const HERMES_TELEGRAM_TOKEN_KEY = "TELEGRAM_BOT_TOKEN";
+
+/** What Hermes holds as its Telegram credential — and whether we could look. */
+export interface HermesTelegramToken {
+  /** Hermes' bot token, or null when it has none / could not be read. */
+  token: string | null;
+  /** False when ~/.hermes/.env could not be read, so `token` proves nothing. */
+  known: boolean;
+}
+
+/**
+ * The bot token Hermes itself would use.
+ *
+ * Read straight from the file the harness names as its own env store —
+ * `hermes config env-path` prints ~/.hermes/.env, and that is where `hermes
+ * config set TELEGRAM_BOT_TOKEN` writes — through hermes-env.ts, which mirrors
+ * Hermes' `load_env` character for character. Deliberately NOT `hermes config
+ * get TELEGRAM_BOT_TOKEN`: that is a ~2 s subprocess on a Jetson that prints
+ * the raw secret on stdout, and the callers are panel reads on 3 s and 20 s
+ * polls. Hermes has no bot-identity command at all (`hermes send --list
+ * telegram --json` answers the approved CHAT ids, not the bot), so the
+ * credential is the only native answer to "which bot is this box on".
+ *
+ * Tri-state, because "Hermes has no bot" and "we could not find out" are
+ * different answers and only one of them may be acted on.
+ */
+export async function readHermesTelegramToken(): Promise<HermesTelegramToken> {
+  try {
+    const token = await getHermesEnvValue(HERMES_TELEGRAM_TOKEN_KEY);
+    return { token: token || null, known: true };
+  } catch {
+    // An unreadable .env — EACCES after a root-owned write, EIO on a failing
+    // eMMC, a directory where the file should be. Reporting "no bot" here is
+    // what let the approvals guard wave through the harness's own bot.
+    return { token: null, known: false };
+  }
+}
 
 /**
  * Store the bot token where Hermes reads it (~/.hermes/.env) via

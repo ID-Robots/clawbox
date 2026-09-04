@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { get } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesGatewayStatus, hermesTelegramRegistered } from "@/lib/hermes-telegram";
+import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 
 export const dynamic = "force-dynamic";
 
@@ -123,16 +124,26 @@ async function probeHermes(token: string): Promise<HermesTelegramProbe> {
 
 export async function GET() {
   try {
-    const token = await get("telegram_bot_token");
-    if (!token || typeof token !== "string") {
-      return NextResponse.json({ configured: false });
-    }
+    // WHICH EDITION FIRST. Reading ClawBox's own `telegram_bot_token` up here
+    // made the Hermes branch below unreachable on exactly the boxes it was
+    // written for: on Hermes the credential is the harness's, and ClawBox's
+    // copy is written only as a side effect of /setup-api/telegram/configure,
+    // so a box paired with `hermes config set` — or restored with ~/.hermes
+    // intact but no ClawBox config.json — answered `configured: false` and the
+    // owner was invited to set up the bot he was already chatting with.
+    const harness = await getActiveHarness();
 
-    if ((await getActiveHarness()) === "hermes") {
+    if (harness === "hermes") {
+      const { token } = await readActiveTelegramBot(harness);
+      if (!token) return NextResponse.json({ configured: false });
+
       const { registered, gateway } = await probeHermes(token);
-      // `null` = Hermes couldn't be asked; fall back to the stored token rather
-      // than reporting a working bot as gone.
-      const configured = registered ?? true;
+      // `null` = Hermes couldn't be asked; fall back to the token we found
+      // rather than reporting a working bot as gone. Tied to `token` and not
+      // written as a bare `true`, so the fallback carries its own reason: a
+      // plain `true` is right only while the guard above stands, and this
+      // branch's guard has already moved once.
+      const configured = registered ?? Boolean(token);
       const info = configured ? await fetchBotInfo(token) : null;
       return NextResponse.json({
         configured,
@@ -145,6 +156,10 @@ export async function GET() {
       });
     }
 
+    const token = await get("telegram_bot_token");
+    if (!token || typeof token !== "string") {
+      return NextResponse.json({ configured: false });
+    }
     const info = await fetchBotInfo(token);
     return NextResponse.json({ configured: true, ...info });
   } catch (err) {

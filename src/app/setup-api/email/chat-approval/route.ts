@@ -34,6 +34,7 @@ import {
   TelegramUnavailableError,
 } from "@/lib/email-approval-telegram";
 import { hasOwnerSession } from "@/lib/owner-session";
+import { readActiveTelegramBot, telegramBotId } from "@/lib/telegram-bot-identity";
 
 export const dynamic = "force-dynamic";
 
@@ -98,8 +99,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "That is not a Telegram bot token" }, { status: 400 });
     }
 
-    const mainToken = await configGet("telegram_bot_token");
-    if (typeof mainToken === "string" && safeBotToken(mainToken) === token) {
+    // Which bot is the HARNESS already long-polling? Asked of the store the
+    // running edition actually keeps it in — ClawBox's on OpenClaw, Hermes' own
+    // ~/.hermes/.env on Hermes, where ClawBox may hold no copy at all.
+    //
+    // Compared by BOT ID, not by the whole token: Telegram's /revoke issues a
+    // fresh secret for the same bot, and two tokens that differ only there feed
+    // the same getUpdates stream.
+    const mainBot = await readActiveTelegramBot();
+    const mainBotId = telegramBotId(mainBot.token);
+    if (mainBotId !== null && mainBotId === telegramBotId(token)) {
       // The whole design rests on this bot's updates being ours alone. Handing
       // it the token the harness is already long-polling would make both
       // pollers fight ("Conflict: terminated by other getUpdates request") and
@@ -111,6 +120,25 @@ export async function POST(request: Request) {
           kind: "same_bot",
         },
         { status: 400 },
+      );
+    }
+    if (!mainBot.known) {
+      // FAIL CLOSED — and after the check above, so a store we could not read
+      // still gets the specific "this is the same bot" answer whenever the
+      // fallback copy happens to prove it.
+      //
+      // The old guard reached this state by simply finding nothing in ClawBox's
+      // store, which on a Hermes box was the ORDINARY state — and it waved the
+      // save through. "We could not check" is not evidence that this is a
+      // second bot, and the cost of being wrong is the owner's own Telegram
+      // chat going deaf.
+      return NextResponse.json(
+        {
+          error:
+            "Could not read which Telegram bot this ClawBox already chats with, so a second bot cannot be confirmed as different. Try again in a moment.",
+          kind: "bot_unknown",
+        },
+        { status: 503 },
       );
     }
 
