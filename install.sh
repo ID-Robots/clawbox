@@ -133,6 +133,13 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
       # Temp name + rename, NEVER a copy over the live file: a copy that fails
       # halfway leaves behind exactly the stub described above.
       _mf_restage() {
+        # Once per run. Both call sites below are reachable in a single pass — a
+        # helper that was not answering is replaced, answers, and then fails
+        # --write — and staging the same bytes a second time cannot change that
+        # outcome. It only widens the window in which a file out of the
+        # clawbox-writable tree is being installed root-owned into libexec.
+        [ "${_mf_staged:-0}" = "0" ] || return 1
+        _mf_staged=1
         [ -f "$_mf_src" ] || return 1
         if ! install -o root -g root -m 0755 "$_mf_src" "$_mf.new"; then
           echo "[bootstrap] WARN: could not stage a fresh root-exec manifest helper" >&2
@@ -210,6 +217,16 @@ PROVISION_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || echo unknown)-$$"
 PROVISION_STATUS_UNPUBLISHED=0
 
 record_provision_failure() {
+  local f
+  # Idempotent. Three sites now record `root_exec_manifest` — the bootstrap's
+  # verdict block, refresh_root_exec_manifest and install_root_libexec — and two
+  # of them can fire in the same run, which put the token in the operator's
+  # "Steps that failed:" line twice and wrote it twice into the marker the flash
+  # host parses. `if`, not `[ … ] &&`: a for loop whose last command fails
+  # returns non-zero, and under `set -e` that would abort the installer here.
+  for f in ${PROVISION_FAILURES[@]+"${PROVISION_FAILURES[@]}"}; do
+    if [ "$f" = "$1" ]; then return 0; fi
+  done
   PROVISION_FAILURES+=("$1")
 }
 
@@ -3653,6 +3670,35 @@ refresh_root_exec_manifest() {
   record_provision_failure root_exec_manifest
 }
 
+# Install one root-owned file WITHOUT ever leaving a prefix of it behind.
+#
+# `install` writes into the destination inode with O_TRUNC, so a copy that dies
+# part way through — a full or read-only /usr — leaves an executable PREFIX of
+# the file at the destination. For every script this function installs that
+# prefix is silently PERMISSIVE rather than noisy, because each one's dispatch
+# is at the bottom: a truncated clawbox-root-manifest.sh exits 0 for --write and
+# --verify without looking at anything (TASK-584, which is why every caller now
+# probes it first), and a truncated clawbox-root-step.sh reaches EOF and exits 0
+# without exec'ing the step at all — which `Type=oneshot` reports to the updater
+# as a step that SUCCEEDED.
+#
+# So: temp name in the same directory, then rename. `rename(2)` within a
+# directory is atomic, so the live file is either the whole old one or the whole
+# new one and never a prefix of either — and a failed copy leaves the working
+# file it was replacing untouched. Same shape as the bootstrap's _mf_restage,
+# which had this and the path that runs on every install did not. TASK-584.
+install_root_file() {
+  local src="$1" dst="$2" mode="${3:-0755}"
+  if ! install -o root -g root -m "$mode" "$src" "$dst.new"; then
+    rm -f "$dst.new" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv -f "$dst.new" "$dst"; then
+    rm -f "$dst.new" 2>/dev/null || true
+    return 1
+  fi
+}
+
 install_root_libexec() {
   install -d -o root -g root -m 0755 /usr/local/libexec
   install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR"
@@ -3661,7 +3707,7 @@ install_root_libexec() {
   # function refuses to run any step unless the manifest this writes verifies.
   for src in clawbox-root-manifest.sh clawbox-run-root-step.sh; do
     if [ -f "$PROJECT_DIR/config/$src" ]; then
-      install -o root -g root -m 0755 "$PROJECT_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src"
+      install_root_file "$PROJECT_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src"
     fi
   done
   # Everything the web server may invoke as root via a NOPASSWD grant. Same
@@ -3669,14 +3715,14 @@ install_root_libexec() {
   for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
              clawbox-resource-limits.sh; do
     if [ -f "$PROJECT_DIR/scripts/$src" ]; then
-      install -o root -g root -m 0755 "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src"
+      install_root_file "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src"
     fi
   done
   # The limits the scripts above read. Root-owned for the same reason they are.
   install -d -o root -g root -m 0755 /etc/clawbox
   if [ -f "$PROJECT_DIR/config/clawbox-resource-limits.env" ]; then
-    install -o root -g root -m 0644 "$PROJECT_DIR/config/clawbox-resource-limits.env" \
-      /etc/clawbox/resource-limits.env
+    install_root_file "$PROJECT_DIR/config/clawbox-resource-limits.env" \
+      /etc/clawbox/resource-limits.env 0644
   fi
 
   # Manifest, THEN dispatcher — never the other way round. The dispatcher fails
@@ -3688,7 +3734,7 @@ install_root_libexec() {
   # install_sudoers_dropin follows for the allow-list. TASK-445.
   if write_root_exec_manifest; then
     if [ -f "$PROJECT_DIR/config/clawbox-root-step.sh" ]; then
-      install -o root -g root -m 0755 "$PROJECT_DIR/config/clawbox-root-step.sh" \
+      install_root_file "$PROJECT_DIR/config/clawbox-root-step.sh" \
         "$ROOT_LIBEXEC_DIR/clawbox-root-step.sh"
     fi
   else
@@ -4483,8 +4529,8 @@ step_polkit_rules() {
   # it was how the unscoped .pkla ended up as the only authority.
   local POLKIT_RULES_DIR="/etc/polkit-1/rules.d"
   if [ -d "$POLKIT_RULES_DIR" ] && [ -f "$PROJECT_DIR/config/49-clawbox-updates.rules" ]; then
-    install -o root -g root -m 0644 "$PROJECT_DIR/config/49-clawbox-updates.rules" \
-      "$POLKIT_RULES_DIR/49-clawbox-updates.rules"
+    install_root_file "$PROJECT_DIR/config/49-clawbox-updates.rules" \
+      "$POLKIT_RULES_DIR/49-clawbox-updates.rules" 0644
   fi
   echo "  Polkit rules installed (NetworkManager only; root steps go through sudo)"
 }
@@ -4607,8 +4653,8 @@ step_resource_limits() {
   # clawbox-writable and this runs as root.
   install -d -o root -g root -m 0755 /etc/clawbox
   if [ -f "$PROJECT_DIR/config/clawbox-resource-limits.env" ]; then
-    install -o root -g root -m 0644 "$PROJECT_DIR/config/clawbox-resource-limits.env" \
-      /etc/clawbox/resource-limits.env
+    install_root_file "$PROJECT_DIR/config/clawbox-resource-limits.env" \
+      /etc/clawbox/resource-limits.env 0644
   fi
   install_root_libexec
   "$ROOT_LIBEXEC_DIR/clawbox-resource-limits.sh" --apply || \

@@ -106,6 +106,13 @@ contains() {
 # bottom of the helper ran: the token from a helper that knows --selftest, or
 # exit 64 from an older one rejecting a verb it does not know. A stub does
 # neither: it prints nothing and exits 0.
+#
+# This file is the side of that comparison that can be OLDER than the helper:
+# install_root_libexec installs the helper unconditionally and this dispatcher
+# only if the manifest write succeeded. So the token below is a wire format —
+# see SELFTEST_TOKEN in clawbox-root-manifest.sh. Changing it there without
+# adding the old value as a second accepted answer here would make this refuse a
+# healthy helper, fleet-wide.
 manifest_helper_alive() {
   local out rc=0
   out="$("$MANIFEST_HELPER" --selftest 2>/dev/null)" || rc=$?

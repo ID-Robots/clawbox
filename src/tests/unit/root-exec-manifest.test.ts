@@ -571,6 +571,54 @@ d("install.sh::install_root_libexec", () => {
   });
 });
 
+d("install.sh::install_root_file", () => {
+  it("never leaves a prefix of a root helper where the live one was", () => {
+    // The stub factory, on the path that runs on EVERY install and every
+    // `--step systemd_services` — which is the remedy every refusal in this
+    // chain prints. `install` writes into the destination inode with O_TRUNC,
+    // so a copy killed part way through (a full or read-only /usr) left an
+    // executable PREFIX of the file behind. Every script install_root_libexec
+    // installs dispatches at the BOTTOM, so that prefix is silently PERMISSIVE:
+    // a truncated clawbox-root-manifest.sh exits 0 for --write and --verify
+    // without looking, and a truncated clawbox-root-step.sh reaches EOF and
+    // exits 0 without exec'ing the step at all — which `Type=oneshot` reports
+    // to the updater as a step that succeeded.
+    const dst = path.join(libexec, "victim.sh");
+    const live = "#!/bin/sh\n# the working copy\nexit 0\n";
+    fs.writeFileSync(dst, live, { mode: 0o755 });
+    const src = path.join(tmp, "big.sh");
+    fs.writeFileSync(src, `#!/bin/sh\n${"# pad\n".repeat(30_000)}exit 0\n`);
+
+    // RLIMIT_FSIZE 8 blocks = 4096 bytes, so the source cannot fit and the copy
+    // dies mid-write — the real shape of the failure, not a mocked one.
+    const r = sh(
+      [
+        "set -uo pipefail",
+        unroot(shellFn("install_root_file")),
+        "ulimit -f 8",
+        `if install_root_file "${src}" "${dst}"; then echo RC=ok; else echo RC=fail; fi`,
+        "",
+      ].join("\n"),
+    );
+    expect(r.stdout, r.stderr).toContain("RC=fail");
+    expect(fs.readFileSync(dst, "utf-8"), "a failed copy truncated the live file").toBe(live);
+    expect(fs.existsSync(`${dst}.new`), "a staged copy was left behind").toBe(false);
+  });
+
+  it("installs the whole file when the copy fits", () => {
+    const dst = path.join(libexec, "victim.sh");
+    const src = path.join(tmp, "small.sh");
+    fs.writeFileSync(src, "#!/bin/sh\nexit 7\n");
+    const r = sh(
+      ["set -euo pipefail", unroot(shellFn("install_root_file")), `install_root_file "${src}" "${dst}"`, ""].join("\n"),
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(fs.readFileSync(dst, "utf-8")).toBe("#!/bin/sh\nexit 7\n");
+    expect(fs.statSync(dst).mode & 0o777).toBe(0o755);
+    expect(fs.existsSync(`${dst}.new`)).toBe(false);
+  });
+});
+
 d("the liveness token", () => {
   it("is the same literal in every file that asks for it", () => {
     // The helper, the root dispatcher and install.sh are three separately

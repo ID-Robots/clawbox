@@ -42,8 +42,9 @@
 # Usage (root only):
 #   clawbox-root-manifest.sh --write     record the tree as it is now
 #   clawbox-root-manifest.sh --verify    exit 0 if it still matches, 65 if not
-#   clawbox-root-manifest.sh --selftest  print SELFTEST_TOKEN — proof this file
-#                                        is complete, which no exit status is
+#   clawbox-root-manifest.sh --selftest  print SELFTEST_TOKEN — proof that this
+#                                        file is complete, which no exit status
+#                                        of the verbs above can give
 #
 # Installed by install.sh::install_root_libexec to
 # /usr/local/libexec/clawbox/clawbox-root-manifest.sh, root:root 0755.
@@ -73,6 +74,15 @@ MANIFEST_FILE="/etc/clawbox/root-exec.manifest"
 # line of this file can print it. Repeated as a literal in install.sh and
 # config/clawbox-root-step.sh, which are installed separately and cannot share a
 # constant; src/tests/unit/root-exec-manifest.test.ts pins them against this one.
+#
+# THIS STRING IS A WIRE FORMAT — never change it, only ever add a second
+# accepted value. install_root_libexec installs this helper unconditionally but
+# the dispatcher only if the manifest write succeeded, so the two ARE reachable
+# at different releases on the same box. A changed token would leave an older
+# dispatcher asking a newer helper: it gets exit 0 with a token it does not
+# recognise, which is neither the match nor the 64 an unknown verb returns, and
+# it would declare a perfectly healthy helper dead — every pinned root step
+# refused, on boxes that are fine, fleet-wide.
 SELFTEST_TOKEN="clawbox-root-manifest alive"
 
 # Everything the clawbox-root-update@ chain can end up running as root:
@@ -218,7 +228,7 @@ case "${1:-}" in
   --verify-file) verify_file "${2:-}" "${3:-}" ;;
   --selftest) printf '%s\n' "$SELFTEST_TOKEN" ;;
   *)
-    echo "usage: $0 --write|--verify|--verify-file <recorded path> <file>|--selftest" >&2
+    echo "usage: $0 --write | --verify | --verify-file <recorded path> <file> | --selftest" >&2
     exit 64
     ;;
 esac
