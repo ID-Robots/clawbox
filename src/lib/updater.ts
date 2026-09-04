@@ -186,16 +186,28 @@ function rootStepResultFailed(result: string | null): boolean {
 /**
  * Read the BUILD_ID of the build the SERVER RUNS FROM.
  *
- * Through `resolveBuildDir`, not `path.join(PROJECT_DIR, ".next")`: the service
- * runs with cwd `.next/standalone`, so the assets it serves come from
- * `.next/standalone/.next` — and `.next` "can be a newer half-finished build",
- * as that helper's own comment puts it. Reading the wrong tree would answer
- * "the rebuild produced a new build" about a directory nobody serves.
+ * The service runs with cwd `.next/standalone`, so the assets it serves come
+ * from `.next/standalone/.next` — and `.next` "can be a newer half-finished
+ * build", as build-identity.ts's own comment puts it. Reading the wrong tree
+ * would answer "the rebuild produced a new build" about a directory nobody
+ * serves.
+ *
+ * The serving tree is chosen by the ENTRY POINT, not by `resolveBuildDir`.
+ * That helper picks the standalone tree only when its BUILD_ID is present and
+ * otherwise falls back to `.next` — which is precisely the state a failed
+ * rebuild leaves: the standalone tree exists and its BUILD_ID does not. Falling
+ * back there would read a `.next/BUILD_ID` nobody serves, `buildMissing` would
+ * be false, and the continuation would mark the update complete over a box that
+ * cannot boot. `standalone/server.js` is what production-server.js requires, so
+ * its presence is what says which tree is the serving one.
  */
 async function readBuildId(): Promise<string> {
   try {
-    const buildDir = await resolveBuildDir(PROJECT_DIR);
-    return (await readFile(path.join(buildDir, "BUILD_ID"), "utf-8")).trim();
+    const standalone = path.join(PROJECT_DIR, ".next", "standalone");
+    const serving = existsSync(path.join(standalone, "server.js"))
+      ? path.join(standalone, ".next")
+      : await resolveBuildDir(PROJECT_DIR);
+    return (await readFile(path.join(serving, "BUILD_ID"), "utf-8")).trim();
   } catch {
     return "";
   }

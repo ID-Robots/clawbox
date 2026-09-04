@@ -1,4 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// Runs real bash for every case: vitest's 5 s test and 10 s hook defaults are
+// not enough on a loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,15 +56,15 @@ function shellFunction(name: string): string {
 }
 
 /**
- * The helpers this PR adds, or nothing.
+ * The helpers, all of them required.
  *
- * Deliberately tolerant, and only for these: on the code these tests were
- * written against there are no such functions, and their absence is the bug. A
- * hard failure here would make every case below fail with "not found in
- * install.sh", which proves nothing about what the old `do_rebuild` DID.
+ * They were optional while they did not exist yet; they ship now, and a
+ * tolerant lookup would be a hole: a renamed or deleted helper makes
+ * `do_rebuild` fail with command-not-found, and every case asserting
+ * `status).not.toBe(0)` would still pass — for the wrong reason.
  */
-function optionalShellFunctions(...names: string[]): string {
-  return names.map((n) => findShellFunction(n)).filter(Boolean).join("\n\n");
+function shellFunctions(...names: string[]): string {
+  return names.map((n) => shellFunction(n)).join("\n\n");
 }
 
 type BuildOutcome =
@@ -83,6 +87,14 @@ interface Scenario {
   parkedBuild?: "servable" | "none";
   /** Units `systemctl is-active --quiet` answers yes for at the start. */
   activeUnits?: string[];
+  /**
+   * Does `systemctl start` actually bring the unit up?
+   *
+   * False models the crash-loop: the command succeeds, `Restart=always` keeps
+   * retrying, and the unit never becomes active — which is exactly the state
+   * the readiness poll exists to report.
+   */
+  startWorks?: boolean;
   bunInstall?: "succeeds" | "fails";
   nodePty?: "succeeds" | "fails";
   /** Which shipped function to run. */
@@ -116,6 +128,7 @@ function run(scenario: Scenario = {}): Run {
     previousBuild = "servable",
     parkedBuild = "none",
     activeUnits = ["ollama.service"],
+    startWorks = true,
     bunInstall = "succeeds",
     nodePty = "succeeds",
     entry = "do_rebuild",
@@ -155,8 +168,13 @@ function run(scenario: Scenario = {}): Run {
     "FAKE_BUILD=" + JSON.stringify(fakeBuild),
     "SYSTEMCTL_LOG=" + JSON.stringify(systemctlLog),
     'ACTIVE_UNITS="' + activeUnits.join(" ") + '"',
+    'START_WORKS=' + (startWorks ? "1" : "0"),
     "",
     "is_test_mode() { return 1; }",
+    "# The readiness poll waits a real second per attempt. The LOOP is the",
+    "# subject, not the wall clock, so the wait is a no-op here and all twenty",
+    "# attempts run instantly.",
+    "sleep() { :; }",
     "ensure_node_pty() {",
     nodePty === "succeeds"
       ? "  echo '  node-pty is already loadable'"
@@ -178,7 +196,7 @@ function run(scenario: Scenario = {}): Run {
     "  # A real `start` makes the unit active, so the restore path's readiness",
     "  # poll is answered by what it actually did rather than by a constant.",
     '  if [ "$1" = "start" ] || [ "$1" = "restart" ]; then',
-    '    ACTIVE_UNITS="$ACTIVE_UNITS $2"',
+    '    [ "$START_WORKS" = "1" ] && ACTIVE_UNITS="$ACTIVE_UNITS $2"',
     "    return 0",
     "  fi",
     '  if [ "$1" = "stop" ]; then',
@@ -200,7 +218,7 @@ function run(scenario: Scenario = {}): Run {
     "# own suite; here it only has to be present and harmless.",
     "free_memory_for_build() { :; }",
     "",
-    optionalShellFunctions(
+    shellFunctions(
       "verify_build_present",
       "promote_parked_build",
       "set_previous_build_aside",
@@ -344,11 +362,22 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
   it("says the dashboard is down when the restored build will not start", () => {
     // clawbox-setup has Restart=always, so a restore that crash-loops is
     // invisible unless someone looks. `systemctl start … || true` under a
-    // message that asserts an outcome is the false-success shape.
-    const r = run({ build: "oom-killed", activeUnits: [] });
-    // The stub only makes a unit active when `start` is called, and the
-    // scenario's start succeeds, so this asserts the poll ran at all.
-    expect(r.stderr).toMatch(/dashboard is serving again|dashboard is DOWN/);
+    // message that asserts an outcome is the false-success shape — and an
+    // alternation over both messages would be satisfied by an implementation
+    // that skips the readiness poll entirely. This scenario's `start` is a
+    // no-op, so only the DOWN branch can produce a line.
+    const r = run({ build: "oom-killed", startWorks: false });
+
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/dashboard is DOWN/);
+    expect(r.stderr).not.toMatch(/dashboard is serving again/);
+  });
+
+  it("says the dashboard is serving when the restore really comes up", () => {
+    const r = run({ build: "oom-killed" });
+
+    expect(r.stderr).toMatch(/dashboard is serving again/);
+    expect(r.stderr).not.toMatch(/dashboard is DOWN/);
   });
 
   it("replaces the previous build only once the new one exists", () => {

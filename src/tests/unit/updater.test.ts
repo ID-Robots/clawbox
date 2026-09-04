@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
 import * as fs from "fs/promises";
+import { existsSync } from "fs";
 
 vi.mock("child_process", () => ({
   exec: vi.fn(),
@@ -10,6 +11,19 @@ vi.mock("child_process", () => ({
 vi.mock("fs/promises", () => ({
   readFile: vi.fn(),
 }));
+
+// `existsSync` is how readBuildId decides WHICH tree the server runs from — the
+// standalone entry point, not a BUILD_ID that a failed rebuild may have taken
+// with it. Partial, because `updater.ts` is not the only module in this graph
+// that touches `fs`.
+vi.mock("fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs")>();
+  // The REAL implementation by default — other code in this graph asks whether
+  // real files exist (the build-identity script, for one) and a blanket `false`
+  // would rewrite those tests' subject. Only the case that is about WHICH build
+  // tree the server runs from overrides it.
+  return { ...actual, existsSync: vi.fn(actual.existsSync) };
+});
 
 vi.mock("@/lib/config-store", () => ({
   get: vi.fn(),
@@ -42,6 +56,7 @@ const mockSetMany = vi.mocked(setMany);
 const mockExec = vi.mocked(childProcess.exec);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockReadFile = vi.mocked(fs.readFile);
+const mockExists = vi.mocked(existsSync);
 const mockGatewayUp = vi.mocked(waitForPortOpen);
 
 /**
@@ -1104,6 +1119,28 @@ describe("updater", () => {
       const state = updater.getUpdateState();
       expect(state.phase).toBe("failed");
       expect(state.error).toContain("no build");
+    });
+
+    it("reports a failed update when the SERVING tree lost its build", async () => {
+      // The half a `resolveBuildDir` fallback would miss. A failed rebuild can
+      // leave `.next/standalone/server.js` in place — that is what the service
+      // loads — while the standalone BUILD_ID beside it is gone and a stale
+      // `.next/BUILD_ID` is still there. Reading the fallback tree would answer
+      // about a directory nobody serves, and the update would resume.
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue("build-aaa");
+      mockExists.mockImplementation((file: unknown) => String(file).endsWith("standalone/server.js"));
+      mockReadFile.mockImplementation(async (file) => {
+        // Only the NON-serving tree still has one.
+        if (String(file).endsWith("standalone/.next/BUILD_ID")) {
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        }
+        if (String(file).endsWith("BUILD_ID")) return "build-bbb\n";
+        throw new Error("ENOENT");
+      });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      expect(updater.getUpdateState().phase).toBe("failed");
     });
 
     it("reports a failed update when a box that had no build still has none", async () => {
