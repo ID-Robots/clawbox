@@ -746,7 +746,11 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only on a fresh CUDA box", () 
     const all = res.su.join("\n");
     expect(all, "the STT wheels were not installed").toContain("faster-whisper");
     // Kokoro first, always: a failed pip here must never cost the box its voice.
-    expect(all.indexOf("kokoro")).toBeLessThan(all.indexOf("faster-whisper"));
+    const kokoroAt = all.indexOf("kokoro");
+    // -1 is less than every index, so without this the ordering assertion also
+    // passed on a run where Kokoro never happened at all.
+    expect(kokoroAt, "Kokoro never ran").toBeGreaterThan(-1);
+    expect(kokoroAt).toBeLessThan(all.indexOf("faster-whisper"));
     // And the flag that makes it affordable at all.
     expect(INSTALL_VOICE_SH).toContain("CMAKE_CUDA_ARCHITECTURES");
   });

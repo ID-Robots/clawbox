@@ -4948,7 +4948,7 @@ ensure_local_embeddings() {
     return 0
   fi
   if ! ollama_wait_ready 30; then
-    echo "  Ollama is not answering - semantic memory stays on lexical FTS for now"
+    echo "  Ollama is not reachable - semantic memory stays on lexical FTS for now"
     return 0
   fi
   as_clawbox_login "timeout -k 10 600 $helper" || true
@@ -5003,7 +5003,11 @@ step_ollama_install() {
     # its port, and its "not reachable" branch is a silent no-op: no state
     # written, no retry, no provisioning failure recorded — a box that simply
     # lost a race kept lexical FTS and looked healthy doing it.
-    ollama_wait_ready 30 || echo "  Ollama did not answer in time; the helper below will report what it found"
+    # "not reachable", not "did not answer": the post-run check below owns that
+    # second phrase for a DIFFERENT failure — a core that answered and could not
+    # be parsed — and two unrelated "did not answer" sentences in one run send
+    # the operator to the wrong box. Same vocabulary the helper itself uses.
+    ollama_wait_ready 30 || echo "  Ollama is not reachable yet; the helper below will report what it found"
     as_clawbox_login "$ENSURE_EMBEDDINGS" || true
     # The helper exits 0 on every soft failure by design (a missing Ollama must
     # not abort an install), so its exit code says nothing about the outcome.

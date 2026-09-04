@@ -800,7 +800,13 @@ whisper_mark_installed() {
 write_whisper_unit() {
   local ld
   ld=$(kokoro_ld_path expected)
-  mkdir -p "$SYSTEMD_USER"
+  # Both failures are reportable: this runs inside a function called with `||`,
+  # so errexit is OFF for its body and an ignored mkdir or redirection would let
+  # the caller stamp the install and report a ready engine whose unit file does
+  # not exist — the same disagreement between local-models.ts (unit presence)
+  # and stt-local.ts (a real import) that the write-last ordering exists to
+  # prevent, arriving from the other direction.
+  mkdir -p "$SYSTEMD_USER" || return 1
   cat > "$SYSTEMD_USER/whisper-server.service" << EOF
 [Unit]
 Description=Whisper STT Server (GPU)
@@ -837,7 +843,10 @@ install_whisper_stt() {
   fi
   if whisper_stack_present; then
     echo "  faster-whisper already installed"
-    write_whisper_unit
+    if ! write_whisper_unit; then
+      echo "  Warning: could not write whisper-server.service" >&2
+      return 12
+    fi
     activate_user_units
     return 0
   fi
@@ -880,7 +889,13 @@ install_whisper_stt() {
     return 12
   fi
 
-  write_whisper_unit
+  # Before the stamp, and before anything says "ready": a stamped box skips this
+  # work on every later update, so stamping over a missing unit would make the
+  # defect permanent.
+  if ! write_whisper_unit; then
+    echo "  Warning: could not write whisper-server.service" >&2
+    return 12
+  fi
   whisper_mark_installed
   activate_user_units
   echo "  faster-whisper ready"

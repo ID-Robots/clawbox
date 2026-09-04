@@ -34,9 +34,23 @@ function shellCode(fn: string): string {
   return fn.split(NL).filter((l) => !l.trim().startsWith("#")).join(NL);
 }
 
+/**
+ * The body of the --tts-only arm.
+ *
+ * Anchored, and loudly: `slice(VOICE_SH.indexOf(...))` on a missed anchor is
+ * `slice(-1)` — the last CHARACTER of the file, not an empty string — so the
+ * exit-contract test below would iterate nothing and pass having inspected no
+ * code at all.
+ */
+function ttsOnlyArm(): string {
+  const at = VOICE_SH.indexOf('if [ "${1:-}" = "--tts-only" ]; then');
+  if (at < 0) throw new Error("the --tts-only arm was not found in install-voice.sh");
+  return VOICE_SH.slice(at);
+}
+
 describe("the STT half is reachable from the path every box runs", () => {
   it("--tts-only installs it, after Kokoro", () => {
-    const arm = VOICE_SH.slice(VOICE_SH.indexOf('if [ "${1:-}" = "--tts-only" ]; then'));
+    const arm = ttsOnlyArm();
     const kokoro = arm.indexOf("install_kokoro_tts");
     const stt = arm.indexOf("install_whisper_stt");
     expect(stt).toBeGreaterThan(-1);
@@ -46,13 +60,13 @@ describe("the STT half is reachable from the path every box runs", () => {
   });
 
   it("and before the case that exits, so a mute box still gets its ears", () => {
-    const arm = VOICE_SH.slice(VOICE_SH.indexOf('if [ "${1:-}" = "--tts-only" ]; then'));
+    const arm = ttsOnlyArm();
     expect(arm.indexOf("install_whisper_stt")).toBeLessThan(arm.indexOf('case "$TTS_KOKORO_VERDICT" in'));
   });
 
   it("does not touch the arm's exit contract, which is Kokoro's", () => {
     // install.sh grades step_openclaw_tts by these codes; STT must not move them.
-    const arm = VOICE_SH.slice(VOICE_SH.indexOf('if [ "${1:-}" = "--tts-only" ]; then'));
+    const arm = ttsOnlyArm();
     const end = arm.indexOf(`${NL}fi`);
     for (const line of arm.slice(0, end).split(NL).filter((l) => l.trim().startsWith("exit "))) {
       expect(line, `exit must not carry the STT code: ${line}`).not.toContain("STT_RC");
@@ -126,16 +140,20 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
 
   function run({
     cuda = true, pipOk = true, importOk = true, buildOk = true,
-    skip = false, stamped = false,
+    skip = false, stamped = false, unitWritable = true,
   } = {}) {
     if (stamped) fs.writeFileSync(stampPath(), "1\n");
+    // A regular FILE where the unit directory should be: `mkdir -p` cannot
+    // create it, which is the cheapest honest way to fail write_whisper_unit.
+    const systemdDir = unitWritable ? path.join(tmp, "systemd") : path.join(tmp, "blocked", "systemd");
+    if (!unitWritable) fs.writeFileSync(path.join(tmp, "blocked"), "not a directory");
     const log = path.join(tmp, "calls.log");
     fs.writeFileSync(log, "");
     const script = [
       "set -euo pipefail",
       `CLAWBOX_HOME="${tmp}"`,
       `CLAWBOX_USER="$(id -un)"`,
-      `SYSTEMD_USER="${tmp}/systemd"`,
+      `SYSTEMD_USER="${systemdDir}"`,
       `WORKSPACE="${tmp}/workspace"`,
       `WHISPER_STAMP="${stampPath()}"`,
       'WHISPER_STAMP_VERSION="1"',
@@ -219,6 +237,18 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
     const r = run({ skip: true });
     expect(r.out).toContain("RC=13");
     expect(r.calls.some((c) => c.startsWith("pip"))).toBe(false);
+  });
+
+  it("does not stamp or report ready when the unit cannot be written", () => {
+    // errexit is OFF inside this function — it is called with `|| STT_RC=$?` —
+    // so an ignored mkdir failure would let it stamp the install and announce a
+    // ready engine whose unit file does not exist. A stamped box skips the work
+    // on every later update, which would make that permanent. Reported by
+    // CodeRabbit on #648.
+    const r = run({ unitWritable: false });
+    expect(r.out).toContain("RC=12");
+    expect(r.stamped, "a failed install must not be stamped").toBe(false);
+    expect(r.out).toMatch(/could not write whisper-server\.service/);
   });
 
   it("is stamp-gated: an installed box pays one import check, not a build", () => {
