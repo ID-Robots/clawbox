@@ -795,6 +795,20 @@ describe("POST /setup-api/ai-models/configure", () => {
     );
   });
 
+  it("refuses a ClawBox AI key offered as another provider's API key", async () => {
+    // A `claw_…` key authenticates to the ClawBox AI proxy and nowhere else.
+    // Registered as the OpenAI api_key profile it becomes that provider's
+    // bearer: measured on a box, `openai:default` held one and every turn on
+    // `openai/gpt-5.5` went to https://api.openai.com/v1/responses and came
+    // back `401 … Incorrect API key provided: claw_***`. Worse, an eligible
+    // api_key profile shadows the owner's working ChatGPT sign-in on the same
+    // provider, so the box answers on a silent fallback instead.
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "claw_token_abc" }));
+
+    expect(res.status).toBe(400);
+    expect(pasteCallFor("openai:default")).toBeUndefined();
+  });
+
   it("leaves the order alone for a provider that is not OpenAI", async () => {
     await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant" }));
 
@@ -1592,6 +1606,45 @@ describe("POST /setup-api/ai-models/configure", () => {
     const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
     expect(written.profiles["openai:chatgpt"].access).toBe("access.token.jwt");
     expect(written.profiles["openai:chatgpt"].id).toBe("id.token.jwt");
+  });
+
+  it("clears EVERY agent's codex-home mirror on a ChatGPT sign-in, not just ~/.codex", async () => {
+    // The sync timer refuses to overwrite a `<agentDir>/codex-home/auth.json`
+    // whose refresh token core does not have — overwriting a live app-server
+    // rotation with core's spent copy is what burnt the token family in #278.
+    // On a 2026.8 box core's store can no longer be written from that script
+    // (the per-agent table holds zero profiles after `doctor --fix`), so the
+    // file never leaves that state: it keeps the PREVIOUS account's token for
+    // the life of the box and the timer warns about it every ten minutes.
+    //
+    // A sign-in is the one moment the account genuinely changes, so it is the
+    // only place the divergence can be settled. Clearing both mirrors here lets
+    // the restart below regenerate them from the fresh profile.
+    mockFs.readdir.mockResolvedValue(["main", "support"] as unknown as never);
+    mockFs.readFile.mockImplementation(async (file) =>
+      String(file).endsWith("oauth-device-tokens.json")
+        ? JSON.stringify({
+            provider: "openai",
+            access_token: "access.token.jwt",
+            id_token: "id.token.jwt",
+            refresh_token: "refresh-token",
+            expires_in: 3600,
+            createdAt: Date.now(),
+          })
+        : JSON.stringify({ version: 1, profiles: {} }),
+    );
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      authMode: "subscription",
+      oauthHandoff: true,
+    }));
+    expect(res.status).toBe(200);
+
+    const removed = mockFs.rm.mock.calls.map((call) => String(call[0]));
+    expect(removed.some((file) => file.endsWith("/.codex/auth.json"))).toBe(true);
+    expect(removed.some((file) => file.endsWith("/agents/main/agent/codex-home/auth.json"))).toBe(true);
+    expect(removed.some((file) => file.endsWith("/agents/support/agent/codex-home/auth.json"))).toBe(true);
   });
 
   it("binds the handoff tokens to the provider recorded in the file, not the body", async () => {

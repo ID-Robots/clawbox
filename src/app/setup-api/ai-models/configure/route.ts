@@ -1683,6 +1683,30 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         { status: 400 }
       );
     }
+    // A `claw_…` key authenticates to the ClawBox AI proxy and to nothing else.
+    // Stored as another provider's api_key profile it becomes that provider's
+    // credential and 401s on every turn: measured on a box, `openai:default`
+    // held one and turns on `openai/gpt-5.5` came back from api.openai.com with
+    // `Incorrect API key provided: claw_***`. Worse, an eligible api_key profile
+    // is a candidate ahead of nothing — it is tried, spends the request, and the
+    // gateway then falls back to another model — so the owner sees a provider
+    // that saved cleanly and answers as something else. Refuse the save rather
+    // than store a credential that cannot work. The prefix is a build-time
+    // constant and the message echoes no user input.
+    //
+    // This is about the AUTH PROFILE only. The image setup deliberately puts
+    // the same token in `models.providers.openai.apiKey`, which is a different
+    // slot with its own ownership rules (`canOwnOpenAiImageApiKey`) and its own
+    // measured consequences — see the note above that function.
+    // Not the local providers: for ollama / llamacpp this field carries a MODEL
+    // ID, not a credential (see the branch below), so a model whose name began
+    // with the prefix would be refused as if it were a key.
+    if (!isClawAI && !isOllama && !isLlamaCpp && normalizedApiKey.startsWith(CLAWBOX_AI_TOKEN_PREFIX)) {
+      return NextResponse.json(
+        { error: "That is a ClawBox AI key. Select ClawBox AI as the provider, or paste this provider's own key." },
+        { status: 400 }
+      );
+    }
     if (isLocalScope && !isOllama && !isLlamaCpp) {
       return NextResponse.json(
         { error: "Local AI scope is only supported for Ollama and llama.cpp" },
@@ -2789,10 +2813,39 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // stale file so the restart below regenerates it with the fresh token —
     // afterward the Codex app-server owns its own refresh, so we don't touch
     // it again.
+    //
+    // Every agent's `codex-home/auth.json` goes with it. That file is the
+    // Codex app-server's own CODEX_HOME copy, and scripts/codex-auth-mirror.js
+    // deliberately refuses to overwrite one holding a refresh token core does
+    // not have: overwriting a live app-server rotation with core's spent copy
+    // is what burnt the token family in #278. On a 2026.8 box that script can
+    // no longer write core's store back (the per-agent `auth_profile_store`
+    // row holds zero profiles after `doctor --fix`), so a diverged file never
+    // leaves that state — it keeps the PREVIOUS account's token for the life of
+    // the box and the sync timer warns about it every ten minutes, advising a
+    // re-login that did not clear it. A sign-in is the one moment the account
+    // genuinely changes, which makes it the only place the divergence can be
+    // settled without guessing.
     if (isChatgptSubscription) {
-      await fs
-        .rm(path.join(CLAWBOX_HOME_DIR, ".codex", "auth.json"), { force: true })
-        .catch(() => {});
+      const agentsRoot = path.join(OPENCLAW_HOME_DIR, "agents");
+      const agentIds = await fs.readdir(agentsRoot).catch((err: unknown) => {
+        // Not fatal — the sign-in itself succeeded — but a box that could not
+        // be enumerated keeps its stale codex-home mirrors, and that state is
+        // otherwise invisible: `force: true` swallows ENOENT, not EACCES.
+        console.warn("[configure] Could not enumerate agent dirs to clear stale Codex mirrors:", err instanceof Error ? logSafe(err.message) : err);
+        return [] as string[];
+      });
+      const staleMirrors = [
+        path.join(CLAWBOX_HOME_DIR, ".codex", "auth.json"),
+        ...agentIds.map((id) => path.join(agentsRoot, id, "agent", "codex-home", "auth.json")),
+      ];
+      await Promise.all(
+        staleMirrors.map((file) =>
+          fs.rm(file, { force: true }).catch((err: unknown) => {
+            console.warn("[configure] Could not clear a stale Codex mirror:", logSafe(file), err instanceof Error ? logSafe(err.message) : err);
+          }),
+        ),
+      );
     }
 
     // (The OAuth doctor migration runs right after the store write in step 1
