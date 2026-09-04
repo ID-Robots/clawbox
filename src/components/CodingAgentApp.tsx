@@ -248,6 +248,25 @@ function useProjectGit(project: Project | null, version: number): GitInfo | null
   return git && git.dir === dir ? git.info : null;
 }
 
+/**
+ * A project's picture, in a box of the caller's choosing.
+ *
+ * The size has to come from here, not from InstalledAppIcon: that component
+ * was written for the desktop's colour tiles, where the picture is meant to
+ * bleed to the tile's edge, so its <img> is `w-full h-full` and its `size`
+ * prop only ever sizes the fallback glyph. Handed to a flex row with no box
+ * around it, the icon took the whole width of the project row and pushed the
+ * name and the chips onto the next line.
+ */
+function ProjectIcon({ project, size }: { project: Project; size: "w-6 h-6" | "w-7 h-7" }) {
+  if (!project.iconUrl) return null;
+  return (
+    <span className={`${size} shrink-0 rounded-md overflow-hidden flex items-center justify-center`}>
+      <InstalledAppIcon appId={project.folder} iconUrl={project.iconUrl} name={project.name} size={size} />
+    </span>
+  );
+}
+
 /** One cell of the run page's figures grid. */
 function StatTile({ label, value, hint, testId }: { label: string; value: string; hint?: string; testId?: string }) {
   return (
@@ -1340,9 +1359,7 @@ export default function CodingAgentApp() {
                         {/* The picture the box drew for this project while a run
                             worked in it (src/lib/project-icon.ts). Absent until
                             one has been drawn, which is most of a fresh box. */}
-                        {project.iconUrl && (
-                          <InstalledAppIcon appId={project.folder} iconUrl={project.iconUrl} name={project.name} size="w-6 h-6" />
-                        )}
+                        <ProjectIcon project={project} size="w-6 h-6" />
                         <span className="text-xs font-medium text-[var(--text-primary)] break-words">{project.name}</span>
                         {/* Says where the folder lives: a code project's is
                             under the checkout, not in the owner's folder. */}
@@ -1505,8 +1522,16 @@ export default function CodingAgentApp() {
                 {/* A run that finished on its own keeps whatever it started:
                     an app that serves itself on a port is meant to stay up,
                     so the device says what survived instead of killing it
-                    unasked, and the owner ends it when they are done. */}
-                {run.leftover && (
+                    unasked, and the owner ends it when they are done.
+
+                    Only once the run is OVER, though. A paused run also
+                    records what it left behind, and killRunLeftovers refuses
+                    one on purpose — the run is still the owner's to resume and
+                    those leftovers are the very thing a resume carries on
+                    against — so the button here could never do anything but
+                    show that refusal. The same guard hides the flag a resume
+                    carries into a running run, where it is stale as well. */}
+                {run.leftover && isSettled(run.status) && (
                   <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-2.5 flex items-center gap-2 flex-wrap" data-testid="coding-agent-run-leftover">
                     <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 16 }} aria-hidden="true">bolt</span>
                     <span className="text-[11px] text-[var(--text-secondary)]">{t("codingAgent.leftoverRunning")}</span>
@@ -1806,9 +1831,8 @@ export default function CodingAgentApp() {
             </button>
             <div className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-3">
               <div className="flex items-center gap-2 flex-wrap">
-                {view.project.iconUrl && (
-                  <InstalledAppIcon appId={view.project.folder} iconUrl={view.project.iconUrl} name={view.project.name} size="w-7 h-7" />
-                )}
+                {/* The same picture as the row it was opened from, one size up. */}
+                <ProjectIcon project={view.project} size="w-7 h-7" />
                 <span className="text-sm font-semibold text-[var(--text-primary)] break-words">{view.project.name}</span>
                 {view.project.kind === "codeProject" && (
                   <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--text-muted)] border-white/20">

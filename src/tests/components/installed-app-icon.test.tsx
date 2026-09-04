@@ -85,6 +85,25 @@ describe("InstalledAppIcon", () => {
     expect(img()?.getAttribute("src")).toBe("/setup-api/apps/icon/notes");
   });
 
+  /**
+   * The size contract, pinned because a caller got it wrong: `size` is the
+   * fallback glyph's, and the picture fills the caller's box. A caller with no
+   * box of its own therefore paints the icon at the full width of whatever
+   * holds it — which is exactly what the Coding Agent's project rows did.
+   */
+  it("sizes the glyph from `size` and leaves the picture filling the caller's box", () => {
+    const { rerender } = render(<InstalledAppIcon appId="todo" name="Todo" size="w-7 h-7" />);
+    expect(img()).toHaveClass("w-full", "h-full");
+    expect(img()).not.toHaveClass("w-7", "h-7");
+
+    fireEvent.error(img()!);
+    expect(screen.getByText("extension")).toHaveStyle({ fontSize: "28px" });
+
+    rerender(<InstalledAppIcon appId="notes" name="Notes" size="w-12 h-12" />);
+    fireEvent.error(img()!);
+    expect(screen.getByText("extension")).toHaveStyle({ fontSize: "48px" });
+  });
+
   it("shows the glyph straight away when there is nothing to load", () => {
     render(<InstalledAppIcon name="Nothing" />);
     expect(img()).toBeNull();
