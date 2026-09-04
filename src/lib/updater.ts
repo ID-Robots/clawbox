@@ -17,6 +17,7 @@ import { waitForPortOpen } from "./port-probe";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { startRootStep } from "./root-step-runner";
+import { setUpdateLock, clearUpdateLock } from "./update-lock";
 import { collectBuildIdentity } from "./build-identity";
 import type { AuthProfileEntries } from "./subscription-surface";
 import {
@@ -1737,6 +1738,11 @@ function launchUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOpt
     })
     .finally(() => {
       running = false;
+      // The lock is released here and nowhere else on the success path. This
+      // does NOT run when do_rebuild kills the server mid-run — the process
+      // simply ends — which is exactly right: the flag stays on disk and the
+      // desktop is still locked when the box comes back for post_update.
+      void clearUpdateLock();
     });
 }
 
@@ -1772,7 +1778,14 @@ export function checkContinuation(): Promise<boolean> {
 
 async function resumeContinuation(): Promise<boolean> {
   const needsContinuation = await get("update_needs_continuation");
-  if (!needsContinuation) return false;
+  if (!needsContinuation) {
+    // Boot safety. A run that died between setting the lock and writing its
+    // continuation flag would otherwise leave the desktop locked with nothing
+    // left to unlock it — there is no update to resume, so there is no lock to
+    // hold. This is the one release path that does not follow a finished run.
+    await clearUpdateLock();
+    return false;
+  }
 
   await set("update_needs_continuation", undefined);
 
@@ -1808,6 +1821,7 @@ async function resumeContinuation(): Promise<boolean> {
     state.steps[restartIndex].status = "failed";
     state.steps[restartIndex].error = message;
     state.error = message;
+    await clearUpdateLock();
     return false;
   }
 
@@ -1928,6 +1942,23 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // the repo, so there is nothing for it to observe.
   if (startFrom === 0 && steps.some((s) => s.id === RESTART_STEP_ID)) {
     await captureDriftBaseline();
+  }
+
+  // Lock the desktop, AWAITED, before the first step runs.
+  //
+  // Here rather than in startUpdate/resumeContinuation, and awaited rather than
+  // fired and forgotten, so the flag is on disk before anything else happens —
+  // config-store.set is synchronous inside today, but nothing about this should
+  // depend on that staying true. It also covers the continuation, whose flag
+  // survived the reboot but may not have on a box that was power-cycled instead.
+  //
+  // Scoped to the flow that contains the RESTART step, the same test the drift
+  // baseline above uses: that is the one that runs `git reset --hard` and
+  // `git clean -fd` over the project. The OpenClaw-only flow reinstalls a
+  // package and bounces the gateway, and locking the owner's desktop for that
+  // would be over-reach.
+  if (steps.some((s) => s.id === RESTART_STEP_ID)) {
+    await setUpdateLock();
   }
 
   let failed = false;

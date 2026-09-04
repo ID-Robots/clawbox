@@ -6,6 +6,7 @@ import { verifyMcpBearer } from "@/lib/mcp-token";
 import { isPublicGatewayAsset } from "@/lib/gateway-static";
 import { readEdition } from "@/lib/edition-source";
 import { isBootstrapAllowedPath } from "@/lib/setup-api-gate";
+import { UPDATE_LOCK_KEY, UPDATING_PAGE } from "@/lib/update-lock";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
@@ -23,6 +24,12 @@ interface ConfigSnapshot {
   setupComplete: boolean;
   passwordConfigured: boolean;
   sessionGen: number;
+  /**
+   * An update owns the box. Read from the same cached snapshot as everything
+   * else here, so the lock costs no extra I/O: config.json is already stat'd
+   * per request and re-read only when its mtime moves.
+   */
+  updateInProgress: boolean;
   // Webapp ids whose InstalledMeta says `public: true` — served read-only
   // over GET /setup-api/webapps without a session (see step 5 below).
   publicWebapps: ReadonlySet<string>;
@@ -50,6 +57,7 @@ function readConfigCached(): ConfigSnapshot {
       password_configured?: unknown;
       session_generation?: unknown;
       "pref:installed_meta"?: unknown;
+      [UPDATE_LOCK_KEY]?: unknown;
     };
     const sessionGen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
@@ -59,6 +67,7 @@ function readConfigCached(): ConfigSnapshot {
       setupComplete: parsed.setup_complete === true,
       passwordConfigured: parsed.password_configured === true,
       sessionGen,
+      updateInProgress: parsed[UPDATE_LOCK_KEY] === true,
       publicWebapps: publicWebappIds(parsed["pref:installed_meta"]),
     };
     return configCache;
@@ -78,6 +87,10 @@ function readConfigCached(): ConfigSnapshot {
       setupComplete: !missing,
       passwordConfigured: !missing,
       sessionGen: 0,
+      // Fail OPEN for this one, unlike the auth fields above: a corrupt
+      // config.json is not evidence of an update, and locking the desktop on it
+      // would take away the surfaces the owner needs to fix the box.
+      updateInProgress: false,
       publicWebapps: NO_PUBLIC_WEBAPPS,
     };
     return configCache;
@@ -210,6 +223,18 @@ const GATEWAY_ONLY_EXACT = new Set(["/favicon.svg", "/favicon-32.png"]);
 const GATEWAY_ONLY_PREFIXES = ["/api", "/assets"];
 
 
+
+/**
+ * A page the owner looks at, as opposed to an API, an asset or the gateway.
+ *
+ * Deliberately narrow: the desktop and the standalone app pages. The gateway UI
+ * is left reachable because the assistant answers on it throughout an update,
+ * and /login stays reachable so an expired session is still recoverable.
+ */
+function isDesktopPagePath(pathname: string): boolean {
+  if (pathname === UPDATING_PAGE) return false;
+  return pathname === "/" || pathname === "/app" || pathname.startsWith("/app/");
+}
 
 function isGatewayOnlyPath(pathname: string): boolean {
   if (GATEWAY_ONLY_EXACT.has(pathname)) return true;
@@ -426,6 +451,21 @@ export async function middleware(request: NextRequest) {
   // 4. Check session cookie
   const sessionCookie = request.cookies.get("clawbox_session")?.value;
   if (sessionCookie && await verifySessionCookie(sessionCookie, currentSessionGeneration())) {
+    // 4a. An update owns the box: send desktop navigations to the updating page.
+    //
+    // Not decoration. `updateClawBoxAndReboot` runs `git reset --hard` and
+    // `git clean -fd` over the project while the desktop is still on screen,
+    // and every app on it can write through /setup-api — so a window left open
+    // can save into a tree that is being rewritten underneath it.
+    //
+    // Only top-level PAGE navigations are redirected. /setup-api/* is left
+    // alone on purpose: the updating page itself polls the status route, and an
+    // API surface answering a redirect with HTML is the defect #304 fixed.
+    // Placed after the session check so an unauthenticated visitor still gets
+    // the login page rather than a page whose only content needs a session.
+    if (isDesktopPagePath(pathname) && readConfigCached().updateInProgress) {
+      return NextResponse.redirect(new URL(UPDATING_PAGE, request.url));
+    }
     return NextResponse.next();
   }
 
