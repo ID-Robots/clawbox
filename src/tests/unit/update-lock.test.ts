@@ -35,15 +35,32 @@ function fn(name: string): string {
 }
 
 describe("the lock is written where a run starts and released where one ends", () => {
-  it("is set when the owner starts an update", () => {
-    expect(fn("startUpdate")).toContain("setUpdateLock()");
+  it("is taken before the first step runs, and awaited", () => {
+    // Awaited, not fired and forgotten: config-store.set happens to be
+    // synchronous inside today, and nothing here should depend on that staying
+    // true. Reported by CodeRabbit on #649.
+    const run = fn("runUpdate");
+    expect(run).toContain("await setUpdateLock()");
+    expect(run.indexOf("await setUpdateLock()")).toBeLessThan(run.indexOf("for (let i = startFrom"));
   });
 
-  it("is re-asserted by the half that runs after the reboot", () => {
-    // A box power-cycled rather than rebooted by the update may have lost the
-    // write; the second half owns the box just as much as the first.
-    const resume = fn("resumeContinuation");
-    expect(resume).toContain("setUpdateLock()");
+  it("is taken by the flow that rewrites the tree, and not by the other one", () => {
+    // The OpenClaw-only flow reinstalls a package and bounces the gateway; it
+    // never runs `git reset --hard`, so locking the owner's desktop for it
+    // would be over-reach. Same test the drift baseline uses.
+    const run = fn("runUpdate");
+    const at = run.indexOf("await setUpdateLock()");
+    expect(run.slice(0, at)).toContain("steps.some((s) => s.id === RESTART_STEP_ID)");
+  });
+
+  it("covers the half that runs after the reboot", () => {
+    // runUpdate is the entry point for both halves, so one call covers the
+    // continuation too — whose flag survived the reboot, but may not have on a
+    // box that was power-cycled instead.
+    expect(fn("runUpdate")).toContain("await setUpdateLock()");
+    // …and the fire-and-forget calls it replaced are gone.
+    expect(fn("startUpdate")).not.toContain("void setUpdateLock");
+    expect(fn("resumeContinuation")).not.toContain("void setUpdateLock");
   });
 
   it("is released exactly once on the success path, in launchUpdate", () => {
@@ -151,6 +168,22 @@ describe("update-lock — behaviour against a real config store", () => {
       expect(m.UPDATE_LOCK_KEY in onDisk()).toBe(false);
       expect(await m.isUpdateLocked()).toBe(false);
     });
+  });
+
+  it("says whether it actually took the lock, and says so out loud when it did not", async () => {
+    // A failure must not stop the update — refusing to update a box because a
+    // courtesy lock could not be written is the worse outcome, and an
+    // unwritable config.json is exactly what an update exists to repair. But it
+    // must not be silent either. Reported by CodeRabbit on #649.
+    const m = await import("@/lib/update-lock");
+    expect(await m.setUpdateLock()).toBe(true);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Make the store unwritable: a FILE where the data directory should be.
+    fs.rmSync(path.join(tmp, "data"), { recursive: true, force: true });
+    fs.writeFileSync(path.join(tmp, "data"), "not a directory");
+    expect(await m.setUpdateLock()).toBe(false);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("reports unlocked on a box that has never updated", () => {

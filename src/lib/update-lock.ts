@@ -27,19 +27,46 @@ export const UPDATE_LOCK_KEY = "update_in_progress";
 /** Where the owner is sent while the box updates. */
 export const UPDATING_PAGE = "/updating";
 
-export async function setUpdateLock(): Promise<void> {
+/**
+ * Take the lock. Answers whether it was actually taken.
+ *
+ * A failure is REPORTED and does not stop the update. Refusing to update a box
+ * because a courtesy lock could not be written would be the worse outcome by
+ * some way: config.json being unwritable is exactly the kind of state an update
+ * exists to repair, and the desktop being reachable during one is a smaller
+ * harm than a box that can no longer be fixed. But it is said out loud, because
+ * silently running an update with the desktop unlocked is not something anyone
+ * should have to infer from behaviour.
+ */
+export async function setUpdateLock(): Promise<boolean> {
   try {
     await set(UPDATE_LOCK_KEY, true);
-  } catch {
-    // A lock that cannot be written must not stop the update it was protecting.
+    return true;
+  } catch (err) {
+    console.warn(
+      "[Updater] Could not lock the desktop for this update - it stays reachable while the update runs:",
+      err instanceof Error ? err.message : err,
+    );
+    return false;
   }
 }
 
-export async function clearUpdateLock(): Promise<void> {
+/**
+ * Release it. A failure here leaves the desktop redirected to /updating, which
+ * is why it is reported too — and why it is recoverable without anyone doing
+ * anything clever: the next boot finds no update to resume and clears the flag
+ * (resumeContinuation in updater.ts).
+ */
+export async function clearUpdateLock(): Promise<boolean> {
   try {
     await set(UPDATE_LOCK_KEY, undefined);
-  } catch {
-    // Nothing to do: the boot-time check clears it on the next start.
+    return true;
+  } catch (err) {
+    console.warn(
+      "[Updater] Could not release the desktop lock - the next start will clear it:",
+      err instanceof Error ? err.message : err,
+    );
+    return false;
   }
 }
 

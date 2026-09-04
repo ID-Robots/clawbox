@@ -1837,9 +1837,6 @@ async function resumeContinuation(): Promise<boolean> {
   }
   state.currentStepIndex = startFrom;
 
-  // Re-assert it: the flag survived the reboot, but a box that was power-cycled
-  // rather than rebooted by the update may have lost the write.
-  void setUpdateLock();
   launchUpdate(steps, startFrom, { markCompleted: true });
   return true;
 }
@@ -1855,10 +1852,6 @@ export function startUpdate(): { started: boolean; error?: string } {
   state.phase = "running";
   state.currentStepIndex = 0;
 
-  // Fire-and-forget: the desktop lock is a courtesy to the owner, not a
-  // precondition of the update, and awaiting a config write here would delay
-  // the run for it.
-  void setUpdateLock();
   launchUpdate(steps, 0, { markCompleted: true });
   return { started: true };
 }
@@ -1949,6 +1942,23 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // the repo, so there is nothing for it to observe.
   if (startFrom === 0 && steps.some((s) => s.id === RESTART_STEP_ID)) {
     await captureDriftBaseline();
+  }
+
+  // Lock the desktop, AWAITED, before the first step runs.
+  //
+  // Here rather than in startUpdate/resumeContinuation, and awaited rather than
+  // fired and forgotten, so the flag is on disk before anything else happens —
+  // config-store.set is synchronous inside today, but nothing about this should
+  // depend on that staying true. It also covers the continuation, whose flag
+  // survived the reboot but may not have on a box that was power-cycled instead.
+  //
+  // Scoped to the flow that contains the RESTART step, the same test the drift
+  // baseline above uses: that is the one that runs `git reset --hard` and
+  // `git clean -fd` over the project. The OpenClaw-only flow reinstalls a
+  // package and bounces the gateway, and locking the owner's desktop for that
+  // would be over-reach.
+  if (steps.some((s) => s.id === RESTART_STEP_ID)) {
+    await setUpdateLock();
   }
 
   let failed = false;
