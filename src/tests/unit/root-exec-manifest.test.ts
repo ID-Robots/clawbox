@@ -591,10 +591,15 @@ d("install.sh::install_root_file", () => {
 
     // RLIMIT_FSIZE 8 blocks = 4096 bytes, so the source cannot fit and the copy
     // dies mid-write — the real shape of the failure, not a mocked one.
+    // `ulimit -c 0` first: SIGXFSZ is a dumping signal, and `sh()` inherits the
+    // test runner's working directory, so on a host whose `core_pattern` names
+    // a plain file this would drop a `core` in the repo. Same guard as
+    // install-bootstrap-manifest.test.ts's copy of this setup.
     const r = sh(
       [
         "set -uo pipefail",
         unroot(shellFn("install_root_file")),
+        "ulimit -c 0",
         "ulimit -f 8",
         `if install_root_file "${src}" "${dst}"; then echo RC=ok; else echo RC=fail; fi`,
         "",
