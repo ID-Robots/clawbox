@@ -492,6 +492,27 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(enabledPlugins()).toEqual(["clawai", "other", PLUGIN]);
   });
 
+  it("normalises a stored-as-text plugins.enabled even when this hook is NOT installed", () => {
+    // The repair has to be independent of the EMAIL: hook, because the box that
+    // most needs it is the one where the hook could not be installed: a string
+    // here makes `_get_enabled_set` answer EMPTY, so Hermes loads no user
+    // plugin at all — the customer's image backend included — and nothing else
+    // on the box rewrites the type. Gating the repair on `hook_plugin` skipped
+    // exactly that box.
+    fs.writeFileSync(configPath, `plugins:\n  enabled: '["clawai"]'\n`);
+    const bareRoot = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-bare-root-"));
+    try {
+      fs.mkdirSync(path.join(bareRoot, "mcp"), { recursive: true });
+      fs.writeFileSync(path.join(bareRoot, "mcp", "clawbox-mcp.ts"), "// stand-in\n");
+      const r = run({}, bareRoot);
+      expect(r.status).toBe(0);
+      expect(installedFiles()).toEqual([]); // the hook really is not there
+      expect(enabledPlugins()).toEqual(["clawai"]); // and the type is a list again
+    } finally {
+      fs.rmSync(bareRoot, { recursive: true, force: true });
+    }
+  });
+
   it("does nothing at all on an OpenClaw box", () => {
     // gateway-pre-start.sh owns that edition; this script exits before it
     // touches anything.

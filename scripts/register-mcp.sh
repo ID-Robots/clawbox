@@ -518,72 +518,81 @@ else:
 # `hermes config set` stores lists as a JSON string ('["a","b"]'), which
 # `parse_config_string_list` reads, and the same two forms the skills block
 # below handles turn up here.
+#
+# THE TYPE REPAIR IS NOT GATED ON THE HOOK. Reading the key, normalising a
+# string back into a sequence and appending the hook are three separate
+# questions, and only the last one needs a hook to append: `hook_plugin` is
+# empty whenever the plugin's files did not land (see EMAIL_HOOK_INSTALLED
+# above), and a box whose install failed AND whose `plugins.enabled` is a
+# string is exactly the box that loads no plugins at all with nothing else on
+# it to put the type back. TASK-701.
 hook_plugin = os.environ.get("CLAWBOX_EMAIL_HOOK_PLUGIN") or ""
-if hook_plugin:
-    plugins_cfg = cfg.get("plugins")
-    if plugins_cfg is None:
-        plugins_cfg = {}
-        cfg["plugins"] = plugins_cfg
-    if isinstance(plugins_cfg, dict):
-        raw_enabled = plugins_cfg.get("enabled")
-        if isinstance(raw_enabled, str):
-            text = raw_enabled.strip()
-            if text.startswith("["):
-                # `hermes config set` stores a list as a JSON string, and
-                # src/lib/hermes-clawai.ts writes this very key that way with
-                # JSON.stringify — so JSON first, and the Python literal form
-                # only as a fallback for anything hand-written.
-                parsed = None
+plugins_cfg = cfg.get("plugins")
+if plugins_cfg is None and hook_plugin:
+    # Created only when there is a name to write into it; an absent key with
+    # nothing to add is not a repair, it is a needless config rewrite.
+    plugins_cfg = {}
+    cfg["plugins"] = plugins_cfg
+if plugins_cfg is not None and not isinstance(plugins_cfg, dict):
+    print("[register-mcp] WARNING: plugins is not a mapping; leaving plugins.enabled alone "
+          "and the EMAIL: directive hook disabled.", file=sys.stderr)
+elif isinstance(plugins_cfg, dict):
+    raw_enabled = plugins_cfg.get("enabled")
+    if isinstance(raw_enabled, str):
+        text = raw_enabled.strip()
+        if text.startswith("["):
+            # `hermes config set` stores a list as a JSON string, and
+            # src/lib/hermes-clawai.ts writes this very key that way with
+            # JSON.stringify — so JSON first, and the Python literal form
+            # only as a fallback for anything hand-written.
+            parsed = None
+            try:
+                parsed = json.loads(text)
+            except ValueError:
                 try:
-                    parsed = json.loads(text)
-                except ValueError:
-                    try:
-                        parsed = ast.literal_eval(text)
-                    except (ValueError, SyntaxError):
-                        parsed = None
-                if isinstance(parsed, list):
-                    names = [str(item) for item in parsed]
-                else:
-                    # A list we cannot read is left ALONE. Falling back to
-                    # "the whole string is one plugin name" would write
-                    # `['["clawai", …', 'clawbox_email_directives']` and the
-                    # customer's image backend would stop loading on the next
-                    # boot — the exact failure the merge above exists to
-                    # prevent, caused by the code preventing it.
-                    names = None
-                    print("[register-mcp] WARNING: plugins.enabled is a list this script cannot parse; "
-                          "leaving it untouched and the EMAIL: directive hook disabled.", file=sys.stderr)
+                    parsed = ast.literal_eval(text)
+                except (ValueError, SyntaxError):
+                    parsed = None
+            if isinstance(parsed, list):
+                names = [str(item) for item in parsed]
             else:
-                names = [raw_enabled] if raw_enabled else []
-        elif isinstance(raw_enabled, (list, tuple)):
-            names = [str(item) for item in raw_enabled]
-        elif raw_enabled is None:
-            names = []
+                # A list we cannot read is left ALONE. Falling back to
+                # "the whole string is one plugin name" would write
+                # `['["clawai", …', 'clawbox_email_directives']` and the
+                # customer's image backend would stop loading on the next
+                # boot — the exact failure the merge above exists to
+                # prevent, caused by the code preventing it.
+                names = None
+                print("[register-mcp] WARNING: plugins.enabled is a list this script cannot parse; "
+                      "leaving it untouched.", file=sys.stderr)
         else:
-            names = None
-            print("[register-mcp] WARNING: plugins.enabled is not a list or a string; "
-                  "leaving the EMAIL: directive hook disabled.", file=sys.stderr)
-        if names is not None and hook_plugin not in names:
-            plugins_cfg["enabled"] = names + [hook_plugin]
-            changed = True
-            print("[register-mcp] enabled the " + hook_plugin
-                  + " plugin — EMAIL: card directives are stripped on the way to a channel")
-        elif names is not None and isinstance(raw_enabled, str):
-            # NORMALISE THE TYPE even when there is no name to add. A string
-            # here is the residue of a `hermes config set` that exited 0 and
-            # stored its literal as text; `_get_enabled_set` reads a non-list
-            # as EMPTY, so the box loads NO user plugin at all — ours, the
-            # customer's and this hook included. The branch above healed it
-            # only as a side effect of having a name to append, so a box whose
-            # residue already spelled the hook stayed broken indefinitely.
-            # `yaml.safe_dump` writes it back as a real sequence. TASK-701.
-            plugins_cfg["enabled"] = names
-            changed = True
-            print("[register-mcp] rewrote plugins.enabled as a list — it was stored as text, "
-                  "which loads no plugins at all")
+            names = [raw_enabled] if raw_enabled else []
+    elif isinstance(raw_enabled, (list, tuple)):
+        names = [str(item) for item in raw_enabled]
+    elif raw_enabled is None:
+        names = []
     else:
-        print("[register-mcp] WARNING: plugins is not a mapping; "
-              "leaving the EMAIL: directive hook disabled.", file=sys.stderr)
+        names = None
+        print("[register-mcp] WARNING: plugins.enabled is not a list or a string; "
+              "leaving it untouched.", file=sys.stderr)
+    if names is not None and hook_plugin and hook_plugin not in names:
+        plugins_cfg["enabled"] = names + [hook_plugin]
+        changed = True
+        print("[register-mcp] enabled the " + hook_plugin
+              + " plugin — EMAIL: card directives are stripped on the way to a channel")
+    elif names is not None and isinstance(raw_enabled, str):
+        # NORMALISE THE TYPE even when there is no name to add. A string here
+        # is the residue of a `hermes config set` that exited 0 and stored its
+        # literal as text; `_get_enabled_set` reads a non-list as EMPTY, so the
+        # box loads NO user plugin at all — ours, the customer's and this hook
+        # included. The branch above healed it only as a side effect of having
+        # a name to append, so a box whose residue already spelled the hook —
+        # or one with no hook to append at all — stayed broken indefinitely.
+        # `yaml.safe_dump` writes it back as a real sequence. TASK-701.
+        plugins_cfg["enabled"] = names
+        changed = True
+        print("[register-mcp] rewrote plugins.enabled as a list — it was stored as text, "
+              "which loads no plugins at all")
 
 if not changed:
     print("[register-mcp] Hermes MCP registration already current, skipping write")
