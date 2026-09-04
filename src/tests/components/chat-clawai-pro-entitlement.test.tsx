@@ -278,4 +278,31 @@ describe("the boot guard when the switch it asks for fails", () => {
     // …and nothing claims the box was moved off the model it is still on.
     expect(document.body.textContent).not.toMatch(/needs a Max subscription/i);
   });
+
+  it("tries again when the chat is closed and re-opened", async () => {
+    // The other half of the same latch. Never releasing it is the mirror
+    // defect: `page.tsx` keeps ChatPopup mounted for the whole session and only
+    // toggles `isOpen`, so one failed attempt would leave the box on a refused
+    // model until a page reload — a capability probed once and treated as
+    // settled. The latch therefore remembers the INPUTS it tried, and closing
+    // the chat forgets them, which is the retry an owner reaches for.
+    const calls = installFetch(
+      async () => ({ ok: true, json: async () => REFUSED_STATUS }),
+      async () => ({
+        ok: false,
+        status: 500,
+        json: async () => ({ error: "Selected AI provider is not configured" }),
+      }),
+    );
+    const { rerender } = render(<ChatPopup isOpen onClose={() => {}} />);
+    await settle(calls);
+    expect(modelWrites(calls)).toHaveLength(1);
+
+    rerender(<ChatPopup isOpen={false} onClose={() => {}} />);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+    rerender(<ChatPopup isOpen onClose={() => {}} />);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+
+    expect(modelWrites(calls)).toHaveLength(2);
+  });
 });

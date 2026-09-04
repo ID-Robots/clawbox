@@ -339,6 +339,27 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash"]);
     });
 
+    it("keeps the Max id in that fallback when the PLAN is Max and only the device stamp is Flash", async () => {
+      // TASK-691, reached through the compatibility door. `mapPortalTier`
+      // prefers `deviceTier` on purpose, so deriving the fallback list from the
+      // badge alone gave a Max subscriber `["deepseek-v4-flash"]` — which the
+      // boot guard reads as a POSITIVE refusal and writes his primary model
+      // down on, under a message telling him to buy the plan he already has.
+      // The plan is what an entitlement may be read from.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("flash");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "max", deviceTier: "flash" }),
+        { status: 200 },
+      ));
+
+      const body = await (await GET()).json();
+
+      // The BADGE still follows the device stamp — that is its job.
+      expect(body.clawaiAccountTier).toBe("flash");
+      expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
+    });
+
     it("says null — not an empty list — when the portal could not be asked", async () => {
       // Null is "not answered". An empty list would read as "nothing is
       // allowed" and lock the box out of its own models.

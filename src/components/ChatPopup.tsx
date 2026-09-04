@@ -273,7 +273,7 @@ import {
 } from '@/lib/hermes-reasoning'
 import { readHermesChatPrefs, writeHermesChatPrefs } from '@/lib/hermes-chat-prefs'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
-import { clawboxAiMaxPickUnconfirmed, isClawboxAiProModel, portalDeniesClawboxAiModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-models'
+import { isClawboxAiProModel, portalDeniesClawboxAiModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-models'
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
@@ -4177,25 +4177,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }])
       return false
     }
-    // The Max model is also the one pick the portal may simply not have been
-    // asked about — it is unreachable, or it answers 401/403 to a revoked or
-    // migrated token, both of which arrive here as an unanswered list. This
-    // pick persists into `agents.defaults.model.primary`, which Telegram and
-    // the coding agent run too, so declining it while the answer is missing and
-    // the last confirmed badge is not Max costs the owner a retry, where
-    // letting it through costs every turn until the portal answers. The BOOT
-    // GUARD, which writes, keeps failing open on the same doubt — see
-    // `clawboxAiMaxPickUnconfirmed`.
-    if (!clawboxLogin.loading
-      && clawboxAiMaxPickUnconfirmed(target.model, clawboxLogin.allowedModels, clawboxLogin.tier)) {
-      setMessages(prev => [...prev, {
-        role: 'system',
-        text: `${target.label} could not be checked against your ClawBox AI plan — the ClawBox portal did not answer. Try again in a moment, or [check the plan in the portal](${PORTAL_DASHBOARD_URL}). Staying on the current model.`,
-        timestamp: Date.now(),
-        variant: 'error',
-      }])
-      return false
-    }
     setSwitchingModel(true)
     setErrorMsg('')
     try {
@@ -4249,7 +4230,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } finally {
       setSwitchingModel(false)
     }
-  }, [chatModelState, connect, switchingModel, clawboxLogin.allowedModels, clawboxLogin.tier, clawboxLogin.loading])
+  }, [chatModelState, connect, switchingModel, clawboxLogin.allowedModels])
 
   // The dropdown gate above only catches picks the user *clicks*. An account
   // the portal refuses can also boot with the Max model already saved as the
@@ -4264,34 +4245,50 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // the badge it fired for "tier unknown" too — a single failed status poll
   // was enough to rewrite a Max box's primary model to flash and tell its
   // owner to buy the subscription he already had (TASK-691).
-  const tierGuardRef = useRef(false)
+  //
+  // WHAT THE LATCH BELOW REMEMBERS, and why it is not a boolean. `switchChatModel`
+  // writes `switchingModel`, which is one of its own useCallback deps, so calling
+  // it changes its identity — and this effect depends on that identity. A boolean
+  // latch released on failure therefore re-armed the guard with nothing about the
+  // box changed, and any repeatable failure of `/setup-api/chat/model` (400
+  // "provider is not configured", 409, 500, a proxy's non-JSON body) became a POST
+  // loop against the box's own setup server with two system messages per turn of
+  // it. A boolean latch never released is the other error: `page.tsx` keeps this
+  // component mounted for the whole session and only toggles `isOpen`, so one
+  // failed attempt would leave the box on a refused model until a page reload —
+  // a capability probed once and treated as settled, which is the shape this
+  // codebase keeps producing.
+  //
+  // So it remembers the INPUTS the last attempt was made for. Re-entry on the
+  // same box state buys nothing; a changed active model or a changed entitlement
+  // list buys exactly one more attempt, and so does closing and re-opening the
+  // chat, which is the retry an owner reaches for. `allowedModels` keeps its
+  // array identity across polls that bring the same ids back (`sameIds` in
+  // use-clawbox-login.ts), so `===` here means "the answer has not changed".
+  const tierGuardAttemptRef = useRef<{ model: string; allowed: readonly string[] | null } | null>(null)
   useEffect(() => {
-    if (tierGuardRef.current || clawboxLogin.loading) return
+    if (!isOpen) {
+      tierGuardAttemptRef.current = null
+      return
+    }
+    if (clawboxLogin.loading) return
     const active = chatModelState?.activeModel
     // The Max tier and nothing else: it is the only ClawBox AI model with a
     // tier below it to fall back to, and the message below says so by name.
-    if (!isClawboxAiProModel(active)) return
+    if (!active || !isClawboxAiProModel(active)) return
     if (!portalDeniesClawboxAiModel(active, clawboxLogin.allowedModels)) return
     // The recovery is "drop to the Flash tier", so only run it when the portal
     // allows that one. Switching to a second refused model would move the
     // error rather than fix it.
     if (portalDeniesClawboxAiModel(CLAWBOX_AI_MODEL_BY_TIER.flash, clawboxLogin.allowedModels)) return
+    const attempted = tierGuardAttemptRef.current
+    if (attempted && attempted.model === active && attempted.allowed === clawboxLogin.allowedModels) return
     // `switchChatModel` early-returns without attempting anything while another
-    // switch is in flight, so wait rather than spend the latch on a call that
-    // cannot happen. `switchingModel` is a dep, so the effect comes back by
-    // itself when that other switch finishes. This is the ONLY reason the guard
-    // gets a second chance.
+    // switch is in flight, so wait rather than record an attempt that was never
+    // made. `switchingModel` is a dep, so the effect comes back by itself when
+    // that other switch finishes.
     if (switchingModel) return
-    // Latched for the life of the component, and deliberately NOT released when
-    // the switch fails. `switchChatModel` writes `switchingModel`, which is one
-    // of its own useCallback deps — calling it changes its identity, which
-    // re-runs this effect. Releasing the latch on a failure therefore re-armed
-    // the guard with nothing about the box changed, and any route failure that
-    // repeats (400 "provider is not configured", 409, 500, a proxy's non-JSON
-    // body) became a POST loop against the box's own setup server with two
-    // system messages per turn of it. One attempt; the error `switchChatModel`
-    // leaves in the transcript is the answer, and re-opening the chat retries.
-    tierGuardRef.current = true
+    tierGuardAttemptRef.current = { model: active, allowed: clawboxLogin.allowedModels }
     void switchChatModel({ model: CLAWBOX_AI_MODEL_BY_TIER.flash, label: 'Pro Tier' })
       .then(switched => {
         // Posted from the SUCCESS path only. This sentence says the box was
@@ -4306,7 +4303,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           variant: 'error',
         }])
       })
-  }, [chatModelState?.activeModel, clawboxLogin.allowedModels, clawboxLogin.loading, switchChatModel, switchingModel])
+  }, [isOpen, chatModelState?.activeModel, clawboxLogin.allowedModels, clawboxLogin.loading, switchChatModel, switchingModel])
 
   const handleChatSourceChange = useCallback(async (optionId: string) => {
     const target = chatModelState?.options.find(option => option.id === optionId)

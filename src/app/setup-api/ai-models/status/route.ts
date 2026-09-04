@@ -37,15 +37,27 @@ const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
 
 /**
- * The entitlement list a device-info answer without `allowedModels` implies:
- * the old badge rule, written out. `"pro"` (the Max device tier) reaches both
- * chat tiers, anything else reaches Flash — which every paid plan can run.
+ * The entitlement list a device-info answer without `allowedModels` implies.
  *
  * Only the compatibility path uses this. A portal that publishes the real list
  * always wins, and a portal that could not be reached gets no list at all.
+ *
+ * It reaches the Max id when EITHER reading of the response does, and that
+ * "either" is load-bearing in both directions. The device stamp alone is what
+ * the old badge rule used, and deriving the list from it reproduced TASK-691
+ * through this very door: a Max subscriber whose box is stamped
+ * `deviceTier: "flash"` — a state `mapPortalTier` preserves on purpose — would
+ * get `["deepseek-v4-flash"]`, which the boot guard reads as a positive refusal
+ * and WRITES his primary model down on. The plan alone would be the mirror
+ * mistake: a box the portal stamped `"pro"` used to be allowed to run the Max
+ * model under the old rule, and a compatibility path must not start refusing
+ * something that used to work. So: the more permissive of the two.
  */
-function allowedModelsForTier(tier: ClawboxAiTier | null): string[] {
-  return tier === "pro"
+function allowedModelsForCompat(
+  deviceTier: ClawboxAiTier | null,
+  planTier: ClawboxAiTier | null,
+): string[] {
+  return deviceTier === "pro" || planTier === "pro"
     ? [CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID]
     : [CLAWBOX_AI_FLASH_MODEL_ID];
 }
@@ -203,7 +215,8 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
         // be refused silently becomes allowed on such a deployment. Only the
         // portal-ANSWERED branch does this — an unreachable portal stays null,
         // which is the whole point of the change.
-        clawaiAllowedModels = lookup.allowedModels ?? allowedModelsForTier(lookup.tier);
+        clawaiAllowedModels = lookup.allowedModels
+          ?? allowedModelsForCompat(lookup.tier, lookup.planTier);
         accountTierSource = "portal";
         // Persist the portal-confirmed tier so the portal-unreachable
         // fallback reflects the last *confirmed* tier, not a stale
