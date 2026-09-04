@@ -1,5 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, readdirSync, existsSync, chmodSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  mkdirSync,
+  readdirSync,
+  existsSync,
+  chmodSync,
+  symlinkSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -491,51 +501,304 @@ describe("gateway-pre-start.sh local embeddings hand-off", () => {
   });
 });
 
-// install.sh runs the script synchronously and then reads openclaw.json to
-// report the outcome (the script exits 0 on every soft failure by design). That
-// check must accept the key the installed core actually uses, or a v2 install
-// prints "WARN: local embeddings are not configured yet" over a configured box.
-describe.skipIf(!hasPython3)("install.sh local embeddings post-run check", () => {
+// install.sh runs the script synchronously and then reports which embedder the
+// box ended up on (the script exits 0 on every soft failure by design).
+//
+// That report used to be re-derived from openclaw.json, and it read BOTH
+// `memory.search` and `agents.defaults.memorySearch`, preferring whichever
+// named a provider. OpenClaw 2 reads only the first and a v1 core only the
+// second, so a v2 box with an empty `memory.search` and a stale legacy
+// `ollama` block — the state an un-migrated upgrade leaves — was told
+// "Local embeddings ready … needs no API key" while every note was being
+// embedded by the default cloud provider (TASK-659).
+//
+// It now asks the core: `openclaw memory status --agent main --deep --json`,
+// the same call src/lib/clawkeep-memory.ts makes, read with the same
+// provider→location rule as providerLocation() there. So there is no second
+// copy of the generation rule to drift, and no way to vouch for a box from a
+// key its core ignores.
+//
+// These run the shipped block out of install.sh — the edition gate, the CLI
+// call, the classifier and the message it picks — under `set -euo pipefail`
+// against a stub `openclaw`. The openclaw.json fixture is still written on
+// every run: it is what the old check read, so a regression back to reading
+// the config is visible rather than silently equivalent.
+describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
   const INSTALL_SH = readFileSync(path.resolve(process.cwd(), "install.sh"), "utf-8");
-  const HEAD = "python3 - /home/clawbox/.openclaw/openclaw.json <<'PY'";
-  const start = INSTALL_SH.indexOf(HEAD);
-  const end = start < 0 ? -1 : INSTALL_SH.indexOf("\nPY\n", start);
-  const program = start < 0 || end < 0 ? "" : INSTALL_SH.slice(INSTALL_SH.indexOf("\n", start) + 1, end);
 
-  function configured(cfg: unknown): boolean {
-    if (!program) throw new Error("install.sh post-run check not found — the heredoc test above names it");
-    const file = path.join(dir, "post-run.json");
-    writeFileSync(file, JSON.stringify(cfg));
-    return spawnSync("python3", ["-c", program, file], { encoding: "utf-8" }).status === 0;
+  /**
+   * The embedding half of `step_ollama_install`: from the helper path it runs
+   * to the end of the function. Sliced rather than taking the whole function,
+   * which would try to install Ollama itself.
+   */
+  const BLOCK = (() => {
+    const start = INSTALL_SH.indexOf('  local ENSURE_EMBEDDINGS="$PROJECT_DIR/scripts/ensure-local-embeddings.sh"');
+    if (start < 0) return "";
+    const end = INSTALL_SH.indexOf("\n}", start);
+    if (end < 0) return "";
+    const body = INSTALL_SH.slice(start, end);
+    // The "must not say ready" assertions would pass over a truncated slice,
+    // so the slice has to reach the block's last statement to count.
+    return body.includes("could not pull qwen3-embedding:0.6b") ? body : "";
+  })();
+
+  const READY = "Local embeddings ready";
+
+  interface Report {
+    out: string;
+    /** Every argv the stub `openclaw` was called with, one per line. */
+    cliCalls: string;
+    /** One line per invocation of the stub ensure-local-embeddings.sh. */
+    helperCalls: string;
   }
 
-  it("ships the check as a heredoc this test can run verbatim", () => {
-    expect(program).toContain("import json");
+  /**
+   * Run the shipped block against a fake device root.
+   *
+   * `as_clawbox` is the real seam — on a device it runs the command as the
+   * clawbox user. The stub keeps the argv the installer builds and only
+   * redirects `/home/clawbox/...` into the temp root.
+   *
+   * `cli` scripts the stub `openclaw`: a JSON string to print, or `null` to
+   * exit 1 saying nothing (a core that is not there, or cannot answer).
+   * `cliExit` is the status it then exits with — the case where a core prints
+   * a complete, parseable answer and still fails.
+   */
+  function report(opts: {
+    edition?: "openclaw" | "hermes";
+    cli: string | null;
+    cliExit?: number;
+    config?: unknown;
+    /**
+     * Run the block on a box with no `python3`. `--step ollama_install` runs
+     * standalone, without `step_apt_update`, so the interpreter this block
+     * parses with is not guaranteed on that path — and the message it prints
+     * when it cannot parse names the wrong culprit if it blames the core.
+     */
+    withoutPython?: boolean;
+  }): Report {
+    if (!BLOCK) throw new Error("install.sh post-run check not found, or extracted truncated");
+    const home = path.join(dir, "device", "home", "clawbox");
+    const project = path.join(dir, "device", "project");
+    const stubBin = path.join(dir, "device", "bin");
+    const cliLog = path.join(dir, "device", "openclaw-calls.log");
+    const helperLog = path.join(dir, "device", "helper-calls.log");
+    mkdirSync(path.join(home, ".openclaw"), { recursive: true });
+    mkdirSync(path.join(project, "scripts"), { recursive: true });
+    mkdirSync(stubBin, { recursive: true });
+    // What the OLD check read. Deliberately the state that made it lie: an
+    // empty v2 home beside a stale legacy block still naming ollama.
+    writeFileSync(
+      path.join(home, ".openclaw", "openclaw.json"),
+      JSON.stringify(
+        opts.config ?? {
+          memory: { search: {} },
+          agents: { defaults: { memorySearch: { provider: "ollama", model: MODEL } } },
+        },
+      ),
+    );
+    // Best-effort and its exit code says nothing; the check under test is what
+    // reports afterwards.
+    writeFileSync(
+      path.join(project, "scripts", "ensure-local-embeddings.sh"),
+      `#!/usr/bin/env bash\nprintf 'ran\\n' >> ${JSON.stringify(helperLog)}\nexit 0\n`,
+    );
+    chmodSync(path.join(project, "scripts", "ensure-local-embeddings.sh"), 0o755);
+    const openclaw = path.join(stubBin, "openclaw");
+    writeFileSync(
+      openclaw,
+      opts.cli === null
+        ? `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(cliLog)}\nexit 1\n`
+        : `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(cliLog)}\ncat <<'JSON'\n${opts.cli}\nJSON\nexit ${opts.cliExit ?? 0}\n`,
+    );
+    chmodSync(openclaw, 0o755);
+    // A bounded call is part of the contract, but the real `timeout` is not on
+    // every dev host; the stub keeps the argv assertable and runs the command.
+    const timeoutStub = path.join(stubBin, "timeout");
+    writeFileSync(
+      timeoutStub,
+      // Skip the options (-k takes a value) and the duration, then run it.
+      '#!/usr/bin/env bash\nwhile [ "${1#-}" != "$1" ]; do\n  case "$1" in -k|--kill-after) shift 2 ;; *) shift ;; esac\ndone\nshift\nexec "$@"\n',
+    );
+    chmodSync(timeoutStub, 0o755);
+
+    const program = [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      `FAKE_ROOT=${JSON.stringify(home)}`,
+      // The device home the installer names. Never touched: as_clawbox maps it.
+      'CLAWBOX_HOME="/home/clawbox"',
+      `PROJECT_DIR=${JSON.stringify(project)}`,
+      `OPENCLAW_BIN=${JSON.stringify(openclaw)}`,
+      // A PATH with no python3 on it still has to resolve `bash` for the stub
+      // shebangs, so it is the real bash by symlink and nothing else.
+      opts.withoutPython
+        ? `PATH=${JSON.stringify(stubBin)}:${JSON.stringify(pythonlessBin())}`
+        : `PATH=${JSON.stringify(stubBin)}:$PATH`,
+      "as_clawbox() {",
+      "  local a; local -a mapped=()",
+      '  for a in "$@"; do',
+      '    case "$a" in /home/clawbox*) mapped+=("$FAKE_ROOT${a#/home/clawbox}") ;; *) mapped+=("$a") ;; esac',
+      "  done",
+      '  "${mapped[@]}"',
+      "}",
+      'as_clawbox_login() { "$@"; }',
+      `has_openclaw_harness() { return ${opts.edition === "hermes" ? 1 : 0}; }`,
+      "check_embeddings() {",
+      BLOCK,
+      "}",
+      "check_embeddings",
+      "",
+    ].join("\n");
+
+    const file = path.join(dir, "post-run-check.sh");
+    writeFileSync(file, program);
+    chmodSync(file, 0o755);
+    const run = spawnSync("bash", [file], { encoding: "utf-8", timeout: 30_000 });
+    // Best-effort by contract: the block must never abort the install, whatever
+    // it finds — a core that hangs, is absent, or answers nonsense included.
+    expect(run.status).toBe(0);
+    return {
+      out: `${run.stdout ?? ""}${run.stderr ?? ""}`,
+      cliCalls: existsSync(cliLog) ? readFileSync(cliLog, "utf-8") : "",
+      helperCalls: existsSync(helperLog) ? readFileSync(helperLog, "utf-8") : "",
+    };
+  }
+
+  /**
+   * A PATH directory carrying `bash` and nothing else, so `python3` is
+   * genuinely unresolvable rather than merely stubbed to fail — which is what
+   * a box that never ran `step_apt_update` looks like to this block.
+   */
+  function pythonlessBin(): string {
+    const bin = path.join(dir, "device", "nopython");
+    mkdirSync(bin, { recursive: true });
+    const bash = spawnSync("bash", ["-c", "command -v bash"], { encoding: "utf-8" }).stdout.trim();
+    if (!bash) throw new Error("could not locate bash");
+    symlinkSync(bash, path.join(bin, "bash"));
+    return bin;
+  }
+
+  /** One `openclaw memory status --json` row, as the core shapes it. */
+  const status = (provider: unknown, model: unknown = MODEL) =>
+    JSON.stringify([{ agentId: "main", status: { provider, model } }]);
+
+  it("ships the check as a block this test can run verbatim", () => {
+    expect(BLOCK).toContain("memory status");
   });
 
-  it("accepts OpenClaw 2's memory.search home", () => {
-    expect(configured({ memory: { search: { provider: "ollama", model: MODEL } } })).toBe(true);
+  it("asks the core, bounded, instead of re-reading openclaw.json", () => {
+    const run = report({ cli: status("ollama") });
+    expect(run.cliCalls).toContain("memory status --agent main --deep --json");
+    // -k, because `timeout` alone sends SIGTERM only and
+    // collectMemoryStatusJson() escalates to SIGKILL after 5 s: a CLI that
+    // ignores SIGTERM must not hang the installer where it would not hang the
+    // panel this block exists to agree with.
+    expect(BLOCK).toMatch(/timeout -k \d+ \d+ "\$OPENCLAW_BIN" memory status/);
   });
 
-  it("still accepts the legacy agents.defaults.memorySearch home", () => {
-    expect(configured({ agents: { defaults: { memorySearch: { provider: "ollama", model: MODEL } } } })).toBe(true);
+  it("reports the model the core resolved as ready", () => {
+    expect(report({ cli: status("ollama") }).out).toContain(READY);
   });
 
-  it("does not report a box that is on a remote provider, or not configured, as ready", () => {
-    expect(configured({ memory: { search: { provider: "openai", model: "text-embedding-3-large" } } })).toBe(false);
-    expect(configured({ agents: { defaults: {} } })).toBe(false);
-    expect(configured({ memory: { search: { model: MODEL } } })).toBe(false);
+  it("does not call a box on a stale legacy block ready", () => {
+    // The un-migrated upgrade, and the whole of TASK-659: openclaw.json still
+    // says ollama under the OpenClaw 1 key, and the core reports openai.
+    const run = report({ cli: status("openai", "text-embedding-3-large") });
+    expect(run.out).not.toContain(READY);
+    expect(run.out).toMatch(/cloud/i);
+    // Named so the operator knows which provider is being paid for.
+    expect(run.out).toContain("openai");
   });
 
-  it("reads only the active home — a stale legacy block cannot vouch for a box OpenClaw 2 has on the cloud", () => {
-    // The upgrade case: agents.defaults.memorySearch still says ollama from
-    // the box's OpenClaw 1 days, and the owner has since picked OpenAI under
-    // memory.search, the only home the running core reads. Every note is
-    // being sent to OpenAI; "needs no API key" would be a false claim.
-    const stale = { provider: "ollama", model: MODEL };
-    const remote = { provider: "openai", model: "text-embedding-3-large" };
-    expect(configured({ memory: { search: remote }, agents: { defaults: { memorySearch: stale } } })).toBe(false);
-    // The mirror image is ready: the active home is local, whatever the stale one says.
-    expect(configured({ memory: { search: stale }, agents: { defaults: { memorySearch: remote } } })).toBe(true);
+  it("treats an on-device provider as local whatever the model is", () => {
+    // providerLocation() in src/lib/clawkeep-memory.ts maps ollama and local to
+    // "local" regardless of model, and the Memory Shard panel shows that. The
+    // installer must not call the same box a cloud embedder.
+    const run = report({ cli: status("ollama", "nomic-embed-text") });
+    expect(run.out).not.toMatch(/cloud/i);
+    expect(run.out).toContain("nomic-embed-text");
+  });
+
+  it("reports a core that switched memory search off as off, not as ready", () => {
+    const run = report({ cli: status("none", "") });
+    expect(run.out).not.toContain(READY);
+    expect(run.out).toMatch(/switched off/i);
+  });
+
+  for (const [name, cli] of [
+    ["a core that cannot answer", null],
+    ["a core that answers nonsense", "not json at all"],
+    ["a core that answers an empty provider", JSON.stringify([{ agentId: "main", status: {} }])],
+  ] as const) {
+    it(`says it could not ask over ${name}, rather than guessing`, () => {
+      // Every one of these used to collapse into a claim about the config.
+      const run = report({ cli });
+      expect(run.out).not.toContain(READY);
+      // One message for three states: the CLI could not be asked, its answer
+      // could not be read, or it answered without naming a provider. Naming
+      // only the first was wrong for the third, which did answer.
+      expect(run.out).toMatch(/could not read an embedder/i);
+    });
+  }
+
+  it("does not trust a core that printed an answer and then failed", () => {
+    // TASK-659's own defect, re-entered through the exit code instead of the
+    // config key. `--deep` failing its provider probe after emitting the
+    // shallow status, a core that reports and then exits on an unrelated
+    // warning, or `timeout` killing the CLI after a complete document has
+    // already been written — each is a box whose embedder is NOT known.
+    // collectMemoryStatusJson() in src/lib/clawkeep-memory.ts rejects on
+    // `code !== 0`; this block must not disagree with it.
+    const run = report({ cli: status("ollama"), cliExit: 1 });
+    expect(run.out).not.toContain(READY);
+    expect(run.out).toMatch(/could not read an embedder/i);
+  });
+
+  it("does not report a local provider the core named no model for as ready on nothing", () => {
+    // `local:` + an empty model fell through to the `local:*` arm and printed
+    // "Local embeddings ready on , not qwen3-embedding:0.6b" — a sentence with
+    // a hole in it that still claims READY over a box whose index cannot be
+    // matched to anything.
+    const run = report({ cli: status("ollama", "") });
+    expect(run.out).not.toMatch(/ready on\s*,/);
+    expect(run.out).not.toMatch(/on\s+,\s+not/);
+    // On-device and keyless is still true and worth saying; the model is not.
+    expect(run.out).toMatch(/named no model/i);
+    expect(run.out).toMatch(/non-fatal/);
+  });
+
+  it("blames its own missing interpreter, not the core, when it cannot parse", () => {
+    // The catch-all says "openclaw memory status did not answer, or named no
+    // provider". With no python3 the core answered perfectly and the installer
+    // could not read it — a warning that names the wrong thing sends the
+    // operator to the wrong box.
+    const run = report({ cli: status("ollama"), withoutPython: true });
+    expect(run.out).not.toContain(READY);
+    expect(run.out).toMatch(/python3/i);
+    expect(run.out).not.toMatch(/did not answer/i);
+    expect(run.out).toMatch(/non-fatal/);
+    // It still ASKED: the core was reached and answered, which is why blaming
+    // it would be false.
+    expect(run.cliCalls).toContain("memory status");
+  });
+
+  it("says memory search is not on this edition on hermes, and asks no core", () => {
+    // step_ollama_install has no edition guard, and a hermes box has no core,
+    // no openclaw.json and no memory search to have an embedder.
+    const run = report({ edition: "hermes", cli: status("ollama") });
+    expect(run.out).not.toContain(READY);
+    expect(run.out).toMatch(/does not include it/i);
+    expect(run.cliCalls).toBe("");
+  });
+
+  it("does no embedding work at all on hermes, not just no reporting", () => {
+    // The gate used to sit below the helper, so a hermes box ran
+    // ensure-local-embeddings.sh, found no provider anywhere, and pulled a
+    // ~640 MB model whose config write then failed soft by design — and the
+    // very next line told the operator the edition does not have the feature.
+    expect(report({ edition: "hermes", cli: status("ollama") }).helperCalls).toBe("");
+    // The control: it still runs where there IS a core to configure.
+    expect(report({ cli: status("ollama") }).helperCalls).toContain("ran");
   });
 });
