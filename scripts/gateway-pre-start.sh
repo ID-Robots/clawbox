@@ -2540,7 +2540,7 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   # goes straight through the route and does not wait for this.
   #
   # The transformation is byte-for-byte the one writeLanguagePersona() performs
-  # — src/tests/unit/gateway-prestart-language.test.ts runs this very block
+  # — src/tests/unit/gateway-prestart-onboarding.test.ts runs this very block
   # against that function and compares — and it rewrites nothing when the files
   # already say the right thing, so it is a no-op on every reboot after the
   # first.

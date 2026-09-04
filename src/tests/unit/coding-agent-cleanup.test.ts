@@ -205,6 +205,15 @@ describe("what a run left running", () => {
     await finished(run.id);
   }, 20_000);
 
+  it("refuses the Kill gesture on a paused run — what it left listening is what a resume carries on against", async () => {
+    readyDevice(["sleep 30", "exit 0"].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Work", projectId: "site", source: "agent" });
+    await lib.pauseRun(run.id);
+    expect(() => lib.killRunLeftovers(run.id)).toThrow(lib.CodingAgentError);
+    lib.stopRun(run.id);
+  }, 20_000);
+
   it("answers rather than throws for a run whose group is long gone", async () => {
     readyDevice(`echo '${RESULT}'\nexit 0`);
     makeProject("site");

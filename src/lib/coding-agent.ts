@@ -2591,15 +2591,20 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
  * The owner's Kill button: end whatever a settled run left behind.
  *
  * Only a settled run — a live one is Stop's business, and stopping is what
- * that gesture already means. Idempotent: a group that is already gone answers
- * `killed: false` rather than an error, because "nothing is running" is the
- * state the caller wanted either way.
+ * that gesture already means. A PAUSED run is refused for the opposite reason:
+ * it is still the owner's to resume, and what it left listening is likely the
+ * very thing the resumed run carries on against. Idempotent: a group that is
+ * already gone answers `killed: false` rather than an error, because "nothing
+ * is running" is the state the caller wanted either way.
  */
 export function killRunLeftovers(id: string): CodingRun {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (isLive(run.status)) {
     throw new CodingAgentError("invalid", "That run is still going. Stop it instead; stopping ends everything it started.");
+  }
+  if (isHeld(run.status)) {
+    throw new CodingAgentError("invalid", "That run is paused, not finished. Resume it, or stop it first.");
   }
   if (killRunGroup(run.pgid)) pushProgress(run, "The owner ended what the run had left running");
   run.leftover = false;
