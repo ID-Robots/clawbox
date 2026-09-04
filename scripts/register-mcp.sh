@@ -124,7 +124,12 @@ fi
 # bare "Permission denied" for a token this uid cannot read. Same correction as
 # gateway-pre-start.sh's copy of this line.
 if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$( { wc -c < "$MCP_TOKEN_FILE"; } 2>/dev/null || echo 0 )" -lt 32 ]; then
-  mkdir -p "$(dirname "$MCP_TOKEN_FILE")"
+  # Guarded like its sibling in gateway-pre-start.sh: in plain command position a
+  # `data/` that cannot be CREATED (a read-only $PROJECT_DIR, ENOSPC) exits
+  # non-zero and `set -e` kills the run before the reconcile — which is the same
+  # "no device tools at all on the hermes SKU" outcome the mint guard below
+  # exists to prevent, one line earlier. TASK-657.
+  mkdir -p "$(dirname "$MCP_TOKEN_FILE")" 2>/dev/null || true
   # `umask 077` in the subshell, not a chmod afterwards: a bare redirect creates
   # the file at the umask's mode — 0644 under root's — and the chmod below only
   # closes that window AFTER the secret is already on disk and world-readable.
@@ -146,7 +151,13 @@ if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$( { wc -c < "$MCP_TOKEN_FILE"; } 2>/dev/nul
     ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MCP_TOKEN_FILE" ) 2>/dev/null || MCP_TOKEN_MINTED=no
   fi
   if [ "${MCP_TOKEN_MINTED:-yes}" = no ]; then
-    log "WARN: could not write $MCP_TOKEN_FILE — registering the MCP server anyway; the bearer is seeded again at every clawbox-setup boot"
+    # State what is true, not a repair that cannot happen. production-server.js
+    # seeds the same path as the same uid, so every state that fails this mint
+    # fails that one too, and on the hermes SKU clawbox-gateway.service is masked
+    # so gateway-pre-start.sh's replacement never runs either. The registration
+    # is still worth writing — it is what puts the tools in `hermes mcp list` —
+    # but they will 401 until the directory is writable.
+    log "WARN: could not write $MCP_TOKEN_FILE — registering the MCP server anyway, but it has no bearer: /setup-api/* tool calls will answer 401 until $(dirname "$MCP_TOKEN_FILE") is writable"
   else
     log "minted $MCP_TOKEN_FILE"
   fi

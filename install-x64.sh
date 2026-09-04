@@ -448,7 +448,7 @@ step_openclaw_install() {
     # An unknown pin is already a defined state -- the fallback on the next line
     # -- and an aborted install is not. TASK-657, the third copy of the read
     # install.sh:2245 and gateway-pre-start.sh:45 already guard.
-    TARGET=$(head -1 "$PIN_FILE" | awk '{print $1}' || true)
+    TARGET=$(head -1 "$PIN_FILE" 2>/dev/null | awk '{print $1}' || true)
     if [ -z "$TARGET" ]; then
       # Say it: the fallback is silently a DIFFERENT core version from the one
       # the repo pinned, and external plugins are locked to whatever wins here.

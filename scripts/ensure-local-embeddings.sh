@@ -55,6 +55,16 @@ if [ -z "${CLAWBOX_OPENCLAW_V2:-}" ]; then
   CLAWBOX_OPENCLAW_V2=0
   OPENCLAW_PKG="$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/package.json"
   INSTALLED_VERSION="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("version") or "")' "$OPENCLAW_PKG" 2>/dev/null || true)"
+  # Shape-checked, the same way scripts/gateway-pre-start.sh grades this exact
+  # file: a version that is not a date says nothing about the generation. The
+  # bare `sort -V` below reads a non-date as NEWER than 2026.8 -- `next` and
+  # `dev` both grade v2 -- so a dev build, a fork or a vendor rebuild picked
+  # memory.search on a core that may be v1. Anchored to the whole string because
+  # this is a version FIELD, and a suffix is kept by the extraction
+  # (2026.8.1-rc.2 -> 2026.8.1), so only a genuinely undatable core falls out.
+  # Falling out is the safe direction here: it lands on the same legacy names a
+  # box with no core at all already takes, and that write fails soft. TASK-657.
+  INSTALLED_VERSION="$(printf '%s' "$INSTALLED_VERSION" | grep -oE '^20[0-9]{2}\.[0-9]+\.[0-9]+' || true)"
   if [ -n "$INSTALLED_VERSION" ] && [ "$(printf '%s\n' 2026.8 "$INSTALLED_VERSION" | sort -V | head -1)" = "2026.8" ]; then
     CLAWBOX_OPENCLAW_V2=1
   fi

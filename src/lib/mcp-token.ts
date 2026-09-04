@@ -27,12 +27,17 @@ import crypto from "crypto";
  * and what lets `production-server.js` seed it before the first
  * request. But the FILE is the rotation's authority: it is what
  * `mcp/lib/api.ts` presents and what `scripts/gateway-pre-start.sh`
- * rewrites, so once the file changes under this process the next
- * failed bearer check adopts its contents and the earlier value stops
- * being accepted. An env pin therefore holds only until the file is
- * rotated, never after — which costs nothing in production, where the
- * only setter of the variable is `production-server.js` and it sets it
- * to that same file's contents.
+ * rewrites. So the env value holds only until the FIRST bearer check
+ * that fails against it: that check re-reads the file and adopts what
+ * it finds, whether or not anything rotated, and the env value stops
+ * being accepted from then on. Said plainly because it is easy to read
+ * the rate limit as "only on a rotation" — `lastReadMtimeMs` starts
+ * null, so the first failed check of the process always reads.
+ *
+ * In production that is inert: the only setter of the variable is
+ * `production-server.js`, and it sets it to this same file's contents,
+ * so the adoption is a no-op until a real rotation. An operator who
+ * pins the variable to something else should expect the file to win.
  *
  * Verification is constant-time via `crypto.timingSafeEqual` to keep
  * the bearer check robust against timing oracles.
@@ -132,10 +137,18 @@ export function verifyMcpBearer(headerValue: string | null): boolean {
     return false;
   }
   if (mtimeMs === lastReadMtimeMs) return false;
-  lastReadMtimeMs = mtimeMs;
 
   const onDisk = readTokenFile();
-  if (!onDisk || onDisk === cached) return false;
+  // Spend the rotation's one allowed read only on a read that RETURNED. Stamping
+  // the mtime on the attempt let a single transient failure — an EMFILE or ENOMEM
+  // on a loaded server, a momentary EACCES inside the rotation window — record
+  // this mtime forever, so the rotated token was never adopted until the file
+  // changed AGAIN: the 401s this re-read exists to end, re-opened permanently by
+  // one unlucky syscall. A file that is genuinely unreadable now costs one failed
+  // `open()` per bad bearer, the same order as the `statSync` above it.
+  if (!onDisk) return false;
+  lastReadMtimeMs = mtimeMs;
+  if (onDisk === cached) return false;
 
   // Adopt on the ROTATION, not on a caller presenting the new value. Making the
   // adoption conditional on `matches(presented, onDisk)` reintroduces the

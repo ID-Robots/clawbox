@@ -223,7 +223,39 @@ d("register-mcp.sh — registering on Hermes", () => {
     // And it says so, rather than failing silently or claiming it minted one.
     expect(r.stdout).toMatch(/WARN: could not write .*\.mcp-token/);
     expect(r.stdout).not.toMatch(/minted/);
+    // The remedy it names has to be one that can actually happen.
+    // production-server.js seeds the same path as the same uid, so "seeded
+    // again at every clawbox-setup boot" was false in every state that reaches
+    // this line — and on the hermes SKU clawbox-gateway.service is masked, so
+    // gateway-pre-start.sh's replacement never runs either.
+    expect(r.stdout).toMatch(/401/);
+    expect(r.stdout).not.toMatch(/seeded again/);
     expect(fs.existsSync(path.join(dataDir, ".mcp-token"))).toBe(false);
+  });
+
+  it.skipIf(isRoot)("still registers the MCP server when data/ cannot even be created", () => {
+    // One line earlier than the mint: `mkdir -p "$(dirname "$MCP_TOKEN_FILE")"`
+    // was the last write in this block left in plain command position, so a
+    // $PROJECT_DIR that cannot be written — a read-only mount, ENOSPC — exited
+    // non-zero and `set -e` killed the run before the reconcile, which is the
+    // same "no device tools at all on the hermes SKU" outcome the mint guard
+    // below it exists to prevent. The sibling case above cannot see it: it
+    // creates data/ first and only then chmods it, so the mkdir is always a
+    // no-op on a directory that already exists. TASK-657.
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
+    expect(fs.existsSync(path.join(root, "data"))).toBe(false);
+    fs.chmodSync(root, 0o555);
+
+    let r;
+    try {
+      r = run();
+    } finally {
+      fs.chmodSync(root, 0o755);
+    }
+
+    expect(r.status, `the registration aborted:\n${r.stdout}${r.stderr}`).toBe(0);
+    expect(clawboxEntry().command).toBe(path.join(home, "fake-bun"));
+    expect(fs.existsSync(path.join(root, "data"))).toBe(false);
   });
 
   it("does not disturb a bearer token that already exists", () => {

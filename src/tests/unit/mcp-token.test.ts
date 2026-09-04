@@ -157,6 +157,45 @@ describe("mcp-token", () => {
       expect(verifyMcpBearer(`Bearer ${before}`)).toBe(false);
     });
 
+    it("does not let one transient read error consume the rotation's re-read", async () => {
+      // The mtime is the budget for the re-read, so it must be spent on a read
+      // that RETURNED. Stamped on the ATTEMPT, a single transient failure — an
+      // EMFILE or ENOMEM on a loaded server, a momentary EACCES inside the
+      // rotation window — recorded that mtime forever: every later check saw
+      // `mtimeMs === lastReadMtimeMs` and returned early, so the rotated token
+      // was never adopted until the file changed AGAIN. One unlucky syscall
+      // re-opened the 401s this re-read exists to end, permanently.
+      const { getMcpToken, verifyMcpBearer } = await loadModule(tmpDir);
+      getMcpToken();
+      const tokenPath = path.join(tmpDir, "data", ".mcp-token");
+
+      const rotated = "f".repeat(64);
+      fs.writeFileSync(tokenPath, `${rotated}\n`, { mode: 0o600 });
+
+      // Exactly one read fails, on the first check after the rotation.
+      const realRead = fs.readFileSync;
+      let thrown = false;
+      const spy = vi.spyOn(fs, "readFileSync").mockImplementation(((f: never, ...rest: never[]) => {
+        if (f === tokenPath && !thrown) {
+          thrown = true;
+          const err = new Error("EMFILE: too many open files") as Error & { code: string };
+          err.code = "EMFILE";
+          throw err;
+        }
+        return (realRead as never as (...a: never[]) => never)(f, ...rest);
+      }) as never);
+      try {
+        expect(verifyMcpBearer(`Bearer ${rotated}`)).toBe(false);
+        expect(thrown, "the fixture never exercised the failing read").toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+
+      // The rotation is still picked up on the next call, with no further write
+      // to the file — the transient did not spend its budget.
+      expect(verifyMcpBearer(`Bearer ${rotated}`)).toBe(true);
+    });
+
     it("rejects a token that's a prefix of the real one", async () => {
       // Guard against any accidental startsWith comparison — timingSafeEqual
       // requires equal lengths so this should be a fast reject.

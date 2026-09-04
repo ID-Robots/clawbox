@@ -2242,7 +2242,7 @@ step_openclaw_install() {
     # installer here. The `else` branch below already reports an unknown pin and
     # falls back to the hardcoded version — that is the defined answer, and an
     # aborted update is not. TASK-657, same shape as gateway-pre-start.sh:45.
-    PINNED=$(head -1 "$PIN_FILE" | awk '{print $1}' || true)
+    PINNED=$(head -1 "$PIN_FILE" 2>/dev/null | awk '{print $1}' || true)
     if [ -n "$PINNED" ]; then
       echo "  Pinned OpenClaw target from $PIN_FILE: $PINNED"
     else

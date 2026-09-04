@@ -369,11 +369,17 @@ except OSError as err:
     # also does NOT re-apply the gateway auth token, the messaging-channel
     # security pass, the gateway.controlUi.allowedOrigins rebuild (a changed LAN
     # IP is not picked up), the model catalog or the provider blocks.
+    #
+    # The MCP registration reconcile is named too, and it is the one that is
+    # SILENT rather than skipped: the shell carries on past this program and runs
+    # it, but that block's own `except (OSError, json.JSONDecodeError)` exits 0
+    # on the same unreadable file, so its `if !` guard prints nothing and the
+    # registration no-ops without a word. Say it here, where the cause is known.
     print(
         "  WARN: this boot therefore does NOT re-apply the gateway auth token, "
         "the messaging-channel security pass, the gateway.controlUi.allowedOrigins "
-        "rebuild (a changed LAN IP is not picked up), the model catalog or the "
-        "provider blocks.",
+        "rebuild (a changed LAN IP is not picked up), the model catalog, the "
+        "provider blocks or the MCP server registration.",
         file=sys.stderr,
     )
     raise SystemExit(0)
@@ -2411,14 +2417,32 @@ fi
 # skip the openclaw.json reconcile — leaving the MCP subprocess
 # with a stale or missing CLAWBOX_MCP_TOKEN and every tool call
 # 307'd to /login again.
+#
+# WARN and skip, never `exit 1`. This was the last unguarded step in the block,
+# and it made every guard above it decorative: when the seeding AND the
+# replacement both fail -- `data/` not writable, or ENOSPC on a box whose token
+# was never seeded -- control fell out of the "left exactly as it stands" WARN
+# straight into an `exit 1` here. `ExecStartPre=` carries no `-` prefix
+# (config/clawbox-gateway.service), so that fails the unit, and Restart=always
+# then spends StartLimitBurst: no gateway and no chat, on every boot. It is not
+# even privileged: `data/` is clawbox-owned at 0755, so any process running as
+# clawbox -- a coding-agent run, the in-UI terminal, an ssh session -- reaches it
+# by removing the token and chmod-ing the directory. TASK-657, and the same
+# outcome the block was rewritten to remove.
+#
+# A missing bearer costs this boot its MCP tools, exactly like a failed
+# registration write below, which has always been a WARN. It must not also cost
+# the box its gateway, its chat, the CLAWBOX.md seeding or the deepseek catalog
+# pass that follow. The empty value is carried deliberately: the reconcile's
+# python `sys.exit(0)`s on it, so openclaw.json keeps whatever it already had.
+CLAWBOX_MCP_TOKEN_VAL=""
 if [ ! -r "$MCP_TOKEN_FILE" ]; then
-  echo "  ERROR: MCP token file is not readable: $MCP_TOKEN_FILE" >&2
-  exit 1
-fi
-CLAWBOX_MCP_TOKEN_VAL="$(cat "$MCP_TOKEN_FILE")"
-if [ -z "$CLAWBOX_MCP_TOKEN_VAL" ]; then
-  echo "  ERROR: MCP token file is empty: $MCP_TOKEN_FILE" >&2
-  exit 1
+  echo "  WARN: MCP token file is not readable ($MCP_TOKEN_FILE); skipping the MCP server registration — the ClawBox MCP tools are unavailable this boot" >&2
+else
+  CLAWBOX_MCP_TOKEN_VAL="$(cat "$MCP_TOKEN_FILE" 2>/dev/null || true)"
+  if [ -z "$CLAWBOX_MCP_TOKEN_VAL" ]; then
+    echo "  WARN: MCP token file is empty ($MCP_TOKEN_FILE); skipping the MCP server registration — the ClawBox MCP tools are unavailable this boot" >&2
+  fi
 fi
 export CLAWBOX_MCP_TOKEN_VAL
 export CLAWBOX_BUN_BIN="${CLAWBOX_BUN_BIN:-$CLAWBOX_HOME_DIR/.bun/bin/bun}"

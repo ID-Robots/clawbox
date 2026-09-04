@@ -444,6 +444,12 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
     chmodFails?: boolean;
     /** What a stubbed `stat -c %a` reports, for a mode this uid cannot produce. */
     statSays?: string;
+    /**
+     * Permission bits to leave on `data/` itself. 0500 is the state where the
+     * block can neither seed a token nor replace one: `mktemp` and the redirect
+     * both fail, and nothing downstream may turn that into a failed unit.
+     */
+    dataMode?: number;
   }): {
     status: number | null;
     out: string;
@@ -478,6 +484,7 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
       writeFileSync(stub, `#!/bin/sh\necho ${opts.statSays}\n`);
       chmodSync(stub, 0o755);
     }
+    if (opts.dataMode !== undefined) chmodSync(path.join(clawboxRoot, "data"), opts.dataMode);
     const r = run(
       [
         `CLAWBOX_ROOT=${JSON.stringify(clawboxRoot)}`,
@@ -487,6 +494,9 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
         'echo "REACHED_END=1"',
       ].join("\n"),
     );
+    // Put the directory back before anything reads through it, including the
+    // afterEach cleanup.
+    if (opts.dataMode !== undefined) chmodSync(path.join(clawboxRoot, "data"), 0o755);
     const mode = existsSync(file) ? statSync(file).mode & 0o777 : null;
     // A case that leaves the token unreadable to this uid must still be
     // reportable: the mode is already captured, so open it up for the
@@ -583,6 +593,30 @@ describe.runIf(canRun)("gateway-pre-start's MCP token hardening", () => {
     expect(r.contents, "a token no other user can read was rotated anyway").toBe(EXISTING);
     expect(r.exported).toBe(EXISTING);
     expect(r.out).not.toMatch(/WARN/);
+  });
+
+  it.skipIf(isRoot)("boots without a bearer it can neither seed nor replace, instead of failing the unit", () => {
+    // The last unguarded step in the block, and it made every guard above it
+    // decorative: when the seeding AND the replacement both fail — `data/` not
+    // writable — control fell out of the "left exactly as it stands" WARN
+    // straight into `ERROR: MCP token file is not readable → exit 1`.
+    // `ExecStartPre=` carries no `-` prefix, so that fails the unit and
+    // Restart=always spends StartLimitBurst: no gateway and no chat, on every
+    // boot. Not privileged, either — `data/` is clawbox-owned at 0755, so any
+    // process running as clawbox reaches it with `rm .mcp-token; chmod 500 .`.
+    // A missing bearer costs this boot its MCP tools, exactly like the failed
+    // registration write below it, which has always been a WARN. TASK-657.
+    const r = token({ dataMode: 0o500 });
+    expect(r.status, `the pre-start aborted, so the box gets no gateway:\n${r.out}`).toBe(0);
+    expect(r.out).toContain("REACHED_END=1");
+    // Said, and said as what it costs — not as an error, and not silently.
+    expect(r.out).toMatch(/WARN: MCP token file is not readable/);
+    expect(r.out).toMatch(/MCP tools are unavailable this boot/);
+    expect(r.out).not.toMatch(/ERROR/);
+    // Empty, deliberately: the reconcile's python sys.exit(0)s on it, so
+    // openclaw.json keeps whatever it already had rather than being rewritten
+    // with a token this boot never read.
+    expect(r.exported).toBe("");
   });
 
   it("seeds a missing token at 0600 without a chmod to do it", () => {

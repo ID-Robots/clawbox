@@ -463,6 +463,32 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh on OpenClaw 2", () => {
     expect(r.search).toEqual({});
   });
 
+  for (const version of ["next", "dev", "0.0.0-dev"]) {
+    it(`refuses to read a core v2 on a version that is not a date (${version})`, () => {
+      // `sort -V` reads a non-date as NEWER than 2026.8 — `next` and `dev` both
+      // graded v2 — so a dev build, a fork, an `npm i -g <git url>` install or a
+      // vendor rebuild picked memory.search on a core that may well be v1, whose
+      // CLI then refuses the key. gateway-pre-start.sh got this shape check for
+      // exactly that reason; this file reads the SAME package.json by the same
+      // derivation and was left behind. Unknown falls to the legacy names, which
+      // is where a box with no core at all already lands and where the write
+      // fails soft. TASK-657.
+      const r = run({ installedVersion: version, stubV2: false, present: true });
+      expect(r.status).toBe(0);
+      expect(configSets(r.calls)).toEqual([
+        `openclaw config set agents.defaults.memorySearch.model ${MODEL}`,
+        "openclaw config set agents.defaults.memorySearch.provider ollama",
+      ]);
+    });
+  }
+
+  it("still reads a real date version, suffix and all", () => {
+    // The control: the shape check must not reject the versions the fleet runs.
+    const r = run({ installedVersion: "2026.8.1-rc.2", stubV2: true, present: true });
+    expect(r.status).toBe(0);
+    expect(configSets(r.calls)[0]).toBe(`openclaw config set memory.search.model ${MODEL}`);
+  });
+
   it("lets the generation gateway-pre-start.sh exported win over the package on disk", () => {
     // Pre-start asked the binary itself; a package.json that disagrees is the
     // mid-update case, and the binary is the process that parses the write.
