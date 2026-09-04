@@ -22,10 +22,10 @@ import { isSameOriginRequest } from "@/lib/same-origin";
  * route can name is `KOKORO_UNIT`, checked again by the allow-list inside
  * `startUserEngine`.
  *
- * Owner cookie AND our own origin, the pattern `tts/speak` keeps: spawning
- * systemctl is not something another site's page may do with the cookie it
- * rides on, and the agent's MCP bearer — which the middleware also admits
- * here — is not the person.
+ * Owner cookie AND our own origin — a stricter gate than `tts/speak`, which
+ * asks for the origin alone: spawning systemctl is not something another
+ * site's page may do with the cookie it rides on, and the agent's MCP bearer
+ * — which the middleware also admits here — is not the person.
  *
  * Deliberately NOT gated on the edition. The Kokoro unit is written by
  * install-voice.sh on every SKU and both harnesses speak through the same

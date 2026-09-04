@@ -3152,11 +3152,11 @@ step_openclaw_tts() {
       # path on EVERY utterance — and that is the one path the script cannot
       # walk alone: it synthesises WAV and then shells out to
       # `ffmpeg -codec:a libmp3lame`, refusing the whole run when ffmpeg is
-      # absent rather than write WAV bytes into an .mp3. install.sh never
-      # installs ffmpeg in the main flow (step_ffmpeg_install is defined and
-      # dispatchable but uncalled), so on any image that does not happen to
-      # ship it the box's own voice fails 100% of the time; where it IS
-      # present it is a libmp3lame encode per reply inside a 12 s budget.
+      # absent rather than write WAV bytes into an .mp3. `tts_ensure_ffmpeg`
+      # now installs it from `step_openclaw_tts`, but it only warns when the
+      # install fails, so an image without ffmpeg still reaches this arm and
+      # the box's own voice fails every time; where it IS present it is a
+      # libmp3lame encode per reply inside a 12 s budget.
       #
       # wav matches the OpenClaw arm's deliberate `outputFormat: "wav"` a
       # screen below — same script, same reason ("Kokoro emits WAV natively,
