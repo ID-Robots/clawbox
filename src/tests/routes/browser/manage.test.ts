@@ -14,9 +14,11 @@ vi.mock("fs/promises", () => ({
     readdir: vi.fn().mockRejectedValue(new Error("ENOENT")),
     mkdir: vi.fn().mockResolvedValue(undefined),
     unlink: vi.fn().mockResolvedValue(undefined),
-    // The snap test (is this a small wrapper script or a real browser?) and
-    // the start page handed to scripts/launch-browser.sh.
+    // The snap test (is this a small wrapper script or a real browser?) reads
+    // size and bytes through ONE handle, so the route opens rather than stats.
+    open: vi.fn().mockRejectedValue(new Error("ENOENT")),
     stat: vi.fn().mockRejectedValue(new Error("ENOENT")),
+    // The start page handed to scripts/launch-browser.sh.
     readFile: vi.fn().mockRejectedValue(new Error("ENOENT")),
     writeFile: vi.fn().mockResolvedValue(undefined),
   },
@@ -74,6 +76,7 @@ describe("/setup-api/browser/manage", () => {
     vi.mocked(fs.readdir).mockRejectedValue(new Error("ENOENT"));
     vi.mocked(fs.mkdir).mockResolvedValue(undefined as never);
     vi.mocked(fs.unlink).mockResolvedValue(undefined);
+    vi.mocked(fs.open).mockRejectedValue(new Error("ENOENT"));
     vi.mocked(fs.stat).mockRejectedValue(new Error("ENOENT"));
     vi.mocked(fs.readFile).mockRejectedValue(new Error("ENOENT"));
     vi.mocked(fs.writeFile).mockResolvedValue(undefined);
@@ -209,8 +212,11 @@ describe("/setup-api/browser/manage", () => {
         if (String(p) === "/usr/bin/chromium-browser") return undefined;
         throw new Error("ENOENT");
       });
-      vi.mocked(fs.stat).mockResolvedValue({ size: 512 } as never);
-      vi.mocked(fs.readFile).mockResolvedValue("#!/bin/sh\nexec /snap/bin/chromium\n" as never);
+      vi.mocked(fs.open).mockResolvedValue({
+        stat: async () => ({ size: 512 }),
+        readFile: async () => "#!/bin/sh\nexec /snap/bin/chromium\n",
+        close: async () => undefined,
+      } as never);
 
       const res = await GET();
       const body = await res.json();
