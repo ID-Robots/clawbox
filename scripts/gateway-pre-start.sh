@@ -3217,8 +3217,89 @@ CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 # and the marker that says it is already there. Matched with `grep -qF` and
 # `index(...) == 1`, so it must be the literal start of the heading line.
 CLAWBOX_GUIDE_TOPUP="## System actions and restarts"
-# EVERY write below is guarded, and that is a boot requirement rather than a
-# matter of taste: config/clawbox-gateway.service runs this script as
+
+# Append to a file so that a write which stops PART WAY leaves nothing behind.
+#
+# Every append below writes its HEADING first, and that heading is also the
+# marker the next boot greps for to decide whether the append already happened.
+# A write that stops half-way — ENOSPC on a full Jetson eMMC is the realistic
+# shape — therefore leaves the marker sitting on a fragment: every later gateway
+# start finds the heading, appends nothing, and the file stays cut mid-sentence
+# FOREVER, while the only warning is a journal line from a boot nobody is
+# watching. What is lost is the tail of the section, which is where TASK-612's
+# deliverable ("never queue an operator_approval proposal") lives.
+#
+# Rolling the file back to the length it had removes the fragment AND the
+# marker, so the next boot retries. Rollback rather than build-a-copy-and-
+# rename: these are owner-personalised files with their own mode and owner, and
+# the case this exists for is a FULL disk, where a second full copy is the least
+# affordable thing to ask for.
+#
+# NAMED FOR WHAT IT IS, not "atomic", because it is not: it undoes a write that
+# FAILED, and nothing it can do covers a shell that DIES between the partial
+# write and the rollback — a SIGTERM from `systemctl restart` landing in
+# ExecStartPre, an OOM kill, a power cut on the very box whose disk is full.
+# That residual window is the price of not writing a second copy of the file,
+# and it is a much smaller target than the whole build: temp-file + rename is
+# the option that closes it, at the cost of a full copy at peak on the one
+# occasion there is no room for one.
+#
+# The destination must already exist; all three callers guarantee it (the seed
+# branch runs only when it does not, and the AGENTS.md blocks test `-f` first).
+# A missing file is still handled rather than assumed: there is nothing to
+# measure, so the rollback is a removal.
+clawbox_append_or_rollback() {
+  local dest="$1" payload="$2" before="" after=""
+  # A no-op append that reports success is the failure mode this whole block
+  # goes to lengths to avoid elsewhere ("appending a separator alone would
+  # report a success that added nothing, and would do it again on every gateway
+  # start"). Refuse it here so no future caller has to remember.
+  if [ -z "$payload" ]; then
+    echo "  WARNING: refusing to append an empty payload to $dest" >&2
+    return 1
+  fi
+  # Measured BEFORE the write, and a length that could not be read is a length
+  # this must never truncate to: with no number the only safe outcome is to
+  # leave the file as the failed write left it and say so.
+  if [ -e "$dest" ]; then
+    before="$(wc -c < "$dest" 2>/dev/null || true)"
+    before="${before//[![:digit:]]/}"
+  else
+    before="absent"
+  fi
+  if printf '%s' "$payload" >> "$dest"; then
+    return 0
+  fi
+  if [ -z "$before" ]; then
+    echo "  WARNING: could not measure $dest before a failed append; a partial write may remain" >&2
+    return 1
+  fi
+  if [ "$before" = "absent" ]; then
+    # Nothing to roll back TO. The file is either absent (the open failed) or a
+    # fragment this call created; either way removing it is the rollback.
+    rm -f "$dest" 2>/dev/null || true
+    return 1
+  fi
+  # A write that failed at OPEN — EACCES on a 0444 file, EROFS on a rootfs
+  # remounted read-only — wrote nothing at all, and truncating then fails for
+  # the same reason. Warning about a file that is byte-identical to what it was
+  # sends an operator triaging a real disk fault to inspect a guide that is
+  # fine, on every boot. Ask the file before saying anything about it.
+  after="$(wc -c < "$dest" 2>/dev/null || true)"
+  after="${after//[![:digit:]]/}"
+  if [ -n "$after" ] && [ "$after" = "$before" ]; then
+    return 1
+  fi
+  # `truncate` is coreutils, which is essential on both rootfs images; the `dd`
+  # form is the busybox fallback and costs nothing to carry.
+  if ! truncate -s "$before" "$dest" 2>/dev/null \
+    && ! dd of="$dest" bs=1 seek="$before" count=0 2>/dev/null; then
+    echo "  WARNING: could not roll $dest back after a failed append; it may be cut mid-section" >&2
+  fi
+  return 1
+}
+# EVERY write in this block — the appends through the helper above included —
+# is guarded, and that is a boot requirement rather than a matter of taste: config/clawbox-gateway.service runs this script as
 # `ExecStartPre=` with no leading `-`, so under `set -euo pipefail` a failing
 # write here is the unit's failure. With Restart=always and RestartSec=5 the
 # gateway would burn StartLimitBurst=20 in about a hundred seconds and then sit
@@ -3246,6 +3327,14 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
     if install -m 644 "$CLAWBOX_GUIDE_SRC" "$CLAWBOX_GUIDE_DST"; then
       echo "  Seeded CLAWBOX.md in OpenClaw workspace"
     else
+      # The seed has the same partial-write problem as the appends, and it is
+      # WORSE: the fragment it leaves already contains the top-up marker, so the
+      # `grep -qF` below finds the heading on every later boot, appends nothing,
+      # and the box keeps a guide cut mid-sentence for good. The enclosing
+      # `elif [ ! -f "$CLAWBOX_GUIDE_DST" ]` proves the file did not exist before
+      # this attempt, so removing it destroys nothing and the next boot re-seeds
+      # from scratch.
+      rm -f "$CLAWBOX_GUIDE_DST" 2>/dev/null || true
       # The first-boot and post-factory-reset path, and the one write in this
       # block that used to be bare: a full rootfs, a filesystem remounted
       # read-only after errors, or the documented "delete CLAWBOX.md to
@@ -3302,15 +3391,26 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
         # it. Appending a separator alone would report a success that added
         # nothing, and would do it again on every gateway start.
         echo "  WARNING: the shipped guide no longer carries '$CLAWBOX_GUIDE_TOPUP'" >&2
-      # A file that does not end in a newline would otherwise have its last
-      # line joined to the separator, making it a setext heading.
-      elif { [ -s "$CLAWBOX_GUIDE_DST" ] && [ "$(tail -c1 "$CLAWBOX_GUIDE_DST")" != "" ] && printf '\n'; \
-             printf '\n---\n\n%s\n' "$CLAWBOX_GUIDE_SECTION"; } >> "$CLAWBOX_GUIDE_DST"; then
-        echo "  Appended the system-actions section to CLAWBOX.md"
       else
-        # Its cause is on this shell's stderr already; do not hide it behind a
-        # 2>/dev/null that the failing redirection never reaches anyway.
-        echo "  WARNING: could not append the system-actions section to CLAWBOX.md" >&2
+        # A file that does not end in a newline would otherwise have its last
+        # line joined to the separator, making it a setext heading.
+        CLAWBOX_GUIDE_LEAD=""
+        if [ -s "$CLAWBOX_GUIDE_DST" ] && [ "$(tail -c1 "$CLAWBOX_GUIDE_DST")" != "" ]; then
+          CLAWBOX_GUIDE_LEAD=$'\n'
+        fi
+        # Rendered whole first, then handed to the one writer that can undo a
+        # partial write. `printf -v` and not a command substitution: `$( )`
+        # strips trailing newlines, and the section's final newline is what
+        # keeps the next append off the last line of this one.
+        printf -v CLAWBOX_GUIDE_APPEND '%s\n---\n\n%s\n' "$CLAWBOX_GUIDE_LEAD" "$CLAWBOX_GUIDE_SECTION"
+        if clawbox_append_or_rollback "$CLAWBOX_GUIDE_DST" "$CLAWBOX_GUIDE_APPEND"; then
+          echo "  Appended the system-actions section to CLAWBOX.md"
+        else
+          # The cause is on this shell's stderr already — the helper's failing
+          # redirection prints it — so this line names the deliverable, not the
+          # errno.
+          echo "  WARNING: could not append the system-actions section to CLAWBOX.md" >&2
+        fi
       fi
     else
       # Separated from the empty-extraction case on purpose: an unreadable
@@ -3340,7 +3440,8 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
     # always been bare, so a read-only AGENTS.md aborted pre-start under
     # `set -euo pipefail` and the gateway never started — over a pointer
     # sentence. Reachable whenever the file exists without the marker.
-    if printf '\n\n%s\n\nSee `CLAWBOX.md` for device-specific conventions: where user-installed skills live, how to control the desktop Chromium via `browser_*` tools, how to install/uninstall skills through the App Store, and which system actions are the owner'"'"'s.\n' "$CLAWBOX_AGENTS_POINTER" >> "$CLAWBOX_AGENTS_MD"; then
+    printf -v CLAWBOX_AGENTS_POINTER_TEXT '\n\n%s\n\nSee `CLAWBOX.md` for device-specific conventions: where user-installed skills live, how to control the desktop Chromium via `browser_*` tools, how to install/uninstall skills through the App Store, and which system actions are the owner'"'"'s.\n' "$CLAWBOX_AGENTS_POINTER"
+    if clawbox_append_or_rollback "$CLAWBOX_AGENTS_MD" "$CLAWBOX_AGENTS_POINTER_TEXT"; then
       echo "  Appended CLAWBOX.md reference to AGENTS.md"
     else
       echo "  WARNING: could not append the CLAWBOX.md reference to AGENTS.md" >&2
@@ -3363,7 +3464,8 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   # never be delivered again.
   CLAWBOX_AGENTS_RULE="## System actions on this ClawBox"
   if [ -f "$CLAWBOX_AGENTS_MD" ] && ! grep -qF "$CLAWBOX_AGENTS_RULE" "$CLAWBOX_AGENTS_MD"; then
-    if printf '\n\n%s\n\nRestarting the OpenClaw gateway is not yours to do from a chat turn: the gateway hosts this session, so the restart kills the reply before it lands. It is rarely needed either — saving a setting under Settings -> Providers, Voice or Channels restarts it. Say that, and name the setting.\n\nA device restart or shutdown IS yours when the owner asks in their own words: `system_power`, `confirm: true`, with their reason. Their own control is the power menu in the desktop tray, not Settings -> System.\n\nNever queue an `operator_approval` proposal for any of this. ClawBox renders no approval card, so a queued proposal is shown to nobody; a parked one is answered with `openclaw approvals pending` / `openclaw approvals resolve` from the Terminal app. `CLAWBOX.md` has the long form.\n' "$CLAWBOX_AGENTS_RULE" >> "$CLAWBOX_AGENTS_MD"; then
+    printf -v CLAWBOX_AGENTS_RULE_TEXT '\n\n%s\n\nRestarting the OpenClaw gateway is not yours to do from a chat turn: the gateway hosts this session, so the restart kills the reply before it lands. It is rarely needed either — saving a setting under Settings -> Providers, Voice or Channels restarts it. Say that, and name the setting.\n\nA device restart or shutdown IS yours when the owner asks in their own words: `system_power`, `confirm: true`, with their reason. Their own control is the power menu in the desktop tray, not Settings -> System.\n\nNever queue an `operator_approval` proposal for any of this. ClawBox renders no approval card, so a queued proposal is shown to nobody; a parked one is answered with `openclaw approvals pending` / `openclaw approvals resolve` from the Terminal app. `CLAWBOX.md` has the long form.\n' "$CLAWBOX_AGENTS_RULE"
+    if clawbox_append_or_rollback "$CLAWBOX_AGENTS_MD" "$CLAWBOX_AGENTS_RULE_TEXT"; then
       echo "  Appended the system-actions rule to AGENTS.md"
     else
       # Advisory text must never hold up the gateway; the next start retries.
