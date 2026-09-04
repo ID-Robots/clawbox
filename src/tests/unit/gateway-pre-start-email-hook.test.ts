@@ -490,13 +490,13 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
       // 124 immediately. Stamping either buys a day of "not repeating the check
       // this boot" — a day of warning noise AND a day in which a hook that
       // genuinely stopped registering goes unreported — over one transient
-      // spike. The evidence that tells them apart is the elapsed time, not the
+      // spike. The evidence that tells them apart is what the run COST, not the
       // exit code, so this is classified like 126/127: a NOTE, and no stamp.
       stubOpenclaw(`exit ${code}`);
       const first = run();
       expect(first.status).toBe(0);
       expect(first.stderr).toContain(`cli-killed exit ${code}`);
-      expect(first.stderr).toMatch(/ended inside the 45s ceiling/);
+      expect(first.stderr).toMatch(/answered within 5s/);
       expect(first.stderr).not.toMatch(/WARNING/);
       expect(existsSync(attemptStamp())).toBe(false);
       writeFileSync(path.join(dir, "calls.log"), "");
@@ -505,6 +505,32 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
       expect(second.stderr).not.toMatch(/WARNING/);
     },
   );
+
+  it("DOES stamp an EXPENSIVE kill, even though our ceiling never fired", () => {
+    // The third case, and the one splitting on the ceiling got wrong. The stamp
+    // exists to bound COST — that is the whole reason 126/127 go unstamped, a
+    // failed `execve` costing microseconds. A kill that burned real seconds is
+    // expensive whoever sent it: the OOM killer picking `plugins inspect` (it
+    // module-loads every enabled plugin, 44 of them on a paired box) at ~30-40 s
+    // on a memory-tight Orin answers 137 without this script's `timeout` coming
+    // near it. Leaving THAT unstamped puts those seconds back on the
+    // ExecStartPre of every gateway restart — a skill install, a Telegram
+    // reconfigure, a provider change, every crash — for ever, with the desktop
+    // showing "Reload gateway" through all of it. That is the regression this
+    // file's header exists to prevent.
+    stubOpenclaw("sleep 6\nexit 137");
+    const first = run();
+    expect(first.status).toBe(0);
+    // Stamped, and the verdict says what it cost rather than what killed it.
+    expect(first.stderr).toContain("cli-unavailable exit 137");
+    expect(first.stderr).toMatch(/after \d+s/);
+    expect(first.stderr).not.toContain("cli-killed");
+    expect(existsSync(attemptStamp())).toBe(true);
+    // ...and the next start does not pay those seconds again.
+    writeFileSync(path.join(dir, "calls.log"), "");
+    run();
+    expect(calls()).not.toContain("plugins inspect");
+  }, 60_000);
 
   it.skipIf(process.getuid?.() === 0)("leaves the installed plugin ALONE when it is the sources that cannot be read", () => {
     // `cp` opens its source first and never touches the destination when that

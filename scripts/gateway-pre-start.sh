@@ -1831,9 +1831,18 @@ fi
 # check sees no package and silently skips the entire repair path. Ask the
 # pinned CLI for the root it will actually load, time-bounded because this is
 # ExecStartPre, and accept it only when it contains the expected package file.
+#
+# `-k 5` is what makes "time-bounded" true. Plain `timeout` sends SIGTERM and
+# then goes on WAITING for the child, and an `openclaw` that ignores it — or any
+# surviving grandchild — keeps this command substitution's pipe open through the
+# `python3` stage, which reads stdin to EOF. Bash completes the assignment when
+# the SURVIVOR dies, not when `timeout` returns: measured 60 s of wall clock
+# against a 2 s ceiling. This is an ExecStartPre with no leading `-`, so that
+# stall is the gateway's start time and then the unit's failure — with no agent
+# on the box — over the codex plugin-repair probe.
 if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ]; then
   CODEX_PLUGIN_DIR_FOUND="$(
-    timeout 20 "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
+    timeout -k 5 20 "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
       python3 -c 'import json, os, sys
 try:
     data = json.load(sys.stdin)
@@ -1864,8 +1873,10 @@ fi
 # as the fallback for older CLIs or malformed registry output.
 CODEX_REGISTRY_DEPS_OK=0
 if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+  # `-k 5` for the reason spelled out above the sibling call: without it the
+  # ceiling is not one, because a survivor holds this substitution's pipe.
   CODEX_REGISTRY_DEPS_OK="$(
-    timeout 20 "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
+    timeout -k 5 20 "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
       python3 -c 'import json, sys
 try:
     data = json.load(sys.stdin)
@@ -2515,13 +2526,45 @@ PY
     # HERMES_CLI_TIMEOUT has to be validated precisely because a user-writable
     # .env can reach it, and `timeout 0` means no timeout at all.
     CLAWBOX_HOOK_CEILING=45
-    # Wall clock either side of the call, so the arm below can tell "our ceiling
-    # fired" from "something killed it early". `SECONDS` is bash's own counter:
-    # no fork, and no `date`-not-on-PATH case to reason about.
-    CLAWBOX_HOOK_BEGAN=$SECONDS
+    # What separates a kill worth backing off from one worth re-asking is COST,
+    # which is the ground 126|127 go unstamped on: a failed `execve` answers in
+    # microseconds. So the threshold is "was it as cheap as that", NOT "did our
+    # ceiling fire" — an OOM kill at 40 s on a memory-tight Orin is expensive
+    # whoever sent the signal, and leaving it unstamped puts those 40 s back on
+    # EVERY gateway restart for ever, which is the regression this file's header
+    # exists to prevent and the reason the attempt stamp was added at all.
+    CLAWBOX_HOOK_CHEAP=5
+    # MONOTONIC, not wall clock. `SECONDS` is `now - shell start`, so a clock
+    # STEP inside the measured interval lands straight in the elapsed time — and
+    # the Orin has no battery-backed RTC, so it boots with a stale clock and
+    # timesyncd steps it in the same few seconds this ExecStartPre runs. A
+    # forward step would stamp a 3-second kill as a 3602-second one; a backward
+    # step would leave a real 45 s timeout unstamped. `/proc/uptime` is
+    # CLOCK_BOOTTIME and immune to both, and `read` is a builtin, so this still
+    # costs no fork.
+    clawbox_hook_uptime() {
+      local up rest
+      read -r up rest < /proc/uptime 2>/dev/null || return 1
+      up="${up%%.*}"
+      case "$up" in ''|*[!0-9]*) return 1 ;; esac
+      printf '%s' "$up"
+    }
+    CLAWBOX_HOOK_BEGAN="$(clawbox_hook_uptime || true)"
     CLAWBOX_HOOK_JSON="$(timeout -k 5 "$CLAWBOX_HOOK_CEILING" "$OPENCLAW_BIN" plugins inspect "$CLAWBOX_HOOK_PLUGIN_ID" --runtime --json 2>"$CLAWBOX_HOOK_ERR_FILE")" \
       || CLAWBOX_HOOK_RC=$?
-    CLAWBOX_HOOK_ELAPSED=$(( SECONDS - CLAWBOX_HOOK_BEGAN ))
+    CLAWBOX_HOOK_ENDED="$(clawbox_hook_uptime || true)"
+    if [ -n "$CLAWBOX_HOOK_BEGAN" ] && [ -n "$CLAWBOX_HOOK_ENDED" ]; then
+      CLAWBOX_HOOK_ELAPSED=$(( CLAWBOX_HOOK_ENDED - CLAWBOX_HOOK_BEGAN ))
+      CLAWBOX_HOOK_TOOK="after ${CLAWBOX_HOOK_ELAPSED}s"
+    else
+      # No readable /proc/uptime: we cannot say what it cost, so call it
+      # EXPENSIVE and stamp — the same rule the stamp itself uses for a missing
+      # sha256sum, which is to act rather than skip on a comparison that cannot
+      # be made. Backing off wrongly costs one day of re-checking; not backing
+      # off wrongly costs the ceiling on every restart for ever.
+      CLAWBOX_HOOK_ELAPSED="$CLAWBOX_HOOK_CHEAP"
+      CLAWBOX_HOOK_TOOK="after an unmeasured time"
+    fi
     CLAWBOX_HOOK_ERR="$(tr '\n\r' '  ' < "$CLAWBOX_HOOK_ERR_FILE" 2>/dev/null | cut -c1-200 || true)"
     # Never `rm` the fallback.
     [ "$CLAWBOX_HOOK_ERR_FILE" = "/dev/null" ] || rm -f "$CLAWBOX_HOOK_ERR_FILE" 2>/dev/null || true
@@ -2544,22 +2587,24 @@ PY
       # signals its whole process group and SIGKILL cannot be ignored, so it
       # kills itself too and the caller reads 128+9.
       #
-      # STAMPED ON THE EVIDENCE, NOT ON THE EXIT CODE. Backing a box off for a
-      # day is justified by COST: the box burned the whole ceiling, and one
-      # that cannot module-load its plugins in that time will usually not
-      # manage it on the next restart either. That holds for a run that reached
-      # the ceiling. It is false for the OTHER way 137 arrives — the OOM killer
-      # on a loaded box, with no `timeout` involved, which can answer in three
-      # seconds — and for a CLI that chose 124 as its own exit code. Stamping
-      # those buys a day of warning noise AND a day in which a hook that
-      # genuinely stopped registering goes unreported, over one transient
-      # spike. So a run that ended well inside the ceiling is classified like
-      # 126/127, which are deliberately not stamped for exactly this reason.
+      # STAMPED ON THE COST, NOT ON THE EXIT CODE. Backing a box off for a day
+      # is justified by what the run SPENT: a box that burned the ceiling will
+      # usually burn it again on the next restart, and 126/127 go unstamped
+      # because a failed `execve` costs microseconds. 137 arrives both ways —
+      # our own SIGKILL at the ceiling, and the OOM killer on a loaded box with
+      # no `timeout` involved — and so does 124, which a CLI can choose as its
+      # own exit code. The exit code therefore says nothing about the cost, and
+      # the elapsed time says everything: a kill that answered inside
+      # CLAWBOX_HOOK_CHEAP seconds is as cheap to repeat as a 127, and anything
+      # slower is stamped whoever sent the signal. Stamping a cheap kill buys a
+      # day of warning noise AND a day in which a hook that genuinely stopped
+      # registering goes unreported; NOT stamping an expensive one puts those
+      # seconds back on every restart, for ever.
       124|137)
-        if [ "$CLAWBOX_HOOK_ELAPSED" -ge "$CLAWBOX_HOOK_CEILING" ]; then
-          CLAWBOX_HOOK_VERDICT="cli-unavailable exit $CLAWBOX_HOOK_RC after ${CLAWBOX_HOOK_ELAPSED}s${CLAWBOX_HOOK_ERR:+: $CLAWBOX_HOOK_ERR}"
+        if [ "$CLAWBOX_HOOK_ELAPSED" -ge "$CLAWBOX_HOOK_CHEAP" ]; then
+          CLAWBOX_HOOK_VERDICT="cli-unavailable exit $CLAWBOX_HOOK_RC $CLAWBOX_HOOK_TOOK${CLAWBOX_HOOK_ERR:+: $CLAWBOX_HOOK_ERR}"
         else
-          CLAWBOX_HOOK_VERDICT="cli-killed exit $CLAWBOX_HOOK_RC after ${CLAWBOX_HOOK_ELAPSED}s${CLAWBOX_HOOK_ERR:+: $CLAWBOX_HOOK_ERR}"
+          CLAWBOX_HOOK_VERDICT="cli-killed exit $CLAWBOX_HOOK_RC $CLAWBOX_HOOK_TOOK${CLAWBOX_HOOK_ERR:+: $CLAWBOX_HOOK_ERR}"
         fi
         ;;
       0)
@@ -2616,11 +2661,11 @@ PY
         echo "  NOTE: the openclaw CLI could not be run ($CLAWBOX_HOOK_VERDICT), so whether the $CLAWBOX_HOOK_PLUGIN_ID plugin registered its hook is unknown here — it is installed and enabled, and this will be re-checked on the next start" >&2
         ;;
       cli-killed*)
-        # It ended well inside the ceiling, so this script's `timeout` is NOT
+        # It answered inside the CHEAP window, so this script's `timeout` is NOT
         # what stopped it: a kill from outside (the OOM killer on a loaded box,
         # an operator, a restart) or the CLI's own exit code. UNKNOWN either
-        # way, and cheap to ask again — so no stamp, exactly like 126/127.
-        echo "  NOTE: 'openclaw plugins inspect $CLAWBOX_HOOK_PLUGIN_ID --runtime' ended inside the ${CLAWBOX_HOOK_CEILING}s ceiling ($CLAWBOX_HOOK_VERDICT) — a kill from outside or the CLI's own exit code, not this script's timeout — so whether the plugin registered its hook is unknown here; it is installed and enabled, and this will be re-checked on the next start" >&2
+        # way, and it cost nothing — so no stamp, exactly like 126/127.
+        echo "  NOTE: 'openclaw plugins inspect $CLAWBOX_HOOK_PLUGIN_ID --runtime' answered within ${CLAWBOX_HOOK_CHEAP}s ($CLAWBOX_HOOK_VERDICT) — a kill from outside or the CLI's own exit code, not this script's timeout, and cheap to repeat — so whether the plugin registered its hook is unknown here; it is installed and enabled, and this will be re-checked on the next start" >&2
         ;;
       cli-unavailable*)
         # UNKNOWN, not a defect: telling an operator "directives will still
