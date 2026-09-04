@@ -1107,7 +1107,9 @@ describe("codex-auth-mirror.js", () => {
     // (`openclaw doctor --fix`, the state-integrity check) looks at the state
     // dir, the config file and the runtime dirs, and never at ~/.codex or an
     // agent's codex-home; core's Codex reader only reads them. This script is
-    // the sole writer, so it is the only place the mode can be enforced.
+    // the only ClawBox-owned writer — the Codex app-server rewrites its own
+    // CODEX_HOME copy, so a mirror can come back with a mode nothing here
+    // chose, which is the whole reason the check belongs on every pass.
     seedProfile(accessToken("acct-1"), "refresh-1");
     run();
     for (const file of [homeAuthPath, codexHomeAuthPath]) {
@@ -1130,6 +1132,62 @@ describe("codex-auth-mirror.js", () => {
     expect([homeAuthPath, codexHomeAuthPath].map((f) => statSync(f).mtimeMs)).toEqual(mtimes);
     expect(stdout).toContain("credential already current");
     expect(stdout).not.toMatch(/Codex auth\.json (created|refreshed|realigned):/);
+  });
+
+  it("leaves a mirror an operator made STRICTER alone — 0400 stays 0400", () => {
+    // The other half of the trigger. Tightening on core's own criterion (any
+    // group/other bit set) rather than on `mode !== 0o600` is what keeps this
+    // true: an exact comparison would WIDEN a deliberate 0400 to 0600 on every
+    // tick and call it a security repair.
+    seedProfile(accessToken("acct-1"), "refresh-1");
+    run();
+    chmodSync(homeAuthPath, 0o400);
+
+    run();
+
+    expect(statSync(homeAuthPath).mode & 0o777).toBe(0o400);
+  });
+
+  it("still mirrors EVERY destination when the codex dir is not owner-writable", () => {
+    // A directory the owner cannot write is not "stricter" — it is a mirror
+    // that can never be written again. Core repairs it in two steps and this
+    // must too: restore the owner's rwx first (`canWriteDir` -> `addUserRwx`),
+    // then tighten. Enforcing only the tighten leaves ~/.codex at 0500, the
+    // write below fails EACCES, and the throw takes out main()'s whole
+    // destinations loop — losing the app-server's CODEX_HOME copy behind it,
+    // which is the exact failure the guarded chmods already exist to prevent.
+    seedProfile(accessToken("acct-1"), "refresh-1");
+    mkdirSync(path.dirname(homeAuthPath), { recursive: true });
+    chmodSync(path.dirname(homeAuthPath), 0o500);
+
+    run();
+
+    expect(statSync(path.dirname(homeAuthPath)).mode & 0o777).toBe(0o700);
+    expect(existsSync(homeAuthPath)).toBe(true);
+    // The LATER destination — the one an aborted loop never reaches.
+    expect(existsSync(codexHomeAuthPath)).toBe(true);
+  });
+
+  it("keeps mirroring, and never says \"already current\", when one destination cannot be written", () => {
+    // The last per-destination operation that could still end the pass. It is
+    // reported on the channel the timer keeps, the later destination is still
+    // written, and the summary line must not answer "credential already
+    // current" on stdout while stderr says the write failed.
+    seedProfile(accessToken("acct-1"), "refresh-1");
+    mkdirSync(path.dirname(homeAuthPath), { recursive: true });
+    // A directory, where the credential file has to go: the write fails with
+    // EISDIR whatever the permissions are, which an unprivileged test can do
+    // and a chmod-based fixture cannot (CI may run as root).
+    mkdirSync(homeAuthPath, { recursive: true });
+
+    const { stdout, stderr, status } = runCapturing();
+
+    expect(stderr).toContain("could not write");
+    expect(stderr).toContain(homeAuthPath);
+    expect(stdout).not.toContain("credential already current");
+    expect(status).toBe(0);
+    expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-1");
   });
 
   it("fails CLOSED when another writer holds core's store — no adoption, nothing overwritten", () => {

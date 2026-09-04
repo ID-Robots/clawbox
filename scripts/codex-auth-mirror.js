@@ -434,78 +434,96 @@ function syncReason(existing, credential) {
 }
 
 /**
- * Tighten one path that holds — or contains — an OAuth token, on EVERY pass.
+ * Keep one path that holds — or contains — an OAuth token owner-only, on EVERY
+ * pass, and reachable by the owner.
  *
  * `writeFileSync(..., { mode })` applies the mode on CREATION only, so a file
  * another tool left 0644 kept that mode through every rewrite while holding a
  * refresh token. Repairing it only where the credential is rewritten was the
  * same defect one step further out: a mirror that is already current but 0644
  * short-circuits on "credential already current" and stays world-readable for
- * the life of the box. So this is called before that short-circuit, not after
- * it, and the pass that runs 144 times a day is the one that repairs it.
+ * the life of the box. So this runs before that short-circuit, and the pass
+ * that runs 144 times a day is the one that repairs it.
  *
- * Nothing else will: core's own permission repair (`openclaw doctor --fix`,
- * the state-integrity check) covers the state dir, the config file and the
- * runtime state dirs, and never `~/.codex` or an agent's `codex-home`; core's
- * Codex credential reader only reads `auth.json`. This script is the sole
- * writer of these files, so it is the only place their mode can be enforced.
+ * Nothing else will. This script is the only ClawBox-owned writer of these
+ * files — the Codex app-server rewrites its own CODEX_HOME copy, which is
+ * exactly why the mode has to be re-checked every pass rather than only where
+ * we write — and core repairs neither: its state-integrity check
+ * (`openclaw doctor --fix`) covers the state dir, the config file and the
+ * runtime state dirs and never `~/.codex` or an agent's `codex-home`, and its
+ * Codex credential reader only reads `auth.json`.
  *
- * The trigger is core's own: `doctor` tightens when any group/other bit is set
- * (`(stat.mode & 0o77) !== 0`) and repairs to the same 0700 / 0600. Matching it
- * keeps the common pass a single `statSync` with no write at all, and never
- * widens a path an operator deliberately made stricter — 0400 stays 0400.
+ * BOTH of core's repairs, in core's order, because porting only the second is a
+ * regression: `doctor` first restores the owner's rwx on a directory it cannot
+ * use (`canWriteDir` -> `addUserRwx`, `mode & 0o777 | 0o700`), and only then
+ * tightens anything with a group/other bit set (`(mode & 0o77) !== 0`) to 0700 /
+ * 0600. A directory the owner cannot write is not "stricter", it is a mirror
+ * that can never be written again — the unconditional chmod this replaced was
+ * repairing that by accident. `requiredOwnerBits` is 0 for the credential files
+ * themselves, so a mirror an operator deliberately made 0400 stays 0400.
  *
- * Non-fatal, and reported on stderr rather than through log(): the timer unit
- * runs with CODEX_AUTH_MIRROR_QUIET=1, so a log() line here would be silent on
- * exactly the path that runs 144 times a day, and a credential left readable by
- * other users would say nothing at all. An EPERM (a path owned by another user)
- * must also never abort the pass: for the directory this runs BEFORE the write,
- * and throwing here once aborted main()'s whole destinations loop — losing this
- * mirror AND every later one, including the app-server's CODEX_HOME copy
- * without which every Codex turn falls back to the Cloudflare-challenged
- * browser endpoint. One un-tightenable path must cost that path's permissions,
- * not the pass.
+ * Non-fatal, and reported on stderr: the timer unit runs with
+ * CODEX_AUTH_MIRROR_QUIET=1, so log() would be silent on exactly the path that
+ * runs 144 times a day. An EPERM (a path owned by another user) must cost that
+ * path's permissions, not the pass.
  */
-function enforceMode(target, mode) {
+function enforceMode(target, mode, requiredOwnerBits = 0) {
   const complain = (error) =>
     console.error(
       `  Codex auth.json: could not tighten permissions on ${target} — it may be readable by other users (${error.code || error.message}).`,
     );
   let current;
   try {
-    current = fs.statSync(target).mode;
+    current = fs.statSync(target).mode & 0o7777;
   } catch (error) {
-    // ENOENT is the create path: nothing to tighten yet, and writeMirror's
-    // own write creates the file 0600. Anything else is a path whose
-    // permissions cannot even be READ — not "normal and idempotent", so it is
-    // named rather than swallowed.
+    // ENOENT is the create path in writeMirror (the write below makes the file
+    // 0600) and, at the skip call site in main(), a file that has since gone.
+    // Neither is worth a line; anything else is a path whose permissions cannot
+    // even be READ, which is not "normal and idempotent".
     if (error.code !== "ENOENT") complain(error);
     return;
   }
-  if ((current & 0o077) === 0) return;
+  const tooOpen = (current & 0o077) !== 0;
+  const ownerLocked = (current & requiredOwnerBits) !== requiredOwnerBits;
+  if (!tooOpen && !ownerLocked) return;
   try {
-    fs.chmodSync(target, mode);
+    fs.chmodSync(target, tooOpen ? mode : current | requiredOwnerBits);
   } catch (error) {
     complain(error);
   }
 }
 
+/** writeMirror's answer when the credential could not be written at all. */
+const WRITE_FAILED = Symbol("write-failed");
+
 function writeMirror(dest, credential) {
   const existing = readJson(dest);
   const reason = syncReason(existing, credential);
   const dir = path.dirname(dest);
+  if (reason) fs.mkdirSync(dir, { recursive: true });
   // Before the write, so a directory this pass just created is owner-only
   // before a credential lands in it — and before the short-circuit below, so an
   // already-current mirror is repaired too.
-  if (reason) fs.mkdirSync(dir, { recursive: true });
-  enforceMode(dir, 0o700);
+  enforceMode(dir, 0o700, 0o700);
   enforceMode(dest, 0o600);
   if (!reason) return null;
-  fs.writeFileSync(
-    dest,
-    JSON.stringify(buildAuthFile(credential, existing), null, 2),
-    { mode: 0o600 },
-  );
+  try {
+    fs.writeFileSync(
+      dest,
+      JSON.stringify(buildAuthFile(credential, existing), null, 2),
+      { mode: 0o600 },
+    );
+  } catch (error) {
+    // The last per-destination operation that could still end the pass. A
+    // read-only mount, a root-owned file, ENOSPC — one unwritable destination
+    // must cost that destination, not the app-server's CODEX_HOME copy behind
+    // it in the loop. Never reported as synced: a mirror counted as written
+    // that was not is the false success this file keeps guarding against.
+    console.error(
+      `  Codex auth.json: could not write ${dest} (${error.code || error.message}); the remaining mirrors are still being synced.`,
+    );
+    return WRITE_FAILED;
+  }
   return reason;
 }
 
@@ -580,6 +598,12 @@ function writeBackToCore(agentDirs, tokens, profileId) {
     if (tokens.id_token) profiles[id].id = tokens.id_token;
     try {
       fs.writeFileSync(jsonPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+      // Same creation-only `mode`, on a file that always pre-exists here (the
+      // loop only runs when it already holds this profile) — and this one holds
+      // the REFRESH token, not the access-token mirror. Core's own audit flags
+      // it (`fs.auth_profiles.perms_readable`) and never repairs it, so this is
+      // the only place it gets repaired.
+      enforceMode(jsonPath, 0o600);
       wrote = true;
     } catch {
       // Non-fatal; the sqlite store below is the one core reads.
@@ -805,6 +829,7 @@ function main() {
   }
 
   let synced = 0;
+  let failed = 0;
   for (const dest of destinations) {
     if (skip.has(dest)) {
       // The sibling call site of writeMirror's own permission pass, and the one
@@ -814,12 +839,14 @@ function main() {
       // there). Tightening a mode touches no credential, so the reason it is
       // skipped does not reach this — and "the file we refuse to touch" is
       // exactly the one that would otherwise stay world-readable forever.
-      enforceMode(path.dirname(dest), 0o700);
+      enforceMode(path.dirname(dest), 0o700, 0o700);
       enforceMode(dest, 0o600);
       continue;
     }
     const reason = writeMirror(dest, credential);
-    if (reason) {
+    if (reason === WRITE_FAILED) {
+      failed += 1;
+    } else if (reason) {
       synced += 1;
       log(`Codex auth.json ${reason}: ${dest}`);
     }
@@ -828,7 +855,10 @@ function main() {
   // ones this pass owns, so a single left-behind file must not silence it —
   // and must not let it read as "every mirror is current" either, which is the
   // opposite of the warning printed a few lines up.
-  if (synced === 0 && skip.size < destinations.length) {
+  // `failed` too: a destination whose write threw has already said so on
+  // stderr, and "credential already current" over it would contradict that on
+  // the other stream — the same false success the skip warning is guarded for.
+  if (synced === 0 && failed === 0 && skip.size < destinations.length) {
     log(
       "Codex auth.json: credential already current" +
         (skip.size > 0 ? " on the files this pass owns" : ""),
