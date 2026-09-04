@@ -370,7 +370,6 @@ export const de: Record<string, string> = {
   "localModels.unavailable": "Der Zustand von {list} konnte nicht gelesen werden.",
   "localModels.disk": "Speicherplatz {size}",
   "localModels.memoryInUse": "Belegter Arbeitsspeicher {size}",
-  "localModels.ollama.title": "Ollama-Bibliothek",
   "localModels.footer": "Was Sie im Menü ausschalten, bleibt auch nach einem Neustart aus.",
   "localModels.group.llm": "KI-Agent-Modell",
   "localModels.group.tts": "Stimme (Text zu Sprache)",

@@ -371,7 +371,6 @@ export const fr: Record<string, string> = {
   "localModels.unavailable": "Impossible de lire l'état de : {list}.",
   "localModels.disk": "Disque {size}",
   "localModels.memoryInUse": "Mémoire utilisée {size}",
-  "localModels.ollama.title": "Bibliothèque Ollama",
   "localModels.footer": "Ce que vous désactivez reste désactivé après un redémarrage.",
   "localModels.group.llm": "Modèle de l'agent IA",
   "localModels.group.tts": "Voix (synthèse vocale)",

@@ -367,7 +367,6 @@ export const sv: Record<string, string> = {
   "localModels.unavailable": "Det gick inte att läsa läget för: {list}.",
   "localModels.disk": "På disk {size}",
   "localModels.memoryInUse": "Använt minne {size}",
-  "localModels.ollama.title": "Ollama-bibliotek",
   "localModels.footer": "Det du stänger av i menyn förblir avstängt efter en omstart.",
   "localModels.group.llm": "AI-agentens modell",
   "localModels.group.tts": "Röst (text till tal)",

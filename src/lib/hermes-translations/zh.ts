@@ -382,7 +382,6 @@ export const zh: Record<string, string> = {
   "localModels.unavailable": "无法读取以下模型的状态：{list}。",
   "localModels.disk": "磁盘 {size}",
   "localModels.memoryInUse": "已用内存 {size}",
-  "localModels.ollama.title": "Ollama 模型库",
   "localModels.footer": "停用的项目在重启后仍保持关闭。",
   "localModels.group.llm": "AI 助手模型",
   "localModels.group.tts": "语音（文字转语音）",

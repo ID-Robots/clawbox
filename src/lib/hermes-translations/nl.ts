@@ -371,7 +371,6 @@ export const nl: Record<string, string> = {
   "localModels.unavailable": "De status van het volgende kon niet worden gelezen: {list}.",
   "localModels.disk": "Schijf {size}",
   "localModels.memoryInUse": "Geheugen in gebruik {size}",
-  "localModels.ollama.title": "Ollama-bibliotheek",
   "localModels.footer": "Wat je in het menu uitschakelt, blijft uit na een herstart.",
   "localModels.group.llm": "AI-agentmodel",
   "localModels.group.tts": "Stem (tekst naar spraak)",
