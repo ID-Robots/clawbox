@@ -9,6 +9,7 @@ import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, notifyCodingRunStarted, handoffCodingRun, type OpenAppDetail } from "@/lib/ui-events";
+import { parseNotifyAction } from "@/lib/notify-action";
 import { useAutoHide } from "@/lib/use-auto-hide";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
@@ -1375,7 +1376,14 @@ function ChromeDesktopInner() {
         // re-asks the runs route) so an open chat shows the run card too.
         notifyCodingRunStarted();
       } else if (action.type === "notify" && action.message) {
-        window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: action.message } }));
+        // A notice may name where it takes the owner — the email-approval
+        // toast opens Settings → Email. Checked against the allowlist here as
+        // well as where it was written: the ring is a file on disk in between,
+        // and one of its writers is the agent-driven `ui_notify`.
+        const target = parseNotifyAction(action.action);
+        window.dispatchEvent(new CustomEvent("clawbox:toast", {
+          detail: { message: action.message, ...(target ? { action: target } : {}) },
+        }));
       }
     };
     const poll = async () => {

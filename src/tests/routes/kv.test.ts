@@ -241,6 +241,32 @@ describe("/setup-api/kv", () => {
       expect(ringAfter).toHaveLength(1);
     });
 
+    // The legacy slot is how the `ui_notify` MCP tool and `clawbox notify`
+    // reach the ring, and `ui_notify` is driven by the AGENT. A notice that
+    // can be CLICKED is a different thing from a notice that can be read, so
+    // an out-of-process writer may not name a destination: only ClawBox's own
+    // in-process producers attach one.
+    it("strips a click destination from a legacy notice — the agent cannot make a toast clickable", async () => {
+      const store = new Map<string, string>();
+      mockKvSet.mockImplementation((k: string, v: string) => { store.set(k, v); });
+      mockKvGet.mockImplementation((k: string) => store.get(k) ?? null);
+
+      await POST(new Request("http://localhost/setup-api/kv", {
+        method: "POST",
+        body: JSON.stringify({
+          key: "ui:pending-action",
+          value: JSON.stringify({ type: "notify", message: "click me", action: { open: "settings", section: "email" } }),
+        }),
+      }));
+
+      const ring = JSON.parse((await (await GET(
+        new Request("http://localhost/setup-api/kv?key=ui:pending-actions"),
+      )).json()).value);
+      expect(ring).toHaveLength(1);
+      expect(ring[0]).toMatchObject({ type: "notify", message: "click me" });
+      expect(ring[0]).not.toHaveProperty("action");
+    });
+
     it("refuses a legacy pending action that is not a JSON object", async () => {
       for (const value of ["not json", JSON.stringify(["array"])]) {
         const res = await POST(new Request("http://localhost/setup-api/kv", {

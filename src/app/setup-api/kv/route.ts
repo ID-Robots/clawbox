@@ -36,7 +36,17 @@ function parseLegacyAction(value: string): Record<string, unknown> | null {
     return null;
   }
   if (!action || typeof action !== "object" || Array.isArray(action)) return null;
-  return action as Record<string, unknown>;
+  const fields = { ...(action as Record<string, unknown>) };
+  // A notice from ANOTHER PROCESS may not carry a click destination. This slot
+  // is how the `ui_notify` MCP tool and `clawbox notify` reach the ring, and
+  // `ui_notify` is driven by the agent: a notice that can be CLICKED is a
+  // different thing from one that can only be read, and letting the assistant
+  // name where the owner lands would hand it a target on their desktop.
+  // ClawBox's own in-process producers attach one through notifyOwner()
+  // (src/lib/email-notify.ts), which checks it against the allowlist in
+  // src/lib/notify-action.ts.
+  delete fields.action;
+  return fields;
 }
 
 // GET /setup-api/kv?key=foo        → single key

@@ -41,6 +41,7 @@
 import { NextResponse } from "next/server";
 import { getEmailCredentials, toSmtpConfig } from "@/lib/email-config";
 import { notifyOwner } from "@/lib/email-notify";
+import { OPEN_EMAIL_SETTINGS } from "@/lib/notify-action";
 // Asking in chat is a NOTIFICATION, not a second gate: it posts the draft and a
 // button to a bot ClawBox owns exclusively. Nothing this route returns can
 // approve anything, and the agent reading the answer cannot press the button.
@@ -167,8 +168,12 @@ export async function POST(request: Request) {
       // (`sendApprovalPrompt` above is already idempotent per draft; this was
       // the half that was not.)
       if (!queued.deduped) {
+        // With the destination, the toast's body is the way in: clicking it
+        // opens Settings on the Email section rather than leaving the owner to
+        // find it. Allowlisted, never a free-form target — see notify-action.ts.
         await notifyOwner(
           `The assistant wants to send an email. Open Settings → Email to approve or delete it.`,
+          OPEN_EMAIL_SETTINGS,
         ).catch(() => undefined);
       }
       console.error(`[email/send] queued for owner approval (chat prompt: ${prompt.kind})`);
