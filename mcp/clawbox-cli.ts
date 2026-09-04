@@ -18,8 +18,9 @@
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { spawnSync } from "child_process";
-import { installEdition, resolveEdition, type Ed } from "./lib/edition";
+import { installEdition, resolveAppHarness, type Ed } from "./lib/edition";
 import { builtInApps } from "./lib/context";
+import { HARNESS_ONLY_APP_IDS, isInstalledAppVisible } from "../src/lib/desktop-app-editions";
 import { INSTALLED_APP_ID_RE } from "./lib/schema";
 
 const API_BASE = process.env.CLAWBOX_API_BASE || "http://127.0.0.1:80";
@@ -66,25 +67,33 @@ function getApiToken(): string {
 }
 
 /**
- * Which harness's built-in apps this box has.
+ * Which harness's built-in apps this box has — or null, when that could not be
+ * determined.
  *
  * NOT `installEdition() === "hermes" ? … : "openclaw"`. That answer has THREE
  * values — the premium `dual` SKU carries both harnesses — and folding `dual`
  * into `openclaw` refused `clawbox app open hermes` on a dual box that is
  * running Hermes, while the desktop opened that dashboard from the ACTIVE
- * harness and `ui_open_app` allowed it from `resolveEdition`. One question,
- * three surfaces, and the CLI was the one giving a different answer.
+ * harness and `ui_open_app` allowed it. One question, three surfaces, and the
+ * CLI was the one giving a different answer.
  *
- * `resolveEdition` is that same resolution: a locked edition decides on its
- * own, and only `dual` asks the device which harness is active. The bearer is
- * OPTIONAL here — `app list` has always worked without a token, and the only
- * cost of not sending one is that a session-gated device answers the dual
- * question with the default harness rather than the active one.
+ * `resolveAppHarness` is that same resolution: a locked edition decides on its
+ * own, only `dual` asks the device which harness is active, and an unreadable
+ * lock or a device that does not answer is NULL rather than a guess — see the
+ * note there on why an app gate cannot fail closed onto one harness. The
+ * bearer is OPTIONAL — `app list` has always worked without a token, and the
+ * cost is only that a session-gated device leaves the dual question
+ * unresolved rather than answering it.
  */
-function openHarness(): Promise<Ed> {
+function openHarness(): Promise<Ed | null> {
   const token = findApiToken();
-  return resolveEdition(API_BASE, token ? `Bearer ${token}` : null);
+  return resolveAppHarness(API_BASE, token ? `Bearer ${token}` : null);
 }
+
+/** Why an app that exists on ONE harness cannot be opened right now. */
+const UNKNOWN_HARNESS_NOTE =
+  "This ClawBox could not say which harness it is running, so apps that belong to only one of them"
+  + " are not offered. Check /etc/clawbox/edition.env and that the device's web server is up.";
 
 async function api(path: string, options?: RequestInit) {
   const headers = new Headers(options?.headers);
@@ -221,7 +230,8 @@ async function main() {
     // typo, for an installed id missing its `installed-` prefix, and for the
     // other harness's apps — a false success on the CLI sibling of the list
     // `app list` below prints from.
-    const openable = builtInApps(await openHarness()).map((a) => a.id);
+    const harness = await openHarness();
+    const openable = builtInApps(harness).map((a) => a.id);
     const isInstalled = appId.startsWith("installed-");
     if (isInstalled) {
       // The shape check, exactly where ui_open_app applies it: an installed id
@@ -235,21 +245,38 @@ async function main() {
       // id the device does not have is still a window that never opens, and
       // printing a tick over it is the same false success the built-in branch
       // below exists to stop.
-      const prefs = await api("/setup-api/preferences?keys=installed_apps") as {
+      //
+      // …and MEMBERSHIP IN WHAT THE DESKTOP WOULD OPEN, not merely in
+      // `installed_apps`: a store-installed OpenClaw skill is unusable on
+      // Hermes (its window shells out to the openclaw binary), so the desktop
+      // drops it and a tick here would be printed over a window that never
+      // appears. One predicate, shared with the desktop and with ui_open_app.
+      const prefs = await api("/setup-api/preferences?keys=installed_apps,installed_meta") as {
         installed_apps?: unknown;
+        installed_meta?: unknown;
       };
-      const installed = Array.isArray(prefs?.installed_apps)
+      const meta = (prefs?.installed_meta ?? {}) as Record<string, { webappUrl?: unknown } | undefined>;
+      const installed = (Array.isArray(prefs?.installed_apps)
         ? prefs.installed_apps.filter((v): v is string => typeof v === "string")
-        : [];
+        : []
+      ).filter((id) => isInstalledAppVisible(meta[id], harness));
       if (!installed.includes(appId.slice("installed-".length))) {
         console.error(
-          `No installed app "${appId.slice("installed-".length)}" on this ClawBox.`
+          `No installed app "${appId.slice("installed-".length)}" this ClawBox can open.`
           + (installed.length ? ` Installed: ${installed.join(", ")}` : " Nothing is installed."),
         );
         process.exit(1);
       }
     } else if (!openable.includes(appId)) {
-      console.error(`No built-in app "${appId}" on this ClawBox. Try: ${openable.join(", ")}`);
+      // An app the OTHER harness owns is "not here"; the same app while the
+      // harness is unknown is "could not be placed". Saying the first over the
+      // second tells the agent as a durable fact that a dual box has no
+      // dashboard, which is how it stops asking.
+      console.error(
+        harness === null && HARNESS_ONLY_APP_IDS.includes(appId)
+          ? `Cannot open "${appId}": ${UNKNOWN_HARNESS_NOTE}`
+          : `No built-in app "${appId}" on this ClawBox. Try: ${openable.join(", ")}`,
+      );
       process.exit(1);
     }
     await apiPost("/setup-api/kv", {
@@ -266,11 +293,14 @@ async function main() {
     const edition = installEdition();
     const harness = await openHarness();
     console.log(
-      edition === harness
-        ? `Built-in apps (${edition} edition):`
-        : `Built-in apps (${edition} edition, running ${harness}):`,
+      harness === null
+        ? `Built-in apps (${edition} edition, harness undetermined):`
+        : edition === harness
+          ? `Built-in apps (${edition} edition):`
+          : `Built-in apps (${edition} edition, running ${harness}):`,
     );
     for (const app of builtInApps(harness)) console.log(`  ${app.id} — ${app.name}`);
+    if (harness === null) console.log(`  (${UNKNOWN_HARNESS_NOTE})`);
 
   } else if (cmd === "edition") {
     console.log(installEdition());

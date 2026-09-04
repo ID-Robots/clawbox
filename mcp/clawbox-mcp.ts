@@ -44,7 +44,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { API_BASE, authHeader } from "./lib/api";
 import { buildContext } from "./lib/context";
-import { installEdition, resolveEdition, type Ed } from "./lib/edition";
+import { installEdition, resolveAppHarness, resolveEdition, type Ed } from "./lib/edition";
 import { resolveProfile } from "./lib/profile";
 import { createRegistrar, type Profile } from "./lib/register";
 import { registerAiTools } from "./tools/ai";
@@ -130,7 +130,14 @@ function instructionsFor(edition: Ed, profile: Profile): string {
  * per edition and diff the tool lists without connecting a transport.
  */
 export async function buildServer(edition: Ed, profile: Profile) {
-  const ctx = await buildContext(edition, installEdition(), profile);
+  // The app list is a different question from the tool set — see
+  // `resolveAppHarness`. Resolved here, once, beside the edition probe.
+  const ctx = await buildContext(
+    edition,
+    installEdition(),
+    profile,
+    await resolveAppHarness(API_BASE, authHeader()),
+  );
   const server = new McpServer(
     { name: "clawbox", version: VERSION },
     { instructions: instructionsFor(edition, profile) },

@@ -78,6 +78,7 @@ const ctx = (
 ): McpContext => ({
   edition,
   install: edition,
+  appHarness: edition,
   profile: "full",
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
   providers,

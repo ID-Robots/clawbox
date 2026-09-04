@@ -11,6 +11,7 @@ import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
 import { INSTALLED_APP_ID_RE, zBool, zConfirm, zEnumOf, zInt, zOptText, zSlug, zText } from "../lib/schema";
 import { builtInApps, type McpContext } from "../lib/context";
+import { isInstalledAppVisible } from "../../src/lib/desktop-app-editions";
 import type { InstalledHermesSkill } from "../../src/lib/hermes-skills";
 
 const UI_PICKUP_DELAY_MS = 2_500;
@@ -42,14 +43,28 @@ interface PrefsBody {
   installed_meta?: unknown;
 }
 
-/** Webapps and store apps the user has installed, by id. */
-async function installedAppIds(): Promise<string[]> {
+/**
+ * Webapps and store apps the user has installed AND the desktop would open, by
+ * id.
+ *
+ * `installed_apps` alone is not that list. A store-installed OpenClaw skill is
+ * unusable on Hermes — its window shells out to the openclaw binary — so the
+ * desktop drops it from `getAllApps()` through `isInstalledAppVisible`, and a
+ * gate that checked only membership answered "Opened <name>" over a window
+ * that never appeared. Both facts come out of one preferences read.
+ *
+ * `harness: null` asks for the list UNFILTERED, which is what a REMOVAL wants:
+ * an app this harness cannot open is still the owner's to delete.
+ */
+async function installedAppIds(harness: string | null): Promise<string[]> {
   const prefs = await apiGet<PrefsBody>("/setup-api/preferences", {
-    query: { keys: "installed_apps" },
+    query: { keys: "installed_apps,installed_meta" },
     timeoutMs: 10_000,
   }).catch(() => null);
   const raw = prefs?.installed_apps;
-  return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : [];
+  const meta = (prefs?.installed_meta ?? {}) as Record<string, { webappUrl?: unknown } | undefined>;
+  const ids = Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : [];
+  return ids.filter((id) => isInstalledAppVisible(meta[id], harness));
 }
 
 /**
@@ -100,7 +115,14 @@ const WEBAPP_RULES: ErrorRule[] = [
 ];
 
 export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
-  const apps = builtInApps(ctx.edition);
+  // The APP harness, not the tool-set edition: an unreadable edition lock
+  // resolves the tool set to hermes (the smaller, nested one) and must not
+  // therefore hide `store`/`openclaw`/`memory-shard` from a box that has them
+  // or advertise `hermes` on a box that may not. `null` shows what both
+  // harnesses have, the answer the desktop uses while its own fetch is in
+  // flight. A startup snapshot, like the registration itself — on the dual SKU
+  // a harness switched after this child spawned is seen at the next restart.
+  const apps = builtInApps(ctx.appHarness);
   const builtInIds = apps.map((a) => a.id);
   const appLine = apps.map((a) => a.id).join(", ");
 
@@ -131,11 +153,11 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
             "Call ui_list_apps and pass an id from its installed_apps list, unchanged.",
           );
         }
-        const ids = await installedAppIds();
+        const ids = await installedAppIds(ctx.appHarness);
         if (!ids.includes(app_id.slice("installed-".length))) {
           throw new ToolError(
             "NOT_FOUND",
-            "That installed app is not on this device.",
+            "That installed app is not on this device, or this harness cannot open it.",
             "Call ui_list_apps to see which installed apps exist, and use one of those ids.",
           );
         }
@@ -176,7 +198,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: 6_000 },
     async () => {
       const builtIn = apps.map((a) => ({ id: a.id, name: a.name, what: a.description }));
-      const installed = (await installedAppIds()).map((id) => ({ id: `installed-${id}`, name: id }));
+      const installed = (await installedAppIds(ctx.appHarness)).map((id) => ({ id: `installed-${id}`, name: id }));
       // On Hermes the agent's own capabilities come from the skills store, not
       // from ~/.openclaw/skills (which does not exist there — listing it was
       // why installed skills always showed up empty on a Hermes device).
@@ -291,7 +313,8 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     { app_id: zSlug("App id, as ui_list_apps reports it without the installed- prefix") },
     { editions: ["openclaw", "hermes"], readOnly: false, destructive: true },
     async ({ app_id }: { app_id: string }) => {
-      const installed = await installedAppIds();
+      // Unfiltered: removing an app this harness cannot open is legitimate.
+      const installed = await installedAppIds(null);
       if (!installed.includes(app_id)) {
         throw new ToolError(
           "NOT_FOUND",

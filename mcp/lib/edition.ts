@@ -72,7 +72,49 @@ export async function resolveEdition(apiBase: string, authHeader: string | null)
   }
   const installed = readEdition();
   if (installed === "openclaw" || installed === "hermes") return installed;
+  // Dual box whose API is not up yet — register the default harness's tools
+  // rather than an empty or half-wrong set.
+  return (await askActiveHarness(apiBase, authHeader)) ?? "openclaw";
+}
 
+/**
+ * Which harness's built-in APPS this device shows, or null when that cannot be
+ * determined.
+ *
+ * A SEPARATE QUESTION from `resolveEdition`, and the difference is the whole
+ * reason this exists. That one picks a TOOL SET, where the two answers are
+ * nested — hermes is openclaw minus the shell and file tools — so an
+ * undetermined edition can fail closed onto the smaller one. The app sets are
+ * not nested: `openclaw`/`store`/`memory-shard` against `hermes`/
+ * `hermes-skills`. Answering "hermes" for an unreadable lock would refuse
+ * three apps the box has AND tick off two it may not, which is the same false
+ * success the gate exists to stop.
+ *
+ * So this returns null instead, and every caller hides BOTH harness-only sets
+ * — the answer `hiddenAppIdsForHarness(null)` already gives the desktop while
+ * its own fetch is in flight.
+ *
+ * No console line: this is asked by the CLI as well as the MCP, and one
+ * invocation of `clawbox app list` registers no tools.
+ */
+export async function resolveAppHarness(
+  apiBase: string,
+  authHeader: string | null,
+): Promise<Ed | null> {
+  if (lockUnreadable()) return null;
+  const installed = readEdition();
+  if (installed === "openclaw" || installed === "hermes") return installed;
+  return askActiveHarness(apiBase, authHeader);
+}
+
+/**
+ * The harness the DEVICE says is active, or null when it did not say.
+ *
+ * Null rather than a default, because the two callers want opposite things
+ * from a silence: registration needs some tool set, an app gate must not claim
+ * a harness it never resolved.
+ */
+async function askActiveHarness(apiBase: string, authHeader: string | null): Promise<Ed | null> {
   try {
     const res = await fetch(`${apiBase}/setup-api/harness/active`, {
       headers: {
@@ -85,12 +127,13 @@ export async function resolveEdition(apiBase: string, authHeader: string | null)
     if (res.ok) {
       const body = (await res.json()) as { active?: unknown };
       if (body?.active === "hermes") return "hermes";
+      if (body?.active === "openclaw") return "openclaw";
     }
   } catch {
-    // Dual box whose API is not up yet — register the default harness's tools
-    // rather than an empty or half-wrong set.
+    // The device could not be reached, or answered something this build does
+    // not know. Either way nothing was resolved.
   }
-  return "openclaw";
+  return null;
 }
 
 /** The raw install edition, for reporting (can be "dual"). */

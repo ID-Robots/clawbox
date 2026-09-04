@@ -50,6 +50,7 @@ import { registerOrientationTools } from "../../../mcp/tools/orientation";
 const ctx = (edition: "openclaw" | "hermes", install: McpContext["install"] = edition): McpContext => ({
   edition,
   install,
+  appHarness: edition,
   profile: "full",
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
   providers: ["clawai", "openai"],

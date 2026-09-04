@@ -53,7 +53,11 @@ const APP_DESCRIPTIONS: Record<string, Omit<DesktopApp, "id">> = {
   vnc: { name: "Remote Desktop", description: "VNC viewer" },
 };
 
-export function builtInApps(edition: Ed): DesktopApp[] {
+/**
+ * The built-in apps this harness has. `null` — the harness could not be
+ * determined — answers the apps that exist on BOTH, never one harness's guess.
+ */
+export function builtInApps(edition: Ed | null): DesktopApp[] {
   return Object.entries(APP_DESCRIPTIONS)
     .filter(([id]) => appExistsOnEdition(id, edition))
     .map(([id, def]) => ({ id, ...def }));
@@ -75,6 +79,17 @@ export interface McpContext {
   edition: Ed;
   /** The raw install edition — can be "dual", which `edition` resolves. */
   install: "openclaw" | "hermes" | "dual";
+  /**
+   * Whose built-in DESKTOP APPS this device shows, or null when that could not
+   * be determined — a different question from `edition`, which is a tool set
+   * and fails closed onto the smaller of two nested answers. See
+   * `resolveAppHarness`.
+   *
+   * A STARTUP SNAPSHOT, like everything else here: on the `dual` SKU a harness
+   * switch made after this child spawned is not seen until it restarts, which
+   * `mcp/tools/desktop.ts` says out loud where it matters.
+   */
+  appHarness: Ed | null;
   profile: Profile;
   capabilities: Capabilities;
   /**
@@ -196,6 +211,7 @@ export async function buildContext(
   edition: Ed,
   install: "openclaw" | "hermes" | "dual",
   profile: Profile,
+  appHarness: Ed | null = edition,
 ): Promise<McpContext> {
   let screenGrabber: string | null = null;
   for (const bin of SCREEN_GRABBERS) {
@@ -236,6 +252,7 @@ export async function buildContext(
   return {
     edition,
     install,
+    appHarness,
     profile,
     capabilities: { screenGrabber, imageConvert, journal, du },
     providers,

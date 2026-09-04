@@ -59,6 +59,7 @@ import type { McpContext } from "../../../mcp/lib/context";
 const ctx = (edition: "openclaw" | "hermes"): McpContext => ({
   edition,
   install: edition,
+  appHarness: edition,
   profile: "full",
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
   providers: [],

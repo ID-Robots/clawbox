@@ -58,7 +58,43 @@ export function hiddenAppIdsForHarness(harness: string | null): string[] {
   return [...hiddenFor(harness)];
 }
 
-/** Whether a built-in app id exists on this (resolved) edition at all. */
-export function appExistsOnEdition(id: string, edition: AppEdition): boolean {
+/**
+ * Whether a built-in app id exists on this harness at all.
+ *
+ * `null` is "which harness this is could not be determined" — an unreadable
+ * edition lock, a `dual` box whose device did not answer — and it hides BOTH
+ * harness-only sets, exactly as the desktop does while its own fetch is in
+ * flight. There is no smaller-of-the-two to fail closed onto here: the two app
+ * sets are different, not nested, so picking one would BOTH hide apps the box
+ * has and offer apps it does not.
+ */
+export function appExistsOnEdition(id: string, edition: AppEdition | null): boolean {
   return !hiddenFor(edition).includes(id);
+}
+
+/**
+ * Should an app the user INSTALLED still be shown on this harness?
+ *
+ * An `installed` app is normally an OpenClaw skill: its window calls
+ * /setup-api/apps/settings + /apps/skill-info, both of which shell out to the
+ * openclaw binary, and its uninstall reloads the OpenClaw gateway. None of that
+ * exists on a Hermes device, so the window would open onto errors. A WEBAPP
+ * (`webappUrl`) is different: harness-independent, served by
+ * /setup-api/webapps, and frequently the Hermes agent's OWN output.
+ *
+ * Takes the meta ROW rather than the id, because "is it a webapp" is the whole
+ * question and only the row knows. Lives here, beside the built-in gate, so the
+ * desktop grid and the two agent-facing gates (`ui_open_app`, `clawbox app
+ * open`) cannot answer it differently — the drift this module exists to end.
+ *
+ * `null` (the harness is not resolved yet, or could not be) keeps them VISIBLE,
+ * unlike the built-in harness apps: they are the majority case on an OpenClaw
+ * box, and hiding then re-showing them would flash the whole desktop on every
+ * load.
+ */
+export function isInstalledAppVisible(
+  meta: { webappUrl?: unknown } | undefined,
+  harness: string | null,
+): boolean {
+  return harness !== "hermes" || !!meta?.webappUrl;
 }

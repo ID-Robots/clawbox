@@ -38,6 +38,16 @@ function have(bin: string, args: string[]): boolean {
 const CAN_RUN = process.platform !== "win32" && have("bun", ["--version"]);
 const d = CAN_RUN ? describe : describe.skip;
 
+// A skipped file reports green while asserting nothing, and this is the ONLY
+// test of the CLI's gate. CI installs bun (pr-tests-coverage.yml,
+// oven-sh/setup-bun), so if it ever stops resolving there, say so out loud
+// rather than going quiet.
+describe("the CLI can be run at all", () => {
+  it.skipIf(!process.env.CI)("has bun on PATH in CI", () => {
+    expect(CAN_RUN).toBe(true);
+  });
+});
+
 let server: http.Server;
 let base: string;
 let home: string;
@@ -45,6 +55,8 @@ let lockPath: string;
 /** What the device would answer for `/setup-api/harness/active`. */
 let activeHarness: string;
 let installedApps: string[];
+/** `installed_meta` rows, by raw id — a `webappUrl` marks a ClawBox web app. */
+let installedMeta: Record<string, { webappUrl?: string }>;
 /** Every `ui:pending-action` the CLI posted, newest last. */
 let posted: Array<Record<string, unknown>>;
 
@@ -60,7 +72,7 @@ beforeAll(async () => {
       return;
     }
     if (req.method === "GET" && url.pathname === "/setup-api/preferences") {
-      json({ installed_apps: installedApps });
+      json({ installed_apps: installedApps, installed_meta: installedMeta });
       return;
     }
     if (req.method === "POST" && url.pathname === "/setup-api/kv") {
@@ -94,6 +106,7 @@ afterAll(async () => {
 beforeEach(() => {
   activeHarness = "openclaw";
   installedApps = [];
+  installedMeta = {};
   posted = [];
 });
 
@@ -104,14 +117,18 @@ beforeEach(() => {
  * the event loop until the child exits would leave the child's own request
  * unanswered forever — the two would wait for each other.
  */
-function cli(args: string[], edition: string): Promise<{ status: number; stdout: string; stderr: string }> {
-  fs.writeFileSync(lockPath, `CLAWBOX_EDITION=${edition}\n`);
+function cli(
+  args: string[],
+  edition: string,
+  opts: { lockBody?: string; apiBase?: string } = {},
+): Promise<{ status: number; stdout: string; stderr: string }> {
+  fs.writeFileSync(lockPath, opts.lockBody ?? `CLAWBOX_EDITION=${edition}\n`);
   return new Promise((resolve, reject) => {
     const child = spawn("bun", [CLI, ...args], {
       env: testEnv({
         PATH: process.env.PATH ?? "",
         HOME: home,
-        CLAWBOX_API_BASE: base,
+        CLAWBOX_API_BASE: opts.apiBase ?? base,
         CLAWBOX_EDITION_FILE: lockPath,
         // Long enough to pass the CLI's own length check; the stub device does
         // not look at it.
@@ -158,13 +175,94 @@ d("clawbox app open — the edition gate", () => {
 
   it("opens an app the device really installed, and refuses one it did not", async () => {
     installedApps = ["notes"];
-    expect((await cli(["app", "open", "installed-notes"], "hermes")).status).toBe(0);
+    expect((await cli(["app", "open", "installed-notes"], "openclaw")).status).toBe(0);
     expect(posted).toContainEqual(
       expect.objectContaining({ type: "open_app", appId: "installed-notes" }),
     );
-    const missing = await cli(["app", "open", "installed-ledger"], "hermes");
+    const missing = await cli(["app", "open", "installed-ledger"], "openclaw");
     expect(missing.status).toBe(1);
     expect(missing.stderr).toContain("No installed app");
+  });
+
+  it("refuses a store-installed skill on Hermes, and opens a web app", async () => {
+    // An installed STORE app is an OpenClaw skill: its window shells out to the
+    // openclaw binary, so the Hermes desktop drops it from `getAllApps()` and a
+    // tick here would be printed over a window that never appears. A ClawBox
+    // web app is harness-independent — often the Hermes agent's own output.
+    installedApps = ["weather-skill", "notes"];
+    installedMeta = { notes: { webappUrl: "/setup-api/webapps?app=notes" } };
+
+    const skill = await cli(["app", "open", "installed-weather-skill"], "hermes");
+    expect(skill.status).toBe(1);
+    expect(posted).toEqual([]);
+
+    const webapp = await cli(["app", "open", "installed-notes"], "hermes");
+    expect(webapp.status, webapp.stderr).toBe(0);
+    expect(posted).toContainEqual(expect.objectContaining({ appId: "installed-notes" }));
+
+    // …and on OpenClaw the same skill opens.
+    posted = [];
+    expect((await cli(["app", "open", "installed-weather-skill"], "openclaw")).status).toBe(0);
+  });
+});
+
+d("clawbox app open — when the harness cannot be determined", () => {
+  // A lock file that EXISTS and carries no edition: a truncated write, a
+  // permission change, a partial reflash. The MCP resolves that to the smaller
+  // TOOL SET on purpose — an unreadable lock must not hand a device the shell
+  // and file tools. Apps are not a subset of one another, though: answering
+  // "hermes" there hides `store`, `openclaw` and `memory-shard` from a box
+  // that has them and ticks off `hermes` on a box that may not. The desktop's
+  // own rule for an unknown harness is to hide BOTH sets and say so.
+  const NO_EDITION = "# ClawBox edition lock\n# (truncated)\n";
+
+  it("keeps offering the apps that exist on either harness", async () => {
+    const r = await cli(["app", "open", "settings"], "openclaw", { lockBody: NO_EDITION });
+    expect(r.status, r.stderr).toBe(0);
+    expect(posted).toContainEqual(expect.objectContaining({ appId: "settings" }));
+  });
+
+  it("refuses BOTH harnesses' own apps rather than guessing one", async () => {
+    for (const appId of ["hermes", "hermes-skills", "store", "openclaw", "memory-shard"]) {
+      posted = [];
+      const r = await cli(["app", "open", appId], "openclaw", { lockBody: NO_EDITION });
+      expect(r.status, `${appId} must be refused`).toBe(1);
+      // Not "there is no such app": the device may well have it. Ticking off an
+      // open the desktop then drops is the false success this gate exists for.
+      expect(r.stderr).toMatch(/which harness/i);
+      expect(posted).toEqual([]);
+    }
+  });
+
+  it("lists neither harness's own apps, and says why", async () => {
+    const r = await cli(["app", "list"], "openclaw", { lockBody: NO_EDITION });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("settings —");
+    for (const appId of ["hermes —", "store —", "openclaw —", "memory-shard —"]) {
+      expect(r.stdout).not.toContain(appId);
+    }
+    expect(r.stdout).toMatch(/harness/i);
+  });
+
+  it("does not report a harness it never resolved when the device cannot answer", async () => {
+    // A dual box mid-update: the web server is restarting, so
+    // /setup-api/harness/active does not answer. Defaulting to one harness
+    // would tell the agent as a durable fact that the box has no dashboard.
+    const dead = "http://127.0.0.1:9";
+    const open = await cli(["app", "open", "hermes"], "dual", { apiBase: dead });
+    expect(open.status).toBe(1);
+    expect(open.stderr).toMatch(/which harness/i);
+    const list = await cli(["app", "list"], "dual", { apiBase: dead });
+    expect(list.stdout).not.toContain("hermes —");
+    expect(list.stdout).not.toContain("store —");
+  });
+
+  it("prints nothing about registering a tool set", async () => {
+    // The MCP's fail-closed notice is about tools/list on a long-lived stdio
+    // server. A CLI invocation registers nothing, and the line names a path
+    // this run may not even be reading.
+    const r = await cli(["app", "list"], "openclaw", { lockBody: NO_EDITION });
+    expect(`${r.stdout}${r.stderr}`).not.toMatch(/tool set|clawbox-mcp/i);
   });
 });
 

@@ -42,7 +42,7 @@ import { fetchHarness } from "@/lib/client-harness";
 import { samePairingToken } from "@/lib/telegram-pairing-token";
 import type { InstalledMeta } from "@/lib/store-categories";
 import { apps, type AppDef } from "@/lib/desktop-apps";
-import { hiddenAppIdsForHarness } from "@/lib/desktop-app-editions";
+import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
 import {
   layoutIcons,
   layoutsEqual,
@@ -94,28 +94,11 @@ function canonicalIconOrder(installedAppIds: readonly string[]): string[] {
   return [...installedAppIds, ...BUILT_IN_APP_IDS.map((id) => `desktop-${id}`)];
 }
 
-/**
- * Should an app the user installed from the OpenClaw store still be shown?
- *
- * An `installed` app IS an OpenClaw skill: its window (InstalledAppSettings)
- * calls /setup-api/apps/settings + /apps/skill-info, both of which shell out to
- * the openclaw binary, and its uninstall reloads the OpenClaw gateway. None of
- * that exists on a Hermes device, so the window would open onto errors — hide
- * it. A WEBAPP (meta.webappUrl) is different: those are ClawBox code-assistant
- * builds served by /setup-api/webapps, harness-independent, and frequently the
- * Hermes agent's OWN output — hiding them would be the regression, not the fix.
- *
- * This filters what is RENDERED only. The persisted installedApps list is never
- * mutated, so a dual box that switches back finds its layout intact.
- *
- * While the harness is still unresolved (null) these stay VISIBLE, unlike the
- * built-in harness apps: they are the majority case on an OpenClaw box, they
- * are not the surface goal B forbids, and hiding then re-showing them would
- * flash the whole desktop on every load.
- */
-function isInstalledAppVisible(meta: InstalledMeta | undefined, harness: string | null): boolean {
-  return harness !== "hermes" || !!meta?.webappUrl;
-}
+// `isInstalledAppVisible` lives in src/lib/desktop-app-editions.ts beside the
+// built-in harness gate, so the desktop and the two agent-facing gates answer
+// it from one copy. It filters what is RENDERED only: the persisted
+// installedApps list is never mutated, so a dual box that switches back finds
+// its layout intact.
 
 // LAN port of the auth-gated Hermes dashboard proxy (scripts/hermes-dashboard-proxy.js).
 const HERMES_DASH_PROXY_PORT = 8090;

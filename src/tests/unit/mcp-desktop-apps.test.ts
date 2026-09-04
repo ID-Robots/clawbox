@@ -47,6 +47,7 @@ function idsFor(edition: "openclaw" | "hermes"): string[] {
 const ctx = (edition: "openclaw" | "hermes"): McpContext => ({
   edition,
   install: edition,
+  appHarness: edition,
   profile: "full",
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
   providers: [],
@@ -161,6 +162,59 @@ describe("ui_open_app accepts every id it advertises", () => {
     for (const id of ["../etc", "a/b", "a b", "a.b", "", "-lead"]) {
       expect(INSTALLED_APP_ID_RE.test(`installed-${id}`), `${id} must be refused`).toBe(false);
     }
+  });
+});
+
+describe("an installed app the desktop would not open", () => {
+  it("is refused on Hermes when it is a store skill, and opened when it is a web app", async () => {
+    // The desktop drops a store-installed OpenClaw skill on Hermes — its window
+    // shells out to the openclaw binary — so answering "Opened <name>" for one
+    // is a tick over a window that never appears. Both gates read the rule from
+    // src/lib/desktop-app-editions.ts.
+    apiGet.mockResolvedValue({
+      installed_apps: ["weather-skill", "notes"],
+      installed_meta: { notes: { webappUrl: "/setup-api/webapps?app=notes" } },
+    });
+    const h = captureRegistrar("hermes");
+    registerDesktopTools(h.reg, ctx("hermes"));
+
+    const skill = await h.call("ui_open_app", { app_id: "installed-weather-skill" });
+    expect(skill.isError).toBe(true);
+    if (skill.isError) expect(skill.error.code).toBe("NOT_FOUND");
+
+    const webapp = await h.call("ui_open_app", { app_id: "installed-notes" });
+    expect(webapp.isError, JSON.stringify(webapp)).toBe(false);
+
+    // …and it is still the owner's to REMOVE, on either harness.
+    const removed = await h.call("app_uninstall", { app_id: "weather-skill", confirm: true });
+    expect(removed.isError, JSON.stringify(removed)).toBe(false);
+  });
+});
+
+describe("when the harness could not be determined", () => {
+  // The MCP resolves its TOOL SET closed onto hermes when the edition lock is
+  // unreadable, because those two answers are nested — hermes is openclaw
+  // without the shell and file tools. The APP sets are not nested, so the same
+  // answer would refuse `store` on a box that has it and tick off `hermes` on
+  // a box that does not. `appHarness: null` is the third answer.
+  const unknown: McpContext = { ...ctx("hermes"), appHarness: null };
+
+  it("advertises and opens only what both harnesses have", async () => {
+    const h = captureRegistrar("hermes");
+    registerDesktopTools(h.reg, unknown);
+    for (const id of HARNESS_ONLY_APP_IDS) {
+      const outcome = await h.call("ui_open_app", { app_id: id });
+      expect(outcome.isError, `${id} must not be opened on an undetermined harness`).toBe(true);
+    }
+    const shared = await h.call("ui_open_app", { app_id: "settings" });
+    expect(shared.isError).toBe(false);
+  });
+
+  it("does not name an app in its own description that it would refuse", async () => {
+    const h = captureRegistrar("hermes");
+    registerDesktopTools(h.reg, unknown);
+    const described = h.tools.get("ui_open_app")?.description ?? "";
+    for (const id of HARNESS_ONLY_APP_IDS) expect(described).not.toContain(id);
   });
 });
 
