@@ -79,6 +79,12 @@ export async function POST(request: Request) {
   // unaffected either way, so this was never a false success — just litter,
   // and litter that makes `~/.openclaw` exist is the kind that misleads the
   // next person debugging an edition question.
+  //
+  // Hermes needs no equivalent of its own either — TASK-553 asked, and the
+  // answer is no: neither Hermes nor its ClawBox proxy holds a list a rename
+  // could invalidate. The reasoning and the proof are in
+  // src/tests/unit/hermes-dashboard-proxy-renamed-host.test.ts.
+
   // Which half of the gateway leg failed, if either — the two need different
   // words, and one try around both would have blamed a gateway that was never
   // restarted for a failed origins write. `null` means nothing is outstanding:

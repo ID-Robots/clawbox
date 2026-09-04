@@ -157,8 +157,12 @@ const ALLOWED_HOSTS = new Set(
     .filter(Boolean),
 );
 
-// Single mDNS label — letters/digits/hyphens, no dots. Mirrors the same regex in
-// src/lib/gateway-proxy.ts so the two host checks can't drift apart.
+// Single mDNS label — letters/digits/hyphens, no dots. The REGEX is shared with
+// src/lib/gateway-proxy.ts (and with the rename route's own HOSTNAME_RE, so
+// every name a rename can produce is a label this accepts). The POLICY around
+// it deliberately is not the same: this proxy accepts any `<label>.local`
+// because nothing restarts it on a rename, while the gateway path reflects only
+// a configured or cached host. TASK-553.
 const MDNS_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 let cachedMdnsHost; // undefined = not computed yet, null = unusable hostname
