@@ -1640,6 +1640,44 @@ describe("after a restart", () => {
     expect(run?.error).toMatch(/restarted/);
     expect(JSON.parse(fs.readFileSync(runsFile(), "utf-8"))[0].status).toBe("failed");
   });
+
+  it("forgets the process group a settled run left behind, because the restart took it", async () => {
+    // The recorded number belonged to the cgroup this restart replaced, and
+    // Linux may already have given it to something else — an offer to end a
+    // process nobody can still identify is worse than no offer at all.
+    fs.writeFileSync(runsFile(), JSON.stringify([{
+      id: "run-leftover1",
+      task: "left a server listening",
+      directory: home,
+      projectId: null,
+      source: "owner",
+      status: "completed",
+      startedAt: Date.now() - 60_000,
+      completedAt: Date.now() - 30_000,
+      sessionId: "sess-left",
+      model: null,
+      summary: null,
+      error: null,
+      numTurns: 2,
+      filesTouched: [],
+      commandsRun: 0,
+      permissionDenials: 0,
+      progress: [],
+      exitCode: 0,
+      pgid: 4242,
+      leftover: true,
+    }]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    // Nothing was settled, so the operator's count stays at zero.
+    expect(lib.reconcileAfterRestart()).toBe(0);
+    const run = lib.getRun("run-leftover1");
+    expect(run?.pgid).toBeNull();
+    expect(run?.leftover).toBe(false);
+    const onDisk = JSON.parse(fs.readFileSync(runsFile(), "utf-8"))[0];
+    expect(onDisk.pgid).toBeNull();
+    expect(onDisk.leftover).toBe(false);
+  });
 });
 
 describe("the pull request on disk", () => {

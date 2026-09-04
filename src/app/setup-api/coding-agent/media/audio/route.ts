@@ -7,8 +7,8 @@ import { mediaError, resolveMediaTarget, writeMediaFile } from "@/lib/coding-age
 export const dynamic = "force-dynamic";
 
 /**
- * POST { path, text } → a WAV of that text, spoken in this box's own voice and
- * written into the active coding run's folder.
+ * POST { path, text } → that text spoken in this box's own voice, written
+ * into the active coding run's folder as the file the caller named.
  *
  * The box already speaks — the chat plays a reply back through
  * `src/lib/voice-speak.ts` — and a run building anything with sound had no way
@@ -33,6 +33,24 @@ export const dynamic = "force-dynamic";
 /** Below this a WAV is a header and nothing else — the same floor voice-speak uses. */
 const MIN_AUDIO_BYTES = 1024;
 
+/**
+ * What the file may be called, and how to tell whether the bytes agree.
+ *
+ * The chain answers WAV on an OpenClaw box, but a Hermes box speaks through
+ * its own harness and hands back whatever that produced. Writing those bytes
+ * into the `.wav` the caller asked for would put a lie on disk that the next
+ * thing to open the file — a browser's audio element, the run's own page —
+ * would trust, so the name has to be earned rather than assumed.
+ */
+const AUDIO_FORMATS: { extension: string; matches: (bytes: Buffer) => boolean }[] = [
+  // "RIFF....WAVE": the container's own name, at the two places it appears.
+  { extension: ".wav", matches: (b) => b.length > 12 && b.toString("latin1", 0, 4) === "RIFF" && b.toString("latin1", 8, 12) === "WAVE" },
+  // An MPEG audio frame, or the ID3 tag that so often precedes one.
+  { extension: ".mp3", matches: (b) => b.length > 3 && (b.toString("latin1", 0, 3) === "ID3" || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0)) },
+  // "OggS", which is what an Opus stream arrives in.
+  { extension: ".ogg", matches: (b) => b.length > 4 && b.toString("latin1", 0, 4) === "OggS" },
+];
+
 export async function POST(request: Request) {
   const unauthorized = await requireSession(request);
   if (unauthorized) return unauthorized;
@@ -49,9 +67,11 @@ export async function POST(request: Request) {
   const text = typeof body.text === "string" ? speechTextFor(body.text, SPEECH_MAX_CHARS) : "";
   if (!text) return mediaError("Say what should be spoken.", "bad_request", 400);
 
+  const asked = typeof body.path === "string" ? body.path.trim().toLowerCase() : "";
+  const wanted = AUDIO_FORMATS.find((f) => asked.endsWith(f.extension)) ?? AUDIO_FORMATS[0];
   const resolved = await resolveMediaTarget({
     path: body.path,
-    extension: ".wav",
+    extension: wanted.extension,
     kind: "audio",
     overwrite: body.overwrite === true,
   });
@@ -71,6 +91,17 @@ export async function POST(request: Request) {
   }
   const engine = spoken.headers.get("X-ClawBox-Voice-Engine");
   const mime = spoken.headers.get("content-type")?.split(";")[0].trim() ?? "audio/wav";
+  if (!wanted.matches(audio)) {
+    const actual = AUDIO_FORMATS.find((f) => f.matches(audio));
+    return mediaError(
+      actual
+        ? `This box's voice answered ${actual.extension.slice(1).toUpperCase()}, not ${wanted.extension.slice(1).toUpperCase()}. Ask again for a file ending in ${actual.extension}.`
+        : "This box's voice answered in a format this tool cannot name.",
+      "format",
+      409,
+      actual ? { extension: actual.extension, mime } : { mime },
+    );
+  }
   const written = await writeMediaFile(target, "audio", audio);
   if (!written.ok) return written.response;
   return NextResponse.json(

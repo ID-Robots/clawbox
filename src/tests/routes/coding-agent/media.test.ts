@@ -57,7 +57,9 @@ vi.mock("@/lib/voice-speak", () => ({
 // (it re-encodes to a real PNG on the box, and to nothing here if it cannot
 // load — both of which the route already treats as fine).
 const PNG = Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), Buffer.alloc(64, 7)]);
-const WAV = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4096, 3)]);
+// A real RIFF/WAVE header, because the route now refuses bytes whose container
+// does not match the name it was asked to write.
+const WAV = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4, 0), Buffer.from("WAVE"), Buffer.alloc(4096, 3)]);
 
 const RUN_ID = "run-abc12345";
 let base: string;
@@ -253,6 +255,33 @@ describe("what the far side answers", () => {
     expect(json.engine).toBe("local");
     expect(json.bytes).toBe(WAV.length);
     expect(json.used).toBe(1);
+  });
+
+  it("refuses to put a name on the file that its bytes do not earn", async () => {
+    // A Hermes box speaks through its own harness, which may answer MP3. The
+    // .wav the run asked for would be a lie the next thing to open the file
+    // believes, so nothing is written and the run is told what to ask for.
+    const mp3 = Buffer.concat([Buffer.from("ID3"), Buffer.alloc(4096, 9)]);
+    speakReply.mockResolvedValueOnce(
+      new Response(new Uint8Array(mp3), { headers: { "Content-Type": "audio/mpeg", "X-ClawBox-Voice-Engine": "local" } }),
+    );
+    const res = await postAudio(body({ path: "intro.wav", text: "Hello" }, "audio"));
+    expect(res.status).toBe(409);
+    const json = await res.json();
+    expect(json.code).toBe("format");
+    expect(json.extension).toBe(".mp3");
+    expect(fs.existsSync(path.join(workingDir, "intro.wav"))).toBe(false);
+    expect(noteRunMedia).not.toHaveBeenCalled();
+  });
+
+  it("writes the file when the run asks for the name the voice actually answers in", async () => {
+    const mp3 = Buffer.concat([Buffer.from("ID3"), Buffer.alloc(4096, 9)]);
+    speakReply.mockResolvedValueOnce(
+      new Response(new Uint8Array(mp3), { headers: { "Content-Type": "audio/mpeg", "X-ClawBox-Voice-Engine": "local" } }),
+    );
+    const res = await postAudio(body({ path: "intro.mp3", text: "Hello" }, "audio"));
+    expect(res.status).toBe(200);
+    expect(fs.existsSync(path.join(workingDir, "intro.mp3"))).toBe(true);
   });
 
   it("refuses an empty prompt or an empty line before it spends anything", async () => {

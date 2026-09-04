@@ -1800,15 +1800,28 @@ function loadRuns(): CodingRun[] {
 export function reconcileAfterRestart(): number {
   const list = loadRuns();
   let repaired = 0;
+  let changed = false;
   for (const run of list) {
+    // A recorded process group belonged to the cgroup this restart replaced, so
+    // whatever it named is gone — and Linux is free to hand that number to
+    // something else, which the Kill button would then signal in this run's
+    // name. Forgetting it costs nothing: `spawnRun` records a fresh group, and
+    // an offer to end a process nobody can still identify is worse than no
+    // offer at all.
+    if (run.pgid !== null || run.leftover) {
+      run.pgid = null;
+      run.leftover = false;
+      changed = true;
+    }
     if (run.status === "running" && !live.has(run.id)) {
       run.status = "failed";
       run.error = "The ClawBox web server restarted while this run was in progress. Start it again.";
       run.completedAt = Date.now();
       repaired += 1;
+      changed = true;
     }
   }
-  if (repaired > 0) {
+  if (changed) {
     try {
       writeAll(list);
     } catch (err) {
@@ -2645,7 +2658,10 @@ export function noteRunMedia(runId: string, kind: keyof RunMedia, file: string |
   const run = loadRuns().find((r) => r.id === runId);
   if (!run) return 0;
   run.mediaGenerated[kind] += 1;
-  if (file) noteFile(run, relativeToRun(run, file));
+  // Evidence is listed with the run in its own right, and counting it as work
+  // made a review pass that changed nothing report a changed file and arm a
+  // review of no work — the same reason the stream parser skips it.
+  if (file && !isEvidencePath(run, file)) noteFile(run, relativeToRun(run, file));
   persist(true);
   return run.mediaGenerated[kind];
 }

@@ -159,7 +159,7 @@ export function registerMediaTools(reg: Registrar): void {
       "Speak a line of text in this device's own voice and save it as a WAV in your project — narration, a greeting, a spoken cue. Keep clips short and few: the device has one voice and the chat shares it, so a refusal that names memory or says it is busy means try once more later and then carry on without sound.",
       {
         text: zText(4_000, "What to say. Plain sentences; formatting marks are stripped before it is spoken."),
-        path: zText(512, "Where to save it, relative to your working folder, e.g. audio/intro.wav. Must end in .wav."),
+        path: zText(512, "Where to save it, relative to your working folder, e.g. audio/intro.wav. Must end in .wav, .mp3 or .ogg, and the box only writes it when the voice really answered in that format."),
       },
       { editions: ["openclaw", "hermes"], family: "browser", readOnly: false, maxChars: 2_000 },
       async ({ text: line, path: given }: { text: string; path: string }) => {

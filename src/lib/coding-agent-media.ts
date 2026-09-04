@@ -57,6 +57,10 @@ export type MediaErrorCode =
   | "outside"
   | "bad_extension"
   | "exists"
+  // The bytes that came back are not the container the file name promises, so
+  // nothing was written: a Hermes box speaks through its own harness, and the
+  // next thing to open the file would trust the name over its contents.
+  | "format"
   | "write_failed"
   // What the far side answered, when the refusal was not this box's. The MCP
   // rules branch on the HTTP status, but the code is what a person reading the
