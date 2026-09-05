@@ -69,7 +69,13 @@ function appListenerOwned(port, directory) {
     const out = require("child_process").execFileSync("ss", ["-H", "-l", "-t", "-n", "-p", `sport = :${port}`], { encoding: "utf-8", timeout: 5000, env: { PATH: process.env.PATH || "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" } });
     let real = directory;
     try { real = fs.realpathSync(directory); } catch {}
-    for (const m of out.matchAll(/pid=(\d+)/g)) {
+    // Only a row bound where 127.0.0.1 reaches it vouches for the port.
+    const reachable = out.split("\n").filter((row) => {
+      const local = row.trim().split(/\s+/)[3] || "";
+      const host = local.slice(0, local.lastIndexOf(":"));
+      return ["127.0.0.1", "0.0.0.0", "*", "[::]", "::", "[::1]"].includes(host);
+    }).join("\n");
+    for (const m of reachable.matchAll(/pid=(\d+)/g)) {
       try {
         const cwd = fs.readlinkSync(`/proc/${m[1]}/cwd`);
         const rel = path.relative(real, cwd);
@@ -88,8 +94,19 @@ function resolveAppPort(reqUrl) {
   const id = m[1];
   const root = process.env.CLAWBOX_ROOT || __dirname;
   const meta = readJsonSync(path.join(root, "data", "webapps", id, "meta.json"));
-  if (!meta || !isProxyablePort(meta.port) || typeof meta.directory !== "string" || !path.isAbsolute(meta.directory)) return null;
-  if (!appListenerOwned(meta.port, meta.directory)) return null;
+  if (!meta || !isProxyablePort(meta.port)) return null;
+  // The project folder: on the registration, or — for one that predates the
+  // field — the folder of that id under the owner's project folder or the
+  // code projects, the way src/lib/app-proxy.ts's projectFolderFor answers.
+  let directory = typeof meta.directory === "string" && path.isAbsolute(meta.directory) ? meta.directory : null;
+  if (!directory) {
+    const config = readJsonSync(path.join(root, "data", "config.json"));
+    const projects = config && typeof config.coding_agent_default_directory === "string" && path.isAbsolute(config.coding_agent_default_directory) ? config.coding_agent_default_directory : null;
+    for (const candidate of [...(projects ? [path.join(projects, id)] : []), path.join(root, "data", "code-projects", id)]) {
+      try { if (fs.statSync(candidate).isDirectory()) { directory = candidate; break; } } catch {}
+    }
+  }
+  if (!directory || !appListenerOwned(meta.port, directory)) return null;
   return { port: meta.port, strip: meta.stripBasePath === true, id };
 }
 

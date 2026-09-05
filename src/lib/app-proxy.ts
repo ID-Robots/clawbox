@@ -68,7 +68,7 @@ export const APP_PROXY_CSP = "sandbox allow-scripts allow-forms allow-popups all
 
 /** How long a listener verdict is trusted: an "owned" one for this long, a refusal for a fraction of it, so a server just started is picked up on the next try. */
 export const LISTENER_CHECK_TTL_MS = 30_000;
-const LISTENER_REFUSAL_TTL_MS = 3_000;
+export const LISTENER_REFUSAL_TTL_MS = 3_000;
 
 export interface AppProxyTarget {
   id: string;
@@ -183,7 +183,12 @@ async function checkListener(port: number, directory: string): Promise<ListenerV
   if (r.code !== 0) return "unverifiable";
   const lines = r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
   if (lines.length === 0) return "not_listening";
-  const pids = [...new Set([...r.stdout.matchAll(/pid=(\d+)/g)].map((m) => Number(m[1])))];
+  // Only a row the proxy can actually reach at 127.0.0.1 vouches for the
+  // port: a project's listener bound to some other local address must not
+  // authorise a different service answering on loopback.
+  const reachable = lines.filter((l) => isLoopbackListenRow(l));
+  if (reachable.length === 0) return "not_listening";
+  const pids = [...new Set([...reachable.join("\n").matchAll(/pid=(\d+)/g)].map((m) => Number(m[1])))];
   if (pids.length === 0) return "not_owned";
   const real = await fs.promises.realpath(directory).catch(() => directory);
   for (const pid of pids) {
@@ -191,6 +196,14 @@ async function checkListener(port: number, directory: string): Promise<ListenerV
     if (cwd && isInside(cwd, real)) return "owned";
   }
   return "not_owned";
+}
+
+/** Is this `ss -H -ltn` row bound where 127.0.0.1 reaches it — loopback or every address? */
+export function isLoopbackListenRow(row: string): boolean {
+  // State Recv-Q Send-Q Local:Port Peer:Port [Process]
+  const local = row.split(/\s+/)[3] ?? "";
+  const host = local.slice(0, local.lastIndexOf(":"));
+  return host === "127.0.0.1" || host === "0.0.0.0" || host === "*" || host === "[::]" || host === "::" || host === "[::1]" || host === "::ffff:127.0.0.1" || host === "[::ffff:127.0.0.1]";
 }
 
 /** The sentence for a listener verdict, for the owner. */

@@ -111,6 +111,30 @@ describe("whose listener it is", () => {
     } finally {
       await mine.close().catch(() => undefined);
     }
+    // A refusal is forgotten fast, so a server started a moment later is
+    // picked up: refused first, then owned once the TTL has passed.
+    lib._resetListenerCacheForTests();
+    const port = mine.port;
+    expect(await lib.listenerOwnedBy(port, process.cwd())).toBe("not_listening");
+    const server = http.createServer((_req, res) => { res.end("ok"); });
+    await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+    try {
+      expect(await lib.listenerOwnedBy(port, process.cwd())).toBe("not_listening");
+      await new Promise((resolve) => setTimeout(resolve, lib.LISTENER_REFUSAL_TTL_MS + 200));
+      expect(await lib.listenerOwnedBy(port, process.cwd())).toBe("owned");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("counts only a row bound where 127.0.0.1 reaches it", () => {
+    expect(lib.isLoopbackListenRow('LISTEN 0 511 127.0.0.1:4230 0.0.0.0:* users:(("node",pid=1,fd=18))')).toBe(true);
+    expect(lib.isLoopbackListenRow("LISTEN 0 511 0.0.0.0:4230 0.0.0.0:*")).toBe(true);
+    expect(lib.isLoopbackListenRow("LISTEN 0 511 *:4230 *:*")).toBe(true);
+    expect(lib.isLoopbackListenRow("LISTEN 0 511 [::]:4230 [::]:*")).toBe(true);
+    // Bound to the LAN address only: 127.0.0.1 does not reach it, so it vouches for nothing.
+    expect(lib.isLoopbackListenRow('LISTEN 0 511 192.168.1.20:4230 0.0.0.0:* users:(("node",pid=1,fd=18))')).toBe(false);
+    expect(lib.isLoopbackListenRow("")).toBe(false);
   });
 });
 

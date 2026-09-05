@@ -290,6 +290,19 @@ function humanSize(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024 ** 2))} MB`;
 }
 
+/**
+ * Imports run ONE AT A TIME: the free-space check reads a snapshot, and two
+ * copies passing the same snapshot together could take the reserve with
+ * them. A promise chain is the whole lock — a request waits for the one
+ * before it, whether that one succeeded or not.
+ */
+let importChain: Promise<unknown> = Promise.resolve();
+function oneAtATime<T>(work: () => Promise<T>): Promise<T> {
+  const run = importChain.then(work, work);
+  importChain = run.catch(() => undefined);
+  return run;
+}
+
 /** Room for `bytes` more on the project folder's disk, keeping the reserve, or the refusal. */
 async function roomFor(projectsRoot: string, bytes: number): Promise<{ ok: false; reason: ImportReason; detail: string } | null> {
   const free = await freeBytes(projectsRoot);
@@ -364,7 +377,11 @@ export function expandHome(input: string): string {
  * Copy a folder on the box into the project folder. `source` is what the
  * owner typed (absolute, or `~/…`).
  */
-export async function importFolder(input: { source: string; projectsRoot: string | null }): Promise<ImportOutcome> {
+export function importFolder(input: { source: string; projectsRoot: string | null }): Promise<ImportOutcome> {
+  return oneAtATime(() => importFolderNow(input));
+}
+
+async function importFolderNow(input: { source: string; projectsRoot: string | null }): Promise<ImportOutcome> {
   if (!input.projectsRoot) return { ok: false, reason: "no_project_folder", detail: "Set a project folder in the Coding Agent's settings first." };
   const typed = expandHome(input.source ?? "");
   if (!typed || !path.isAbsolute(typed)) return { ok: false, reason: "invalid", detail: "Give the folder as an absolute path, e.g. /home/clawbox/old-site or ~/old-site." };
@@ -375,6 +392,8 @@ export async function importFolder(input: { source: string; projectsRoot: string
   // fence that stands on its own — said as "begins with home plus a
   // separator" on the resolved path, before any read of it.
   const home = path.resolve(os.homedir());
+  // A home of "/" would make the fence the whole disk.
+  if (home === path.sep) return { ok: false, reason: "refused", detail: "This box's home directory is the filesystem root; nothing can be imported from it." };
   if (!source.startsWith(withSep(home))) {
     return { ok: false, reason: "refused", detail: `Only a folder under ${home} can be imported.` };
   }
@@ -447,7 +466,11 @@ export async function importFolder(input: { source: string; projectsRoot: string
 const FULL_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 /** Clone one of the connected account's repositories into the project folder. */
-export async function importGitHubRepo(input: { fullName: string; projectsRoot: string | null }): Promise<ImportOutcome> {
+export function importGitHubRepo(input: { fullName: string; projectsRoot: string | null }): Promise<ImportOutcome> {
+  return oneAtATime(() => importGitHubRepoNow(input));
+}
+
+async function importGitHubRepoNow(input: { fullName: string; projectsRoot: string | null }): Promise<ImportOutcome> {
   if (!input.projectsRoot) return { ok: false, reason: "no_project_folder", detail: "Set a project folder in the Coding Agent's settings first." };
   const fullName = (input.fullName ?? "").trim();
   if (!FULL_NAME_RE.test(fullName) || fullName.includes("..")) return { ok: false, reason: "invalid", detail: "Name the repository as owner/name." };

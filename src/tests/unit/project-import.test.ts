@@ -170,6 +170,24 @@ describe("importFolder", () => {
     expect(fs.lstatSync(path.join(projects, "linky", "escape")).isSymbolicLink()).toBe(true);
   });
 
+  it("refuses everything when the home directory is the filesystem root", async () => {
+    process.env.HOME = "/";
+    vi.resetModules();
+    const rootLib = await import("@/lib/project-import");
+    expect(await rootLib.importFolder({ source: "/etc", projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });
+    process.env.HOME = home;
+  });
+
+  it("runs imports one at a time, so two of one name cannot both pass the checks", async () => {
+    const a = makeSource("twin");
+    const [first, second] = await Promise.all([
+      lib.importFolder({ source: a, projectsRoot: projects }),
+      lib.importFolder({ source: a, projectsRoot: projects }),
+    ]);
+    expect([first.ok, second.ok].sort()).toEqual([false, true]);
+    expect(fs.existsSync(path.join(projects, "twin", "README.md"))).toBe(true);
+  });
+
   it("refuses a link under home that leads outside it", async () => {
     fs.symlinkSync(os.tmpdir(), path.join(home, "out"));
     expect(await lib.importFolder({ source: path.join(home, "out"), projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });

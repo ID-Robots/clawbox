@@ -16,7 +16,7 @@
  * folder is typed in Settings: there is no folder picker on the box, and
  * the Files app browses the home directory only.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD_SURFACE, FIELD, INSET_SURFACE, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 
@@ -69,6 +69,10 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
   /** The repository (or "folder") an import is running for; null when none is. */
   const [importing, setImporting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The current translation, for a fetch memoised once: a language switched
+  // while the panel is up must word the next failure in the new one.
+  const tRef = useRef(t);
+  useEffect(() => { tRef.current = t; }, [t]);
 
   // The listing as a value: the effect below and the Retry button both ask
   // for it and set the state when it ARRIVES — never in the effect's own
@@ -79,12 +83,10 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
       const data = await res.json().catch(() => ({})) as { login?: string; repos?: ImportableRepo[]; truncated?: boolean; error?: string; kind?: string };
       if (res.ok) return { kind: "ready", login: data.login ?? "", repos: Array.isArray(data.repos) ? data.repos : [], truncated: data.truncated === true };
       if (data.kind === "not_connected" || data.kind === "no_gh") return { kind: "not_connected" };
-      return { kind: "error", message: data.error || t("codingAgent.importFailed") };
+      return { kind: "error", message: data.error || tRef.current("codingAgent.importFailed") };
     } catch {
-      return { kind: "error", message: t("codingAgent.importFailed") };
+      return { kind: "error", message: tRef.current("codingAgent.importFailed") };
     }
-    // `t` changes with the language; the listing does not depend on it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
