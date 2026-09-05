@@ -11,9 +11,12 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Every other workflow here caps its job (codeql 30, e2e-tests 30,
-    # build-identity 20, e2e-install 90); this one ran to GitHub's six-hour
-    # default. It matters now: raising the per-test ceiling for the files that
+    # The four workflows that run real work cap their jobs (codeql 30,
+    # e2e-tests 30, build-identity 20, e2e-install 90); this one — the only job
+    # in the repo that runs the whole vitest suite — ran to GitHub's six-hour
+    # default. (The `comment` jobs here and in the e2e workflows, and
+    # docs-deploy / issue-triage / pr-review, are still uncapped; each is a
+    # short API call, and none of them was the one burning a runner.) It matters now: raising the per-test ceiling for the files that
     # start real processes makes a genuine hang that much more expensive to
     # surface, and this is the backstop that keeps "a hung test must not cost a
     # day" true without weakening the 5 s default everywhere else. TASK-702.

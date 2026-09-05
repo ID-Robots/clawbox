@@ -36,7 +36,25 @@ const ROOT = path.join(REPO, "src", "tests");
 const rel = (p: string) => path.relative(REPO, p).split(path.sep).join("/");
 
 /**
- * Comments blanked, length and newlines preserved. Strings are WALKED but kept.
+ * Where a `/` can begin a REGEX rather than a division.
+ *
+ * The walker has to know, and it is not decoration: a regex containing an odd
+ * number of quotes — `/["\']/`, which this very file writes — puts a quote-only
+ * walker into "inside a string" state and it stays desynced until the next
+ * matching quote, then desynced the OTHER way inside a real string. Both
+ * directions were reproduced and both are SILENT: a commented-out
+ * `vi.setConfig` is read as a declaration, and a real `execFileSync(` gets
+ * blanked as part of a "comment" the walker found inside `"https://…"`.
+ *
+ * The rule is the classic one every lexer uses: a `/` after a value (an
+ * identifier, a literal, a closing bracket) is division; after an operator,
+ * punctuation, the start of input, or one of these keywords, it opens a regex.
+ */
+const REGEX_MAY_FOLLOW = /(?:^|[^\w$)\]}'"`])(?:return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)$|[(,=:[!&|?{};+\-*%~^<>]$|^$/;
+
+/**
+ * Comments blanked, length and newlines preserved. Strings and regexes are
+ * WALKED but kept.
  *
  * Every pattern below is read against this rather than the raw file: a
  * `vi.mock("child_process")` written inside a comment would otherwise EXCLUDE a
@@ -47,11 +65,13 @@ const rel = (p: string) => path.relative(REPO, p).split(path.sep).join("/");
  * Strings are kept because the facts this reads LIVE in them: the module
  * specifier of `from "child_process"` is a string, and blanking it would make
  * every file look like it starts no process at all. They are still walked, so a
- * `//` inside a URL cannot be mistaken for the start of a comment.
+ * `//` inside a URL cannot be mistaken for the start of a comment — and so is a
+ * regex literal, for the reason above it.
  */
 function code(source: string): string {
   const out = source.split("");
   let i = 0;
+  let prev = "";
   const blank = (from: number, to: number) => {
     for (let k = from; k < to && k < out.length; k++) if (out[k] !== "\n") out[k] = " ";
   };
@@ -70,7 +90,24 @@ function code(source: string): string {
       let j = i + 1;
       while (j < source.length && source[j] !== quote) j += source[j] === "\\" ? 2 : 1;
       i = j + 1;
+      prev = quote;
+    } else if (source[i] === "/" && REGEX_MAY_FOLLOW.test(prev)) {
+      // A regex body, character classes included: `/[/]/` is legal and the `/`
+      // inside the class does not close it.
+      let j = i + 1;
+      let inClass = false;
+      while (j < source.length && source[j] !== "\n") {
+        const c = source[j];
+        if (c === "\\") { j += 2; continue; }
+        if (c === "[") inClass = true;
+        else if (c === "]") inClass = false;
+        else if (c === "/" && !inClass) break;
+        j++;
+      }
+      i = j + 1;
+      prev = "/";
     } else {
+      if (!/\s/.test(source[i])) prev = (prev + source[i]).slice(-24);
       i++;
     }
   }
@@ -88,10 +125,18 @@ function code(source: string): string {
  */
 const CHILD_PROCESS_IMPORT = new RegExp(
   [
-    // ESM: `import * as cp from`, `import { a, b as c } from`, `import cp from`
-    String.raw`import\s+(?:\*\s+as\s+(?<esmNs>\w+)|\{(?<esmNamed>[^}]*)\}|(?<esmDefault>\w+))\s+from\s+["'](?:node:)?child_process["']`,
-    // CJS: `const { a, b: c } = require(...)`, `const cp = require(...)`
-    String.raw`(?:const|let|var)\s+(?:\{(?<cjsNamed>[^}]*)\}|(?<cjsNs>\w+))\s*=\s*require\(\s*["'](?:node:)?child_process["']\s*\)`,
+    // ESM: `import * as cp from`, `import { a, b as c } from`, `import cp from`,
+    // and `import cp, { a } from` — the last one bound nothing before, because
+    // the alternation had no branch for a default clause FOLLOWED by a named
+    // one, so a file writing the two together dropped out of the check.
+    String.raw`import\s+(?:\*\s+as\s+(?<esmNs>\w+)|(?:(?<esmDefaultNamed>\w+)\s*,\s*)?\{(?<esmNamed>[^}]*)\}|(?<esmDefault>\w+))\s+from\s+["'](?:node:)?child_process["']`,
+    // CJS and DYNAMIC: `const { a, b: c } = require(...)`, `const cp = require(...)`,
+    // `const { execFileSync } = await import("node:child_process")`. The dynamic
+    // form is not hypothetical — it is already the house style for a value
+    // import in this tree (`routes/hermes/oauth-wizard-handoff.test.ts`,
+    // `unit/instrumentation-terminal-server.test.ts`), and a new suite written
+    // that way with nothing mocked would have got no ceiling and no complaint.
+    String.raw`(?:const|let|var)\s+(?:\{(?<cjsNamed>[^}]*)\}|(?<cjsNs>\w+))\s*=\s*(?:await\s+)?(?:require|import)\(\s*["'](?:node:)?child_process["']\s*\)`,
   ].join("|"),
   "g",
 );
@@ -124,6 +169,9 @@ function processStarters(source: string): string[] {
     // out of the check — which is the direction that loses the guard.
     const g = m.groups ?? {};
     const namespace = g.esmNs || g.cjsNs || g.esmDefault;
+    // A default clause beside a named one binds the module object too, and its
+    // named specifiers are read below in the same pass.
+    if (g.esmDefaultNamed) for (const starter of STARTERS) names.push(`${g.esmDefaultNamed}.${starter}`);
     if (namespace) {
       // `import * as cp` / `const cp = require(...)` / a default import: any
       // starter reached off the module object.
@@ -161,14 +209,28 @@ function startsAProcess(source: string): boolean {
  * `git` calls go through the untouched `execFileSync`.
  */
 function mocksChildProcessWholly(source: string): boolean {
-  const at = source.search(/vi\.mock\(\s*["'](?:node:)?child_process["']/);
-  if (at < 0) return false;
-  return !/importOriginal|importActual/.test(source.slice(at, at + 500));
+  // The FACTORY'S SHAPE, not an identifier. Asking whether `importOriginal` or
+  // `importActual` appears nearby reads the author's choice of parameter name:
+  // `gateway-restart-hermes.test.ts` and `gateway-restart-readiness.test.ts`
+  // both write `async (orig) => ({ ...(await orig()), … })`, which spreads the
+  // real module and is emphatically not whole — and both were called whole.
+  // vitest 4's `vi.mock(path, { spy: true })` is the same trap with no factory
+  // function at all: the real implementations still run.
+  //
+  // So: whole ONLY when the call has no second argument. Anything else keeps
+  // some of the original as far as this guard is concerned, which errs toward
+  // counting a file as a spawner — the over-report direction, where the cost is
+  // a ceiling a file did not need and the alternative is a silent hole.
+  return new RegExp(String.raw`vi\.mock\(\s*["'](?:node:)?child_process["']\s*\)`).test(source);
 }
 
 /** The house form: `vi.setConfig({ testTimeout: …, hookTimeout: … })` at file top. */
-function declared(source: string, key: "testTimeout" | "hookTimeout"): number | null {
-  const call = /^\s*vi\.setConfig\(\s*\{([\s\S]*?)\}\s*\)/m.exec(code(source));
+function declared(stripped: string, key: "testTimeout" | "hookTimeout"): number | null {
+  // Takes the ALREADY-stripped form, like its two neighbours above. It used to
+  // take the raw source and re-run `code()` itself — a third convention one
+  // screenful from the other two, and passing `f.source` to `startsAProcess` by
+  // the same reflex silently over-reports.
+  const call = /^\s*vi\.setConfig\(\s*\{([\s\S]*?)\}\s*\)/m.exec(stripped);
   if (!call) return null;
   const match = new RegExp(`\\b${key}\\s*:\\s*([0-9_]+)`).exec(call[1]);
   return match ? Number(match[1].replace(/_/g, "")) : null;
@@ -187,6 +249,18 @@ const MIN_TIMEOUT_MS = 15_000;
  * fake-timer probe fan-out whose module imports dominate under load. A pattern
  * broad enough to catch these automatically would catch most of the component
  * suite with it.
+ */
+/**
+ * ...and the SIBLING ceiling, named so nobody has to rediscover it: Testing
+ * Library's `asyncUtilTimeout` (`src/tests/setup.ts`) bounds a SINGLE `findBy*`
+ * wait at 5 s, and nothing here raises it. That is deliberate rather than
+ * missed. The failures this file is about report vitest's own "Test timed out
+ * in 5000ms", which is several sub-5 s waits in series and is exactly what
+ * `testTimeout` governs; a single wait that needed longer would fail with
+ * "Unable to find an element…" instead. Raising `asyncUtilTimeout` to 15 s was
+ * tried on this branch and REVERTED — the same cases still failed, one at
+ * 15.5 s and one on an outright assertion at 387 ms — so under heavy parallel
+ * load something is not arriving at all, which no budget fixes. Its own card.
  */
 const ALSO_REQUIRED = [
   "src/tests/routes/chat/capabilities-parallel.test.ts",
@@ -256,13 +330,106 @@ describe("test-timeout hygiene", () => {
     expect(startsAProcess(code('const m = /x/; m.exec("s");'))).toBe(false);
   });
 
+  // Every fixture below joins the module specifier to the rest at RUNTIME.
+  // `code()` deliberately KEEPS strings, so a spelled-out
+  // `from "child_process"` anywhere in this file — inside a string literal
+  // included — would make the guard file itself a spawner and report itself as
+  // an offender. Which is the detector working, and a confusing way to find out.
+  const CP = '"node:child_process"';
+
+  it("is not thrown off by a regex literal containing a quote", () => {
+    // The walker knows strings and comments; a regex is neither, and
+    // `/["\']/` — which this very file writes — puts a quote-only walker into
+    // "inside a string" state until the next matching quote, then leaves it
+    // desynced the OTHER way inside a real string. Both directions are silent,
+    // which is why they get a case each.
+    const spawner = `import { execFileSync } from ${CP};`;
+    const quoteRegex = 'const QUOTED = /["\']/;';
+
+    // A: a commented-out declaration must not read as a declaration. This is
+    // the exact thing `code()`'s docblock says it exists to prevent.
+    const commentedOut = [
+      spawner,
+      quoteRegex,
+      "/*",
+      "vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });",
+      "*/",
+      'execFileSync("git", ["--version"]);',
+    ].join("\n");
+    expect(declared(code(commentedOut), "testTimeout")).toBeNull();
+    expect(startsAProcess(code(commentedOut))).toBe(true);
+
+    // B: a real call must not be blanked. Desynced into "code" state inside a
+    // string, the walker read the `//` of a URL as a comment and blanked the
+    // rest of the line — the spawner call with it.
+    const urlThenCall = [
+      spawner,
+      quoteRegex,
+      'const url = "https://example.com"; execFileSync("git", ["--version"]);',
+    ].join("\n");
+    expect(startsAProcess(code(urlThenCall))).toBe(true);
+  });
+
+  it("follows a dynamic import, and a default clause beside a named one", () => {
+    // `const { execFileSync } = await import(…)` is already the house form for a
+    // value import in this tree, and `import cp, { execFileSync } from …` had no
+    // branch in the alternation at all. A new suite in either style would have
+    // got no ceiling and no complaint.
+    const dynamic = [
+      `const { execFileSync } = await import(${CP});`,
+      'execFileSync("git", ["--version"]);',
+    ].join("\n");
+    expect(startsAProcess(code(dynamic))).toBe(true);
+
+    const dynamicNs = [
+      `const cp = await import(${CP});`,
+      'cp.execFileSync("git", ["--version"]);',
+    ].join("\n");
+    expect(startsAProcess(code(dynamicNs))).toBe(true);
+
+    const defaultAndNamed = [
+      `import cp, { execFileSync } from ${CP};`,
+      'execFileSync("git", ["--version"]);',
+    ].join("\n");
+    expect(startsAProcess(code(defaultAndNamed))).toBe(true);
+
+    // …and the default binding of that same import is followed too.
+    const defaultAndNamedNs = [
+      `import cp, { spawnSync } from ${CP};`,
+      'cp.execFileSync("git", ["--version"]);',
+    ].join("\n");
+    expect(startsAProcess(code(defaultAndNamedNs))).toBe(true);
+  });
+
+  it("calls a mock whole only when it replaces the module outright", () => {
+    // A factory that spreads the original leaves the real `execFileSync` in
+    // place, and two files in this tree write exactly that with the parameter
+    // named `orig` — so a check keyed on the words `importOriginal`/
+    // `importActual` called both of them whole. So does vitest 4's
+    // `vi.mock(path, { spy: true })`, which has no factory function at all.
+    const whole = `vi.mock(${CP});`;
+    expect(mocksChildProcessWholly(code(whole))).toBe(true);
+
+    for (const partial of [
+      `vi.mock(${CP}, async (orig) => ({ ...(await orig()), spawn: vi.fn() }));`,
+      `vi.mock(${CP}, async (importOriginal) => ({ ...(await importOriginal()) }));`,
+      `vi.mock(${CP}, { spy: true });`,
+      `vi.mock(${CP}, () => ({ spawn: vi.fn() }));`,
+    ]) {
+      expect(mocksChildProcessWholly(code(partial)), partial).toBe(false);
+    }
+
+    // …and a mock written inside a comment excludes nothing at all.
+    expect(mocksChildProcessWholly(code(`// vi.mock(${CP});`))).toBe(false);
+  });
+
   it("gives every test that starts a real process both ceilings", () => {
     const offenders = spawners
       .filter((f) => !(f.rel in INLINE_BUDGET))
       .filter(
         (f) =>
-          (declared(f.source, "testTimeout") ?? 0) < MIN_TIMEOUT_MS
-          || (declared(f.source, "hookTimeout") ?? 0) < MIN_TIMEOUT_MS,
+          (declared(f.code, "testTimeout") ?? 0) < MIN_TIMEOUT_MS
+          || (declared(f.code, "hookTimeout") ?? 0) < MIN_TIMEOUT_MS,
       )
       .map((f) => f.rel);
 
@@ -277,8 +444,8 @@ describe("test-timeout hygiene", () => {
       // pass: the list would otherwise silently stop guarding anything.
       if (source === undefined) return true;
       return (
-        (declared(source, "testTimeout") ?? 0) < MIN_TIMEOUT_MS
-        || (declared(source, "hookTimeout") ?? 0) < MIN_TIMEOUT_MS
+        (declared(code(source), "testTimeout") ?? 0) < MIN_TIMEOUT_MS
+        || (declared(code(source), "hookTimeout") ?? 0) < MIN_TIMEOUT_MS
       );
     });
 
@@ -292,10 +459,15 @@ describe("test-timeout hygiene", () => {
     for (const [name, expected] of Object.entries(INLINE_BUDGET)) {
       const source = byRel.get(name);
       expect(source, `${name} is listed as inline-budgeted but does not exist`).toBeDefined();
-      const inline = [...code(source!).matchAll(/\}\s*,\s*([0-9_]+)\s*\)/g)]
+      // Anchored to the END of a statement, which is where an `it(…, timeout)`
+      // budget sits — `/\}\s*,\s*(\d+)\s*\)/` alone also matches any helper
+      // called as `foo({…}, 5)`. And the MAXIMUM, not the minimum: the claim is
+      // "this file carries a bigger budget inline", and a second deliberately
+      // short case would otherwise turn a still-valid exemption red.
+      const inline = [...code(source!).matchAll(/\}\s*,\s*([0-9_]+)\s*\)\s*;?\s*$/gm)]
         .map((m) => Number(m[1].replace(/_/g, "")));
       expect(inline.length, `${name} carries no inline timeout any more`).toBeGreaterThan(0);
-      expect(Math.min(...inline)).toBeGreaterThanOrEqual(expected);
+      expect(Math.max(...inline)).toBeGreaterThanOrEqual(expected);
     }
   });
 
@@ -320,28 +492,46 @@ describe("test-timeout hygiene", () => {
     // test that has genuinely hung, which is what they are for. Matched on a
     // comment-stripped form, so the ruling can still be WRITTEN down where a
     // reader would look for it.
+    // No `^\s*` anchor: `test: { clearMocks: true, testTimeout: 30_000 }` on one
+    // line defeats a line-anchored pattern, and it is the same ruling broken.
+    const KEY_ANYWHERE = /[\s,{](testTimeout|hookTimeout)\s*:/;
     const config = code(fs.readFileSync(path.join(REPO, "vitest.config.ts"), "utf-8"));
-    expect(config).not.toMatch(/^\s*(testTimeout|hookTimeout)\s*:/m);
-    // …and not through the back door either: a flag on the runner defeats the
-    // ruling without touching the config file.
+    expect(config).not.toMatch(KEY_ANYWHERE);
+    // …and not through a SETUP FILE either. vitest's own runner comment names
+    // that as the place a user calls `vi.setConfig` globally, and this repo
+    // gives the `components` project one — a declaration there raises the
+    // ceiling for every component test with nothing else noticing.
+    for (const setup of [...config.matchAll(/["']([^"']*src\/tests\/[^"']*setup[^"']*)["']/g)].map((m) => m[1])) {
+      const file = path.join(REPO, setup);
+      if (!fs.existsSync(file)) continue;
+      expect(code(fs.readFileSync(file, "utf-8")), `${setup} raises a global ceiling`)
+        .not.toMatch(/vi\.setConfig\([\s\S]*?(testTimeout|hookTimeout)/);
+    }
+    // …and not through the runner's CLI either. cac camel-cases every parsed
+    // option, so `--test-timeout=30000` reaches vitest as `testTimeout` and a
+    // camelCase-only pattern waves it straight through.
+    const CLI_FLAG = /--(test|hook)-?[Tt]imeout/;
     const pkg = fs.readFileSync(path.join(REPO, "package.json"), "utf-8");
-    expect(pkg).not.toMatch(/--(test|hook)Timeout/);
+    expect(pkg).not.toMatch(CLI_FLAG);
     const workflow = fs.readFileSync(
       path.join(REPO, ".github", "workflows", "pr-tests-coverage.yml"),
       "utf-8",
     );
-    expect(workflow).not.toMatch(/--(test|hook)Timeout/);
+    expect(workflow).not.toMatch(CLI_FLAG);
   });
 
   it("caps the test job at thirty minutes, so a genuine hang cannot burn a runner", () => {
-    // The cheap half of the same ruling. Raising 79 files' budget six-fold
-    // makes a real hang six times more expensive to surface, and this job was
-    // the only one in the repo with no ceiling at all — GitHub's default is
-    // six hours. Every other workflow here caps itself.
+    // The cheap half of the same ruling. Raising eighty-odd files' budget
+    // six-fold makes a real hang six times more expensive to surface, and this
+    // job — the only one in the repo that runs the whole suite — had no ceiling
+    // at all, so GitHub's six-hour default applied.
     // The `test` job specifically, and the value specifically: `/timeout-minutes:
     // \d+/` anywhere in the file passes when the cap sits on another job, or
-    // when it is 360. The job is bounded by the next two-space key after
-    // `jobs:`, so a key under `on:` cannot be mistaken for one.
+    // when it is 360. The job is bounded by the NEXT two-space key after its
+    // own, so a key under `on:` cannot be mistaken for one — and the job is
+    // found BY NAME, because pinning it to the first position would fail this
+    // assertion, over a message about a timeout, the day someone adds a `lint:`
+    // job above it.
     const workflow = fs.readFileSync(
       path.join(REPO, ".github", "workflows", "pr-tests-coverage.yml"),
       "utf-8",
@@ -349,9 +539,11 @@ describe("test-timeout hygiene", () => {
     const jobsAt = workflow.indexOf("\njobs:\n");
     expect(jobsAt).toBeGreaterThan(-1);
     const headers = [...workflow.slice(jobsAt).matchAll(/^ {2}([\w-]+):$/gm)];
-    expect(headers[0]?.[1]).toBe("test");
-    const end = headers[1] ? jobsAt + headers[1].index! : workflow.length;
-    const testJob = workflow.slice(jobsAt, end);
+    const at = headers.findIndex((h) => h[1] === "test");
+    expect(at, "no `test` job in pr-tests-coverage.yml").toBeGreaterThan(-1);
+    const start = jobsAt + headers[at].index!;
+    const end = headers[at + 1] ? jobsAt + headers[at + 1].index! : workflow.length;
+    const testJob = workflow.slice(start, end);
     const cap = /^\s*timeout-minutes:\s*(\d+)\s*$/m.exec(testJob);
     expect(cap, "the test job has no timeout-minutes").not.toBeNull();
     expect(Number(cap![1])).toBe(30);
