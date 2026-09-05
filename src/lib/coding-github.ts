@@ -253,7 +253,14 @@ export interface GitHubStatus {
 }
 
 export type BackupOutcome =
-  | { pushed: true; repo: string; created: boolean; branch: string }
+  | {
+      pushed: true;
+      repo: string;
+      created: boolean;
+      branch: string;
+      /** The base branch pushed beside a run branch and made the repository's default, when there was one. */
+      base?: string;
+    }
   | {
       pushed: false;
       reason: BackupFailure;
@@ -505,6 +512,31 @@ async function attachExistingRepo(dir: string, fullName: string, branch: string)
   return { pushed: true, repo: url, created: false, branch };
 }
 
+/** The base branch beside a run branch — `main` or `master`, whichever the folder has and is not on. */
+async function localBaseBranch(dir: string, current: string): Promise<string | null> {
+  for (const candidate of ["main", "master"]) {
+    if (candidate === current) return null;
+    const r = await run("git", ["-C", dir, "rev-parse", "--verify", "--quiet", `refs/heads/${candidate}`]);
+    if (r.code === 0) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Push the base branch of a repository just created from a run branch, and
+ * make it the default on GitHub (the REST call: gh 2.4.0 has no `repo
+ * edit`). Best effort — the backup itself succeeded; a base that could not
+ * be pushed is reported as absent, never as a failed backup.
+ */
+async function settleDefaultBranch(dir: string, fullName: string, current: string): Promise<string | null> {
+  const base = await localBaseBranch(dir, current);
+  if (!base) return null;
+  const pushed = await run("git", ["-C", dir, "push", "--set-upstream", "origin", base], { timeoutMs: PUSH_TIMEOUT_MS });
+  if (pushed.code !== 0) return null;
+  const set = await run("gh", ["api", "-X", "PATCH", `repos/${fullName}`, "-f", `default_branch=${base}`], { cwd: dir });
+  return set.code === 0 ? base : null;
+}
+
 /** A repository name GitHub will accept, from a folder name. */
 export function repoNameFor(directory: string): string {
   const base = path.basename(path.resolve(directory));
@@ -627,7 +659,13 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
     created = true;
     const url = await run("git", ["-C", dir, "remote", "get-url", "origin"]);
     repo = url.stdout || name;
-    return { pushed: true, repo, created, branch };
+    // `--push` sent the CURRENT branch, and GitHub made it the default. A
+    // checkout on a run's branch (every run branches before it works) would
+    // leave the repository defaulting to `clawbox/run-…`, and a pull request
+    // then has nothing to compare against: push the base beside it and make
+    // that the default.
+    const base = await settleDefaultBranch(dir, `${status.login}/${name}`, branch);
+    return { pushed: true, repo, created, branch, ...(base ? { base } : {}) };
   }
 
   const push = await run(

@@ -114,6 +114,36 @@ describe("backing up a folder whose repository already exists on the account", (
     expect(outcome.detail).not.toContain("already exists");
   });
 
+  it("pushes the base branch beside a run branch on a new repository and makes it the default, so a pull request has something to compare", async () => {
+    // No remote before the create, the new one after it.
+    let remoteAsks = 0;
+    const calls = script({
+      "repo create": () => exitingChild(0, "https://github.com/yalexx/harness-test"),
+      "rev-parse --abbrev-ref HEAD": () => exitingChild(0, "clawbox/run-abc"),
+      "rev-parse --verify --quiet refs/heads/main": () => exitingChild(1),
+      "rev-parse --verify --quiet refs/heads/master": () => exitingChild(0, "e1ff637"),
+      "remote get-url origin": () => (remoteAsks++ === 0 ? exitingChild(1, "", "fatal: No such remote 'origin'") : exitingChild(0, "https://github.com/yalexx/harness-test.git")),
+    });
+    const outcome = await lib.backupToGitHub(DIR);
+    expect(outcome).toMatchObject({ pushed: true, created: true, branch: "clawbox/run-abc", base: "master" });
+    expect(calls).toContainEqual(expect.stringContaining("push --set-upstream origin master"));
+    expect(calls).toContainEqual(expect.stringContaining("api -X PATCH repos/yalexx/harness-test -f default_branch=master"));
+  });
+
+  it("leaves the default alone when the checkout is on the base branch itself", async () => {
+    let remoteAsks = 0;
+    const calls = script({
+      "repo create": () => exitingChild(0, "https://github.com/yalexx/harness-test"),
+      "rev-parse --abbrev-ref HEAD": () => exitingChild(0, "master"),
+      "rev-parse --verify --quiet refs/heads/main": () => exitingChild(1),
+      "remote get-url origin": () => (remoteAsks++ === 0 ? exitingChild(1, "", "fatal: No such remote 'origin'") : exitingChild(0, "https://github.com/yalexx/harness-test.git")),
+    });
+    const outcome = await lib.backupToGitHub(DIR);
+    expect(outcome).toMatchObject({ pushed: true, created: true, branch: "master" });
+    expect("base" in outcome).toBe(false);
+    expect(calls.some((c) => c.includes("default_branch="))).toBe(false);
+  });
+
   it("does not attach anything when the create failed for another reason", async () => {
     const calls = script({ "repo create": () => exitingChild(1, "", "GraphQL: Resource not accessible by integration") });
     const outcome = await lib.backupToGitHub(DIR);
