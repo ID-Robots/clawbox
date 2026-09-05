@@ -26,7 +26,8 @@ vi.mock("child_process", () => ({ execFile: execFileMock }));
 
 /** Drive the callback-style execFile `promisify` wraps. */
 function answer(handler: (args: string[]) => { stdout?: string; stderr?: string; fail?: boolean }) {
-  execFileMock.mockImplementation((_cmd: string, args: string[], _opts: unknown, cb: Function) => {
+  type Cb = (err: Error | null, out?: { stdout: string; stderr: string }) => void;
+  execFileMock.mockImplementation((_cmd: string, args: string[], _opts: unknown, cb: Cb) => {
     const { stdout = "", stderr = "", fail = false } = handler(args);
     if (fail) {
       const err = Object.assign(new Error("Command failed"), { stdout, stderr });
