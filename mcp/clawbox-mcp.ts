@@ -139,12 +139,21 @@ function instructionsFor(edition: Ed, profile: Profile): string {
  * a checker that built the server the ordinary way would examine a fraction of
  * the surface and report the whole thing OK. Nothing else passes it; the
  * running server always takes the probes.
+ *
+ * It may override CAPABILITIES only. The server's identity — `edition`,
+ * `install`, `profile`, `appHarness` — is settled by the arguments, and
+ * `instructionsFor(edition, profile)` and `createRegistrar(server, edition,
+ * profile)` go on using those; a `Partial<McpContext>` let a caller write a
+ * different edition into `ctx`, which is what the GATES read, and get a context
+ * that disagreed with its own registrar. The checker already restricts itself
+ * this way (`Posture` in mcp/check-tools.ts); saying it in the signature closes
+ * it for every caller.
  */
 export async function buildServer(
   edition: Ed,
   profile: Profile,
   appHarness: Ed | null,
-  overrides?: Partial<McpContext>,
+  overrides?: Partial<Omit<McpContext, "edition" | "install" | "profile" | "appHarness">>,
 ) {
   // The app list is a different question from the tool set — see
   // `resolveAppHarness` — but it is answered by the SAME probe, taken once in
