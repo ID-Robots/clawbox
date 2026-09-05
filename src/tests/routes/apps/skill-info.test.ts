@@ -121,12 +121,12 @@ describe("/setup-api/apps/skill-info", () => {
     expect(exec).toHaveBeenCalledTimes(1);
 
     // Inside the freshness window: nothing spawned.
-    vi.setSystemTime(new Date("2026-08-31T10:00:10Z"));
+    vi.setSystemTime(new Date("2026-08-31T10:09:00Z"));
     await GET(get());
     expect(exec).toHaveBeenCalledTimes(1);
 
     // Past it: the cached list is answered without waiting, and a rescan runs.
-    vi.setSystemTime(new Date("2026-08-31T10:01:00Z"));
+    vi.setSystemTime(new Date("2026-08-31T10:10:01Z"));
     let resolveScan: (v: unknown) => void = () => {};
     exec.mockImplementation(() => new Promise((r) => { resolveScan = r; }));
     const res = await GET(get());
