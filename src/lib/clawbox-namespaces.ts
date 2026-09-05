@@ -86,8 +86,11 @@ export const CLAWBOX_PAGE_ROOTS = [
  * paths as backtick template literals, so a grep for double-quoted `"/apps"`
  * finds nothing — and finds nothing for `/chat` either, which is how a grep
  * that could not see its own positives got read as proof of a negative. Run in
- * `/usr/lib/node_modules/openclaw/dist/control-ui/assets` at the pinned
- * OPENCLAW_VERSION (2026.8.1, install.sh):
+ * the pinned OPENCLAW_VERSION's bundle (2026.8.1, install.sh) — on a box that
+ * is `/home/clawbox/.npm-global/lib/node_modules/openclaw/dist/control-ui/assets`,
+ * NOT the `npm root -g` of `/usr/lib/node_modules`, which is where this said to
+ * look and where openclaw is not installed (and `openclaw` is not on the
+ * `clawbox` user's PATH either, so `dirname $(which openclaw)` does not find it):
  *
  *     grep -ohE '\bpath:`/[^`]{0,50}`' *.js | sed 's/path://; s/`//g' | sort -u
  *
