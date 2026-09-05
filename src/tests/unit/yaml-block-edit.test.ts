@@ -545,6 +545,9 @@ describe("getTopLevelScalar and a document PyYAML will not load", () => {
     ["a value that only looks like a folded header", `other: >=1.0\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`],
     ["a value that only looks like a block header", `other: |pipe\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`],
     ["content after a document end marker", `TELEGRAM_BOT_TOKEN: ${TOKEN}\n...\nTELEGRAM_BOT_TOKEN: DECOY\n`],
+    ["a directive with no document start after it", `%YAML 1.1\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`],
+    ["a document marker inside a multi-line quoted value", `notes: "hello\n---\nworld"\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`],
+    ["a # that is NOT a comment, with a tab after it", `other: x#a\tb\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`],
   ])("says it could not look when the file has %s", (_name, text) => {
     expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value: null, readable: false });
   });
@@ -564,6 +567,16 @@ describe("getTopLevelScalar and a document PyYAML will not load", () => {
     ["--- inside a block scalar", `notes: |\n  ---\n  more\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
     ["a # with no space in front of it", "TELEGRAM_BOT_TOKEN: 111111:AAH#x\n", "111111:AAH#x"],
     ["an apostrophe in another key's plain value", `other: don't stop\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a tab in a SEQUENCE ITEM's block scalar", `list:\n  - |\n    a\tb\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a tab in a TAGGED block scalar", `notes: !!str |\n  a\tb\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a tab in an ANCHORED block scalar", `notes: &n |\n  a\tb\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a tab in a block under a key with a # in it", `a#b: |\n  x\ty\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a tab in a block under a key with a colon in it", `a:b: |\n  x\ty\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a bad-header-looking line inside a block's text", `list:\n  - |\n    other: >=1.0\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a tab at the explicit block indent", `notes: |2\n    a\n  \tb\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a tab in a comment opened straight after a quote", `other: "x"#a\tb\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a tab in a comment opened straight after a flow collection", `other: [a]#c\td\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a directive before the only document's start marker", `%YAML 1.1\n---\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
     ["a block header with an indent and a chomp", `notes: |2-\n  x: "one\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
     ["a block header with a trailing comment", `notes: | # a note\n  x: "one\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
   ])("still reads the token from a file with %s", (_name, text, value) => {

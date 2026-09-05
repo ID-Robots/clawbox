@@ -81,7 +81,7 @@ describe("patchHermesConfig and the mode of config.yaml", () => {
   });
 
   it("creates a config.yaml this box has never had at 0600", async () => {
-    await lib.patchHermesConfig({ set: { "model.provider": "clawlocal" } });
+    await patch();
 
     expect(modeOf(configPath)).toBe("600");
   });
@@ -97,6 +97,23 @@ describe("patchHermesConfig and the mode of config.yaml", () => {
     const backup = `${configPath}.bak`;
     expect(modeOf(backup)).toBe("600");
     // It really is the previous revision, not the new one.
+    expect(await fsp.readFile(backup, "utf-8")).toContain("provider: openrouter");
+  });
+
+  // ...and the row that exercises the REPAIR rather than the creation: on a box
+  // that took an earlier build the `.bak` was written with the config's own
+  // mode and is sitting at 0644, and `writeFile`'s `mode` is ignored for a file
+  // that already exists — so without the `rm` and the chmod this fresh copy of
+  // the credential file would keep the old width.
+  it("re-secures a .bak an earlier build left wide", async () => {
+    writeConfigAt(0o600);
+    const backup = `${configPath}.bak`;
+    fs.writeFileSync(backup, "stale: 1\n", { mode: 0o666 });
+    fs.chmodSync(backup, 0o666);
+
+    await patch();
+
+    expect(modeOf(backup)).toBe("600");
     expect(await fsp.readFile(backup, "utf-8")).toContain("provider: openrouter");
   });
 

@@ -25,8 +25,11 @@
 //     scalars, a sequence where we expect a mapping, duplicate or quoted keys)
 //     falls back to `hermes config set` — comments lost, config intact, which is
 //     the right way round;
-//   * writes are atomic (temp file + rename in the same directory) and preserve
-//     the existing mode, which is 0600 on a ClawBox;
+//   * writes are atomic (temp file + rename in the same directory) and
+//     RE-SECURE the file to 0600 — the temp, the `.bak` and, through the
+//     rename, config.yaml itself — rather than preserving the mode it happens
+//     to have, because nothing on the device narrows this file and the umask
+//     that created it on some boxes did not (see `writeAtomically`);
 //   * writes are serialised in-process.
 //
 // KNOWN HAZARD, stated rather than hidden: Hermes takes a lock on config.yaml
@@ -158,7 +161,12 @@ async function writeAtomically(file: string, text: string, keepBackup: string | 
   await fs.mkdir(path.dirname(file), { recursive: true });
   if (keepBackup !== null) {
     // Written before the rename so a crash mid-write still leaves the previous
-    // revision on disk under a name a human can find.
+    // revision on disk under a name a human can find — and REMOVED first, like
+    // the temp below and for the same reason: `writeFile`'s `mode` is ignored
+    // for a file that already exists, so a `.bak` an older build left at 0644
+    // would hold this fresh copy of the credential file at that mode until the
+    // chmod landed, and keep it there if the chmod failed.
+    await fs.rm(`${file}.bak`, { force: true }).catch(() => {});
     await fs.writeFile(`${file}.bak`, keepBackup, { mode: CONFIG_MODE });
     await chmodBestEffort(`${file}.bak`, CONFIG_MODE);
   }

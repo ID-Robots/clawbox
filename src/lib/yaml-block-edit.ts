@@ -401,12 +401,18 @@ export interface TopLevelScalar {
   /** The key's top-level scalar, or null when it has none we can read. */
   value: string | null;
   /**
-   * False when a line at column 0 DOES define this key, with a value this
-   * reader cannot resolve to a scalar: a block scalar (`|`, `>`), a tag, an
-   * anchor or alias, a flow collection, or a quote that does not close. `value`
-   * is null then, and it means "there is something here and we cannot name it"
-   * — a different fact from "the key is not defined", and the only one of the
-   * two a save gate may act on.
+   * False when this reader could not LOOK, which is two facts and never "the
+   * key is not defined":
+   *
+   *  - a line at column 0 defines the key with a value it cannot resolve to a
+   *    scalar — a block scalar (`|`, `>`), a tag, an anchor or alias, a flow
+   *    collection, or a quote that does not close; or
+   *  - the DOCUMENT is one PyYAML refuses to load, in which case the key may be
+   *    absent, present, or anything at all — nothing in a file the Hermes bridge
+   *    cannot load is evidence about what the gateway is polling.
+   *
+   * `value` is null either way, and this is the only one of the two states a
+   * save gate may act on.
    */
   readable: boolean;
 }
@@ -426,6 +432,9 @@ const OPAQUE_VALUE_RE = /^[|>!&*{[]/;
  */
 const ANY_KEY_RE = /^( *)(?:"[^"]*"|'[^']*'|[^\s#"'][^:#]*?) *:(?: (.*))?$/;
 
+/** A `#` opens a comment only when a token has just ENDED in front of it. */
+const COMMENT_OPENERS = new Set([" ", '"', "'", "]", "}"]);
+
 /**
  * Does this STRUCTURE line carry a TAB PyYAML would refuse?
  *
@@ -437,16 +446,27 @@ const ANY_KEY_RE = /^( *)(?:"[^"]*"|'[^']*'|[^\s#"'][^:#]*?) *:(?: (.*))?$/;
  * comment, and inside a block scalar's content, which the caller handles
  * because only it knows the block's indent.
  *
- * A `#` opens a comment only when whitespace precedes it (`abc#c` is the plain
- * scalar `abc#c`; `abc #c` is `abc` plus a comment) — and a TAB in front of one
- * is not that whitespace: PyYAML raises on the tab before it ever reaches the
- * `#`. That is why the tab test comes first and why `KEY: value<TAB># note` is
- * a refusal rather than a comment question.
+ * A `#` opens a comment only when the token in front of it has ENDED — the rule
+ * {@link splitTrailingComment} already states 260 lines up, and for the reason
+ * written there: `other: "x"#c` is a comment because the flow scalar closed at
+ * the quote, while `other: x#c` is the plain scalar `x#c`. Requiring a SPACE
+ * made `"x"#c<TAB>d` "we could not look", which is a permanent 503 on the
+ * approvals gate over a config PyYAML loads. A TAB in front of a `#` is not
+ * that ending: PyYAML raises on the tab before it ever reaches the `#`, which
+ * is why the tab test comes first and `KEY: value<TAB># note` is a refusal
+ * rather than a comment question.
  *
  * A quote only OPENS at the start of a token, so it is recognised only at the
  * start of the line or after a space. `other: don't stop` is a plain scalar
  * with an apostrophe in it, and treating that as an opening quote would swallow
  * the rest of the line and miss a tab further along.
+ *
+ * What that costs, so it is not re-derived: a quote character in the MIDDLE of
+ * a plain scalar, after a space (`other: a 'b<TAB>c`), still opens one here and
+ * the tab behind it is read as quoted data — PyYAML raises on that document and
+ * this answers a bot out of it. Fail-open on a shape nothing writes, and the
+ * alternative — tracking real value positions across a line — is the parser
+ * this module exists not to be.
  */
 function refusesTab(line: string): boolean {
   let quote: '"' | "'" | null = null;
@@ -465,14 +485,14 @@ function refusesTab(line: string): boolean {
     }
     if (ch === "\t") return true;
     // The rest of the line is a comment; PyYAML reads no tokens out of it.
-    if (ch === "#" && (i === 0 || line[i - 1] === " ")) return false;
+    if (ch === "#" && (i === 0 || COMMENT_OPENERS.has(line[i - 1]))) return false;
     if ((ch === '"' || ch === "'") && (i === 0 || line[i - 1] === " ")) quote = ch;
   }
   return false;
 }
 
-/** A sequence item, with whatever it puts in the value position. */
-const SEQ_ITEM_RE = /^ *-(?: +(.*))?$/;
+/** A sequence item: indent in `[1]`, whatever it puts in the value position in `[2]`. */
+const SEQ_ITEM_RE = /^( *)-(?: +(.*))?$/;
 
 /** A document start or end marker on a line of its own. */
 const DOC_MARKER_RE = /^(?:---|\.\.\.)(?:\s|$)/;
@@ -488,6 +508,40 @@ const DOC_MARKER_RE = /^(?:---|\.\.\.)(?:\s|$)/;
  * naming this box's bot out of a file the bridge exports nothing from.
  */
 const BLOCK_HEADER_RE = /^[|>](?:[+-][1-9]?|[1-9][+-]?)? *(?:#.*)?$/;
+
+/** The explicit indentation indicator in a block header, or 0 for "measure it". */
+function blockHeaderIndent(header: string): number {
+  const digit = /^[|>][+-]?([1-9])/.exec(header);
+  return digit ? Number(digit[1]) : 0;
+}
+
+/**
+ * The indent a block scalar's content must sit DEEPER than, when this line
+ * opens one — or -1 when it opens none.
+ *
+ * {@link ANY_KEY_RE} models only the key shapes this reader may answer a VALUE
+ * out of, and a block can be opened by three it deliberately excludes: a value
+ * carrying a tag or an anchor (`notes: !!str |`, `notes: &n |`), and a key with
+ * a `#` or a `:` inside it (`a#b:`, `a:b:`). A block's content is TEXT, so
+ * reading it as structure is how a tab, or a `|pipe`, in a command somebody
+ * pasted into a `- |` item turned a config.yaml the gateway loads happily into
+ * "we could not look" — a 503 on the approvals-bot save with no way out of it.
+ *
+ * Deliberately looser than the value rules above, because it decides only what
+ * to SKIP and never what to answer: a false positive costs a few skipped lines
+ * of somebody else's subtree, a false negative costs the fail-open it exists to
+ * close. The header must still be the FIRST token after the colon, so
+ * `other: a |` — a plain scalar that merely ends in a pipe — opens nothing.
+ */
+function blockOpenerIndent(line: string): number {
+  const indent = indentOf(line);
+  let rest = line.slice(indent);
+  for (let dash = /^- +/.exec(rest); dash; dash = /^- +/.exec(rest)) rest = rest.slice(dash[0].length);
+  const key = /^(?:"[^"]*"|'[^']*'|[^\s#"'].*?): +/.exec(rest);
+  if (key) rest = rest.slice(key[0].length);
+  for (let mark = /^[!&]\S* +/.exec(rest); mark; mark = /^[!&]\S* +/.exec(rest)) rest = rest.slice(mark[0].length);
+  return BLOCK_HEADER_RE.test(rest) ? indent : -1;
+}
 
 /**
  * The file's lines, minus the CONTINUATION lines of a multi-line quoted value.
@@ -523,12 +577,17 @@ const BLOCK_HEADER_RE = /^[|>](?:[+-][1-9]?|[1-9][+-]?)? *(?:#.*)?$/;
  * dead box and the configure route's same-bot guard refuse a token that was
  * fine. `readable: false` costs a degraded panel the owner can act on.
  *
- * KNOWN LIMIT: a flow scalar is recognised in the two value positions a line
- * can carry one — after `key:` and after a sequence item's `-` — but not when
- * it is CLOSED by a later line this reader did not know it was inside. And the
- * `loadable` check is a line-level one, so a document PyYAML refuses for a
- * structural reason no single line shows (a block nested at an indentation its
- * parent cannot hold) is still read rather than refused.
+ * KNOWN LIMITS, measured against PyYAML 6.0.1 rather than guessed at. A flow
+ * scalar is recognised in the two value positions a line can carry one — after
+ * `key:` and after a sequence item's `-` — but not when it is CLOSED by a later
+ * line this reader did not know it was inside. And `loadable` is a LINE-level
+ * check, so four classes of unloadable document are still read rather than
+ * refused: a block nested at an indentation its parent cannot hold; a `----`
+ * line; a `---` carrying content on the same line; and a tab that follows a
+ * quote character INSIDE a plain scalar (`other: a 'b<TAB>c`), which the quote
+ * rule in {@link refusesTab} reads as quoted data. All four are fail-open and
+ * none is a shape a config.yaml grows in ordinary use; closing them needs the
+ * indentation stack this module exists not to have.
  */
 function documentLines(lines: string[]): { lines: string[]; unterminated: boolean; loadable: boolean } {
   const kept: string[] = [];
@@ -536,6 +595,7 @@ function documentLines(lines: string[]): { lines: string[]; unterminated: boolea
   let blockIndent: number | null = null;
   let contentIndent: number | null = null;
   let sawContent = false;
+  let sawDirective = false;
   let documentEnded = false;
   let loadable = true;
   for (const raw of lines) {
@@ -558,6 +618,11 @@ function documentLines(lines: string[]): { lines: string[]; unterminated: boolea
       contentIndent = null;
     }
     if (open !== null) {
+      // A `---` or `...` at column 0 ends the document even from inside a flow
+      // scalar — PyYAML's `scan_flow_scalar_breaks` raises "found unexpected
+      // document separator" — so these swallowed lines are still worth this one
+      // test.
+      if (DOC_MARKER_RE.test(raw)) loadable = false;
       const close = closingQuoteIndex(raw, 0, open);
       if (close !== -1) {
         open = null;
@@ -567,6 +632,14 @@ function documentLines(lines: string[]): { lines: string[]; unterminated: boolea
       continue;
     }
     if (refusesTab(raw)) loadable = false;
+    if (/^%/.test(raw)) {
+      // A `%YAML` / `%TAG` directive is not content: the `---` that MUST follow
+      // it opens THIS document rather than a second one, and PyYAML raises
+      // `ParserError` when it is missing.
+      sawDirective = true;
+      kept.push(raw);
+      continue;
+    }
     if (DOC_MARKER_RE.test(raw)) {
       // `safe_load` raises on a stream holding more than one document, so a
       // second `---` (or anything after a `...`) is a file that loads nowhere —
@@ -575,11 +648,12 @@ function documentLines(lines: string[]): { lines: string[]; unterminated: boolea
       if (raw.startsWith("---")) {
         if (sawContent) loadable = false;
         sawContent = true;
+        sawDirective = false;
       } else {
         documentEnded = true;
       }
     } else if (!isBlank(raw) && !/^ *#/.test(raw)) {
-      if (documentEnded) loadable = false;
+      if (documentEnded || sawDirective) loadable = false;
       sawContent = true;
     }
     kept.push(raw);
@@ -589,18 +663,26 @@ function documentLines(lines: string[]): { lines: string[]; unterminated: boolea
     // `TELEGRAM_BOT_TOKEN:` line inside one was read as a line of its own and
     // named a decoy as this box's bot, on a document PyYAML loads happily.
     const item = m ? null : SEQ_ITEM_RE.exec(raw);
-    const inline = m ? m[2] : item?.[1];
-    if (!m && !item) continue;
+    const inline = m ? m[2] : item?.[2];
     const value = (inline ?? "").trim();
-    if (/^[|>]/.test(value)) {
+    if ((m || item) && /^[|>]/.test(value)) {
+      // A header PyYAML would raise on is only a refusal in a value position we
+      // are SURE of — a key line or a sequence item — never on the loose match
+      // below, which is allowed to be wrong about what a line is.
       if (!BLOCK_HEADER_RE.test(value)) loadable = false;
-      // Only a KEY's block is tracked. A sequence item's content is measured
-      // from the `-` rather than from a key line, and was never followed here;
-      // its header is still checked, because `- >=1.0` refuses the document
-      // exactly as `other: >=1.0` does.
-      if (m) blockIndent = m[1].length;
+      blockIndent = m ? m[1].length : item![1].length;
+      contentIndent = blockHeaderIndent(value) ? blockIndent + blockHeaderIndent(value) : null;
       continue;
     }
+    // ...and the openers those two do not model: a tag, an anchor, a key with a
+    // `#` or a `:` in it. Skipping only, never a refusal.
+    const opener = blockOpenerIndent(raw);
+    if (opener !== -1) {
+      blockIndent = opener;
+      contentIndent = null;
+      continue;
+    }
+    if (!m && !item) continue;
     const quote = value[0];
     if ((quote === '"' || quote === "'") && closingQuoteIndex(value, 1, quote) === -1) {
       open = quote;
@@ -655,12 +737,18 @@ function readInlineScalar(inline: string): TopLevelScalar {
  * Read a TOP-LEVEL scalar without parsing anything else in the file.
  *
  * {@link getYamlPath} scans the whole enclosing block and REFUSES any shape the
- * line editor does not model — a `---` header, a tab at any depth, a sequence,
- * a duplicate key somewhere else entirely. For an editing pass that refusal is
- * right (it falls back to the CLI). For a reader answering "does this file
- * define KEY", it is not: none of those constructs is evidence about KEY, and
- * treating them as "we could not look" is what a caller then has to turn into a
- * refusal.
+ * line editor does not model — a sequence, a duplicate key somewhere else
+ * entirely, a nested block. For an editing pass that refusal is right (it falls
+ * back to the CLI). For a reader answering "does this file define KEY", it is
+ * not: none of those constructs is evidence about KEY, and treating them as "we
+ * could not look" is what a caller then has to turn into a refusal.
+ *
+ * The one whole-file fact that IS evidence about every key is a document PyYAML
+ * will not load, because Hermes' bridge loads config.yaml with PyYAML: when it
+ * raises, the bridge exports nothing and the gateway polls no bot, so a token
+ * answered out of such a file is a bot that does not exist. That — a second
+ * document, and a tab where a token may start — comes back `readable: false`
+ * with everything else (see {@link documentLines}).
  *
  * The question is answerable without them, because a top-level key is a line at
  * the ROOT MAPPING'S OWN INDENT — column 0 in every file a machine wrote, and
