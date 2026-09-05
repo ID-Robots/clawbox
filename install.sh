@@ -1566,14 +1566,27 @@ restore_previous_build() {
 # first attempt and is reported as such rather than hidden behind a second
 # five-minute build. Both attempts stream to the step log as before; the copy
 # here only exists so the gate can read what was printed.
+#
+# Every branch below is written the long way — `if`, never `[ … ] && …` — and
+# the build runs as an `if` CONDITION. Both are about errexit: this file is
+# `set -euo pipefail`, `do_rebuild` calls this in a `||` context (errexit
+# suspended for the whole body) and `step_build` calls it bare (errexit live),
+# so a failing pipeline or a false `[ … ] &&` test outside a condition would
+# kill the script on the first attempt in one caller and not the other.
 run_next_build() {
   local log rc attempt
   log="$(mktemp "${TMPDIR:-/tmp}/clawbox-build-XXXXXX.log")"
+  rc=0
   for attempt in 1 2; do
-    as_clawbox_login "cd $PROJECT_DIR && $BUN run build" 2>&1 | tee "$log"
+    if as_clawbox_login "cd $PROJECT_DIR && $BUN run build" 2>&1 | tee "$log"; then
+      rc=0
+      break
+    fi
+    # The BUILD's status, not tee's. A pipeline that only failed in tee still
+    # has to be reported as a failure, or a full disk would pass for a build.
     rc=${PIPESTATUS[0]}
-    [ "$rc" -eq 0 ] && break
-    [ "$attempt" -eq 2 ] && break
+    if [ "$rc" -eq 0 ]; then rc=1; fi
+    if [ "$attempt" -eq 2 ]; then break; fi
     grep -Eq "ENOENT.*copyfile" "$log" || break
     echo "  A file this build was tracing changed while it ran (ENOENT during the standalone copy) — building once more"
   done
@@ -2350,7 +2363,10 @@ step_build() {
   promote_parked_build
   as_clawbox_login "cd $PROJECT_DIR && $BUN install"
   ensure_node_pty
-  as_clawbox_login "cd $PROJECT_DIR && $BUN run build"
+  # Through do_rebuild's helper, for do_rebuild's reason: `--step build` is
+  # dispatchable on a live box, where the agent can create or remove a web app
+  # while the trace is being copied.
+  run_next_build
   # The same two questions do_rebuild asks, through the same helper: an install
   # that leaves a box unable to load the server is the defect this file already
   # tested for, and the identity half is the one the box already owns.

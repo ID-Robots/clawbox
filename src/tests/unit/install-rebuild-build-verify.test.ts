@@ -490,6 +490,15 @@ describe("do_rebuild verifies the build it produced", () => {
     expect(r.buildId).toBe("old-build-id");
   });
 
+  it("gives the full-install build the same retry", () => {
+    // `install.sh --step build` is dispatchable on a live box, so it races the
+    // same writers do_rebuild does.
+    const r = run({ build: "trace-race-then-succeeds", entry: "step_build" });
+    expect(r.status).toBe(0);
+    expect(r.attempts).toBe(2);
+    expect(r.hasEntry).toBe(true);
+  });
+
   it("does not retry a build that failed for any other reason", () => {
     // A retry over a real failure buys the owner a second wait and the same
     // answer, and hides which attempt the error came from.
