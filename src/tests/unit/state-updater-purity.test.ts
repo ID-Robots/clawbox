@@ -1,25 +1,34 @@
 import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
+import ts from "typescript";
 
-// Parses ~270 files with the TypeScript compiler inside ONE case, and v8
-// coverage instrumentation multiplies that by about seven: 426 ms of parse
+// The sweep parses ~270 files with the TypeScript compiler, and v8 coverage
+// instrumentation multiplies that by about seven: 426 ms of parse
 // uninstrumented, 2 874 ms under `test:coverage:ci` on an idle machine, and
 // 5 318 ms on a four-worker CI runner — where it failed the whole job with
 // vitest's "Test timed out in 5000ms" over a tree the rule found CLEAN, which
 // is the false-failure class in the guard itself.
 //
 // The ceiling is declared rather than the walk narrowed, because the walk IS
-// the sibling sweep this PR leans on: it is what says the four state-holding
-// directories carry no second offender. Cutting it to the files that import
-// the streaming state, or tightening the text pre-filter into something that
-// tries to predict which files the AST rule can fire on, buys ~1.7 s and pays
-// for it in exactly the currency this file's docblock warns about — a guard
-// that silently stops looking. 30 s is ~6x the measured CI cost and still
-// fails a case that has genuinely hung. Both ceilings, per the house form; see
+// the sibling sweep this rule exists to be: it is what says the four
+// state-holding directories carry no second offender. Cutting it to the files
+// that import the streaming state, or tightening the text pre-filter into
+// something that tries to predict which files the AST rule can fire on, buys
+// ~1.7 s and pays for it in exactly the currency the docblock below warns
+// about — a guard that silently stops looking.
+//
+// A ceiling alone was not enough, and this is why the sweep is split into one
+// case PER ROOT below: measured at load ~52 on a 12-core machine, the combined
+// walk failed at 34 107 ms against a 30 000 ms budget. The cost is O(files) and
+// grows with the tree, so a single case holding the whole walk is the 5 000 ms
+// failure again, one doubling later. `testTimeout` is per CASE, so four cases
+// parsing 76 / 10 / 59 / 128 files have a quarter of the exposure over exactly
+// the same files. 30 s rather than 60 s because the split is the structural
+// fix and the budget is only the backstop — a case that has genuinely hung
+// should still be caught. Both ceilings, per the house form; see
 // src/tests/unit/test-timeout-hygiene.test.ts, which pins this file by name.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
-import fs from "node:fs";
-import path from "node:path";
-import ts from "typescript";
 
 /**
  * A React state updater is a PURE function of the previous state.
@@ -53,10 +62,19 @@ const ROOTS = ["src/components", "src/hooks", "src/app", "src/lib"];
  * callback is NOT a state updater — React does not re-run it — so they cannot
  * open one.
  *
- * They are excluded in BOTH positions, which means scheduling a timer from
- * inside an updater is not reported either. That is a gap, stated rather than
- * papered over: it is an impurity, but a far less damaging one than a second
- * state write, and separating the two positions costs more than it buys.
+ * Excluded in BOTH positions, so scheduling a timer from inside an updater is
+ * not itself reported — a real but far less damaging impurity than a second
+ * state write. What IS reported is a state write **inside** that timer, because
+ * the walk recurses into the callback: React re-running the updater schedules
+ * the timer twice, so the write really does happen twice. Both directions are
+ * pinned in the fixture rather than left to this paragraph.
+ *
+ * This set is also the ESCAPE HATCH, and it works in both positions. A built-in
+ * mutator that matches the name rule but is pure with respect to anything
+ * outside the updater — `d.setHours(0, 0, 0, 0)` on a `Date` created inside it —
+ * belongs here. There is none in the tree today; the alternative when one
+ * arrives must not be to weaken the rule, because `Date.prototype.setHours`
+ * cannot be renamed and a `prev`-dependent normalisation cannot be hoisted out.
  */
 const NOT_UPDATERS = new Set(["setTimeout", "setInterval", "setImmediate"]);
 
@@ -108,6 +126,36 @@ function nestedWriterName(node: ts.CallExpression): string | null {
   return null;
 }
 
+/**
+ * Calls that are a side effect whatever they are called.
+ *
+ * `^(set|apply)[A-Z]` is a NAME rule, and the two defects it could not name
+ * were both real: a `fetch` POST inside `setUpdateAvailable` (page.tsx) and
+ * `kv.set` / `kv.remove` inside `setHidden` (Mascot.tsx) — the second one
+ * screen from the same file's correct pattern, missed only because `kv.set`
+ * has no capital after `set`. A rule that finds two of three instances of a
+ * defect and calls the sweep done is the shape this repo keeps producing.
+ *
+ * So persistence and network are named directly, by RECEIVER rather than by
+ * method name: every member of `kv`, `localStorage` and `sessionStorage`
+ * counts, and so does a bare `fetch`. Naming the receiver is what makes
+ * `kv.remove` and a future `kv.whatever` covered without listing methods.
+ */
+const SIDE_EFFECT_RECEIVERS = new Set([
+  "kv", "localStorage", "sessionStorage",
+  "window.localStorage", "window.sessionStorage",
+  "globalThis.localStorage", "globalThis.sessionStorage",
+]);
+const SIDE_EFFECT_CALLS = new Set(["fetch"]);
+
+function isSideEffectCall(node: ts.CallExpression, file: ts.SourceFile): boolean {
+  if (ts.isIdentifier(node.expression)) return SIDE_EFFECT_CALLS.has(node.expression.text);
+  if (ts.isPropertyAccessExpression(node.expression)) {
+    return SIDE_EFFECT_RECEIVERS.has(node.expression.expression.getText(file));
+  }
+  return false;
+}
+
 function sourceFiles(dir: string): string[] {
   const out: string[] = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -126,13 +174,29 @@ function sourceFiles(dir: string): string[] {
  * `streamingRef.current = …` inside an updater is a render-phase mutation, and
  * the ref is exactly what the fix uses to read the buffer from outside.
  */
+function readSource(relativePath: string): string {
+  return fs.readFileSync(path.join(process.cwd(), relativePath), "utf-8");
+}
+
+/**
+ * The cheap text pre-filter: a file with no `set`/`apply` + capital anywhere in
+ * it cannot hold a hit, because every hit needs an OPENER of that shape — so
+ * parsing it is wasted work, and the walk is ~640 files.
+ *
+ * An OVER-approximation on purpose: it can only include files that turn out
+ * clean, never skip one that is not. Named rather than inlined so the walk case
+ * can put a FLOOR under it: nothing else does, and a future narrowing that
+ * still matched the fixture would leave every case green while the real tree
+ * went unread — the guard silently stopping to look, which is the one failure
+ * this file refuses to accept anywhere else.
+ */
+function mayHoldStateWrite(text: string): boolean {
+  return /(?:set|apply)[A-Z]/.test(text);
+}
+
 function impureUpdaters(relativePath: string): string[] {
-  const text = fs.readFileSync(path.join(process.cwd(), relativePath), "utf-8");
-  // A file with no `set`/`apply` + capital anywhere in it cannot hold a state
-  // write, so parsing it is wasted work — the walk is ~700 files. An OVER-
-  // approximation on purpose: it can only include files that turn out clean,
-  // never skip one that is not.
-  if (!/(?:set|apply)[A-Z]/.test(text)) return [];
+  const text = readSource(relativePath);
+  if (!mayHoldStateWrite(text)) return [];
   const file = ts.createSourceFile(
     relativePath,
     text,
@@ -149,7 +213,9 @@ function impureUpdaters(relativePath: string): string[] {
         const name = nestedWriterName(node);
         // Reported as WRITTEN — `catalog.setSort()`, not `setSort()` — so the
         // message names the call the reader has to go and find.
-        if (name && isStateWriter(name)) hits.push(`${node.expression.getText(file)}()`);
+        if ((name && isStateWriter(name)) || isSideEffectCall(node, file)) {
+          hits.push(`${node.expression.getText(file)}()`);
+        }
       }
       // EVERY assignment operator, not just `=`. `someRef.current += 1` is the
       // generation-counter idiom this codebase uses in thirteen places,
@@ -198,14 +264,39 @@ function impureUpdaters(relativePath: string): string[] {
 }
 
 describe("no state write inside a state updater", () => {
-  it("has no state write inside a state updater, anywhere in the UI", () => {
+  it("walks the whole state-holding tree, and parses the part of it that can hold a write", () => {
+    // The WALK and the PRE-FILTER, not only the rule. Rename a directory, add
+    // an exclude, change the extension test, and the file list goes short or
+    // empty while every case below stays green — an empty-list assertion over
+    // an empty tree proves nothing. The same is true one layer in: narrow
+    // `mayHoldStateWrite` and the real tree stops being parsed while the
+    // fixture, which contains `setStreaming` and `applyWrapper`, keeps passing.
+    //
+    // Two anchors, and a floor under each layer: the surface the defect was on,
+    // and the shared state both surfaces consume.
+    const files = ROOTS.flatMap((root) => sourceFiles(root));
+    expect(files.length).toBeGreaterThan(300);
+    expect(files).toContain("src/components/ChatApp.tsx");
+    expect(files).toContain("src/lib/chat-tool-events.tsx");
+    expect(files.filter((f) => mayHoldStateWrite(readSource(f))).length).toBeGreaterThan(200);
+  });
+
+  // ONE CASE PER ROOT, and the reason is a budget rather than a taxonomy:
+  // `testTimeout` is per case, and the combined walk has already failed twice
+  // on its own cost (5 000 ms in CI, 34 107 ms against a 30 s ceiling on a
+  // saturated machine). Four cases parse the same files with a quarter of the
+  // exposure each. The roots are separate directories, so a failure also names
+  // the half of the tree to look in.
+  it.each(ROOTS)("has no state write inside a state updater in %s", (root) => {
     // The four directories that hold this app's React state, not just the two
-    // chat surfaces: after TASK-703 there are NO such sites left, so the rule
-    // can be stated as a rule. `src/app/page.tsx` held two more — the wallpaper
-    // upload and the delete, each writing localStorage and calling two sibling
-    // setters from inside a `setCustomWallpapers` updater — and they were fixed
-    // rather than excluded by the scope of the test that claims to cover them.
-    // They were idempotent, which is exactly why they went unnoticed.
+    // chat surfaces. `src/app/page.tsx` held two more than the bug report named
+    // — the wallpaper upload and the delete, each writing localStorage and
+    // calling two sibling setters from inside a `setCustomWallpapers` updater —
+    // and they were fixed rather than excluded by the scope of the test that
+    // claims to cover them. They were idempotent, which is exactly why they
+    // went unnoticed, and so were the four found since: FilesApp's localStorage
+    // write, InstalledAppSettings' `kv.setJSON`, page.tsx's dismissal `fetch`
+    // and Mascot's `kv.set`/`kv.remove`.
     //
     // `src/lib` is in the list because that is where the state BOTH surfaces
     // share lives: `useChatToolCalls` (chat-tool-events.tsx) is called from
@@ -213,35 +304,29 @@ describe("no state write inside a state updater", () => {
     // through the same abort path.
     //
     // WHAT A GREEN TICK HERE DOES NOT PROVE, so the next reader does not read
-    // it as absence. The rule is syntactic and cannot follow a name: a setter
-    // reached through an alias (`const append = setMessages`) or an updater
-    // declared as a variable and passed in by name are both invisible. A setter
-    // reached through a property (`ctx.setSort(…)`) IS seen in the nested
-    // position — where the defect lives — but does not open an updater. And it
-    // detects state writes and ref writes only — an updater whose one side
-    // effect is a `fetch` or an `audio.play()` is impure and is not reported.
-    // Chasing those by AST costs more than it buys; saying so costs a paragraph.
+    // it as absence — this says "no site the rule can SEE", which is a smaller
+    // claim than "no site". The rule is syntactic and cannot follow a name: a
+    // setter reached through an alias (`const append = setMessages`), or an
+    // updater declared as a variable and passed in by name, is invisible. A
+    // setter reached through a property (`ctx.setSort(…)`) IS seen in the
+    // nested position — where the defect lives — but does not open an updater.
+    // Side effects are covered where they are NAMED: state writes, ref writes,
+    // `fetch`, and every member of `kv`/`localStorage`/`sessionStorage`. An
+    // updater whose one side effect is something else — an `audio.play()`, a
+    // `postMessage`, a write through a persistence module imported under
+    // another name — is impure and is not reported. When one of those turns up,
+    // the answer is to name its receiver in SIDE_EFFECT_RECEIVERS, which is why
+    // that set is keyed on the receiver rather than on method names.
     //
     // In the other direction it is deliberately over-eager: any single-argument
     // call to a `set*`/`apply*` identifier taking a function is treated as an
     // updater, whether or not the callee is a React setter. That is the safe
     // side of the trade — the alternative is a rule that has to know which
     // names are setters — but it means a legitimate `setX(fn)` helper of one's
-    // own can turn this red. If that happens, the answer is to rename the
-    // helper or to hoist the callback out of the call, not to weaken the rule.
-    const files = ROOTS.flatMap((root) => sourceFiles(root));
-    // The WALK, not only the rule. Rename a directory, add an exclude, change
-    // the extension test, and `files` becomes short or empty while both cases
-    // here stay green — an empty list assertion over an empty tree proves
-    // nothing. Two anchors and a floor: the surface the defect was on, and the
-    // shared state both surfaces consume.
-    expect(files.length).toBeGreaterThan(300);
-    expect(files).toContain("src/components/ChatApp.tsx");
-    expect(files).toContain("src/lib/chat-tool-events.tsx");
-
-    const offenders = files.flatMap(impureUpdaters);
-
-    expect(offenders).toEqual([]);
+    // own can turn this red. The answer is to rename the helper, to hoist the
+    // callback out of the call, or — for a built-in mutator in the nested
+    // position — to name it in NOT_UPDATERS. Not to weaken the rule.
+    expect(sourceFiles(root).flatMap(impureUpdaters)).toEqual([]);
   });
 
   it("catches the shapes the defect actually took", () => {
@@ -262,6 +347,9 @@ describe("no state write inside a state updater", () => {
       expect.stringContaining("setConciseRefWrite(updater) -> streamingRef.current ="),
       expect.stringContaining("setCompoundRefWrite(updater) -> streamingRef.current +="),
       expect.stringContaining("setThroughProperty(updater) -> catalog.setSort()"),
+      expect.stringContaining("setWithFetch(updater) -> fetch()"),
+      expect.stringContaining("setWithKvWrite(updater) -> kv.set()"),
+      expect.stringContaining("setWithDeferredWrite(updater) -> setMessages()"),
     ]);
   });
 });

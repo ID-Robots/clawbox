@@ -28,7 +28,11 @@ export function shapes(
   setConciseRefWrite: Setter<string>,
   setCompoundRefWrite: Setter<string>,
   setThroughProperty: Setter<string>,
+  setWithFetch: Setter<string>,
+  setWithKvWrite: Setter<string>,
+  setWithDeferredWrite: Setter<string>,
   catalog: { setSort: (next: string) => void },
+  kv: { set: (key: string, value: string) => void },
   streamingRef: { current: string },
 ): void {
   // The defect as it shipped: a sibling setter called from inside an updater.
@@ -87,6 +91,33 @@ export function shapes(
   // may not be blind.
   setThroughProperty((prev) => {
     catalog.setSort("name");
+    return prev;
+  });
+
+  // A network call inside an updater. `fetch` matches no name rule at all, and
+  // the real one was a dismissal POST inside `setUpdateAvailable` in page.tsx —
+  // sent once per render attempt rather than once per click.
+  setWithFetch((prev) => {
+    fetch("/setup-api/update/dismissal", { method: "POST" }).catch(() => {});
+    return prev;
+  });
+
+  // A persistence write through a LOWER-CASE member. `kv.set` has no capital
+  // after `set`, so a name rule cannot see it — and that is exactly what hid
+  // the third instance of this defect in Mascot.tsx while two others were being
+  // fixed. Covered by receiver, not by method name.
+  setWithKvWrite((prev) => {
+    kv.set("clawbox:fixture", "1");
+    return prev;
+  });
+
+  // A timer INSIDE an updater, which is the half of the NOT_UPDATERS rule the
+  // comment used to get wrong. The timer CALL is not reported — React never
+  // re-runs a timer callback — but the state write inside it is, and must be:
+  // React re-running the updater schedules the timer twice, so the write really
+  // does happen twice.
+  setWithDeferredWrite((prev) => {
+    setTimeout(() => setMessages((msgs) => msgs), 0);
     return prev;
   });
 
