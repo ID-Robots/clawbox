@@ -36,6 +36,12 @@ import { getGatewayServiceHealth } from "@/lib/gateway-health";
 const CONFIG_EDITION_FILE = process.env.CLAWBOX_EDITION_FILE;
 const CONFIG_EDITION = process.env.CLAWBOX_EDITION;
 
+/** `process.env.X = undefined` stores the STRING "undefined"; absence is a delete. */
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+}
+
 /** systemd's answer for a unit masked to /dev/null. */
 const maskedUnit = {
   active: false,
@@ -86,8 +92,8 @@ describe("/setup-api/gateway", () => {
 
   afterEach(() => {
     fs.rmSync(editionDir, { recursive: true, force: true });
-    process.env.CLAWBOX_EDITION_FILE = CONFIG_EDITION_FILE;
-    process.env.CLAWBOX_EDITION = CONFIG_EDITION;
+    restoreEnv("CLAWBOX_EDITION_FILE", CONFIG_EDITION_FILE);
+    restoreEnv("CLAWBOX_EDITION", CONFIG_EDITION);
   });
 
   it("proxies gateway HTML with injected script", async () => {

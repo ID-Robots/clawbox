@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as childProcess from "child_process";
 
@@ -104,6 +107,22 @@ describe("gateway service health", () => {
       expect(value, `${field} is not settled by --property=${GATEWAY_SHOW_PROPERTIES.join(",")}`)
         .not.toBeUndefined();
     }
+    // Fields the parser DERIVES are booleans and never go null — `active` is
+    // false for an absent ActiveState just as it is for an inactive unit — so
+    // the shape check above cannot see one of those added from an unqueried
+    // property. Read the property names out of the source as well.
+    const source = fs.readFileSync(
+      path.resolve(__dirname, "..", "..", "lib", "gateway-health.ts"),
+      "utf8",
+    );
+    const readProperties = [
+      ...new Set(Array.from(source.matchAll(/properties\.([A-Za-z]+)/g), (m) => m[1])),
+    ];
+    expect(readProperties.length).toBeGreaterThan(3);
+    for (const property of readProperties) {
+      expect(GATEWAY_SHOW_PROPERTIES, `${property} is read but never queried`).toContain(property);
+    }
+
     // The journal scope reads InvocationID off the SAME stdout, so it is part of
     // the same contract.
     expect(gatewayJournalArgs(`InvocationID=${"a".repeat(32)}\n`)).not.toBeNull();
