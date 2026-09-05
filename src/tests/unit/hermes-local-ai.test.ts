@@ -259,6 +259,25 @@ describe("registering the local model with Hermes", () => {
     await expect(removeLocalAiFromHermes()).rejects.toThrow(/still registered/i);
   });
 
+  it("refuses when only the model list survived the removal", async () => {
+    // `providers.clawlocal.models` on its own is still an entry Hermes renders
+    // as a picker row, so a removal that dropped the endpoint and kept the
+    // catalogue has not ended the state it was called to end. The CLI fallback
+    // walks the unsets one call at a time, so partial is a real outcome.
+    const file = deviceConfig({
+      [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+      [`providers.${HERMES_LOCAL_PROVIDER}.models`]: "gemma4-e2b-it-q4_0",
+    });
+    patchMock.mockImplementation(async (patch: { unset?: string[] }) => {
+      for (const key of patch.unset ?? []) {
+        if (!key.endsWith(".models")) delete file[key];
+      }
+      return { mode: "cli", backupPath: null };
+    });
+
+    await expect(removeLocalAiFromHermes()).rejects.toThrow(/still registered/i);
+  });
+
   it("refuses when the selection still points at a provider that is gone", async () => {
     // The other half of the same state, and the worse one: every chat turn 502s
     // with "Unknown provider 'clawlocal'".
