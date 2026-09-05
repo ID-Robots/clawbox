@@ -56,8 +56,12 @@ function manifestIconPaths(): string[] {
 function collectIconUrls(node: unknown, into: string[]): void {
   if (node === null || node === undefined) return;
   if (typeof node === "string" || node instanceof URL) {
-    const value = String(node);
-    if (value.startsWith("/")) into.push(value);
+    // Resolved, not filtered on a leading slash: a `new URL("/icon.png", …)`
+    // stringifies absolute, and dropping it would be this guard
+    // under-deriving again. Anything on another ORIGIN is somebody else's
+    // asset and not this gate's business.
+    const resolved = new URL(String(node), "http://box/");
+    if (resolved.origin === "http://box") into.push(resolved.pathname + resolved.search);
     return;
   }
   if (Array.isArray(node)) {
@@ -65,9 +69,16 @@ function collectIconUrls(node: unknown, into: string[]): void {
     return;
   }
   if (typeof node === "object") {
-    for (const value of Object.values(node as Record<string, unknown>)) {
-      collectIconUrls(value, into);
+    const record = node as Record<string, unknown>;
+    // An `IconDescriptor` is `{ url, sizes?, type?, … }` — only `url` is a URL.
+    // Walking every value turned `sizes: "48x48"` into a path and asked the
+    // gate for `/48x48`. Anything else here is the rel-keyed `Icons` object
+    // (`icon`, `shortcut`, `apple`, `other`), whose values are all icons.
+    if ("url" in record) {
+      collectIconUrls(record.url, into);
+      return;
     }
+    for (const value of Object.values(record)) collectIconUrls(value, into);
   }
 }
 
@@ -157,6 +168,14 @@ describe("assets declared to the browser are reachable without a session", () =>
     // (/Login, /ASSETS/x.css); this pins it for the entries added here.
     for (const lookalike of ["/ICON-192.PNG", "/Icon-512.png", "/icon-192.png/", "/favicon-32X32.png"]) {
       expect((await get(lookalike)).status, lookalike).toBe(307);
+    }
+  });
+
+  it("admits a HEAD as well as a GET — a browser asks before it fetches", async () => {
+    for (const iconPath of manifestIconPaths()) {
+      const response = await get(iconPath, "HEAD");
+      expect(response.status, `HEAD ${iconPath}`).toBe(200);
+      expect(response.headers.get("Location"), iconPath).toBeNull();
     }
   });
 
