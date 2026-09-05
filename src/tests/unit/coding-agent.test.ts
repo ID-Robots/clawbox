@@ -15,6 +15,7 @@
  * installer puts it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "child_process";
 import crypto from "crypto";
 import fs from "fs";
 import os from "os";
@@ -735,6 +736,32 @@ describe("a run", () => {
       // (the moment a follow-up would start), the run is still alone.
       await vi.waitFor(() => { expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(COMMIT_LINE); }, { timeout: 10_000 });
       expect(allRuns().length).toBe(1);
+    });
+
+    it("records a commit the run made ITSELF, so the pull request step and the row see it", async () => {
+      // The angry-pigs run (2026-09-05) committed its own work through its
+      // shell; the settle's `git add -A` then staged nothing, the record said
+      // no commit, and "Nothing was committed" closed a pull request over a
+      // branch two commits ahead of its base.
+      readyDevice();
+      const dir = makeProject("site");
+      const g = (...args: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=T", "-c", "user.email=t@example.com", ...args], { encoding: "utf-8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: home } }).trim();
+      g("init", "--quiet"); g("add", "-A"); g("commit", "--quiet", "-m", "before");
+      installFakeWrapper([
+        `echo '${INIT}'`,
+        'echo "mine" > "$PWD/mine.txt"',
+        'git -C "$PWD" -c user.name=Run -c user.email=run@example.com add -A && git -C "$PWD" -c user.name=Run -c user.email=run@example.com commit -q -m "the run commits"',
+        `echo '${JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Write", input: { file_path: `${dir}/mine.txt` } }] } })}'`,
+        `echo '{"type":"result","subtype":"success","num_turns":2,"result":"Committed it myself."}'`,
+        "exit 0",
+      ].join("\n"));
+      const done = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
+      await vi.waitFor(() => { expect(lib.getRun(done.id)?.commit).toBeTruthy(); }, { timeout: 10_000 });
+      const run = lib.getRun(done.id)!;
+      expect(run.commit).toBe(g("rev-parse", "--short", "HEAD"));
+      expect(run.commitError).toBeNull();
+      expect(run.progress.join("\n")).toMatch(/Committed by the run itself as /);
+      expect(g("log", "--oneline")).toMatch(/the run commits/);
     });
 
     it("does nothing while the owner's review switch is off", async () => {

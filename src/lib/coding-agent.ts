@@ -97,7 +97,7 @@ import {
   type PrChecks,
   type PrState,
 } from "@/lib/coding-pr";
-import { commitRunWork, lastCommit, type LastCommit } from "@/lib/coding-git";
+import { commitRunWork, lastCommit, type LastCommit, newestCommitSince } from "@/lib/coding-git";
 import { closeSessionsForRun } from "@/lib/browser-sessions";
 import { ensureProjectIcon } from "@/lib/project-icon";
 import { webappIconPath } from "@/lib/webapp-icon";
@@ -3657,7 +3657,12 @@ export function isTransientFailure(error: string | null): boolean {
  * attempt is over, so what must follow the commit can wait for it.
  */
 async function recordRunWork(run: CodingRun): Promise<void> {
-  if (run.filesTouched.length === 0) return;
+  // No file the tools confirmed — but a run that wrote through its shell and
+  // committed there has a commit of its own to record all the same.
+  if (run.filesTouched.length === 0) {
+    await noteOwnCommit(run);
+    return;
+  }
   try {
     const outcome = await commitRunWork({
       directory: run.directory,
@@ -3678,12 +3683,35 @@ async function recordRunWork(run: CodingRun): Promise<void> {
       console.error(`[coding-agent] ${run.id} not committed: ${outcome.reason}`);
     } else {
       run.commitError = null;
+      // Nothing left to stage because the run committed its work ITSELF.
+      await noteOwnCommit(run);
     }
     persist(true);
   } catch (err) {
     run.commitError = (err instanceof Error ? err.message : String(err)).slice(0, MAX_ERROR_CHARS);
     persist(true);
     console.error("[coding-agent] commit failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * A commit the run made ITSELF, through its shell: the newest commit since it
+ * started is its own, and the record carries it — the pull request step and
+ * the project's row read `commit`, and a branch two commits ahead of its base
+ * is not "nothing was committed" (the angry-pigs run, 2026-09-05). Never
+ * throws; a folder that is not its own repository answers nothing.
+ */
+async function noteOwnCommit(run: CodingRun): Promise<void> {
+  try {
+    const own = await newestCommitSince(run.directory, run.startedAt);
+    if (!own || own === run.commit) return;
+    run.commit = own;
+    run.commitError = null;
+    pushProgress(run, `Committed by the run itself as ${own}`);
+    console.error(`[coding-agent] ${run.id} committed itself as ${own}`);
+    persist(true);
+  } catch (err) {
+    console.error("[coding-agent] own commit:", err instanceof Error ? err.message : err);
   }
 }
 

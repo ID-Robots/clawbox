@@ -164,6 +164,27 @@ async function initRepo(dir: string): Promise<string | null> {
   return null;
 }
 
+/**
+ * The newest commit in the folder, when it landed after `sinceMs` — the
+ * run's OWN commit, made through its shell rather than by the settle. On
+ * 2026-09-05 a run built a whole game, committed it itself (its brief says
+ * to verify and commit), and the settle's `git add -A` then found nothing
+ * to stage: the record said no commit, and the pull request step answered
+ * "Nothing was committed" for a branch two commits ahead of its base. A
+ * minute of slack covers a clock that is not quite the run's.
+ */
+export async function newestCommitSince(directory: string, sinceMs: number): Promise<string | null> {
+  const dir = path.resolve(directory);
+  const root = await isOwnRepoRoot(dir);
+  if (!root.known || !root.value) return null;
+  const r = await git(dir, ["log", "-1", "--format=%h %ct"]);
+  if (r.code !== 0 || !r.stdout) return null;
+  const [sha, ct] = r.stdout.trim().split(/\s+/);
+  const committedAt = Number(ct) * 1000;
+  if (!sha || !Number.isFinite(committedAt) || committedAt < sinceMs - 60_000) return null;
+  return sha;
+}
+
 /** The commit message: what the run was, and what it said it did. */
 export function buildCommitMessage(input: { runId: string; task: string; summary: string | null }): string {
   const subject = `Coding agent: ${firstLine(input.task, 68)}`;
