@@ -231,24 +231,53 @@ describe("the checks CI runs, and their blocking status", () => {
     expect(tests.slice(0, jobsAt)).toMatch(/\non:\n {2}pull_request:\n(?! {4})/);
   });
 
-  it("does not report a suite that never ran as a suite that failed", () => {
-    // The other direction of the same untrustworthy sentence. `needs.test.result`
-    // is the JOB's verdict, so a blocking step ahead of vitest — sudoers, the
-    // MCP typecheck, the MCP tool contract — failing rendered
-    // "## ❌ Tests — Result: **failed**" over a suite that never started: a
-    // false failure over an operation never attempted, and the mirror image of
-    // the "passed" the case above closes.
+  it("says Tests passed or failed only about the suite, never about the job", () => {
+    // `needs.test.result` is the JOB's verdict and the sentence claims something
+    // about the SUITE. They come apart in both directions: a blocking step ahead
+    // of vitest failing leaves the suite unrun, and a step after it failing
+    // (Parse coverage, which runs `if: always()` and parses JSON) turns the job
+    // red over a green suite. Reading the job verdict as the suite's is a false
+    // failure either way, so the verdict is driven off the suite step's own
+    // outcome and the job result gets a line of its own.
     //
-    // The step's own outcome is what settles it, so it has to be an id, an
-    // output, and a branch — all three, or the comment silently falls back to
-    // the job verdict.
+    // It takes all four — the id, the job output, the env, and a branch that
+    // reads only `success`/`failure` as a verdict — or the comment silently
+    // falls back to the job.
     expect(step("bun run test:coverage:ci")).toMatch(/^\s+id: suite$/m);
     expect(tests).toMatch(/^\s+suite: \$\{\{ steps\.suite\.outcome \}\}$/m);
     expect(tests).toMatch(/SUITE_OUTCOME: \$\{\{ needs\.test\.outputs\.suite \}\}/);
-    // Only an outcome the suite itself produced may be read as a verdict;
-    // skipped, cancelled and an unevaluated output must not become "failed".
-    expect(tests).toMatch(/SUITE_OUTCOME === 'success' \|\| process\.env\.SUITE_OUTCOME === 'failure'/);
+    expect(tests).toMatch(/const passed = suite === 'success';/);
+    expect(tests).toMatch(/const failed = suite === 'failure';/);
     expect(tests).toContain("did not run");
+    // …and the job's own result is reported, not silently dropped.
+    expect(tests).toContain("TEST_RESULT !== 'success'");
+  });
+
+  it("keeps every PR-comment job reachable on a red run", () => {
+    // The hole that let all of the above ship dead. Every other assertion in
+    // this file is about the `test` job; the feature lives in `comment`.
+    //
+    // A job whose `if:` carries no status-check function gets GitHub's implicit
+    // `success()`, so it is SKIPPED whenever the job it `needs` failed. The
+    // comment is edited in place under one marker, so its section then keeps
+    // whatever it last said — verified live, `test -> failure, comment ->
+    // skipped` on runs 33967347945, 33968019417 and 33939067430, while a PR
+    // whose latest run was red showed "✅ Tests — Result: passed" for a day.
+    // The only sentence the job had ever been able to render was "passed".
+    //
+    // All three comment jobs, because it is the same mechanism in each and
+    // e2e-tests.yml had it too; e2e-install.yml is the one that got it right,
+    // and is pinned here so it stays that way.
+    for (const file of ["pr-tests-coverage.yml", "e2e-tests.yml", "e2e-install.yml"]) {
+      const yml = read(`.github/workflows/${file}`);
+      const at = yml.indexOf("\n  comment:\n");
+      expect(at, `${file} has no comment job`).toBeGreaterThan(-1);
+      const header = yml.slice(at, yml.indexOf("    steps:", at));
+      expect(header, `${file}: the comment job does not wait for the job it reports on`)
+        .toMatch(/^ {4}needs: \S+$/m);
+      expect(header, `${file}: the comment job's if: has no status function, so GitHub skips it whenever the job it reports on fails`)
+        .toMatch(/^ {4}if:.*(always\(\)|!cancelled\(\)|failure\(\))/m);
+    }
   });
 
   it("runs the advisory step after the suite it must not delay", () => {
@@ -257,6 +286,10 @@ describe("the checks CI runs, and their blocking status", () => {
     // is what keeps it running when the suite went red — the counts are most
     // useful on exactly that run.
     expect(tests.indexOf("bun run test:coverage:ci")).toBeLessThan(tests.indexOf("bun run lint >"));
-    expect(step("bun run lint >")).toMatch(/if:\s*always\(\)/);
+    // Either status function keeps it running on a red suite. `!cancelled()` is
+    // the better one — `always()` also runs it while the job is being cancelled,
+    // which on a hung suite spends another two minutes after the timeout that
+    // exists to stop exactly that — and it is the idiom e2e-tests.yml uses.
+    expect(step("bun run lint >")).toMatch(/if:\s*(\$\{\{\s*)?(always\(\)|!cancelled\(\))/);
   });
 });
