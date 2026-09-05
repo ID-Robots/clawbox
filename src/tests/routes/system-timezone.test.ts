@@ -120,6 +120,13 @@ afterEach(async () => {
   await fs.rm(TZ_ENV_PATH, { force: true });
 });
 
+/** Every temp the route could have left behind, found by shape rather than name. */
+async function leftoverTemps(): Promise<string[]> {
+  const dir = path.dirname(TZ_ENV_PATH);
+  const base = path.basename(TZ_ENV_PATH);
+  return (await fs.readdir(dir)).filter((f) => f !== base && f.includes(base));
+}
+
 function post(body: unknown): Request {
   return new Request("http://localhost/setup-api/system/timezone", {
     method: "POST",
@@ -294,9 +301,7 @@ describe("/setup-api/system/timezone", () => {
 
     expect(results.map((r) => r.status)).toEqual(Array(12).fill(200));
     expect(await fs.readFile(TZ_ENV_PATH, "utf-8")).toBe("TIMEZONE=Europe/Sofia\n");
-    const leftovers = (await fs.readdir(path.dirname(TZ_ENV_PATH)))
-      .filter((f) => f.startsWith("timezone.env") && f !== "timezone.env");
-    expect(leftovers).toEqual([]);
+    expect(await leftoverTemps()).toEqual([]);
   });
 
   it("leaves no temp file behind when the write cannot land", async () => {
@@ -306,7 +311,10 @@ describe("/setup-api/system/timezone", () => {
       const mod = await import("@/app/setup-api/system/timezone/route");
 
       expect((await mod.POST(post({ timezone: "Europe/Sofia" }))).status).toBe(500);
-      await expect(fs.stat(`${TZ_ENV_PATH}.tmp`)).rejects.toThrow();
+      // Scanned by SHAPE, not by a fixed name: the temp is
+      // `.timezone.env.<uuid>.tmp`, so asserting on `${TZ_ENV_PATH}.tmp` would
+      // pass whether or not the catch cleaned anything up.
+      expect(await leftoverTemps()).toEqual([]);
     } finally {
       await fs.rm(TZ_ENV_PATH, { recursive: true, force: true });
     }
@@ -423,6 +431,25 @@ describe("/setup-api/system/timezone", () => {
 
     expect(res.status).toBe(502);
     expect(String(body.warning)).toMatch(/clock|Terminal/i);
+  });
+
+  it("does not record the zone as applied when only the OS leg failed", async () => {
+    // Recording it there was a permanent false success: GET answered
+    // `applied: true`, TimezoneAdopter stopped offering, and `date`, the
+    // Terminal and every log line stayed on Etc/UTC for ever, because nothing
+    // else re-runs step_set_timezone. Leaving the marker unset IS the retry.
+    mockStartRootStep.mockRejectedValue(new Error("unit failed"));
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    const res = await mod.POST(post({ timezone: "Europe/Sofia" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(body.applied).toBe(false);
+    expect(setMock).not.toHaveBeenCalledWith("timezone_applied", "Europe/Sofia");
+    // "until the next reboot" promised a repair that does not exist: nothing
+    // reads data/timezone.env at boot.
+    expect(String(body.warning)).not.toMatch(/reboot/i);
   });
 
   it("does not report success when the harness write failed", async () => {

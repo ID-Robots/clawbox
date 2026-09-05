@@ -227,14 +227,19 @@ d("apply_timezone", () => {
       "  echo 'Failed to set time zone: Invalid time zone' >&2; return 1",
       "}",
       extractShellFunction("apply_timezone"),
-      'apply_timezone "Europe/Sofia" || true',
+      'apply_timezone "Europe/Sofia"; echo "rc=$?"',
     ].join("\n");
     const r = spawnSync("bash", ["-c", script], {
       encoding: "utf-8",
       env: testEnv({ PATH: process.env.PATH ?? "" }),
     });
 
-    expect(`${r.stdout ?? ""}${r.stderr ?? ""}`).toContain("Invalid time zone");
+    const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+    expect(out).toContain("Invalid time zone");
+    // The STATUS as well as the sentence: the non-zero return is what makes the
+    // root step red, and `|| true` discarded it — turning the `return 1` into a
+    // `return 0` would have kept this green over a silent no-op.
+    expect(out).toContain("rc=1");
   });
 
   it("is a no-op, not a failure, when nothing has been recorded", () => {

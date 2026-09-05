@@ -155,7 +155,13 @@ export async function POST(request: Request) {
   // step has run yet at this point, so the honest answer is that the zone was
   // not saved — and returning here keeps it that way.
   const envPath = timezoneEnvPath();
-  const tmpPath = `${envPath}.${randomUUID()}.tmp`;
+  // Dot-prefixed, like src/lib/webapp-icon.ts and src/lib/coding-agent-media.ts:
+  // an orphan left by a process killed between the write and the rename stays
+  // out of the way of anything listing data/.
+  const tmpPath = path.join(
+    path.dirname(envPath),
+    `.${path.basename(envPath)}.${randomUUID()}.tmp`,
+  );
   try {
     await fs.mkdir(path.dirname(envPath), { recursive: true });
     await fs.writeFile(tmpPath, `TIMEZONE=${tz}\n`, { mode: 0o600, flag: "wx" });
@@ -185,12 +191,23 @@ export async function POST(request: Request) {
     await startRootStep("set_timezone");
   } catch (err) {
     console.warn("[timezone] Failed to trigger set_timezone service:", err);
+    // NOT "until the next reboot": nothing reads data/timezone.env at boot and
+    // step_set_timezone is on no install or update path, so a reboot repairs
+    // nothing. What does repair it is the applied marker staying unset — see
+    // below.
     osFailure = "The assistant now uses this timezone, but the device clock could not be changed — "
-      + "the Terminal and the logs stay on the old zone until the next reboot.";
+      + "the Terminal and the logs stay on the old zone. It is not recorded as applied, so the next "
+      + "time this dashboard is opened it will try again.";
   }
 
   const harness = await applyTimeZoneToHarness(tz);
-  if (!harness.failure) await set(TIMEZONE_APPLIED_KEY, tz);
+  // BOTH legs, not just the harness one. Marking the zone applied when only the
+  // OS leg failed made GET report `applied: true`, TimezoneAdopter stop
+  // offering, and the box keep `Etc/UTC` for `date`, the Terminal and every log
+  // line for ever — with the box's own state saying the change had landed.
+  // Nothing else re-runs this step. Leaving the marker unset is the retry.
+  const applied = !harness.failure && !osFailure;
+  if (applied) await set(TIMEZONE_APPLIED_KEY, tz);
 
   const warning = harness.failure ?? osFailure ?? harness.pending;
   if (warning) {
@@ -200,7 +217,7 @@ export async function POST(request: Request) {
         changed: true,
         timezone: tz,
         harness: harness.applied,
-        applied: !harness.failure,
+        applied,
         warning,
       },
       // A leg that FAILED is a half-applied change the caller must be able to
