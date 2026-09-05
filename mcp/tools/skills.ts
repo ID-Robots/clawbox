@@ -848,7 +848,10 @@ export function registerSkillTools(reg: Registrar): void {
         // Compare what is PRINTED, not the raw values: a name that differs from
         // the id only in whitespace produced a `shows as` clause whose two
         // halves were then identical once both had been flattened.
-        const shows = shown !== oneLine(s.id) ? `, shows as "${shown}"` : "";
+        // Both sides at the same bound: `shown` is capped, so an uncapped id made
+        // a row whose name IS its id and is longer than the cap differ by the
+        // truncation alone, and it gained a clause naming a name it does not show.
+        const shows = shown !== oneLine(s.id, 120) ? `, shows as "${shown}"` : "";
         // The id is flattened but NOT shortened: it is the string
         // skill_uninstall resolves, and half of it would be worse than a long
         // line. A valid id has no whitespace anyway (isValidSkillName), so this
@@ -1268,7 +1271,11 @@ export function registerSkillTools(reg: Registrar): void {
         // match.
         throw refusalToToolError(err) ?? err;
       }
-      const name = body.name ?? id.split("/").pop() ?? id;
+      // Flattened but NOT shortened, exactly as skill_list treats a lock id: this
+      // is a text() answer, so a newline out of the publisher's frontmatter would
+      // write a sentence of its own — and it is also the string skill_uninstall
+      // resolves, which zText(128) accepts whole, so half of it would be worse.
+      const name = oneLine(body.name ?? id.split("/").pop() ?? id);
       const repaired = body.files?.repaired?.length ?? 0;
       // Return the LOCK NAME: it is the argument skill_uninstall needs, and
       // handing it over now is what stops the model guessing it later.
@@ -1336,7 +1343,13 @@ export function registerSkillTools(reg: Registrar): void {
       const sent = removing?.id ?? wanted;
       // The rules fire only on a FAILURE, where there is no body to read, so
       // they get what the pre-condition knew.
-      const shownPre = removing && removing.name !== sent ? ` (it showed as "${removing.name}")` : "";
+      // Flattened and bounded like the success answer below, and compared at the
+      // same bound: this is the same publisher field, on the same tool, and a
+      // refusal that prints it raw disagrees with the answer that does not.
+      const shownName = removing === undefined ? undefined : oneLine(removing.name, 120);
+      const shownPre = shownName !== undefined && shownName !== oneLine(sent, 120)
+        ? ` (it showed as "${shownName}")`
+        : "";
       let done: UninstallOk;
       try {
         done = await skillsPost<UninstallOk>(
@@ -1397,7 +1410,13 @@ export function registerSkillTools(reg: Registrar): void {
       // nothing to tell apart from the real one.
       const askedRaw = removed?.name ?? (typeof done?.requested === "string" ? done.requested : undefined);
       const asked = askedRaw === undefined ? undefined : oneLine(askedRaw, 120);
-      const shown = asked && asked !== id
+      // Both sides at the same bound, exactly as skill_list's row and the two
+      // refusals above: `asked` is capped and a lock id is not, and a hub entry
+      // with no `name:` of its own carries `name === id` (enumerateInstalledSkills),
+      // so a legal 121-128-character id differed from its own card by the
+      // truncation alone — and the tool named a card that exists nowhere, in a
+      // shape isValidSkillName() accepts, for the agent to hand straight back.
+      const shown = asked && asked !== oneLine(id, 120)
         ? removed
           ? ` (it showed as "${asked}")`
           : ` (you asked for "${asked}")`
@@ -1433,7 +1452,18 @@ export function registerSkillTools(reg: Registrar): void {
       const unshadowed = after.find((sk) => sk.id === id && !isRemovableOrigin(sk.origin));
       const alias = unshadowed
         ? undefined
-        : after.find((sk) => sk.id !== id && (sk.name === wanted || sk.name === asked));
+        // COMPARE WHAT IS PRINTED. `asked` is flattened and bounded above, so
+        // matching it against a RAW row silently loses this sentence for every
+        // card name oneLine() alters — a double space, a trailing space, a NBSP,
+        // anything over the bound — and the sentence is the guard that stops the
+        // next skill_list reading as a failed removal. The `wanted` clause stays a
+        // raw comparison on purpose — it is the string the AGENT typed, which
+        // isValidSkillName() has already refused whitespace in, so flattening the
+        // row on that side would widen what an exact name matches rather than fix
+        // what it prints. The flattened clause is the one that covers a card, and
+        // it is never the dead branch: the route answers `requested` on every 200
+        // (setup-api/hermes/skills/uninstall/route.ts), so `asked` is defined.
+        : after.find((sk) => sk.id !== id && (sk.name === wanted || oneLine(sk.name, 120) === asked));
       const survivor = unshadowed ?? alias;
       if (!survivor) return text(`Removed the skill "${id}"${shown}.`);
       const kind = survivor.origin === "local"
