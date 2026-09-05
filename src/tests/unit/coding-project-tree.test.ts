@@ -178,6 +178,13 @@ describe("writing a file", () => {
     expect(fs.readFileSync(path.join(project, "src", "app.js"), "utf8")).toBe("saved\n");
   });
 
+  it("saves a file whose name is at the filesystem's limit — the sibling is named apart from it", async () => {
+    const long = "l".repeat(250) + ".txt";
+    fs.writeFileSync(path.join(project, long), "old\n");
+    expect(await writeProjectFile(project, long, "new\n")).toEqual({ ok: true, path: long, size: 4 });
+    expect(fs.readFileSync(path.join(project, long), "utf8")).toBe("new\n");
+  });
+
   it("creates nothing: a name that is not there is a 404, not a new file", async () => {
     expect(await writeProjectFile(project, "src/new.js", "x")).toEqual({ ok: false, status: 404 });
     expect(fs.existsSync(path.join(project, "src", "new.js"))).toBe(false);

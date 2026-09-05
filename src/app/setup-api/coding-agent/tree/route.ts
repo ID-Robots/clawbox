@@ -8,11 +8,12 @@ export const dynamic = "force-dynamic";
 
 /**
  * How many bytes a PUT body may be: the write cap with room for JSON's own
- * overhead (a newline is two characters escaped, a control character six).
- * Route handlers have no body limit of their own, and `request.json()`
- * would buffer the whole thing before the content's cap could be applied.
+ * overhead — six bytes per content byte at worst (a control character is
+ * `\u0001`), plus the envelope. Route handlers have no body limit of their
+ * own, and `request.json()` would buffer the whole thing before the
+ * content's cap could be applied.
  */
-export const MAX_PUT_BODY_BYTES = MAX_TREE_WRITE_BYTES * 4 + 16 * 1024;
+export const MAX_PUT_BODY_BYTES = MAX_TREE_WRITE_BYTES * 6 + 16 * 1024;
 
 /** The JSON body, read chunk by chunk under the cap — never buffered whole first. */
 async function readCappedJson(request: Request, maxBytes: number): Promise<{ ok: true; body: unknown } | { ok: false; status: 400 | 413 }> {

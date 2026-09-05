@@ -175,6 +175,14 @@ describe("saving a file", () => {
 });
 
 describe("the body cap", () => {
+  it("takes a file at the write cap whose every byte escapes to six", async () => {
+    const { MAX_TREE_WRITE_BYTES } = await import("@/lib/coding-project-tree");
+    const content = "\u0001".repeat(MAX_TREE_WRITE_BYTES);
+    const res = await PUT(put({ projectId: "site", file: "src/app.js", content }));
+    expect(res.status).toBe(200);
+    expect(fs.readFileSync(path.join(project, "src", "app.js"), "utf8")).toBe(content);
+  });
+
   it("refuses a body past MAX_PUT_BODY_BYTES with 413 before parsing it, by its length and by what it streams", async () => {
     const { MAX_PUT_BODY_BYTES } = await import("@/app/setup-api/coding-agent/tree/route");
     const huge = JSON.stringify({ projectId: "site", file: "src/app.js", content: "x".repeat(MAX_PUT_BODY_BYTES) });

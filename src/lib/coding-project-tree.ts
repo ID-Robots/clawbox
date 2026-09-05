@@ -261,7 +261,9 @@ export async function writeProjectFile(projectDir: string, rel: string, content:
     } finally {
       fs.closeSync(targetFd);
     }
-    tmpName = `.${name}.clawbox-save-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+    // Named apart from the target: a name near the filesystem's component
+    // limit would make its sibling too long to create.
+    tmpName = `.clawbox-save-${process.pid}-${crypto.randomBytes(8).toString("hex")}`;
     const tmpFd = fs.openSync(path.join(viaDir, tmpName), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, mode);
     try {
       let written = 0;
