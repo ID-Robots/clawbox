@@ -228,6 +228,13 @@ describe("GET /[...gateway] (catch-all route)", () => {
     // decode and two more `25`s walked around it.
     ["http://localhost/portal%252525252Fnope", "page"],
     ["http://localhost/setup-api%252525252Fnope", "api"],
+    // A junk escape appended to a spelling that IS denied. All-or-nothing
+    // decoding threw on the `%zz`, yielded nothing, matched nothing and handed
+    // these to the gateway — a cheaper walk-around than the nesting above it.
+    // Decoding per escape RUN leaves the `%zz` alone and still reads the `%2F`.
+    ["http://localhost/portal%2Fnope%zz", "page"],
+    ["http://localhost/setup-api%2Fnope%zz", "api"],
+    ["http://localhost/setup%252Fnope%25zz", "page"],
   ];
 
   it.each(CLAWBOX_OWNED_UNMATCHED)(
@@ -256,18 +263,20 @@ describe("GET /[...gateway] (catch-all route)", () => {
     },
   );
 
-  it.each([
-    ["a claimed root", "/portal"],
-    ["a root the gateway would otherwise own", "/nope"],
-  ])(
-    "answers 404 for a path nested past the decode cap (%s)",
-    async (_what, root) => {
-      // Past the cap the box cannot read the path AT ALL, and an unreadable
-      // path is not handed to the gateway either — the give-up fails CLOSED,
-      // which is what stops "append two more `25`s" from being a bypass
-      // whatever the cap is set to. Deep enough that no value of
-      // MAX_DECODE_PASSES worth having could reach the end of it.
-      const separator = `%${"25".repeat(199)}2F`;
+  it("answers 404 for a path nested past the decode cap, whoever's root it is", async () => {
+    // Past the cap the box cannot read the path AT ALL, and an unreadable path
+    // is not handed to the gateway either — the give-up fails CLOSED, which is
+    // what stops "append two more `25`s" from being a bypass whatever the cap
+    // is set to. Deep enough that no value of MAX_DECODE_PASSES worth having
+    // could reach the end of it.
+    //
+    // `/nope` is here to say what the branch really does: at this depth the
+    // LITERAL spelling is under nobody's root, so this case does not reach the
+    // claimed-root path at all and the 404 comes from the give-up alone. It is
+    // one branch, deliberately shown from the side where nothing else could
+    // produce the answer.
+    const separator = `%${"25".repeat(199)}2F`;
+    for (const root of ["/portal", "/nope"]) {
       mockGetAll.mockResolvedValue({ setup_complete: true });
 
       const res = await gatewayGet(
@@ -277,11 +286,11 @@ describe("GET /[...gateway] (catch-all route)", () => {
         }),
       );
 
-      expect(res.status).toBe(404);
-      expect(mockServeGatewayHTML).not.toHaveBeenCalled();
-      expect(mockProxyGatewayRequest).not.toHaveBeenCalled();
-    },
-  );
+      expect(res.status, root).toBe(404);
+      expect(mockServeGatewayHTML, root).not.toHaveBeenCalled();
+      expect(mockProxyGatewayRequest, root).not.toHaveBeenCalled();
+    }
+  });
 
   it("still serves the shell for the gateway's OWN namespaces", async () => {
     // The other half of the boundary: a prefix test that swallowed /api or
@@ -322,6 +331,11 @@ describe("GET /[...gateway] (catch-all route)", () => {
     // that DOES fail closed keys on the pass count and never on "contains
     // `%`": a gateway path carrying one stray `%` must go on being answered.
     "http://localhost/setup-api%zz",
+    // The OTHER side of MAX_DECODE_PASSES. Without this the cap could be
+    // lowered to 4 "for performance" and every gateway path with five
+    // nestings would start 404ing with the whole suite still green — failing
+    // closed harder never trips a claimed-side assertion.
+    "http://localhost/chat%252525252Fnope",
   ])("leaves %s with the gateway, decoded or not", async (url) => {
     mockGetAll.mockResolvedValue({ setup_complete: true });
 

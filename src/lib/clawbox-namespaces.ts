@@ -141,24 +141,37 @@ export function isSetupApiPath(pathname: string): boolean {
  * ALLOW gates, and decoding there would widen an auth decision.
  *
  * To a fixpoint because one pass is not enough: `/setup%252Fnope` decodes to
- * `/setup%2Fnope`, which is still an encoded separator. Each pass strictly
- * shortens the string (a `%XX` triple becomes one code unit) or returns at the
- * `next === current` fixpoint, so the loop terminates with or without the cap.
+ * `/setup%2Fnope`, which is still an encoded separator. Each pass that changes
+ * anything strictly SHORTENS the string — an escape sequence is at least three
+ * characters in and at most two UTF-16 code units out (`%F0%9F%98%80` is 12
+ * characters and one emoji) — so the loop reaches a fixpoint on its own.
  *
- * The cap is a RUNAWAY GUARD, not a policy, and it fails CLOSED: a path still
- * carrying `%` when the passes run out is one this box cannot read, so it is
- * claimed rather than handed to the gateway. A cap that gave up and allowed
- * made the function non-idempotent under its own decode — it denied
- * `/portal%2Fnope` and permitted `/portal%252525252Fnope`, which is four
- * passes away from it, so "append two more `25`s" walked around the check this
- * module exists to make. Failing closed is what makes the depth uninteresting:
- * the cost of guessing wrong is a 404 on a path nobody can spell on purpose.
+ * PER ESCAPE RUN, not all-or-nothing, and that is the difference between
+ * denying a spelling and denying a family. `decodeURIComponent` over the whole
+ * path throws on the first malformed escape and yields nothing, so
+ * `/portal%2Fnope` was denied while `/portal%2Fnope%zz` — the same path with a
+ * junk suffix — decoded to nothing, matched nothing and was handed to the
+ * gateway. Appending `%zz` was a cheaper walk-around than the nested-encoding
+ * one this module was written to close. Decoding each maximal run of
+ * well-formed escapes and leaving the rest alone closes both.
  *
- * A malformed escape (`/%zz`) is the OTHER outcome and keeps today's answer.
- * `decodeURIComponent` is all-or-nothing, so it throws, and that is a settled
- * fact about the path rather than a budget running out: the caller falls back
- * to the literal spelling and `/assets/a%zz.js` stays the gateway's, rather
- * than a real asset 404ing over one stray `%`.
+ * Nothing is lost by it: over the 55 Control UI routes and the gateway's
+ * static paths, in every encoding either decoder was measured on, both claim
+ * NOTHING — `/assets/a%zz.js` and `/assets/100%25.png` stay the gateway's
+ * under this one exactly as they did under the old one.
+ *
+ * The cap bounds the work AND, when it fires, chooses the answer — so it is
+ * not only a runaway guard, and the two must not be read apart. It fails
+ * CLOSED: a path the passes ran out on is one this box cannot read to the end,
+ * so it is claimed rather than handed to the gateway. A cap that gave up and
+ * ALLOWED made the function non-idempotent under its own decode — it denied
+ * `/portal%2Fnope` and permitted `/portal%252525252Fnope`, four passes away
+ * from it. Note what the number therefore decides: at more than
+ * MAX_DECODE_PASSES nestings EVERY path is 404'd, the gateway's included, so
+ * lowering it is a behaviour change and `gateway.test.ts` pins both sides.
+ * 33 nestings is a 73-character URL — short, but unreachable by accident,
+ * because only a NESTED escape consumes a pass: `"%25".repeat(50)` is 50
+ * sequential escapes and costs two.
  */
 const MAX_DECODE_PASSES = 32;
 
@@ -166,26 +179,44 @@ type DecodedPath = {
   /** The path as far as it could be decoded. */
   spelling: string;
   /**
-   * The passes ran out with `%` still in the string — this box does not know
-   * what the path says. Never set for a malformed escape, which has an answer.
+   * The passes ran out before the fixpoint — this box does not know what the
+   * path says. Never set for a path that simply CONTAINS a `%` it cannot
+   * decode: that is a settled answer, not a budget running out.
    */
   undecodable: boolean;
 };
 
+/**
+ * One pass: every maximal run of well-formed `%XX` escapes decoded, everything
+ * else left exactly as it was.
+ *
+ * A RUN rather than one escape at a time, because a non-ASCII character is
+ * several escapes together (`%E2%82%AC` is one euro sign) and decoding them
+ * singly would produce mojibake instead of the character the client sent. A run
+ * that is well-formed percent-encoding but not valid UTF-8 makes
+ * `decodeURIComponent` throw, and that run is then left alone too.
+ */
+function decodeEscapeRuns(pathname: string): string {
+  return pathname.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    try {
+      return decodeURIComponent(run);
+    } catch {
+      return run;
+    }
+  });
+}
+
 function decodePercentEncoding(pathname: string): DecodedPath {
   let current = pathname;
   for (let pass = 0; pass < MAX_DECODE_PASSES; pass++) {
-    if (!current.includes("%")) return { spelling: current, undecodable: false };
-    let next: string;
-    try {
-      next = decodeURIComponent(current);
-    } catch {
-      return { spelling: current, undecodable: false };
-    }
+    const next = decodeEscapeRuns(current);
     if (next === current) return { spelling: current, undecodable: false };
     current = next;
   }
-  return { spelling: current, undecodable: current.includes("%") };
+  // "Would one more pass still change it?" — the honest test for a budget that
+  // ran out, and not "does it still contain `%`", which is also true of the
+  // settled `/assets/a%zz.js`.
+  return { spelling: current, undecodable: decodeEscapeRuns(current) !== current };
 }
 
 /**
@@ -193,8 +224,16 @@ function decodePercentEncoding(pathname: string): DecodedPath {
  *
  * `"api"` and `"page"` differ only in what an unmatched path should answer
  * WITH — the ownership question has one answer for both.
+ *
+ * `"unreadable"` is not a namespace and deliberately not spelled as one: it is
+ * "this box could not decode the path to the end, so it is refused rather than
+ * handed on". The caller answers it like a page, but that is the CALLER's
+ * decision to make with the fact in front of it — folding it into `"page"`
+ * would tell a second reader that a path nobody could read is a ClawBox page.
  */
-export function clawboxNamespaceKind(pathname: string): "api" | "page" | null {
+export function clawboxNamespaceKind(
+  pathname: string,
+): "api" | "page" | "unreadable" | null {
   // Lower-cased HERE and not in `isUnderRoot`: Next's router is case-sensitive,
   // so `/Setup-Api/nope` and `/Portal/nope` matched no ClawBox route and were
   // answered with the shell and the token (measured on a box). This is the same
@@ -218,10 +257,10 @@ export function clawboxNamespaceKind(pathname: string): "api" | "page" | null {
     if (CLAWBOX_API_ROOTS.some((root) => isUnderRoot(candidate, root))) return "api";
     if (CLAWBOX_PAGE_ROOTS.some((root) => isUnderRoot(candidate, root))) return "page";
   }
-  // Neither spelling is the path's LAST word — the decode gave up with `%`
-  // still in it — so "this is the gateway's" is not something this box knows.
-  // Claimed, as a plain 404: the deny-only argument above is what makes that
-  // the safe guess, and no client can spell a path this deep by accident.
-  if (decoded.undecodable) return "page";
+  // Neither spelling is the path's LAST word — the passes ran out before the
+  // fixpoint — so "this is the gateway's" is not something this box knows.
+  // Refused rather than guessed: the deny-only argument above is what makes
+  // that the safe answer, and no client can spell a path this deep by accident.
+  if (decoded.undecodable) return "unreadable";
   return null;
 }

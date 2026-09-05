@@ -68,7 +68,15 @@ function isTransparentWrapper(name: string): boolean {
   return /^[(@]/.test(name);
 }
 
-/** Every literal top-level URL segment, seen through Next's routing rules. */
+/**
+ * Every literal top-level URL segment, seen through Next's routing rules.
+ *
+ * DIRECTORIES only, which is the edge of what this guard can see: Next's
+ * metadata-file conventions make a top-level URL out of a FILE — `robots.ts` is
+ * `/robots.txt`, `sitemap.ts` is `/sitemap.xml` — and one of those would be
+ * invisible here. None exists today; adding one means widening this walk, not
+ * just adding a root.
+ */
 function topLevelRouteSegments(dir: string = APP_DIR): string[] {
   const segments = fs
     .readdirSync(dir, { withFileTypes: true })
