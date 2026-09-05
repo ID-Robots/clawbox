@@ -582,6 +582,7 @@ _llamacpp_gaps = []
 _llamacpp_rows = []
 _llamacpp_dropped_rows = 0
 _llamacpp_named_rows = 0
+_llamacpp_trimmed_rows = 0
 if _wants_llamacpp:
     _entry_now = _llamacpp_entry if isinstance(_llamacpp_entry, dict) else {}
     _base_url_now = _entry_now.get("baseUrl")
@@ -593,12 +594,27 @@ if _wants_llamacpp:
         # and no `name` fails the schema exactly as an empty id does, and is
         # trivially completable; a row naming no model at all cannot be
         # repaired into one, so it is dropped and counted.
+        #
+        # The id is TRIMMED into the kept row, not only into the comparison
+        # below. `_llamacpp_have_ids` strips before matching, so a padded id
+        # satisfies the "this row already exists" test and nothing is appended —
+        # while the row that stays in the file keeps its padding, and the
+        # harness matches a row id with a strict `==` against a ref it has
+        # already normalised. The migration would print "Completed", the gateway
+        # would start, and every turn would still end "Unknown model", which is
+        # the exact failure this block exists to remove. Counted for the same
+        # reason `_llamacpp_named_rows` is: on an entry whose baseUrl is already
+        # usable nothing else makes `models` a gap, so an uncounted correction
+        # is computed and never written.
         for _row in _entry_models:
             _row_id = _row.get("id") if isinstance(_row, dict) else None
             if not (isinstance(_row_id, str) and _row_id.strip()):
                 _llamacpp_dropped_rows += 1
                 continue
             _row = dict(_row)
+            if _row["id"] != _row_id.strip():
+                _row["id"] = _row_id.strip()
+                _llamacpp_trimmed_rows += 1
             _row_name = _row.get("name")
             if not (isinstance(_row_name, str) and _row_name.strip()):
                 _row["name"] = _row_id.strip()
@@ -607,13 +623,14 @@ if _wants_llamacpp:
     # Missing rows are APPENDED, never a replacement: an entry that lists one
     # model while `primary`/`fallbacks` name another left the box mute with
     # "Unknown model" and said nothing, because the entry looked complete.
-    _llamacpp_have_ids = {_r["id"].strip() for _r in _llamacpp_rows}
+    _llamacpp_have_ids = {_r["id"] for _r in _llamacpp_rows}
     _llamacpp_missing_ids = [i for i in _llamacpp_model_ids if i not in _llamacpp_have_ids]
     if (
         not isinstance(_entry_models, list)
         or _llamacpp_missing_ids
         or _llamacpp_dropped_rows
         or _llamacpp_named_rows
+        or _llamacpp_trimmed_rows
     ):
         _llamacpp_gaps.append("models")
 
@@ -846,6 +863,14 @@ elif _wants_llamacpp and _llamacpp_gaps:
                     + (
                         " — dropped " + str(_llamacpp_dropped_rows) + " model row(s) naming no id"
                         if _llamacpp_dropped_rows
+                        else ""
+                    )
+                    # A value CHANGED is named for the same reason a value
+                    # discarded is: an id corrected in place is otherwise an
+                    # invisible edit to the operator's own file.
+                    + (
+                        " — trimmed whitespace from " + str(_llamacpp_trimmed_rows) + " model row id(s)"
+                        if _llamacpp_trimmed_rows
                         else ""
                     )
                 )

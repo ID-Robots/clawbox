@@ -365,6 +365,57 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
     expect(log).toContain("gateway will refuse this config");
   });
 
+  it("trims a row id the operator padded, instead of reporting a repair that changes nothing", () => {
+    // The comparison that decides whether a row already exists strips the id
+    // (`_llamacpp_have_ids`), but the row KEPT carries the padded value. So a
+    // padded row satisfies the check, no row is appended, the migration prints
+    // "Completed", and the gateway starts on a config whose row id the core
+    // matches with a strict `===` against an already-normalised ref — every
+    // turn still ends "Unknown model: llamacpp/<id>", which is the exact
+    // failure this migration exists to remove.
+    writeToken(TOKEN);
+    const { cfg, changed } = migrate({
+      models: {
+        providers: {
+          llamacpp: {
+            api: "openai-completions",
+            models: [{ id: " gemma4-e2b-it-q4_0 ", name: "gemma4-e2b-it-q4_0" }],
+          },
+        },
+      },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(changed).toBe(true);
+    expect((llamacppProvider(cfg).models ?? []).map((m) => m.id)).toEqual(["gemma4-e2b-it-q4_0"]);
+  });
+
+  it("trims it on an entry that is otherwise complete, where nothing else would fire", () => {
+    // The counter half of the same fix. With a usable provider baseUrl already
+    // there, `baseUrl` is not a gap; unless the padded id is itself counted as
+    // one, the repair never runs and the corrected row is never written — the
+    // box stays mute with an entry that looks complete, which is the state the
+    // "APPENDED, never a replacement" note above was written for.
+    writeToken(TOKEN);
+    const { cfg, changed } = migrate({
+      models: {
+        providers: {
+          llamacpp: {
+            baseUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+            api: "openai-completions",
+            models: [{ id: "gemma4-e2b-it-q4_0\n", name: "gemma4-e2b-it-q4_0" }],
+          },
+        },
+      },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(changed).toBe(true);
+    expect((llamacppProvider(cfg).models ?? []).map((m) => m.id)).toEqual(["gemma4-e2b-it-q4_0"]);
+    // ...and the entry it did not need to re-point is left alone.
+    expect(llamacppProvider(cfg).baseUrl).toBe("http://127.0.0.1/setup-api/local-ai/llamacpp/v1");
+  });
+
   it("does nothing on a box that does not use llamacpp at all", () => {
     writeToken(TOKEN);
     const { cfg, changed } = migrate({
