@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getGatewayToken } from "@/lib/gateway-proxy";
 import { getGatewayServiceHealth, type GatewayServiceHealth } from "@/lib/gateway-health";
 import { envPort } from "@/lib/port-probe";
+import { readEdition } from "@/lib/edition-source";
 
 export const dynamic = "force-dynamic";
 
@@ -92,12 +93,42 @@ function escapeHtml(value: string): string {
 }
 
 function gatewayOfflineResponse(health: GatewayServiceHealth) {
-  const breaker = health.breakerActive
+  // A unit systemd cannot LOAD is not a unit that is down, and this page used to
+  // tell both stories the same way: "OpenClaw Gateway Offline … not running on
+  // port 18789", with a Retry that can never succeed and a restart command
+  // systemctl refuses outright on a masked unit.
+  //
+  // The Hermes SKU is the permanent case — install.sh's
+  // step_edition_gateway_state removes the unit file and masks the name to
+  // /dev/null, so the port will never open — and an update or factory reset
+  // holding the same mask is the temporary one, on any SKU.
+  //
+  // The BRANCH is taken from the device (systemd's own LoadState), not from the
+  // edition, so a Hermes box whose /etc/clawbox/edition.env cannot be read still
+  // gets a page that is true. The edition only picks the WORDING below, where
+  // being wrong costs a vague sentence rather than a false one.
+  const unitAbsent = health.unitLoaded === false;
+  const breaker = health.breakerActive && !unitAbsent
     ? `<p class="breaker" role="alert"><strong>Automatic restart breaker activated.</strong> Repair the configuration, then run <code>sudo systemctl reset-failed clawbox-gateway &amp;&amp; sudo systemctl restart clawbox-gateway</code>.</p>`
     : "";
   const finalError = health.finalStartupError
     ? `<pre>${escapeHtml(health.finalStartupError)}</pre>`
     : "";
+  const hermesEdition = readEdition() === "hermes";
+  const heading = unitAbsent
+    ? (hermesEdition ? "OpenClaw Is Not Installed" : "Gateway Unavailable")
+    : "OpenClaw Gateway Offline";
+  const detail = unitAbsent
+    ? (hermesEdition
+      ? "This device runs the Hermes agent. The OpenClaw gateway is not installed here, so its Control UI has nothing to show."
+      : `The gateway service cannot be started: systemd reports it as <code>${escapeHtml(health.loadState ?? "unavailable")}</code>. An update or factory reset holds that lock while it runs.`)
+    : `The gateway service is not running on port ${GATEWAY_PORT}.`;
+  // Retrying a device that has no gateway unit at all only repaints the same
+  // page; while the mask is an update's lock it clears on its own, so the
+  // button stays for that case and goes for the SKU that will never have one.
+  const retry = unitAbsent && hermesEdition
+    ? ""
+    : `<button onclick="location.reload()">Retry</button>`;
   const html = `<!DOCTYPE html>
 <html><head><style>
   body { margin:0; height:100vh; display:flex; align-items:center; justify-content:center;
@@ -116,11 +147,11 @@ function gatewayOfflineResponse(health: GatewayServiceHealth) {
   button:hover { background:#334155; }
 </style></head><body>
 <div class="box">
-  <h2>OpenClaw Gateway Offline</h2>
-  <p>The gateway service is not running on port ${GATEWAY_PORT}.</p>
+  <h2>${heading}</h2>
+  <p>${detail}</p>
   ${breaker}
   ${finalError}
-  <button onclick="location.reload()">Retry</button>
+  ${retry}
 </div>
 </body></html>`;
   return new NextResponse(html, {
