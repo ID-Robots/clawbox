@@ -1062,15 +1062,21 @@ function pluginsNeedingConsent(journal: string): { managed: string[]; unmanaged:
   // `getGatewayFailureDetail` — which scans in REVERSE — handed the owner the
   // discord sentence.
   const namesRe = new RegExp(PLUGIN_CAPABILITY_CONSENT_RE.source, "gi");
-  const managed = new Set<string>();
-  const unmanaged = new Set<string>();
+  // KEYED by the normalised id, VALUED by the first raw id seen for it. One
+  // boot's journal can name the same plugin twice under different spellings —
+  // `codex` from one start, `@openclaw/codex` from another — and a set of raw
+  // ids would then repair it twice, giving the pinned force-install two
+  // separate six-minute budgets back to back on a Jetson. The repair runs
+  // under the raw name because that is what the registry answers to.
+  const managed = new Map<string, string>();
+  const unmanaged = new Map<string, string>();
   for (const match of journal.matchAll(namesRe)) {
     const id = match[1];
-    // Bucketed by the NORMALISED id, repaired under the id the journal used:
-    // that is the name the registry answers to.
-    (CLAWBOX_MANAGED_PLUGIN_IDS.has(normalizeManagedPluginId(id)) ? managed : unmanaged).add(id);
+    const key = normalizeManagedPluginId(id);
+    const bucket = CLAWBOX_MANAGED_PLUGIN_IDS.has(key) ? managed : unmanaged;
+    if (!bucket.has(key)) bucket.set(key, id);
   }
-  return { managed: [...managed], unmanaged: [...unmanaged] };
+  return { managed: [...managed.values()], unmanaged: [...unmanaged.values()] };
 }
 
 /**

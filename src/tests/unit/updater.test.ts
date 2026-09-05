@@ -864,6 +864,52 @@ describe("updater", () => {
       expect(calls.some((call) => call.includes("plugins enable discord"))).toBe(false);
     });
 
+    it("repairs a plugin named twice under different spellings only ONCE", async () => {
+      // One boot's journal can carry both spellings — a restart before the
+      // registry key changed, an alias from `plugins list`. Repairing per raw
+      // name would give the pinned force-install two six-minute budgets back
+      // to back on a Jetson for one plugin.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: [
+            'Plugin "discord" requires capability consent; rerun with --accept-capabilities.',
+            'Plugin "openclaw-discord" requires capability consent; rerun with --accept-capabilities.',
+            "",
+          ].join("\n"),
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      mockGatewayUp.mockImplementation(async () =>
+        mockExecFile.mock.calls.some(([cmd, args]) =>
+          `${cmd} ${(args as string[]).join(" ")}`.includes("plugins enable"),
+        ),
+      );
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      const enables = mockExecFile.mock.calls
+        .map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`)
+        .filter((call) => call.includes("plugins enable"));
+      expect(enables).toHaveLength(1);
+      // The FIRST spelling the journal used — the name the registry answered to
+      // when it refused.
+      expect(enables[0]).toContain("plugins enable discord --accept-capabilities");
+    });
+
     it("respects an owner-disabled plugin recorded under its ALIAS", async () => {
       // The journal names the core's own plugin id (`discord`), while
       // `plugins.entries` can be keyed under the alias `ensureChannelPlugin`
