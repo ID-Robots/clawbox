@@ -109,6 +109,9 @@ test("a project's page carries its files and changes, and a run's page its bread
   await expect(win.getByTestId("coding-agent-breadcrumb")).toContainText("My Site");
   await expect(win.getByTestId("coding-agent-git-info")).toContainText("main");
   await expect(win.getByTestId("coding-agent-project-copy")).toContainText(PROJECT.directory);
+  // The page opens on its runs; the files are one tab away.
+  await expect(win.getByTestId("coding-agent-workspace-runs")).toHaveAttribute("aria-selected", "true");
+  await win.getByTestId("coding-agent-workspace-files").click();
   const tree = win.getByTestId("coding-agent-file-tree");
   await expect(tree.getByTestId("coding-agent-tree-src")).toBeVisible();
   await tree.getByTestId("coding-agent-tree-src").click();

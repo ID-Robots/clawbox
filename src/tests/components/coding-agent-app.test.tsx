@@ -512,12 +512,15 @@ describe("CodingAgentApp", () => {
   });
 
   describe("recent runs", () => {
-    it("lists the runs in the project's Runs tab, with the count on the tab, and never a toggle", async () => {
+    it("opens a project on its Runs tab — first in the row, selected by default — with the count on the tab, and never a toggle", async () => {
       stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
-      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+      await screen.findByTestId("coding-agent-project-page");
       const tab = screen.getByTestId("coding-agent-workspace-runs");
       expect(tab).toHaveAttribute("aria-selected", "true");
+      expect(screen.getAllByRole("tab")[0]).toBe(tab);
+      expect(await screen.findByTestId("coding-agent-project-runs")).toBeInTheDocument();
       expect(tab.textContent).toContain("(1)");
       expect(await screen.findByText("Add a dark mode toggle")).toBeInTheDocument();
       expect(screen.queryByTestId("coding-agent-runs-toggle")).toBeNull();
@@ -806,6 +809,34 @@ describe("CodingAgentApp", () => {
       expect(settled).not.toHaveAttribute("data-live");
       // The chat card's chips: a command line is a command chip.
       expect(within(settled).getByTestId("coding-agent-run-activity-steps").querySelector("li")).toHaveAttribute("data-kind", "command");
+    });
+
+    it("says when each step happened — on hover, as the clock time and the distance from the start — when the record carries the times", async () => {
+      const startedAt = RUN.startedAt;
+      const run = { ...RUN, progress: ["$ bun install", "Writing app.js"], progressAt: [startedAt + 12_000, startedAt + 3 * 60_000 + 5_000] };
+      stubFetch({ enabled: true, readiness: READY }, [run], { projects: [SITE_PROJECT] });
+      const { unmount } = render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+      const steps = await screen.findByTestId("coding-agent-run-activity-steps");
+      const rows = steps.querySelectorAll("li");
+      expect(rows).toHaveLength(2);
+      expect(rows[0].getAttribute("title")).toMatch(/\+12s$/);
+      expect(rows[1].getAttribute("title")).toMatch(/\+3m 5s$/);
+      expect(rows[1].getAttribute("title")).toMatch(/\d{1,2}:\d{2}:\d{2}/);
+      const times = within(steps).getAllByTestId("coding-agent-run-activity-time");
+      expect(times.map((el) => el.textContent)).toEqual(["+12s", "+3m 5s"]);
+      expect(times[0]).toHaveAttribute("datetime", new Date(startedAt + 12_000).toISOString());
+      unmount();
+
+      // A record from before the times: the steps, and no clock to invent.
+      stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, progress: ["$ bun install"] }], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+      const bare = await screen.findByTestId("coding-agent-run-activity-steps");
+      expect(bare.querySelector("li")).not.toHaveAttribute("title");
+      expect(within(bare).queryByTestId("coding-agent-run-activity-time")).toBeNull();
     });
 
     it("lists every agent on the run's page — the run itself, the helpers still out, and the ones back with how long they took", async () => {

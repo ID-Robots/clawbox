@@ -647,6 +647,8 @@ export interface CodingRun {
    */
   resumable: boolean;
   progress: string[];
+  /** When each progress line was recorded (ms since the epoch), one for one with `progress`. */
+  progressAt: number[];
   /**
    * The run's OWN plan — the latest list Claude Code wrote with its TodoWrite
    * tool, whole, replacing the one before it.
@@ -1712,6 +1714,13 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // disappears the next time the file is read.
     pr: normalizePr(raw.pr),
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
+    // Only a list that matches the lines one for one is a list of their times;
+    // a record from before the field has none, and the timeline says nothing.
+    progressAt: (() => {
+      const lines = Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string").length : 0;
+      const at = Array.isArray((raw as { progressAt?: unknown }).progressAt) ? ((raw as { progressAt: unknown[] }).progressAt) : [];
+      return at.length === lines && at.every((n) => typeof n === "number") ? (at as number[]) : [];
+    })(),
     todos: parseTodos(raw.todos) ?? [],
     exitCode: typeof raw.exitCode === "number" ? raw.exitCode : null,
     // A record written before the media switches existed had neither tool, so
@@ -1941,6 +1950,7 @@ function cloneRun(run: CodingRun): CodingRun {
     ...run,
     filesTouched: [...run.filesTouched],
     progress: [...run.progress],
+    progressAt: [...run.progressAt],
     deniedActions: [...run.deniedActions],
     activeSubagents: run.activeSubagents.map((a) => ({ ...a })),
     subagents: run.subagents.map((a) => ({ ...a })),
@@ -2746,7 +2756,10 @@ function pushProgress(run: CodingRun, line: string): void {
   const cleaned = line.replace(/\s+/g, " ").trim();
   if (!cleaned) return;
   run.progress.push(cleaned.length > MAX_PROGRESS_LINE_CHARS ? `${cleaned.slice(0, MAX_PROGRESS_LINE_CHARS - 1)}…` : cleaned);
+  // When it happened, kept in step with the line: the timeline shows it on hover.
+  run.progressAt.push(Date.now());
   if (run.progress.length > PROGRESS_KEEP) run.progress.splice(0, run.progress.length - PROGRESS_KEEP);
+  if (run.progressAt.length > run.progress.length) run.progressAt.splice(0, run.progressAt.length - run.progress.length);
 }
 
 function relativeToRun(run: CodingRun, file: unknown): string | null {
@@ -4282,6 +4295,7 @@ function newRunRecord(fields: {
     // No pull request until the aftermath opens one.
     pr: null,
     progress: [],
+    progressAt: [],
     todos: [],
     exitCode: null,
     media: { images: fields.settings.generateImages, audio: fields.settings.generateAudio },

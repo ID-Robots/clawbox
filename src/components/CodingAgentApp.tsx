@@ -85,6 +85,8 @@ interface Run {
   /** What was refused, in the owner's words. */
   deniedActions?: string[];
   progress: string[];
+  /** When each progress line happened, one for one with `progress`; absent on a record from before the field. */
+  progressAt?: number[];
   effort?: Effort;
   /** Sub-agents working right now; 0 once the run has settled. */
   subagentsActive?: number;
@@ -1529,6 +1531,7 @@ export default function CodingAgentApp() {
           const todos = run.todos ?? [];
           const todosDone = todos.filter((x) => x.status === "completed").length;
           const activity = run.progress.slice(-ACTIVITY_SHOWN);
+          const activityAt = (run.progressAt?.length === run.progress.length ? run.progressAt : []).slice(-ACTIVITY_SHOWN);
           const title = run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 160);
           const fullTask = !run.reviewOf && run.task.trim() !== firstLine(run.task, 160) ? run.task : null;
           return (
@@ -1735,7 +1738,7 @@ export default function CodingAgentApp() {
 
               {/* The timeline: every step the runner recorded, drawn the way
                   the chat's card draws its live work, live or settled. */}
-              <CodingRunTimeline lines={activity} live={isLive(run.status)} />
+              <CodingRunTimeline lines={activity} times={activityAt} startedAt={run.startedAt} live={isLive(run.status)} />
 
               {/* The summary is the run's closing message, and that is
                   markdown. Drawn through the chat's renderer, which builds

@@ -62,9 +62,12 @@ const STATUS_GLYPH: Record<ChangeStatus, { letter: string; className: string }> 
   conflict: { letter: "!", className: "text-red-400" },
 };
 
-export default function CodingProjectWorkspace({ query, live, initialRef = null, initialTab = "files", fill = false, runs, runsCount = 0, runsLive = false, team }: Props) {
+export default function CodingProjectWorkspace({ query, live, initialRef = null, initialTab, fill = false, runs, runsCount = 0, runsLive = false, team }: Props) {
   const { t } = useT();
-  const [tab, setTab] = useState<WorkspaceTab>(initialTab);
+  // The project page opens on its RUNS — what the owner comes to a project
+  // for — and the files and the changes are one tab away; a host that hands
+  // no runs (a run's own page) opens on the files.
+  const [tab, setTab] = useState<WorkspaceTab>(initialTab ?? (runs ? "runs" : "files"));
   const tabClass = (id: WorkspaceTab) => (tab === id ? SEGMENT_ON : SEGMENT_OFF);
   const panelClass = fill ? "flex-1 min-h-0 flex flex-col" : undefined;
   // The pane's height: a fixed cap inside a scrolling page, or the column's
@@ -74,6 +77,27 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
   return (
     <div className={`mt-3 ${fill ? "flex-1 min-h-0 flex flex-col" : ""}`} data-testid="coding-agent-workspace" data-fill={fill || undefined}>
       <div className={`${SEGMENTED_TRACK} ${runs || team ? "max-w-xl" : "max-w-xs"}`} role="tablist" aria-label={t("codingAgent.workspaceTitle")}>
+        {/* The runs and the team are tabs too, not a rail: the rail was
+            22rem wide, and a run's row in it wrapped its title three deep
+            and its figures six. Every tab has the whole width now — and the
+            runs come FIRST: they are what the owner opens a project for. */}
+        {runs && (
+          <button
+            type="button"
+            role="tab"
+            id="coding-agent-workspace-tab-runs"
+            aria-selected={tab === "runs"}
+            aria-controls="coding-agent-workspace-pane-runs"
+            onClick={() => setTab("runs")}
+            data-testid="coding-agent-workspace-runs"
+            className={tabClass("runs")}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">history</span>
+            {t("codingAgent.runsTab")}
+            <span className="text-[var(--text-muted)] font-normal">({runsCount})</span>
+            {runsLive && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" aria-hidden="true" data-testid="coding-agent-workspace-runs-live" />}
+          </button>
+        )}
         <button
           type="button"
           role="tab"
@@ -100,26 +124,6 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
           <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">difference</span>
           {t("codingAgent.changesTab")}
         </button>
-        {/* The runs and the team are tabs too, not a rail: the rail was
-            22rem wide, and a run's row in it wrapped its title three deep
-            and its figures six. Every tab has the whole width now. */}
-        {runs && (
-          <button
-            type="button"
-            role="tab"
-            id="coding-agent-workspace-tab-runs"
-            aria-selected={tab === "runs"}
-            aria-controls="coding-agent-workspace-pane-runs"
-            onClick={() => setTab("runs")}
-            data-testid="coding-agent-workspace-runs"
-            className={tabClass("runs")}
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">history</span>
-            {t("codingAgent.runsTab")}
-            <span className="text-[var(--text-muted)] font-normal">({runsCount})</span>
-            {runsLive && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" aria-hidden="true" data-testid="coding-agent-workspace-runs-live" />}
-          </button>
-        )}
         {team && (
           <button
             type="button"

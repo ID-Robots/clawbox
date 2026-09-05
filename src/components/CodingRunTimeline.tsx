@@ -41,14 +41,36 @@ const TONE: Record<ProgressDescription["kind"], string> = {
 interface Props {
   /** The runner's progress lines, oldest first. */
   lines: string[];
+  /** When each line happened, one for one with `lines`; empty when the record predates the times. */
+  times?: number[];
+  /** When the run started, for the "+3m 12s" beside a step's clock time. */
+  startedAt?: number;
   /** The run is still going: the newest step is the one happening now. */
   live: boolean;
   testId?: string;
 }
 
-export default function CodingRunTimeline({ lines, live, testId = "coding-agent-run-activity" }: Props) {
+/** "+3m 12s" — a step's distance from the run's start. */
+function sinceStart(at: number, startedAt: number): string {
+  const sec = Math.max(0, Math.round((at - startedAt) / 1000));
+  if (sec < 60) return `+${sec}s`;
+  const m = Math.floor(sec / 60);
+  return `+${m}m ${sec - m * 60}s`;
+}
+
+export default function CodingRunTimeline({ lines, times = [], startedAt, live, testId = "coding-agent-run-activity" }: Props) {
   const { t } = useT();
   if (lines.length === 0) return null;
+  const timed = times.length === lines.length;
+  // The clock time and how far into the run: on hover, and as the row's
+  // accessible name, so a line's "when" is one hover away and never in the
+  // way of the line itself.
+  const when = (i: number) => {
+    if (!timed) return null;
+    const at = times[i];
+    const clock = new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return startedAt ? `${clock} · ${sinceStart(at, startedAt)}` : clock;
+  };
   const label = (step: ProgressDescription) => (step.labelKey ? t(STEP_KEY[step.labelKey]) : step.label);
   const detail = (step: ProgressDescription) =>
     step.counts ? `${step.counts.done}/${step.counts.total} ${t("codingAgent.chatDone")}` : step.detail;
@@ -67,15 +89,31 @@ export default function CodingRunTimeline({ lines, live, testId = "coding-agent-
           const step = describeProgressLine(line);
           const current = live && i === lines.length - 1;
           return (
-            <li key={`${i}:${line}`} className="flex min-w-0" data-kind={step.kind} aria-current={current ? "step" : undefined}>
+            <li
+              key={`${i}:${line}`}
+              className="group flex items-center gap-2 min-w-0"
+              data-kind={step.kind}
+              data-at={timed ? times[i] : undefined}
+              aria-current={current ? "step" : undefined}
+              title={when(i) ?? undefined}
+            >
               <span
-                title={step.kind === "text" ? line : undefined}
+                title={[when(i), step.kind === "text" ? line : null].filter(Boolean).join(" — ") || undefined}
                 className={`inline-flex items-center gap-1 max-w-full rounded-md px-1.5 py-px text-[11px] leading-4 ${TONE[step.kind]} ${current ? "ring-1 ring-amber-400/40" : ""}`}
               >
                 <span className="material-symbols-rounded shrink-0" style={{ fontSize: 13 }} aria-hidden="true">{step.icon}</span>
                 <span className="truncate">{label(step)}</span>
                 {detail(step) && <span className="opacity-75 truncate">{detail(step)}</span>}
               </span>
+              {timed && startedAt && (
+                <time
+                  dateTime={new Date(times[i]).toISOString()}
+                  className="ml-auto shrink-0 font-mono text-[10px] text-[var(--text-muted)] opacity-0 group-hover:opacity-100 transition-opacity"
+                  data-testid={`${testId}-time`}
+                >
+                  {sinceStart(times[i], startedAt)}
+                </time>
+              )}
             </li>
           );
         })}
