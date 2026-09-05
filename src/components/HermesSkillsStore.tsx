@@ -33,6 +33,7 @@ import {
   rankFacets,
 } from '@/lib/hermes-skill-facets';
 import { type SkillsCopy, useCopy } from './hermes-skills/copy';
+import { announceSkillChange } from '@/lib/skill-change-message';
 import {
   Alert,
   EmptyState,
@@ -409,6 +410,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         // it has to be told to run again.
         detail.refresh(key);
         setLive(COPY.liveInstalled(skill.name));
+        announceSkillChange({ action: 'install', name: skill.name, id: key, kind: 'skill' });
         await installed.refresh();
       } catch (err) {
         const outcome = outcomeOf(err);
@@ -467,6 +469,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         // whatever the button tracked progress under.
         detail.refresh(key, name, identifier);
         setLive(COPY.liveRemoved(name));
+        announceSkillChange({ action: 'uninstall', name, id: identifier ?? key, kind: 'skill' });
         await installed.refresh();
       } catch (err) {
         const outcome = outcomeOf(err);

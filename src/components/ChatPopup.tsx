@@ -36,7 +36,7 @@ import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
 import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
-import { buildSkillChangeMessage } from '@/lib/skill-change-message'
+import { SKILL_CHANGE_EVENT, buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
 // ── The harness transport ──
@@ -4753,10 +4753,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       retryCountRef.current = 0
       connect()
     }
-    window.addEventListener('clawbox-skill-installed', skillHandler)
+    window.addEventListener(SKILL_CHANGE_EVENT, skillHandler)
     window.addEventListener('clawbox:primary-ai-configured', providerHandler)
     return () => {
-      window.removeEventListener('clawbox-skill-installed', skillHandler)
+      window.removeEventListener(SKILL_CHANGE_EVENT, skillHandler)
       window.removeEventListener('clawbox:primary-ai-configured', providerHandler)
       if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
     }

@@ -6,6 +6,7 @@ import { useT } from "@/lib/i18n";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR } from "@/lib/store-categories";
 import { clawhubSkillUrl } from "@/lib/clawhub-url";
 import { categoryLabelFromKey } from "@/lib/hermes-skill-facets";
+import { announceSkillChange } from "@/lib/skill-change-message";
 
 const STORE_API = "/setup-api/apps/store";
 const STORE_ICONS_BASE = "https://clawbox.com/store/icons";
@@ -475,7 +476,9 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "success" } }));
       onInstall(app);
       // Notify chat to refresh agent skills
-      window.dispatchEvent(new CustomEvent('clawbox-skill-installed', { detail: { action: 'install', name: app.name, id: app.id } }));
+      // The store installs OpenClaw skills; it is registered on no other
+      // harness (`store` is OpenClaw-only), so the kind is not in doubt.
+      announceSkillChange({ action: 'install', name: app.name, id: app.id, kind: 'skill' });
       setTimeout(() => clearProgress(app.id), 2000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Network error";
