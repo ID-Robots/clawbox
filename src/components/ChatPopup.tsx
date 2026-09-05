@@ -524,6 +524,24 @@ interface ChatTab {
 const TABS_STORAGE_KEY = 'clawbox-chat-tabs'
 const TAB_LABEL_MAX = 24
 
+/** The transcript, as the tab strip's one panel. */
+const TRANSCRIPT_PANEL_ID = 'chat-transcript-panel'
+/**
+ * A tab's DOM id, derived from its session key so the panel can name the
+ * selected tab as its label without either side holding an index. `null` is the
+ * main conversation, which has no tab key of its own.
+ *
+ * The key's punctuation is folded to `_` — an OpenClaw session key is
+ * `agent:main:clawbox-…`, and while a colon is legal in an HTML id it has to be
+ * escaped in every CSS selector that looks one up. `aria-controls` and
+ * `aria-labelledby` are IDREFs and would not care; a later `querySelector`
+ * would, and this is the cheaper end to fix it at. The fold is lossy, which is
+ * harmless here: one id per open tab, and two live keys that differ only in
+ * punctuation do not exist.
+ */
+const tabDomId = (key: string | null) =>
+  `chat-tab-${key === null ? 'main' : key.replace(/[^A-Za-z0-9_-]/g, '_')}`
+
 /**
  * The ✕ on a tab plate — it closes a side tab, and restarts main. One control
  * in two places, so its box, its hover ladder and its glyph are written once.
@@ -991,12 +1009,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // BOX is fetching, where the call itself resolves with the media — so it ends
   // when the promise does, and sharing the other flag would start that poll and
   // let a history read paint the same picture the promise is about to.
-  const [drawing, setDrawing] = useState(false)
-  // Guards re-entry from the render-time state, which lags a rapid second
-  // click, and carries the abort so closing the popup can end a wait nobody is
+  //
+  // Tracked PER CONVERSATION, keyed by tab (null is the main one). It was one
+  // component-wide flag, so a picture asked for in one tab put "Generating
+  // image…" over another tab's transcript and greyed ITS picture button until
+  // the request settled — while the picture itself already followed the rule
+  // `dispatchTurn` and `loadHistory` follow and landed in the tab that asked.
+  const [drawingTabs, setDrawingTabs] = useState<ReadonlySet<string | null>>(() => new Set())
+  // The controllers behind them. Re-entry is decided from the ref, which does
+  // not lag a rapid second click on one tab — two generations would be two
+  // charges against the customer's daily allowance for one intent — and it
+  // carries the aborts, so closing the popup can end every wait nobody is
   // watching any more.
-  const drawingRef = useRef(false)
-  const drawingAbortRef = useRef<AbortController | null>(null)
+  const drawingRef = useRef(new Map<string | null, AbortController>())
+  const syncDrawingTabs = useCallback(() => {
+    setDrawingTabs(new Set(drawingRef.current.keys()))
+  }, [])
 
   // ── The Create button's wizard ──
   // The same card the Coding Agent app opens: name, what it should do, which
@@ -1423,6 +1451,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [tabs, setTabs] = useState<ChatTab[]>(storedTabs.tabs)
   const [activeTabKey, setActiveTabKey] = useState<string | null>(storedTabs.active)
   const activeTabKeyRef = useRef<string | null>(storedTabs.active)
+  /** Is THIS conversation waiting on a composer picture? See `drawingTabs`. */
+  const drawing = drawingTabs.has(activeTabKey)
   const [mainSessionKey, setMainSessionKey] = useState('')
   const mainSessionKeyRef = useRef('')
   // Sessions whose turn is still running while another tab is shown. The
@@ -2590,6 +2620,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       window.clearTimeout(ackOnlyHistoryTimerRef.current)
       ackOnlyHistoryTimerRef.current = null
     }
+    // The AGENT's picture wait, which belongs to the turn being left behind.
+    // The COMPOSER's (`drawingTabs`) deliberately survives: it is keyed by tab
+    // now, so it stays with the conversation that asked and is on screen again
+    // when the owner comes back to it.
     endImageWait()
     imageWaitFromRef.current = 0
     imageBaselineRef.current = 0
@@ -2705,6 +2739,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       next.delete(key)
       return next
     })
+    // A composer picture still being fetched for THIS tab. `deleteSession`
+    // cannot reach it — it aborts the adapter's own turn controller, and only
+    // when `running`, which a drawing tab never sets — and the image route
+    // appends the picture to the transcript when it lands, so a generation left
+    // running would re-create the file this close is about to delete, with the
+    // owner's conversation back on disk and the picture billed against a
+    // conversation that no longer exists.
+    drawingRef.current.get(key)?.abort()
     const dispose = async () => {
       // switchSession marks the key busy on the way out when its run is
       // live; the tab is gone now, so the mark must go too.
@@ -4030,7 +4072,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // Re-entry is decided from the ref, not from `drawing`: a second click can
     // land in the window before the state commit, and two generations would be
     // two charges against the customer's daily allowance for one intent.
-    if (!prompt || drawingRef.current) return
+    //
+    // PER CONVERSATION, not per popup: two tabs are two intents and may each
+    // buy a picture, which is a real change to what a burst of clicking can
+    // spend — nothing on the box refuses the second request, and the only
+    // back-stop is the plan's daily allowance (a 429 the chat words). It is
+    // the right UI model, and it is the owner's call to make: see the PR body.
+    // The tab that asked, so the wait is shown where it belongs and a second
+    // click on THIS tab is refused while another conversation may still ask.
+    const tabAtSend = activeTabKeyRef.current
+    if (!prompt || drawingRef.current.has(tabAtSend)) return
     // The conversation that asked. A generation takes 15-40 seconds and the
     // route records it under this key, so a tab switch mid-wait must not paint
     // the picture into whichever conversation is on screen when it lands —
@@ -4038,9 +4089,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const keyAtSend = sessionKeyRef.current
     setInput('')
     const controller = new AbortController()
-    drawingAbortRef.current = controller
-    drawingRef.current = true
-    setDrawing(true)
+    drawingRef.current.set(tabAtSend, controller)
+    syncDrawingTabs()
     setMessages(prev => [...prev, { role: 'user', text: prompt, timestamp: Date.now() }])
     try {
       const { media } = await adapter.generateImage(prompt, controller.signal)
@@ -4069,17 +4119,28 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         timestamp: Date.now(),
       }])
     } finally {
-      drawingRef.current = false
-      setDrawing(false)
-      drawingAbortRef.current = null
+      // Only ever clear our OWN entry: a generation that settles must not take
+      // down one this tab started after it.
+      if (drawingRef.current.get(tabAtSend) === controller) {
+        drawingRef.current.delete(tabAtSend)
+        syncDrawingTabs()
+      }
     }
-  }, [input, adapter])
+  }, [input, adapter, syncDrawingTabs])
 
   // A wait nobody is watching is a paid generation still running. Closing the
-  // popup ends it, the same way it drops the agent's image wait just above.
+  // popup ends it, the same way it drops the agent's image wait just above —
+  // and so does UNMOUNTING while open, which the `isOpen` branch alone never
+  // saw: an effect keyed on it only fires when the flag changes, so a popup
+  // taken off the page mid-generation left the request running and billed.
+  // The controllers take themselves out of the map in `generatePicture`'s
+  // `finally`, which runs whether the request was aborted or not.
   useEffect(() => {
-    if (isOpen) return
-    drawingAbortRef.current?.abort()
+    const abortAll = () => {
+      for (const controller of drawingRef.current.values()) controller.abort()
+    }
+    if (isOpen) return abortAll
+    abortAll()
   }, [isOpen])
 
   const sendMessage = useCallback(() => {
@@ -5007,6 +5068,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     // mean eight presses to reach the composer.
                     tabIndex={active ? 0 : -1}
                     aria-selected={active}
+                    // The other half of the ARIA tabs pattern: a `tab` that
+                    // controls nothing leaves assistive tech with a strip of
+                    // buttons and no way to say what selecting one changed.
+                    // One panel for every tab, because the transcript IS the
+                    // panel — it is re-read for the conversation that was
+                    // selected rather than swapped for a second element.
+                    id={tabDomId(tab.main ? null : tab.key)}
+                    aria-controls={TRANSCRIPT_PANEL_ID}
                     data-testid="chat-tab"
                     data-session-key={tab.key}
                     // Both dots are aria-hidden decoration, so without this a
@@ -5182,14 +5251,28 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       </div>
 
       {/* Messages area — sits under the header bar in the flow, so it needs
-          no clearance beyond its own breathing room. */}
-      <div style={{
-        flex: 1, overflowY: 'auto', padding: '12px 14px 12px',
-        display: 'flex', flexDirection: 'column', gap: 10,
-        userSelect: 'text',
-        scrollbarWidth: 'thin',
-        scrollbarColor: 'rgba(255,255,255,0.1) transparent',
-      }}>
+          no clearance beyond its own breathing room.
+
+          It is the tab strip's PANEL: `aria-labelledby` names whichever tab is
+          selected, so the conversation on screen is announced as that tab's
+          content. `tabIndex={0}` because a scrollable region has to be
+          reachable by keyboard — several of its bubbles carry nothing
+          focusable, and the transcript is the one thing here worth paging
+          through. */}
+      <div
+        id={TRANSCRIPT_PANEL_ID}
+        role="tabpanel"
+        aria-labelledby={tabDomId(activeTabKey)}
+        tabIndex={0}
+        data-testid="chat-transcript"
+        style={{
+          flex: 1, overflowY: 'auto', padding: '12px 14px 12px',
+          display: 'flex', flexDirection: 'column', gap: 10,
+          userSelect: 'text',
+          scrollbarWidth: 'thin',
+          scrollbarColor: 'rgba(255,255,255,0.1) transparent',
+        }}
+      >
         {(status === 'connecting' || reloadingSkill) && (reloadingSkill || messages.length === 0) && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 14, color: 'rgba(255,255,255,0.5)', fontSize: 13 }}>
             <style>{`@keyframes spin { to { transform: rotate(360deg) } } @keyframes dots { 0%,20% { content: '' } 40% { content: '.' } 60% { content: '..' } 80%,100% { content: '...' } } @keyframes clawReloadFill { from { transform: scaleX(0.04) } to { transform: scaleX(0.9) } }`}</style>

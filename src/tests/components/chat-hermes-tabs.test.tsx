@@ -416,4 +416,69 @@ describe("what a screen reader is told about a tab", () => {
     await waitFor(() => expect(activeTabKey()).toBe(DESKTOP));
     await screen.findByText(/nothing was written/i);
   });
+  it("keeps the composer's picture wait in the tab that asked for it", async () => {
+    // The picture already lands in the right conversation; the WAIT did not.
+    // `drawing` was one component-wide flag, so a generation started in main
+    // put "Generating image…" over a second tab's transcript and greyed its
+    // picture button — a control the owner can see is not disabled by anything
+    // in the conversation they are looking at.
+    box.facts.hasClawaiToken = true;
+    box.facts.hasClawaiImageRoute = true;
+    let release!: (answer: unknown) => void;
+    const held = new Promise<unknown>((resolve) => { release = resolve; });
+    box.imageReply = () => ({ ok: true, status: 200, payload: held });
+    await mountHermesChat(box);
+
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "a red maple leaf" } });
+    const draw = await screen.findByTestId("generate-image");
+    await waitFor(() => expect(draw).not.toBeDisabled());
+    fireEvent.click(draw);
+    await waitFor(() => expect(box.imagePrompts).toEqual(["a red maple leaf"]));
+    await screen.findByText(translations.en["chat.generatingImage"]);
+
+    await openNewTab();
+    // This conversation asked for nothing and is not waiting for anything.
+    expect(screen.queryByText(translations.en["chat.generatingImage"])).toBeNull();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "a blue whale" } });
+    await waitFor(() => expect(screen.getByTestId("generate-image")).not.toBeDisabled());
+    // And the button works, rather than merely looking enabled: the guard is
+    // one generation PER CONVERSATION now, so this tab may ask for its own.
+    fireEvent.click(screen.getByTestId("generate-image"));
+    await waitFor(() => expect(box.imagePrompts).toEqual(["a red maple leaf", "a blue whale"]));
+
+    // Back where it was asked for, the wait is still on screen and the button
+    // is still held — one generation per conversation, as before.
+    fireEvent.click(tabs()[0]);
+    await waitFor(() => expect(activeTabKey()).toBe(DESKTOP));
+    await screen.findByText(translations.en["chat.generatingImage"]);
+    expect(screen.getByTestId("generate-image")).toBeDisabled();
+
+    release({ ok: true, media: [] });
+    await waitFor(() =>
+      expect(screen.queryByText(translations.en["chat.generatingImage"])).toBeNull());
+  });
+
+  it("names the transcript as the tab strip's panel", async () => {
+    // The strip implements the ARIA tabs pattern — tablist, roving tabindex,
+    // manual activation — with no `tabpanel` anywhere, so a screen reader was
+    // told these were tabs and never what selecting one changed.
+    await mountHermesChat(box);
+    await openNewTab();
+
+    const panel = screen.getByTestId("chat-transcript");
+    expect(panel).toHaveAttribute("role", "tabpanel");
+    for (const tab of tabs()) {
+      expect(tab.getAttribute("aria-controls"), tab.getAttribute("data-session-key") ?? "")
+        .toBe(panel.id);
+      expect(tab.id).toBeTruthy();
+    }
+    // Labelled by whichever tab is selected, and it follows the selection.
+    const selected = () => tabs().find((el) => el.getAttribute("aria-selected") === "true")!;
+    expect(panel.getAttribute("aria-labelledby")).toBe(selected().id);
+
+    fireEvent.click(tabs()[0]);
+    await waitFor(() => expect(activeTabKey()).toBe(DESKTOP));
+    expect(panel.getAttribute("aria-labelledby")).toBe(selected().id);
+  });
 });
