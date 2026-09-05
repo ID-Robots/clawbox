@@ -9,12 +9,11 @@
 import { apiGet, apiPost, CLAWBOX_ROOT } from "../lib/api";
 import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
 import { fitRows } from "../lib/guard";
-import { json, text, type Registrar } from "../lib/register";
+import { json, LIST_MAX_CHARS, text, type Registrar } from "../lib/register";
 import { INSTALLED_APP_ID_RE, zBool, zConfirm, zEnumOf, zInstalledAppId, zInt, zOptText, zSlug, zText } from "../lib/schema";
 import { builtInApps, openedAppNotice, UNKNOWN_HARNESS_NOTE, type McpContext } from "../lib/context";
 import { HARNESS_ONLY_APP_IDS, isInstalledAppVisible } from "../../src/lib/desktop-app-editions";
 import type { InstalledHermesSkill } from "../../src/lib/hermes-skills";
-import { SKILL_LIST_MAX_CHARS } from "./skills";
 
 const UI_PICKUP_DELAY_MS = 2_500;
 
@@ -212,7 +211,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     // takes no arguments and cannot "narrow the query". The rows below are
     // compact for the same reason, and the skills list is bounded to what fits
     // rather than left to the slicer.
-    { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: SKILL_LIST_MAX_CHARS },
+    { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: LIST_MAX_CHARS },
     async () => {
       const builtIn = apps.map((a) => ({ id: a.id, name: a.name, what: a.description }));
       const installed = (await installedAppIds(ctx.appHarness)).map((id) => ({ id: `installed-${id}`, name: id }));
@@ -246,7 +245,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
       const spent = envelope.type === "text" ? envelope.text.length : 0;
       const fitted = fitRows(
         skills,
-        SKILL_LIST_MAX_CHARS - spent - OMISSION_FIELD_BUDGET,
+        LIST_MAX_CHARS - spent - OMISSION_FIELD_BUDGET,
         SKILLS_ROW_OVERHEAD,
       );
       return json({

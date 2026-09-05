@@ -23,20 +23,10 @@ import {
 import { type ApiOptions, apiGet, apiPost } from "../lib/api";
 import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
 import { fitRows } from "../lib/guard";
-import { json, text, type Registrar } from "../lib/register";
+import { json, LIST_MAX_CHARS, text, type Registrar } from "../lib/register";
 import { zBool, zEnumOf, zInt, zText } from "../lib/schema";
 
 const BROWSABLE_SOURCES = HERMES_SKILL_SOURCES.filter((s) => isBrowsableSource(s));
-
-/**
- * skill_list's output cap. 12,000 rather than the 6,000 it carried since it was
- * written: measured against a real Hermes box (90 installed rows — 82 bundled,
- * 3 from the store, 5 made on the device — emitting 3,165 characters), the old
- * cap left room for 46 further store installs, because #582 grew every store
- * row by a third. 12,000 covers a device with well over a hundred of them, and
- * matches the budget coding_agent_status already takes for a comparable list.
- */
-export const SKILL_LIST_MAX_CHARS = 12_000;
 
 /** Characters reserved for the "and N more" line, so it always fits. */
 const OMISSION_BUDGET = 200;
@@ -765,7 +755,7 @@ export function registerSkillTools(reg: Registrar): void {
       + "install something twice, and before skill_uninstall to get the exact name. "
       + "Only skills marked \"from the store\" can be removed.",
     {},
-    { editions: ["hermes"], readOnly: true, profile: "core", maxChars: SKILL_LIST_MAX_CHARS },
+    { editions: ["hermes"], readOnly: true, profile: "core", maxChars: LIST_MAX_CHARS },
     async () => {
       const body = await skillsGet<InstalledBody>("/setup-api/hermes/skills/installed", { timeoutMs: 15_000 });
       // A device ships ~77 built-in skills. One terse line each — pretty-printed
@@ -809,7 +799,7 @@ export function registerSkillTools(reg: Registrar): void {
       // skill_uninstall takes, and half of one is not an id. #582 made every
       // row a third longer (the lock id leads, a differing card name is spelled
       // out) without moving the cap, which halved how many store installs fit.
-      const fitted = fitRows(lines, SKILL_LIST_MAX_CHARS - header.length - OMISSION_BUDGET);
+      const fitted = fitRows(lines, LIST_MAX_CHARS - header.length - OMISSION_BUDGET);
       const omitted = fitted.omitted
         ? [`(${fitted.omitted} more installed skills are not listed — the full list was too long to send. `
           + "Do not conclude a skill is absent because it is missing here; ask about it by name.)"]

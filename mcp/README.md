@@ -654,6 +654,11 @@ to the approved senders (`src/lib/coding-agent-notify.ts`).
    supply by accident.
 4. **Timeouts and output caps everywhere.** Default 8 s per API call and 4 000
    characters per result; images over 1 MB are dropped rather than truncated.
+   A tool whose answer is a LIST bounds its own rows against its cap and says
+   how many it left out (`skill_list`, `ui_list_apps`, `fitRows` in
+   `mcp/lib/guard.ts`), because the cap's own enforcement is a hard slice: it
+   cuts a JSON answer mid-object and an id mid-word, and its "narrow the query"
+   is advice a tool with no arguments cannot take.
 5. **Errors are instructions, not stack traces.** Every failure is
    `{ error, code, message, next }` — including schema rejections, which the SDK
    would otherwise render as a raw zod issue array (`reg.finalize()` owns

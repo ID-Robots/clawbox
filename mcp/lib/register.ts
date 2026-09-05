@@ -74,6 +74,21 @@ export interface RegisteredToolInfo {
 }
 
 export const DEFAULT_MAX_CHARS = 4_000;
+
+/**
+ * The cap for a tool whose answer is a LIST of what is on the device.
+ *
+ * 12,000 rather than the 6,000 `skill_list` and `ui_list_apps` carried since
+ * they were written: measured against a real Hermes box (90 installed rows —
+ * 82 bundled, 3 from the store, 5 made on the device — emitting 3,165
+ * characters), the old cap left room for only 46 further store installs,
+ * because #582 grew every store row by a third (the lock id leads and a
+ * differing card name is spelled out). This covers a device with well over a
+ * hundred, and matches the budget coding_agent_status already takes for a
+ * comparable list. Both tools still bound their own rows against it (fitRows)
+ * rather than letting capText slice the answer.
+ */
+export const LIST_MAX_CHARS = 12_000;
 // An image bigger than this eats a small model's whole context window.
 const MAX_IMAGE_BASE64 = 1024 * 1024;
 
