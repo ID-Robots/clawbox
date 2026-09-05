@@ -258,6 +258,37 @@ describe("a refused anonymous fetch is not 'up to date'", () => {
   });
 });
 
+describe("a retry delay an operator got wrong", () => {
+  it("is replaced with the default, and said out loud", async () => {
+    // `Number("soon")` is NaN and a negative value stays negative; `setTimeout`
+    // treats both as 0, so the retries would still run — back to back, removing
+    // the spacing the policy depends on and sending the anonymous requests in a
+    // burst, which is the condition the refusal is caused by. The shell knobs
+    // are clamped the same way in install.sh and scripts/force-update.sh.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.UPDATER_REMOTE_CHECK_RETRY_DELAY_MS = "soon";
+    process.env.UPDATER_REMOTE_RETRY_DELAY_MS = "-1";
+
+    await import("@/lib/updater");
+    const said = warn.mock.calls.map((c) => c.join(" ")).join("\n");
+
+    expect(said).toMatch(/UPDATER_REMOTE_CHECK_RETRY_DELAY_MS="soon".*using 1200/);
+    expect(said).toMatch(/UPDATER_REMOTE_RETRY_DELAY_MS="-1".*using 4000/);
+    warn.mockRestore();
+  });
+
+  it("keeps a deliberate override", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.UPDATER_REMOTE_CHECK_RETRY_DELAY_MS = "0";
+
+    await import("@/lib/updater");
+
+    expect(warn.mock.calls.map((c) => c.join(" ")).join("\n"))
+      .not.toMatch(/UPDATER_REMOTE_CHECK_RETRY_DELAY_MS/);
+    warn.mockRestore();
+  });
+});
+
 describe("the call the answer depends on is the one that is retried", () => {
   /**
    * `ls-remote` is the AUTHORITATIVE half of the version check: the tag list is

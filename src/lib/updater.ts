@@ -198,8 +198,29 @@ const REMOTE_CHECK_ATTEMPTS = 2;
  * matters, because the refusal being retried is caused by too many of them.
  */
 const REMOTE_ADVISORY_ATTEMPTS = 1;
-const REMOTE_RETRY_DELAY_MS = Number(process.env.UPDATER_REMOTE_RETRY_DELAY_MS || "4000");
-const REMOTE_CHECK_RETRY_DELAY_MS = Number(process.env.UPDATER_REMOTE_CHECK_RETRY_DELAY_MS || "1200");
+/**
+ * An override that is not a non-negative number of milliseconds is replaced
+ * with the default, and said out loud.
+ *
+ * `Number("garbage")` is NaN and a negative value stays negative; `setTimeout`
+ * treats both as 0, so the retries would still run but back-to-back — removing
+ * the one thing the policy depends on, and sending the anonymous requests in a
+ * burst, which is the condition the refusal is caused by. The shell knobs are
+ * clamped the same way, in install.sh and scripts/force-update.sh.
+ */
+function retryDelayMsFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    console.warn(`[Updater] ${name}="${raw}" is not a number of milliseconds, using ${fallback}`);
+    return fallback;
+  }
+  return parsed;
+}
+
+const REMOTE_RETRY_DELAY_MS = retryDelayMsFromEnv("UPDATER_REMOTE_RETRY_DELAY_MS", 4000);
+const REMOTE_CHECK_RETRY_DELAY_MS = retryDelayMsFromEnv("UPDATER_REMOTE_CHECK_RETRY_DELAY_MS", 1200);
 
 const ANONYMOUS_REFUSAL_REASON =
   "GitHub refused this ClawBox's anonymous request for the update repository. "

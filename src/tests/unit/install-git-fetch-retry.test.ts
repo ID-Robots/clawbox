@@ -161,8 +161,15 @@ function runFetchWithKnobs(knobs: Record<string, string>): ReturnType<typeof run
   return runBounded(script, knobs);
 }
 
-/** force-update.sh's inline twin, with `run_as_clawbox` and `sleep` stubbed. */
-function runForceFetch(gitSays: string, knobs: Record<string, string> = {}): ReturnType<typeof runBounded> {
+/**
+ * force-update.sh's inline twin, with `run_as_clawbox` and `sleep` stubbed.
+ * `rc` is what the stub returns; 0 drives the success path.
+ */
+function runForceFetch(
+  gitSays: string,
+  knobs: Record<string, string> = {},
+  rc = 128,
+): ReturnType<typeof runBounded> {
   const script = [
     "set -euo pipefail",
     `ATTEMPTS=${JSON.stringify(attemptLog)}`,
@@ -170,12 +177,16 @@ function runForceFetch(gitSays: string, knobs: Record<string, string> = {}): Ret
     "run_as_clawbox() {",
     "  printf 'fetch\\n' >> \"$ATTEMPTS\"",
     `  printf '%s\\n' ${JSON.stringify(gitSays)} >&2`,
-    "  return 128",
+    `  return ${rc}`,
     "}",
     "sleep() { :; }",
     extractShellFunctionFrom(FORCE_UPDATE_SH, "git_retryable_failure"),
     extractShellFunctionFrom(FORCE_UPDATE_SH, "fetch_with_retry"),
-    'fetch_with_retry || echo "rc=$?"',
+    // stdout is captured apart from stderr so the success case can assert that
+    // git's own output does NOT reach a caller reading this function's stdout —
+    // the guarantee the install.sh twin is already pinned on.
+    'out="$(fetch_with_retry)" || echo "rc=$?"',
+    'printf "STDOUT[%s]\\n" "$out"',
   ].join("\n");
 
   return runBounded(script, knobs);
@@ -229,6 +240,20 @@ d("scripts/force-update.sh retries the same way, or does not retry at all", () =
 
     expect(r.attempts).toBe(3);
     expect(r.output).toMatch(/GitHub refused this device's anonymous request/);
+  });
+
+  it("does not retry a fetch that succeeded, and keeps git's output off stdout", () => {
+    // Every other case here drives the failure path, so the two behaviours the
+    // install.sh twin is pinned on were unasserted in this copy: one attempt on
+    // success, and git's chatter re-emitted on stderr — a caller reading this
+    // function's stdout must not mistake progress output for a result.
+    const r = runForceFetch("Fetching origin", {}, 0);
+
+    expect(r.status).toBe(0);
+    expect(r.attempts).toBe(1);
+    expect(r.output).toContain("STDOUT[]");
+    expect(r.output).not.toMatch(/rc=/);
+    expect(r.output).toContain("Fetching origin");
   });
 
   it("does not retry a failure asking again cannot fix", () => {
