@@ -141,6 +141,18 @@ describe("registering the local model with Hermes", () => {
     expect(sets()).toContain(`providers.${HERMES_LOCAL_PROVIDER}.models=qwen3:8b`);
   });
 
+  it("still registers when the CLI could not be RUN at all", async () => {
+    // `runHermesCli` rejects (a missing binary, a timeout, its own SIGKILL)
+    // rather than returning a code. That is a question that failed, exactly as
+    // 127 is, and it is now read the same way: no catalogue is written, the
+    // repair is handed back, and the endpoint keys still land. It used to
+    // propagate and fail the whole enable with a raw error.
+    cliMock.mockRejectedValue(new Error("hermes timed out"));
+    await applyLocalAiToHermes({ provider: "ollama", model: "qwen3:8b" });
+    expect(sets().some((kv) => kv.startsWith(`providers.${HERMES_LOCAL_PROVIDER}.models=`))).toBe(false);
+    expect(sets()).toContain(`providers.${HERMES_LOCAL_PROVIDER}.api_mode=openai`);
+  });
+
   it("writes no catalogue when the CLI never answered", async () => {
     // 127 is the shim over a rebuilding venv, not "the key is unset".
     cliMock.mockImplementation(async (args: string[]) =>

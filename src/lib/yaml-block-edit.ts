@@ -31,8 +31,12 @@
  * to fall back to the Hermes CLI on that signal: losing the comments is bad,
  * corrupting the config is worse.
  *
- * That contract belongs to the EDITING half. {@link getTopLevelScalar} is a
- * reader, and a reader may not raise on a construct somewhere else in the file:
+ * That contract belongs to the EDITING half. {@link readYamlPath} is a third
+ * category and does raise, on purpose: it is a reader whose CALLER turns the
+ * refusal into a state ("we could not look") and then asks Hermes' own reader,
+ * so giving up loudly is strictly better there than answering a shape it cannot
+ * index. {@link getTopLevelScalar} is a reader of the second kind, and a reader
+ * of that kind may not raise on a construct somewhere else in the file:
  * a sequence, a duplicate key or a nested block is not evidence about the key it
  * was asked for, and a caller would have to turn the refusal into one. It never
  * throws; it answers a third state (`readable: false`) for a value it cannot
@@ -399,15 +403,28 @@ export function getYamlPath(text: string, path: string[]): string | null {
 /** `{}` / `[ ]` — a collection written inline with no members in it. */
 const EMPTY_FLOW_RE = /^(?:\{\s*\}|\[\s*\])$/;
 
+/** Is there anything but blank lines and comments in [start, end)? */
+function hasContent(lines: string[], start: number, end: number): boolean {
+  for (let i = start; i < end; i += 1) {
+    if (!isSkippable(lines[i])) return true;
+  }
+  return false;
+}
+
 /**
  * Is the path THERE, and — when it is a scalar — what does it say?
  *
  *   "value"   — a scalar this reader can name.
- *   "present" — the key is there in a shape that is not a scalar: a nested
- *               block, a sequence, an empty flow collection, a bare `key:`, a
- *               quoted value carrying an escape PyYAML resolves and this
- *               reader does not.
- *   "absent"  — the file parsed and the key is not in it.
+ *   "present" — the key is there in a shape this reader will not name: a block
+ *               or a sequence written underneath it, an empty flow collection,
+ *               a bare `key:`, a quoted value carrying an escape PyYAML
+ *               resolves and this reader does not. A NON-empty flow collection
+ *               on the leaf answers `value` with its literal text instead —
+ *               `models: [a, b]` is `"[a, b]"` — which is what `getYamlPath`
+ *               has always done and is a leftover either way here.
+ *   "absent"  — the key is not in the file. Line-scanned, never parsed, so
+ *               this is only an answer where the level it looked at could be
+ *               indexed; see the `scanBlock` note in the walk below.
  *
  * Separate from {@link getYamlPath} because that answers a different question
  * — "give me the scalar to splice" — and gets THIS one wrong in both
@@ -444,8 +461,33 @@ export function readYamlPath(text: string, path: string[]): YamlPathRead {
   let indent = 0;
 
   for (let depth = 0; depth < path.length; depth += 1) {
-    const entry = findEntry(lines, start, end, indent, path[depth]);
-    if (!entry) return { state: "absent" };
+    // `scanBlock` rather than `findEntry`, because a key that is not among the
+    // entries and a LEVEL WITH NO ENTRIES AT ALL are different facts and only
+    // the first is "absent".
+    //
+    // The walk descends exactly INDENT_STEP per level and `scanBlock` skips
+    // every line deeper than the level it is scanning, so a block written at
+    // any other indent — a hand-edited file, a `yaml.dump(indent=4)` by some
+    // other writer — yields no entries and no error. Answering `absent` there
+    // would be the worst possible direction, because it is the SAME blind spot
+    // that makes the WRITER a silent no-op on that file: `unsetYamlPath`
+    // changes nothing, `patchText`'s own verification passes on the same
+    // reader, no CLI fallback is entered, and a read-back sharing the blind
+    // spot could only ever confirm the write it cannot see.
+    //
+    // So: entries at this level and none of them ours → the key is absent.
+    // No entries but lines we skipped → we could not look, which the caller
+    // turns into "unreadable" and asks Hermes' own reader instead.
+    const entries = scanBlock(lines, start, end, indent);
+    const entry = entries.find((e) => e.key === path[depth]) ?? null;
+    if (!entry) {
+      if (entries.length === 0 && hasContent(lines, start, end)) {
+        throw new YamlEditUnsupported(
+          `could not read the block at ${path.slice(0, depth).join(".") || "the document root"}`,
+        );
+      }
+      return { state: "absent" };
+    }
 
     if (depth === path.length - 1) {
       // A key with no inline text opens a block, a sequence, or nothing at all;

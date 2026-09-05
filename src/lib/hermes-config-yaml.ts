@@ -316,9 +316,11 @@ export async function readHermesConfigTopLevelScalar(
  *                  nested block or a list (which is what Hermes' own model
  *                  discovery writes into `providers.<slug>.models`), or a key
  *                  with no value at all. Still a key in the file.
- *   "absent"     — the file parsed and the key is not there — including under a
- *                  parent written as the inline `{}`, since a mapping with no
- *                  members cannot hold a member by that name.
+ *   "absent"     — the key is not there — including under a parent written as
+ *                  the inline `{}`, since a mapping with no members cannot hold
+ *                  a member by that name. Line-scanned, never parsed: a level
+ *                  the reader could not index answers `unreadable` instead, so
+ *                  this stays a positive fact rather than "we found nothing".
  *   "unreadable" — the file could not be read (EACCES), or the path could not
  *                  be resolved in it (a non-empty flow mapping, a duplicate
  *                  key). Not an answer, and never to be treated as one.

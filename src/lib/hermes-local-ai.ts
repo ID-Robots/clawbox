@@ -216,9 +216,11 @@ type LocalCatalogueState = "absent" | "scalar" | "foreign" | "unknown";
  * Is the key still in config.yaml, according to HERMES' OWN READER?
  *
  * `hermes config get <key>` loads the file with PyYAML, which is the same
- * loader the gateway uses, so it answers for every shape — an emptied `{}`, a
- * discovered `models` block, a duplicate key — that our line reader has to
- * decline. Exit 0 is "there in some shape", "config key not set" is "not
+ * loader the gateway uses, so it answers for the shapes our line reader has to
+ * decline but PyYAML reads happily — a block at an indent we cannot index, a
+ * duplicate key, a flow mapping with members. A document PyYAML itself refuses
+ * is declined by both, and lands in `unknown` where it belongs. Exit 0 is
+ * "there in some shape", "config key not set" is "not
  * there", and anything else — including the 126/127 a `step_hermes_install`
  * rebuild produces without ever reaching argparse — is the CLI failing to
  * answer rather than answering "no".
@@ -391,6 +393,15 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
     unset.push("model.provider", "model.default");
   }
   await patchHermesConfig({ unset });
+  // BEFORE the proof, not after it. `withProviderMcpRefresh` samples the
+  // provider set either side of this call and re-reads it in a `finally`
+  // precisely because "the write threw" is not "nothing was written" — and that
+  // re-read only sees the new catalogue if the memo has been dropped. Left at
+  // the end, a partial removal that then refuses would leave `getModelOptions`
+  // serving the pre-removal set, so no `reload.mcp` is asked for and
+  // `ai_set_provider`'s enum goes on offering a provider whose endpoint is
+  // already gone. The file may have changed whatever the proof below concludes.
+  invalidateModelOptions();
 
   // PROVED, not inferred. `patchHermesConfig`'s merge path reads every key back
   // (patchText), but its CLI fallback does not: `applyViaCli`'s unset loop
@@ -413,7 +424,8 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
   // `null` for a file it could not read as well as for a key that is gone, and
   // the two are not interchangeable HERE: the CLI fallback runs precisely
   // because the line editor could not work with this file, so a read-back that
-  // cannot resolve the path is the likely companion of the write that failed.
+  // cannot resolve the path is the ordinary companion of that write, not the
+  // exotic one.
   // Reading that as "removed" would rebuild the false success one layer down.
   //
   // "present" is a leftover as much as "value" is: `providers.clawlocal.models`
@@ -428,24 +440,30 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
     if (read.state === "value" || read.state === "present") leftovers.push(key);
     else if (read.state === "unreadable") unresolved.push(key);
   }
-  if (unresolved.length > 0) {
-    // HARNESS FIRST, and it is what keeps this proof from inventing a failure.
-    // Our line reader is not the only reader of config.yaml: `hermes config
-    // get` is Hermes' own, loading the file with PyYAML exactly as the gateway
-    // does, and `localCatalogueState` above already trusts it for the shape
-    // question. Asking it is the difference between "the file is not
-    // line-editable" and "nobody can say whether the removal landed" — and
-    // answering the first as the second is a 502 the owner can never clear,
-    // because the retry the banner asks for reads the same file.
-    //
-    // In parallel, and only for the keys the file could not answer: this is the
-    // exotic branch, and six 15-second timeouts in series would sit in front of
-    // a click the owner is holding open.
-    const answers = await Promise.all(unresolved.map(cliKeyPresence));
-    unresolved.forEach((key, i) => {
-      if (answers[i] === "present") leftovers.push(key);
-      else if (answers[i] === "unknown") unproven.push(key);
-    });
+  // HARNESS FIRST, and it is what keeps this proof from inventing a failure.
+  // Our line reader is not the only reader of config.yaml: `hermes config get`
+  // is Hermes' own, loading the file with PyYAML exactly as the gateway does,
+  // and `localCatalogueState` above already trusts it for the shape question.
+  // Asking it is the difference between "this file is not line-editable" and
+  // "nobody can say whether the removal landed" — and answering the first as
+  // the second is a 502 the owner can never clear, because the retry the banner
+  // asks for reads the same file.
+  //
+  // One at a time, and only until the CLI stops answering. This branch is an
+  // ordinary outcome rather than an exotic one — the whole reason the write
+  // took the CLI is that the reader could not work with this file, so it can be
+  // all six keys — and six `hermes` python interpreters started at once on a
+  // Jetson is precisely the case where they all time out and a removal that
+  // landed answers 502. A CLI that failed to ANSWER once will not answer for
+  // the next key either: that is a fact about the shim, not about the key.
+  let cliAnswering = true;
+  for (const key of unresolved) {
+    const presence = cliAnswering ? await cliKeyPresence(key) : "unknown";
+    if (presence === "present") leftovers.push(key);
+    else if (presence === "unknown") {
+      cliAnswering = false;
+      unproven.push(key);
+    }
   }
   if (leftovers.length > 0) {
     console.error("[hermes-local-ai] keys survived the removal:", leftovers.join(", "));
@@ -459,6 +477,5 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
     );
   }
 
-  invalidateModelOptions();
   return { wasDefault, model };
 }
