@@ -71,7 +71,7 @@ export async function ownerCookie() {
   );
 }
 
-async function request(method, apiPath, { body, auth } = {}) {
+async function request(method, apiPath, { body, auth, timeoutMs } = {}) {
   const headers = { accept: "application/json" };
   if (body !== undefined) headers["content-type"] = "application/json";
   if (auth === "owner") headers.cookie = `clawbox_session=${await ownerCookie()}`;
@@ -84,6 +84,9 @@ async function request(method, apiPath, { body, auth } = {}) {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
+    // Node's fetch has no timeout of its own: a request that hangs would
+    // hold the loop past any deadline it was given.
+    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
   });
   const text = await res.text();
   let json = null;
@@ -115,8 +118,8 @@ export async function startRun({ task, directory, projectId, resumeRunId }) {
 export const stopRun = (id) => post("/setup-api/coding-agent/stop", { runId: id, id });
 
 /** The runs going right now — a task's own, and the review pass that follows it. */
-export async function liveRuns() {
-  const res = await request("GET", "/setup-api/coding-agent/runs");
+export async function liveRuns(timeoutMs = 30_000) {
+  const res = await request("GET", "/setup-api/coding-agent/runs", { timeoutMs });
   const runs = Array.isArray(res.json?.runs) ? res.json.runs : [];
   return runs.filter((r) => r.status === "running");
 }
@@ -127,7 +130,9 @@ export async function waitForIdle(deadlineMs = 10 * 60_000, everyMs = 5_000) {
   for (;;) {
     // A poll that failed is not an answer: asked again, never read as idle.
     let live = null;
-    try { live = await liveRuns(); } catch { /* asked again below */ }
+    // Each poll is bounded by what is left of the deadline, so a stalled
+    // request cannot hold the loop past it.
+    try { live = await liveRuns(Math.max(1_000, Math.min(30_000, until - Date.now()))); } catch { /* asked again below */ }
     if (live !== null && live.length === 0) return true;
     if (Date.now() >= until) return false;
     await new Promise((r) => setTimeout(r, everyMs));

@@ -214,6 +214,26 @@ describe("a worker whose commit failed", () => {
   });
 });
 
+describe("a worker in the project itself whose commit failed", () => {
+  it("is rejected with the reason too — no worktree, no merge, still not counted done", async () => {
+    // No team branch: the code-project shape, workers one at a time in the folder.
+    runner.resolveWorkingDirectory.mockResolvedValue({ directory: "/home/clawbox/clawbox/data/code-projects/site", projectId: "site" });
+    outcomes = [
+      { summary: PARALLEL_PLAN },
+      { summary: "index done", filesTouched: ["index.html"], commitError: "fatal: index.lock exists" },
+      { summary: "index done for real", filesTouched: ["index.html"] },
+      { summary: "styles done", filesTouched: ["styles.css"] },
+      { summary: "app wired", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", projectId: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.tasks.find((t) => t.task_id === "t1")!.attempts).toBe(2);
+    expect(done.log.some((e) => e.type === "review" && /NOT COMMITTED: fatal: index.lock exists/.test(e.message))).toBe(true);
+    expect(plumbing.mergeWorkerBranch).not.toHaveBeenCalled();
+  });
+});
+
 describe("a stop that lands while a worker is being made", () => {
   it("starts no worker and gives the worktree back", async () => {
     outcomes = [{ summary: PARALLEL_PLAN }];
