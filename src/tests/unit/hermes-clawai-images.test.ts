@@ -51,6 +51,53 @@ import { CLAWBOX_AI_PROXY_URL, applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { CLAWBOX_AI_IMAGE_MODEL_ID } from "@/lib/clawbox-ai-models";
 import { HERMES_IMAGE_PLUGIN_NAME, HERMES_IMAGE_TOKEN_ENV } from "@/lib/hermes-image-plugin";
 
+const OK = { code: 0, stdout: "", stderr: "" };
+
+/**
+ * A `hermes` that actually STORES what it is told for `plugins.enabled`, and
+ * REPORTS what it would load from it.
+ *
+ * The write is proved by asking Hermes now (TASK-701): `plugins list --json`,
+ * whose `status` comes from the loader's own `_get_enabled_set`. A stub
+ * answering "" to every call therefore reports a plugin that is not enabled,
+ * and the link then correctly refuses to claim the box can draw — which would
+ * end every case here in the same place. Modelling the store keeps each case
+ * about what it is about. `override` wins where a case needs a specific
+ * failure.
+ */
+function hermesFake(
+  override: (args: string[]) => { code: number; stdout: string; stderr: string } | undefined = () => undefined,
+  seed?: unknown,
+): void {
+  let stored = seed;
+  cliMock.mockImplementation(async (args: string[]) => {
+    const forced = override(args);
+    if (forced) return forced;
+    if (args[0] === "plugins" && args[1] === "list") {
+      // `set(enabled) if isinstance(enabled, list) else set()` — the rule the
+      // real one applies (hermes_cli/plugins_cmd.py:1309-1324).
+      const enabled = Array.isArray(stored) && stored.includes(HERMES_IMAGE_PLUGIN_NAME);
+      return {
+        code: 0,
+        stdout: JSON.stringify([
+          { name: HERMES_IMAGE_PLUGIN_NAME, status: enabled ? "enabled" : "not enabled", version: "1.0.0", description: "", source: "user" },
+        ]),
+        stderr: "",
+      };
+    }
+    if (args[1] === "set" && args[2] === "plugins.enabled") {
+      stored = JSON.parse(args[3]);
+      return OK;
+    }
+    if (args[1] === "get" && args[2] === "plugins.enabled") {
+      return stored === undefined
+        ? { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" }
+        : { code: 0, stdout: JSON.stringify(stored), stderr: "" };
+    }
+    return OK;
+  });
+}
+
 /** Every `config set`, as "key=value", in the order they were issued. */
 function sets(): string[] {
   return cliMock.mock.calls
@@ -66,7 +113,7 @@ describe("enabling image generation when ClawBox AI is linked", () => {
     installMock.mockReset();
     drawsMock.mockReset();
     refreshMock.mockReset();
-    cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
+    hermesFake();
     // Called twice per link: once before the writes, once after. The default is
     // the ordinary case — a box that could not draw, and now can.
     drawsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
@@ -110,11 +157,7 @@ describe("enabling image generation when ClawBox AI is linked", () => {
   });
 
   it("adds itself to plugins.enabled without dropping the customer's plugins", async () => {
-    cliMock.mockImplementation(async (args: string[]) =>
-      args[1] === "get" && args[2] === "plugins.enabled"
-        ? { code: 0, stdout: "- weather\n- spotify\n", stderr: "" }
-        : { code: 0, stdout: "", stderr: "" },
-    );
+    hermesFake(() => undefined, ["weather", "spotify"]);
     await applyClawaiToHermes("claw_token_abc", "flash");
     expect(sets()).toContain(
       `plugins.enabled=${JSON.stringify(["weather", "spotify", HERMES_IMAGE_PLUGIN_NAME])}`,
@@ -122,11 +165,7 @@ describe("enabling image generation when ClawBox AI is linked", () => {
   });
 
   it("leaves plugins.enabled alone when it already lists us", async () => {
-    cliMock.mockImplementation(async (args: string[]) =>
-      args[1] === "get" && args[2] === "plugins.enabled"
-        ? { code: 0, stdout: `- ${HERMES_IMAGE_PLUGIN_NAME}\n`, stderr: "" }
-        : { code: 0, stdout: "", stderr: "" },
-    );
+    hermesFake(() => undefined, [HERMES_IMAGE_PLUGIN_NAME]);
     await applyClawaiToHermes("claw_token_abc", "flash");
     expect(sets().some((s) => s.startsWith("plugins.enabled="))).toBe(false);
   });
@@ -135,11 +174,7 @@ describe("enabling image generation when ClawBox AI is linked", () => {
     // `hermes config get` exits NON-ZERO for an absent key, with this wording.
     // It is not a failed read: there is genuinely nothing to preserve, so the
     // list is created with ours in it.
-    cliMock.mockImplementation(async (args: string[]) =>
-      args[1] === "get" && args[2] === "plugins.enabled"
-        ? { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" }
-        : { code: 0, stdout: "", stderr: "" },
-    );
+    hermesFake();
     await applyClawaiToHermes("claw_token_abc", "flash");
     expect(sets()).toContain(`plugins.enabled=${JSON.stringify([HERMES_IMAGE_PLUGIN_NAME])}`);
   });
@@ -149,10 +184,10 @@ describe("enabling image generation when ClawBox AI is linked", () => {
     // list. Reading that as "empty" and writing ours over it would unload every
     // plugin the customer had enabled — the one destructive thing this whole
     // function can do.
-    cliMock.mockImplementation(async (args: string[]) =>
+    hermesFake((args) =>
       args[1] === "get" && args[2] === "plugins.enabled"
         ? { code: 1, stdout: "", stderr: "could not acquire config lock" }
-        : { code: 0, stdout: "", stderr: "" },
+        : undefined,
     );
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await applyClawaiToHermes("claw_token_abc", "flash");
@@ -167,10 +202,10 @@ describe("enabling image generation when ClawBox AI is linked", () => {
     // before the base URL, a failed base URL would leave a box advertising a
     // backend with nowhere to send the request: no composer button, and every
     // request for a picture dying inside the agent.
-    cliMock.mockImplementation(async (args: string[]) =>
+    hermesFake((args) =>
       args[2] === `image_gen.${HERMES_IMAGE_PLUGIN_NAME}.base_url`
         ? { code: 1, stdout: "", stderr: "nope" }
-        : { code: 0, stdout: "", stderr: "" },
+        : undefined,
     );
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await applyClawaiToHermes("claw_token_abc", "flash");
@@ -209,10 +244,8 @@ describe("enabling image generation when ClawBox AI is linked", () => {
   });
 
   it("does not stop the link when a config write for images fails", async () => {
-    cliMock.mockImplementation(async (args: string[]) =>
-      args[2]?.startsWith("image_gen")
-        ? { code: 1, stdout: "", stderr: "nope" }
-        : { code: 0, stdout: "", stderr: "" },
+    hermesFake((args) =>
+      args[2]?.startsWith("image_gen") ? { code: 1, stdout: "", stderr: "nope" } : undefined,
     );
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await expect(applyClawaiToHermes("claw_token_abc", "flash")).resolves.toMatchObject({

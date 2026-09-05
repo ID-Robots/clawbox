@@ -22,3 +22,23 @@ import type { HermesCliResult } from "@/lib/hermes-cli";
 export function hermesCliAnswered(result: Pick<HermesCliResult, "code">): boolean {
   return typeof result.code === "number" && result.code !== 126 && result.code !== 127;
 }
+
+/**
+ * Did `hermes config set` say its own coercion missed and it stored the value
+ * as TEXT?
+ *
+ * `hermes config set k '["a","b"]'` exits 0 either way; when the structured
+ * parse does not yield a list it prints "…storing as string." to stderr and
+ * saves the literal (hermes_cli/config.py:5514-5527 on the pinned 0.20.5).
+ * Every key this repo writes as a JSON literal has to read that line, because
+ * an exit code is not an outcome — `providers.clawai.models` degrades to a
+ * one-id allowlist and `plugins.enabled` disables every user plugin on the box.
+ *
+ * One function rather than the regex written out at each site: the two callers
+ * that had their own copy also grew their own idea of what the answer MEANT,
+ * which is how a proved "stored as text" and an unanswerable question came to
+ * be handled alike in one of them.
+ */
+export function hermesStoredValueAsText(result: Pick<HermesCliResult, "stderr">): boolean {
+  return /storing as string/i.test(result.stderr ?? "");
+}

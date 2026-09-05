@@ -2,17 +2,21 @@ import { setMany } from "@/lib/config-store";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
 import { runHermesCli, type HermesCliResult } from "@/lib/hermes-cli";
-import { hermesCliAnswered } from "@/lib/hermes-cli-answered";
+import { hermesCliAnswered, hermesStoredValueAsText } from "@/lib/hermes-cli-answered";
 import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { refreshHermesImageTools } from "@/lib/hermes-image-refresh";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
 import { setHermesEnvValues } from "@/lib/hermes-env";
 import {
+  HERMES_IMAGE_PLUGIN_KEY,
   HERMES_IMAGE_PLUGIN_NAME,
   HERMES_IMAGE_TOKEN_ENV,
   installHermesImagePlugin,
   mergePluginsEnabled,
+  decodePluginsEnabledJson,
+  decodePluginsEnabledPlain,
+  type PluginsEnabledState,
 } from "@/lib/hermes-image-plugin";
 import {
   CLAWBOX_AI_CHAT_MODEL_IDS,
@@ -508,7 +512,7 @@ export async function reconcileClawaiModelsWithHermes(): Promise<void> {
     // this repair would have latched "done" over it. Not reachable on the build
     // `HERMES_PIN_COMMIT` installs — the coercion chain there yields a real
     // list — which is exactly why it is worth a guard rather than a comment.
-    const storedAsText = /storing as string/i.test(written.stderr ?? "");
+    const storedAsText = hermesStoredValueAsText(written);
     // AND NEITHER IS A CLEAN STDERR. That warning only exists on a CLI whose
     // coercion block prints it, so it cannot speak for one old enough to lack
     // the block — where the same literal is stored as text with an EMPTY stderr
@@ -1003,34 +1007,481 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
   // any other reason (a locked config, a timeout) knows NOTHING about what is
   // in that list — treating it as empty would write `["clawai"]` over the
   // customer's own enabled plugins and silently unload every one of them. So
-  // only the "not set" wording proceeds; anything else stops here, and the
-  // capability probe reports a box that cannot draw through its agent, which
-  // is the truth.
-  const current = await runHermesCli(["config", "get", "plugins.enabled"], { timeoutMs: 15_000 });
-  const listing = `${current.stdout ?? ""}\n${current.stderr ?? ""}`;
-  if (current.code !== 0 && !/config key not set/i.test(listing)) {
-    throw new Error(current.stderr?.trim() || "hermes config get plugins.enabled failed");
+  // only the "not set" wording proceeds; anything else stops here, with what
+  // the box already holds left exactly as it is.
+  //
+  // `--json` IS LOAD-BEARING. In the plain rendering a stored LIST and a stored
+  // STRING that spells one are the same characters, and `hermes config set`
+  // stores the literal as TEXT whenever its coercion misses
+  // (hermes_cli/config.py:5514-5527, exit 0 either way). Hermes then loads NO
+  // user plugin at all — `_get_enabled_set` answers `set(enabled) if
+  // isinstance(enabled, list) else set()` — while ClawBox read the residue back
+  // as a real list and concluded there was nothing to do. TASK-701.
+  //
+  // WITHDRAW THE CLAIM ON AN ANSWER, NEVER ON A FAILED QUESTION. Every box
+  // that can be in the residue state has been linked once already, so
+  // `image_gen.provider` is on disk naming us — and that single key is what
+  // `hermesAgentDrawsImages` reads — so an answer that PROVES the plugin
+  // cannot load has to take it back down; declining to re-make the claim would
+  // leave the composer button and the capability both saying yes over a plugin
+  // Hermes does not load.
+  //
+  // But only such an answer. This function runs on every AI-Models save and
+  // every re-link and has no periodic caller, and the only unattended writer of
+  // `image_gen.provider` is the boot repair in `scripts/register-mcp.sh`, which
+  // puts it back solely where it has just repaired the plugin list that made it
+  // unloadable — so a withdrawal made over a
+  // held config lock, a timeout, a shim exiting 127 or a rendering that is not
+  // machine-readable is not caution: it is image generation gone from a
+  // working box until the owner happens to save Settings again. Those failures
+  // establish NOTHING about what is on disk; they are reported, and what the
+  // box holds is left exactly as it was (which is what beta did).
+  let loadable: boolean;
+  try {
+    const { state, typed } = await readPluginsEnabledFromCli();
+    if (state.kind === "unreadable") {
+      // Not a proof of anything, and the two reasons are said apart: a build
+      // that takes `--json` without honouring it renders the same ambiguous
+      // text here as a healthy list would, while a command that printed nothing
+      // read no value at all and must not be reported as if it had.
+      throw new Error(
+        state.reason === "silent"
+          ? "hermes answered nothing for plugins.enabled — left alone, image generation not re-armed"
+          : "plugins.enabled holds a value this build cannot read — left alone, image generation not re-armed",
+      );
+    }
+    if (state.kind === "residue" && !state.names.length) {
+      // The one place "MERGED, NEVER REPLACED" gives way: a residue no name
+      // could be recovered from is overwritten, because leaving it would leave
+      // the box loading no plugin at all. Said out loud before it happens, and
+      // said HERE rather than in the decoder, which also runs as the prover —
+      // where nothing is replaced and the same line would be a false report.
+      console.warn(
+        `[hermes/clawai] plugins.enabled holds ${state.shape}, which names no plugin;`
+        + " replacing it rather than merging into it",
+      );
+    }
+    const merged = mergePluginsEnabled(state);
+    // NULL IS "NOTHING TO WRITE", NEVER "NOTHING TO ASK". The key already names
+    // us in a real list — the state of every healthy linked box — so the write
+    // is skipped; but the allow-list is not the only thing Hermes gates on, and
+    // deriving "loadable" from it here would be the same inference this whole
+    // path exists to stop making. `plugins.disabled` names us and every type
+    // check on `plugins.enabled` still says yes. So the prover runs on both
+    // paths: the write path asks it after the write, this one asks it directly.
+    loadable = merged
+      ? await writePluginsEnabled(merged, typed)
+      : await hermesConfirmsPluginLoadable(typed);
+  } catch (err) {
+    if (err instanceof PluginsEnabledDisproved) await withdrawImageProviderClaim();
+    throw err;
   }
-  const merged = mergePluginsEnabled(current.code === 0 ? current.stdout : "");
+  // WHAT OUR BACKEND IS, before the proof — it turns nothing on. These name the
+  // model and the address this device's own plugin posts to, and
+  // `image_gen.clawai.base_url` is the key a re-link exists to repair when
+  // `CLAWBOX_AI_PROXY_URL` moves in a release. Written ahead of the proof
+  // because held behind it they were skipped whenever the listing could not be
+  // asked, leaving a box that still claims `clawai` posting to the address of
+  // the release before. (They are still skipped whenever the read OR the proof
+  // throws — nothing below the block above runs then — which is the honest
+  // limit of the hoist.)
+  const describes: string[][] = [
+    ["config", "set", `image_gen.${HERMES_IMAGE_PLUGIN_NAME}.model`, CLAWBOX_AI_IMAGE_MODEL_ID],
+    ["config", "set", `image_gen.${HERMES_IMAGE_PLUGIN_NAME}.base_url`, CLAWBOX_AI_PROXY_URL],
+  ];
+  for (const args of describes) await runOrThrow(args);
+  if (!loadable) {
+    // Hermes never answered the question that would prove it loads the plugin.
+    // Not a failure worth throwing over, and not proof either — so no new claim
+    // is made, no old one is taken away, and the next link asks again.
+    console.warn(
+      "[hermes/clawai] hermes did not confirm the plugin is loadable — image generation left as it was",
+    );
+    return;
+  }
   // `image_gen.provider` LAST, because it is the key `hermesAgentDrawsImages`
   // reads and therefore the key that turns the agent's picture ability on. A
   // provider written first and then a failed `base_url` would leave a box
   // claiming it can draw through a backend that has nowhere to send the
   // request; written last, a failure anywhere above means the claim was never
   // made and the composer button stays.
-  const steps: string[][] = [
-    ...(merged ? [["config", "set", "plugins.enabled", JSON.stringify(merged)]] : []),
-    ["config", "set", "image_gen.model", CLAWBOX_AI_IMAGE_MODEL_ID],
-    ["config", "set", `image_gen.${HERMES_IMAGE_PLUGIN_NAME}.model`, CLAWBOX_AI_IMAGE_MODEL_ID],
-    ["config", "set", `image_gen.${HERMES_IMAGE_PLUGIN_NAME}.base_url`, CLAWBOX_AI_PROXY_URL],
-    ["config", "set", "image_gen.provider", HERMES_IMAGE_PLUGIN_NAME],
-  ];
-  for (const args of steps) {
-    const r = await runHermesCli(args, { timeoutMs: 15_000 });
-    if (r.code !== 0) {
-      // Thrown, not swallowed: the caller logs it and the link still succeeds.
-      // Half-written image config is exactly what the capability probe is for.
-      throw new Error(r.stderr?.trim() || `hermes ${args.join(" ")} failed`);
-    }
+  // The GLOBAL `image_gen.model` belongs with the provider, not with the
+  // describing writes above: whichever backend is SELECTED reads it (our own
+  // plugin reads `image_gen.clawai.model`), so it is ours to name only when we
+  // are about to become that backend. Written unconditionally it replaced a
+  // customer's chosen model on every AI-Models save — including on the paths
+  // that then make no claim at all — which is the mirror of the care
+  // `withdrawImageProviderClaim` takes not to remove somebody else's provider.
+  // Before `image_gen.provider`, so the ordering rule below still holds.
+  await runOrThrow(["config", "set", "image_gen.model", CLAWBOX_AI_IMAGE_MODEL_ID]);
+  await runOrThrow(["config", "set", "image_gen.provider", HERMES_IMAGE_PLUGIN_NAME]);
+}
+
+/**
+ * One `hermes config set` that has to land.
+ *
+ * Thrown, not swallowed: the caller logs it and the link still succeeds.
+ * Half-written image config is exactly what the capability probe is for.
+ */
+async function runOrThrow(args: string[]): Promise<void> {
+  const r = await runHermesCli(args, { timeoutMs: 15_000 });
+  if (r.code !== 0) throw new Error(r.stderr?.trim() || `hermes ${args.join(" ")} failed`);
+}
+
+/**
+ * Read `plugins.enabled` as Hermes would, and say whether the TYPE could be
+ * asked about at all.
+ *
+ * `typed` is the second half of the answer: false means this build cannot
+ * render the key machine-readably, so a list and a string that spells one are
+ * indistinguishable here and no proof is possible on this box — a permanent
+ * property, not a moment, which is why the caller keeps its claim there.
+ */
+async function readPluginsEnabledFromCli(): Promise<{ state: PluginsEnabledState; typed: boolean }> {
+  const typedRead = await runHermesCli(
+    ["config", "get", "plugins.enabled", "--json"],
+    { timeoutMs: 15_000 },
+  );
+  if (typedRead.code === 0) return { state: decodePluginsEnabledJson(typedRead.stdout), typed: true };
+  if (/config key not set/i.test(`${typedRead.stdout ?? ""}\n${typedRead.stderr ?? ""}`)) {
+    return { state: { kind: "list", names: [] }, typed: true };
   }
+  // A CLI whose `config get` does not take the flag answers argparse's
+  // "unrecognized arguments: --json". Ask again PLAINLY rather than refusing
+  // the feature: `--json` is only what lets the type be PROVED, and a build
+  // that cannot answer that question has told us nothing about whether the
+  // stored value is residue. Losing image generation there would be a false
+  // failure, not a conservative one — these boxes draw today.
+  //
+  // ONLY for that answer, though. Any other failure — a held config lock, a
+  // timeout, a wedged shim — must propagate: falling back to the ambiguous
+  // rendering there is how a stored `["clawai"]` string gets read as a list
+  // again, which is the whole defect this function exists to remove.
+  if (!UNSUPPORTED_OPTION_RE.test(`${typedRead.stdout ?? ""}\n${typedRead.stderr ?? ""}`)) {
+    throw new Error(
+      typedRead.stderr?.trim() || `hermes config get plugins.enabled --json failed (exit ${typedRead.code})`,
+    );
+  }
+  const plainRead = await runHermesCli(["config", "get", "plugins.enabled"], { timeoutMs: 15_000 });
+  const listing = `${plainRead.stdout ?? ""}\n${plainRead.stderr ?? ""}`;
+  if (plainRead.code !== 0 && !/config key not set/i.test(listing)) {
+    throw new Error(plainRead.stderr?.trim() || "hermes config get plugins.enabled failed");
+  }
+  console.warn(
+    "[hermes/clawai] this hermes does not answer `config get --json`;"
+    + " plugins.enabled is merged from the plain rendering and its type is not proved",
+  );
+  // The SIBLING of the silence rule in `decodePluginsEnabledJson`, and it
+  // matters just as much here: this build cannot be asked the typed question,
+  // so `writePluginsEnabled` arms the backend without a listing to prove it,
+  // and the merge that runs first would write `["clawai"]` over whatever the
+  // key really holds. An exit 0 that printed NOTHING is not "the list is
+  // empty"; the unset key arrives on the branch above, as a non-zero exit
+  // saying "Config key not set" (or those words in the rendering), and only
+  // that is read as an empty list.
+  if (plainRead.code === 0 && !plainRead.stdout?.trim()) {
+    return { state: { kind: "unreadable", reason: "silent" }, typed: false };
+  }
+  return {
+    state: decodePluginsEnabledPlain(plainRead.code === 0 ? plainRead.stdout : ""),
+    typed: false,
+  };
+}
+
+/**
+ * Stop claiming the agent can draw.
+ *
+ * `hermesAgentDrawsImages` reads `image_gen.provider` and nothing else, and
+ * nothing else on the device writes it while the owner is away except the
+ * boot repair in `scripts/register-mcp.sh`, which puts the claim back only
+ * where it has just made the plugin loadable again — so on a box linked once
+ * before, declining to re-write the key leaves the old claim standing. Only
+ * OUR selection is withdrawn: a customer who chose FAL by hand keeps it (the "known and accepted
+ * false positive" hermes-features.ts documents is their choice, not ours).
+ *
+ * Best effort, and never throws: it runs on the way out of a failure that is
+ * already being reported, and a second error here would replace the first.
+ */
+async function withdrawImageProviderClaim(): Promise<void> {
+  try {
+    const read = await runHermesCli(["config", "get", "image_gen.provider"], { timeoutMs: 15_000 });
+    if (read.code !== 0 || read.stdout.trim() !== HERMES_IMAGE_PLUGIN_NAME) return;
+    await runHermesCli(["config", "unset", "image_gen.provider"], { timeoutMs: 15_000 });
+    console.warn(
+      "[hermes/clawai] withdrew image_gen.provider — the ClawBox AI backend is not loadable here",
+    );
+  } catch {
+    // Nothing to add: the caller is already reporting why we got here.
+  }
+}
+
+/**
+ * Argparse's (and Click's) answers for an option a build does not have.
+ * Matched on the WORDING because the exit code (2) is shared with every other
+ * usage error. Both spellings of "unrecognised" are listed: the population this
+ * fallback exists for is boxes moved off `HERMES_PIN_COMMIT` by a hand-run
+ * `hermes update`, which is precisely where the wording can differ. A miss only
+ * costs the plain fallback — the type is then simply not proved, and nothing is
+ * withdrawn over it.
+ */
+const UNSUPPORTED_OPTION_RE =
+  /unrecogni[sz]ed arguments?:|no such option|unknown option|invalid choice|got unexpected extra argument/i;
+
+/**
+ * Hermes was ASKED AND ANSWERED, and the answer establishes that it will not
+ * load our plugin: the CLI's own "storing as string" on the write, or
+ * `hermes plugins list` reporting the plugin as anything but enabled.
+ *
+ * The one error that withdraws `image_gen.provider`. Everything else that can
+ * go wrong around this key — a held config lock, a timeout, 126/127 from the
+ * shim, a listing that is not JSON, a write that never landed — leaves the box
+ * holding whatever it held, because none of it says the plugin is absent and
+ * nothing on the device would put the claim back (see the caller).
+ */
+class PluginsEnabledDisproved extends Error {}
+
+/**
+ * Write `plugins.enabled` and PROVE Hermes will load us from it.
+ *
+ * AN EXIT CODE IS NOT AN OUTCOME — the same rule `reconcileClawaiModelsWithHermes`
+ * follows for `providers.clawai.models`, and it matters more here. That key
+ * degrades one picker; this one is the opt-in allow-list for every user plugin
+ * on the box, and a value Hermes cannot read as a list disables all of them.
+ *
+ * The caller's ordering is what turns the answer into behaviour:
+ * `image_gen.provider` — the key `hermesAgentDrawsImages` reads, and therefore
+ * the key that turns the agent's picture ability on — is written after this. So
+ * anything short of proof means the box does not claim it can draw. A wrong
+ * `false` only hides an ability; a wrong `true` is an apology.
+ *
+ * There is no retry loop: this runs once, at link time, and the caller logs
+ * while the link itself still succeeds.
+ *
+ * @returns true when the plugin is loadable as far as this build can be asked —
+ *          false when the write exited 0 and the question that would prove it
+ *          could not be put. Throws when the write could not be made (a plain
+ *          Error: nothing was established, and the box is no worse off than
+ *          before the save) and `PluginsEnabledDisproved` when the CLI's answer
+ *          establishes that no plugin can load from what is stored.
+ */
+async function writePluginsEnabled(names: string[], typed: boolean): Promise<boolean> {
+  const written = await runHermesCli(
+    ["config", "set", "plugins.enabled", JSON.stringify(names)],
+    { timeoutMs: 15_000 },
+  );
+  if (written.code !== 0) {
+    throw new Error(written.stderr?.trim() || "hermes config set plugins.enabled failed");
+  }
+  // The CLI's own warning when its coercion did not yield a structure. Cheap,
+  // and it names the cause; the read-back below is what covers a build too old
+  // to print it, where the same literal is stored as text with a clean stderr.
+  if (hermesStoredValueAsText(written)) {
+    throw new PluginsEnabledDisproved(
+      "hermes stored plugins.enabled as text, so no plugin would load — image generation left off",
+    );
+  }
+  return hermesConfirmsPluginLoadable(typed);
+}
+
+/**
+ * Will Hermes LOAD our plugin? The one prover, for both paths.
+ *
+ * ASK HERMES, do not re-derive its answer. `hermes plugins list --json` runs
+ * `_get_enabled_set()` itself — the very function the loader uses — so its
+ * verdict cannot disagree with what will actually load, the way a type
+ * inference over `config get` can. And it is the ONLY thing that catches
+ * `plugins.disabled`, a deny-list that wins over `plugins.enabled` and leaves
+ * every reading of the allow-list saying "loadable" over a plugin Hermes
+ * refuses. That is why the caller asks this even when it wrote nothing: an
+ * allow-list that already names us is a reason to skip the WRITE, never a
+ * reason to skip the QUESTION.
+ *
+ * @param typed whether this build answered `config get --json` at all.
+ * @returns true when Hermes reports the plugin enabled — false when the
+ *          question could not be put on a build that can otherwise be asked
+ *          machine-readable questions. Throws `PluginsEnabledDisproved` when
+ *          Hermes answers that it will not load it.
+ */
+async function hermesConfirmsPluginLoadable(typed: boolean): Promise<boolean> {
+  const verdict = await hermesReportsPluginEnabled(HERMES_IMAGE_PLUGIN_NAME);
+  if (verdict === "enabled") return true;
+  if (verdict === "not-enabled") {
+    // ANSWERED, and the answer is no: the value stored is not a list Hermes
+    // can load us from, or `plugins.disabled` names us. This is the proof.
+    throw new PluginsEnabledDisproved(
+      "hermes does not report the plugin as enabled",
+    );
+  }
+  if (verdict === "no-such-question" && typed) {
+    // This build HAS no listing to ask, so no link of it will ever get THAT
+    // proof, and refusing the feature over it would take image generation away
+    // from a first link for good. But it is not a build that can be asked
+    // NOTHING: it answers `config get --json`, so the two keys Hermes actually
+    // gates on can still be read machine-readably. Ask those instead of arming
+    // on an exit code — a build without the listing is not a licence to make
+    // the claim TASK-701 exists to stop making.
+    console.warn(
+      "[hermes/clawai] this hermes does not answer `plugins list --json`;"
+      + " proving the plugin from plugins.enabled and plugins.disabled instead",
+    );
+    return hermesKeysConfirmPluginLoadable();
+  }
+  // A QUESTION THAT COULD NOT BE ASKED IS NOT A WRITE THAT FAILED. 126, 127 and
+  // a signalled `null` are the shell's codes for the `hermes` shim while
+  // `step_hermes_install` rebuilds the venv under it — nothing was parsed, and
+  // any write above still exited 0 with no coercion warning. Suppressing image
+  // generation for the whole link over that is the false-failure shape; the
+  // sibling repair answers `unverified` and tries again for the same reason.
+  console.warn(
+    "[hermes/clawai] hermes could not be asked whether the plugin is enabled;"
+    + " what is on disk is left exactly as it is, unproved",
+  );
+  // A build that answers NEITHER machine-readable question cannot be asked at
+  // all — a permanent property rather than a moment — and refusing the feature
+  // on those boxes would take away something that works today. Where the build
+  // does answer `config get --json` (so the ambiguity this whole path exists
+  // for was resolvable) a silent listing is a moment, and no claim is made.
+  return !typed;
+}
+
+/**
+ * What Hermes itself says about a plugin, or why it could not be asked.
+ *
+ * `cannot-ask` and `no-such-question` are kept apart because they are a moment
+ * and a permanent property of the build: a shim exiting 127 will answer at the
+ * next link, a subcommand flag that does not exist never will.
+ */
+type HermesPluginVerdict = "enabled" | "not-enabled" | "cannot-ask" | "no-such-question";
+
+/**
+ * Would Hermes load this plugin? ASKED, not inferred.
+ *
+ * HARNESS-FIRST, READ ON THE BOX (0.20.5 = 2026.8.19, the pinned build,
+ * read-only, 2026-09-04). `hermes plugins list --json` prints one row per
+ * discovered plugin as `{name, status, version, description, source}`
+ * (`hermes_cli/plugins_cmd.py:1969-1980`), and `status` comes from
+ * `_plugin_status(name, enabled, disabled, key)` (`:1930-1936`) over
+ * `_get_enabled_set()` (`:1309-1324`) — the SAME function the loader gates on,
+ * `set(enabled) if isinstance(enabled, list) else set()`. So a residue stored
+ * as text reads back "not enabled" from Hermes' own mouth, and a name in
+ * `plugins.disabled` reads "disabled" — a state a type check on
+ * `plugins.enabled` calls loadable and Hermes never loads. Measured: the
+ * command answers in ~1 s and reports our plugin `{"status": "enabled",
+ * "source": "user"}` on a linked box.
+ *
+ * A MISSING ROW IS NOT A NO. The rows come from `_discover_all_plugins()`, so
+ * an absent one means discovery did not see the directory — which says nothing
+ * about the allow-list this function was asked about. Reported as "cannot ask"
+ * so it makes no claim and withdraws none.
+ */
+async function hermesReportsPluginEnabled(name: string): Promise<HermesPluginVerdict> {
+  const listed = await runHermesCli(["plugins", "list", "--json"], { timeoutMs: 15_000 });
+  if (!hermesCliAnswered(listed) || listed.code !== 0) {
+    // A build without this flag can never answer, however often it is asked —
+    // the same permanent property `config get --json` is exempted for, matched
+    // on the same wording. Told apart from a transient failure because the
+    // caller owes those two different things.
+    return hermesCliAnswered(listed)
+      && UNSUPPORTED_OPTION_RE.test(`${listed.stdout ?? ""}\n${listed.stderr ?? ""}`)
+      ? "no-such-question"
+      : "cannot-ask";
+  }
+  let rows: unknown;
+  try {
+    rows = JSON.parse(listed.stdout);
+  } catch {
+    return "cannot-ask";
+  }
+  if (!Array.isArray(rows)) return "cannot-ask";
+  const row = rows.find(
+    (r): r is { name: string; status?: unknown } =>
+      !!r && typeof r === "object" && (r as { name?: unknown }).name === name,
+  );
+  if (!row) return "cannot-ask";
+  if (row.status === "enabled") return "enabled";
+  // THE NEGATIVE IS A CLOSED LIST, not "anything that is not `enabled`".
+  // `not-enabled` is the one verdict that WITHDRAWS a working box's claim, and
+  // this file already argues (see UNSUPPORTED_OPTION_RE) that CLI wording
+  // differs on builds moved off the pin by a hand-run `hermes update`. An
+  // unrecognised status — a renamed field, an "enabled (user)" — would then
+  // take image generation away from a box where Hermes was loading the plugin
+  // all along, on every Save, with nothing to put it back. A wrong
+  // `cannot-ask` hides nothing; a wrong `not-enabled` is an apology.
+  //
+  // The list is what `_plugin_status` can return, read on the pinned 0.20.5
+  // build (`hermes_cli/plugins_cmd.py:1931-1937`): exactly `disabled`,
+  // `enabled` and `not enabled`.
+  return typeof row.status === "string" && HERMES_NOT_LOADED_STATUSES.has(row.status.toLowerCase())
+    ? "not-enabled"
+    : "cannot-ask";
+}
+
+/** The statuses that PROVE Hermes will not load the plugin. See above. */
+const HERMES_NOT_LOADED_STATUSES = new Set(["disabled", "not enabled", "not-enabled"]);
+
+/**
+ * The proof a build WITHOUT `plugins list --json` can still give.
+ *
+ * Hermes gates a user plugin on exactly two keys, and this reads both the way
+ * the loader does rather than inferring either:
+ *   `plugins.enabled`  — `_get_enabled_set()` is
+ *      `set(enabled) if isinstance(enabled, list) else set()`, so anything that
+ *      is not a LIST naming us means no load. That is a fact about what is
+ *      stored, so it PROVES the negative.
+ *   `plugins.disabled` — `_plugin_status` gives it precedence, in either
+ *      spelling (`clawai` and the resolved `image_gen/clawai`).
+ *
+ * A question that could not be PUT — an unreadable rendering, a read that
+ * failed — establishes nothing and answers false: no claim made, none taken
+ * away, and the next Save asks again. Only an ANSWER that names the negative
+ * throws, exactly as the listing's does.
+ */
+async function hermesKeysConfirmPluginLoadable(): Promise<boolean> {
+  const { state, typed } = await readPluginsEnabledFromCli();
+  if (!typed || state.kind === "unreadable") return false;
+  if (state.kind === "residue" || !state.names.includes(HERMES_IMAGE_PLUGIN_NAME)) {
+    throw new PluginsEnabledDisproved(
+      "plugins.enabled does not read back as a list naming the plugin",
+    );
+  }
+  const denied = await readPluginsDisabledFromCli();
+  if (!denied) return false;
+  if (denied.has(HERMES_IMAGE_PLUGIN_NAME) || denied.has(HERMES_IMAGE_PLUGIN_KEY)) {
+    throw new PluginsEnabledDisproved("plugins.disabled names the plugin");
+  }
+  return true;
+}
+
+/**
+ * `plugins.disabled` as a set of names, or null when it could not be read.
+ *
+ * Null rather than an empty set for every DOUBT — a read that failed, a
+ * rendering that could not be parsed — because an empty set here reads as
+ * "nothing is denied" and that is not a claim to invent. Two things ARE an
+ * honest empty, because both are ANSWERS: the CLI's own "Config key not set",
+ * and a value that is not a LIST — `_get_disabled_set()` reads that as denying
+ * nothing, so it denies nothing here too.
+ */
+async function readPluginsDisabledFromCli(): Promise<Set<string> | null> {
+  const read = await runHermesCli(
+    ["config", "get", "plugins.disabled", "--json"],
+    { timeoutMs: 15_000 },
+  );
+  const listing = `${read.stdout ?? ""}\n${read.stderr ?? ""}`;
+  if (read.code !== 0) {
+    return /config key not set/i.test(listing) ? new Set() : null;
+  }
+  const state = decodePluginsEnabledJson(read.stdout);
+  // The same decoder, and the same reading of silence: a command that printed
+  // nothing has not said the deny-list is empty.
+  if (state.kind === "unreadable") return null;
+  // A RESIDUE DENIES NOTHING, so its recovered names are not a deny-list.
+  // `_get_disabled_set()` gates on the same type as the allow-list —
+  // `set(disabled) if isinstance(disabled, list) else set()`
+  // (hermes_cli/plugins_cmd.py:1257-1269, read on the pinned 0.20.5 build) —
+  // so a `plugins.disabled` stored as a STRING is a value Hermes loads the
+  // plugin over. Returning the names recovered out of it would withdraw
+  // `image_gen.provider` from a box that is drawing today; the honest empty is
+  // the only reading that matches what Hermes does.
+  return state.kind === "residue" ? new Set() : new Set(state.names);
 }

@@ -304,6 +304,18 @@ export CLAWBOX_MCP_API_BASE="$API_BASE"
 # false success this whole step exists to avoid.
 export CLAWBOX_EMAIL_HOOK_PLUGIN=""
 [ "$EMAIL_HOOK_INSTALLED" = "1" ] && export CLAWBOX_EMAIL_HOOK_PLUGIN="$EMAIL_HOOK_PLUGIN"
+# The ClawAI image backend, for the re-arm below. Its files are written by the
+# LINK path (src/lib/hermes-image-plugin.ts), not by this script — this is only
+# where they would be if the box has ever been linked.
+export CLAWBOX_IMAGE_PLUGIN="clawai"
+# The plugin's CANONICAL registry key — its second spelling, and the one
+# `hermes plugins disable clawai` writes into `plugins.disabled`
+# (`cmd_disable` -> `_resolve_plugin_key`, hermes_cli/plugins_cmd.py:1710-1739
+# and :1337-1362, read on the pinned 0.20.5 build). Hermes' own
+# `_plugin_status` tests both spellings; so must the re-arm's deny-list check.
+# Mirrors HERMES_IMAGE_PLUGIN_KEY in src/lib/hermes-image-plugin.ts.
+export CLAWBOX_IMAGE_PLUGIN_KEY="image_gen/clawai"
+export CLAWBOX_IMAGE_PLUGIN_ENTRY="$HERMES_PLUGINS_DIR/image_gen/clawai/__init__.py"
 
 python3 - <<'PY'
 import ast, json, os, sys, tempfile
@@ -506,6 +518,55 @@ else:
     print("[register-mcp] WARNING: agent is not a mapping; "
           "leaving the clarify timeout at hermes' own default.", file=sys.stderr)
 
+def config_name_list(value):
+    """The plugin names in a hermes config list value, or None for a shape this
+    script cannot read.
+
+    ONE reader for both `plugins.enabled` and `plugins.disabled`, because the
+    re-arm below has to weigh them against each other and a second parse that
+    disagreed by a corner case would arm the backend over its own deny-list.
+    Three forms reach these keys: a real sequence, hermes' own JSON-string form
+    ('["a","b"]', how `hermes config set` stores a list whose coercion missed),
+    and a bare scalar meaning one name.
+
+    None, never []: a shape nobody understands is not consent. Read as empty,
+    an unparseable `enabled` would be overwritten and an unparseable `disabled`
+    would be taken for "nothing is denied".
+
+    DELIBERATELY STRICTER THAN HERMES ON `disabled`. `_get_disabled_set()` is
+    `set(disabled) if isinstance(disabled, list) else set()`, so hermes reads a
+    JSON-string, a bare scalar or any other NON-LIST deny-list as denying
+    NOTHING, while this reader either recovers names from it or answers None,
+    and the re-arm below then declines either way. That asymmetry is
+    safe HERE and only here: the cost is that a boot does not re-arm and the
+    owner's next Settings -> AI Models save does it instead. The same reading
+    in src/lib/hermes-clawai.ts would WITHDRAW `image_gen.provider` from a box
+    that draws today, which is why that reader answers the empty set for a
+    residue.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    if not isinstance(value, str):
+        return None
+    if not value.strip().startswith("["):
+        return [value] if value else []
+    # `hermes config set` stores a list as a JSON string, and
+    # src/lib/hermes-clawai.ts writes this very key that way with
+    # JSON.stringify — so JSON first, and the Python literal form only as a
+    # fallback for anything hand-written.
+    parsed = None
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        try:
+            parsed = ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            parsed = None
+    return [str(item) for item in parsed] if isinstance(parsed, list) else None
+
+
 # ── Enable the outbound EMAIL:-directive hook plugin. ───────────────────────
 # `plugins.enabled` is opt-in for every user plugin on the box
 # (hermes_cli/plugins.py:4000 skips anything not listed), and it is the SAME
@@ -518,59 +579,147 @@ else:
 # `hermes config set` stores lists as a JSON string ('["a","b"]'), which
 # `parse_config_string_list` reads, and the same two forms the skills block
 # below handles turn up here.
+#
+# THE TYPE REPAIR IS NOT GATED ON THE HOOK. Reading the key, normalising a
+# string back into a sequence and appending the hook are three separate
+# questions, and only the last one needs a hook to append: `hook_plugin` is
+# empty whenever the plugin's files did not land (see EMAIL_HOOK_INSTALLED
+# above), and a box whose install failed AND whose `plugins.enabled` is a
+# string is exactly the box that loads no plugins at all with nothing else on
+# it to put the type back. TASK-701.
 hook_plugin = os.environ.get("CLAWBOX_EMAIL_HOOK_PLUGIN") or ""
-if hook_plugin:
-    plugins_cfg = cfg.get("plugins")
-    if plugins_cfg is None:
-        plugins_cfg = {}
-        cfg["plugins"] = plugins_cfg
-    if isinstance(plugins_cfg, dict):
-        raw_enabled = plugins_cfg.get("enabled")
-        if isinstance(raw_enabled, str):
-            text = raw_enabled.strip()
-            if text.startswith("["):
-                # `hermes config set` stores a list as a JSON string, and
-                # src/lib/hermes-clawai.ts writes this very key that way with
-                # JSON.stringify — so JSON first, and the Python literal form
-                # only as a fallback for anything hand-written.
-                parsed = None
-                try:
-                    parsed = json.loads(text)
-                except ValueError:
-                    try:
-                        parsed = ast.literal_eval(text)
-                    except (ValueError, SyntaxError):
-                        parsed = None
-                if isinstance(parsed, list):
-                    names = [str(item) for item in parsed]
-                else:
-                    # A list we cannot read is left ALONE. Falling back to
-                    # "the whole string is one plugin name" would write
-                    # `['["clawai", …', 'clawbox_email_directives']` and the
-                    # customer's image backend would stop loading on the next
-                    # boot — the exact failure the merge above exists to
-                    # prevent, caused by the code preventing it.
-                    names = None
-                    print("[register-mcp] WARNING: plugins.enabled is a list this script cannot parse; "
-                          "leaving it untouched and the EMAIL: directive hook disabled.", file=sys.stderr)
-            else:
-                names = [raw_enabled] if raw_enabled else []
-        elif isinstance(raw_enabled, (list, tuple)):
-            names = [str(item) for item in raw_enabled]
-        elif raw_enabled is None:
-            names = []
-        else:
-            names = None
-            print("[register-mcp] WARNING: plugins.enabled is not a list or a string; "
-                  "leaving the EMAIL: directive hook disabled.", file=sys.stderr)
-        if names is not None and hook_plugin not in names:
-            plugins_cfg["enabled"] = names + [hook_plugin]
-            changed = True
-            print("[register-mcp] enabled the " + hook_plugin
-                  + " plugin — EMAIL: card directives are stripped on the way to a channel")
+# Set only where a STRING became a real list — the state a withdrawn image
+# claim is paired with. See the re-arm below.
+repaired_enabled = False
+names = None
+plugins_cfg = cfg.get("plugins")
+if plugins_cfg is None and hook_plugin:
+    # Created only when there is a name to write into it; an absent key with
+    # nothing to add is not a repair, it is a needless config rewrite.
+    plugins_cfg = {}
+    cfg["plugins"] = plugins_cfg
+if plugins_cfg is not None and not isinstance(plugins_cfg, dict):
+    print("[register-mcp] WARNING: plugins is not a mapping; leaving plugins.enabled alone."
+          + (" The EMAIL: directive hook stays disabled." if hook_plugin else ""), file=sys.stderr)
+elif isinstance(plugins_cfg, dict):
+    raw_enabled = plugins_cfg.get("enabled")
+    names = config_name_list(raw_enabled)
+    if names is None:
+        # LEFT ALONE, whichever shape it is. Falling back to "the whole string
+        # is one plugin name" would write `['["clawai", …', 'clawbox_…']` and
+        # the customer's image backend would stop loading on the next boot —
+        # the exact failure the merge below exists to prevent, caused by the
+        # code preventing it.
+        print("[register-mcp] WARNING: plugins.enabled is "
+              + ("a list this script cannot parse" if isinstance(raw_enabled, str)
+                 else "not a list or a string")
+              + "; leaving it untouched."
+              + (" The EMAIL: directive hook stays disabled." if hook_plugin else ""),
+              file=sys.stderr)
+    if names is not None and hook_plugin and hook_plugin not in names:
+        names = names + [hook_plugin]
+        plugins_cfg["enabled"] = names
+        changed = True
+        # A string that had a name to append was normalised too — the write
+        # below is `yaml.safe_dump` of a real sequence either way.
+        repaired_enabled = isinstance(raw_enabled, str)
+        print("[register-mcp] enabled the " + hook_plugin
+              + " plugin — EMAIL: card directives are stripped on the way to a channel")
+    elif names is not None and isinstance(raw_enabled, str):
+        # NORMALISE THE TYPE even when there is no name to add. A string here
+        # is the residue of a `hermes config set` that exited 0 and stored its
+        # literal as text; `_get_enabled_set` reads a non-list as EMPTY, so the
+        # box loads NO user plugin at all — ours, the customer's and this hook
+        # included. The branch above healed it only as a side effect of having
+        # a name to append, so a box whose residue already spelled the hook —
+        # or one with no hook to append at all — stayed broken indefinitely.
+        # `yaml.safe_dump` writes it back as a real sequence. TASK-701.
+        plugins_cfg["enabled"] = names
+        changed = True
+        repaired_enabled = True
+        print("[register-mcp] rewrote plugins.enabled as a list — it was stored as text, "
+              "which loads no plugins at all")
+
+# ── Re-arm the ClawAI image backend the repair above made loadable. ─────────
+# `enableHermesImageGeneration` (src/lib/hermes-clawai.ts) unsets
+# `image_gen.provider` when Hermes has ANSWERED that it will not load our
+# plugin — the honest thing to do at that moment — and it runs only when the
+# owner presses Save in Settings → AI Models. So without this, the repair above
+# would leave a box whose plugin loads again still reporting that it cannot
+# draw, until someone happened to open that page. A claim taken away by a proof
+# is put back by the opposite proof.
+#
+# AT THE AGENT'S NEXT START, not at this moment. Like the MCP registration this
+# script exists for, the repair and the re-arm are writes to config.yaml: the
+# Hermes agent already running discovered its plugins at ITS start and holds
+# that answer, and this script — which runs as `clawbox`, not root, and has
+# never restarted a unit — does not disturb it. So on the boot that repairs a
+# residue the claim can be true of the config and not yet of the running agent,
+# for one dashboard lifetime. Strictly better than the state before, which was
+# permanent, and the reason the line below reports what it WROTE rather than
+# claiming the plugin is loaded.
+#
+# ALL FOUR CONDITIONS, or nothing is written:
+#   1. we JUST turned a string into a list, and that list names the backend —
+#      so this can only fire on the box the withdrawal was made on;
+#   2. the backend's files are really on disk (the link path put them there),
+#      because "named in config, nothing to load" is the false success this
+#      whole script keeps guarding against;
+#   3. `image_gen.provider` is UNSET. Never over a backend the customer chose
+#      by hand, and never as a first-time opt-in on a box nobody has linked.
+#      KNOWN LIMIT: unset is read as "nobody has chosen", and it cannot tell
+#      that from an owner who cleared the key BY HAND to stop the agent drawing
+#      — nothing in ClawBox distinguishes the two, since only the link path and
+#      this block ever write it. The supported way to say no is Hermes' own
+#      `hermes plugins disable clawai`, which condition 4 honours and which the
+#      link path reads back as proof; a real ClawBox switch for it belongs on
+#      the AI Models page, not in a boot script's inference.
+#   4. `plugins.disabled` does NOT name the backend, IN EITHER SPELLING. The
+#      deny-list WINS over `plugins.enabled` (`_plugin_status`,
+#      hermes_cli/plugins_cmd.py:1931-1937), so a name in it is loadable by
+#      every reading of the allow-list and loaded by none — and it is one of the
+#      two answers the link path withdraws the claim FOR. Repairing a type does
+#      not lift a denial, so re-arming without asking it would put back,
+#      unattended, the very claim a proof had just taken away. BOTH spellings
+#      because `hermes plugins disable clawai` stores the RESOLVED key
+#      `image_gen/clawai` (`cmd_disable` -> `_resolve_plugin_key`, :1710-1739
+#      and :1337-1362, read on the pinned 0.20.5 build) while the loader's
+#      allow-list carries the bare name — hermes' own `_plugin_status` tests
+#      both, and a check that knew only one would miss the deny-list in the one
+#      state the harness's own command produces. Weighed through the same
+#      reader as the allow-list, and a
+#      deny-list this script cannot read declines the re-arm rather than
+#      guessing: the cost is one Settings → Save, which asks Hermes itself.
+image_plugin = os.environ.get("CLAWBOX_IMAGE_PLUGIN") or ""
+image_plugin_key = os.environ.get("CLAWBOX_IMAGE_PLUGIN_KEY") or ""
+image_entry = os.environ.get("CLAWBOX_IMAGE_PLUGIN_ENTRY") or ""
+if repaired_enabled and image_plugin and image_plugin in (names or []):
+    denied = config_name_list(plugins_cfg.get("disabled"))
+    image_cfg = cfg.get("image_gen")
+    if image_cfg is None:
+        image_cfg = {}
+    if not isinstance(image_cfg, dict):
+        print("[register-mcp] WARNING: image_gen is not a mapping; leaving the image backend alone.",
+              file=sys.stderr)
+    elif image_cfg.get("provider") is not None:
+        pass  # somebody's choice, ours or theirs — not this script's to move
+    elif denied is None:
+        print("[register-mcp] WARNING: plugins.disabled is a shape this script cannot read; "
+              "leaving image_gen.provider unset.", file=sys.stderr)
+    elif image_plugin in denied or (image_plugin_key and image_plugin_key in denied):
+        # BOTH spellings: `hermes plugins disable clawai` stores the resolved
+        # key, and hermes' own `_plugin_status` matches either.
+        print("[register-mcp] plugins.disabled names the ClawAI image backend, so hermes "
+              "loads it from no list; leaving image_gen.provider unset")
+    elif not (image_entry and os.path.isfile(image_entry)):
+        print("[register-mcp] the ClawAI image backend is not installed; "
+              "leaving image_gen.provider unset")
     else:
-        print("[register-mcp] WARNING: plugins is not a mapping; "
-              "leaving the EMAIL: directive hook disabled.", file=sys.stderr)
+        image_cfg["provider"] = image_plugin
+        cfg["image_gen"] = image_cfg
+        changed = True
+        print("[register-mcp] re-armed image_gen.provider — the plugin list was repaired "
+              "and the ClawBox AI backend is installed; hermes loads it at its next start")
 
 if not changed:
     print("[register-mcp] Hermes MCP registration already current, skipping write")

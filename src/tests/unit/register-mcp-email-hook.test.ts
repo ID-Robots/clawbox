@@ -105,6 +105,19 @@ function enabledPlugins(): unknown {
   return plugins?.enabled;
 }
 
+/** What `image_gen.provider` holds, if anything. */
+function imageProvider(): unknown {
+  const imageGen = readConfig().image_gen as Record<string, unknown> | undefined;
+  return imageGen?.provider;
+}
+
+/** The ClawAI image backend on disk, where the LINK path would have put it. */
+function installImageBackend(): void {
+  const dir = path.join(pluginsDir, "image_gen", "clawai");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "__init__.py"), "# stand-in for the shipped backend\n");
+}
+
 function installedFiles(): string[] {
   const dir = path.join(pluginsDir, PLUGIN);
   return fs.existsSync(dir) ? fs.readdirSync(dir).sort() : [];
@@ -490,6 +503,130 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     fs.writeFileSync(configPath, `plugins:\n  enabled: '["clawai", "other"]'\n`);
     run();
     expect(enabledPlugins()).toEqual(["clawai", "other", PLUGIN]);
+  });
+
+  it("normalises a stored-as-text plugins.enabled even when this hook is NOT installed", () => {
+    // The repair has to be independent of the EMAIL: hook, because the box that
+    // most needs it is the one where the hook could not be installed: a string
+    // here makes `_get_enabled_set` answer EMPTY, so Hermes loads no user
+    // plugin at all — the customer's image backend included — and nothing else
+    // on the box rewrites the type. Gating the repair on `hook_plugin` skipped
+    // exactly that box.
+    fs.writeFileSync(configPath, `plugins:\n  enabled: '["clawai"]'\n`);
+    const bareRoot = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-bare-root-"));
+    try {
+      fs.mkdirSync(path.join(bareRoot, "mcp"), { recursive: true });
+      fs.writeFileSync(path.join(bareRoot, "mcp", "clawbox-mcp.ts"), "// stand-in\n");
+      const r = run({}, bareRoot);
+      expect(r.status).toBe(0);
+      expect(installedFiles()).toEqual([]); // the hook really is not there
+      expect(enabledPlugins()).toEqual(["clawai"]); // and the type is a list again
+    } finally {
+      fs.rmSync(bareRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("re-arms the image backend the repair just made loadable", () => {
+    // The link path withdraws `image_gen.provider` when Hermes answers that it
+    // will not load the plugin, and it is only reached from Settings → Save.
+    // Repairing the list without putting the claim back would leave a box that
+    // CAN draw reporting that it cannot until somebody opened that page.
+    fs.writeFileSync(configPath, `plugins:\n  enabled: '["clawai"]'\n`);
+    installImageBackend();
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(enabledPlugins()).toEqual(["clawai", PLUGIN]);
+    expect(imageProvider()).toBe("clawai");
+  });
+
+  it("never writes over a backend the customer chose", () => {
+    fs.writeFileSync(
+      configPath,
+      `plugins:\n  enabled: '["clawai"]'\nimage_gen:\n  provider: fal\n`,
+    );
+    installImageBackend();
+    run();
+    expect(imageProvider()).toBe("fal");
+  });
+
+  it("arms nothing while plugins.disabled names the backend", () => {
+    // The deny-list WINS over the allow-list (`_plugin_status`,
+    // hermes_cli/plugins_cmd.py:1930-1936) — it is the very state the link
+    // path's withdrawal exists for, and the type repair does not change it.
+    // Re-arming here would put back, unattended, exactly the claim a proof had
+    // just taken away, on a box where Hermes still loads nothing.
+    fs.writeFileSync(
+      configPath,
+      `plugins:\n  enabled: '["clawai"]'\n  disabled:\n    - clawai\n`,
+    );
+    installImageBackend();
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(enabledPlugins()).toEqual(["clawai", PLUGIN]); // the type repair still happens
+    expect(imageProvider()).toBeUndefined();
+    expect(r.stdout).toMatch(/disabled/);
+  });
+
+  it("arms nothing while plugins.disabled names the backend by its RESOLVED key", () => {
+    // The spelling `hermes plugins disable clawai` actually writes. Read on the
+    // pinned 0.20.5 build: `cmd_disable` (hermes_cli/plugins_cmd.py:1710-1739)
+    // stores `_resolve_plugin_key(name)`, which answers `image_gen/clawai` —
+    // the category directory joined to the name — and Hermes' own
+    // `_plugin_status` (:1931-1937) then tests BOTH spellings. A check that
+    // knew only the bare name would miss the deny-list in the one state an
+    // owner can actually produce with the harness's own command.
+    fs.writeFileSync(
+      configPath,
+      `plugins:\n  enabled: '["clawai"]'\n  disabled:\n    - image_gen/clawai\n`,
+    );
+    installImageBackend();
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(enabledPlugins()).toEqual(["clawai", PLUGIN]); // the type repair still happens
+    expect(imageProvider()).toBeUndefined();
+  });
+
+  it("arms nothing when plugins.disabled is a shape it cannot read", () => {
+    // Declining costs one Settings → Save, which re-asks Hermes directly.
+    // Re-arming over a deny-list nobody could read would be a claim made on a
+    // guess, and this key is the one that turns the composer button on.
+    fs.writeFileSync(
+      configPath,
+      `plugins:\n  enabled: '["clawai"]'\n  disabled: 7\n`,
+    );
+    installImageBackend();
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(imageProvider()).toBeUndefined();
+  });
+
+  it("still arms when plugins.disabled names somebody else", () => {
+    // The counterweight: a deny-list that is not about us must not cost the
+    // repair its re-arm.
+    fs.writeFileSync(
+      configPath,
+      `plugins:\n  enabled: '["clawai"]'\n  disabled: '["weather"]'\n`,
+    );
+    installImageBackend();
+    run();
+    expect(imageProvider()).toBe("clawai");
+  });
+
+  it("arms nothing when the backend's files are not on the box", () => {
+    // "named in config, nothing to load" is the false success this script
+    // guards against everywhere else.
+    fs.writeFileSync(configPath, `plugins:\n  enabled: '["clawai"]'\n`);
+    run();
+    expect(imageProvider()).toBeUndefined();
+  });
+
+  it("arms nothing on a box whose list needed no repair", () => {
+    // A real list is not the state a withdrawal is paired with, so there is
+    // nothing here to put back — and a first-time opt-in is not this script's.
+    fs.writeFileSync(configPath, "plugins:\n  enabled:\n    - clawai\n");
+    installImageBackend();
+    run();
+    expect(imageProvider()).toBeUndefined();
   });
 
   it("does nothing at all on an OpenClaw box", () => {
