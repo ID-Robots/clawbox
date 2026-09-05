@@ -278,6 +278,11 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   //    each other.
   const inFlight = new Map<string, Promise<void>>();
   const slots = board.branch ? MAX_TEAM_WORKERS : 1;
+  // Workers dispatched whose run is not persisted yet (a worktree being
+  // added): a reservation the spawn slot counts beside the live runs, and
+  // ONLY until the run is live — counted twice, two live workers would
+  // shut out a valid third.
+  const starting = new Set<string>();
   while (!team.stopRequested) {
     if (board.alerts >= MAX_ALERTS) {
       setTeamStatus(board, SYSTEM, "failed", `Stopped after ${board.alerts} alerts.`);
@@ -289,10 +294,10 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     for (const task of ready) {
       if (inFlight.size >= slots) break;
       if (inFlight.size >= 1) {
-        // The workers in flight are counted as starting: a worker whose
-        // worktree is still being added has no persisted run yet, and
-        // without this the memory guard would not even be consulted.
-        const slot = await teamSpawnSlot({ id: board.id, role: "worker", taskId: task.task_id }, inFlight.size);
+        // A worker whose worktree is still being added has no persisted
+        // run yet; without the reservation the memory guard would not even
+        // be consulted for the second worker.
+        const slot = await teamSpawnSlot({ id: board.id, role: "worker", taskId: task.task_id }, starting.size);
         if (!slot.ok) {
           waitingForRoom = slot.wait;
           // A refusal that is not "wait" — a stranger's run holds the box —
@@ -301,11 +306,12 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
           break;
         }
       }
-      const work = workTask(team, task, source)
+      starting.add(task.task_id);
+      const work = workTask(team, task, source, () => starting.delete(task.task_id))
         .catch((err) => {
           bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Task ${task.task_id} could not be worked: ${err instanceof Error ? err.message : String(err)}` });
         })
-        .finally(() => { inFlight.delete(task.task_id); });
+        .finally(() => { starting.delete(task.task_id); inFlight.delete(task.task_id); });
       inFlight.set(task.task_id, work);
     }
     if (inFlight.size === 0) {
@@ -333,7 +339,8 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   saveBoard(board);
 }
 
-async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource): Promise<void> {
+/** `onStarted` is called once the worker's run is persisted — the reservation it held is released there. */
+async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource, onStarted?: () => void): Promise<void> {
   const { board, bus } = team;
 
   // Its own worktree and branch, when the team has a branch to fork from.
@@ -360,6 +367,7 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource)
     if (worktree) await removeWorktree(board.directory, worktree.path);
     throw err;
   }
+  onStarted?.();
   const me = worker(run.id);
   bus.send(SYSTEM, { type: "assign", task_id: task.task_id, worker_id: run.id });
   const row = board.tasks.find((t) => t.task_id === task.task_id);

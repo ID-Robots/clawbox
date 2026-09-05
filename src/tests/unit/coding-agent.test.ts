@@ -2112,9 +2112,14 @@ describe("the team's spawn slot", () => {
     fs.writeFileSync(runsFile(), JSON.stringify([]));
     vi.resetModules();
     lib = await import("@/lib/coding-agent");
-    // Nothing persisted, one worker starting: the memory guard is consulted.
+    // Nothing persisted, one worker starting: the memory guard is consulted,
+    // and its reading is what the wait is about.
+    memAvailable.mockClear();
     memAvailable.mockResolvedValueOnce(300);
-    expect(await lib.teamSpawnSlot({ id: "team-1", role: "worker", taskId: "t2" }, 1)).toMatchObject({ ok: false, wait: true });
+    const lowMemory = await lib.teamSpawnSlot({ id: "team-1", role: "worker", taskId: "t2" }, 1);
+    expect(lowMemory).toMatchObject({ ok: false, wait: true });
+    expect(memAvailable).toHaveBeenCalledTimes(1);
+    expect((lowMemory as { reason: string }).reason).toContain("300 MB free");
     // Nothing persisted, the cap's worth starting: a wait for a slot.
     const full = await lib.teamSpawnSlot({ id: "team-1", role: "worker", taskId: "t2" }, lib.MAX_TEAM_WORKERS);
     expect(full).toMatchObject({ ok: false, wait: true });
