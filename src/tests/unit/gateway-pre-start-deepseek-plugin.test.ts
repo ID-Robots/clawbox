@@ -24,13 +24,29 @@ const SCRIPT = path.resolve(process.cwd(), "scripts/gateway-pre-start.sh");
 const hasBash = spawnSync("bash", ["--version"], { stdio: "ignore" }).status === 0;
 const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
 
+
+/**
+ * The repair helpers the blocks below call (TASK-606). They are defined ~1300
+ * lines earlier in the script, so an extract that started at the block would
+ * run a call to a function that is not there — `clawbox_plugin_repair_clear:
+ * command not found`, exit 127. Prepended rather than stubbed, so these suites
+ * keep running the shipped code.
+ */
+function repairHelpers(): string {
+  const src = readFileSync(SCRIPT, "utf-8");
+  const start = src.indexOf("# ── Booting WITHOUT a plugin that could not be made loadable ");
+  const end = src.indexOf("# A `.openclaw` INSIDE the state directory", start);
+  if (start < 0 || end < 0) throw new Error("the plugin-repair helpers are not in gateway-pre-start.sh");
+  return src.slice(start, end);
+}
+
 /** The deepseek plugin block, verbatim, from its guard to the workspace resolver that follows it. */
 function extractBlock(): string {
   const src = readFileSync(SCRIPT, "utf-8");
   const start = src.indexOf('if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ ! -f "$OPENCLAW_HOME_DIR/extensions/deepseek/openclaw.plugin.json" ]; then');
   const end = src.indexOf("# Resolve the workspace from agents.defaults.workspace", start);
   if (start < 0 || end < 0) throw new Error("deepseek plugin block not found in gateway-pre-start.sh");
-  return src.slice(start, end);
+  return `${repairHelpers()}\n${src.slice(start, end)}`;
 }
 
 const BLOCK = hasBash && hasPython3 ? extractBlock() : "";

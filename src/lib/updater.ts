@@ -409,7 +409,7 @@ export interface UpdateState {
 
 export { RESTART_STEP_ID } from "./update-constants";
 import { RESTART_STEP_ID } from "./update-constants";
-import { clearPluginRepair } from "./plugin-repair";
+import { clearPluginRepair, readPluginRepairs } from "./plugin-repair";
 
 // Ceiling for the rebuild/restart hand-off: bun build alone runs minutes on a
 // Jetson, plus the config/redeploy steps before it and the reboot after.
@@ -1453,12 +1453,38 @@ async function pluginConsentRepairIsAllowed(pluginId: string): Promise<boolean> 
   // the alias would read an owner's explicit `enabled: false` as "no opinion"
   // and switch his channel back on.
   const wanted = normalizeManagedPluginId(pluginId);
-  return !Object.entries(entries).some(([key, entry]) =>
+  const switchedOff = Object.entries(entries).some(([key, entry]) =>
     normalizeManagedPluginId(key) === wanted
     && !!entry
     && typeof entry === "object"
     && (entry as Record<string, unknown>).enabled === false,
   );
+  if (!switchedOff) return true;
+  // …UNLESS CLAWBOX SWITCHED IT OFF ITSELF (TASK-606). The boot script now
+  // writes the same `enabled: false` when it cannot consent a plugin, so the
+  // gateway can start — and from here that is indistinguishable from a person
+  // running `openclaw plugins disable discord`. Without this the repair TASK-603
+  // built for exactly the 2026-09-01 Discord outage would skip the plugin for
+  // ever, on the grounds that the box had disabled it a boot earlier.
+  //
+  // `plugin-repair.json` is the only thing on the device that knows the
+  // difference: a row with `disabled: true` for this plugin is ClawBox's own
+  // switch-off, and the repair must still run.
+  return await clawboxSwitchedPluginOff(wanted);
+}
+
+/** True when `data/plugin-repair.json` says ClawBox switched this plugin off. */
+async function clawboxSwitchedPluginOff(canonicalId: string): Promise<boolean> {
+  try {
+    const repairs = await readPluginRepairs();
+    return Object.values(repairs).some(
+      (row) => normalizeManagedPluginId(row.id) === canonicalId && row.disabled,
+    );
+  } catch {
+    // An unreadable marker is not consent: fall back to respecting the config,
+    // which is the pre-TASK-606 behaviour.
+    return false;
+  }
 }
 
 /**
@@ -1737,6 +1763,10 @@ async function codexCapabilityRepairIsAllowed(): Promise<boolean> {
       ? entries.codex as Record<string, unknown>
       : null;
     if (codex?.enabled !== false) return true;
+    // The same TASK-606 caveat as `pluginConsentRepairIsAllowed`: a `false`
+    // ClawBox wrote at boot so the gateway could start is not the owner's veto,
+    // and reading it as one would leave Codex permanently unrepairable.
+    if (await clawboxSwitchedPluginOff("codex")) return true;
 
     const agents = cfg.agents && typeof cfg.agents === "object"
       ? cfg.agents as Record<string, unknown>

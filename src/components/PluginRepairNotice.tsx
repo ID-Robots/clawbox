@@ -83,7 +83,7 @@ export default function PluginRepairNotice({
         onClick={retry}
         disabled={phase === "working"}
         data-testid={`plugin-repair-retry-${repair.pluginId}`}
-        className="font-semibold text-[var(--coral)] underline underline-offset-2 disabled:opacity-60"
+        className="font-semibold text-[var(--coral-bright)] underline underline-offset-2 disabled:opacity-60"
       >
         {phase === "working" ? t("settings.providers.repairing") : t("settings.providers.repairRetry")}
       </button>

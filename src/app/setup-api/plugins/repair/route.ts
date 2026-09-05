@@ -6,7 +6,8 @@ import { promisify } from "util";
 import { NextResponse } from "next/server";
 
 import { getActiveHarness } from "@/lib/harness";
-import { runOpenclawConfigSet } from "@/lib/openclaw-config";
+import { installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
+import { restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { hasOwnerSession } from "@/lib/owner-session";
 import {
   canonicalPluginId,
@@ -50,75 +51,60 @@ const OPENCLAW_BIN = process.env.OPENCLAW_BIN
 /** Long enough for an npm install on a Jetson, short enough to answer a click. */
 const INSTALL_TIMEOUT_MS = 180_000;
 const CONSENT_TIMEOUT_MS = 60_000;
-const LIST_TIMEOUT_MS = 60_000;
+const INSPECT_TIMEOUT_MS = 120_000;
 
-interface PluginListRow {
-  id?: unknown;
-  name?: unknown;
-  installed?: unknown;
-  enabled?: unknown;
-  status?: unknown;
-  consented?: unknown;
-  capabilitiesAccepted?: unknown;
+interface RuntimeInspection {
+  plugin?: { id?: unknown; status?: unknown; activated?: unknown };
 }
 
 /**
- * Is this plugin, by the harness's own account, installed and consented?
+ * Did this plugin actually LOAD, by the harness's own account?
+ *
+ * `plugins list` cannot answer that. It reads a persisted discovery snapshot —
+ * `{"id":"discord","enabled":true,"status":"loaded","origin":"global"}` is the
+ * shape `src/lib/openclaw-channels.ts` records for a globally installed package
+ * whose `plugins.entries.<id>` is missing entirely — so "the CLI can see it" is
+ * the one thing the boot script never doubted, and reading `enabled` as consent
+ * would clear the badge for a plugin whose capability surface is still
+ * unaccepted, putting the box straight back in the readiness-refusal loop.
+ *
+ * `plugins inspect <id> --runtime` module-loads it and reports what happened —
+ * the same command `scripts/gateway-pre-start.sh` uses to prove its own hook
+ * plugin registered. It is expensive (a registry snapshot plus a module load of
+ * every enabled plugin, tens of seconds on an Orin), which is why the boot path
+ * gates it behind a stamp and this one does not: a person is waiting on a
+ * button they pressed, and the alternative is telling them a repair happened
+ * because a command exited 0.
  *
  * Null when the CLI could not be asked or its answer could not be read — never
  * `false`, because "we could not check" and "it is still broken" want different
- * words on screen and only one of them should keep a badge up.
+ * words on screen and only one of them should clear a badge.
  */
-async function harnessSaysRepaired(pluginId: string): Promise<boolean | null> {
+async function harnessSaysLoaded(pluginId: string): Promise<boolean | null> {
   let stdout: string;
   try {
-    ({ stdout } = await execFile(OPENCLAW_BIN, ["plugins", "list", "--json"], {
-      timeout: LIST_TIMEOUT_MS,
+    ({ stdout } = await execFile(OPENCLAW_BIN, ["plugins", "inspect", pluginId, "--runtime", "--json"], {
+      timeout: INSPECT_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
     }));
   } catch {
     return null;
   }
-  let parsed: unknown;
+  let parsed: RuntimeInspection;
   try {
-    parsed = JSON.parse(stdout);
+    parsed = JSON.parse(stdout) as RuntimeInspection;
   } catch {
     return null;
   }
-  const rows: PluginListRow[] = Array.isArray(parsed)
-    ? (parsed as PluginListRow[])
-    : Array.isArray((parsed as { plugins?: unknown })?.plugins)
-      ? ((parsed as { plugins: PluginListRow[] }).plugins)
-      : [];
-  if (rows.length === 0) return null;
-  const wanted = canonicalPluginId(pluginId);
-  for (const row of rows) {
-    const id = typeof row.id === "string" ? row.id : typeof row.name === "string" ? row.name : null;
-    if (!id || canonicalPluginId(id) !== wanted) continue;
-    // The shape has moved between builds, so read every spelling that means the
-    // same thing and require BOTH halves — an installed plugin whose
-    // capabilities are still unconsented is the exact state that refuses
-    // readiness, and calling that repaired would put the box back in the loop.
-    const installed = row.installed === true || row.status === "loaded" || row.status === "installed";
-    const consented = row.consented === true
-      || row.capabilitiesAccepted === true
-      || (row.consented === undefined && row.capabilitiesAccepted === undefined && row.enabled === true);
-    return installed && consented;
-  }
-  return false;
+  const plugin = parsed.plugin;
+  if (!plugin || typeof plugin !== "object") return null;
+  if (plugin.status === undefined && plugin.activated === undefined) return null;
+  // BOTH, and neither inferred from the other: a plugin can be discovered
+  // (`status: "loaded"`) and still refuse to activate on an unaccepted surface,
+  // which is precisely the state that refuses gateway readiness.
+  return plugin.status === "loaded" && plugin.activated === true;
 }
 
-/**
- * What still needs repair, for a panel that has no provider row to hang it on.
- *
- * The Providers strip gets the same fact stamped on its own rows by
- * `provider-status.ts` — one request instead of two for the screen that polls —
- * and the Channels list reads it here. Both call `readPluginRepairs()`, so
- * there is one file and one answer; what differs is only who asks.
- *
- * Owner-only like the POST: it names what is broken on this device, which is
- * not something the agent needs and not something to hand out on a bearer.
- */
 export async function GET(req: Request) {
   if (!(await hasOwnerSession(req))) {
     return NextResponse.json({ ok: false, code: "owner_only" }, { status: 403 });
@@ -167,14 +153,37 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, code: "not_marked" }, { status: 404 });
   }
 
-  const args = entry.stage === "install"
-    ? ["plugins", "install", entry.id, "--accept-capabilities"]
-    : ["plugins", "enable", entry.id, "--accept-capabilities"];
   try {
-    await execFile(OPENCLAW_BIN, args, {
-      timeout: entry.stage === "install" ? INSTALL_TIMEOUT_MS : CONSENT_TIMEOUT_MS,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    if (entry.stage !== "install") {
+      await execFile(OPENCLAW_BIN, ["plugins", "enable", entry.id, "--accept-capabilities"], {
+        timeout: CONSENT_TIMEOUT_MS,
+        maxBuffer: 8 * 1024 * 1024,
+      });
+    } else if (canonicalPluginId(entry.id) === "deepseek") {
+      // The DeepSeek provider has its own installer, and it is the one that
+      // knows the `clawhub:` scheme and the pinned-then-unpinned order. A
+      // `plugins install deepseek` here would name no scheme at all and could
+      // fetch an unrelated npm package — and then accept its capabilities.
+      const result = await installDeepseekProviderPlugin();
+      if (!result.installed) throw new Error(result.failures.join("; "));
+    } else {
+      // THE SPEC THE BOOT SCRIPT USED, never the short id: `codex` resolves
+      // `@latest`, drifts ahead of the pinned runtime and crashes every Codex
+      // chat. A marker written before this field existed has no spec, and this
+      // refuses rather than guessing one — the next boot writes a full row.
+      if (!entry.spec) {
+        return NextResponse.json({ ok: false, code: "no_spec" }, { status: 409 });
+      }
+      // `--force` because the boot path uses it and because the CLI exits 1
+      // with "plugin already exists (delete it first)" otherwise — the
+      // commonest repair state is a package on disk with a broken peer-dep
+      // symlink, and without this the Retry could never succeed once.
+      await execFile(
+        OPENCLAW_BIN,
+        ["plugins", "install", entry.spec, "--force", "--accept-capabilities"],
+        { timeout: INSTALL_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
+      );
+    }
   } catch {
     // Deliberately not returned as the reason: the CLI's stderr on this path
     // carries registry URLs and package specs, and the owner's next move is the
@@ -182,7 +191,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, code: "repair_failed" }, { status: 502 });
   }
 
-  const repaired = await harnessSaysRepaired(entry.id);
+  const repaired = await harnessSaysLoaded(entry.id);
   if (repaired !== true) {
     return NextResponse.json(
       { ok: false, code: repaired === null ? "unverified" : "repair_failed" },
@@ -209,7 +218,19 @@ export async function POST(req: Request) {
   }
 
   await clearPluginRepair(entry.id).catch(() => false);
-  // Installed, consented and switched back on. The gateway loads it at its next
-  // start, which is what the panel tells the owner.
-  return NextResponse.json({ ok: true, pluginId: entry.id, restartRequired: true });
+
+  // AND RESTART, like every other route that installs a plugin. `plugins
+  // install` prints "Restart the gateway to load plugins" for a reason: without
+  // this the owner presses Retry, the badge vanishes and the provider is still
+  // not connected — the badge would have been the only honest thing on screen.
+  // Reported rather than folded into the verdict: the config and the store are
+  // already right, and a gateway that did not come back is a different problem
+  // with a different answer.
+  let restarted = true;
+  try {
+    await restartGateway();
+  } catch {
+    restarted = false;
+  }
+  return NextResponse.json({ ok: true, pluginId: entry.id, restarted });
 }

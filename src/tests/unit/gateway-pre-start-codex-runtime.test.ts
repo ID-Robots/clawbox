@@ -113,8 +113,23 @@ function extractManagedConsentFlow(): string {
   return SCRIPT_SOURCE.slice(start, end);
 }
 
-const PLUGIN_FLOW = extractPluginFlow();
-const MANAGED_CONSENT_FLOW = extractManagedConsentFlow();
+/**
+ * The plugin-repair helpers both flows call (TASK-606). They live ~1300 lines
+ * earlier in the script, so an extract that started at either flow would run a
+ * call to a function that is not there — exit 127, `clawbox_plugin_boot_without:
+ * command not found`. Prepended rather than stubbed, so these suites keep
+ * running the shipped code rather than a stand-in for it.
+ */
+function extractRepairHelpers(): string {
+  const start = SCRIPT_SOURCE.indexOf("# \u2500\u2500 Booting WITHOUT a plugin that could not be made loadable ");
+  const end = SCRIPT_SOURCE.indexOf("# A `.openclaw` INSIDE the state directory", start);
+  if (start < 0 || end < 0) throw new Error("plugin-repair helpers not found");
+  return SCRIPT_SOURCE.slice(start, end);
+}
+
+const REPAIR_HELPERS = extractRepairHelpers();
+const PLUGIN_FLOW = `${REPAIR_HELPERS}\n${extractPluginFlow()}`;
+const MANAGED_CONSENT_FLOW = `${REPAIR_HELPERS}\n${extractManagedConsentFlow()}`;
 
 let dir: string;
 

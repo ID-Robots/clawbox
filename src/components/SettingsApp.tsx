@@ -1256,14 +1256,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // Read once per Channels visit rather than polled: it changes at boot and
   // when the owner presses Retry, and both of those re-read it explicitly.
   const [pluginRepairs, setPluginRepairs] = useState<PluginRepairInfo[]>([]);
-  const loadPluginRepairs = useCallback(async () => {
+  const fetchPluginRepairs = useCallback(async (): Promise<PluginRepairInfo[] | null> => {
     try {
       const r = await fetch("/setup-api/plugins/repair", { cache: "no-store" });
-      if (!r.ok) return;
+      if (!r.ok) return null;
       const body = (await r.json()) as { repairs?: PluginRepairInfo[] };
-      setPluginRepairs(Array.isArray(body.repairs) ? body.repairs : []);
+      return Array.isArray(body.repairs) ? body.repairs : [];
     } catch {
       // A box that cannot answer keeps the rows exactly as they were.
+      return null;
     }
   }, []);
 
@@ -2822,8 +2823,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // request that answers nothing anywhere else.
   useEffect(() => {
     if (activeSection !== "channels" && !isChannelSection(activeSection)) return;
-    void loadPluginRepairs();
-  }, [activeSection, loadPluginRepairs]);
+    // `alive` because the answer comes back after an await and a Settings pane
+    // is left by clicking another one.
+    let alive = true;
+    (async () => {
+      const rows = await fetchPluginRepairs();
+      if (alive && rows) setPluginRepairs(rows);
+    })();
+    return () => { alive = false; };
+  }, [activeSection, fetchPluginRepairs]);
 
   // A channel pane keeps the Messaging Channels entry lit: the sidebar no longer has a
   // row of its own to highlight, and an unlit sidebar reads as "nowhere".
@@ -3841,7 +3849,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     {repair && (
                       <PluginRepairNotice
                         repair={repair}
-                        onRepaired={() => { void loadPluginRepairs(); void refreshChannel(); }}
+                        onRepaired={() => {
+                          void fetchPluginRepairs().then((rows) => { if (rows) setPluginRepairs(rows); });
+                          void refreshChannel();
+                        }}
                         className="px-3 pb-3"
                       />
                     )}

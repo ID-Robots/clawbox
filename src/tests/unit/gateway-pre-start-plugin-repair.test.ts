@@ -119,7 +119,7 @@ function run(env: Record<string, string> = {}) {
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-function config(): { plugins?: { entries?: Record<string, { enabled?: boolean }> } } {
+function config(): { plugins?: { entries?: Record<string, { enabled?: boolean } | undefined> } } {
   return JSON.parse(readFileSync(configPath, "utf-8"));
 }
 
@@ -174,8 +174,14 @@ d("gateway-pre-start.sh — a plugin that cannot be consented", () => {
     run({ OC_ENABLE_EXIT: "1" });
     expect(Object.keys(marker())).toEqual(["discord"]);
 
-    // The plugin is off now, so put it back the way a Retry would and let the
-    // next boot consent it: the badge must not outlive the failure.
+    // THE FIXTURE RE-ENABLES IT, and that is not cheating — it is what the
+    // Retry does, and it is the only thing that can: this loop reads
+    // `plugins.entries` for entries that are ALREADY `enabled: true`, so a
+    // plugin the previous boot switched off is not offered to it again. The
+    // property under test is the one that is this script's own: when it does
+    // consent a plugin, the badge goes. Clearing it for a plugin still switched
+    // off belongs to the Retry route and to the updater, which have their own
+    // tests.
     writeFileSync(
       configPath,
       JSON.stringify({ plugins: { entries: { discord: { enabled: true } } } }, null, 2),
@@ -183,6 +189,27 @@ d("gateway-pre-start.sh — a plugin that cannot be consented", () => {
     const r = run();
     expect(r.status).toBe(0);
     expect(marker()).toEqual({});
+  });
+
+  it("leaves ClawBox's own EMAIL: plugin enabled and unmarked when its consent fails", () => {
+    // It is copied out of the checkout ~450 lines further down, and that block
+    // writes `enabled: true` unconditionally — so a disable here would be
+    // undone in the same run, leaving a marker that says `disabled: true` over
+    // a config that says otherwise, on a row no panel can render and no Retry
+    // can clear. There is also no registry package for a Retry to install.
+    writeFileSync(
+      configPath,
+      JSON.stringify(
+        { plugins: { entries: { "clawbox-email-directives": { enabled: true } } } },
+        null,
+        2,
+      ),
+    );
+    const r = run({ OC_ENABLE_EXIT: "1" });
+    expect(r.status).toBe(0);
+    expect(config().plugins?.entries?.["clawbox-email-directives"]?.enabled).toBe(true);
+    expect(marker()).toEqual({});
+    expect(r.stderr).toContain("EMAIL: directives may reach channels");
   });
 
   it("records the failure even when the entry cannot be switched off", () => {

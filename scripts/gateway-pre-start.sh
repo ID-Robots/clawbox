@@ -2403,9 +2403,10 @@ PY
 # write this file still boots without the plugin, it just cannot explain itself
 # in Settings, and the boot log says so.
 clawbox_plugin_repair_mark() {
-  local id="$1" stage="$2" disabled="$3" reason="$4"
+  local id="$1" stage="$2" disabled="$3" reason="$4" spec="${5:-}"
   if ! CLAWBOX_REPAIR_ID="$id" CLAWBOX_REPAIR_STAGE="$stage" \
     CLAWBOX_REPAIR_DISABLED="$disabled" CLAWBOX_REPAIR_REASON="$reason" \
+    CLAWBOX_REPAIR_SPEC="$spec" \
     python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY'
 import json, os, sys, tempfile, time
 
@@ -2431,6 +2432,13 @@ rows[plugin_id] = {
     "reason": os.environ["CLAWBOX_REPAIR_REASON"],
     "atMs": int(time.time() * 1000),
     "disabled": os.environ["CLAWBOX_REPAIR_DISABLED"] == "1",
+    # THE SPEC THIS SCRIPT ACTUALLY INSTALLS, not the short id. `codex` is
+    # installed as `@openclaw/codex@<pinned core>` and the DeepSeek provider as
+    # `clawhub:@openclaw/deepseek-provider@<release>`; a Retry that ran
+    # `plugins install codex` would resolve @latest, drift ahead of the pinned
+    # runtime and crash every Codex chat — the exact bug the pin exists for.
+    # Empty for a consent failure, which installs nothing.
+    "spec": os.environ.get("CLAWBOX_REPAIR_SPEC") or "",
 }
 directory = os.path.dirname(path) or "."
 os.makedirs(directory, exist_ok=True)
@@ -2491,7 +2499,7 @@ PY
 # The whole "boot without it" move: switch the entry off if there is one to
 # switch off, record why, and say it in the boot log.
 clawbox_plugin_boot_without() {
-  local id="$1" stage="$2" reason="$3" disabled=0
+  local id="$1" stage="$2" reason="$3" spec="${4:-}" disabled=0
   if [ "$(clawbox_plugin_entry_enabled "$id")" = "1" ]; then
     if clawbox_plugin_disable "$id"; then
       disabled=1
@@ -2500,7 +2508,7 @@ clawbox_plugin_boot_without() {
       echo "  WARN: could not switch the $id plugin off — the gateway may refuse readiness until it is repaired" >&2
     fi
   fi
-  clawbox_plugin_repair_mark "$id" "$stage" "$disabled" "$reason"
+  clawbox_plugin_repair_mark "$id" "$stage" "$disabled" "$reason" "$spec"
 }
 
 # A `.openclaw` INSIDE the state directory is what the CLI leaves behind when
@@ -2975,7 +2983,8 @@ if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
     # plugin" block above for why that sentence was false under OpenClaw 2.
     echo "  WARN: 'openclaw plugins install $CODEX_SPEC' failed or timed out; booting without Codex"
     clawbox_plugin_boot_without codex install \
-      "The ChatGPT (Codex) plugin could not be installed. The device may be offline, or the package registry unreachable."
+      "The ChatGPT (Codex) plugin could not be installed. The device may be offline, or the package registry unreachable." \
+      "$CODEX_SPEC"
   fi
 elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
   # OpenClaw 2 added declared-capability consent to managed plugins. A plugin
@@ -3137,6 +3146,17 @@ MANAGEDPY
         continue
         ;;
     esac
+    if [ "$MANAGED_PLUGIN" = "clawbox-email-directives" ]; then
+      # NOT switched off, and not marked. This one is OURS: it is copied out of
+      # the checkout by the block ~450 lines below, which then writes
+      # `enabled: true` unconditionally — so a disable here would be undone in
+      # the same script run, leaving a marker that says `disabled: true` over a
+      # config that says otherwise, on a row no panel can render (it is neither
+      # a provider nor a channel) and no Retry can clear. It is also not a
+      # registry package: there is nothing for a Retry to install.
+      echo "  WARN: could not confirm $MANAGED_PLUGIN plugin capabilities; EMAIL: directives may reach channels" >&2
+      continue
+    fi
     # The 2026-09-01 outage was this branch, on discord: readiness refused,
     # `Restart=always`, and the start limit gone in a quarter of an hour.
     echo "  WARN: could not confirm $MANAGED_PLUGIN plugin capabilities; booting without it"
@@ -4116,7 +4136,8 @@ PY
       # read.
       echo "  WARN: could not install @openclaw/deepseek-provider; recording it for repair in Settings"
       clawbox_plugin_boot_without deepseek install \
-        "The DeepSeek provider plugin, which ClawBox AI runs on, could not be installed. The device may be offline, or the package registry unreachable."
+        "The DeepSeek provider plugin, which ClawBox AI runs on, could not be installed. The device may be offline, or the package registry unreachable." \
+        "${DEEPSEEK_PLUGIN_PINNED:-$DEEPSEEK_PLUGIN_SPEC}"
     fi
   fi
 fi

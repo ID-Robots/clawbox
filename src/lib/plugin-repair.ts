@@ -1,6 +1,8 @@
 import fs from "fs/promises";
 import path from "path";
 
+import { getActiveHarness, type Harness } from "@/lib/harness";
+
 // What the boot script could not install or consent, and therefore switched off.
 //
 // WHY THIS FILE EXISTS (TASK-606, owner ruling 2026-09-03, option a). OpenClaw 2
@@ -75,6 +77,18 @@ export interface PluginRepairEntry {
    * behalf.
    */
   disabled: boolean;
+  /**
+   * The spec the boot script actually installs, when the failure was an
+   * install: `@openclaw/codex@<pinned core>`, or
+   * `clawhub:@openclaw/deepseek-provider@<release>`. Empty for a consent
+   * failure, which installs nothing.
+   *
+   * NOT derivable from the id, which is the whole reason it is recorded. A
+   * Retry that ran `plugins install codex` would resolve `@latest`, drift ahead
+   * of the pinned runtime and crash every Codex chat — the bug the pin exists
+   * to prevent — and `plugins install deepseek` names no ClawHub scheme at all.
+   */
+  spec: string;
 }
 
 export type PluginRepairs = Record<string, PluginRepairEntry>;
@@ -93,7 +107,8 @@ function parseEntry(key: string, raw: unknown): PluginRepairEntry | null {
   // (`@openclaw/deepseek-provider` filed under `deepseek`) into one it may not
   // resolve. The key is the fallback for a row written before the field.
   const id = typeof r.id === "string" && r.id.trim() ? r.id.trim() : key;
-  return { id, stage, reason, atMs, disabled: r.disabled === true };
+  const spec = typeof r.spec === "string" ? r.spec.trim() : "";
+  return { id, stage, reason, atMs, disabled: r.disabled === true, spec };
 }
 
 /**
@@ -107,6 +122,13 @@ function parseEntry(key: string, raw: unknown): PluginRepairEntry | null {
  * repairing a plugin that is fine.
  */
 export async function readPluginRepairs(): Promise<PluginRepairs> {
+  // Nothing writes this on Hermes — it has no plugins of this kind and no
+  // pre-start script that installs them — but a DUAL box runs both harnesses
+  // out of one checkout, so the file can be there while OpenClaw is the idle
+  // half. A "Needs repair" badge then describes a harness that is not running,
+  // over a Retry that can only answer 404. Asked once, here, so no reader has
+  // to remember it.
+  if ((await getActiveHarness().catch(() => "openclaw" as Harness)) === "hermes") return {};
   let raw: string;
   try {
     raw = await fs.readFile(pluginRepairPath(), "utf-8");

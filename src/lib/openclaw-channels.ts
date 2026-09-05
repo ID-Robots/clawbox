@@ -39,6 +39,7 @@ import {
   spawnOpenclawCli,
 } from "@/lib/openclaw-config";
 import { installedOpenclawRelease } from "@/lib/openclaw-deepseek-plugin";
+import { clearPluginRepair } from "@/lib/plugin-repair";
 
 /**
  * The official channel plugins ClawBox knows how to install.
@@ -356,6 +357,10 @@ export async function ensureChannelPlugin(
     }
   }
 
+  // The channel's plugin is installed and enabled, whoever asked for it. A
+  // marker only the boot script cleared would leave a "Needs repair" badge on
+  // the Discord row of a box the owner has just reconnected (TASK-606).
+  await clearPluginRepair(channelId).catch(() => false);
   return { ok: true, installed };
 }
 
