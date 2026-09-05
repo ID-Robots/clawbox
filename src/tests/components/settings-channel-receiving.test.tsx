@@ -8,10 +8,13 @@
  * emerald dot anyway, and on Discord that dot sat in the same row as the
  * subtitle "Offline", contradicting the words beside it.
  *
- * THE TRAP THIS ALSO PINS: the OpenClaw branch of `/setup-api/telegram/status`
- * answers `{ configured: true, ...info }` with no `receiving` key at all. A
- * naive `receiving === true` gate would blank the dot on every OpenClaw box —
- * the same false failure, inverted. Missing must read as unknown.
+ * THE TRAP THIS ALSO PINS, in both directions. A route that says NOTHING —
+ * `/setup-api/email/status` by design, and every box still on a build whose
+ * Telegram route had no `receiving` key — must read as unknown, or a naive
+ * `receiving === true` gate blanks the dot on a working box. And a route that
+ * says `null` — "the gateway could not be asked", which every Save's gateway
+ * restart produces — must not read as a definite no, or the panel accuses a
+ * healthy bot. Both are the same false failure, inverted.
  */
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -124,9 +127,11 @@ describe("the Channels hub dot", () => {
     expect(await settledState("whatsapp")).toBe("connected");
   });
 
-  it("does not read a MISSING receiving field as false (the OpenClaw branch)", async () => {
-    // `/setup-api/telegram/status` on OpenClaw answers configured + bot info
-    // and nothing else. That is "this box cannot say", not "no".
+  it("does not read a MISSING receiving field as false (an older server)", async () => {
+    // A box that has not been updated yet answers configured + bot info and
+    // nothing else — the shape every OpenClaw box had before the route learned
+    // to ask `openclaw channels status`. That is "this box cannot say", not
+    // "no", and `/setup-api/email/status` publishes no such field by design.
     telegram = { configured: true, username: "clawbot" };
     render(<SettingsApp ui={ui} />);
     expect(await settledState("telegram")).toBe("connected");
