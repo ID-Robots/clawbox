@@ -1,7 +1,7 @@
 import { runHermesCli } from "@/lib/hermes-cli";
 import { hermesCliAnswered } from "@/lib/hermes-cli-answered";
 import { get } from "@/lib/config-store";
-import { patchHermesConfig, readHermesConfigValue } from "@/lib/hermes-config-yaml";
+import { HermesConfigWriteError, patchHermesConfig, readHermesConfigValue, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { withProviderMcpRefresh } from "@/lib/provider-mcp-refresh";
 import { getLocalAiToken } from "@/lib/local-ai-token";
@@ -343,6 +343,47 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
     unset.push("model.provider", "model.default");
   }
   await patchHermesConfig({ unset });
+
+  // PROVED, not inferred. `patchHermesConfig`'s merge path reads every key back
+  // (patchText), but its CLI fallback does not: `applyViaCli`'s unset loop
+  // discards the exit code, because `hermes config unset` on a key that was
+  // never there is the no-op the loop relies on. So a config.yaml the line
+  // editor refuses (a flow mapping, a duplicate key) sends the patch to a CLI
+  // that a `step_hermes_install` rebuild has left exiting 127 before argparse,
+  // and this function returned as if the provider were gone.
+  //
+  // That return is the ONE fact the disable route answers on for this SKU, so
+  // it has to be a fact.
+  //
+  // EVERY key, not just the endpoint: `applyViaCli` walks the unsets one CLI
+  // call at a time, so it can land some and drop others — and `models` left
+  // behind on its own is a `providers.clawlocal` entry that Hermes still
+  // renders as a picker row, which is the exact state this function exists to
+  // end.
+  //
+  // Through `resolveHermesConfigValue`, because `readHermesConfigValue` answers
+  // `null` for a file it could not read as well as for a key that is gone, and
+  // the two are not interchangeable HERE: the CLI fallback runs precisely
+  // because the line editor could not work with this file, so a read-back that
+  // cannot resolve the path is the likely companion of the write that failed.
+  // Reading that as "removed" would rebuild the false success one layer down.
+  // A key that still resolves to a scalar is a leftover; a key the file cannot
+  // answer for is unproven; only "absent" is removal.
+  const leftovers: string[] = [];
+  const unproven: string[] = [];
+  for (const key of unset) {
+    const read = await resolveHermesConfigValue(key);
+    if (read.state === "value") leftovers.push(key);
+    else if (read.state === "unreadable") unproven.push(key);
+  }
+  if (leftovers.length > 0) {
+    console.error("[hermes-local-ai] keys survived the removal:", leftovers.join(", "));
+    throw new HermesConfigWriteError("The local model is still registered with Hermes.");
+  }
+  if (unproven.length > 0) {
+    console.error("[hermes-local-ai] removal could not be verified for:", unproven.join(", "));
+    throw new HermesConfigWriteError("The Hermes config could not be read back, so the removal is unproven.");
+  }
 
   invalidateModelOptions();
   return { wasDefault, model };

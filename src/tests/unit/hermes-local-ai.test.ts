@@ -10,10 +10,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const cliMock = vi.hoisted(() => vi.fn());
 const patchMock = vi.hoisted(() => vi.fn());
 const readMock = vi.hoisted(() => vi.fn());
+// Defaults survive `mockReset` because they are the implementation `vi.fn()` was
+// created with — the resolved form answers "absent" unless a test says otherwise.
+const resolveMock = vi.hoisted(() =>
+  vi.fn<(key: string) => Promise<{ state: string; value?: string }>>(async () => ({ state: "absent" })),
+);
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/hermes-config-yaml", () => ({
   patchHermesConfig: patchMock,
   readHermesConfigValue: readMock,
+  resolveHermesConfigValue: resolveMock,
+  // Listed because the module UNDER TEST throws it: a factory that omits an
+  // export makes it `undefined`, and `new undefined()` is a TypeError, not the
+  // failure the caller is meant to see.
+  HermesConfigWriteError: class HermesConfigWriteError extends Error {},
 }));
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
 vi.mock("@/lib/local-ai-token", () => ({ getLocalAiToken: () => "local-token-xyz" }));
@@ -199,12 +209,33 @@ describe("registering the local model with Hermes", () => {
     ]);
   });
 
+  /**
+   * A config.yaml the reads and the writes SHARE, because the removal is now
+   * proved by reading the file back rather than by the patch call returning.
+   * `patchHermesConfig` is stubbed to apply the unsets, which is what a device
+   * does; the failing case below stubs one that does not.
+   */
+  function deviceConfig(initial: Record<string, string>) {
+    const file: Record<string, string | null> = { ...initial };
+    readMock.mockImplementation(async (key: string) => file[key] ?? null);
+    resolveMock.mockImplementation(async (key: string) =>
+      typeof file[key] === "string" ? { state: "value", value: file[key] as string } : { state: "absent" },
+    );
+    patchMock.mockImplementation(async (patch: { unset?: string[] }) => {
+      for (const key of patch.unset ?? []) delete file[key];
+      return { mode: "merge", backupPath: null };
+    });
+    return file;
+  }
+
   it("clears a model.provider that still points at the local model", async () => {
     // Leaving it set with the providers block gone is what made every chat turn
     // 502 with "Unknown provider 'clawlocal'" after a Local AI toggle-off.
-    readMock.mockImplementation(async (key: string) =>
-      key === "model.provider" ? HERMES_LOCAL_PROVIDER : "qwen2.5:3b",
-    );
+    deviceConfig({
+      [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+      "model.provider": HERMES_LOCAL_PROVIDER,
+      "model.default": "qwen2.5:3b",
+    });
     const result = await removeLocalAiFromHermes();
     expect(result).toEqual({ wasDefault: true, model: "qwen2.5:3b" });
     expect(unsets()).toContain("model.provider");
@@ -212,13 +243,81 @@ describe("registering the local model with Hermes", () => {
   });
 
   it("leaves someone else's provider selection alone", async () => {
-    readMock.mockImplementation(async (key: string) =>
-      key === "model.provider" ? "openrouter" : "anthropic/claude-sonnet-4",
-    );
+    deviceConfig({
+      [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+      "model.provider": "openrouter",
+      "model.default": "anthropic/claude-sonnet-4",
+    });
     const result = await removeLocalAiFromHermes();
     expect(result.wasDefault).toBe(false);
     expect(unsets()).not.toContain("model.provider");
     expect(unsets()).not.toContain("model.default");
+  });
+
+  it("refuses to report a removal the config did not take", async () => {
+    // `patchHermesConfig`'s merge path reads every key back, but its CLI
+    // fallback does not: `applyViaCli`'s unset loop discards the exit code, so
+    // a `hermes` binary mid-rebuild (127 before argparse) let a whole removal
+    // return normally with `providers.clawlocal` still in the file. The disable
+    // route answers on this return for the Hermes SKU, so it has to be a fact.
+    deviceConfig({
+      [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+    });
+    patchMock.mockResolvedValue({ mode: "cli", backupPath: null });
+
+    await expect(removeLocalAiFromHermes()).rejects.toThrow(/still registered/i);
+  });
+
+  it("refuses when only the model list survived the removal", async () => {
+    // `providers.clawlocal.models` on its own is still an entry Hermes renders
+    // as a picker row, so a removal that dropped the endpoint and kept the
+    // catalogue has not ended the state it was called to end. The CLI fallback
+    // walks the unsets one call at a time, so partial is a real outcome.
+    const file = deviceConfig({
+      [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+      [`providers.${HERMES_LOCAL_PROVIDER}.models`]: "gemma4-e2b-it-q4_0",
+    });
+    patchMock.mockImplementation(async (patch: { unset?: string[] }) => {
+      for (const key of patch.unset ?? []) {
+        if (!key.endsWith(".models")) delete file[key];
+      }
+      return { mode: "cli", backupPath: null };
+    });
+
+    await expect(removeLocalAiFromHermes()).rejects.toThrow(/still registered/i);
+  });
+
+  it("refuses when the config could not be read back at all", async () => {
+    // The CLI fallback is entered BECAUSE the line editor could not work with
+    // this file, so a read-back that cannot resolve the path is the likely
+    // companion of the write that failed. Reading that as "removed" would put
+    // the false success back one layer down.
+    deviceConfig({
+      [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+    });
+    patchMock.mockResolvedValue({ mode: "cli", backupPath: null });
+    resolveMock.mockResolvedValue({ state: "unreadable" });
+
+    await expect(removeLocalAiFromHermes()).rejects.toThrow(/could not be read back/i);
+  });
+
+  it("refuses when the selection still points at a provider that is gone", async () => {
+    // The other half of the same state, and the worse one: every chat turn 502s
+    // with "Unknown provider 'clawlocal'".
+    const file = deviceConfig({
+      [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+      "model.provider": HERMES_LOCAL_PROVIDER,
+      "model.default": "gemma4-e2b-it-q4_0",
+    });
+    patchMock.mockImplementation(async (patch: { unset?: string[] }) => {
+      // The providers block goes; the selection does not.
+      for (const key of patch.unset ?? []) {
+        if (key !== "model.provider") delete file[key];
+      }
+      return { mode: "cli", backupPath: null };
+    });
+
+    await expect(removeLocalAiFromHermes()).rejects.toThrow(/still registered/i);
   });
 });
 
