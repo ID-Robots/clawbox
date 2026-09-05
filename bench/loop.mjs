@@ -64,12 +64,17 @@ function loadTask(id) {
 }
 
 /**
- * The task's folder IS the project: `<projects>/bench-<task>-<stamp>`, directly
+ * The task's folder IS the project: `<projects>/<projectName>-<stamp>`, directly
  * under the owner's project folder, which is what the app lists. A task's
  * "outside" files (the refusal probe's `../shared-config/…`) land beside it.
+ *
+ * The folder is named after the task's NEUTRAL projectName, never its id:
+ * in cycle 1 (2026-09-05) m-04's run read "ambiguity" off the folder name
+ * `bench-m-04-ambiguity-…` and wrote the assumptions section the scorer
+ * rewards — a cue no owner's project carries.
  */
 function seedProject(task, projectsRoot, stamp) {
-  const workdir = path.join(projectsRoot, `bench-${task.id}-${stamp}`);
+  const workdir = path.join(projectsRoot, `${task.projectName ?? "project"}-${stamp}`);
   fs.mkdirSync(workdir, { recursive: true });
   if (task.seedDir) fs.cpSync(task.seedDir, workdir, { recursive: true });
   for (const [rel, content] of Object.entries(task.outside ?? {})) {

@@ -123,6 +123,8 @@ describe("what a run is given", () => {
     // have spent the owner's allowance on a file it cannot place.
     expect(MEDIA_BRIEF_IMAGES).toMatch(/favicon\.png/);
     expect(MEDIA_BRIEF_IMAGES).toMatch(/do not draw the project's own icon/i);
+    // Linked only when it is there: a spent allowance leaves no favicon behind.
+    expect(MEDIA_BRIEF_IMAGES).toMatch(/check with Glob that favicon\.png is there/);
     // And the substitute it reaches for when it cannot draw.
     expect(MEDIA_BRIEF_IMAGES).toMatch(/SVG-to-PNG|imaging library/i);
     expect(MEDIA_BRIEF_AUDIO).toMatch(/one voice/i);

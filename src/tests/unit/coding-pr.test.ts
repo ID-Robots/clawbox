@@ -306,6 +306,33 @@ describe("the pull request across the owner's gestures", () => {
     fs.rmSync(base, { recursive: true, force: true });
   });
 
+  it("starts a run in a folder that is not a repository yet with no pull request, and says so once", async () => {
+    // Every fresh-folder run of bench cycle 1 (2026-09-05) opened with
+    // "No pull request: fatal: not a git repository…" stamped 'failed' at
+    // the top of its page — for a folder the settle then git-inits and
+    // commits into. Not a repository is a fact, not a broken flow.
+    github.startRunBranch.mockResolvedValueOnce({ ok: false, reason: "no_repository", detail: "Not a git repository yet." });
+    installFakeWrapper(finishingBody());
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    expect(started.pr).toBeNull();
+    expect(started.progress.join("\n")).toMatch(/Not a git repository yet: the work is committed into a new one when the run settles/);
+    expect(started.progress.join("\n")).not.toMatch(/No pull request/);
+    const done = await finished(started.id);
+    expect(done.status).toBe("completed");
+    expect(done.pr).toBeNull();
+    expect(github.openPullRequest).not.toHaveBeenCalled();
+  });
+
+  it("still reports a branch that could not be made for any other reason", async () => {
+    github.startRunBranch.mockResolvedValueOnce({ ok: false, detail: "Pushing the branch was refused." });
+    installFakeWrapper(finishingBody());
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    expect(started.pr?.phase).toBe("failed");
+    expect(started.pr?.detail).toBe("Pushing the branch was refused.");
+    expect(started.progress.join("\n")).toMatch(/No pull request: Pushing the branch was refused/);
+    await finished(started.id);
+  });
+
   it("keeps the pull request 'opening' through a pause and opens it when the resumed run completes", async () => {
     // A pause is not the end of the chain: the run resumes IN PLACE, on the
     // same record and branch. Settling the pull request on the pause meant

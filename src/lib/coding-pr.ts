@@ -101,13 +101,22 @@ export async function startRunBranch(input: {
   runId: string;
   /** The ClawBox checkout. A run must never branch or commit THIS repository. */
   protectedRoot: string;
-}): Promise<{ ok: true; branch: string; base: string } | { ok: false; detail: string }> {
+}): Promise<{ ok: true; branch: string; base: string } | { ok: false; detail: string; reason?: "no_repository" }> {
   const dir = path.resolve(input.directory);
   const branch = runBranchName(input.runId);
 
   const inside = await run("git", ["rev-parse", "--is-inside-work-tree"], dir);
   if (!ok(inside)) {
-    return { ok: false, detail: failureDetail(inside, "Reading the git repository", "Make the folder a git repository first.") };
+    // A killed or missing git is a failure; a folder git says is not a
+    // work tree is a fact the caller can act on — the runner commits into
+    // a fresh repository at settle and says so, rather than reporting a
+    // failed pull request.
+    const notARepo = inside.code === 128 && !inside.timedOut && !inside.signal && /not a git repository/i.test(inside.stderr);
+    return {
+      ok: false,
+      ...(notARepo ? { reason: "no_repository" as const } : {}),
+      detail: notARepo ? "Not a git repository yet." : failureDetail(inside, "Reading the git repository", "Make the folder a git repository first."),
+    };
   }
 
   // NEVER the ClawBox checkout itself.
