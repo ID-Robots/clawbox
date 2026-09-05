@@ -353,12 +353,22 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
   // and this function returned as if the provider were gone.
   //
   // That return is the ONE fact the disable route answers on for this SKU, so
-  // it has to be a fact. A non-null read is positive evidence the key survived;
-  // `readHermesConfigValue` also answers null for a file it could not read, so
-  // an unreadable config cannot manufacture a failure here.
-  const stillRegistered = await readHermesConfigValue(`providers.${HERMES_LOCAL_PROVIDER}.base_url`);
-  const stillSelected = wasDefault ? await readHermesConfigValue("model.provider") : null;
-  if (typeof stillRegistered === "string" || stillSelected === HERMES_LOCAL_PROVIDER) {
+  // it has to be a fact.
+  //
+  // EVERY key, not just the endpoint: `applyViaCli` walks the unsets one CLI
+  // call at a time, so it can land some and drop others — and `models` left
+  // behind on its own is a `providers.clawlocal` entry that Hermes still
+  // renders as a picker row, which is the exact state this function exists to
+  // end. A key that still resolves to a scalar is positive evidence it
+  // survived; `readHermesConfigValue` answers null for a file it could not read
+  // as well as for an absent key, so an unreadable config cannot manufacture a
+  // failure here.
+  const leftovers: string[] = [];
+  for (const key of unset) {
+    if (typeof (await readHermesConfigValue(key)) === "string") leftovers.push(key);
+  }
+  if (leftovers.length > 0) {
+    console.error("[hermes-local-ai] keys survived the removal:", leftovers.join(", "));
     throw new HermesConfigWriteError("The local model is still registered with Hermes.");
   }
 
