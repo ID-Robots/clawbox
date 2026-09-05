@@ -431,15 +431,18 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
   // step later would leave the providers block half removed around a selection
   // nobody could read.
   //
-  // It is NOT free, and one shape pays for it: a `model:` written as a flow
-  // mapping over an ordinary two-space `providers:` block is the only config
-  // where our line reader can resolve the providers keys while it cannot
-  // resolve the selection. With the CLI also dead (a `step_hermes_install`
-  // rebuild, ~90 s), that removal used to complete through the merge path with
-  // no CLI spawn at all and now answers 502 with the block still in place. That
-  // success was luck rather than knowledge — "not the default" was a guess, and
-  // the guess being wrong is precisely the defect this read exists to end — so
-  // the conservative branch is kept and the cost is stated instead of hidden.
+  // It is NOT free, and a family of shapes pays for it: any anomaly confined to
+  // the `model:` block while `providers:` stays ordinary — a flow mapping, a
+  // block at any indent but two, a duplicate key inside it, an alias, a
+  // sequence, or an inline comment on the `model:` line (which the merge path
+  // deliberately preserves, so it persists) — leaves our line reader able to
+  // resolve the providers keys and unable to resolve the selection. With the
+  // CLI also dead (a `step_hermes_install` rebuild, ~90 s), those removals used
+  // to complete through the merge path with no CLI spawn at all and now answer
+  // 502 with the block still in place. That success was luck rather than
+  // knowledge — "not the default" was a guess, and the guess being wrong is
+  // precisely the defect this read exists to end — so the conservative branch
+  // is kept and the cost is stated instead of hidden.
   const selection = await selectionValue("model.provider");
   if (!selection.known) {
     console.error("[hermes-local-ai] the active provider could not be read; nothing was removed");
