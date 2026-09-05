@@ -16,6 +16,7 @@ import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-s
 import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
 import { isSafeDiscordToken } from "@/lib/discord-api";
 import { envPort, waitForPortOpen } from "@/lib/port-probe";
+import { getLocalAiToken } from "@/lib/local-ai-token";
 
 const exec = promisify(execFile);
 
@@ -1887,17 +1888,25 @@ export async function ensureLocalAiProxyUrls(): Promise<boolean> {
 
   let changed = false;
 
-  const llamaProvider = providers.llamacpp;
-  if (llamaProvider && llamaProvider.baseUrl !== getLlamaCppProxyBaseUrl()) {
-    llamaProvider.baseUrl = getLlamaCppProxyBaseUrl();
-    changed = true;
-  }
+  // The bearer travels WITH the URL. This repair points the entry at ClawBox's
+  // own local-AI proxy, and that proxy validates `Authorization` against
+  // data/.local-ai-token and answers 401 to anything else — so moving the
+  // baseUrl while leaving somebody else's apiKey beside it turns "the wrong
+  // endpoint" into "a refused request on every single turn", which is not an
+  // improvement. Only ever alongside a baseUrl WE just wrote: an entry already
+  // on the proxy is left exactly as the owner has it.
+  const adoptProxy = (
+    provider: { baseUrl?: string; apiKey?: string } | undefined,
+    proxyUrl: string,
+  ): boolean => {
+    if (!provider || provider.baseUrl === proxyUrl) return false;
+    provider.baseUrl = proxyUrl;
+    provider.apiKey = getLocalAiToken();
+    return true;
+  };
 
-  const ollamaProvider = providers.ollama;
-  if (ollamaProvider && ollamaProvider.baseUrl !== getOllamaProxyBaseUrl()) {
-    ollamaProvider.baseUrl = getOllamaProxyBaseUrl();
-    changed = true;
-  }
+  if (adoptProxy(providers.llamacpp, getLlamaCppProxyBaseUrl())) changed = true;
+  if (adoptProxy(providers.ollama, getOllamaProxyBaseUrl())) changed = true;
 
   if (changed) {
     await writeConfig(config);
