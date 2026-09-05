@@ -144,9 +144,12 @@ describe("/setup-api/hermes/chat — reasoning levels reaching the CLI", () => {
 
     expect(res.status).toBe(200);
     expect(argvFlag("--reasoning")).toBe("high");
-    // No config-store read: only the two-state provider needs to know the
-    // runtime, and every other turn must skip that lookup.
-    expect(mockGet).not.toHaveBeenCalled();
+    // The runtime lookup is skipped: only the two-state provider needs to know
+    // it, and every other turn must not pay for it. Named rather than counted,
+    // because the settle path legitimately reads one other key — the
+    // verification marks (src/lib/provider-verified.ts), at most once per
+    // provider per hour.
+    expect(mockGet).not.toHaveBeenCalledWith("local_ai_provider");
   });
 });
 

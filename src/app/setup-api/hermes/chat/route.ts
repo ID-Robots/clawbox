@@ -48,6 +48,7 @@ import {
   readHermesTurn,
   readHermesUsageMarks,
 } from "@/lib/harness/hermes-turn-record";
+import { recordProviderVerified } from "@/lib/provider-verified";
 import {
   adoptHermesGeneratedImages,
   reclaimImageMentions,
@@ -476,6 +477,14 @@ async function settleTurn(
     ...(served.model ? { model: served.model } : {}),
     ...(served.provider ? { provider: served.provider } : {}),
   }, sessionKey);
+  // A COMPLETED TURN IS THE EXERCISE (TASK-583). `served.provider` is not a
+  // guess and not what the box is configured with — it is who the harness
+  // itself recorded as having billed this answer, which is the one thing that
+  // proves the credential works. Remembering it here is what lets the polled
+  // providers route say "verified" without emitting a single request; see
+  // src/lib/provider-verified.ts. Only when a provider was actually named:
+  // marking off a blank would make "verified" mean "a turn happened".
+  if (served.provider) await recordProviderVerified(served.provider);
   return {
     text: answer,
     harness: "hermes",

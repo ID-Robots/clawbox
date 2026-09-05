@@ -36,6 +36,16 @@ vi.mock("@/lib/hermes-cli", () => ({
   runHermesCli: vi.fn(async () => ({ stdout: "", stderr: "", code: 0 })),
 }));
 
+// TASK-583: `verified` is present on every row and null on all of them, so
+// "connected" still means "a key is on disk". The marks a completed turn leaves
+// behind are the one source that costs nothing to read.
+const configGetMock = vi.hoisted(() => vi.fn(async () => undefined as unknown));
+vi.mock("@/lib/config-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/config-store")>()),
+  get: configGetMock,
+  set: vi.fn(async () => {}),
+}));
+
 const PAYLOAD = {
   providers: [{
     id: "anthropic",
@@ -71,6 +81,8 @@ beforeEach(async () => {
   reconcileClawaiMock.mockClear();
   activeHarnessMock.mockReset();
   activeHarnessMock.mockResolvedValue("hermes");
+  configGetMock.mockReset();
+  configGetMock.mockResolvedValue(undefined);
   vi.resetModules();
   ({ GET } = await import("@/app/setup-api/hermes/models/route"));
 });
@@ -154,5 +166,27 @@ describe("the scoped reply and the device's reasoning level", () => {
     // list, and `savedElsewhere` is null when it IS this provider — so
     // neither can name the default on the box's own provider.
     expect(body.savedPair).toEqual({ provider: "anthropic", model: "anthropic/claude-opus-5" });
+  });
+
+  it("reports a provider that has actually answered as verified, with when", async () => {
+    configGetMock.mockResolvedValue({ anthropic: "2026-09-02T19:53:34.000Z" });
+
+    const row = (await (await GET(request("", false))).json()).providers[0];
+
+    expect(row.verified).toBe(true);
+    expect(row.verifiedAt).toBe("2026-09-02T19:53:34.000Z");
+  });
+
+  it("leaves a provider nothing has exercised at NOT CHECKED, never at not connected", async () => {
+    // An offline box and a rate-limited subscription both land here. Null is
+    // the honest answer; false would say the credential was tried and failed.
+    configGetMock.mockResolvedValue({ openai: "2026-09-02T19:53:34.000Z" });
+
+    const row = (await (await GET(request("", false))).json()).providers[0];
+
+    expect(row.verified).toBeNull();
+    expect(row).not.toHaveProperty("verifiedAt");
+    // ...and presence is still reported separately, exactly as before.
+    expect(row.credentialPresent).toBe(true);
   });
 });

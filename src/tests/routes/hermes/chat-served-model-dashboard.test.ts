@@ -41,6 +41,17 @@ vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => ({
 vi.mock("child_process", () => ({ spawn: spawnMock, execFile: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ HERMES_BIN: "/home/clawbox/.local/bin/hermes" }));
 vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock }));
+// TASK-583: the settle path also remembers WHICH PROVIDER ANSWERED, so a
+// polled route can say "verified" without emitting a probe. The store is
+// mocked rather than the recorder, so this asserts the wiring end to end and
+// still fails cleanly on a tree where the recorder does not exist yet.
+const configSetMock = vi.hoisted(() => vi.fn(async () => {}));
+const configGetMock = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("@/lib/config-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/config-store")>()),
+  get: configGetMock,
+  set: configSetMock,
+}));
 vi.mock("@/lib/harness/media-root", () => ({
   resolveInMediaRoot: vi.fn(async (p: string) => p),
   chatMediaRoot: vi.fn(async () => "/tmp/clawbox-served-model-dashboard-media"),
@@ -264,6 +275,36 @@ describe.skipIf(!sqliteAvailable)(
       // page replays. A bubble that loses its provider on reload is the same
       // defect one layer down.
       expect(persistedAssistant()).toMatchObject({ model: "gpt-5.6-sol", provider: "openai-codex" });
+    });
+
+    it("remembers the provider that answered, so a polled route need never probe", async () => {
+      // `credentialPresent` says a key is on disk; nothing on the box said the
+      // key WORKS, so `verified` was null on all 48 rows. A completed turn IS
+      // the exercise, and the evidence is already here — this is only the
+      // memory of it. No traffic, no latency, nothing of the owner's quota.
+      openTurnMock.mockResolvedValue(fakeTurn({
+        home,
+        model: "gpt-5.6-sol",
+        bills: [{ model: "gpt-5.6-sol", provider: "openai-codex" }],
+      }));
+
+      await doneEvent(await POST(post({ message: "which model are you" })));
+
+      expect(configSetMock).toHaveBeenCalledWith(
+        "provider_verified_at",
+        expect.objectContaining({ "openai-codex": expect.any(String) }),
+      );
+    });
+
+    it("marks nothing when no provider could be named for the turn", async () => {
+      // Not-known must stay not-known: a mark written off a blank would make
+      // "verified" mean "a turn happened", which is the confusion this exists
+      // to remove.
+      openTurnMock.mockResolvedValue(fakeTurn({ home, model: "gpt-5.6-sol" }));
+
+      await doneEvent(await POST(post({ message: "which model are you" })));
+
+      expect(configSetMock).not.toHaveBeenCalledWith("provider_verified_at", expect.anything());
     });
 
     it("still says nothing when the harness recorded no usage for that turn", async () => {

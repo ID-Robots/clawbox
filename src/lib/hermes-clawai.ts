@@ -27,6 +27,7 @@ import {
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
+import { forgetProviderVerified } from "@/lib/provider-verified";
 
 // Applying ClawBox AI to a HERMES device, in one place.
 //
@@ -397,6 +398,10 @@ export async function applyClawaiToHermes(
     );
   }
 
+  // The token just changed — an account switch, a re-pair, a rotated device
+  // token — so an earlier turn on the old one proves nothing about this one.
+  // Same rule as every other credential write; see src/lib/provider-verified.ts.
+  await forgetProviderVerified(CLAWAI_PROVIDER);
   return { provider: CLAWAI_PROVIDER, model, tier };
 }
 

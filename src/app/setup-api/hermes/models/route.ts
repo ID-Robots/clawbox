@@ -19,6 +19,7 @@ import {
   type ModelOptionsPayload,
   type ScopedModelsReply,
 } from "@/lib/hermes-model-options";
+import { readProviderVerified } from "@/lib/provider-verified";
 
 // Hermes' provider/model configuration.
 //
@@ -118,6 +119,10 @@ export async function GET(request: Request) {
     }
 
     const payload = await getModelOptions({ refresh });
+    // What has actually ANSWERED on this box, from ClawBox's own store — one
+    // small read, no provider traffic. See src/lib/provider-verified.ts for why
+    // a completed turn is the evidence and a probe is not.
+    const verifiedAt = await readProviderVerified();
     const models = unionModels(payload);
     const current = payload.current.model;
     // Keep the saved model present in the unscoped list even when its provider
@@ -141,7 +146,13 @@ export async function GET(request: Request) {
         // reads `authenticated` as "this will answer" is the reason a bogus
         // provider looked healthy right up until the first turn 403'd.
         credentialPresent: row.authenticated,
-        verified: row.verified,
+        // Hermes' own verdict still wins where it ever reports one. Otherwise
+        // a turn this provider served is the answer, and having served one can
+        // only mean true — a provider that never answered stays NULL, "not
+        // checked", never `false`: an offline box and a rate-limited
+        // subscription must not be painted as a broken credential.
+        verified: row.verified ?? (verifiedAt[row.id] ? true : null),
+        ...(row.verified === null && verifiedAt[row.id] ? { verifiedAt: verifiedAt[row.id] } : {}),
         isUserDefined: row.isUserDefined,
         source: row.source,
         total: row.total,
