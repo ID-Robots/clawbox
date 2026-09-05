@@ -1581,6 +1581,7 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
         HERMES_CLOUD_TTS_PROVIDER,
         HERMES_FACTORY_TTS_PROVIDER,
         CLAWBOX_AI_SPEECH_TIER,
+        hermesCloudRouteIsOurs,
       },
       { probeLocalTtsEngine, localTtsCommandRunnable },
     ] = await Promise.all([
@@ -1622,31 +1623,16 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
     // same. `gateway-pre-start.sh` — the sibling this refresh is modelled on —
     // refuses for exactly this reason: it computes whether the speech route is
     // already taken and prints "already names its own speech route" rather
-    // than writing.
+    // than writing. Fail closed in this direction: not refreshing a token costs
+    // a 401 the owner can fix from the Voice panel; overwriting the endpoint,
+    // key and model of a speech server they run is silent and cannot be undone
+    // from here.
     //
-    // An UNREAD slot is not ours either. Fail closed in this direction: not
-    // refreshing a token costs a 401 the owner can fix from the Voice panel;
-    // overwriting the endpoint, key and model of a speech server they run is
-    // silent and cannot be undone from here.
-    //
-    // Ownership needs POSITIVE evidence, and "empty" has to mean empty. An
-    // unset `base_url` alone does not say the slot is free: it is optional for
-    // actual OpenAI — the SDK defaults the endpoint — so the canonical way an
-    // owner uses Hermes' own `openai` TTS is a key with no URL at all. The
-    // key is that slot's other occupancy signal, and it is read on the same
-    // pass, so it costs nothing to consult.
-    //
-    // Safe for every ClawBox-shaped box: a fresh one has neither
-    // (`slotIsEmpty`), and a linked one has our proxy in `base_url` whatever
-    // the key holds (`slotIsOurs`) — `writeHermesCloudTarget` writes the
-    // endpoint FIRST, so "key set, URL unset" is a state our own writer cannot
-    // produce.
-    const slotIsOurs = voice.cloudBaseUrl !== null
-      && voice.cloudBaseUrl.replace(/\/+$/, "") === CLAWBOX_AI_PROXY_URL;
-    const slotIsEmpty = voice.cloudBaseUrl === null && !voice.cloudHasKey;
-    const ownRoute = !voice.unread.cloudRoute
-      && !voice.unread.cloudKey
-      && (slotIsOurs || slotIsEmpty);
+    // WHAT counts as ours lives in `hermesCloudRouteIsOurs` and is not restated
+    // here, because the Voice panel asks the same question before calling this
+    // box's voice ClawBox cloud — and two copies of that rule is how the panel
+    // and the writer come to disagree about whose key is in the slot.
+    const ownRoute = hermesCloudRouteIsOurs(voice, CLAWBOX_AI_PROXY_URL);
     const current = voice.provider;
     const unchosen = current === null
       || current === HERMES_FACTORY_TTS_PROVIDER

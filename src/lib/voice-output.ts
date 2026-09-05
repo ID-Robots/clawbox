@@ -39,6 +39,7 @@
  * speech time, and `tts/sample` auditions ONE engine on demand.
  */
 import { buildCloudTtsWarning, cloudTtsDisclosure, type CloudTtsDisclosure } from "@/lib/tts-cloud-warning";
+import { isClawboxAiToken } from "@/lib/clawai-token";
 import {
   DEFAULT_CLOUD_VOICE,
   DEFAULT_LOCAL_VOICE,
@@ -308,7 +309,7 @@ function cloudEndpointConfigured(config: VoiceConfigView, providerId: string): b
 export function cloudCredentialIsUnusable(config: VoiceConfigView, providerId: string): boolean {
   const key = credentialFor(config, providerId);
   if (!key) return false;
-  return key.startsWith("claw_") && !cloudEndpointConfigured(config, providerId);
+  return isClawboxAiToken(key) && !cloudEndpointConfigured(config, providerId);
 }
 
 export interface LocalVoiceProbe {

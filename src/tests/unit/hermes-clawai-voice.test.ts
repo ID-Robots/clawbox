@@ -93,6 +93,7 @@ function voice(provider: string | null) {
     cloudModel: null,
     cloudBaseUrl: null,
     cloudHasKey: false,
+    cloudKeyIsOurs: false,
     unread: { provider: false, cloudRoute: false, cloudKey: false, localProvider: false },
   };
 }
@@ -259,6 +260,60 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
 
     expect(writeCloudMock).not.toHaveBeenCalled();
     expect(selectProviderMock).not.toHaveBeenCalled();
+  });
+
+  it("refreshes a route WE pointed, at an address the proxy has since moved from", async () => {
+    // `CLAWBOX_AI_PROXY_URL` is env-overridable and moves in a release, and the
+    // chat provider's copy of it is repaired on every link for exactly that
+    // reason. Recognising our route by the CURRENT constant alone read a box we
+    // had linked ourselves as the owner's: speech frozen at the retired address
+    // while chat and images were repaired in the same call, and
+    // `hermesSpeaksReplies` still calling the voice configured. The `claw_`
+    // credential beside it is ours wherever it points.
+    readVoiceMock.mockResolvedValue({
+      ...voice("openai"),
+      cloudBaseUrl: `${CLAWBOX_AI_PROXY_URL}-retired`,
+      cloudHasKey: true,
+      cloudKeyIsOurs: true,
+    });
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(writeCloudMock).toHaveBeenCalledWith(TOKEN);
+  });
+
+  it("gives an unchosen box the cloud voice even when our own route has moved", async () => {
+    // The same box with nothing selected. Refusing here left an entitled,
+    // engineless box on an unset key — which on this harness is Microsoft's
+    // Edge, the outcome this whole path exists to prevent.
+    readVoiceMock.mockResolvedValue({
+      ...voice(null),
+      cloudBaseUrl: `${CLAWBOX_AI_PROXY_URL}-retired`,
+      cloudHasKey: true,
+      cloudKeyIsOurs: true,
+    });
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(writeCloudMock).toHaveBeenCalledWith(TOKEN);
+    expect(selectProviderMock).toHaveBeenCalledWith("cloud");
+  });
+
+  it("refreshes the state every LINKED box is actually in", async () => {
+    // The headline refresh case goes through the empty-slot door, so the
+    // canonical state — our proxy in the URL and a token already beside it —
+    // was asserted by nothing, and tightening `slotIsEmpty` later would stop
+    // every real box having its rotated token refreshed with the suite green.
+    readVoiceMock.mockResolvedValue({
+      ...voice("openai"),
+      cloudBaseUrl: CLAWBOX_AI_PROXY_URL,
+      cloudHasKey: true,
+      cloudKeyIsOurs: true,
+    });
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(writeCloudMock).toHaveBeenCalledWith(TOKEN);
   });
 
   it("does not select a cloud voice into a slot the owner already keyed", async () => {

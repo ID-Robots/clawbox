@@ -1,6 +1,7 @@
 import { hermesConfigGet, hermesConfigGetMany, hermesConfigReadPending } from "@/lib/hermes-config-cache";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { LOCAL_TTS_PROVIDER_ID, type VoiceConfigView } from "@/lib/voice-output";
+import { isClawboxAiToken } from "@/lib/clawai-token";
 
 /**
  * Speech on the Hermes edition, driven through Hermes' OWN TTS pipeline.
@@ -93,6 +94,20 @@ export interface HermesVoiceProbe {
    */
   cloudHasKey: boolean;
   /**
+   * Whether that credential is one OF OURS — a `claw_` portal token.
+   *
+   * The other half of "is this slot ours", and the half that survives a move.
+   * `CLAWBOX_AI_PROXY_URL` is env-overridable and expected to change in a
+   * release — `hermes-clawai.ts` says in as many words that a re-link exists to
+   * repair `image_gen.clawai.base_url` when it does — so matching the endpoint
+   * against the CURRENT constant alone reads our own box, linked under the
+   * previous address, as the owner's. The credential beside it says otherwise.
+   *
+   * A presence, never the value: nothing outside `writeHermesCloudTarget` needs
+   * to carry a token around, and an owner's `sk-…` fails this as it should.
+   */
+  cloudKeyIsOurs: boolean;
+  /**
    * Which of these reads did NOT answer, as opposed to answering "unset".
    *
    * `hermes config get` exits the same way for an unset key and for a read
@@ -150,6 +165,7 @@ export async function readHermesVoice(): Promise<HermesVoiceProbe> {
     cloudModel: trimmed(values[KEYS.cloudModel]),
     cloudBaseUrl: trimmed(values[KEYS.cloudBaseUrl]),
     cloudHasKey: trimmed(values[KEYS.cloudApiKey]) !== null,
+    cloudKeyIsOurs: isClawboxAiToken(values[KEYS.cloudApiKey] ?? ""),
     unread: {
       provider: hermesConfigReadPending(KEYS.provider),
       cloudRoute: hermesConfigReadPending(KEYS.cloudBaseUrl),
@@ -161,6 +177,38 @@ export async function readHermesVoice(): Promise<HermesVoiceProbe> {
         || hermesConfigReadPending(KEYS.localCommand),
     },
   };
+}
+
+/**
+ * Is Hermes' `openai` slot OURS — ours to write, and ours to call ClawBox cloud
+ * in a panel?
+ *
+ * ONE rule, two callers, deliberately. `applyClawaiToHermes` asks it before
+ * writing, and `hermesVoiceConfigView` asks it before saying the box speaks
+ * through ClawBox — and those two disagreeing is how a panel comes to report an
+ * owner's own speech server as ours while the writer politely leaves it alone.
+ *
+ * Ownership needs POSITIVE evidence, in three shapes:
+ *
+ *  - the endpoint names our proxy;
+ *  - or the credential is a `claw_` portal token, which is what survives the
+ *    proxy URL moving in a release (a re-link repairs the chat provider's copy
+ *    of that URL for the same reason);
+ *  - or the slot is genuinely EMPTY — no endpoint AND no key. `base_url` is
+ *    optional for real OpenAI, so an unset endpoint alone says nothing: the
+ *    canonical way an owner uses Hermes' generic `openai` slot is their key
+ *    with no URL at all.
+ *
+ * And a read that did not answer is not evidence of anything: `hermes config
+ * get` exits the same way for an unset key and for one an OOM-killed Python
+ * start never answered. Failing closed costs a 401 the Voice panel can fix;
+ * failing open overwrites a speech server someone runs, silently and for good.
+ */
+export function hermesCloudRouteIsOurs(probe: HermesVoiceProbe, proxyUrl: string): boolean {
+  if (probe.unread.cloudRoute || probe.unread.cloudKey) return false;
+  if (probe.cloudKeyIsOurs) return true;
+  if (probe.cloudBaseUrl === null) return !probe.cloudHasKey;
+  return probe.cloudBaseUrl.replace(/\/+$/, "") === proxyUrl.replace(/\/+$/, "");
 }
 
 /**
@@ -201,6 +249,9 @@ export function hermesVoiceConfigView(
   if (probe.localRegistered && probe.localCommand) {
     providers[LOCAL_TTS_PROVIDER_ID] = { command: probe.localCommand };
   }
+  // Whose route is in the slot. Asked with the SAME rule the link path writes
+  // by, so the panel and the writer cannot disagree about one box.
+  const routeIsOurs = proxyUrl !== null && hermesCloudRouteIsOurs(probe, proxyUrl);
   if (token) {
     providers[HERMES_CLOUD_TTS_PROVIDER] = {
       apiKey: token,
@@ -227,7 +278,13 @@ export function hermesVoiceConfigView(
       // is: `proxyUrl` null means "not entitled", and the panel then falls to
       // `cloudCredentialIsUnusable` and its "comes with ClawBox AI Max" line,
       // which is the true statement about such a box.
-      ...(proxyUrl ? { baseUrl: probe.cloudBaseUrl ?? proxyUrl } : {}),
+      //
+      // A FOREIGN endpoint is never shown as ours. The persisted value is read
+      // back only while it is a route we put there; where the owner aimed the
+      // generic slot at their own speech server, this reports the address a
+      // ClawBox WOULD use, so the row offers "switch to ClawBox cloud" rather
+      // than describing their server as if it were ours.
+      ...(proxyUrl ? { baseUrl: (routeIsOurs && probe.cloudBaseUrl) || proxyUrl } : {}),
       ...(probe.cloudVoice ? { voice: probe.cloudVoice } : {}),
       ...(probe.cloudModel ? { model: probe.cloudModel } : {}),
     };
@@ -244,9 +301,18 @@ export function hermesVoiceConfigView(
       // through Microsoft — a cloud the customer never chose and the privacy
       // line never names. Reported as no active engine instead, which is the
       // truth and which also lets Auto move the box onto a real one.
+      // `openai` is dropped for the same reason `edge` is, and it is the same
+      // sentence: a cloud the customer never chose must not be reported as
+      // ClawBox's. On Hermes `openai` is the GENERIC OpenAI-compatible slot, so
+      // a selection pointing at the owner's own speech server was rendered as
+      // "ClawBox cloud, active, with the device token" — the privacy line named
+      // the wrong destination, and re-selecting what looked already active ran
+      // the one write that overwrites their endpoint, key and model. Reported
+      // as no active engine instead, which is true and which leaves the cloud
+      // row selectable as the explicit choice it would be.
       ...(probe.provider === HERMES_LOCAL_TTS_PROVIDER
         ? { provider: LOCAL_TTS_PROVIDER_ID }
-        : probe.provider === HERMES_CLOUD_TTS_PROVIDER
+        : probe.provider === HERMES_CLOUD_TTS_PROVIDER && routeIsOurs
           ? { provider: HERMES_CLOUD_TTS_PROVIDER }
           : {}),
       providers,
@@ -300,7 +366,7 @@ export async function writeHermesCloudTarget(token: string): Promise<void> {
   // whose edition that CLI does not exist.
   const { CLAWBOX_AI_PROXY_URL } = await import("@/lib/harness/credentials");
   await set(KEYS.cloudBaseUrl, CLAWBOX_AI_PROXY_URL);
-  await set(`tts.${HERMES_CLOUD_TTS_PROVIDER}.api_key`, token);
+  await set(KEYS.cloudApiKey, token);
   await set(KEYS.cloudModel, HERMES_CLOUD_TTS_MODEL);
 }
 

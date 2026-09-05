@@ -238,12 +238,15 @@ function userSystemctlEnv(): NodeJS.ProcessEnv {
  * bus — and `answered` exists precisely to tell those apart. So that one
  * message is carried through as the answer it is.
  *
- * Matched on systemd's own phrase for the lookup, NOT on the errno tail: a
- * wedged user bus says `Failed to connect to bus: No such file or directory`,
- * which shares the tail and says nothing whatever about this unit. It, and a
- * timeout, stay silence.
+ * Matched on systemd's own phrase for the lookup AND the errno that means the
+ * file is not there. Neither half is enough on its own: a wedged user bus says
+ * `Failed to connect to bus: No such file or directory`, which shares the tail
+ * and says nothing about this unit, while the phrase alone is systemd's format
+ * string for EVERY failure of the lookup — `Connection reset by peer`,
+ * `Access denied`, `Invalid argument` — none of which learned anything either.
+ * All of those, and a timeout, stay silence.
  */
-const UNIT_FILE_ABSENT = /unit file state/i;
+const UNIT_FILE_ABSENT = /unit file state[\s\S]*:\s*No such file or directory/i;
 
 /**
  * One `systemctl` question, in either scope, with "there is no such unit"
@@ -267,8 +270,13 @@ async function systemctlAnswer(scope: "user" | "system", args: string[]): Promis
     // prints the word we want, so a failure with usable stdout is a real answer.
     const out = (err as { stdout?: string })?.stdout;
     if (typeof out === "string" && out.trim()) return out;
+    // NORMALISED, never passed through. `present` is computed by exclusion —
+    // anything that is not a known absence marker is a unit that exists — so
+    // letting a free-form sentence reach it would make any unrecognised error
+    // read as a present, enabled unit. It is the one absence word systemd
+    // itself uses, or it is silence.
     const errOut = (err as { stderr?: string })?.stderr;
-    if (typeof errOut === "string" && UNIT_FILE_ABSENT.test(errOut)) return errOut;
+    if (typeof errOut === "string" && UNIT_FILE_ABSENT.test(errOut)) return "not-found";
     return null;
   }
 }

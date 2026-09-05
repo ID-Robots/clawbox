@@ -164,6 +164,22 @@ describe("linking a box writes the cloud endpoint once", () => {
     expect(written.indexOf("tts.provider")).toBeGreaterThan(written.indexOf(CLOUD_BASE_URL));
   });
 
+  it("lands the endpoint before the credential, which is what makes an empty slot readable", async () => {
+    // `ownRoute`'s `slotIsEmpty` arm treats "no URL and no key" as ours to
+    // write, and its safety rests entirely on this order: because the endpoint
+    // lands first, a partial write can leave URL-set/key-unset (still
+    // recognisably ours) but never key-set/URL-unset, which the same rule would
+    // read as an owner's slot for ever — never refreshed, never selected, and
+    // nothing on the box able to undo it. Reordering these two lines is
+    // therefore not a cosmetic change.
+    await applyClawaiToHermes(TOKEN, CLAWBOX_AI_SPEECH_TIER);
+
+    const written = keysWritten();
+    const apiKey = `tts.${HERMES_CLOUD_TTS_PROVIDER}.api_key`;
+    expect(written.indexOf(CLOUD_BASE_URL)).toBeGreaterThanOrEqual(0);
+    expect(written.indexOf(apiKey)).toBeGreaterThan(written.indexOf(CLOUD_BASE_URL));
+  });
+
   it("selects the on-device engine without spending writes on a cloud route it will not use", async () => {
     // The refresh is for the provider that SPEAKS through the slot. A box that
     // has its own voice pays neither the three `hermes config set` spawns nor
