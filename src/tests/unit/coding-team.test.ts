@@ -399,13 +399,15 @@ describe("a team that works", () => {
     expect(starts).toHaveLength(2);
   });
 
-  it("fails the team, with the reason, when the planner answers no plan — and never starts a worker", async () => {
-    outcomes = [{ summary: "I think we should refactor everything." }];
+  it("fails the team, with the reason, when the planner answers no plan twice — and never starts a worker", async () => {
+    outcomes = [{ summary: "I think we should refactor everything." }, { summary: "Still prose, sorry." }];
     const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
     const done = await finished(board.id);
     expect(done.status).toBe("failed");
     expect(done.error).toMatch(/no JSON array/);
-    expect(starts).toHaveLength(1);
+    // The planner, and the planner asked once more; no worker.
+    expect(starts).toHaveLength(2);
+    expect(starts.every((s) => (s.team as { role: string }).role === "planner")).toBe(true);
     expect(done.tasks).toEqual([]);
   });
 });
