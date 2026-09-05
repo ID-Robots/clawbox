@@ -474,6 +474,11 @@ export async function disconnectGitHub(): Promise<DisconnectOutcome> {
 async function attachExistingRepo(dir: string, fullName: string, branch: string): Promise<BackupOutcome | null> {
   // The repo is POSITIONAL on gh 2.4.0 (`--repo` is rejected there).
   const viewed = await run("gh", ["repo", "view", fullName, "--json", "url"], { cwd: dir });
+  // A probe that carried no finding — killed on the uplink, or never
+  // started — is not "the repository cannot be read": answering the
+  // create's refusal for it would tell the owner to rename a repository
+  // that is theirs, with a 409 that says not to retry. Report the fault.
+  if (inconclusive(viewed)) return noFinding(viewed, "Reading the existing repository on GitHub", "network");
   if (viewed.code !== 0 || !viewed.stdout) return null;
   let url: string;
   try {
@@ -484,6 +489,7 @@ async function attachExistingRepo(dir: string, fullName: string, branch: string)
     return null;
   }
   const added = await run("git", ["-C", dir, "remote", "add", "origin", url]);
+  if (inconclusive(added)) return noFinding(added, "Attaching the existing repository", "local");
   if (added.code !== 0) {
     return { pushed: false, reason: "failed", detail: failureDetail(added, "Attaching the existing repository") };
   }

@@ -97,6 +97,23 @@ describe("backing up a folder whose repository already exists on the account", (
     expect(outcome.detail).toContain("already exists");
   });
 
+  it("reports a killed or unstarted probe of the existing repository as a fault worth retrying, never as GitHub's refusal", async () => {
+    const killed = (): FakeChild => {
+      const child = new EventEmitter() as FakeChild;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = () => true;
+      setImmediate(() => { child.emit("spawn"); child.emit("close", null, "SIGKILL"); });
+      return child;
+    };
+    script({ "repo view": killed });
+    const outcome = await lib.backupToGitHub(DIR);
+    expect(outcome.pushed).toBe(false);
+    if (outcome.pushed) return;
+    expect(outcome.reason === "gh_unreachable" || outcome.transient === true).toBe(true);
+    expect(outcome.detail).not.toContain("already exists");
+  });
+
   it("does not attach anything when the create failed for another reason", async () => {
     const calls = script({ "repo create": () => exitingChild(1, "", "GraphQL: Resource not accessible by integration") });
     const outcome = await lib.backupToGitHub(DIR);
