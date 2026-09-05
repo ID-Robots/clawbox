@@ -97,6 +97,24 @@ const CHILD_PROCESS_IMPORT = new RegExp(
 );
 const STARTERS = ["spawnSync", "execFileSync", "execSync", "spawn", "execFile", "fork", "exec"];
 
+/**
+ * …and the one form that binds no name at all:
+ * `require("child_process").execSync(…)`. `processStarters` has nothing to
+ * follow there, so this pattern decides on its own — it already contains the
+ * CALL, which is why it can afford to name the starters directly where the
+ * bare-name matching the rule above rejects (`RE.exec(s)`, a local helper
+ * called `spawn`, a mock's type annotation) cannot reach it.
+ *
+ * No file in the tree writes this form today, so the real-tree assertions
+ * below would pass whether or not it were detected. It is covered by a case of
+ * its own for exactly that reason.
+ */
+const CHILD_PROCESS_DIRECT_CALL = new RegExp(
+  String.raw`require\(\s*["'](?:node:)?child_process["']\s*\)\s*\.\s*(?:`
+    + STARTERS.join("|")
+    + String.raw`)\s*\(`,
+);
+
 /** The local names this file can start a process through, or an empty list. */
 function processStarters(source: string): string[] {
   const names: string[] = [];
@@ -128,6 +146,7 @@ function processStarters(source: string): string[] {
  * that spawns and awaits is in the same flake class as one that blocks —
  * `run-tunnel.test.ts` polls for up to 5 000 ms on the wait alone. */
 function startsAProcess(source: string): boolean {
+  if (CHILD_PROCESS_DIRECT_CALL.test(source)) return true;
   return processStarters(source).some((name) =>
     new RegExp(`(?<![\\w.])${name.replace(".", "\\.")}\\s*\\(`).test(source));
 }
@@ -215,6 +234,26 @@ describe("test-timeout hygiene", () => {
     // A path that resolved to nothing would make every assertion below vacuous.
     expect(files.length).toBeGreaterThan(300);
     expect(spawners.length).toBeGreaterThan(50);
+  });
+
+  it("counts a require(...) member call, which binds no name", () => {
+    // The one starter form processStarters cannot follow: there is no binding
+    // to look for, so the file would drop out of the rule below with nothing
+    // saying so. Nothing in the tree writes it today, which is precisely why
+    // the real-tree assertions cannot cover it — they would pass either way.
+    //
+    // The require and the member call are joined at RUNTIME on purpose: spelt
+    // out whole, this fixture would make THIS file a spawner and the rule
+    // below would report it. Which is itself the detector working.
+    const req = 'require("child_process")';
+    const nodeReq = 'require("node:child_process")';
+    expect(startsAProcess(code(`${nodeReq}.execSync("ls");`))).toBe(true);
+    expect(startsAProcess(code(`${req} . spawn ( "ls" );`))).toBe(true);
+    // A require with no call starts nothing…
+    expect(startsAProcess(code(`const cp = ${req};`))).toBe(false);
+    // …and a `.exec(` on something that is not child_process is not a starter,
+    // which is the false positive the import rule exists to avoid.
+    expect(startsAProcess(code('const m = /x/; m.exec("s");'))).toBe(false);
   });
 
   it("gives every test that starts a real process both ceilings", () => {
