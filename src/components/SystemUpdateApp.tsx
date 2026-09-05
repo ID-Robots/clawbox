@@ -8,9 +8,30 @@ import type { StepStatus, UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
 
+interface ComponentVersion {
+  current: string | null;
+  target: string | null;
+  updateAvailable?: boolean;
+}
+
 interface VersionInfo {
-  clawbox: { current: string; target: string | null; updateAvailable?: boolean };
-  openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
+  clawbox: ComponentVersion & { current: string };
+  openclaw: ComponentVersion;
+  // Both optional: a device that has not been updated yet still answers
+  // /update/versions with the old two-key shape, and the Hermes block is
+  // present only on the SKUs that ship Hermes.
+  hermes?: ComponentVersion;
+  edition?: "openclaw" | "hermes" | "dual";
+}
+
+/**
+ * Whether an OpenClaw row is about software this device has. The `hermes` SKU
+ * ships none; `dual` has one even while Hermes is the harness answering. A
+ * payload from a server that predates the `edition` field reads as OpenClaw,
+ * which is what those builds were.
+ */
+function shipsOpenclaw(versions: VersionInfo | null): boolean {
+  return versions?.edition !== "hermes";
 }
 
 interface BranchInfo {
@@ -334,7 +355,11 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       case "available": {
         const updates: string[] = [];
         if (versions && componentNeedsUpdate(versions.clawbox)) updates.push("ClawBox");
-        if (versions && componentNeedsUpdate(versions.openclaw)) updates.push("OpenClaw");
+        // Guarded by the edition, not only by `updateAvailable`: on the Hermes
+        // SKU that flag is false today only because `openclaw.current` is null,
+        // and a headline offering an OpenClaw update on a box that ships no
+        // OpenClaw is not something to leave resting on that.
+        if (versions && shipsOpenclaw(versions) && componentNeedsUpdate(versions.openclaw)) updates.push("OpenClaw");
         return {
           icon: "system_update", iconClass: "text-emerald-300",
           headline: `${updates.length} update${updates.length === 1 ? "" : "s"} available`,
@@ -447,14 +472,14 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
           </div>
 
           {/* COMPONENTS
-              Only ClawBox is exposed as a standalone update target. OpenClaw
-              is pinned by ClawBox (config/openclaw-target.txt) and bumped
-              automatically inside the full ClawBox update — see
+              Only ClawBox is exposed as a standalone update target. The agent
+              harness is pinned by ClawBox (config/openclaw-target.txt) and
+              bumped automatically inside the full ClawBox update — see
               install.sh::step_openclaw_install. Surfacing a separate
               OpenClaw card would let customers bypass the pin and pick
               whatever was last published to npm, which is what we just
-              moved away from. The OpenClaw version is still shown in the
-              ClawBox card's release notes / version-info section. */}
+              moved away from. The installed harness version is reported
+              below the card instead: read-only, no second update button. */}
           {versions && status !== "updating" && status !== "completed" && status !== "failed" && (
             <div className="grid grid-cols-1 gap-3">
               <ComponentCard
@@ -465,6 +490,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                 available={clawboxAvail}
                 onUpdate={() => void triggerUpdate()}
               />
+              <AgentVersions versions={versions} />
             </div>
           )}
 
@@ -682,6 +708,54 @@ function ConfirmModal({
             {confirmLabel}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The harness this box actually runs, read-only.
+ *
+ * TASK-548: this screen is where an owner goes to ask "what version am I on",
+ * and it named only ClawBox — so a Hermes owner could read their agent's
+ * version in Settings -> About and nowhere here. The rows follow the same
+ * per-edition rule About uses: OpenClaw unless the SKU is `hermes`, Hermes
+ * whenever the payload carries it.
+ */
+function AgentVersions({ versions }: { versions: VersionInfo }) {
+  const rows: { name: string; current: string | null; note: string }[] = [];
+  if (shipsOpenclaw(versions)) {
+    rows.push({
+      name: "OpenClaw",
+      current: versions.openclaw.current,
+      note: "Pinned by ClawBox — updated with it",
+    });
+  }
+  if (versions.hermes) {
+    rows.push({
+      name: "Hermes",
+      current: versions.hermes.current,
+      note: "Installed from its own upstream",
+    });
+  }
+  if (!rows.length) return null;
+
+  return (
+    <div className={CARD} data-testid="agent-versions">
+      <div className="text-base font-semibold text-gray-100">Agent</div>
+      <p className="text-xs text-[var(--text-muted)] mt-0.5 mb-3">The assistant harness running on this device</p>
+      <div className="space-y-2">
+        {rows.map((row) => (
+          <div key={row.name} className="flex items-baseline justify-between gap-3 text-xs">
+            <div>
+              <div className="text-sm text-gray-100">{row.name}</div>
+              <div className="text-[11px] text-[var(--text-muted)]">{row.note}</div>
+            </div>
+            <div className="font-mono text-gray-100 truncate">
+              {cleanVersion(row.current ?? "") || row.current || "Not installed"}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
