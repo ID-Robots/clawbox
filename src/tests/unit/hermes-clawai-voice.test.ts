@@ -93,7 +93,7 @@ function voice(provider: string | null) {
     cloudModel: null,
     cloudBaseUrl: null,
     cloudHasKey: false,
-    unread: { provider: false, cloudRoute: false, localProvider: false },
+    unread: { provider: false, cloudRoute: false, cloudKey: false, localProvider: false },
   };
 }
 
@@ -219,8 +219,54 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     // Fail closed: not refreshing a token costs a 401 the Voice panel fixes.
     readVoiceMock.mockResolvedValue({
       ...voice("openai"),
-      unread: { provider: false, cloudRoute: true, localProvider: false },
+      unread: { provider: false, cloudRoute: true, cloudKey: false, localProvider: false },
     });
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(writeCloudMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
+  });
+
+  it("does not take over a speech route the owner filled with their own key", async () => {
+    // The sibling door of the case above, reached by CONFIGURATION rather than
+    // by a slow read. `base_url` is OPTIONAL for actual OpenAI — the SDK
+    // defaults the endpoint — so the canonical way an owner uses Hermes' own
+    // `openai` TTS is `tts.openai.api_key` set and `tts.openai.base_url`
+    // unset. Reading that unset URL as "the slot is empty, so it is ours"
+    // overwrites their key, their model and their route with our proxy and the
+    // device token on EVERY re-link, with `tts.provider` and every panel
+    // unchanged. "Empty" has to mean empty: no URL AND no key.
+    readVoiceMock.mockResolvedValue({ ...voice("openai"), cloudHasKey: true });
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(writeCloudMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
+  });
+
+  it("does not take over a speech route whose key could not be read", async () => {
+    // And an UNREAD key is not an unset one either — the same rule the
+    // selection, the endpoint and the on-device definition are already held
+    // to. With no URL to fall back on, a key we could not read is the only
+    // thing that could say the slot is occupied.
+    readVoiceMock.mockResolvedValue({
+      ...voice("openai"),
+      unread: { provider: false, cloudRoute: false, cloudKey: true, localProvider: false },
+    });
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(writeCloudMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
+  });
+
+  it("does not select a cloud voice into a slot the owner already keyed", async () => {
+    // The second door of the same clause: nothing chosen, no on-device engine,
+    // and the owner's key sitting in the generic slot with no endpoint. The
+    // fall-through would write our proxy over their credential and then point
+    // `tts.provider` at it.
+    readVoiceMock.mockResolvedValue({ ...voice(null), cloudHasKey: true });
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
@@ -241,7 +287,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
       // filled these two are the ones that did not answer.
       localRegistered: false,
       localCommand: null,
-      unread: { provider: false, cloudRoute: false, localProvider: true },
+      unread: { provider: false, cloudRoute: false, cloudKey: false, localProvider: true },
     });
     probeEngineMock.mockResolvedValue(true);
 
@@ -382,7 +428,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     // owner's ElevenLabs with the cloud, silently. The shell half of this same
     // change refuses to make that mistake at length; this is the seam the
     // module already provides for asking which of the two it holds.
-    readVoiceMock.mockResolvedValue({ ...voice(null), unread: { provider: true, cloudRoute: false, localProvider: false } });
+    readVoiceMock.mockResolvedValue({ ...voice(null), unread: { provider: true, cloudRoute: false, cloudKey: false, localProvider: false } });
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 

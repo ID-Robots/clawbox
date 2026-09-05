@@ -106,6 +106,11 @@ export interface HermesVoiceProbe {
    *                      slot. An unread empty string read as "unset, so ours"
    *                      overwrites an owner's own speech server, their key and
    *                      their model, with every panel unchanged.
+   *   - `cloudKey`     — and the same slot's OTHER occupancy signal. `base_url`
+   *                      is optional for real OpenAI, so an owner using Hermes'
+   *                      own `openai` TTS has a key and no endpoint: the key is
+   *                      then the only thing that says the slot is taken, and
+   *                      an unread one must not be read as an empty one.
    *   - `localProvider`— an unread definition read as "this box has no
    *                      on-device voice" sends a working box off-device for
    *                      good: `step_openclaw_tts` then sees `openai` and
@@ -114,7 +119,7 @@ export interface HermesVoiceProbe {
    * Free to compute: `hermesConfigReadPending` reads the memo the reads above
    * have just filled, and spawns nothing.
    */
-  unread: { provider: boolean; cloudRoute: boolean; localProvider: boolean };
+  unread: { provider: boolean; cloudRoute: boolean; cloudKey: boolean; localProvider: boolean };
 }
 
 function trimmed(value: string | undefined): string | null {
@@ -148,6 +153,7 @@ export async function readHermesVoice(): Promise<HermesVoiceProbe> {
     unread: {
       provider: hermesConfigReadPending(KEYS.provider),
       cloudRoute: hermesConfigReadPending(KEYS.cloudBaseUrl),
+      cloudKey: hermesConfigReadPending(KEYS.cloudApiKey),
       // Either half: the type and the command are one definition, and a box
       // whose `type` answered `command` while the command string timed out is
       // as unknown as one where neither answered.

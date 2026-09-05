@@ -228,6 +228,23 @@ function userSystemctlEnv(): NodeJS.ProcessEnv {
   };
 }
 
+/**
+ * Which stderr from `systemctl` is systemd ANSWERING rather than failing.
+ *
+ * `is-enabled` on a unit that does not exist prints its whole answer on
+ * stderr on systemd < 252 (`Failed to get unit file state for x.service: No
+ * such file or directory`) and on stdout on 252+ (`not-found`). Read as
+ * silence, the older shape made an absent unit indistinguishable from a wedged
+ * bus — and `answered` exists precisely to tell those apart. So that one
+ * message is carried through as the answer it is.
+ *
+ * Matched on systemd's own phrase for the lookup, NOT on the errno tail: a
+ * wedged user bus says `Failed to connect to bus: No such file or directory`,
+ * which shares the tail and says nothing whatever about this unit. It, and a
+ * timeout, stay silence.
+ */
+const UNIT_FILE_ABSENT = /unit file state/i;
+
 async function runUserSystemctl(args: string[]): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync("/usr/bin/systemctl", ["--user", ...args], {
@@ -237,7 +254,10 @@ async function runUserSystemctl(args: string[]): Promise<string | null> {
     return stdout;
   } catch (err) {
     const out = (err as { stdout?: string })?.stdout;
-    return typeof out === "string" && out.trim() ? out : null;
+    if (typeof out === "string" && out.trim()) return out;
+    const errOut = (err as { stderr?: string })?.stderr;
+    if (typeof errOut === "string" && UNIT_FILE_ABSENT.test(errOut)) return errOut;
+    return null;
   }
 }
 
@@ -282,17 +302,24 @@ export async function readUnitState(unit: string, scope: "user" | "system"): Pro
       : run("/usr/bin/systemctl", ["is-enabled", unit]),
   ]);
   const enabledWord = (isEnabled ?? "").trim();
-  // `is-enabled` answers with an error string, not a state, when the unit file
-  // is missing — that is how "absent" is told apart from "installed but off".
-  const present = enabledWord !== "" && !enabledWord.toLowerCase().includes("no such file");
+  // `is-enabled` answers "there is no such unit" in TWO shapes, and the version
+  // that answers which depends on the board: `not-found` on systemd >= 252,
+  // and an error string naming the missing file on the older systemd the
+  // shipped Jetson runs. Both are "absent"; matching only the second reported
+  // a unit that does not exist as PRESENT, which keeps a stamped box on an
+  // on-device engine it can no longer speak with.
+  const present = enabledWord !== ""
+    && enabledWord !== "not-found"
+    && !enabledWord.toLowerCase().includes("no such file");
   const activeWord = (isActive ?? "").trim();
   return {
     present,
     active: activeWord === "active",
     enabled: ["enabled", "enabled-runtime", "static", "alias", "indirect"].includes(enabledWord),
     failed: activeWord === "failed",
-    // An error string naming the missing unit file IS an answer — "absent" —
-    // which is exactly what `present` reads it as above. Silence is not.
+    // Either shape of "there is no such unit" IS an answer — "absent" — which
+    // is exactly what `present` reads it as above. Silence is not, and only a
+    // read that said nothing on either stream reaches here empty.
     answered: enabledWord !== "",
   };
 }

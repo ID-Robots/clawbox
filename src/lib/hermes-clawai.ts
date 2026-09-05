@@ -1628,9 +1628,25 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
     // refreshing a token costs a 401 the owner can fix from the Voice panel;
     // overwriting the endpoint, key and model of a speech server they run is
     // silent and cannot be undone from here.
+    //
+    // Ownership needs POSITIVE evidence, and "empty" has to mean empty. An
+    // unset `base_url` alone does not say the slot is free: it is optional for
+    // actual OpenAI — the SDK defaults the endpoint — so the canonical way an
+    // owner uses Hermes' own `openai` TTS is a key with no URL at all. The
+    // key is that slot's other occupancy signal, and it is read on the same
+    // pass, so it costs nothing to consult.
+    //
+    // Safe for every ClawBox-shaped box: a fresh one has neither
+    // (`slotIsEmpty`), and a linked one has our proxy in `base_url` whatever
+    // the key holds (`slotIsOurs`) — `writeHermesCloudTarget` writes the
+    // endpoint FIRST, so "key set, URL unset" is a state our own writer cannot
+    // produce.
+    const slotIsOurs = voice.cloudBaseUrl !== null
+      && voice.cloudBaseUrl.replace(/\/+$/, "") === CLAWBOX_AI_PROXY_URL;
+    const slotIsEmpty = voice.cloudBaseUrl === null && !voice.cloudHasKey;
     const ownRoute = !voice.unread.cloudRoute
-      && (voice.cloudBaseUrl === null
-        || voice.cloudBaseUrl.replace(/\/+$/, "") === CLAWBOX_AI_PROXY_URL);
+      && !voice.unread.cloudKey
+      && (slotIsOurs || slotIsEmpty);
     const current = voice.provider;
     const unchosen = current === null
       || current === HERMES_FACTORY_TTS_PROVIDER
@@ -1668,6 +1684,13 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
     // script is runnable. `local-models.ts` documents the third — "the file can
     // lose the bit long after the config was written" — and `hermesSpeaksReplies`
     // and the Voice route both demand it.
+    //
+    // Only the first two can say "I could not ask"; the third answers a plain
+    // boolean, and that asymmetry is deliberate. `localTtsCommandRunnable` is a
+    // stat and an access on a local path — no spawn, no bus, no Python start —
+    // so the failure modes the other two guard against do not reach it, and a
+    // three-valued answer would buy a state that never occurs at the cost of a
+    // third "leave it alone" branch on the decision that matters most.
     const engine = await probeLocalTtsEngine();
     // MOVING A BOX OFF ITS OWN VOICE IS PERMANENT — the next
     // `step_openclaw_tts` sees `openai`, falls into its "already set" arm and
