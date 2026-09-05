@@ -994,6 +994,111 @@ describe("updater", () => {
       expect(calls.some((call) => call.includes("plugins enable weatherbot"))).toBe(false);
     });
 
+    it("reinstalls a managed plugin whose payload a core upgrade orphaned", async () => {
+      // TASK-602. A core bump re-keys `~/.openclaw/npm/projects/` by the new
+      // generation, so the payloads installed against the old one are no longer
+      // reachable. The core then refuses readiness with a DIFFERENT sentence
+      // from the consent one — `configured plugin payload verification failed`
+      // — and `plugins enable` cannot answer it: the package is not on disk to
+      // be consented to. The repair that works is the pinned reinstall, the
+      // same one the Codex arm already runs.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: [
+            "OpenClaw plugin verification failed; refusing to report the gateway ready.",
+            '- Plugin "discord": configured plugin payload verification failed '
+              + "(missing-install-path): install path is missing. "
+              + "Run `openclaw update repair` to retry plugin repair.",
+            "Resolve the plugin verification errors above, then restart the Gateway.",
+            "clawbox-gateway.service: Start request repeated too quickly.",
+            "",
+          ].join("\n"),
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      // Only the reinstall can make this box healthy: consenting to a package
+      // that is not on disk changes nothing.
+      mockGatewayUp.mockImplementation(async () => {
+        const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+          `${cmd} ${(args as string[]).join(" ")}`,
+        );
+        const repairIndex = calls.findIndex((call) =>
+          call.includes("plugins install @openclaw/discord@2026.8.1 --force --accept-capabilities"),
+        );
+        const restartIndex = calls.findIndex((call) =>
+          call.includes("systemctl restart clawbox-gateway.service"),
+        );
+        return repairIndex >= 0 && restartIndex > repairIndex;
+      });
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      expect(calls.some((call) =>
+        call.includes("plugins install @openclaw/discord@2026.8.1 --force --accept-capabilities"),
+      )).toBe(true);
+    });
+
+    it("names the plugin the core refused, not the systemd start-limit line", async () => {
+      // TASK-602's customer-visible half. systemd gives up after the core has
+      // exited 21 times, so the LAST journal line on the box is its own
+      // start-limit message. With no pattern for the verification refusal the
+      // owner was handed that line — nothing about a plugin, nothing to act on
+      // — while the sentence naming the plugin sat a few lines above it.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: [
+            "OpenClaw plugin verification failed; refusing to report the gateway ready.",
+            '- Plugin "whatsapp": configured plugin payload verification failed '
+              + "(missing-install-path): install path is missing. "
+              + "Run `openclaw update repair` to retry plugin repair.",
+            "clawbox-gateway.service: Start request repeated too quickly.",
+            "clawbox-gateway.service: Failed with result 'exit-code'.",
+            "",
+          ].join("\n"),
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      mockGatewayUp.mockResolvedValue(false);
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const error = updater.getUpdateState().error ?? "";
+      expect(error).toContain('Plugin "whatsapp"');
+      expect(error).toContain("configured plugin payload verification failed");
+      expect(error).not.toContain("Start request repeated too quickly");
+    });
+
     it("continues to doctor and restart when the targeted Codex repair fails", async () => {
       setupExecFileMock({
         "plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities": new Error(
