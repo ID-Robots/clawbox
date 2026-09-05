@@ -500,27 +500,30 @@ export const SUBAGENT_DEFINITIONS = {
    * workflow-subagent, for the two names the brief cannot stop a model from
    * typing.
    */
+  // No Bash for either: a fallback is where a MIS-typed call lands, and a
+  // shell is a way to write that the parent's changed-files list never
+  // sees. A run that wants a check run names the tester.
   "general-purpose": {
     description:
-      "A reader for any question the typed helpers do not fit: reads, runs "
-      + "checks, reports with file paths and line numbers. Use proactively "
-      + "for one-off questions; it never edits.",
+      "A reader for any question the typed helpers do not fit: reads and "
+      + "reports with file paths and line numbers. Use proactively for one-off "
+      + "questions; it never edits and runs nothing — send the tester to run a check.",
     prompt:
-      "You read and report. Read the files and run the checks you were asked "
-      + "to, then answer with file paths, line numbers and the shortest "
-      + "excerpt that proves the point. Never edit a file.",
-    tools: ["Read", "Grep", "Glob", "Bash"],
+      "You read and report. Read and search only — never edit, never run a "
+      + "command. Answer with file paths, line numbers and the shortest "
+      + "excerpt that proves the point.",
+    tools: ["Read", "Grep", "Glob"],
     model: "deepseek-v4-flash",
   },
   claude: {
     description:
-      "The same reader under the name the CLI offers by default: reads, runs "
-      + "checks, reports. Use proactively as a plain reader; it never edits.",
+      "The same reader under the name the CLI offers by default: reads and "
+      + "reports. Use proactively as a plain reader; it never edits and runs nothing.",
     prompt:
-      "You read and report. Read the files and run the checks you were asked "
-      + "to, then answer with file paths, line numbers and the shortest "
-      + "excerpt that proves the point. Never edit a file.",
-    tools: ["Read", "Grep", "Glob", "Bash"],
+      "You read and report. Read and search only — never edit, never run a "
+      + "command. Answer with file paths, line numbers and the shortest "
+      + "excerpt that proves the point.",
+    tools: ["Read", "Grep", "Glob"],
     model: "deepseek-v4-flash",
   },
 } as const;
@@ -763,6 +766,14 @@ export interface CodingRun {
    * because the owner flipped a switch while it worked.
    */
   media: RunMedia;
+  /**
+   * The owner's review-pass switch as it stood when the run STARTED, frozen
+   * like `effort` and `media`: it decides both what the brief says about the
+   * reviewer helper (spawnRun) and whether the pass follows (maybeStartReviewPass),
+   * and the two must agree — a switch flipped mid-run would otherwise give a
+   * run no review at all, or two.
+   */
+  reviewPass: boolean;
   /** Pictures and clips this run has already been given, against the caps. */
   mediaGenerated: { images: number; audio: number };
   /**
@@ -1829,6 +1840,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // A record written before the media switches existed had neither tool, so
     // "off" is the truth about that run and not merely a safe default.
     media: normalizeMedia(raw.media),
+    reviewPass: raw.reviewPass === true,
     mediaGenerated: {
       images: countOf(raw.mediaGenerated?.images),
       audio: countOf(raw.mediaGenerated?.audio),
@@ -1943,7 +1955,7 @@ interface LiveRun {
   /** Resolved once at start, so a retry does not need an async lookup. */
   setprivPath: string;
   /** What this run was spawned with — a retry must match, not re-read. */
-  settings: { effort: CodingEffort; maxTurns: number; reviewPass?: boolean };
+  settings: { effort: CodingEffort; maxTurns: number };
   /** A shell command ran whose effects can be proven neither read-only nor safe to repeat. */
   commandMayHaveSideEffects: boolean;
   /**
@@ -3272,7 +3284,13 @@ export function folderListing(directory: string): string {
   }
   if (entries.length === 0) return "this folder is empty.";
   if (entries.length > FOLDER_LISTING_MAX) return `this folder has ${entries.length} top-level entries.`;
-  const names = entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name)).sort((a, b) => a.localeCompare(b));
+  // Each name printable and short: a name is data the run would see in its
+  // first `ls` regardless, but a newline or a control character in one
+  // would break the ONE line this is, and a very long one is not a name.
+  const names = entries
+    .map((e) => `${e.name.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 80)}${e.isDirectory() ? "/" : ""}`)
+    .filter((n) => n !== "/" && n !== "")
+    .sort((a, b) => a.localeCompare(b));
   return `this folder contains: ${names.join(", ")}`;
 }
 
@@ -4005,11 +4023,9 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutc
   // A team's worker is reviewed by the team's own reviewer, on the merged work.
   if (finished.team) return "skipped";
   if (finished.filesTouched.length === 0) return "skipped";
-  try {
-    if (!(await getReviewPass())) return "skipped";
-  } catch {
-    return "skipped";
-  }
+  // The switch as it stood when THIS run started — the same decision its
+  // brief was written from — never the switch as it stands now.
+  if (!finished.reviewPass) return "skipped";
   try {
     const review = await startRun({
       task: REVIEW_PASS_TASK,
@@ -4207,13 +4223,14 @@ function spawnRun(
   run: CodingRun,
   resumeSessionId: string | null,
   setprivPath: string,
-  settings: { effort: CodingEffort; maxTurns: number; reviewPass?: boolean },
+  settings: { effort: CodingEffort; maxTurns: number },
   stdinText?: string,
 ): void {
-  // Whose review is this run's diff getting? The owner's automatic pass, a
-  // team's reviewer (every task gets one — coding-team-reviewer.ts), or the
-  // run IS the pass: in each case the flash reviewer would be a second look.
-  const reviewedSeparately = settings.reviewPass === true || run.reviewOf !== null || run.team !== null;
+  // Whose review is this run's diff getting? The owner's automatic pass (as
+  // the switch stood when the run started — run.reviewPass), a team's
+  // reviewer (every task gets one — coding-team-reviewer.ts), or the run IS
+  // the pass: in each case the flash reviewer would be a second look.
+  const reviewedSeparately = run.reviewPass || run.reviewOf !== null || run.team !== null;
   const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, run: { id: run.id, directory: run.directory, media: run.media } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
@@ -4470,8 +4487,8 @@ interface RunSettings {
   tokenLimit: number | null;
   generateImages: boolean;
   generateAudio: boolean;
-  /** The owner's review-pass switch, read with the rest so the brief can
-   *  say whether a separate review follows (see REVIEWER_CLAUSE_SLOT). */
+  /** The owner's review-pass switch, read with the rest and frozen on the
+   *  record (CodingRun.reviewPass): the brief and the pass decide from it. */
   reviewPass: boolean;
 }
 
@@ -4540,6 +4557,7 @@ function newRunRecord(fields: {
     todos: [],
     exitCode: null,
     media: { images: fields.settings.generateImages, audio: fields.settings.generateAudio },
+    reviewPass: fields.settings.reviewPass,
     mediaGenerated: { images: 0, audio: 0 },
     pgid: null,
     leftover: false,
@@ -4708,7 +4726,7 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   const continuation = run.sessionId
     ? `You were paused by the owner and are now resumed in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`
     : undefined;
-  spawnOrSettle(run, run.sessionId, setprivPath, { effort: run.effort, maxTurns: run.maxTurns, reviewPass: await getReviewPass() }, continuation);
+  spawnOrSettle(run, run.sessionId, setprivPath, { effort: run.effort, maxTurns: run.maxTurns }, continuation);
   return cloneRun(run);
 }
 
@@ -4830,7 +4848,7 @@ function spawnOrSettle(
   run: CodingRun,
   resumeSessionId: string | null,
   setprivPath: string,
-  settings: { effort: CodingEffort; maxTurns: number; reviewPass?: boolean },
+  settings: { effort: CodingEffort; maxTurns: number },
   stdinText?: string,
 ): void {
   try {

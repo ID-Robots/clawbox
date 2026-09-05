@@ -407,9 +407,10 @@ describe("sub-agent definitions", () => {
     for (const name of ["general-purpose", "claude"] as const) {
       const def = lib.SUBAGENT_DEFINITIONS[name];
       expect(def.model).toBe("deepseek-v4-flash");
-      expect(def.tools).not.toContain("Write");
-      expect(def.tools).not.toContain("Edit");
-      expect(def.prompt).toMatch(/Never edit a file/);
+      // Read-only to the letter: no Write, no Edit, and no shell either — a
+      // fallback with Bash is a way to write that filesTouched never sees.
+      expect([...def.tools].sort()).toEqual(["Glob", "Grep", "Read"]);
+      expect(def.prompt).toMatch(/never edit, never run a command/);
     }
     // ...and the reviewer no longer sells itself as the step before "done":
     // whether a run sends it is the brief's call (see headlessBrief).

@@ -19,9 +19,12 @@ describe("taskTitle", () => {
     expect(taskTitle("# Paginate the inventory API\n\nDetails", 80)).toBe("Paginate the inventory API");
     expect(taskTitle("### Fix the footer ###", 80)).toBe("Fix the footer");
     expect(taskTitle("**Ship the invoice page**", 80)).toBe("Ship the invoice page");
-    // A hash that is not a heading stays: "#1" is an issue number.
+    // A hash that is not a heading stays: "#1" is an issue number, and a
+    // closing hash comes off a heading only.
     expect(taskTitle("#1 blocker: fix login", 80)).toBe("#1 blocker: fix login");
     expect(taskTitle("Add #hashtag support", 80)).toBe("Add #hashtag support");
+    expect(taskTitle("Deploy #", 80)).toBe("Deploy #");
+    expect(taskTitle("Fix issue #12", 80)).toBe("Fix issue #12");
   });
 
   it("cuts a long line with an ellipsis inside the cap", () => {

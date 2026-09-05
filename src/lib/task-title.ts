@@ -17,9 +17,10 @@
  */
 export function taskTitle(text: string, max: number): string {
   const first = (text ?? "").split("\n").map((line) => line.trim()).find((line) => line.length > 0) ?? "";
-  const line = first
-    .replace(/^#{1,6}(?:\s+|$)/, "")
-    .replace(/\s+#+\s*$/, "")
+  // Closing marks come off a HEADING only: "Deploy #" is a title with a hash
+  // in it, "## Deploy ##" is a heading.
+  const heading = /^#{1,6}(?:\s+|$)(.*)$/.exec(first);
+  const line = (heading ? heading[1].replace(/\s+#+\s*$/, "") : first)
     .replace(/^(\*\*|__)(.+)\1$/, "$2")
     .trim();
   if (max < 1) return "";

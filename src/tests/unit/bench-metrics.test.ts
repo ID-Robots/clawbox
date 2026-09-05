@@ -187,7 +187,8 @@ describe("parseTranscript — the per-model bill", () => {
       JSON.stringify({ message: { model: "deepseek-v4-pro", usage: { input_tokens: 1, output_tokens: 1 } } }),
       "not json at all",
     ].join("\n"));
-    const parsed = parseTranscript(file);
+    // The parser is plain JS; its shape is what the figures reader relies on.
+    const parsed = parseTranscript(file) as { lines: number; byModel: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number; messages: number }> } | null;
     expect(parsed).not.toBeNull();
     expect(parsed!.byModel["deepseek-v4-flash"]).toEqual({ input: 10, output: 640, cacheRead: 500, cacheWrite: 0, messages: 1 });
     expect(parsed!.byModel["deepseek-v4-pro"]).toEqual({ input: 4, output: 8, cacheRead: 0, cacheWrite: 2, messages: 2 });
