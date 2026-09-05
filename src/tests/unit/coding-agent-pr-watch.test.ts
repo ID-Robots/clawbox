@@ -19,6 +19,14 @@ import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
 import { isPrPending, MAX_WAIT_MS, POLL_INTERVAL_MS } from "@/lib/coding-pr-state";
 
+// The awaited reset in this file's teardown can now legitimately spend the
+// drain's own budget (SETTLE_DRAIN_BUDGET_MS, 5 s) and then up to ~2.75 s in
+// the removal's linear retry backoff — ~7.8 s of vitest's 10 s DEFAULT hook
+// ceiling, and nothing would say so before it bit. The file imports no
+// child_process of its own, so test-timeout-hygiene.test.ts does not require
+// the declaration; its three siblings carry it and so does this one.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const readPullRequest = vi.hoisted(() => vi.fn());
 const mergePullRequest = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-pr", async (importOriginal) => ({

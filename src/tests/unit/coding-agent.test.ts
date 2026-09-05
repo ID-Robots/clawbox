@@ -15,6 +15,7 @@
  * installer puts it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -149,12 +150,21 @@ function makeProject(id: string): string {
   return dir;
 }
 
-/** Every path under `dir`, sorted: a folder still being written to changes.
+/** Every path under `dir`, sorted, each with what it IS — a folder, or a file
+ *  and the hash of its bytes. A folder still being written to changes. The
+ *  CONTENTS are in it because a late settle can rewrite a file that is already
+ *  there (`project.json`, a `.git` index) without adding or removing a single
+ *  entry name, and a list of names would call that tree unchanged.
  *  A walk that trips over a directory disappearing under it has answered the
  *  question too — as an assertion, not as a stack. */
 function entriesUnder(dir: string): string[] {
   try {
-    return fs.readdirSync(dir, { recursive: true, encoding: "utf-8" }).sort();
+    return fs.readdirSync(dir, { recursive: true, encoding: "utf-8" }).sort().map((rel) => {
+      const stat = fs.lstatSync(path.join(dir, rel));
+      if (!stat.isFile()) return `${rel} ${stat.isDirectory() ? "dir" : "other"}`;
+      const hash = crypto.createHash("sha256").update(fs.readFileSync(path.join(dir, rel))).digest("hex");
+      return `${rel} ${hash.slice(0, 16)}`;
+    });
   } catch (err) {
     return [`changed under the walk: ${err instanceof Error ? err.message : String(err)}`];
   }
@@ -1192,6 +1202,39 @@ describe("retrying a transient upstream failure", () => {
 
     expect(run.status).toBe("stopped");
     expect(run.retries).toBe(0);
+  });
+
+  it("does NOT retry a run the reset itself killed", async () => {
+    // The teardown's reset SIGKILLs whatever is still going, and finishRun
+    // then reads that kill as the provider blinking: stderr says 503, the run
+    // touched nothing, and the one-shot retry guard is
+    // `state.endRequested === null` — still true, because the reset never
+    // said it was the one ending the run. So a REPLACEMENT claude-ds is
+    // spawned that the drain neither killed (`killed` was taken before it
+    // existed) nor waits for (the retry branch returns above
+    // `trackSettleWork`), and `settleWork` answers success with a fresh child
+    // running inside the tree the teardown is about to remove — the ENOTEMPTY
+    // shape this hook exists to stop, arriving through the one path it did
+    // not model.
+    installFakeWrapper([
+      `echo spawned >> "${spawnsFile()}"`,
+      `echo '${INIT}'`,
+      "echo 'API Error: 503 Service Unavailable' >&2",
+      "sleep 30",
+    ].join("\n"));
+    makeProject("site");
+    const spawns = () => (fs.existsSync(spawnsFile())
+      ? fs.readFileSync(spawnsFile(), "utf-8").trim().split("\n").length
+      : 0);
+    await lib.startRun({ task: "t", projectId: "site", source: "agent" });
+    await vi.waitFor(() => { expect(spawns()).toBe(1); }, { timeout: 10_000 });
+
+    await lib._resetCodingAgentStateForTests();
+
+    expect(spawns()).toBe(1);
+    // And none arrives after the drain has already answered, either.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(spawns()).toBe(1);
   });
 });
 

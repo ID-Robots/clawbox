@@ -4132,6 +4132,16 @@ async function within(work: Promise<unknown>, ms: number): Promise<void> {
  * passed. Measured on a loaded box, looking for a quiet turn of the event loop
  * instead missed the settle 6 times in 25.
  *
+ * What the grace is: a BOUND on how late that handler may be, not a barrier.
+ * `reaped()` is exact — the child object really has exited — and the settle
+ * that follows arrives either from `close` (sub-millisecond) or from the
+ * 250 ms `exit` timer when a grandchild holds the pipes, so 400 ms carries
+ * ~150 ms of margin. A settle later than that would leave through the success
+ * path in silence. Removing the window entirely means registering a
+ * placeholder in `settling` synchronously at kill time; measured under 12 CPU
+ * hogs it never opened (6/6 runs green), and `maxRetries` on the removal is
+ * the backstop for what a bounded drain cannot promise.
+ *
  * Bounded, because this is called from a teardown, and it says so when the
  * budget runs out with work still outstanding rather than reporting the same
  * success either way.
@@ -4139,7 +4149,12 @@ async function within(work: Promise<unknown>, ms: number): Promise<void> {
 async function settleWork(killed: ChildProcess[], timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   const left = () => Math.max(0, deadline - Date.now());
-  const reaped = () => killed.every((child) => child.exitCode !== null || child.signalCode !== null);
+  // `!= null` on purpose, both clauses: on a real ChildProcess these are
+  // `number | null` and the test is exact, while the hand-rolled EventEmitter
+  // children of the spawn-failure suite have NEITHER field. Counting those as
+  // reaped at once is the right answer — there is no process to wait for — and
+  // this says it is a decision rather than what `!== null` did by accident.
+  const reaped = () => killed.every((child) => child.exitCode != null || child.signalCode != null);
   let grace = killed.length > 0;
   while (left() > 0) {
     if (settling.size > 0) {
@@ -4993,6 +5008,12 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   for (const state of live.values()) {
     clearTimeout(state.timeout);
     if (state.killTimer) clearTimeout(state.killTimer);
+    // Said BEFORE the signal, like every other path that ends a run (the
+    // owner's Stop, a Pause, the token limit, the idle timeout). Without it
+    // finishRun reads the kill as the provider blinking — transient stderr,
+    // no file touched, `endRequested === null` — and starts a REPLACEMENT
+    // child that this drain neither killed nor waits for.
+    state.endRequested = "stop";
     killTree(state.child, "SIGKILL");
     killed.push(state.child);
   }

@@ -28,6 +28,15 @@ import {
 // "opened", nothing touches git or gh. What is under test is the runner's
 // bookkeeping of the pull request across the owner's gestures, which the pure
 // helpers above cannot see.
+
+// The awaited reset in this file's teardown can now legitimately spend the
+// drain's own budget (SETTLE_DRAIN_BUDGET_MS, 5 s) and then up to ~2.75 s in
+// the removal's linear retry backoff — ~7.8 s of vitest's 10 s DEFAULT hook
+// ceiling, and nothing would say so before it bit. The file imports no
+// child_process of its own, so test-timeout-hygiene.test.ts does not require
+// the declaration; its three siblings carry it and so does this one.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const announce = vi.hoisted(() => vi.fn<(run: unknown) => Promise<undefined>>(async () => undefined));
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: announce }));
 const github = vi.hoisted(() => ({
