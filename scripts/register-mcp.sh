@@ -564,6 +564,7 @@ try:
         protected = json.load(f)
     roots = [str(r) for r in protected["pathRoots"]]
     terminators = str(protected["pathTerminators"])
+    boundary = str(protected["tokenBoundary"])
     verb_first = [str(t) for t in protected["verbFirstTokens"]]
     path_first = [str(t) for t in protected["pathFirstTokens"]]
     redirections = [str(p) for p in protected["redirectionPrefixes"]]
@@ -582,15 +583,23 @@ else:
     # command line gets its own glob, because there is no character there to put
     # in a class — that is the `rm -rf ~/clawbox` spelling.
     term_class = "[" + terminators + "]"
+    # The LEFT boundary of a token, so `rm ` is not found inside `confirm ` or
+    # `xterm `. fnmatch's negated class, and the reason `tokenBoundary` is
+    # stored in fnmatch's own syntax: the JavaScript side translates the `!`,
+    # this side splices it in verbatim. Two variants per token, because a
+    # command that STARTS with the verb has no character in front of it and
+    # `fnmatch` matches the whole string.
+    bound_class = "[" + boundary + "]"
     desired_deny = []
     for root in roots:
         for token in verb_first:
-            desired_deny.append(f"*{token}*{root}")
-            desired_deny.append(f"*{token}*{root}{term_class}*")
+            for head in (f"{token}", f"*{bound_class}{token}"):
+                desired_deny.append(f"{head}*{root}")
+                desired_deny.append(f"{head}*{root}{term_class}*")
         for token in path_first:
             # No end-anchored variant: a root at the end of the line has no
-            # token after it.
-            desired_deny.append(f"*{root}{term_class}*{token}*")
+            # token after it, and no start-anchored one: the root is in front.
+            desired_deny.append(f"*{root}{term_class}*{bound_class}{token}*")
         for prefix in redirections:
             desired_deny.append(f"*{prefix}{root}")
             desired_deny.append(f"*{prefix}{root}{term_class}*")

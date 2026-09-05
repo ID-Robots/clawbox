@@ -30,6 +30,30 @@
   ],
   "pathRoots": ["/clawbox", "/llamacpp/models", "/embed/models"],
 
+  "_writableSubpaths": [
+    "The carve-outs inside the ClawBox tree, for PATHS ONLY - a file tool's",
+    "target, or a working directory. `data/` lives inside the checkout on a",
+    "shipped box, so `/clawbox` covers it, and five of its subtrees are",
+    "deliberately writable: src/lib/file-guard.ts DATA_DIR_PUBLIC_SUBTREES names",
+    "them and the Files app shows them. `code_project_init` hands the agent",
+    "absolute paths under data/code-projects and tells it to edit them with its",
+    "own file tools - there is no code_file_write tool - so denying writes there",
+    "would take multi-file web apps off the OpenClaw edition altogether.",
+    "NOT applied to command text. A shell `rm` inside the tree is what cost a",
+    "customer a 3.2 GB download; a code project's files are written by file",
+    "tools, never by `rm`, so the two harnesses go on answering commands the",
+    "same way and only the path-shaped checks carry the exception.",
+    "data/llamacpp and data/embed are absent on purpose: they are the model",
+    "store, and they have roots of their own."
+  ],
+  "writableSubpaths": [
+    "/clawbox/data/webapps",
+    "/clawbox/data/icons",
+    "/clawbox/data/catalog-cache",
+    "/clawbox/data/code-projects",
+    "/clawbox/data/coding-agent-artifacts"
+  ],
+
   "_pathTerminators": [
     "What may follow a root for it to be that directory rather than a longer name.",
     "A root at the very end of the command line counts too - that is the",
@@ -45,6 +69,16 @@
     "('cp ~/clawbox/config/x /tmp/' copies OUT of the tree)."
   ],
   "verbFirstTokens": ["rm ", "unlink ", "shred ", "truncate ", "mv ", "tee "],
+
+  "_tokenBoundary": [
+    "What may come immediately BEFORE a token for it to be that command. The",
+    "trailing space in 'rm ' stops it matching 'rmdir'; without a left boundary",
+    "it still matched inside 'confirm the models', 'xterm -e ls' and",
+    "'grep -rn \"rm \" ~/clawbox/scripts' - three pieces of ordinary work, refused",
+    "by a rule documented as un-liftable. Written as an fnmatch negated class",
+    "because the Hermes side is fnmatch and both sides lowercase first."
+  ],
+  "tokenBoundary": "!a-z0-9_-",
 
   "_pathFirstTokens": [
     "Path-then-destroy spellings: 'cd <protected> && rm <file>', and find's own",

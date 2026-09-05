@@ -157,13 +157,18 @@ d("gateway-pre-start.sh — the protected-path deny hook", () => {
   });
 
   it("says so when the installed copy does not refuse a model-folder delete", () => {
-    // A table that parses and protects nothing: the enable would still succeed
-    // and the boot log would still be clean if nothing exercised the copy.
+    // A table that parses and protects the wrong thing. Deliberately NOT an
+    // empty `pathRoots`: the loader treats that as unusable and falls back to
+    // the compiled-in floor, which would refuse the delete and prove nothing.
+    // The enable would still succeed and the boot log would still be clean if
+    // nothing exercised the copy that landed.
     writeFileSync(
       path.join(root, TABLE_REL),
       JSON.stringify({
-        pathRoots: [],
+        pathRoots: ["/somewhere-else"],
+        writableSubpaths: [],
         pathTerminators: "/ ",
+        tokenBoundary: "!a-z0-9_-",
         verbFirstTokens: ["rm "],
         pathFirstTokens: ["rm "],
         redirectionPrefixes: [">~"],
@@ -190,6 +195,19 @@ d("gateway-pre-start.sh — the protected-path deny hook", () => {
     } finally {
       chmodSync(source, 0o644);
     }
+  });
+
+  it("says so when the config cannot be read, instead of a clean boot", () => {
+    // The false success this whole card is about, one screen further in: the
+    // files land, the config is never written, and the boot log used to be
+    // completely silent — an operator seeing a clean start on a box whose guard
+    // the gateway will never load.
+    writeFileSync(configPath, "{ broken", "utf-8");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(installedFiles()).toContain("index.mjs");
+    expect(r.stderr).toContain("could not enable");
+    expect(r.stderr).toContain("NOT protected");
   });
 
   it("is a no-op on the config once the plugin is enabled", () => {

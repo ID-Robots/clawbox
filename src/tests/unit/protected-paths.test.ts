@@ -12,8 +12,10 @@ import {
 } from "@/tests/fixtures/protected-path-cases";
 import plugin, { onBeforeToolCall } from "../../../scripts/openclaw-plugins/clawbox-path-guard/index.mjs";
 import {
+  COMPILED_IN_FLOOR,
   commandDenyReason,
   foldHome,
+  protectedPathTable,
   toolCallDenyReason,
 } from "../../../scripts/openclaw-plugins/clawbox-path-guard/path-guard.mjs";
 
@@ -240,5 +242,30 @@ describe("OpenClaw — the shapes only a structured hook can see", () => {
 
   it("has no opinion about a tool it does not know", () => {
     expect(onBeforeToolCall({ toolName: "web_search", params: { query: "rm ~/clawbox" } })).toBeUndefined();
+  });
+});
+
+describe("the compiled-in floor", () => {
+  // path-guard.mjs falls back to a small hard-coded table when
+  // config/protected-paths.json cannot be read, because `mcp/lib/guard.ts`
+  // imports it and a throw there would take the whole ClawBox MCP server down —
+  // every device tool, the read-only ones included — over a truncated file.
+  // A floor is only safe while it is a SUBSET of the real thing; one that had
+  // drifted into naming a root the table no longer protects would deny
+  // something nobody decided to deny, silently, on exactly the boxes where
+  // something else is already wrong.
+  it("is a subset of the shipped table", () => {
+    const table = protectedPathTable();
+    expect(table).not.toBe(COMPILED_IN_FLOOR);
+    for (const key of ["pathRoots", "verbFirstTokens", "pathFirstTokens", "redirectionPrefixes"] as const) {
+      for (const value of COMPILED_IN_FLOOR[key]) {
+        expect(table[key], `${key} lost ${value}`).toContain(value);
+      }
+    }
+    expect(table.pathTerminators).toBe(COMPILED_IN_FLOOR.pathTerminators);
+    expect(table.tokenBoundary).toBe(COMPILED_IN_FLOOR.tokenBoundary);
+    // The carve-outs are deliberately EMPTY in the floor: a fallback that
+    // invented an exception would open a hole rather than close one.
+    expect(COMPILED_IN_FLOOR.writableSubpaths).toEqual([]);
   });
 });

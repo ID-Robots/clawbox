@@ -3130,10 +3130,17 @@ plugin_id = os.environ["CLAWBOX_HOOK_PLUGIN_ID"]
 try:
     with open(cfg_path) as f:
         cfg = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
+except (FileNotFoundError, json.JSONDecodeError, OSError):
     # A config this script could not read is one the blocks above already
     # reported on; writing a fresh one from here would discard it.
-    sys.exit(0)
+    #
+    # NON-ZERO, so the caller reports it and clears READY. Exiting 0 here made
+    # the function's own contract false — "READY=1 means the files are on disk
+    # AND the config says the gateway may load them" — on the one box where it
+    # matters: a corrupt openclaw.json left the plugin installed, unenabled, and
+    # the boot log silent, so the operator saw a clean start on a device whose
+    # guard the gateway would never load.
+    sys.exit(1)
 
 plugins = cfg.get("plugins")
 if not isinstance(plugins, dict):

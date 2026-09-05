@@ -27,7 +27,9 @@ import { isProtectedFilePath } from "../../src/lib/file-guard";
 // builtins, so it satisfies the rule at the top of this file.
 import {
   commandDenyReason,
-  toolCallDenyReason,
+  destructiveToken,
+  isProtectedDirectory,
+  pathDenyReason,
 } from "../../scripts/openclaw-plugins/clawbox-path-guard/path-guard.mjs";
 import { ToolError } from "./errors";
 
@@ -138,7 +140,11 @@ export function assertPathAllowed(abs: string): void {
  */
 export function assertWritePathAllowed(abs: string): void {
   assertPathAllowed(abs);
-  const denied = toolCallDenyReason({ toolName: "write", params: { path: abs } }, HOME);
+  // The PATH predicate, not the tool-shaped one: `toolCallDenyReason` drops any
+  // string containing a newline, because a tool PARAMETER may be a file body —
+  // and a filename may legally contain one, so routing a resolved path through
+  // it let `…/models/a\nb.gguf` through.
+  const denied = pathDenyReason(abs, HOME);
   if (!denied) return;
   throw new ToolError(
     "BLOCKED_PATH",
@@ -151,12 +157,22 @@ export function assertWritePathAllowed(abs: string): void {
  * Whether a shell string names a protected path in a destroying spelling.
  * Re-exported so `bash`'s pre-flight and the OpenClaw hook cannot disagree.
  */
-export function commandDeniedByPathGuard(command: string): string | null {
+export function commandDeniedByPathGuard(command: string, cwd?: string): string | null {
   // The SAME home this module expands `~` against, never os.homedir(): the
   // rule folds the resolved home into `~/` before matching, and a guard that
   // folded a different directory than `resolveUserPath` expands would answer
   // about a path nobody named.
-  return commandDenyReason(command, HOME);
+  const inCommand = commandDenyReason(command, HOME);
+  if (inCommand) return inCommand;
+  // THE WORKING DIRECTORY, which `bash` takes and used to throw away. The whole
+  // reason the OpenClaw hook reads `workdir` is that `cd <protected> && rm x`
+  // reaches a text matcher as two tokens it cannot relate — and this tool is
+  // handed the directory as an argument, so the same hole was open here in a
+  // simpler form: `bash({ cwd: "~/clawbox/data/llamacpp/models", command: "rm
+  // -f gemma.gguf" })`.
+  if (!cwd || !isProtectedDirectory(cwd, HOME)) return null;
+  const token = destructiveToken(command, HOME);
+  return token ? `\`${token}\` run from inside ${cwd}` : null;
 }
 
 /** Drop every protected path from a result list (entries, glob hits, matches). */

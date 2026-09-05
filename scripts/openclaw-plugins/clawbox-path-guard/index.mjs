@@ -30,12 +30,28 @@
 // config/protected-paths.json, and src/tests/unit/protected-paths.test.ts runs
 // a single case table through both so they cannot drift.
 //
+// TWO NATIVE CONFINEMENTS EXIST AND ARE THE WRONG SHAPE, named rather than
+// passed over: `tools.fs.workspaceOnly` restricts read/write/edit/apply_patch
+// to the workspace directory, and `tools.exec.applyPatch.workspaceOnly`
+// defaults to TRUE (so `apply_patch` is already confined and this plugin's
+// apply_patch arm is a backstop for a box that turned it off). Neither can
+// express "these two paths, everywhere else free": both confine the agent to
+// `~/.openclaw/workspace`, and the first blocks reads too, which the ruling
+// explicitly does not.
+//
 // NO MATCHER. The registration deliberately does not narrow to a list of tool
-// ids. A matcher is validated against canonical ids and rejects aliases, so a
-// list is a thing that can be wrong in two directions — a tool renamed upstream
-// silently stops being guarded, and an alias in the list fails the whole
-// registration. `toolCallDenyReason` already answers `null` for every tool it
-// does not know, which costs a Set lookup per call and cannot fall behind.
+// ids: a matcher is validated against canonical ids and rejects aliases, so a
+// wrong entry fails the whole registration.
+//
+// THAT IS NOT THE SAME AS "cannot fall behind", and the first draft of this
+// comment claimed it was. `COMMAND_TOOLS` and `FILE_MUTATING_TOOLS` ARE a list
+// of tool ids, and the first version of them had already fallen behind the very
+// core this PR pins: `process` — the tool the exec description itself steers a
+// model to for "input/intervention" — was missing, so `exec(bash, pty,
+// background)` followed by `process write "rm -rf …"` walked straight through.
+// Matching every tool is what makes that a fixable miss rather than a silent
+// one: the handler sees the call, and a tool id nobody has taught it about is
+// the only thing it lets past.
 
 import { toolCallDenyReason, denyMessage } from "./path-guard.mjs";
 

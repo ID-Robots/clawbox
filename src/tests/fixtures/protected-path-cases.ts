@@ -178,6 +178,26 @@ export const PROTECTED_PATH_COMMAND_CASES: ProtectedPathCommandCase[] = [
     denied: false,
     why: "the HF cache is deliberately outside the rule — deleting it is the documented repair for a corrupt download",
   },
+  {
+    command: "echo a > ~/clawbox-backup/x; echo b > ~/clawbox/data/config.json",
+    denied: true,
+    why: "a redirection into the tree AFTER one into a look-alike sibling — the first-occurrence-only rule let this through on one edition and denied it on the other",
+  },
+  {
+    command: "echo confirm the models && ls ~/clawbox/data/llamacpp/models",
+    denied: false,
+    why: "`rm ` inside `confirm ` is not the command rm; a token needs a left boundary as well as its trailing space",
+  },
+  {
+    command: "xterm -e ls ~/clawbox",
+    denied: false,
+    why: "the same, inside a program's name",
+  },
+  {
+    command: "/bin/rm ~/clawbox/data/x",
+    denied: true,
+    why: "…and a real `rm` reached by its absolute path still is one: `/` is a boundary",
+  },
 ];
 
 export interface ProtectedPathToolCase {
@@ -258,5 +278,41 @@ export const PROTECTED_PATH_TOOL_CASES: ProtectedPathToolCase[] = [
     params: { path: "~/clawbox/data/llamacpp/models/x.gguf" },
     denied: false,
     why: "the ruling forbids destroying these paths, not looking at them",
+  },
+  {
+    toolName: "process",
+    params: { action: "write", sessionId: "s1", data: "rm -rf ~/clawbox/data/llamacpp/models\n" },
+    denied: true,
+    why: "the two-call bypass: `exec` starts a pty session naming no protected path, and `process` types the delete into it — the core's own exec description steers a model there",
+  },
+  {
+    toolName: "terminal",
+    params: { input: "rm -rf ~/clawbox/data/llamacpp/models" },
+    denied: true,
+    why: "the shared operator terminal is a second door into a live shell",
+  },
+  {
+    toolName: "write",
+    params: { path: "/home/clawbox/clawbox/data/code-projects/todo/index.html", content: "<html>" },
+    denied: false,
+    why: "THE REGRESSION: data/ is inside the checkout, and code_project_init hands the agent absolute paths there and tells it to edit them with its own file tools — denying this took multi-file web apps off the box",
+  },
+  {
+    toolName: "write",
+    params: { path: "/home/clawbox/clawbox/data/webapps/todo/index.html", content: "<html>" },
+    denied: false,
+    why: "the other DATA_DIR public subtrees are writable for the same reason",
+  },
+  {
+    toolName: "write",
+    params: { path: "/home/clawbox/clawbox/data/config.json", content: "{}" },
+    denied: true,
+    why: "the carve-outs are the named subtrees, not data/ itself",
+  },
+  {
+    toolName: "write",
+    params: { path: "/home/clawbox/clawbox/data/llamacpp/models/x.gguf", content: "x" },
+    denied: true,
+    why: "and never the model store, whichever list you read it from",
   },
 ];
