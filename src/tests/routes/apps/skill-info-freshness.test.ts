@@ -157,6 +157,37 @@ describe("skill-info freshness", () => {
     expect(exec, "and no fourth scan was needed").toHaveBeenCalledTimes(3);
   });
 
+  it("does not re-run a failing scan on every request when NOTHING is cached", async () => {
+    // The cold-start case: a box whose CLI is broken from boot has no cached
+    // list for the freshness stamp to belong to, so without a remembered
+    // failure every request started another scan — each with a 30 s timeout,
+    // for as long as the box stayed broken.
+    exec.mockRejectedValue(new Error("openclaw: command not found"));
+    expect((await GET(get())).status).toBe(503);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(exec).toHaveBeenCalledTimes(1);
+
+    advance(5_000);
+    expect((await GET(get())).status, "still answered, still 503").toBe(503);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(exec, "inside the failure window").toHaveBeenCalledTimes(1);
+
+    advance(31_000);
+    expect((await GET(get())).status).toBe(503);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(exec, "past the failure window").toHaveBeenCalledTimes(2);
+
+    // An install or a toggle is a reason to look again now, not in 30 s.
+    exec.mockResolvedValue(listing(true));
+    await POST(new Request("http://localhost/setup-api/apps/settings", {
+      method: "POST",
+      body: JSON.stringify({ appId: "test-skill", settings: { _setEnabled: true } }),
+    }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(exec).toHaveBeenCalledTimes(3);
+    expect((await (await GET(get())).json())).toHaveLength(1);
+  });
+
   it("does not re-run a failing scan on every single request", async () => {
     await GET(get());
     expect(exec).toHaveBeenCalledTimes(1);

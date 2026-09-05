@@ -85,6 +85,14 @@ let cachedSkills: SkillInfo[] | null = null;
 let cacheTime = 0;
 /** False when `cacheTime` was stamped by a FAILED scan rather than a good one. */
 let cacheAnswered = true;
+/**
+ * The last failed scan, remembered even when there is NOTHING cached — the
+ * cold-start case, and the one that matters most: a box whose CLI is broken
+ * from boot has no cached list for `cacheTime` to belong to, so every request
+ * would start another 30 s-timeout scan for as long as it stayed broken.
+ * Cleared by a success and by every invalidation.
+ */
+let lastFailure: { at: number; message: string } | null = null;
 let inFlightLoad: { epoch: number; promise: Promise<SkillInfo[]> } | null = null;
 /**
  * Invalidation count. A scan that STARTED before the last invalidation is
@@ -133,19 +141,21 @@ function load(): Promise<SkillInfo[]> {
         cachedSkills = skills;
         cacheTime = Date.now();
         cacheAnswered = true;
+        lastFailure = null;
       }
       return skills;
     })
     .catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn("[skill-info] Failed to load skills:", msg);
-      if (cachedSkills) {
-        if (epoch === scanEpoch) {
+      if (epoch === scanEpoch) {
+        lastFailure = { at: Date.now(), message: msg };
+        if (cachedSkills) {
           cacheTime = Date.now();
           cacheAnswered = false;
         }
-        return cachedSkills;
       }
+      if (cachedSkills) return cachedSkills;
       throw new SkillListUnavailableError(msg);
     })
     .finally(() => {
@@ -161,6 +171,12 @@ function load(): Promise<SkillInfo[]> {
  * awaited only when nothing has been scanned yet since boot.
  */
 export async function listSkills(): Promise<SkillInfo[]> {
+  if (!cachedSkills && withinFailureWindow()) {
+    // Nothing to serve and the CLI just refused. Answer with what it said
+    // rather than spending another 30 s-timeout spawn on it; the route turns
+    // this into the same 503 the caller would have got anyway.
+    throw new SkillListUnavailableError(lastFailure!.message);
+  }
   if (cachedSkills) {
     const age = Date.now() - cacheTime;
     // `age >= 0` because Date.now() is wall-clock: an RTC corrected BACKWARDS
@@ -231,10 +247,20 @@ export async function findSkill(appId: string): Promise<SkillInfo | null> {
  * 0, so the next reader is served the old list at once and starts a scan that
  * can see the change.
  */
+/** Is a remembered failure still inside its (short) window? */
+function withinFailureWindow(): boolean {
+  if (!lastFailure) return false;
+  const age = Date.now() - lastFailure.at;
+  return age >= 0 && age < FAILURE_STALE_AFTER_MS;
+}
+
 export function refreshSkillsCache(): void {
   if (openclawIsAbsent()) return;
   cacheTime = 0;
   cacheAnswered = true;
+  // Something on this box just changed; a failure remembered from before it is
+  // no reason to refuse to look.
+  lastFailure = null;
   scanEpoch += 1;
   void load().catch(() => {});
 }
