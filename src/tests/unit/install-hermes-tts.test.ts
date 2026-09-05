@@ -391,14 +391,36 @@ describe.skipIf(!hasBash)("the on-device voice is registered with Hermes nativel
         .toMatch(/no on-device engine \(this board declines Kokoro[^)]*\)/);
       // What an unread selection can be hiding, and the one command that
       // settles it.
+      expect(res.out).toMatch(/falls back to its factory Edge cloud/);
       expect(res.out).toMatch(/--step openclaw_tts/);
     });
 
-    it("says nothing about a missing engine on that path when the engine is there", () => {
+    it("says the same about the selection when the engine IS there", () => {
+      // The Edge risk is the unread SELECTION's, not the engine's: a box with
+      // a perfectly good Kokoro whose `tts.provider` could not be read is
+      // equally on Microsoft's cloud if that key is unset, and equally fixed by
+      // re-running this step. Only the engine clause is conditional.
       const res = runStep("hermes", { hermesReadFails: true, voiceExit: 0, ttsStatus: "KOKORO=ready\n" });
 
       expect(res.out).toMatch(/could not read tts.provider/);
+      expect(res.out, `the operator was told nothing about the unread selection:\n${res.out}`)
+        .toMatch(/falls back to its factory Edge cloud/);
+      expect(res.out).toMatch(/--step openclaw_tts/);
       expect(res.out).not.toMatch(/no on-device engine/);
+    });
+
+    it("says what a dual box's Hermes voice actually depends on", () => {
+      // `getActiveHarness()` answers the STORED harness on a licensed dual box,
+      // and `setActiveHarness` may store "hermes" — so the link does wire the
+      // Hermes voice there. Telling that operator to go and do by hand what
+      // happens by itself is the mirror of the false promise this Note exists
+      // to avoid.
+      const res = runStep("dual", { voiceExit: 13, ttsStatus: "KOKORO=skipped:no-cuda\n" });
+
+      expect(res.out).toMatch(/stays SILENT/);
+      expect(res.out, `the dual note still claims nothing wires it:\n${res.out}`)
+        .toMatch(/while Hermes is the active harness/);
+      expect(res.out).not.toMatch(/nothing selects the Hermes cloud voice automatically/);
     });
 
     it("still leaves an owner's own provider alone when there is no engine", () => {

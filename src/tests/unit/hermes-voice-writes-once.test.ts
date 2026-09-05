@@ -25,6 +25,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const cliMock = vi.hoisted(() => vi.fn());
 const hasEngineMock = vi.hoisted(() => vi.fn());
+const probeEngineMock = vi.hoisted(() => vi.fn());
 const runnableMock = vi.hoisted(() => vi.fn());
 const inventoryMock = vi.hoisted(() => vi.fn());
 /** What `hermes config get <key>` answers; a missing key is unset. */
@@ -40,6 +41,7 @@ vi.mock("@/lib/hermes-config-cache", () => ({
 vi.mock("@/lib/local-models", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/local-models")>()),
   hasLocalTtsEngine: hasEngineMock,
+  probeLocalTtsEngine: probeEngineMock,
   localTtsCommandRunnable: runnableMock,
   buildTtsInventory: inventoryMock,
 }));
@@ -94,6 +96,8 @@ beforeEach(() => {
   cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
   hasEngineMock.mockReset();
   hasEngineMock.mockResolvedValue(false);
+  probeEngineMock.mockReset();
+  probeEngineMock.mockResolvedValue(false);
   runnableMock.mockReset();
   runnableMock.mockResolvedValue(true);
   inventoryMock.mockReset();
@@ -160,21 +164,22 @@ describe("linking a box writes the cloud endpoint once", () => {
     expect(written.indexOf("tts.provider")).toBeGreaterThan(written.indexOf(CLOUD_BASE_URL));
   });
 
-  it("refreshes the rotated credential once on a box that speaks for itself", async () => {
-    // The refresh is deliberately unconditional on an entitled box whose cloud
-    // slot is ours — the portal rotates the token on every re-link and this is
-    // the only writer of it on this edition — so it runs even where the
-    // on-device engine is what gets selected. Once, though.
+  it("selects the on-device engine without spending writes on a cloud route it will not use", async () => {
+    // The refresh is for the provider that SPEAKS through the slot. A box that
+    // has its own voice pays neither the three `hermes config set` spawns nor
+    // the proxy URL and device token parked in Hermes' generic OpenAI slot.
     box.config = {
       [`tts.providers.${HERMES_LOCAL_TTS_PROVIDER}.type`]: "command",
       [`tts.providers.${HERMES_LOCAL_TTS_PROVIDER}.command`]: SCRIPT,
     };
-    hasEngineMock.mockResolvedValue(true);
+    probeEngineMock.mockResolvedValue(true);
 
     await applyClawaiToHermes(TOKEN, CLAWBOX_AI_SPEECH_TIER);
 
     const written = keysWritten();
-    expect(written.filter((k) => k === CLOUD_BASE_URL)).toHaveLength(1);
     expect(written.filter((k) => k === "tts.provider")).toHaveLength(1);
+    // ...and the cloud slot is left out of it entirely: this box speaks for
+    // itself, so there is no route to keep fresh.
+    expect(written.filter((k) => k.startsWith(`tts.${HERMES_CLOUD_TTS_PROVIDER}.`))).toEqual([]);
   });
 });

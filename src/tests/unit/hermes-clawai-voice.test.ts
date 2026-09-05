@@ -21,9 +21,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const cliMock = vi.hoisted(() => vi.fn());
 const readVoiceMock = vi.hoisted(() => vi.fn());
 const selectProviderMock = vi.hoisted(() => vi.fn());
-const hasEngineMock = vi.hoisted(() => vi.fn());
+const probeEngineMock = vi.hoisted(() => vi.fn());
 const runnableMock = vi.hoisted(() => vi.fn());
-const pendingMock = vi.hoisted(() => vi.fn());
 const writeCloudMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
@@ -46,11 +45,10 @@ vi.mock("@/lib/hermes-tts", async (importOriginal) => ({
   readHermesVoice: readVoiceMock,
   selectHermesProvider: selectProviderMock,
   writeHermesCloudTarget: writeCloudMock,
-  hermesVoiceReadPending: pendingMock,
 }));
 vi.mock("@/lib/local-models", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/local-models")>()),
-  hasLocalTtsEngine: hasEngineMock,
+  probeLocalTtsEngine: probeEngineMock,
   localTtsCommandRunnable: runnableMock,
 }));
 // Every case here reaches `applyClawaiToHermes`, which resolves the vision
@@ -79,7 +77,13 @@ const TOKEN = "claw_test_token";
  */
 const ENTITLED = CLAWBOX_AI_SPEECH_TIER;
 
-/** What `readHermesVoice()` answers; `provider` and `localRegistered` decide. */
+/**
+ * What `readHermesVoice()` answers; `provider` and `localRegistered` decide.
+ *
+ * `unread` is every read ANSWERED — the ordinary box. The cases that matter
+ * most here override one flag at a time, because `hermes config get` exits the
+ * same way for an unset key and for one that never answered.
+ */
 function voice(provider: string | null) {
   return {
     provider,
@@ -89,6 +93,7 @@ function voice(provider: string | null) {
     cloudModel: null,
     cloudBaseUrl: null,
     cloudHasKey: false,
+    unread: { provider: false, cloudRoute: false, localProvider: false },
   };
 }
 
@@ -97,14 +102,13 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     cliMock.mockReset();
     readVoiceMock.mockReset();
     selectProviderMock.mockReset();
-    hasEngineMock.mockReset();
+    probeEngineMock.mockReset();
     cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
     selectProviderMock.mockResolvedValue(undefined);
     writeCloudMock.mockReset();
     writeCloudMock.mockResolvedValue(undefined);
-    hasEngineMock.mockResolvedValue(false);
+    probeEngineMock.mockResolvedValue(false);
     runnableMock.mockResolvedValue(true);
-    pendingMock.mockReturnValue(false);
   });
 
   it("selects the cloud voice when nothing has been chosen and there is no engine", async () => {
@@ -128,7 +132,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
   it("replaces an on-device selection that has no engine behind it", async () => {
     // The state the box was measured in: selected, and mute.
     readVoiceMock.mockResolvedValue(voice(HERMES_LOCAL_TTS_PROVIDER));
-    hasEngineMock.mockResolvedValue(false);
+    probeEngineMock.mockResolvedValue(false);
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
@@ -139,7 +143,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     // Linking a box is not a reason to move an owner off the on-device engine
     // — that engine is the product's whole claim.
     readVoiceMock.mockResolvedValue(voice(HERMES_LOCAL_TTS_PROVIDER));
-    hasEngineMock.mockResolvedValue(true);
+    probeEngineMock.mockResolvedValue(true);
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
@@ -153,7 +157,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     // words off the device would be permanent — the next step_openclaw_tts
     // sees `openai` and preserves it as the owner's choice for good.
     readVoiceMock.mockResolvedValue(voice(null));
-    hasEngineMock.mockResolvedValue(true);
+    probeEngineMock.mockResolvedValue(true);
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
@@ -165,7 +169,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     // `command`, so Hermes would refuse the provider outright. Registering it
     // is install.sh's job; the cloud is the working answer until it has run.
     readVoiceMock.mockResolvedValue({ ...voice(null), localRegistered: false });
-    hasEngineMock.mockResolvedValue(true);
+    probeEngineMock.mockResolvedValue(true);
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
@@ -206,6 +210,110 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     expect(selectProviderMock).not.toHaveBeenCalled();
   });
 
+  it("does not take over a speech route whose read never answered", async () => {
+    // `hermes config get` exits the same way for an unset key and for one an
+    // OOM-killed Python start never answered, and `readHermesVoice` reports
+    // both as `cloudBaseUrl: null`. Reading the second as "unset, so ours"
+    // hands an owner's own speech server, their key and their model to our
+    // proxy on one slow read, with `tts.provider` and every panel unchanged.
+    // Fail closed: not refreshing a token costs a 401 the Voice panel fixes.
+    readVoiceMock.mockResolvedValue({
+      ...voice("openai"),
+      unread: { provider: false, cloudRoute: true, localProvider: false },
+    });
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(writeCloudMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
+  });
+
+  it("does not move a box off its own voice when the definition could not be read", async () => {
+    // The mirror, and the more expensive one: an unread
+    // `tts.providers.clawbox-local.type` reads as "this box has no on-device
+    // voice", and moving it off is PERMANENT — the next step_openclaw_tts sees
+    // `openai`, falls into its "already set" arm and preserves it for good. A
+    // box that had never sent a syllable off-device would speak every reply
+    // through the proxy after one timed-out read.
+    readVoiceMock.mockResolvedValue({
+      ...voice(HERMES_LOCAL_TTS_PROVIDER),
+      // What an unread definition really looks like: the reads that would have
+      // filled these two are the ones that did not answer.
+      localRegistered: false,
+      localCommand: null,
+      unread: { provider: false, cloudRoute: false, localProvider: true },
+    });
+    probeEngineMock.mockResolvedValue(true);
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(selectProviderMock).not.toHaveBeenCalled();
+  });
+
+  it("does not move a box off its own voice when the engine probe could not answer", async () => {
+    // Same end state reached without any Hermes read failing: a wedged user
+    // systemd bus makes `systemctl --user is-enabled` answer nothing, which as
+    // a plain boolean is "no engine". `probeLocalTtsEngine` says `null` — "I
+    // could not ask" — and over a `clawbox-local` selection that is not a
+    // reason to send the owner's words off the device.
+    readVoiceMock.mockResolvedValue(voice(HERMES_LOCAL_TTS_PROVIDER));
+    probeEngineMock.mockResolvedValue(null);
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(selectProviderMock).not.toHaveBeenCalled();
+  });
+
+  it("still reaches the cloud when the engine cannot be asked and nothing was chosen", async () => {
+    // The guard above is only for a box already ON its own voice. An unset key
+    // is not a selection to protect — to Hermes it IS Microsoft's Edge cloud —
+    // so leaving it alone would be the worse outcome of the two.
+    readVoiceMock.mockResolvedValue(voice(null));
+    probeEngineMock.mockResolvedValue(null);
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(selectProviderMock).toHaveBeenCalledWith("cloud");
+  });
+
+  it("still selects the on-device engine when the cloud credential will not write", async () => {
+    // The cloud target is the CLOUD path's definition write; nothing about
+    // selecting Kokoro depends on it. Written before the engine question, one
+    // failed `hermes config set tts.openai.*` abandoned the whole decision and
+    // left a box with a working engine on an unset key — which is Edge.
+    readVoiceMock.mockResolvedValue(voice(null));
+    probeEngineMock.mockResolvedValue(true);
+    writeCloudMock.mockRejectedValue(new HermesTtsWriteError("Could not write tts.openai.base_url."));
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(selectProviderMock).toHaveBeenCalledWith("local");
+  });
+
+  it("does not park our proxy and token in the slot of a box speaking with something else", async () => {
+    // An owner on ElevenLabs: the refresh exists for the provider that speaks
+    // THROUGH the slot, and three `hermes config set` spawns inside the link
+    // for a route this box will never use would also leave the ClawBox proxy
+    // and the device credential in Hermes' generic OpenAI slot.
+    readVoiceMock.mockResolvedValue(voice("elevenlabs"));
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(writeCloudMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
+  });
+
+  it("writes to the same route it recognises as its own", async () => {
+    // `ownRoute` compares `tts.openai.base_url` with `hermes-clawai`'s
+    // CLAWBOX_AI_PROXY_URL while `writeHermesCloudTarget` writes the one
+    // `harness/credentials` exports. They are the same value only because that
+    // module re-exports this one; a copy would silently stop us recognising
+    // our own route and re-open the rotated-token hole.
+    const { CLAWBOX_AI_PROXY_URL: written } = await import("@/lib/harness/credentials");
+
+    expect(written).toBe(CLAWBOX_AI_PROXY_URL);
+  });
+
   it("does not select a cloud voice it was not allowed to point", async () => {
     // Nothing on-device, and the cloud slot is the owner's. Selecting `openai`
     // here would speak through THEIR endpoint with THEIR key.
@@ -235,7 +343,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     // refuse. Selecting it would leave an entitled box permanently mute with
     // the cloud voice it holds a credential for one write away.
     readVoiceMock.mockResolvedValue(voice(null));
-    hasEngineMock.mockResolvedValue(true);
+    probeEngineMock.mockResolvedValue(true);
     runnableMock.mockResolvedValue(false);
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
@@ -274,8 +382,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     // owner's ElevenLabs with the cloud, silently. The shell half of this same
     // change refuses to make that mistake at length; this is the seam the
     // module already provides for asking which of the two it holds.
-    readVoiceMock.mockResolvedValue(voice(null));
-    pendingMock.mockReturnValue(true);
+    readVoiceMock.mockResolvedValue({ ...voice(null), unread: { provider: true, cloudRoute: false, localProvider: false } });
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 

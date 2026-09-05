@@ -248,6 +248,22 @@ export interface UnitState {
   enabled: boolean;
   /** `is-active` says "failed": it exited with an error, it is not merely stopped. */
   failed: boolean;
+  /**
+   * Did systemd ANSWER, or did the question fail?
+   *
+   * `is-enabled` prints a word for every unit it knows about and an error
+   * string naming the missing file for one it does not — so an EMPTY answer is
+   * neither: a 5 s timeout, a SIGKILL, or "Failed to connect to bus" on a
+   * wedged user bus, all of which arrive here as `present: false`.
+   *
+   * A cosmetic false negative is right for a panel that reloads. It is wrong
+   * for a writer that runs once: the ClawBox AI link path reads this to decide
+   * whether a box can still speak for itself, and moving it off its on-device
+   * voice is permanent (`step_openclaw_tts` then preserves the new value as
+   * the owner's choice). That caller asks `probeLocalTtsEngine`, which reports
+   * "could not ask" rather than "no".
+   */
+  answered: boolean;
 }
 
 export async function readUnitState(unit: string, scope: "user" | "system"): Promise<UnitState> {
@@ -275,6 +291,9 @@ export async function readUnitState(unit: string, scope: "user" | "system"): Pro
     active: activeWord === "active",
     enabled: ["enabled", "enabled-runtime", "static", "alias", "indirect"].includes(enabledWord),
     failed: activeWord === "failed",
+    // An error string naming the missing unit file IS an answer — "absent" —
+    // which is exactly what `present` reads it as above. Silence is not.
+    answered: enabledWord !== "",
   };
 }
 
@@ -381,35 +400,59 @@ export function friendlyModelName(raw: string | null | undefined): string | null
 }
 
 /**
- * Does this box have an on-device speech engine?
+ * THE rule: does this box have an on-device speech engine?
  *
  * BOTH the stamp and the unit. The weights alone are not an installation: on
  * the loop's own test box the 82M Kokoro weights sit in the HuggingFace cache
  * from a run that failed afterwards, with no unit and no stamp. Reporting that
- * as installed is precisely the lie this tab removes.
+ * as installed is precisely the lie the Voice tab removes.
  *
- * Lives HERE, beside `kokoroEntry`, and `kokoroEntry` calls it — the rule is
- * written once, so the answer the Voice panel gives and the answer the ClawBox
- * AI link path acts on cannot drift. A module of its own would have been a
- * second copy of the rule, which is the thing being prevented.
- *
- * Never throws: a probe that cannot run answers "no engine", which points the
- * box at the cloud voice it has a credential for rather than leaving it mute.
+ * Written ONCE, here, beside `kokoroEntry`: the panel's row, the chat turn's
+ * spoken-reply capability and the ClawBox AI link path all reach it, so they
+ * cannot drift into giving one box two answers. Not exported — the callers
+ * want one of the two functions below, which do the reading as well.
  */
-export function localTtsEngineInstalled(stamped: boolean, unitPresent: boolean): boolean {
+function localTtsEngineInstalled(stamped: boolean, unitPresent: boolean): boolean {
   return stamped && unitPresent;
 }
 
-export async function hasLocalTtsEngine(): Promise<boolean> {
+/**
+ * The rule, over a fresh sample, with "I could not ask" kept distinct from "no".
+ *
+ * `null` means the question failed — a wedged user systemd bus, a 5 s timeout,
+ * a SIGKILL — on a box that does hold the Kokoro stamp, so nothing here is
+ * evidence either way. Only a caller whose write is PERMANENT needs that
+ * distinction, and there is exactly one: the ClawBox AI link path moves a box
+ * off its on-device voice for good (`step_openclaw_tts` afterwards sees the
+ * new value and preserves it as the owner's choice), so a false negative there
+ * costs the owner the engine they paid for. Everything else wants
+ * `hasLocalTtsEngine` and its fail-closed `false`.
+ *
+ * No stamp and no answer is still a real `false`: the stamp is a required half
+ * of the rule and `exists()` answers it on its own.
+ */
+export async function probeLocalTtsEngine(): Promise<boolean | null> {
   try {
     const [stamped, unit] = await Promise.all([
       exists(KOKORO_STAMP),
       readUnitState(KOKORO_UNIT, "user"),
     ]);
+    if (!unit.answered) return stamped ? null : false;
     return localTtsEngineInstalled(stamped, unit.present);
   } catch {
-    return false;
+    return null;
   }
+}
+
+/**
+ * Does this box have an on-device speech engine, fail-closed?
+ *
+ * "Could not ask" answers "no engine", which for a panel is a cosmetic false
+ * negative that the next load corrects, and for the chat turn is one reply
+ * without a player rather than a player that plays nothing.
+ */
+export async function hasLocalTtsEngine(): Promise<boolean> {
+  return (await probeLocalTtsEngine()) === true;
 }
 
 async function kokoroEntry(): Promise<LocalModelEntry> {

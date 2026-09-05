@@ -3807,12 +3807,16 @@ step_openclaw_tts() {
           # step that can leave `tts.provider` UNSET on a first install, and an
           # unset key is not silence: `tools/tts_tool.py` resolves
           # `(tts_config.get("provider") or DEFAULT_PROVIDER)` with
-          # DEFAULT_PROVIDER = "edge", so it is Microsoft's cloud voice. The
-          # engine verdict is already in hand; on this path it is the only
-          # thing this step can still tell the operator.
+          # DEFAULT_PROVIDER = "edge", so it is Microsoft's cloud voice.
+          #
+          # Said whatever the ENGINE did, because the Edge risk does not depend
+          # on it: a box with a perfectly good Kokoro whose selection could not
+          # be read is equally on Edge, and equally fixed by re-running this
+          # step. Only the engine clause below is conditional.
+          echo "           If that selection is in fact unset, Hermes falls back to its factory Edge cloud rather than staying silent. Re-run once the CLI answers:" >&2
+          echo "           sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
           if [ "$KOKORO_HAVE" != true ]; then
-            echo "           This box also has no on-device engine ($KOKORO_REASON). If the unread selection is unset, Hermes falls back to its factory Edge cloud rather than staying silent. Re-run once the CLI answers:" >&2
-            echo "           sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
+            echo "           This box also has no on-device engine ($KOKORO_REASON)." >&2
           fi
         else
         case "$CURRENT_HERMES_TTS" in
@@ -3863,13 +3867,17 @@ step_openclaw_tts() {
               if [ "$KOKORO_HAVE" != true ]; then
                 # Qualified by SKU. `applyClawaiToHermes` — the only writer of
                 # the Hermes cloud voice — runs where `getActiveHarness()`
-                # answers "hermes", which a dual box does not: there the Hermes
-                # harness's `tts.provider` has no automatic writer at all, and
-                # promising one would be a false success in an install log.
+                # answers "hermes". On a hermes box that is always; on a dual
+                # box it is whichever harness the owner has switched to (a
+                # LICENSED dual box unlocks the switcher, so `getActiveHarness`
+                # answers the stored value, and an unlicensed one degrades to
+                # openclaw), so the link wires the Hermes voice there only while
+                # Hermes is the one running. Promising it unconditionally would
+                # be a false success in an install log.
                 if is_hermes_edition; then
                   echo "  Note: this box has no on-device engine ($KOKORO_REASON), so its Hermes voice stays SILENT until ClawBox AI is linked on a plan that includes cloud speech. The $HERMES_TTS_PROVIDER selection is kept deliberately: clearing it would hand the box to Hermes' factory Edge cloud." >&2
                 else
-                  echo "  Note: this box has no on-device engine ($KOKORO_REASON), so its Hermes voice stays SILENT. On a dual box nothing selects the Hermes cloud voice automatically — set it from Settings -> Voice. The $HERMES_TTS_PROVIDER selection is kept deliberately: clearing it would hand the box to Hermes' factory Edge cloud." >&2
+                  echo "  Note: this box has no on-device engine ($KOKORO_REASON), so its Hermes voice stays SILENT. On a dual box it is wired when ClawBox AI is linked while Hermes is the active harness, and can always be set from Settings -> Voice. The $HERMES_TTS_PROVIDER selection is kept deliberately: clearing it would hand the box to Hermes' factory Edge cloud." >&2
                 fi
               fi
             else

@@ -92,6 +92,29 @@ export interface HermesVoiceProbe {
    * under a panel calling it ready.
    */
   cloudHasKey: boolean;
+  /**
+   * Which of these reads did NOT answer, as opposed to answering "unset".
+   *
+   * `hermes config get` exits the same way for an unset key and for a read
+   * that never completed — a 10 s timeout, an OOM-killed Python start on a
+   * loaded Jetson — and every field above collapses both into `null`/`false`.
+   * A page that re-fetches can live with that; a writer that runs ONCE cannot,
+   * because each of these keys decides something it cannot take back:
+   *
+   *   - `provider`     — replacing a choice we could not read.
+   *   - `cloudRoute`   — `tts.openai` is Hermes' GENERIC OpenAI-compatible
+   *                      slot. An unread empty string read as "unset, so ours"
+   *                      overwrites an owner's own speech server, their key and
+   *                      their model, with every panel unchanged.
+   *   - `localProvider`— an unread definition read as "this box has no
+   *                      on-device voice" sends a working box off-device for
+   *                      good: `step_openclaw_tts` then sees `openai` and
+   *                      preserves it as the owner's choice.
+   *
+   * Free to compute: `hermesConfigReadPending` reads the memo the reads above
+   * have just filled, and spawns nothing.
+   */
+  unread: { provider: boolean; cloudRoute: boolean; localProvider: boolean };
 }
 
 function trimmed(value: string | undefined): string | null {
@@ -122,6 +145,15 @@ export async function readHermesVoice(): Promise<HermesVoiceProbe> {
     cloudModel: trimmed(values[KEYS.cloudModel]),
     cloudBaseUrl: trimmed(values[KEYS.cloudBaseUrl]),
     cloudHasKey: trimmed(values[KEYS.cloudApiKey]) !== null,
+    unread: {
+      provider: hermesConfigReadPending(KEYS.provider),
+      cloudRoute: hermesConfigReadPending(KEYS.cloudBaseUrl),
+      // Either half: the type and the command are one definition, and a box
+      // whose `type` answered `command` while the command string timed out is
+      // as unknown as one where neither answered.
+      localProvider: hermesConfigReadPending(KEYS.localType)
+        || hermesConfigReadPending(KEYS.localCommand),
+    },
   };
 }
 
@@ -519,19 +551,6 @@ export async function hermesSpeaksReplies(): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-/**
- * Did the read of the SELECTION alone fail to answer?
- *
- * The narrow sibling of `hermesVoiceProbePending`, for a caller whose whole
- * decision rests on `tts.provider`. The aggregate above deliberately
- * over-reports across five keys because a PAGE re-fetches; a writer that runs
- * once — the ClawBox AI link path — would abandon the box over a key it never
- * consults, and nothing re-runs it.
- */
-export function hermesVoiceReadPending(): boolean {
-  return hermesConfigReadPending(KEYS.provider);
 }
 
 /**
