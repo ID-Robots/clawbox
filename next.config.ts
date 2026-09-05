@@ -73,12 +73,46 @@ const nextConfig: NextConfig = {
   // for this build's entry. Narrowing the sweep is a separate change: parts of
   // it are load-bearing today (`.next/standalone/scripts` comes from it, and
   // system-profile.ts resolves scripts/ from the process cwd).
+  //
+  // `.git` is in that 6186-file list too — 88 MB of it on the OpenClaw box,
+  // measured 2026-09-05 — and unlike the middleware half it CAN be excluded
+  // here. Read out of the installed next@16.3.3 in this checkout (TASK-692),
+  // because the paragraph above led a review to the opposite conclusion:
+  //
+  //   * next-trace-entrypoints-plugin.js keys `entryNameFilesMap` by
+  //     `entrypoint.name` for EVERY server-compiler entrypoint, not only route
+  //     entries, so `instrumentation` has an entry in it.
+  //   * collect-build-traces.js iterates that map and applies these globs to
+  //     each `.nft.json`, skipping only static pages and `edgeRuntimeRoutes` —
+  //     which is exactly why MIDDLEWARE keeps its `data/` entry and the
+  //     server-compiler traces do not.
+  //   * `picomatch("*", { dot: true, contains: true })("instrumentation")` is
+  //     `true`, and `.git/**` matches `.git/objects/...` under the same
+  //     options. Both checked with the vendored matcher.
+  //   * build/utils.js copies the standalone tree FROM those lists, so an
+  //     entry dropped here is a file never copied.
+  //
+  // So `.git` is excluded at the source rather than deleted afterwards. What
+  // is NOT measured: a real `next build` on a box with this line in place —
+  // that is device work. scripts/postbuild.sh therefore still sweeps `.git`
+  // and still FAILS the build if a copy survives, which is the post-condition
+  // the suites pin; this line is meant to make that sweep find nothing.
+  //
+  // Its companion, the checkout's own `.env`, genuinely has no switch: Next
+  // copies `.env` and `.env.production` ITSELF, AFTER the trace, in
+  // writeStandaloneDirectory() (next/dist/build/index.js) — nothing on that
+  // path reads this config. On a box that file is 0600 and holds
+  // GOOGLE_OAUTH_CLIENT_SECRET and, where install.sh was given one,
+  // CLAWBOX_AI_API_KEY, so the copy is removed from the build artifact and its
+  // survival fails the build. Nothing loses by it: systemd hands the real file
+  // to clawbox-setup as an EnvironmentFile and @next/env never overwrites a
+  // variable that is already in the environment.
   outputFileTracingExcludes: {
     // No "./" prefix: Next matches these globs relative to the tracing root,
     // and "./data/**" silently matched nothing — the build kept dying on
     // data/webapps/<app>/index.html whenever a webapp was created or removed
     // while it ran.
-    "*": ["data/**", "**/data/webapps/**", "**/data/code-projects/**"],
+    "*": ["data/**", "**/data/webapps/**", "**/data/code-projects/**", ".git/**"],
   },
   outputFileTracingIncludes: {
     "/setup-api/pets/thumb": [
