@@ -36,7 +36,7 @@ import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
 import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
-import { buildSkillChangeMessage } from '@/lib/skill-change-message'
+import { SKILL_CHANGE_EVENT, buildSkillChangeMessage, type SkillChangeEvent } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
 // ── The harness transport ──
@@ -4723,7 +4723,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // answer is the confirmation the overlay was standing in for, and it is a
     // truthful one — it comes from the session that now has the skill.
     const skillHandler = (e: Event) => {
-      const detail = ((e as CustomEvent).detail || {}) as { action?: string; name?: string; id?: string }
+      // The shared type, not a restatement of three of its fields: the local
+      // cast used to omit `kind`, which survived only because the object was
+      // handed on by reference — one destructure away from every webapp
+      // removal saying "skill" again with the whole suite green.
+      const detail = ((e as CustomEvent).detail || {}) as SkillChangeEvent
       // Goes out the same door a typed message does — queued behind a turn
       // that is still answering, sent through startRun otherwise, which owns
       // the disconnected queue, the Hermes branch and the run bookkeeping.
@@ -4753,10 +4757,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       retryCountRef.current = 0
       connect()
     }
-    window.addEventListener('clawbox-skill-installed', skillHandler)
+    window.addEventListener(SKILL_CHANGE_EVENT, skillHandler)
     window.addEventListener('clawbox:primary-ai-configured', providerHandler)
     return () => {
-      window.removeEventListener('clawbox-skill-installed', skillHandler)
+      window.removeEventListener(SKILL_CHANGE_EVENT, skillHandler)
       window.removeEventListener('clawbox:primary-ai-configured', providerHandler)
       if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
     }

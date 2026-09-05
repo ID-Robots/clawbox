@@ -5,6 +5,7 @@ import type { StoreApp } from "./AppStore";
 import * as kv from "@/lib/client-kv";
 import { useT } from "@/lib/i18n";
 import { clawhubSkillUrl } from "@/lib/clawhub-url";
+import { announceSkillChange } from "@/lib/skill-change-message";
 
 interface AppSetting {
   key: string;
@@ -208,7 +209,9 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
       // No local record: skill-info reads the value back from openclaw.json,
       // which the write above just changed — a KV mirror only ever disagreed.
       setEnabled(newEnabled);
-      window.dispatchEvent(new CustomEvent('clawbox-skill-installed', { detail: { action: newEnabled ? 'enable' : 'disable', id: appId } }));
+      // `kind` left at its default: this toggle writes openclaw.json's skill
+      // enable flag, so it is only ever reached for a skill.
+      announceSkillChange({ action: newEnabled ? 'enable' : 'disable', id: appId });
     } catch (err) {
       console.warn("[settings] Failed to toggle skill:", err);
       setToggleError(true);
