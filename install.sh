@@ -3307,7 +3307,16 @@ try {
 }
 if (!cfg.channels) cfg.channels = {};
 const { dmPolicy: _dm, allowFrom: _af, ...rest } = cfg.channels.telegram || {};
-cfg.channels.telegram = { ...rest, enabled: true, botToken };
+// OpenClaw's OWN value wins. This block exists to re-register the channel on a
+// fresh ~/.openclaw (a factory reset, a new image) out of the only copy that
+// survived it. ClawBox's data/config.json is a MIRROR its configure route
+// happens to write, and channels.telegram.botToken is what the gateway polls
+// and what every ClawBox panel now reads (src/lib/telegram-bot-identity.ts) —
+// so copying the mirror over a bot the owner re-pointed with `openclaw config
+// set` silently restored an older one at the next update. The
+// dmPolicy/allowFrom strip above still runs either way.
+const existingToken = typeof rest.botToken === "string" ? rest.botToken.trim() : "";
+cfg.channels.telegram = { ...rest, enabled: true, botToken: existingToken || botToken };
 fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
 const tmp = `${cfgPath}.tmp`;
 fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));

@@ -722,7 +722,11 @@ try {
     // default requires owner approval before the agent responds to a new
     // sender. See src/lib/openclaw-config.ts:setTelegramToken.
     const {dmPolicy:_dm,allowFrom:_af,...rest}=c.channels.telegram||{};
-    c.channels.telegram={...rest,enabled:true,botToken:cb.telegram_bot_token};
+    // OpenClaw's own value wins over ClawBox's mirror — see the same block in
+    // install.sh: the mirror re-registers the channel on a fresh ~/.openclaw,
+    // it does not restore an older bot over one `openclaw config set` re-pointed.
+    const existingToken=typeof rest.botToken==='string'?rest.botToken.trim():'';
+    c.channels.telegram={...rest,enabled:true,botToken:existingToken||cb.telegram_bot_token};
     process.stderr.write('  Telegram channel registered in OpenClaw config\n');
   }
 } catch {}
