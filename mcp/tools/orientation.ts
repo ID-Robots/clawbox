@@ -57,7 +57,7 @@ const DEFAULT_QUALIFIER: Record<Ed, string> = {
 // is refused. The bridge snippet is quoted whole because a one-file app from
 // webapp_create has to carry it itself; code_project_init writes it into the
 // scaffold.
-const WEBAPP_STORAGE_GUIDE = `## Storing data in a ClawBox webapp
+export const WEBAPP_STORAGE_GUIDE = `## Storing data in a ClawBox webapp
 
 Do NOT use localStorage — it does not survive a session. Do NOT fetch
 /setup-api/kv (or any /setup-api route) from the app: a webapp runs in a
@@ -96,7 +96,10 @@ stored as submitted, and a name like PORT would be a ReferenceError in the
 browser:
   <script>location.replace(location.protocol + "//" + location.hostname + ":4199/");</script>
 The desktop frames the box's own host on any port. Keep the server listening
-on 0.0.0.0, and say in the reply which port it serves on.`;
+on 0.0.0.0, and say in the reply which port it serves on. To stop or restart
+a server YOU started, use its PID (the one \`node …\` printed, or \`$!\`) —
+never pkill, killall or fuser: ClawBox's own web server is a Next.js server
+too, and \`pkill -f next-server\` takes the box down with your run.`;
 
 function loadFieldGuide(): string | null {
   try {

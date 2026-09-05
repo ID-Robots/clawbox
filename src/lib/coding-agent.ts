@@ -557,6 +557,12 @@ export const BASH_ALLOWLIST: readonly string[] = [
 export const BASH_DENYLIST: readonly string[] = [
   "Bash(sudo:*)", "Bash(su:*)", "Bash(rm:*)", "Bash(curl:*)", "Bash(wget:*)", "Bash(ssh:*)", "Bash(scp:*)",
   "Bash(systemctl:*)", "Bash(nmcli:*)", "Bash(reboot:*)", "Bash(shutdown:*)",
+  // Killing by NAME. The box's own web server is a Next server — its process
+  // title is `next-server (v…)` — and on 2026-09-05 a run's `pkill -f
+  // next-server`, meant for the dev server it had started, took ClawBox
+  // down with it: systemd restarted the box's server, which marked the
+  // run lost fourteen minutes in. A run ends what it started by PID.
+  "Bash(pkill:*)", "Bash(killall:*)", "Bash(fuser:*)", "Bash(kill -1:*)", "Bash(kill -9 -1:*)", "Bash(kill -15 -1:*)", "Bash(kill -TERM -1:*)", "Bash(kill -KILL -1:*)",
   "Bash(git push:*)", "Bash(git reset:*)", "Bash(git clean:*)", "Bash(git checkout:*)",
   "Bash(openclaw:*)", "Bash(hermes:*)", "Bash(claude:*)", "Bash(claude-ds:*)", "Bash(clawbox:*)",
 ];
