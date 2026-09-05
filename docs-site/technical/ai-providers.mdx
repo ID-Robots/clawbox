@@ -20,7 +20,7 @@ For choosing a provider as a user, see [Choose Your AI Provider](/setup/choose-a
 | Provider | Auth | Model namespace | Default model | Notes |
 |---|---|---|---|---|
 | **ClawBox AI** | Portal device-pairing token | `deepseek/…` | `deepseek-v4-flash` | DeepSeek-backed, proxied via the portal. Tiers: Free/Pro → `v4-flash`, Max → `v4-pro` (1.6T) |
-| **Anthropic (Claude)** | API key | `anthropic/…` | `claude-sonnet-4-6` | Routed via Anthropic's OpenAI-compatible endpoint |
+| **Anthropic (Claude)** | API key | `anthropic/…` | `claude-opus-5` | Routed via Anthropic's OpenAI-compatible endpoint |
 | **OpenAI (API key)** | `sk-…` API key | `openai/…` | `gpt-5.4` | Direct `api.openai.com`, per-token billing |
 | **ChatGPT subscription** | ChatGPT OAuth sign-in | `openai/…` + Codex runtime | `openai/gpt-5.5` | Uses your ChatGPT plan. Models: `gpt-5.6-sol/terra/luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` only (no `-pro` variants) |
 | **Google Gemini** | API key | `google/…` | `gemini-2.5-flash` | Routed via Google's OpenAI-compat endpoint |
@@ -29,7 +29,7 @@ For choosing a provider as a user, see [Choose Your AI Provider](/setup/choose-a
 | **llama.cpp** (local) | none (per-install bearer) | `llamacpp/…` | (bundled model) | OpenAI-compat local server |
 
 <Warning>
-**OpenAI has two distinct lanes, and since OpenClaw 2 they share one namespace.** Both are `openai/…`; what separates them is the *credential* and one config key. The API key is the auth profile `openai:default`; the ChatGPT subscription is the OAuth profile `openai:chatgpt`, and its models carry `agents.defaults.models."openai/<id>".agentRuntime.id = "codex"`, which is what routes the turn through the Codex app-server and your ChatGPT plan. The catalogs still differ: the `-pro` tiers exist only on the API lane; the subscription serves `gpt-5.6-sol/terra/luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`. Mixing them up is the root of most "Incorrect API key" tickets — see self-healing below.
+**OpenAI has two distinct lanes, and since OpenClaw 2 they share one namespace.** Both are `openai/…`; what separates them is the *credential* and one config key. The API key is the auth profile `openai:default`; the ChatGPT subscription is the OAuth profile `openai:chatgpt`, and its models carry `agents.defaults.models."openai/<id>".agentRuntime.id = "codex"`, which is what routes the turn through the Codex app-server and your ChatGPT plan. The catalogs still differ: the API lane carries the `-pro` tiers *in addition* to `gpt-5.4/5.5/5.6`, while the subscription serves `gpt-5.6-sol/terra/luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` and no `-pro` at all. Mixing them up is the root of most "Incorrect API key" tickets — see self-healing below.
 
 The older `codex/…` and `openai-codex/…` namespaces are **retired**: the core answers `Unknown model` for them and `openclaw doctor --fix` rewrites them to `openai/…` while keeping the runtime key. The setup UI still calls the row "OpenAI Codex" — that is a label, not a namespace. A box that signed in before the upgrade holds a `codex:default` profile the core never consults, and the chat model list shows that row greyed with "Sign in again in Settings"; reconnecting OpenAI in Settings files it where the core looks.
 </Warning>

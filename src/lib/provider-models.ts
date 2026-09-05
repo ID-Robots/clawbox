@@ -197,13 +197,21 @@ export const OPENAI_MODELS: readonly ProviderModelOption[] = [
  * (2026.8.1): `openclaw models list --provider openai --all --json` answers
  * eleven rows — gpt-5.4, -mini, -nano, -pro, gpt-5.5, gpt-5.5-pro, the three
  * gpt-5.6 and gpt-6-astra, plus the image SKU. `gpt-5.4` is there; `gpt-5` is
- * not. No row carries a `default` tag (the only tag on the box was
- * `configured`, on the model that box is actually using), so — exactly as for
- * ANTHROPIC_DEFAULT_MODEL_ID above — nothing outranks this value in the catalog
- * route, which prefers a harness-tagged `default` when one exists and falls back
- * to `getProviderCatalog(...).defaultModelId` when none does. A later core that
- * starts tagging an OpenAI row would show that row in the picker while the two
- * write paths still send this id; that is the point to revisit if it happens.
+ * not.
+ *
+ * This is the WRITE path's cold start, and it is not the same answer as the
+ * READ path's. `openclaw models list` does tag one row `default` per provider,
+ * the catalog route prefers that tag over the curated `defaultModelId`
+ * (ai-models/catalog/route.ts), and on a stock 2026.8.1 host the tagged openai
+ * row is `gpt-5.6-sol` — so a picker can legitimately show `gpt-5.6-sol` while
+ * a save that names no model writes this id. That divergence is real and known;
+ * what it is NOT is the TASK-705 defect, because both are ids the box can run.
+ * Preferring the catalog route's cached `defaultModelId` here would close it and
+ * is the right next step, but it changes what every cold-start save writes for
+ * every provider and belongs in its own change with its own device proof. The
+ * dev box measured above carries no `default` tag on any openai row (the only
+ * tag present was `configured`), which is why the first version of this comment
+ * claimed the divergence could not occur.
  *
  * Hermes never reads it: there the recommendation comes from the harness's own
  * `/api/model/recommended-default` (src/lib/hermes-model-options.ts).

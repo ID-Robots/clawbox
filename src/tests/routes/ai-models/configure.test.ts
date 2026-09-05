@@ -4,7 +4,7 @@ import * as childProcess from "child_process";
 import fsp from "fs/promises";
 import type { ChildProcess } from "child_process";
 import { EventEmitter } from "events";
-import { getProviderCatalog } from "@/lib/provider-models";
+import { getProviderCatalog, OPENAI_DEFAULT_MODEL_ID } from "@/lib/provider-models";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
@@ -912,11 +912,18 @@ describe("POST /setup-api/ai-models/configure", () => {
   // going to the ChatGPT account — and once the sign-in is removed, the
   // app-server has no credential and every turn dies on the Cloudflare
   // challenge with no ClawBox surface that can undo it.
+  // The armed model in these three fixtures is the OpenAI cold start itself —
+  // an API-key save that carries no model writes exactly this ref, which is why
+  // it is the one that can still be armed for Codex. Derived, not spelt: the
+  // literal `openai/gpt-5` sat here for the same reason it sat in the PROVIDERS
+  // table, and a bump would silently strand these cases on a dead id again.
+  const COLD_START_REF = `openai/${OPENAI_DEFAULT_MODEL_ID}`;
+
   it("clears the Codex runtime arm on an OpenAI API-key save", async () => {
     mockReadOpenClawConfig.mockResolvedValue({
       auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
       agents: {
-        defaults: { models: { "openai/gpt-5.4": { agentRuntime: { id: "codex" } } } },
+        defaults: { models: { [COLD_START_REF]: { agentRuntime: { id: "codex" } } } },
       },
     } as never);
 
@@ -924,7 +931,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(vi.mocked(runOpenclawConfigUnset)).toHaveBeenCalledWith(
-      'agents.defaults.models["openai/gpt-5.4"].agentRuntime',
+      `agents.defaults.models["${COLD_START_REF}"].agentRuntime`,
       expect.anything(),
     );
   });
@@ -941,7 +948,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockReadOpenClawConfig.mockResolvedValue({
       auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
       agents: {
-        defaults: { models: { "openai/gpt-5.4": { agentRuntime: { id: "codex" } } } },
+        defaults: { models: { [COLD_START_REF]: { agentRuntime: { id: "codex" } } } },
       },
     } as never);
     vi.mocked(runOpenclawConfigUnset).mockRejectedValue(new Error("unset failed"));
@@ -950,7 +957,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.warning).toMatch(/still routes openai\/gpt-5\.4 through your ChatGPT account/);
+    expect(body.warning).toContain(`still routes ${COLD_START_REF} through your ChatGPT account`);
   });
 
   it("leaves the arm alone when the save IS the subscription", async () => {
@@ -2161,6 +2168,95 @@ describe("POST /setup-api/ai-models/configure", () => {
   // PROCESSES and the number of times a path is written, not about wall clock,
   // because those are the two things that regressed and the only two a unit
   // test can hold.
+  describe("what the answer says when the primary is written past the catalog check", () => {
+    // The silence that hid `openai/gpt-5`: the route wrote a primary the CLI
+    // had just refused, logged one console.warn nobody reads, and answered a
+    // clean {success:true} — so Settings said "Configured" and the owner found
+    // out on the first turn.
+    //
+    // The refusal on its own is NOT the event. It is a documented normal state
+    // (a placeholder key, a plugin on its first boot, a provider entry this
+    // same request writes later), and warning on it would put an amber line
+    // under every ordinary save — a warning on the happy path is a warning
+    // nobody reads, which is the failure this is meant to end rather than
+    // repeat. What makes it an event is the ID being in no list the box has.
+    const refuseThePrimary = (ref: string) =>
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(
+        new Error(
+          `Cannot set model reference "${ref}" at agents.defaults.model.primary: Unable to refresh provider catalog`,
+        ),
+      );
+
+    it("names an id that is in no catalogue this box has", async () => {
+      // `openai/gpt-5` itself: the id TASK-705 is about, in a provider whose
+      // curated catalogue the box carries in-process, so the answer does not
+      // depend on an enumeration having run.
+      refuseThePrimary("openai/gpt-5");
+      const res = await configurePost(jsonRequest({
+        provider: "openai",
+        apiKey: "sk-test-openai-key",
+        model: "gpt-5",
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.success).toBe(true);
+      // The id is named — a warning that does not say which one sends the
+      // owner nowhere. Read off the batch rather than restated, so it is the
+      // id actually written.
+      const refusedOps = vi.mocked(runOpenclawConfigSetBatch).mock.calls[0][0] as Array<[string, string]>;
+      const written = refusedOps.find(([p]) => p === "agents.defaults.model.primary")?.[1];
+      expect(written).toBe("openai/gpt-5");
+      expect(body.warning).toContain(written!);
+      expect(body.warning).toContain("no model list");
+    });
+
+    it("stays quiet when the refused id is one the box does carry", async () => {
+      // The cold start after this PR: `openai/gpt-5.4` is in OPENAI_MODELS, and
+      // the refusal is the placeholder-key contract doing exactly what it is
+      // documented to do. An amber line here is the false failure.
+      refuseThePrimary("openai/gpt-5.4");
+      const res = await configurePost(jsonRequest({
+        provider: "openai",
+        apiKey: "sk-test-openai-key",
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.success).toBe(true);
+      expect(body.warning).toBeUndefined();
+    });
+
+    it("stays quiet for a provider whose model list the box cannot know", async () => {
+      // deepseek/llamacpp/ollama have no curated catalogue, and on a cold box
+      // no enumeration either. UNKNOWN is not "this id does not exist" — the
+      // ClawBox AI first-boot save is the single most common producer of the
+      // refusal, and it is always over one of our own constants.
+      refuseThePrimary("deepseek/deepseek-v4-pro");
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.success).toBe(true);
+      expect(body.warning).toBeUndefined();
+    });
+
+    it("still writes the primary past the refusal in every one of those cases", async () => {
+      // The warning is a report, not a gate: whatever it decides, the box must
+      // end up on the model the owner asked for.
+      refuseThePrimary("openai/gpt-5");
+      await configurePost(jsonRequest({
+        provider: "openai",
+        apiKey: "sk-test-openai-key",
+        model: "gpt-5",
+      }));
+      expect(vi.mocked(setPrimaryModelWithoutCatalogValidation)).toHaveBeenCalledWith("openai/gpt-5");
+    });
+  });
+
   describe("how many openclaw processes first-run setup costs", () => {
     function invocationCount(): number {
       return (
@@ -2206,37 +2302,8 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(vi.mocked(setPrimaryModelWithoutCatalogValidation)).toHaveBeenCalledWith(primaryOp?.[1]);
     });
 
-    it("says so in the answer when the primary had to be written past the catalog check", async () => {
-      // The silence that hid `openai/gpt-5`. The route wrote a primary the CLI
-      // had just refused, logged one console.warn nobody reads, and answered a
-      // clean {success:true} — so Settings said "Configured" and the owner
-      // found out on the first turn. The id is fixed elsewhere in this PR; this
-      // is what makes the NEXT unresolvable id a visible event.
-      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(
-        new Error(
-          'Cannot set model reference "deepseek/deepseek-v4-pro" at agents.defaults.model.primary: Unable to refresh provider catalog',
-        ),
-      );
-      const res = await configurePost(jsonRequest({
-        provider: "clawai",
-        apiKey: "claw_token_abc",
-      }));
-      const body = await res.json();
-
-      expect(res.status).toBe(200);
-      expect(body.success).toBe(true);
-      expect(body.warning).toContain("could not confirm");
-      // The model it could not confirm is named — a warning that does not say
-      // which id is unresolvable sends the owner nowhere. Read off the batch
-      // rather than restated, so it is the id actually written.
-      const refusedOps = vi.mocked(runOpenclawConfigSetBatch).mock.calls[0][0] as Array<[string, string]>;
-      const written = refusedOps.find(([p]) => p === "agents.defaults.model.primary")?.[1];
-      expect(written).toBeDefined();
-      expect(body.warning).toContain(written!);
-    });
-
     it("says nothing extra when the catalog accepted the primary", async () => {
-      // The other half: a clean save must not grow a warning nobody needs.
+      // A clean save must not grow a warning nobody needs.
       const res = await configurePost(jsonRequest({
         provider: "clawai",
         apiKey: "claw_token_abc",

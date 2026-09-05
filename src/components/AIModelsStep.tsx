@@ -2028,16 +2028,26 @@ export default function AIModelsStep({
       // behind a link labelled "Skip — use local only".
       //
       // What is being traded, stated plainly rather than wished away: the
-      // wizard branch discards whatever `saveWarning` holds. Since TASK-608
-      // that is the ChatGPT-order warning and nothing else — the configure
+      // wizard branch discards whatever `saveWarning` holds. There are two
+      // producers, and neither is worth stopping a first-run wizard for.
+      //
+      // The gateway warning is unreachable here: since TASK-608 the configure
       // route passes `awaitReady: false` when setup is not complete, so
-      // `GatewayNotReadyError` is unreachable here and the gateway warning is
-      // never produced on this screen in the first place. That is deliberate
-      // for the same reason: a slow gateway must not stop a first-run wizard,
-      // and the box recovers on its own within seconds. A gateway that never
-      // comes back is not silent either — it surfaces at the chat the wizard
-      // hands off to, which cannot open a session without one. (The ChatGPT-
-      // order warning is a Settings-only state and really does reappear there.)
+      // `GatewayNotReadyError` is never produced on this screen. Deliberate —
+      // a slow gateway must not stop a first-run wizard, and the box recovers
+      // within seconds. A gateway that never comes back is not silent either;
+      // it surfaces at the chat the wizard hands off to, which cannot open a
+      // session without one. (The ChatGPT-order warning is a Settings-only
+      // state and really does reappear there.)
+      //
+      // The unresolvable-primary warning (TASK-705) IS reachable here, and it
+      // is dropped rather than shown: it says an id is in no catalogue the box
+      // has, and the answer to that is to pick a model — which is the very
+      // screen the owner is on, and the Settings row they will land on next.
+      // Holding the wizard on it would strand them behind a card with no
+      // continue control. Its four other call sites (the ClawBox AI poll, the
+      // llama.cpp install route, the Ollama hook) drop it too; carrying it
+      // through all of them is its own change.
       if (saveWarning) console.warn("[ai-models] configure warning:", saveWarning);
       onNext();
     } else {

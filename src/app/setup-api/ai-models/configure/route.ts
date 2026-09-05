@@ -96,6 +96,7 @@ import {
   isClaudeSubscriptionOnly,
   offSurfaceClaudeModelMessage,
   offSurfaceCodexModelMessage,
+  readKnownModelIds,
 } from "@/lib/subscription-surface";
 // The model name on this route arrives in the request body. For a local
 // provider it is the whole of `apiKey`, which nothing further constrains, and
@@ -2356,12 +2357,25 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //     After the validation above, not before it: the profile ids reach the
     //     CLI as argv.
     let chatgptOrderWarning: string | undefined;
-    // Set when the primary had to be written past the CLI's catalog check. It
-    // used to be a console.warn and nothing else: the box answered a clean
-    // `{success:true}`, Settings said "Configured", and the owner found out on
-    // the first turn. That is how `openai/gpt-5` — an id no openai catalogue on
-    // the pinned core carries — sat in the PROVIDERS table unnoticed. The id is
-    // fixed below; this is what makes the NEXT one visible.
+    // Set when the primary was written past the CLI's catalog check AND the id
+    // is in no list this box has. It used to be a console.warn and nothing
+    // else: the box answered a clean `{success:true}`, Settings said
+    // "Configured", and the owner found out on the first turn. That is how
+    // `openai/gpt-5` — an id no openai catalogue on the pinned core carries —
+    // sat in the PROVIDERS table unnoticed. The id is fixed below; this is what
+    // makes the NEXT one visible.
+    //
+    // On the REFUSAL alone it would be noise, because the refusal is a
+    // documented normal state: a placeholder key (the wizard's "save the
+    // profile without validating the key" contract), a provider plugin on its
+    // first boot, and `models.providers.llamacpp` written later in this same
+    // request all produce it over an id that is perfectly right. Warning there
+    // is the false failure this route already knows not to raise, and a warning
+    // on the happy path is a warning nobody reads.
+    //
+    // Reaches a human only from Settings today: the ClawBox AI device-login
+    // poll, the llama.cpp install route, the Ollama hook and the first-run
+    // wizard branch all discard the field. Recorded rather than widened here.
     let unvalidatedPrimaryWarning: string | undefined;
     if (ocProvider === CHATGPT_PROVIDER) {
       // ONE config read for both OpenAI decisions this save makes: which
@@ -2501,6 +2515,17 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // sidecar lock OpenClaw's CLI/gateway use. That prevents a complete-file
       // write from overwriting a concurrent auth/provider/gateway mutation and
       // refuses malformed input instead of rebuilding the config from a fragment.
+      //
+      // Three routes write `agents.defaults.model.primary` and they hold three
+      // different policies on this same CLI refusal, deliberately, because they
+      // are asked three different questions:
+      //   * here (a credential save)   — write past it, and warn below if the
+      //     id is in no catalogue: refusing would make a placeholder key or a
+      //     plugin's first boot unable to finish setup at all;
+      //   * chat/model (a model PICK)  — refuse it (`refuseUnresolvableModel`):
+      //     the owner chose from a list and can choose again;
+      //   * local-ai/exclusive         — let it throw.
+      // Said here so a fourth writer does not invent a fourth policy.
       await setPrimaryModelWithoutCatalogValidation(primaryModel);
       // The retry above re-lands the plugin enable with the rest of the
       // batch (it is not the primary), so the refusal here is the catalog's.
@@ -2509,10 +2534,22 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // JSON-quoted: the modeled sanitizer for js/log-injection (see 3ef684a1).
         JSON.stringify(logSafe(message)),
       );
-      unvalidatedPrimaryWarning =
-        `Saved, but OpenClaw could not confirm ${primaryModel} against this provider's catalogue. `
-        + "That is expected while a key is still being validated or a plugin is on its first boot; "
-        + "if the model is wrong, chat turns will fail. Pick a model in Settings to change it.";
+      // …and only NOW decide whether a human needs to hear about it: is the id
+      // one this box has? `readKnownModelIds` is the picker's own list — the
+      // catalog route's cached enumeration unioned with the curated catalogue,
+      // read-only and spawn-free. Null is UNKNOWN (no enumeration yet, or a
+      // provider with no curated catalogue at all: llamacpp, ollama, deepseek)
+      // and stays silent, because the whole point is to name an id that exists
+      // NOWHERE, not to report a cold cache.
+      const primaryProvider = primaryModel.includes("/") ? primaryModel.split("/", 1)[0] : "";
+      const primaryId = extractProviderModelId(primaryModel, primaryProvider) ?? "";
+      const knownIds = primaryProvider && primaryId ? await readKnownModelIds(primaryProvider) : null;
+      if (knownIds && !knownIds.has(primaryId)) {
+        unvalidatedPrimaryWarning =
+          `Saved, but ${primaryModel} is in no model list this box has for ${primaryProvider}, `
+          + "and OpenClaw refused to validate it. Chat turns on it will fail. "
+          + "Pick a model in Settings to change it.";
+      }
     }
 
     // 5. Ensure openclaw config files are owned by clawbox
