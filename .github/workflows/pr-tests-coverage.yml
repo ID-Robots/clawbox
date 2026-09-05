@@ -56,42 +56,13 @@ jobs:
         run: bun run typecheck:mcp
 
       # The tool CONTRACT — name and description limits, flat schemas, and which
-      # tools each edition may register. It builds the surface over both
-      # capability postures, so it covers the families a CI runner cannot probe
-      # (see mcp/check-tools.ts); before that it examined a third of the tools
-      # and printed OK over the rest, which is why it could not be a CI job.
+      # tools each edition may register. It builds the surface over four
+      # postures, so it covers the families a CI runner cannot PROBE and the
+      # three tools it is not inside a coding RUN for (see mcp/check-tools.ts);
+      # before that it examined a third of the tools and printed OK over the
+      # rest, which is why it could not be a CI job.
       - name: MCP tool contract
         run: bun run check:mcp-tools
-
-      # ADVISORY, deliberately, and this is the decision the card asked for:
-      # eslint reports 18 errors and 115 warnings on beta today, so a blocking
-      # step would fail every PR on day one and be switched off again — the same
-      # trap the coverage thresholds below describe. Sixteen of the eighteen are
-      # `no-require-imports` in code that uses `require()` on purpose (keeping
-      # Node APIs out of the Edge bundle); the other two are one `no-explicit-any`
-      # and one react-hooks rule. Making the numbers VISIBLE on every PR is the
-      # first step; ratcheting this to blocking, one rule at a time, is the
-      # second, and it needs those eighteen dealt with first.
-      - name: Lint (advisory)
-        continue-on-error: true
-        run: |
-          rc=0
-          bun run lint > lint.out 2>&1 || rc=$?
-          cat lint.out
-          # The counts go to the RUN SUMMARY, not only into a collapsed step
-          # log. `continue-on-error` alone makes the job green and the PR
-          # comment says "Tests passed" — so without this the 18 errors and 115
-          # warnings exist nowhere anyone looks, and the ratchet plan above has
-          # no baseline to ratchet against. A run where eslint CRASHED prints
-          # the fallback line rather than nothing, which is the difference
-          # between advisory and `|| true`.
-          {
-            echo "### Lint (advisory — not blocking)"
-            echo
-            grep -E '[0-9]+ problems? \([0-9]+ errors?, [0-9]+ warnings?\)' lint.out \
-              || echo "eslint produced no summary line (exit $rc) — see the step log"
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit "$rc"
 
       # CI's variant of `bun run test:coverage`: the same suite, the same
       # thresholds, only the reporters differ. The full set (text, html, clover,
@@ -102,6 +73,46 @@ jobs:
       # few seconds and 600 lines of job log nobody scrolls through.
       - name: Test
         run: bun run test:coverage:ci
+
+      # ADVISORY, deliberately, and this is the decision the card asked for:
+      # eslint reports 18 errors and 123 warnings on beta today, so a blocking
+      # step would fail every PR on day one and be switched off again — the same
+      # trap the coverage thresholds below describe. Sixteen of the eighteen are
+      # `no-require-imports` in code that uses `require()` on purpose (keeping
+      # Node APIs out of the Edge bundle); the other two are one `no-explicit-any`
+      # and one react-hooks rule. Making the numbers VISIBLE on every PR is the
+      # first step; ratcheting this to blocking, one rule at a time, is the
+      # second, and it needs those eighteen dealt with first.
+      #
+      # The counts go to the RUN SUMMARY, not only into a collapsed step log:
+      # `continue-on-error` alone makes the job green and the PR comment say
+      # "Tests passed", so without this the errors exist nowhere anyone looks
+      # and the ratchet has no baseline. THREE outcomes, not two — eslint prints
+      # no summary line when it has nothing to report, so a clean run and a
+      # crashed one would otherwise write the same "no summary line" sentence,
+      # and the day the ratchet succeeds every PR would read like a broken step.
+      #
+      # AFTER the suite: it is the only non-blocking step here, and running it
+      # first delayed the verdict a reviewer is actually waiting for.
+      - name: Lint (advisory)
+        if: always()
+        continue-on-error: true
+        run: |
+          rc=0
+          bun run lint > lint.out 2>&1 || rc=$?
+          cat lint.out
+          {
+            echo "### Lint (advisory — not blocking)"
+            echo
+            if summary=$(grep -E '[0-9]+ problems? \([0-9]+ errors?, [0-9]+ warnings?\)' lint.out); then
+              echo "$summary"
+            elif [ "$rc" -eq 0 ]; then
+              echo "Lint clean — 0 problems."
+            else
+              echo "eslint produced no summary line and exited $rc — it crashed; see the step log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
 
       # Always parse coverage so the PR comment can show numbers even on failure.
       - name: Parse coverage

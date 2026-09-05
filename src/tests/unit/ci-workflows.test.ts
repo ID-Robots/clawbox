@@ -74,3 +74,114 @@ describe("E2E workflow Next.js build cache", () => {
     expect(step).toMatch(/restore-keys: \|\n\s+nextjs-\$\{\{ runner\.os \}\}-\$\{\{ hashFiles\('bun\.lock'\) \}\}-\n/);
   });
 });
+
+/**
+ * Which checks CI actually runs — and whether they can still fail the job.
+ *
+ * TASK-708: three commands this repo ships and documents were in NO workflow —
+ * `eslint`, `typecheck:mcp` and `check:mcp-tools`. The consequence was not
+ * theoretical: `tsc -p mcp/tsconfig.json` reported three errors on beta that
+ * nobody saw, in files the MCP tree pulls in transitively, because the root
+ * tsconfig EXCLUDES `mcp/**` and nothing else typechecks that tree. Fixers had
+ * been running these by hand.
+ *
+ * A command that only runs when someone remembers is a check the repo does not
+ * have — and so is a step present but neutered, which is why every assertion
+ * below is made over the STEP, not over the file. Measured on the first
+ * revision of this guard: `continue-on-error: true`, `if: ${{ false }}` and
+ * `run: bun run typecheck:mcp || true` each left all five cases green. That is
+ * the false-success class inside the guard against it.
+ */
+describe("the checks CI runs, and their blocking status", () => {
+  const tests = read(".github/workflows/pr-tests-coverage.yml");
+
+  /**
+   * One step of a job, from its `- name:` to the next one.
+   *
+   * Bounded at the NEXT step, or the slice runs to end-of-file and every
+   * assertion below is satisfied by some other step's keys — measured: without
+   * the bound, moving `continue-on-error` to the Test step left the lint case
+   * green.
+   */
+  function step(command: string): string {
+    const at = tests.indexOf(command);
+    expect(at, `${command} appears nowhere in the workflow`).toBeGreaterThan(-1);
+    const start = tests.lastIndexOf("- name:", at);
+    const next = tests.indexOf("- name:", start + 1);
+    return tests.slice(start, next === -1 ? undefined : next);
+  }
+
+  /**
+   * The step runs exactly that command, and nothing swallows its status.
+   *
+   * `toContain("bun run typecheck:mcp")` matches the workflow's own COMMENTS,
+   * which name every one of these commands — so commenting a step out leaves
+   * such an assertion green. And an anchor that allows a suffix matches
+   * `|| true`, `; true` and `|| echo WARN`, which is the same defect written
+   * the other way round: the step runs, reports success, and checks nothing.
+   */
+  function runsBlocking(command: string): void {
+    const body = step(command);
+    const escaped = command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    expect(body, `${command} is not the step's whole run: line`)
+      .toMatch(new RegExp(`^\\s+run: ${escaped}\\s*$`, "m"));
+    expect(body, `${command} is marked advisory`).not.toMatch(/continue-on-error/);
+    expect(body, `${command} is conditional, so it can be switched off in place`)
+      .not.toMatch(/^\s+if:/m);
+  }
+
+  it("typechecks the MCP tree, blocking", () => {
+    // `mcp/**` is excluded from the root tsconfig on purpose, so `tsc --noEmit`
+    // — wherever it runs — never covers it. This is the only job that can.
+    runsBlocking("bun run typecheck:mcp");
+  });
+
+  it("checks the MCP tool contract, blocking", () => {
+    runsBlocking("bun run check:mcp-tools");
+  });
+
+  it("runs eslint, and says out loud that it is advisory", () => {
+    // eslint reports errors on beta today, so it cannot be blocking without
+    // being fixed first. `continue-on-error` is the mechanism that says so out
+    // loud; a step that is neither blocking nor marked advisory is a check
+    // whose failures nobody can interpret. It is the ONE step here allowed to
+    // carry that key, which the two cases above assert.
+    const lint = step("bun run lint >");
+    expect(lint).toMatch(/continue-on-error:\s*true/);
+    // It writes the counts somewhere a person looks, and tells a CLEAN run from
+    // a CRASHED one — eslint prints no summary line for either, so one branch
+    // for both would make every PR read like a broken step the day the ratchet
+    // reaches zero.
+    expect(lint).toContain("GITHUB_STEP_SUMMARY");
+    expect(lint).toMatch(/Lint clean/);
+    expect(lint).toMatch(/crashed/);
+  });
+
+  it("keeps every check in the same job as the tests", () => {
+    // Not a second workflow and not a second job: these run on the same
+    // checkout and the same `bun install`, so a PR gets one red X with
+    // everything in it rather than four jobs to open.
+    //
+    // The `test` job is bounded by the next two-space key AFTER `jobs:`, so a
+    // key under `on:` cannot be mistaken for a job.
+    const jobsAt = tests.indexOf("\njobs:\n");
+    expect(jobsAt).toBeGreaterThan(-1);
+    const headers = [...tests.slice(jobsAt).matchAll(/^ {2}([\w-]+):$/gm)];
+    expect(headers[0]?.[1]).toBe("test");
+    const end = headers[1] ? jobsAt + headers[1].index! : tests.length;
+    const testJob = tests.slice(jobsAt, end);
+
+    for (const command of ["bun run typecheck:mcp", "bun run check:mcp-tools", "bun run lint"]) {
+      expect(testJob.includes(command), `${command} is not in the test job`).toBe(true);
+    }
+  });
+
+  it("runs the advisory step after the suite it must not delay", () => {
+    // Lint is the only non-blocking step here; running it first put a check
+    // nobody is waiting for in front of the verdict everybody is. `if: always()`
+    // is what keeps it running when the suite went red — the counts are most
+    // useful on exactly that run.
+    expect(tests.indexOf("bun run test:coverage:ci")).toBeLessThan(tests.indexOf("bun run lint >"));
+    expect(step("bun run lint >")).toMatch(/if:\s*always\(\)/);
+  });
+});

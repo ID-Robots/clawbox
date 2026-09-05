@@ -126,20 +126,19 @@ function instructionsFor(edition: Ed, profile: Profile): string {
 }
 
 /**
- * Build a fully-registered server. Exported so mcp/check-tools.ts can build one
- * per edition and diff the tool lists without connecting a transport.
- */
-/**
- * `overrides` exists for the surface CHECKER, not for the running server.
+ * Build a fully-registered server, and hand back its registrar and context.
  *
- * Several tool families register only when a device probe says the box can do
- * the thing — `du`, `journalctl`, a screen grabber, a readable mailbox, the
- * coding harness. Off a real box every one of those probes answers false
- * (mcp/lib/guard.ts spawns in CLAWBOX_ROOT, which does not exist on a CI
- * runner or a dev PC), so a checker that builds the server the ordinary way
- * examines a fraction of the surface and reports the whole thing OK. The
- * checker builds a second, all-capabilities posture with this and checks that
- * too. Nothing else passes it; the running server always takes the probes.
+ * Exported so mcp/check-tools.ts can build one per edition and posture and diff
+ * the tool lists without connecting a transport.
+ *
+ * `overrides` exists for that CHECKER, not for the running server. Several tool
+ * families register only when a device probe says the box can do the thing —
+ * `du`, `journalctl`, a screen grabber, a readable mailbox, the coding harness.
+ * Off a real box every one of those probes answers false (mcp/lib/guard.ts
+ * spawns in CLAWBOX_ROOT, which does not exist on a CI runner or a dev PC), so
+ * a checker that built the server the ordinary way would examine a fraction of
+ * the surface and report the whole thing OK. Nothing else passes it; the
+ * running server always takes the probes.
  */
 export async function buildServer(
   edition: Ed,

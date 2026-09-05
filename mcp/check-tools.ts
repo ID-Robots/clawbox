@@ -4,29 +4,49 @@
  *
  *   bun run mcp/check-tools.ts
  *
- * It builds the server ONCE PER EDITION without connecting a transport, and:
+ * It builds the server over FOUR POSTURES per edition, without connecting a
+ * transport — what this host can actually probe, every capability on, every
+ * capability off, and the profile a delegated coding run gets — and:
  *   1. asserts the tool contract (name regex, description length and banned
- *      phrases, parameter-name regex, readOnly/destructive coherence);
- *   2. prints the registration matrix — which tools each edition gets — and
+ *      phrases, parameter-name regex, readOnly/destructive coherence) over
+ *      every distinct tool SHAPE any posture produces;
+ *   2. asserts each capability gate against its own posture, in both
+ *      directions, and that the set of gated tools is the one this file names
+ *      — so a family that loses its gate, or gains one nobody recorded, is a
+ *      failure rather than a silent change;
+ *   3. prints the registration matrix — which tools each edition gets — and
  *      fails if a Hermes device would be offered an OpenClaw-only tool or the
  *      other way round;
- *   3. reports the approximate tools/list schema size, which is the budget that
- *      matters on a device running a 4-8B local model.
+ *   4. reports the approximate tools/list schema size. That figure is the
+ *      budget that matters on a device running a 4-8B local model, so it is
+ *      printed for the posture a real box registers, with the union — a
+ *      maximum that no single box ever pays — named as such.
  *
  * It is a script rather than a vitest file because the vitest projects only
- * include src/tests/**, and because building the server needs the real device
- * probes, which belong in a deliberate command and not in the unit suite.
+ * include src/tests/**. Its COVERAGE, though, no longer depends on the device
+ * probes: that is what let it become a CI step, and the note at the end says
+ * out loud which probes this host could not exercise.
  */
 
 process.env.CLAWBOX_MCP_NO_AUTOSTART = "1";
 
 import { z } from "zod";
 import { contractViolations, type RegisteredToolInfo } from "./lib/register";
-// The TYPE, so the posture below is checked against the interface it overrides.
-// Without the annotation `Partial<McpContext>` accepts any object at all —
-// every key optional, no excess-property check through a variable — so a
-// renamed or misspelt field type-checks clean and the override goes inert.
+// The directory the probes actually spawn in — imported, not restated: a third
+// copy of that path is a third thing to keep in step with the other two.
+import { DEFAULT_CWD } from "./lib/guard";
+// The TYPE, so the postures below are checked against the interface they
+// override. Excess-property checking does not apply through a variable or a
+// spread, so without an annotation a renamed or misspelt field type-checks
+// clean and the override goes inert; and the annotation is TOTAL rather than
+// `Partial`, so the next capability added to the context cannot silently fall
+// back to this host's probed value and take its tool family out of the check
+// with it — `bun run typecheck:mcp`, which this workflow now runs, fails until
+// both postures name it.
 import type { McpContext } from "./lib/context";
+
+/** Everything a posture must decide: the context minus the server's identity. */
+type Posture = Omit<McpContext, "edition" | "install" | "profile">;
 
 const HERMES_ONLY = ["skill_search", "skill_list", "skill_info", "skill_install", "skill_uninstall", "ai_list_models", "ai_set_provider", "ai_set_model"];
 // backup_list / backup_now are here because ClawKeep archives the OpenClaw
@@ -74,7 +94,7 @@ function schemaShapeViolations(tool: RegisteredToolInfo): string[] {
  * probe, and the full surface a real box registers — exactly as the unit guard
  * in src/tests/unit/mcp-tool-honesty.test.ts does.
  */
-const ALL_CAPABILITIES: Partial<McpContext> = {
+const ALL_CAPABILITIES: Posture = {
   capabilities: { screenGrabber: "scrot", imageConvert: true, journal: true, du: true },
   emailCanRead: true,
   codingAgent: true,
@@ -92,7 +112,7 @@ const ALL_CAPABILITIES: Partial<McpContext> = {
  * DEVICE the probes answer TRUE — the checker is meant to be run there too, and
  * a negative assertion that only holds off a box is not an assertion.
  */
-const NO_CAPABILITIES: Partial<McpContext> = {
+const NO_CAPABILITIES: Posture = {
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
   emailCanRead: false,
   codingAgent: false,
@@ -101,27 +121,58 @@ const NO_CAPABILITIES: Partial<McpContext> = {
 };
 
 /**
- * Tools that register ONLY when a device probe says the box can do the thing.
+ * The tools that exist ONLY where a device probe says the box can do the thing.
  *
- * Named rather than counted, and asserted on every host: these are what the
- * all-capabilities posture exists to reach, so if one is missing from BOTH
- * postures the override plumbing has broken and the run is examining a fraction
- * of the surface again. A length comparison could not see a family that
- * vanished while another was added — measured: with one context field renamed
- * away, three coding_agent tools disappeared and the count went UP.
+ * Not a checklist to satisfy — an EQUALITY. The set is computed from the two
+ * postures (present with every capability on, absent with every one off) and
+ * compared with this list, so a family that quietly loses its gate and a family
+ * that gains one nobody recorded both fail here. A hand-maintained "each of
+ * these must be present" list could see neither; a count could see less still,
+ * measured — with one context field renamed away, three coding_agent tools
+ * disappeared and the total went UP.
  */
 const PROBE_GATED_TOOLS = [
-  "disk_usage", "disk_cleanup", "logs_tail", "screen_capture",
-  "email_list", "email_read",
   "coding_agent_run", "coding_agent_status", "coding_agent_stop",
   "coding_team_run", "coding_team_status", "coding_team_stop",
+  "disk_cleanup", "disk_usage", "email_list", "email_read",
+  "logs_tail", "screen_capture",
 ];
+
+/** The gate that points the OTHER way: it exists where the box cannot draw. */
+const INVERSE_GATED_TOOLS = ["image_generate"];
+
+/**
+ * The tools a delegated coding run gets, and nothing else does.
+ *
+ * `registerMediaTools` and `browser_view_local` are gated on the RUN CONTEXT —
+ * the environment triple the runner sets (`mcp/lib/run-context.ts`) — not on
+ * `McpContext`, so no capability posture reaches them and the checker printed
+ * "Tool contract OK" over three shipped tools it had never built. They are the
+ * ones most in need of the check, too: their descriptions are the longest in
+ * the tree and they only ever run on a customer's device, where the registrar's
+ * contract complaint goes to a stdio server's stderr that nobody reads.
+ */
+const RUN_ONLY_TOOLS = ["browser_view_local", "generate_audio", "generate_image"];
+
+/** The environment the coding-agent runner sets around a run's MCP server. */
+const RUN_ENV = {
+  CLAWBOX_RUN_DIR: "/home/clawbox/projects/example",
+  CLAWBOX_RUN_ARTIFACTS_DIR: "/home/clawbox/clawbox/data/coding-agent-artifacts/example",
+  CLAWBOX_RUN_MEDIA: "images,audio",
+};
+
+/** Names present in `a` and absent from `b`, sorted. */
+function only(a: RegisteredToolInfo[], b: RegisteredToolInfo[]): string[] {
+  const other = new Set(b.map((t) => t.name));
+  return a.filter((t) => !other.has(t.name)).map((t) => t.name).sort();
+}
 
 async function main(): Promise<void> {
   const { buildServer } = await import("./clawbox-mcp");
   const problems: string[] = [];
   const byEdition: Record<string, RegisteredToolInfo[]> = {};
-  let probedAnything = false;
+  const byEditionReal: Record<string, RegisteredToolInfo[]> = {};
+  let probeResults: Record<string, boolean> = {};
 
   for (const edition of ["openclaw", "hermes"] as const) {
     // The app harness is the edition being simulated: this walks each
@@ -129,70 +180,107 @@ async function main(): Promise<void> {
     // describe a box that does not exist.
     const { reg: probedReg, ctx } = await buildServer(edition, "full", edition);
     const probed = probedReg.list();
-    const caps = ctx.capabilities;
-    if (caps.du || caps.journal || caps.screenGrabber || caps.imageConvert
-      || ctx.emailCanRead || ctx.codingAgent || ctx.canGenerateImages) {
-      probedAnything = true;
-    }
+    // Each probe SEPARATELY. A single OR let one true answer — `emailCanRead`
+    // on a dev PC with the setup API up — silence the note about the other six,
+    // and the run then looked like it had exercised the device probes.
+    probeResults = {
+      du: ctx.capabilities.du,
+      journal: ctx.capabilities.journal,
+      screen: ctx.capabilities.screenGrabber !== null,
+      imageConvert: ctx.capabilities.imageConvert,
+      email: ctx.emailCanRead,
+      codingAgent: ctx.codingAgent,
+      images: ctx.canGenerateImages,
+    };
 
-    const { reg: fullReg } = await buildServer(edition, "full", edition, { ...ALL_CAPABILITIES });
+    const { reg: fullReg } = await buildServer(edition, "full", edition, ALL_CAPABILITIES);
     const enabled = fullReg.list();
 
-    // A THIRD posture: every gate the other way round. It carries the one tool
-    // that registers where the box CANNOT do the thing (`image_generate`), and
-    // it is what the negative assertions below are made against.
-    const { reg: bareReg } = await buildServer(edition, "full", { ...NO_CAPABILITIES });
+    // Every gate the other way round. It carries the one tool that registers
+    // where the box CANNOT do the thing (`image_generate`), and it is what the
+    // negative half of each assertion below is made against.
+    const { reg: bareReg } = await buildServer(edition, "full", edition, NO_CAPABILITIES);
     const disabled = bareReg.list();
 
-    // The UNION, for the CONTRACT check only. A capability gate can point
-    // either way: most families register only when the box CAN do the thing,
-    // while `image_generate` registers only where it cannot (it exists to tell
-    // the model why, and would contradict the harness's own image tool on a
-    // linked box). Both halves ship, so both halves get their descriptions,
-    // schemas and edition gating checked.
+    // The posture a delegated coding run gets: the `browser` profile, with the
+    // runner's environment around the build. Restored immediately — the
+    // variables are read at REGISTRATION time, so nothing outside this call
+    // may see them.
+    const savedEnv = Object.fromEntries(Object.keys(RUN_ENV).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, RUN_ENV);
+    let inRun: RegisteredToolInfo[];
+    try {
+      const { reg: runReg } = await buildServer(edition, "browser", edition, ALL_CAPABILITIES);
+      inRun = runReg.list();
+    } finally {
+      for (const [k, v] of Object.entries(savedEnv)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+
+    // The CONTRACT check runs over every distinct tool SHAPE any posture
+    // produces, not over one entry per name. `ai_set_provider` takes an enum
+    // parameter when the Hermes catalogue answered at startup and a free-text
+    // one when it did not (mcp/tools/ai.ts) — de-duplicating by name alone
+    // examined whichever variant happened to be pushed first and left the one a
+    // box with an unreachable dashboard actually ships unchecked.
+    const seen = new Set<string>();
+    for (const tool of [...enabled, ...disabled, ...probed, ...inRun]) {
+      const shape = `${tool.name}(${Object.keys(tool.shape).sort().join(",")})`;
+      if (seen.has(shape)) continue;
+      seen.add(shape);
+      problems.push(...contractViolations(tool), ...schemaShapeViolations(tool));
+    }
+
+    // The matrix and the edition gating are about what a BOX gets, so they read
+    // the union of the postures a box can be in — a gate can point either way,
+    // and both halves ship.
     const tools = [...enabled];
     for (const tool of [...probed, ...disabled]) {
       if (!tools.some((t) => t.name === tool.name)) tools.push(tool);
     }
     byEdition[edition] = tools;
-    for (const tool of tools) problems.push(...contractViolations(tool), ...schemaShapeViolations(tool));
+    byEditionReal[edition] = enabled;
 
-    // Each gate against ITS OWN posture, never the union: the union cannot tell
-    // a working gate from a tool that lost it, because a family that became
-    // unconditional is in the union just the same. So both directions are
-    // asserted — present where the capability is on, ABSENT where it is off —
-    // and that holds on a device too, where the probes answer true.
-    //
-    // A COUNT could say neither: a family that vanished because its context
-    // field was renamed is invisible as long as another one was added
-    // (measured: three coding_agent tools disappeared and the total went UP).
-    const withCaps = new Set(enabled.map((t) => t.name));
-    const withoutCaps = new Set(disabled.map((t) => t.name));
-    for (const name of PROBE_GATED_TOOLS) {
-      if (!withCaps.has(name)) {
-        problems.push(
-          `${edition}: "${name}" registers only behind a device probe and is MISSING from the `
-          + "all-capabilities posture — the capability overrides are not reaching the registrars",
-        );
-      }
-      if (withoutCaps.has(name)) {
-        problems.push(
-          `${edition}: "${name}" is registered with every capability OFF — it has lost its device `
-          + "gate and a box that cannot do the thing is now offered the tool",
-        );
-      }
-    }
-    // The one gate that points the other way, asserted the same way round.
-    if (withCaps.has("image_generate")) {
+    // Each gate against ITS OWN posture, and as an EQUALITY. The union cannot
+    // tell a working gate from a tool that lost it — a family that became
+    // unconditional is in the union just the same — and a "these must all be
+    // present" list cannot see a family that gained a gate nobody recorded.
+    const gated = only(enabled, disabled);
+    const inverse = only(disabled, enabled);
+    if (gated.join(",") !== PROBE_GATED_TOOLS.join(",")) {
       problems.push(
-        `${edition}: "image_generate" is registered on a box that CAN draw — it would contradict `
-        + "the harness's own image tool",
+        `${edition}: the capability-gated tools are [${gated.join(", ")}], not the recorded `
+        + `[${PROBE_GATED_TOOLS.join(", ")}] — a family changed its gate; check it is deliberate `
+        + "and update PROBE_GATED_TOOLS",
       );
     }
-    if (!withoutCaps.has("image_generate")) {
+    if (inverse.join(",") !== INVERSE_GATED_TOOLS.join(",")) {
       problems.push(
-        `${edition}: "image_generate" is missing from a box that cannot draw — the inverse gate is `
-        + "not being read",
+        `${edition}: the tools that exist only where the capability is OFF are `
+        + `[${inverse.join(", ")}], not [${INVERSE_GATED_TOOLS.join(", ")}]`,
+      );
+    }
+
+    // The run-only family, both ways round: present inside a run, and absent
+    // from every posture that is not one.
+    const runExtra = only(inRun, enabled).filter((n) => !RUN_ONLY_TOOLS.includes(n));
+    for (const name of RUN_ONLY_TOOLS) {
+      if (!inRun.some((t) => t.name === name)) {
+        problems.push(
+          `${edition}: "${name}" is registered only inside a coding run and did not appear in the `
+          + "run posture — the run-context override is not reaching the registrars",
+        );
+      }
+      if (tools.some((t) => t.name === name)) {
+        problems.push(`${edition}: "${name}" is registered outside a coding run`);
+      }
+    }
+    if (runExtra.length) {
+      problems.push(
+        `${edition}: the run profile registers [${runExtra.join(", ")}], which nothing outside a run `
+        + "gets and this file does not name — record them in RUN_ONLY_TOOLS",
       );
     }
 
@@ -211,8 +299,16 @@ async function main(): Promise<void> {
   }
 
   for (const [edition, tools] of Object.entries(byEdition)) {
-    const bytes = schemaBytes(tools);
-    console.log(`\n${edition}: ${tools.length} tools, ${(bytes / 1024).toFixed(1)} KB of tools/list payload`);
+    // TWO figures, because they answer different questions. The headline is
+    // what a real box registers — the tools/list payload a 4-8B local model
+    // actually pays for — and the union beside it is a maximum no single box
+    // is ever in, since `image_generate` exists only where the others do not.
+    const real = byEditionReal[edition];
+    const bytes = schemaBytes(real);
+    console.log(
+      `\n${edition}: ${real.length} tools, ${(bytes / 1024).toFixed(1)} KB of tools/list payload`
+      + ` (union of all postures: ${tools.length} tools, ${(schemaBytes(tools) / 1024).toFixed(1)} KB)`,
+    );
     for (const t of tools) {
       const flags = [
         t.opts.readOnly ? "read-only" : "writes",
@@ -228,15 +324,16 @@ async function main(): Promise<void> {
   console.log(`\nOpenClaw only: ${onlyOpenclaw.join(", ")}`);
   console.log(`Hermes only:   ${onlyHermes.join(", ")}`);
 
-  if (!probedAnything) {
-    // Said out loud, every time, because the alternative is the shape this
-    // checker exists to catch: a run that examined a third of the surface and
-    // printed OK. The contract above WAS checked over the full posture; what
-    // this host could not do is tell you whether the probes themselves work.
+  const unprobed = Object.entries(probeResults).filter(([, ok]) => !ok).map(([name]) => name);
+  if (unprobed.length) {
+    // Said out loud, every time, and PER PROBE: the alternative is the shape
+    // this checker exists to catch, a run that examined part of the surface and
+    // printed OK. The contract above WAS checked over every posture; what this
+    // host could not do is tell you whether these particular probes work.
     console.log(
-      "\nnote: no device capability probed true on this host"
-      + ` (CLAWBOX_ROOT=${process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox"} is where probes are spawned).`
-      + "\n      The contract and the matrix above are the ALL-CAPABILITIES posture, which is the"
+      `\nnote: ${unprobed.join(", ")} probed false on this host`
+      + ` (CLAWBOX_ROOT=${DEFAULT_CWD} is where probes are spawned).`
+      + "\n      The contract and the matrix above come from the declared postures, which are the"
       + "\n      surface a real box registers. Run this on a device to exercise the probes too.",
     );
   }
