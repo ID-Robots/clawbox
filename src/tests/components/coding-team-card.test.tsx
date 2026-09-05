@@ -71,43 +71,27 @@ beforeEach(() => { teams = []; });
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe("with no team yet", () => {
-  it("offers the goal form and starts a team for the folder", async () => {
+  it("offers to plan the team in the chat, and hands over on a click", async () => {
     stub();
-    const onOpenRun = vi.fn();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={onOpenRun} />);
+    const onPlan = vi.fn();
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} onPlan={onPlan} />);
     await screen.findByTestId("coding-team-form");
     expect(screen.queryByTestId("coding-team-board")).toBeNull();
-    const start = screen.getByTestId("coding-team-start");
-    expect(start).toBeDisabled();
-    fireEvent.change(screen.getByTestId("coding-team-goal"), { target: { value: "Build the invoice app" } });
-    expect(start).toBeEnabled();
-    fireEvent.click(start);
-    await waitFor(() => expect(posts).toEqual([{ url: "/setup-api/coding-agent/team", body: { goal: "Build the invoice app", directory: DIR } }]));
-    // The board appears, planning, and the form folds away behind Stop.
-    expect(await screen.findByTestId("coding-team-status")).toHaveTextContent(t("codingAgent.team.status.planning"));
-    expect(screen.getByText(t("codingAgent.team.planning"))).toBeInTheDocument();
-    expect(screen.queryByTestId("coding-team-form")).toBeNull();
-    expect(screen.getByTestId("coding-team-stop")).toBeInTheDocument();
+    // No textarea: the goal is written in the chat's Create App card, the
+    // way every other task is, so the assistant carries it.
+    expect(screen.queryByTestId("coding-team-goal")).toBeNull();
+    expect(screen.queryByTestId("coding-team-start")).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-team-plan"));
+    expect(onPlan).toHaveBeenCalledTimes(1);
+    expect(posts).toEqual([]);
   });
 
-  it("names a code project by its id when starting", async () => {
+  it("shows nothing to press on a page with no chat to hand to", async () => {
     stub();
-    render(<CodingTeamCard directory="/home/clawbox/clawbox/data/code-projects/site" projectId="site" onOpenRun={vi.fn()} />);
-    fireEvent.change(await screen.findByTestId("coding-team-goal"), { target: { value: "Add a dark mode" } });
-    fireEvent.click(screen.getByTestId("coding-team-start"));
-    await waitFor(() => expect(posts[0]?.body).toEqual({ goal: "Add a dark mode", projectId: "site" }));
-  });
-
-  it("says in words when the device refuses", async () => {
-    stub();
-    vi.mocked(fetch).mockImplementationOnce(async () => json({ error: "The coding agent is switched off.", kind: "disabled" }, 409));
     render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
-    // The first fetch is the list; the refusal must come from the POST.
-    await screen.findByTestId("coding-team-form");
-    vi.mocked(fetch).mockImplementationOnce(async () => json({ error: "The coding agent is switched off.", kind: "disabled" }, 409));
-    fireEvent.change(screen.getByTestId("coding-team-goal"), { target: { value: "x" } });
-    fireEvent.click(screen.getByTestId("coding-team-start"));
-    expect(await screen.findByTestId("coding-team-error")).toHaveTextContent("The coding agent is switched off.");
+    await screen.findByTestId("coding-team-card");
+    expect(screen.queryByTestId("coding-team-form")).toBeNull();
+    expect(screen.queryByTestId("coding-team-plan")).toBeNull();
   });
 });
 
@@ -116,7 +100,7 @@ describe("with a team working here", () => {
     teams = [WORKING, { ...WORKING, id: "team-older0001", status: "done", directory: DIR }, { ...WORKING, id: "team-elsewhere", directory: "/other" }];
     stub();
     const onOpenRun = vi.fn();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={onOpenRun} />);
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={onOpenRun} onPlan={vi.fn()} />);
     const board = await screen.findByTestId("coding-team-board");
     expect(board).toHaveAttribute("data-team-id", "team-k3x9q2ab");
     expect(screen.getByTestId("coding-team-status")).toHaveTextContent(t("codingAgent.team.status.working"));
@@ -170,7 +154,7 @@ describe("with a team working here", () => {
   it("shows why a team failed", async () => {
     teams = [{ ...WORKING, status: "failed", error: "Stopped after 3 alerts." }];
     stub();
-    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} onPlan={vi.fn()} />);
     expect(await screen.findByTestId("coding-team-reason")).toHaveTextContent("Stopped after 3 alerts.");
     expect(screen.getByTestId("coding-team-form")).toBeInTheDocument();
   });

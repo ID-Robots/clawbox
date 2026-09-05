@@ -226,7 +226,9 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   const codingWindow = page.getByTestId("chrome-window-coding");
   await expect(codingWindow).toBeVisible();
   await expect(codingWindow.getByTestId("coding-agent-state")).toContainText("Off");
-  await codingWindow.getByTestId("coding-agent-open-settings").click();
+  // A wide window carries Settings in its rail and draws no header row; a
+  // narrow one has the row's button. Whichever this window has.
+  await codingWindow.getByTestId("coding-agent-sidebar-settings").or(codingWindow.getByTestId("coding-agent-open-settings")).first().click();
   const codingAgent = codingWindow.getByTestId("coding-agent-settings-panel");
   const agentSwitch = codingAgent.getByRole("switch", { name: "Let the assistant delegate coding work" });
   await expect(agentSwitch).toHaveAttribute("aria-checked", "false");
@@ -234,7 +236,7 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   await expect(codingAgent.getByTestId("coding-agent-effort-max")).toBeVisible();
   await agentSwitch.click();
   await expect(agentSwitch).toHaveAttribute("aria-checked", "true");
-  // The app's header reads the same status the panel just published.
+  // The app's state chip (rail or header) reads the status the panel just published.
   await expect(codingWindow.getByTestId("coding-agent-state")).toContainText("On");
 });
 

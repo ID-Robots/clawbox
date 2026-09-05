@@ -25,10 +25,18 @@ export const CHAT_MESSAGE_EVENT = "clawbox:chat-message";
  */
 export const NEW_APP_EVENT = "clawbox:new-app";
 
+/** What the Create App card should open on: an existing project, and whether the work is for a team. */
+export interface NewAppCardOptions {
+  /** The absolute directory of a project to preselect in the existing-project mode. */
+  project?: string;
+  /** Compose the message for a coding TEAM (coding_team_run) rather than one run. */
+  team?: boolean;
+}
+
 /** Ask the desktop to open the chat with the New app card. */
-export function openNewAppCard(): void {
+export function openNewAppCard(opts: NewAppCardOptions = {}): void {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new Event(NEW_APP_EVENT));
+  window.dispatchEvent(new CustomEvent<NewAppCardOptions>(NEW_APP_EVENT, { detail: opts }));
 }
 export const OPEN_SETTINGS_SECTION_EVENT = "clawbox:open-settings-section";
 
@@ -279,6 +287,24 @@ export function buildResumeProjectPrompt(req: ResumeProjectRequest): string {
   ];
   if (req.kind === "codeProject") lines.push("Then tell me what changed, what was verified, and what is left for the next run.");
   return lines.join("\n");
+}
+
+/**
+ * The message that asks the assistant for a coding TEAM on an existing
+ * project — the multi-agent shape (coding_team_run): a planner splits the
+ * goal, workers do the parts one after another, a reviewer checks each. The
+ * project page's "Plan with the assistant" button opens the Create App card
+ * with the team switch on, and this is what the card then hands the chat.
+ */
+export function buildTeamProjectPrompt(req: Omit<ResumeProjectRequest, "latestRun">): string {
+  const goal = req.instructions.trim().replace(/[.\s]+$/u, "");
+  const target = req.kind === "codeProject" ? `project_id "${req.folder}"` : `directory "${req.directory}"`;
+  return [
+    `Run a coding TEAM on the existing ClawBox project "${req.name.trim()}" in ${req.directory}: ${goal}.`,
+    `Start it with coding_team_run (${target}) — the planner reads the folder and splits the goal into tasks, workers do them one after another, and a reviewer checks each result. Do not start single runs for the parts yourself.`,
+    "Tell me when it is running, and check on it later with coding_team_status; when it is done, summarise what each task did and what was verified.",
+    ...(req.kind === "codeProject" ? ["When the team is done, rebuild the code project with code_project_build so the desktop app shows the change."] : []),
+  ].join("\n");
 }
 
 export function buildFixErrorPrompt(ctx: FixErrorContext): string {

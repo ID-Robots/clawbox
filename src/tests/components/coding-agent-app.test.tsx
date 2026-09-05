@@ -738,9 +738,18 @@ describe("CodingAgentApp", () => {
         render(<CodingAgentApp />);
         const sidebar = await screen.findByTestId("coding-agent-sidebar");
         expect(within(sidebar).getByTestId("coding-agent-sidebar-home")).toHaveAttribute("aria-current", "page");
+        // With the rail up there is no header row: the rail carries the
+        // app's name, its state and Settings, and the row said them twice.
+        expect(screen.queryByTestId("coding-agent-open-settings")).toBeNull();
+        expect(within(sidebar).getByTestId("coding-agent-state")).toHaveTextContent(t("codingAgent.stateOn"));
+        expect(within(sidebar).getByText(t("codingAgent.title"))).toBeInTheDocument();
+        expect(within(sidebar).getByTestId("coding-agent-sidebar-settings")).toBeInTheDocument();
         // A project entry opens the project's page…
         fireEvent.click(within(await within(sidebar).findByTestId("coding-agent-sidebar-projects")).getByText(SITE_PROJECT.name));
         await screen.findByTestId("coding-agent-project-page");
+        // …whose folder fills the column and whose team and runs sit in a rail.
+        expect(screen.getByTestId("coding-agent-workspace")).toHaveAttribute("data-fill", "true");
+        expect(within(screen.getByTestId("coding-agent-project-rail")).getByTestId("coding-agent-runs-toggle")).toBeInTheDocument();
         // …and a run entry the run's page.
         fireEvent.click(within(within(sidebar).getByTestId("coding-agent-sidebar-runs")).getByRole("button"));
         expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", RUN.id);
@@ -1375,6 +1384,42 @@ describe("the workspace, the breadcrumb and the live view", () => {
     expect(await screen.findByTestId("coding-agent-open-settings")).toBeInTheDocument();
   });
 
+  it("keeps the header row in a narrow window, where there is no rail to carry it", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    expect(await screen.findByTestId("coding-agent-open-settings")).toBeInTheDocument();
+    expect(screen.getByTestId("coding-agent-state")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-agent-sidebar")).toBeNull();
+  });
+
+  it("shows a few of a run's pictures and the whole evidence list only on request", async () => {
+    const pictures = Array.from({ length: 6 }, (_, i) => ({ name: `step-${i + 1}.png`, bytes: 100, kind: "image" as const }));
+    const run = { ...RUN, artifacts: [...pictures, { name: "report.md", bytes: 20, kind: "markdown" as const }, { name: "intro.wav", bytes: 4096, kind: "audio" as const }] };
+    stubFetch({ enabled: true, readiness: READY }, [run], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+    const card = await screen.findByTestId("coding-agent-artifacts");
+    // Folded: four thumbnails, no clip, no file list, and the count.
+    expect(card).toHaveAttribute("data-folded", "true");
+    expect(card.querySelectorAll("img")).toHaveLength(4);
+    expect(screen.queryByTestId("coding-agent-artifact-audio")).toBeNull();
+    expect(within(card).queryByText("report.md")).toBeNull();
+    expect(card.textContent).toContain("(8)");
+    const toggle = screen.getByTestId("coding-agent-artifacts-toggle");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle.textContent).toBe(t("codingAgent.artifactsShowAll", { n: 8 }));
+    // Unfolded: everything.
+    fireEvent.click(toggle);
+    expect(card).not.toHaveAttribute("data-folded");
+    expect(card.querySelectorAll("img")).toHaveLength(6);
+    expect(within(screen.getByTestId("coding-agent-artifact-audio")).getByLabelText("intro.wav")).toBeInTheDocument();
+    expect(within(card).getByText("report.md")).toBeInTheDocument();
+    expect(toggle.textContent).toBe(t("codingAgent.artifactsShowFewer"));
+    fireEvent.click(toggle);
+    expect(card).toHaveAttribute("data-folded", "true");
+  });
+
   it("shows the browser the run drives above its terminal while it runs — a picture only — folds it on request, and not once it settled", async () => {
     stubFetch({ enabled: true, readiness: READY }, [LIVE], { projects: [SITE_PROJECT] });
     const { unmount } = render(<CodingAgentApp />);
@@ -1387,8 +1432,14 @@ describe("the workspace, the breadcrumb and the live view", () => {
     const screenMock = within(preview).getByTestId("vnc-mock");
     expect(screenMock).toHaveAttribute("data-view-only", "true");
     expect(screenMock).toHaveAttribute("data-paste", "hidden");
+    // The two share a row while both are showing (side by side in a wide
+    // window); with the preview folded the terminal has the row to itself.
+    const row = screen.getByTestId("coding-agent-live-row");
+    expect(row).toHaveAttribute("data-side-by-side", "true");
+    expect(within(row).getByTestId("coding-agent-run-terminal")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("coding-agent-browser-preview-toggle"));
     expect(within(preview).queryByTestId("vnc-mock")).toBeNull();
+    expect(row).not.toHaveAttribute("data-side-by-side");
     fireEvent.click(screen.getByTestId("coding-agent-browser-preview-toggle"));
     expect(within(preview).getByTestId("vnc-mock")).toBeInTheDocument();
     unmount();

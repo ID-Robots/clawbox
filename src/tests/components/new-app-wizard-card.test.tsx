@@ -10,7 +10,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import NewAppWizardCard from "@/components/NewAppWizardCard";
-import { buildResumeProjectPrompt, CHAT_MESSAGE_EVENT } from "@/lib/ui-events";
+import { buildResumeProjectPrompt, buildTeamProjectPrompt, CHAT_MESSAGE_EVENT } from "@/lib/ui-events";
 
 describe("NewAppWizardCard", () => {
   it("ignores an outside click by default — the page host must not lose typed text", () => {
@@ -95,6 +95,34 @@ describe("NewAppWizardCard — an existing project", () => {
       expect(heard[0]).toContain("code_project_build");
       expect(heard[0]).not.toContain("Create a new ClawBox app");
       expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener(CHAT_MESSAGE_EVENT, onChatMessage);
+    }
+  });
+
+  it("opens on a project the Coding Agent handed over, with the team switch on, and asks for a coding TEAM", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(PROJECTS), { status: 200, headers: { "content-type": "application/json" } })));
+    const heard: string[] = [];
+    const onChatMessage = (e: Event) => heard.push(String((e as CustomEvent<{ text?: string }>).detail?.text ?? ""));
+    window.addEventListener(CHAT_MESSAGE_EVENT, onChatMessage);
+    try {
+      render(<NewAppWizardCard onClose={() => {}} initialProject="/home/clawbox/Projects/shop" initialTeam />);
+      // The existing-project mode, already on the project, the switch on.
+      const select = await screen.findByTestId("coding-agent-new-project");
+      await waitFor(() => expect(select).not.toBeDisabled());
+      expect((select as HTMLSelectElement).value).toBe("/home/clawbox/Projects/shop");
+      expect(screen.getByTestId("coding-agent-new-team")).toBeChecked();
+      fireEvent.change(screen.getByTestId("coding-agent-new-next"), { target: { value: "Add invoices with PDF export." } });
+      fireEvent.click(screen.getByTestId("coding-agent-new-create"));
+      expect(heard).toEqual([buildTeamProjectPrompt({
+        name: "shop", directory: "/home/clawbox/Projects/shop", kind: "folder", folder: "shop", instructions: "Add invoices with PDF export.",
+      })]);
+      expect(heard[0]).toContain("coding_team_run");
+      expect(heard[0]).toContain('directory "/home/clawbox/Projects/shop"');
+      expect(heard[0]).not.toContain("coding_agent_run");
+      // The switch off again: the plain resume message.
+      fireEvent.click(screen.getByTestId("coding-agent-new-team"));
+      expect(screen.getByTestId("coding-agent-new-team")).not.toBeChecked();
     } finally {
       window.removeEventListener(CHAT_MESSAGE_EVENT, onChatMessage);
     }

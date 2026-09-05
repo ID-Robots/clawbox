@@ -999,8 +999,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // The Coding Agent hands "Create app" over to here: the card composes one
   // message for the assistant, so it belongs in the conversation that will
   // carry the reply, not in a second window that cannot show it.
+  // What the last opener asked the card to open on: the Coding Agent's
+  // project page hands over its project and the team switch.
+  const [newAppOptions, setNewAppOptions] = useState<{ project?: string; team?: boolean }>({})
   useEffect(() => {
-    const onNewApp = () => { if (!showNewApp) toggleNewApp() }
+    const onNewApp = (e: Event) => {
+      const detail = (e as CustomEvent<{ project?: unknown; team?: unknown } | undefined>).detail
+      setNewAppOptions({
+        project: typeof detail?.project === 'string' ? detail.project : undefined,
+        team: detail?.team === true,
+      })
+      if (!showNewApp) toggleNewApp()
+    }
     window.addEventListener(NEW_APP_EVENT, onNewApp)
     return () => window.removeEventListener(NEW_APP_EVENT, onNewApp)
   }, [showNewApp, toggleNewApp])
@@ -5787,8 +5797,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       {showNewApp && (
         <div data-testid="chat-new-app" style={{ padding: '10px 14px 0', background: 'rgba(0,0,0,0.2)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
           <NewAppWizardCard
+            key={`${newAppOptions.project ?? ''}|${newAppOptions.team ? 'team' : ''}`}
+            initialProject={newAppOptions.project}
+            initialTeam={newAppOptions.team}
             maxTaskChars={newAppMaxChars ?? DEFAULT_MAX_TASK_CHARS}
-            onClose={() => setShowNewApp(false)}
+            onClose={() => { setShowNewApp(false); setNewAppOptions({}) }}
             // In the chat it floats over the composer like a popover, so it
             // behaves like one: click away (or Escape) and it goes.
             closeOnOutsideClick

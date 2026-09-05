@@ -12,7 +12,7 @@ import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
 import InstalledAppIcon from "./InstalledAppIcon";
 import CodingAgentSetupWizard from "./CodingAgentSetupWizard";
-import { BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD, SECTION_LABEL } from "./coding-agent-ui";
+import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD, CARD_SURFACE, RAIL_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 import { startHarnessTest } from "@/lib/coding-agent-harness-test";
 import { openNewAppCard } from "@/lib/ui-events";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
@@ -156,6 +156,8 @@ export function installedAppId(folder: string): string {
 /** One page of runs. The list is open by default now, so it has to be paged
  *  rather than unbounded — a long history should not push the settings off
  *  the top of the window. */
+/** How many pictures a run's evidence card shows before it asks to be unfolded. */
+const ARTIFACT_PREVIEW = 4;
 const RUNS_PAGE = 10;
 /** Where the preview script lives on the device. */
 const CLAWBOX_ROOT = "/home/clawbox/clawbox";
@@ -277,7 +279,7 @@ function ProjectIcon({ project, size }: { project: Project; size: "w-6 h-6" | "w
 /** One cell of the run page's figures grid. */
 function StatTile({ label, value, hint, testId }: { label: string; value: string; hint?: string; testId?: string }) {
   return (
-    <div className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2 min-w-0" data-testid={testId}>
+    <div className={`${CARD_SURFACE} px-3 py-2 min-w-0`} data-testid={testId}>
       <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] truncate">{label}</div>
       <div className="mt-0.5 text-sm font-semibold text-[var(--text-primary)] truncate" title={hint ?? value}>{value}</div>
       {hint && <div className="text-[10px] text-[var(--text-muted)] truncate">{hint}</div>}
@@ -321,6 +323,11 @@ export default function CodingAgentApp() {
   const [browserPreview, setBrowserPreview] = useState(true);
   /** The markdown artifact open in the preview dialog, if any. */
   const [report, setReport] = useState<{ runId: string; name: string } | null>(null);
+  // The run whose whole evidence list is unfolded. A run that screenshots
+  // every step files dozens of pictures, and drawn in full they pushed the
+  // summary and the files off the page; the card shows a few and the rest
+  // on request. Keyed by run so the next run's page starts folded.
+  const [artifactsOpenFor, setArtifactsOpenFor] = useState<string | null>(null);
   // Runs are behind a button: the answer to "is this on and does it work" is
   // the whole point of opening this window, and a list of past runs pushed it
   // below the fold.
@@ -749,7 +756,7 @@ export default function CodingAgentApp() {
 
   // A window, not a card: keep the app's own background on screen while the
   // first fetch lands, rather than flashing whatever is behind it.
-  if (loading) return <div className="h-full bg-[var(--bg-deep)]" data-testid="coding-agent-panel" />;
+  if (loading) return <div className={`h-full ${APP_GROUND}`} data-testid="coding-agent-panel" />;
 
   const readiness = status?.readiness;
   // Only what is missing is ever listed, so a check carries only the words
@@ -911,7 +918,7 @@ export default function CodingAgentApp() {
         onClick={() => { setShowRuns((v) => !v); setRunsShown(RUNS_PAGE); }}
         aria-expanded={showRuns}
         data-testid="coding-agent-runs-toggle"
-        className="w-full flex items-center justify-between gap-2 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors"
+        className={`w-full flex items-center justify-between gap-2 ${CARD_SURFACE} px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors`}
       >
         <span className="flex items-center gap-2">
           <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">history</span>
@@ -942,7 +949,7 @@ export default function CodingAgentApp() {
               const started = run.status !== "draft";
               const reviewedBy = runs.find((r) => r.reviewOf === run.id);
               return (
-                <li key={run.id} data-run-id={run.id} className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2">
+                <li key={run.id} data-run-id={run.id} className={`${CARD_SURFACE} px-3 py-2`}>
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -1076,14 +1083,29 @@ export default function CodingAgentApp() {
   return (
     // @container so the panel sizes to its WINDOW, not the viewport — this is
     // a desktop window the owner can resize independently of the screen.
-    <div ref={rootRef} className="h-full flex bg-[var(--bg-deep)] text-white @container" data-testid="coding-agent-panel" data-help-bounds>
+    <div ref={rootRef} className={`h-full flex ${APP_GROUND} text-white @container`} data-testid="coding-agent-panel" data-help-bounds>
       {/* The sidebar — the Claude Code web layout's left rail: New, Home,
           Settings, the projects, the recent runs. Only when the window is
           wide enough to spare it (the phone and a small window keep the
           lists on the pages themselves), and not while the wizard runs. */}
       {wide && view.face !== "wizard" && !liveMode && (
-        <aside className="flex w-[15rem] shrink-0 flex-col border-r border-white/[0.06] bg-black/[0.18] overflow-y-auto" data-testid="coding-agent-sidebar">
-          <div className="px-3 pt-4 pb-2 space-y-1">
+        <aside className={`flex w-[15rem] shrink-0 flex-col border-r ${RAIL_SURFACE} overflow-y-auto`} data-testid="coding-agent-sidebar">
+          {/* The app's name and its state live HERE when the rail is shown:
+              the header row above the page said the same things twice. */}
+          <div className="px-4 pt-4 pb-1 flex items-center gap-2">
+            <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">smart_toy</span>
+            <span className="text-[13px] font-semibold tracking-[-0.01em] text-[var(--text-primary)] truncate">{t("codingAgent.title")}</span>
+            {status && (
+              <span
+                data-testid="coding-agent-state"
+                className={`ml-auto shrink-0 text-[10px] font-semibold uppercase tracking-wider border rounded-full px-1.5 py-0.5 flex items-center gap-1 ${status.enabled ? "text-emerald-400 border-emerald-400/40" : "text-[var(--text-muted)] border-white/20"}`}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${status.enabled ? "bg-emerald-400" : "bg-[var(--text-muted)]"}`} aria-hidden="true" />
+                {status.enabled ? t("codingAgent.stateOn") : t("codingAgent.stateOff")}
+              </span>
+            )}
+          </div>
+          <div className="px-3 pt-2 pb-2 space-y-1">
             {!standalone && (
               <button type="button" onClick={openNew} data-testid="coding-agent-sidebar-new" className={`${SIDEBAR_ITEM} text-[var(--text-primary)]`}>
                 <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">add_circle</span>
@@ -1168,12 +1190,16 @@ export default function CodingAgentApp() {
           intro centres itself in it. min-h-0 keeps the scroll on the parent. */}
       {/* A run's page is data — figures, files, a summary, an activity log —
           and reads better wide; the home and project pages stay a column. */}
-      <div className={`mx-auto w-full ${view.face === "run" ? (liveMode ? "max-w-none" : "max-w-6xl") : "max-w-2xl"} px-5 py-4 flex-1 flex flex-col min-h-0`}>
+      <div className={`mx-auto w-full ${view.face === "run" ? (liveMode ? "max-w-none" : "max-w-6xl") : view.face === "project" ? "max-w-none" : "max-w-2xl"} px-5 py-4 flex-1 flex flex-col min-h-0`}>
 
         {/* One row: what this is, whether it is on, and everything you can do
             from here. The primary action used to sit on its own line below,
             left-aligned against nothing; paired with Settings it reads as a
             toolbar and the page below it starts clean. */}
+        {/* The header row is the narrow window's: with the rail up it would
+            repeat the rail's name, state and Settings, and cost the page a
+            row it needs for files. `liveMode` has no chrome at all. */}
+        {!wide && !liveMode && (
         <div className="flex items-center justify-between gap-4 pb-3 mb-1 border-b border-white/[0.06]">
           <div className="flex items-center gap-2 min-w-0">
             <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }} aria-hidden="true">smart_toy</span>
@@ -1230,6 +1256,7 @@ export default function CodingAgentApp() {
           )}
           </div>
         </div>
+        )}
 
         {view.face === "settings" && (<>
           <CodingAgentBreadcrumb
@@ -1313,7 +1340,7 @@ export default function CodingAgentApp() {
             "Ready" is a row that never tells the owner anything; the checklist
             appears only when something is actually missing. */}
         {readiness && !readiness.ready && (
-          <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2">
+          <div className={`mt-3 ${CARD_SURFACE} px-3 py-2`}>
             <ul className="space-y-1">
               {checks.filter((c) => !c.ok).map((c) => (
                 <li key={c.label} className="flex items-center gap-2 text-xs">
@@ -1402,7 +1429,7 @@ export default function CodingAgentApp() {
                         setOpenProjectDir(project.directory);
                       }
                     }}
-                    className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2 flex items-start justify-between gap-3 cursor-pointer hover:bg-white/[0.06] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400/60"
+                    className={`${CARD_SURFACE} px-3 py-2 flex items-start justify-between gap-3 cursor-pointer hover:bg-white/[0.06] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400/60`}
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -1466,6 +1493,7 @@ export default function CodingAgentApp() {
           const project = projects.find((pr) => runBelongsTo(run, pr)) ?? null;
           const reviewedBy = runs.find((r) => r.reviewOf === run.id);
           const artifacts = run.artifacts ?? [];
+          const artifactsFolded = artifacts.length > ARTIFACT_PREVIEW && artifactsOpenFor !== run.id;
           const images = artifacts.filter((a) => a.kind === "image");
           // Clips get a player rather than a link: a run can now record its own
           // narration, and a download is not how you check what it says.
@@ -1510,7 +1538,11 @@ export default function CodingAgentApp() {
                     className="ml-auto w-48"
                   />
                 </div>
-                <div className="mt-2 flex-1 min-h-0 grid grid-rows-2 gap-2" data-testid="coding-agent-live-view">
+                {/* Wide: the browser on the left and the terminal on the
+                    right, each the window's full height — stacked, the
+                    browser sat letterboxed in a strip half the screen wide
+                    with the terminal squeezed under it. Narrow: stacked. */}
+                <div className="mt-2 flex-1 min-h-0 grid grid-rows-2 gap-2 @3xl:grid-rows-1 @3xl:grid-cols-2" data-testid="coding-agent-live-view">
                   <div className="min-h-0 rounded-xl border border-white/10 overflow-hidden bg-black" data-testid="coding-agent-browser-preview">
                     <VNCApp viewOnly pasteButton="hidden" />
                   </div>
@@ -1542,7 +1574,7 @@ export default function CodingAgentApp() {
 
               {/* The header: what this run is, how it stands, and everything
                   you can do to it. */}
-              <div className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3">
+              <div className={`${CARD_SURFACE} px-4 py-3`}>
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${tone.chip}`}>
                     {statusLabel(run.status)}
@@ -1673,10 +1705,20 @@ export default function CodingAgentApp() {
                 <div className="min-w-0">
               {/* While the run works: the browser it drives, on the device's
                   own screen — a picture only, so a click here cannot steer a
-                  page the run is on — folded away with one tap. */}
-              {isLive(run.status) && (
-                <div className="mt-3 rounded-xl border border-white/10 overflow-hidden flex flex-col bg-black" data-testid="coding-agent-browser-preview">
-                  <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.06] bg-white/[0.03] shrink-0">
+                  page the run is on — folded away with one tap — and its
+                  terminal, the transcript tailed live where the activity log
+                  used to be. Side by side when the window has the width and
+                  both are showing; one under the other otherwise. Once the
+                  run has settled, the log (below) is the record. */}
+              {isLive(run.status) && (() => {
+                const command = run.transcriptPath
+                  ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.directory, live: true })
+                  : null;
+                const sideBySide = browserPreview && command !== null;
+                return (
+              <div className={sideBySide ? "@3xl:grid @3xl:grid-cols-2 @3xl:gap-3 @3xl:items-stretch" : ""} data-testid="coding-agent-live-row" data-side-by-side={sideBySide || undefined}>
+                <div className={`mt-3 rounded-xl border border-white/10 overflow-hidden flex flex-col bg-black ${sideBySide ? "@3xl:h-[480px]" : ""}`} data-testid="coding-agent-browser-preview">
+                  <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.06] bg-black/30 shrink-0">
                     <span className="material-symbols-rounded text-sky-300" style={{ fontSize: 16 }} aria-hidden="true">web</span>
                     <p className={`${SECTION_LABEL} !mb-0`}>{t("codingAgent.browserPreviewTitle")}</p>
                     <span className="ml-auto" />
@@ -1691,22 +1733,14 @@ export default function CodingAgentApp() {
                     </button>
                   </div>
                   {browserPreview && (
-                    <div style={{ height: 280 }}>
+                    <div className={`h-[280px] ${sideBySide ? "@3xl:h-auto @3xl:flex-1 @3xl:min-h-0" : ""}`}>
                       <VNCApp viewOnly pasteButton="hidden" />
                     </div>
                   )}
                 </div>
-              )}
-
-              {/* While the run works: its terminal, embedded — the transcript
-                  tailed live where the activity log used to be. Once it has
-                  settled, the log (below) is the record. */}
-              {isLive(run.status) && run.transcriptPath && (() => {
-                const command = livePreviewCommand({ transcriptPath: run.transcriptPath ?? null, sessionId: run.sessionId ?? null, directory: run.directory, live: true });
-                if (!command) return null;
-                return (
-                  <div className="mt-3 rounded-xl border border-emerald-400/20 overflow-hidden flex flex-col" style={{ height: 460, background: "#0d0d1a" }} data-testid="coding-agent-run-terminal">
-                    <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.06] bg-white/[0.03] shrink-0">
+                {command && (
+                  <div className="mt-3 rounded-xl border border-emerald-400/20 overflow-hidden flex flex-col" style={{ height: 480, background: "#0d0d1a" }} data-testid="coding-agent-run-terminal">
+                    <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.06] bg-black/30 shrink-0">
                       <span className="material-symbols-rounded text-emerald-400" style={{ fontSize: 16 }} aria-hidden="true">terminal</span>
                       <p className={`${SECTION_LABEL} !mb-0`}>{t("codingAgent.livePreviewTitle")}</p>
                       <span className="ml-auto" />
@@ -1726,6 +1760,8 @@ export default function CodingAgentApp() {
                       <TerminalApp key={run.id} initialCommand={command} />
                     </div>
                   </div>
+                )}
+              </div>
                 );
               })()}
 
@@ -1733,7 +1769,7 @@ export default function CodingAgentApp() {
                   markdown. Drawn through the chat's renderer, which builds
                   elements from the text and never injects HTML — what lets
                   agent-written words on to the owner's screen at all. */}
-              <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3">
+              <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`}>
                 <p className={SECTION_LABEL}>{t("codingAgent.summaryTitle")}</p>
                 {run.summary ? (
                   <div
@@ -1751,7 +1787,7 @@ export default function CodingAgentApp() {
 
               {/* The plan, as the run last wrote it. */}
               {todos.length > 0 && (
-                <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3" data-testid="coding-agent-run-plan">
+                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-plan">
                   <p className={SECTION_LABEL}>
                     {t("codingAgent.planTitle")}
                     <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{todosDone}/{todos.length}</span>
@@ -1779,7 +1815,7 @@ export default function CodingAgentApp() {
 
               {/* Which helpers are out right now. */}
               {(run.activeSubagents?.length ?? 0) > 0 && (
-                <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3">
+                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`}>
                   <p className={SECTION_LABEL}>{t("codingAgent.helpersTitle")}</p>
                   <ul className="mt-2 space-y-1" data-testid="coding-agent-active-subagents">
                     {run.activeSubagents?.map((a, i) => (
@@ -1803,7 +1839,7 @@ export default function CodingAgentApp() {
               {/* The newest steps, as the runner recorded them — the record
                   once the run has settled. */}
               {activity.length > 0 && !(isLive(run.status) && run.transcriptPath) && (
-                <details className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3" data-testid="coding-agent-run-activity" open={isLive(run.status)}>
+                <details className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-activity" open={isLive(run.status)}>
                   <summary className={`${SECTION_LABEL} cursor-pointer list-none`}>
                     {t("codingAgent.activityTitle")}
                     <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{activity.length}</span>
@@ -1843,11 +1879,27 @@ export default function CodingAgentApp() {
               {/* The run's evidence: screenshots it took while verifying its
                   work, its report.md, and whatever test output it saved. */}
               {artifacts.length > 0 && (
-                <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3" data-testid="coding-agent-artifacts">
-                  <p className={SECTION_LABEL}>{t("codingAgent.artifactsTitle")}</p>
+                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-artifacts" data-folded={artifactsFolded || undefined}>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className={SECTION_LABEL}>
+                      {t("codingAgent.artifactsTitle")}
+                      <span className="ml-1.5 normal-case tracking-normal font-normal text-[var(--text-muted)]">({artifacts.length})</span>
+                    </p>
+                    {artifacts.length > ARTIFACT_PREVIEW && (
+                      <button
+                        type="button"
+                        onClick={() => setArtifactsOpenFor(artifactsFolded ? run.id : null)}
+                        aria-expanded={!artifactsFolded}
+                        data-testid="coding-agent-artifacts-toggle"
+                        className="text-[11px] text-[var(--text-secondary)] hover:text-white underline decoration-white/20"
+                      >
+                        {artifactsFolded ? t("codingAgent.artifactsShowAll", { n: artifacts.length }) : t("codingAgent.artifactsShowFewer")}
+                      </button>
+                    )}
+                  </div>
                   {images.length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-2">
-                      {images.map((a) => (
+                      {(artifactsFolded ? images.slice(0, ARTIFACT_PREVIEW) : images).map((a) => (
                         <a
                           key={a.name}
                           href={artifactUrl(run.id, a.name)}
@@ -1862,7 +1914,7 @@ export default function CodingAgentApp() {
                       ))}
                     </div>
                   )}
-                  {clips.length > 0 && (
+                  {!artifactsFolded && clips.length > 0 && (
                     <div className="mt-2 space-y-1.5" data-testid="coding-agent-artifact-audio">
                       {clips.map((a) => (
                         <div key={a.name} className="flex items-center gap-2 flex-wrap">
@@ -1879,7 +1931,7 @@ export default function CodingAgentApp() {
                       ))}
                     </div>
                   )}
-                  {files.length > 0 && (
+                  {!artifactsFolded && files.length > 0 && (
                     <ul className="mt-2 space-y-0.5">
                       {files.map((a) => (
                         <li key={a.name} className="text-[11px]">
@@ -1948,7 +2000,7 @@ export default function CodingAgentApp() {
             navLabel={t("codingAgent.breadcrumbLabel")}
               backTestId="coding-agent-project-back"
             />
-            <div className="mt-3" data-testid="coding-agent-project-page">
+            <div className="mt-3 flex-1 min-h-0 flex flex-col" data-testid="coding-agent-project-page">
               {/* One row: who this is and what it is. The folder under it is
                   one tap to copy — the home row no longer carries that. */}
               <div className="flex items-center gap-2 flex-wrap">
@@ -2020,21 +2072,34 @@ export default function CodingAgentApp() {
                   </button>
                 )}
               </div>
-              {/* The folder itself, and what changed in it. */}
-              <CodingProjectWorkspace key={projectQuery} query={projectQuery} live={projectLive} />
-              {/* A coding team on this folder: the goal, the board, the log. */}
-              {/* Keyed by the WHOLE scope the card reads by — the folder and
-                  the code-project id — so a project that changes kind under
-                  the same folder is a fresh card, never one holding the
-                  previous team. */}
-              <CodingTeamCard
-                key={`${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
-                directory={p.directory}
-                projectId={p.kind === "codeProject" ? p.folder : null}
-                onOpenRun={(id) => showRun(id)}
-              />
+              {/* Wide: the folder takes the page's height on the left and the
+                  team and the runs sit in a rail on the right — the shape the
+                  run page already has. Narrow: one column, the folder first.
+                  The page used to stack everything in a 42rem column, which
+                  on a maximized window left two thirds of it empty and the
+                  runs three screens down. */}
+              <div className="mt-3 flex-1 min-h-0 flex flex-col @3xl:grid @3xl:grid-cols-[minmax(0,1fr)_22rem] @3xl:gap-4 @3xl:items-stretch" data-testid="coding-agent-project-layout">
+                <div className="min-w-0 min-h-0 flex flex-col">
+                  {/* The folder itself, and what changed in it. */}
+                  <CodingProjectWorkspace key={projectQuery} query={projectQuery} live={projectLive} fill />
+                </div>
+                <aside className="min-w-0 min-h-0 @3xl:overflow-y-auto" data-testid="coding-agent-project-rail">
+                  {/* A coding team on this folder: the board, the log, and the
+                      way to ask for one. Keyed by the WHOLE scope the card
+                      reads by — the folder and the code-project id — so a
+                      project that changes kind under the same folder is a
+                      fresh card, never one holding the previous team. */}
+                  <CodingTeamCard
+                    key={`${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
+                    directory={p.directory}
+                    projectId={p.kind === "codeProject" ? p.folder : null}
+                    onOpenRun={(id) => showRun(id)}
+                    onPlan={standalone ? undefined : () => openNewAppCard({ project: p.directory, team: true })}
+                  />
+                  {runsSection}
+                </aside>
+              </div>
             </div>
-            {runsSection}
           </>);
         })()}
 

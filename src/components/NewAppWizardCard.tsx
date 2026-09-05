@@ -5,6 +5,7 @@ import { useT } from "@/lib/i18n";
 import {
   buildNewAppPrompt,
   buildResumeProjectPrompt,
+  buildTeamProjectPrompt,
   DEFAULT_NEW_APP_TEMPLATE,
   NEW_APP_TEMPLATES,
   dispatchChatMessage,
@@ -111,6 +112,10 @@ export interface NewAppWizardCardProps {
   onClose: () => void;
   /** After Create only: the message has been handed to the chat. */
   onHanded?: () => void;
+  /** Open in the existing-project mode with this directory picked. */
+  initialProject?: string;
+  /** Open with the team switch on: the message asks for coding_team_run. */
+  initialTeam?: boolean;
   /** Extra classes on the card — the chat composer sits it on a darker ground. */
   className?: string;
 }
@@ -119,6 +124,8 @@ export default function NewAppWizardCard({
   maxTaskChars = DEFAULT_MAX_TASK_CHARS,
   onClose,
   onHanded,
+  initialProject,
+  initialTeam,
   className = "",
   closeOnOutsideClick = false,
 }: NewAppWizardCardProps) {
@@ -128,11 +135,14 @@ export default function NewAppWizardCard({
   const [what, setWhat] = useState("");
   const [template, setTemplate] = useState<NewAppTemplate>(DEFAULT_NEW_APP_TEMPLATE);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<WizardMode>("new");
+  const [mode, setMode] = useState<WizardMode>(initialProject ? "existing" : "new");
+  // A team: the same card, the same project, one more switch — the message
+  // asks for coding_team_run instead of one run.
+  const [team, setTeam] = useState(initialTeam === true);
   // The owner's projects, read the first time the existing-project mode is
   // opened: null until then, [] when the box has none (or could not say).
   const [projects, setProjects] = useState<ProjectRow[] | null>(null);
-  const [projectDir, setProjectDir] = useState("");
+  const [projectDir, setProjectDir] = useState(initialProject ?? "");
   const [next, setNext] = useState("");
   useEffect(() => {
     if (mode !== "existing" || projects !== null) return;
@@ -184,14 +194,15 @@ export default function NewAppWizardCard({
       if (!project) return setError(t("codingAgent.newProjectRequired"));
       if (!trimmedNext) return setError(t("codingAgent.newWhatRequired"));
       if (trimmedNext.length > maxTaskChars) return setError(t("codingAgent.newWhatTooLong", { max: maxTaskChars }));
-      dispatchChatMessage(buildResumeProjectPrompt({
+      const req = {
         name: project.name,
         directory: project.directory,
         kind: project.kind,
         folder: project.folder,
         instructions: trimmedNext,
         latestRun: project.latestRun,
-      }));
+      };
+      dispatchChatMessage(team ? buildTeamProjectPrompt(req) : buildResumeProjectPrompt(req));
       setError(null);
       onClose();
       onHanded?.();
@@ -271,7 +282,17 @@ export default function NewAppWizardCard({
             className={`${FIELD} mt-1.5 resize-y min-h-[5.5rem]`}
           />
         </label>
-        <p className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.newExistingHint")}</p>
+        <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={team}
+            onChange={(e) => setTeam(e.target.checked)}
+            data-testid="coding-agent-new-team"
+            className="accent-[var(--coral-bright)]"
+          />
+          {t("codingAgent.newTeamSwitch")}
+        </label>
+        <p className="text-[11px] text-[var(--text-muted)]">{t(team ? "codingAgent.newTeamHint" : "codingAgent.newExistingHint")}</p>
       </>) : (<>
       <label className={LABEL}>
         {t("codingAgent.newNameLabel")}
@@ -331,7 +352,7 @@ export default function NewAppWizardCard({
           data-testid="coding-agent-new-create"
           className="text-[11px] px-3 py-1 rounded-lg bg-[var(--coral-bright)] text-black font-medium hover:opacity-90"
         >
-          {t(mode === "existing" ? "codingAgent.newContinue" : "codingAgent.newCreate")}
+          {t(mode === "existing" ? (team ? "codingAgent.newStartTeam" : "codingAgent.newContinue") : "codingAgent.newCreate")}
         </button>
       </div>
     </form>
