@@ -103,6 +103,22 @@ describe("the Channels hub dot", () => {
     expect(row.textContent).toContain("settings.discordStateOffline");
   });
 
+  it("does not read a route that COULD NOT ASK as not receiving", async () => {
+    // The false failure the other direction. The OpenClaw Discord branch maps
+    // `state: null` — "the gateway could not be asked", which every Save's
+    // gateway restart produces — and flattening that into `receiving: false`
+    // would paint amber over a bot answering in a guild, with the subtitle
+    // still reading "@clawbot" and nothing saying otherwise.
+    discord = { configured: true, verified: false, state: null, receiving: null, username: "clawbot" };
+    telegram = { configured: true, verified: false, receiving: null, username: "clawbot" };
+    render(<SettingsApp ui={ui} />);
+    expect(await settledState("discord")).toBe("connected");
+    expect(await settledState("telegram")).toBe("connected");
+    const row = await screen.findByTestId("settings-channel-telegram");
+    expect(row.textContent).toContain("@clawbot");
+    expect(row.textContent).not.toContain("settings.channelNotReceiving");
+  });
+
   it("stays connected for a channel that IS receiving", async () => {
     render(<SettingsApp ui={ui} />);
     expect(await settledState("whatsapp")).toBe("connected");

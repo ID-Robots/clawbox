@@ -3766,7 +3766,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         {state === "connected" ? (
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" aria-hidden="true" />
                         ) : state === "silent" ? (
-                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400/70 shrink-0" aria-hidden="true" />
+                          /* Full opacity, like the emerald beside it: the two
+                             "we cannot say" dots are the faded ones
+                             (`white/25`), and this is a definite answer. */
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" aria-hidden="true" />
                         ) : state === "unknown" ? (
                           <span
                             className="w-1.5 h-1.5 rounded-full bg-white/25 shrink-0 animate-pulse motion-reduce:animate-none"

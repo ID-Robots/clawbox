@@ -158,6 +158,7 @@ describe("parseHermesGatewayStatus", () => {
       installed: true,
       running: true,
       scope: "system",
+      answered: true,
     });
   });
 
@@ -167,6 +168,7 @@ describe("parseHermesGatewayStatus", () => {
       installed: true,
       running: false,
       scope: "system",
+      answered: true,
     });
   });
 
@@ -180,6 +182,7 @@ describe("parseHermesGatewayStatus", () => {
       installed: false,
       running: false,
       scope: null,
+      answered: true,
     });
   });
 
@@ -189,6 +192,7 @@ describe("parseHermesGatewayStatus", () => {
       installed: false,
       running: true,
       scope: null,
+      answered: true,
     });
   });
 });
