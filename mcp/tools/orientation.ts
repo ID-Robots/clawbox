@@ -403,6 +403,13 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
           ? {
               clawbox: versions.clawbox ?? "unknown",
               ...(shipsOpenclaw(versions, ctx) ? { openclaw: versions.openclaw ?? "unknown" } : {}),
+              // Emitted on its PRESENCE, which is the payload's own "this box
+              // ships Hermes" signal. Without it the tool the server's
+              // instructions tell every model to call FIRST had no answer to
+              // "what version of Hermes am I running" on the two SKUs that have
+              // one — and a model with no answer states one from training
+              // memory. It never carries a target: see updater.ts.
+              ...(versions.hermes ? { hermes: versions.hermes } : {}),
               waiting:
                 versions.clawbox?.updateAvailable === true
                 || (shipsOpenclaw(versions, ctx) && versions.openclaw?.updateAvailable === true),
