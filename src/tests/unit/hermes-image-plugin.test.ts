@@ -188,8 +188,10 @@ describe("plugins.enabled", () => {
   });
 
   it("leaves a shape it cannot read names out of alone", () => {
-    // A JSON value that is not a list names no plugin, so there is nothing to
-    // preserve: it is REPLACED, and the caller journals the old shape first.
+    // A JSON value NO NAME CAN BE RECOVERED FROM names no plugin, so there is
+    // nothing to preserve: it is REPLACED, and the caller journals the old
+    // shape first. Not every non-list is: a bare scalar and a JSON-string
+    // spelling a list both name plugins, and those are kept (see above).
     for (const stored of [7, null, true]) {
       expect(asJson(stored).kind, JSON.stringify(stored)).toBe("residue");
       expect(mergePluginsEnabled(asJson(stored))).toEqual([HERMES_IMAGE_PLUGIN_NAME]);

@@ -1455,10 +1455,12 @@ async function hermesKeysConfirmPluginLoadable(): Promise<boolean> {
 /**
  * `plugins.disabled` as a set of names, or null when it could not be read.
  *
- * Null rather than an empty set for every doubt: an empty set here reads as
- * "nothing is denied", which is precisely the claim this function must not
- * invent. Only the CLI's own "Config key not set" — the key having never been
- * written — is an honest empty.
+ * Null rather than an empty set for every DOUBT — a read that failed, a
+ * rendering that could not be parsed — because an empty set here reads as
+ * "nothing is denied" and that is not a claim to invent. Two things ARE an
+ * honest empty, because both are ANSWERS: the CLI's own "Config key not set",
+ * and a value that is not a LIST — `_get_disabled_set()` reads that as denying
+ * nothing, so it denies nothing here too.
  */
 async function readPluginsDisabledFromCli(): Promise<Set<string> | null> {
   const read = await runHermesCli(

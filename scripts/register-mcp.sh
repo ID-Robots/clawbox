@@ -535,8 +535,9 @@ def config_name_list(value):
 
     DELIBERATELY STRICTER THAN HERMES ON `disabled`. `_get_disabled_set()` is
     `set(disabled) if isinstance(disabled, list) else set()`, so hermes reads a
-    JSON-string or bare-scalar deny-list as denying NOTHING, while this reader
-    recovers its names and the re-arm below then declines. That asymmetry is
+    JSON-string, a bare scalar or any other NON-LIST deny-list as denying
+    NOTHING, while this reader either recovers names from it or answers None,
+    and the re-arm below then declines either way. That asymmetry is
     safe HERE and only here: the cost is that a boot does not re-arm and the
     owner's next Settings -> AI Models save does it instead. The same reading
     in src/lib/hermes-clawai.ts would WITHDRAW `image_gen.provider` from a box
