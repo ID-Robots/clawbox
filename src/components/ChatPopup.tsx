@@ -858,7 +858,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // View: the run's own page in the Coding Agent app, with the whole
       // desktop for it — the live terminal is embedded there while it runs.
       openLabel={t("codingAgent.liveView")}
-      onOpen={() => dispatchOpenCodingRun(run.id, { maximize: true })}
+      onOpen={() => dispatchOpenCodingRun(run.id, { maximize: true, live: true })}
       // A run's screenshot opens in the SAME full-size preview the generated
       // and attached images use (the portal at the end of this component),
       // not a second lightbox of the card's own.

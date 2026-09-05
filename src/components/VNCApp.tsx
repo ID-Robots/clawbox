@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, useCallback, type Ref } from "react";
 import { useT } from "@/lib/i18n";
 import { getTrackedVncKey, type TrackedKey } from "@/lib/vnc-keys";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -34,7 +34,29 @@ function apiError(data: unknown): string | undefined {
   return typeof data.error === "string" ? data.error : undefined;
 }
 
-export default function VNCApp() {
+/** What a host can ask of the screen from outside: open the paste dialog. */
+export interface VNCHandle {
+  openPaste: () => void;
+}
+
+export interface VNCAppProps {
+  /**
+   * A picture only: no keys, no clicks reach the guest. The Coding Agent's
+   * run page embeds the screen this way, so a stray click on the preview
+   * cannot steer the browser a run is driving.
+   */
+  viewOnly?: boolean;
+  /**
+   * Where the paste button lives. `overlay` (the default) draws it over the
+   * screen's top-right, the way the VNC app always has; `hidden` leaves it
+   * to a host that offers the same action from its own toolbar — the
+   * Browser app's single header — through `ref.openPaste()`.
+   */
+  pasteButton?: "overlay" | "hidden";
+  ref?: Ref<VNCHandle>;
+}
+
+export default function VNCApp({ viewOnly = false, pasteButton = "overlay", ref }: VNCAppProps = {}) {
   const { t } = useT();
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<InstanceType<typeof import("@novnc/novnc").default> | null>(null);
@@ -78,6 +100,17 @@ export default function VNCApp() {
   // closure declared before openPasteModal / writeAndPaste exist) can call
   // them. Filled in via a `useEffect` further down.
   const openPasteModalRef = useRef<(() => void) | null>(null);
+  // Mirrors the prop for the connect effect, which runs once per screen and
+  // must not reconnect because the host flipped view-only.
+  const viewOnlyRef = useRef(viewOnly);
+  useEffect(() => {
+    viewOnlyRef.current = viewOnly;
+    if (rfbRef.current) {
+      rfbRef.current.viewOnly = viewOnly;
+      rfbRef.current.focusOnClick = !viewOnly;
+    }
+  }, [viewOnly]);
+  useImperativeHandle(ref, () => ({ openPaste: () => openPasteModalRef.current?.() }), []);
   const writeAndPasteRef = useRef<((text: string) => Promise<boolean>) | null>(null);
   // Same trick for the noVNC `clipboard` event handler — it fires when the
   // guest copies, but the payload is Latin-1-mangled; we use the event as a
@@ -213,7 +246,8 @@ export default function VNCApp() {
         rfb.resizeSession = false;
         rfb.clipViewport = false;
         rfb.showDotCursor = true;
-        rfb.focusOnClick = true;
+        rfb.focusOnClick = !viewOnlyRef.current;
+        rfb.viewOnly = viewOnlyRef.current;
 
         rfb.addEventListener("connect", () => {
           setStatus("connected");
@@ -381,6 +415,7 @@ export default function VNCApp() {
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!vncFocusedRef.current || !rfbRef.current) return;
+      if (viewOnlyRef.current) return;
       if (isEditableTarget(e.target)) return;
 
       if (!getInputCanvas()) return;
@@ -750,7 +785,7 @@ export default function VNCApp() {
       tabIndex={0}
       className="h-full overflow-hidden bg-black relative"
     >
-      {status === "connected" && (
+      {status === "connected" && pasteButton === "overlay" && !viewOnly && (
         <button
           type="button"
           onClick={openPasteModal}

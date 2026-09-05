@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
-import VNCApp from "@/components/VNCApp";
+import { fireEvent, render, waitFor, act } from "@/tests/helpers/test-utils";
+import VNCApp, { type VNCHandle } from "@/components/VNCApp";
+import { createRef } from "react";
 import { getTrackedVncKey } from "@/lib/vnc-keys";
 import { SETUP_AUTH_EXPIRED_MESSAGE } from "@/lib/fetch-setup-json";
 
@@ -349,6 +350,35 @@ describe("VNCApp", () => {
     });
 
     expect(rfb.sendKey).toHaveBeenCalledWith(0xffe3, "ControlLeft", false);
+  });
+
+  it("view-only: tells the connection, draws no paste button, and keeps keys local", async () => {
+    const { queryByTitle } = render(<VNCApp viewOnly />);
+    await waitFor(() => expect(mockRfbInstances).toHaveLength(1));
+    const rfb = mockRfbInstances[0];
+    expect((rfb as unknown as { viewOnly?: boolean }).viewOnly).toBe(true);
+    expect(rfb.focusOnClick).toBe(false);
+    rfb.emit("connect");
+    await waitFor(() => expect(queryByTitle("vnc.pasteToRemote")).toBeNull());
+
+    fireEvent.pointerDown(rfb.target);
+    fireEvent.keyDown(document.body, { key: "a", code: "KeyA" });
+    fireEvent.keyUp(document.body, { key: "a", code: "KeyA" });
+    await new Promise((r) => setTimeout(r, 20));
+    // Focus still releases stale modifiers (harmless key-ups); the typed
+    // key itself never reaches the guest.
+    expect(rfb.sendKey.mock.calls.filter((c) => c[1] === "KeyA")).toEqual([]);
+    expect(rfb.sendKey.mock.calls.filter((c) => c[2] !== false)).toEqual([]);
+  });
+
+  it("lets a host hide the paste button and open the dialog through the handle", async () => {
+    const ref = createRef<VNCHandle>();
+    const { queryByTitle, findByRole } = render(<VNCApp ref={ref} pasteButton="hidden" />);
+    await waitFor(() => expect(mockRfbInstances).toHaveLength(1));
+    mockRfbInstances[0].emit("connect");
+    await waitFor(() => expect(queryByTitle("vnc.pasteToRemote")).toBeNull());
+    act(() => { ref.current?.openPaste(); });
+    expect(await findByRole("dialog")).toBeInTheDocument();
   });
 
   it("prevents local wheel default so VNC scrolling is not hijacked by page zoom", async () => {

@@ -18,6 +18,11 @@
  * headless browser holding the CDP port, which is fair when a person asks for
  * it and not fair as a side effect of `ui_open_app("browser")`.
  *
+ * One header, on every face: the state (home), Open or Close, Paste to VNC,
+ * Open in VNC, and Settings (or Back). The title bar it used to carry above
+ * that repeated the window's own title, and the paste button used to float
+ * over the screen apart from every other control.
+ *
  * The app never decides an edition's shape itself — the route says whether the
  * agent link is a switch via `alwaysOn`; see integrationIsAlwaysOn() in
  * src/app/setup-api/browser/manage/route.ts.
@@ -29,7 +34,7 @@ import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
 import { browserErrorText, runBrowserAction, type BrowserAction } from "@/lib/browser-actions";
 import { autoLaunchSpent, spendAutoLaunch } from "@/lib/browser-auto-launch";
 import ErrorWithFix from "./ErrorWithFix";
-import VNCApp from "./VNCApp";
+import VNCApp, { type VNCHandle } from "./VNCApp";
 import BrowserSetupWizard from "./BrowserSetupWizard";
 import BrowserSettingsPanel, { type BrowserStatus } from "./BrowserSettingsPanel";
 import { BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY } from "./coding-agent-ui";
@@ -78,6 +83,8 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   const [page, setPage] = useState<"home" | "settings">("home");
 
   const actionErrorRef = useRef(false);
+  // The screen, for the header's Paste to VNC button.
+  const vncRef = useRef<VNCHandle>(null);
   const lastStatusJson = useRef("");
 
   const fetchStatus = useCallback(async () => {
@@ -230,45 +237,24 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
 
   return (
     <div className="h-full flex flex-col bg-[var(--bg-deep)] text-white">
-      {/* Header: what this is, and the one control that switches faces. */}
-      <div className="shrink-0 px-5 py-3 border-b border-white/10 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0" style={{ backgroundColor: BRAND_ORANGE }}>
-            <svg className="w-5 h-5" viewBox="0 0 135.47 135.47" aria-hidden="true">
+      {/* ONE header. It used to be two: a title bar (logo, name, subtitle,
+          Settings) over a strip (state, Open/Close, Open in VNC), with the
+          paste button floating over the screen itself. The title repeated
+          what the window's own title bar says, so it went; the strip kept
+          the state and gained the rest — Settings beside Close, and Paste to
+          VNC beside the other actions — one row, on every face. */}
+      <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-white/10" data-testid="browser-header">
+        <div className="w-6 h-6 rounded-lg flex items-center justify-center shrink-0" style={{ backgroundColor: BRAND_ORANGE }} aria-hidden="true">
+          <svg className="w-3.5 h-3.5" viewBox="0 0 135.47 135.47" aria-hidden="true">
               <path d="m67.733 67.733 29.33 16.933-29.33 50.8c37.408 0 67.733-30.325 67.733-67.733 0-12.341-3.3168-23.901-9.0837-33.867h-58.65z" fill="#afccf9"/>
               <path d="m67.733-1e-6c-25.07 0-46.942 13.63-58.654 33.875l29.324 50.792 29.33-16.933v-33.867h58.65c-11.714-20.24-33.583-33.867-58.65-33.867z" fill="#1767d1"/>
               <path d="m0 67.733c0 37.408 30.324 67.733 67.733 67.733l29.33-50.8-29.33-16.933-29.33 16.933-29.324-50.792c-5.7637 9.9632-9.0794 21.519-9.0794 33.858" fill="#679ef5"/>
               <path d="m101.6 67.733c0 18.704-15.163 33.867-33.867 33.867-18.704 0-33.867-15.163-33.867-33.867s15.163-33.867 33.867-33.867c18.704 0 33.867 15.163 33.867 33.867" fill="#fff"/>
               <path d="m95.25 67.733c0 15.197-12.32 27.517-27.517 27.517-15.197 0-27.517-12.32-27.517-27.517 0-15.197 12.32-27.517 27.517-27.517 15.197 0 27.517 12.32 27.517 27.517" fill="#1a74e7"/>
             </svg>
-          </div>
-          <div className="min-w-0">
-            <h1 className="text-sm font-semibold truncate">{t("browser.title")}</h1>
-            <p className="text-[11px] text-white/50 truncate">{t("browser.subtitle", { harness: harnessLabel })}</p>
-          </div>
         </div>
-        {/* The settings live IN this app, on the desktop and on /app/browser
-            alike, so a phone that landed here reaches them without a desktop
-            listening for anything. */}
-        <button
-          type="button"
-          onClick={() => setPage(face === "settings" ? "home" : "settings")}
-          data-testid={face === "settings" ? "browser-settings-back" : "browser-open-settings"}
-          aria-expanded={face === "settings"}
-          className={BTN_SECONDARY}
-        >
-          <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
-            {face === "settings" ? "arrow_back" : "settings"}
-          </span>
-          {face === "settings" ? t("browser.back") : t("browser.openSettings")}
-        </button>
-      </div>
-
-      {face === "home" ? (
-        <div className="flex-1 min-h-0 flex flex-col">
-          {/* The strip: what the browser is doing, and what can be done to it
-              without leaving the screen. */}
-          <div className="shrink-0 flex items-center gap-2 px-5 py-2 border-b border-white/10">
+        {face === "home" ? (
+          <>
             <span
               aria-hidden="true"
               className={`w-2 h-2 rounded-full shrink-0 ${
@@ -278,7 +264,13 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
               }`}
             />
             <span className="text-[11px] text-white/60 truncate" data-testid="browser-state">{stateLabel}</span>
-            <div className="flex-1" />
+          </>
+        ) : (
+          <span className="text-[12px] font-semibold truncate">{face === "settings" ? t("browser.openSettings") : t("browser.title")}</span>
+        )}
+        <div className="flex-1" />
+        {face === "home" && (
+          <>
             {browserRunning ? (
               <button
                 type="button"
@@ -300,12 +292,44 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                 {actionLoading === "open-browser" ? t("browser.opening") : t("browser.openBrowser")}
               </button>
             )}
+            {/* The screen's own paste dialog, opened from here: the button
+                used to float over the picture, apart from every other
+                control. */}
+            <button
+              type="button"
+              onClick={() => vncRef.current?.openPaste()}
+              data-testid="browser-paste"
+              title={t("vnc.pasteToRemote")}
+              className={BTN_SECONDARY}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">content_paste</span>
+              {t("vnc.pasteToRemote")}
+            </button>
             <button type="button" onClick={openVncApp} data-testid="browser-open-vnc" className={BTN_SECONDARY}>
               <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">desktop_windows</span>
               {t("browser.openInVNC")}
             </button>
-          </div>
+          </>
+        )}
+        {/* The settings live IN this app, on the desktop and on /app/browser
+            alike, so a phone that landed here reaches them without a desktop
+            listening for anything. */}
+        <button
+          type="button"
+          onClick={() => setPage(face === "settings" ? "home" : "settings")}
+          data-testid={face === "settings" ? "browser-settings-back" : "browser-open-settings"}
+          aria-expanded={face === "settings"}
+          className={BTN_SECONDARY}
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
+            {face === "settings" ? "arrow_back" : "settings"}
+          </span>
+          {face === "settings" ? t("browser.back") : t("browser.openSettings")}
+        </button>
+      </div>
 
+      {face === "home" ? (
+        <div className="flex-1 min-h-0 flex flex-col">
           {(error || agentBrowsing || (statusReadable && !canRunBrowser)) && (
             <div className="shrink-0 px-5 pt-3 space-y-2">
               {error && (
@@ -355,7 +379,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
               virtual desktop is an honest picture of the device, and VNCApp
               carries its own repair path for a screen that is missing. */}
           <div className="relative flex-1 min-h-0 mt-3">
-            <VNCApp />
+            <VNCApp ref={vncRef} pasteButton="hidden" />
             {starting && (
               <div
                 className="absolute top-3 left-3 z-20 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-black/70 backdrop-blur-sm border border-white/10 text-xs text-white/90"

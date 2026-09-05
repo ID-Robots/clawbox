@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { BACKUP_MESSAGE, backupToGitHub, disconnectGitHub, githubStatus } from "@/lib/coding-github";
 import { CodingAgentError, httpStatusForCodingError, resolveWorkingDirectory } from "@/lib/coding-agent";
-import { gitInfo } from "@/lib/coding-git";
+import { gitChanges, gitFileDiff, gitInfo, gitLog } from "@/lib/coding-git";
 import { requireSession } from "@/lib/route-auth";
 
 export const dynamic = "force-dynamic";
@@ -42,6 +42,20 @@ export async function GET(request: Request) {
     if (unauthorized) return unauthorized;
     try {
       const resolved = await resolveWorkingDirectory({ projectId, directory });
+      // The workspace beside the git block: `?changes` lists what changed
+      // (the working tree, or with `&ref=<sha>` one commit) with the recent
+      // commits to pick from; `?diff=<file>` is one file's unified diff.
+      const ref = url.searchParams.get("ref");
+      const diffFile = url.searchParams.get("diff");
+      if (diffFile !== null) {
+        const diff = await gitFileDiff(resolved.directory, diffFile, ref);
+        if (!diff) return NextResponse.json({ error: "No diff for that file", kind: "not_found" }, { status: 404 });
+        return NextResponse.json({ diff });
+      }
+      if (url.searchParams.has("changes")) {
+        const [changes, log] = await Promise.all([gitChanges(resolved.directory, ref), gitLog(resolved.directory)]);
+        return NextResponse.json({ changes, log });
+      }
       return NextResponse.json({ git: await gitInfo(resolved.directory) });
     } catch (err) {
       if (err instanceof CodingAgentError) {
