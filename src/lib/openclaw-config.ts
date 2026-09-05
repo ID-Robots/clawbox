@@ -16,6 +16,7 @@ import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-s
 import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
 import { isSafeDiscordToken } from "@/lib/discord-api";
 import { envPort, waitForPortOpen } from "@/lib/port-probe";
+import { getLocalAiToken } from "@/lib/local-ai-token";
 
 const exec = promisify(execFile);
 
@@ -1887,17 +1888,83 @@ export async function ensureLocalAiProxyUrls(): Promise<boolean> {
 
   let changed = false;
 
-  const llamaProvider = providers.llamacpp;
-  if (llamaProvider && llamaProvider.baseUrl !== getLlamaCppProxyBaseUrl()) {
-    llamaProvider.baseUrl = getLlamaCppProxyBaseUrl();
-    changed = true;
-  }
+  // The bearer travels WITH the URL. This repair points the entry at ClawBox's
+  // own local-AI proxy, and that proxy validates `Authorization` against
+  // data/.local-ai-token and answers 401 to anything else — so moving the
+  // baseUrl while leaving somebody else's apiKey beside it turns "the wrong
+  // endpoint" into "a refused request on every single turn", which is not an
+  // improvement. Only ever alongside a baseUrl WE just wrote: an entry already
+  // on the proxy is left exactly as the owner has it.
+  //
+  // And the bearer is PROVIDER-WIDE. OpenClaw resolves a row's endpoint as
+  // `model.baseUrl ?? provider.baseUrl` (see the `models.providers` type above)
+  // and has no per-model credential slot, so `providers.<p>.apiKey` is the
+  // bearer for every row under the entry. An entry carrying a row on ANOTHER
+  // HOST is therefore one we cannot re-point without mailing this box's local-AI
+  // token to that host on every turn of that row — so it is left exactly as its
+  // owner wrote it.
+  //
+  // Foreign, not merely present. The same principle as `foreignOpenAiRoute` in
+  // the configure route — a provider block we did not build is one to leave
+  // alone rather than half-configure — but the test there can be sharper,
+  // because ClawBox marks its own image rows and can recognise them. There is no
+  // such marker on a llamacpp row, so ownership is decided by HOST: loopback and
+  // the proxy's own authority are this box, and everything else (including a URL
+  // that will not parse — guessing permissively is the wrong way to be wrong
+  // about a credential) is not. Refusing over a row that points AT US would be a
+  // false failure, and its sibling in `scripts/gateway-pre-start.sh` pays for
+  // that one in a dead gateway: the entry it declines to complete has no
+  // provider `baseUrl`, which OpenClaw's schema requires for this provider.
+  //
+  // A row without an id is skipped: `ModelDefinitionSchema` requires a non-empty
+  // one, so such a row can never route a turn and its `baseUrl` can never
+  // receive anything.
+  const hostOf = (url: string): string | null => {
+    try {
+      return new URL(url).hostname.toLowerCase();
+    } catch {
+      return null;
+    }
+  };
 
-  const ollamaProvider = providers.ollama;
-  if (ollamaProvider && ollamaProvider.baseUrl !== getOllamaProxyBaseUrl()) {
-    ollamaProvider.baseUrl = getOllamaProxyBaseUrl();
-    changed = true;
-  }
+  const routesToAnotherHost = (provider: Record<string, unknown>, proxyUrl: string): boolean => {
+    const ours = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+    const proxyHost = hostOf(proxyUrl);
+    if (proxyHost) ours.add(proxyHost);
+    return (Array.isArray(provider.models) ? provider.models : []).some((row) => {
+      if (!isPlainObject(row)) return false;
+      if (typeof row.id !== "string" || row.id.trim() === "") return false;
+      const baseUrl = typeof row.baseUrl === "string" ? row.baseUrl.trim() : "";
+      if (!baseUrl) return false;
+      const host = hostOf(baseUrl);
+      return host === null || !ours.has(host);
+    });
+  };
+
+  const adoptProxy = (provider: unknown, proxyUrl: string, id: string): boolean => {
+    // `readConfig()` validates the ROOT object only, so anything at all can be
+    // sitting at `models.providers.<id>` in a hand-edited file. Module code is
+    // strict mode: the assignments below THROW on a primitive, and on an array
+    // they land on named properties that `JSON.stringify` then drops — a repair
+    // reported to the caller and never written. Neither is an entry. (The boot
+    // migration in `scripts/gateway-pre-start.sh` REPLACES such an entry with a
+    // fresh valid one; here we only decline to write into it, because this
+    // function repairs a URL and is not the place that rebuilds a provider.)
+    if (!isPlainObject(provider) || provider.baseUrl === proxyUrl) return false;
+    if (routesToAnotherHost(provider, proxyUrl)) {
+      // The URL is deliberately not logged: an owner-configured endpoint can
+      // carry user-info or query credentials, and the journal keeps what it is
+      // given.
+      console.warn(`[openclaw-config] ${id} has a model row on another host; leaving the entry as configured`);
+      return false;
+    }
+    provider.baseUrl = proxyUrl;
+    provider.apiKey = getLocalAiToken();
+    return true;
+  };
+
+  if (adoptProxy(providers.llamacpp, getLlamaCppProxyBaseUrl(), "llamacpp")) changed = true;
+  if (adoptProxy(providers.ollama, getOllamaProxyBaseUrl(), "ollama")) changed = true;
 
   if (changed) {
     await writeConfig(config);

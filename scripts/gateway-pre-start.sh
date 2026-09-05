@@ -235,6 +235,10 @@ fi
 # restart + MCP server) are guarded by their own idempotency checks.
 export CLAWBOX_HOSTNAME="$CONFIGURED_HOSTNAME"
 export CLAWBOX_PORT
+# The migrations below resolve $CLAWBOX_ROOT/.env and the local-AI token from
+# this value; without the export python falls back to the compiled-in default
+# and the two disagree on any box whose root is not /home/clawbox/clawbox.
+export CLAWBOX_ROOT
 # Serialize the LAN_IPS bash array into an env var Python can parse —
 # newline-separated is bash-safe (IPv4s contain no newlines).
 if [ ${#LAN_IPS[@]} -gt 0 ]; then
@@ -457,7 +461,26 @@ if CLAWBOX_OPENCLAW_V2:
         changed = True
 
 # Strip invalid agent keys that prevent gateway from starting.
-agents_defaults = cfg.setdefault("agents", {}).setdefault("defaults", {})
+# `agents` and `agents.defaults` are not guaranteed to be objects either: a
+# hand-edited or half-written config leaves a scalar or a null there, and
+# `setdefault` returns it rather than a dict — every `.get` below then raises
+# AttributeError, which under `set -euo pipefail` aborts ExecStartPre and the
+# gateway never reaches ExecStart at all. Same coercion, same reasoning, as the
+# `models` containers further down.
+_agents_block = cfg.get("agents")
+if not isinstance(_agents_block, dict):
+    if _agents_block is not None:
+        print("  WARN: agents was not an object; replacing it — OpenClaw's schema requires one")
+        changed = True
+    _agents_block = {}
+    cfg["agents"] = _agents_block
+agents_defaults = _agents_block.get("defaults")
+if not isinstance(agents_defaults, dict):
+    if agents_defaults is not None:
+        print("  WARN: agents.defaults was not an object; replacing it")
+        changed = True
+    agents_defaults = {}
+    _agents_block["defaults"] = agents_defaults
 for k in ("tools", "systemPromptSuffix"):
     if k in agents_defaults:
         del agents_defaults[k]
@@ -473,7 +496,13 @@ if CLAWBOX_OPENCLAW_V2:
 # longer recognize it, so every chat turn fails before the agent can reply.
 # Move only those known-dead defaults back to the bundled local model; a user
 # can still re-authorize ClawBox AI / ChatGPT afterward.
-model_defaults = agents_defaults.setdefault("model", {})
+model_defaults = agents_defaults.get("model")
+if not isinstance(model_defaults, dict):
+    if model_defaults is not None:
+        print("  WARN: agents.defaults.model was not an object; replacing it")
+        changed = True
+    model_defaults = {}
+    agents_defaults["model"] = model_defaults
 primary_model = model_defaults.get("primary")
 if isinstance(primary_model, str) and primary_model.lower() in (
     "anthropic/claude-sonnet-4-20250514",
@@ -517,55 +546,218 @@ if isinstance(_fallbacks_now, list):
 # the local runtime but would skip this repair and still fail model resolution.
 _wants_llamacpp = [r.strip() for r in _llamacpp_refs if r.strip().startswith("llamacpp/")]
 
-# Key presence, not truthiness: an existing but empty {} entry is a deliberate
-# operator choice and must be preserved, which .get() would silently overwrite.
+# One row per DISTINCT id, in the order they are configured. Registering only
+# the first left a second llamacpp id among the fallbacks resolving to "Unknown
+# model" — the very failure this migration exists to remove. An EMPTY id (a bare
+# "llamacpp/") is dropped rather than written: ModelDefinitionSchema requires
+# id.min(1), so a row of {"id": "", "name": ""} makes the WHOLE openclaw.json
+# fail validation, and a box that merely could not answer ends up with a gateway
+# that cannot load its config at all.
+_llamacpp_model_ids = []
+for _ref in _wants_llamacpp:
+    _model_id = _ref[len("llamacpp/"):].strip()
+    if _model_id and _model_id not in _llamacpp_model_ids:
+        _llamacpp_model_ids.append(_model_id)
+
 _models_now = cfg.get("models")
 _providers_now = _models_now.get("providers") if isinstance(_models_now, dict) else None
-if _wants_llamacpp and not (
-    isinstance(_providers_now, dict) and "llamacpp" in _providers_now
-):
-    # Touch models/providers only on the repair path. A malformed scalar must
-    # not crash ExecStartPre, and an unrelated config must not gain an empty
-    # models key merely because some other migration changed the file.
-    if not isinstance(_models_now, dict):
-        _models_now = {}
-        cfg["models"] = _models_now
-    if not isinstance(_providers_now, dict):
-        _providers_now = {}
-        _models_now["providers"] = _providers_now
-    _mp = _providers_now
-    # The proxy authenticates openclaw -> Next.js with a per-install bearer
-    # (src/lib/local-ai-token.ts). Writing the entry WITHOUT it would trade
-    # "Unknown model" for a 401 on every turn, which is not an improvement, so
-    # a box with no token file is left alone and told why.
-    _token_path = os.path.join(
-        os.environ.get("CLAWBOX_ROOT", "/home/clawbox/clawbox"), "data", ".local-ai-token"
+_llamacpp_entry = _providers_now.get("llamacpp") if isinstance(_providers_now, dict) else None
+
+# PRESENT is not the same as USABLE, and "usable" means exactly what OpenClaw's
+# own schema means by it — read off the installed package rather than guessed:
+#
+#   ModelProvidersSchema.superRefine  a non-built-in provider id (llamacpp is
+#                                     not in BUILT_IN_MODEL_PROVIDER_OVERLAY_IDS)
+#                                     needs a truthy `baseUrl` and an array
+#                                     `models`. `api` and `apiKey` are optional.
+#   ModelDefinitionSchema             every row needs `id` AND `name`, both
+#                                     .min(1).
+#
+# Key presence alone treated an existing `{}` as a deliberate operator choice,
+# but such an entry fails validation outright — strictly worse than the "Unknown
+# model" this migration exists to fix. So fill exactly what the schema is
+# missing and nothing else: an entry OpenClaw already accepts is never touched,
+# and `api`/`apiKey` are not invented on one that chose to omit them.
+_llamacpp_gaps = []
+_llamacpp_rows = []
+_llamacpp_dropped_rows = 0
+_llamacpp_named_rows = 0
+_llamacpp_trimmed_rows = 0
+if _wants_llamacpp:
+    _entry_now = _llamacpp_entry if isinstance(_llamacpp_entry, dict) else {}
+    _base_url_now = _entry_now.get("baseUrl")
+    if not (isinstance(_base_url_now, str) and _base_url_now.strip()):
+        _llamacpp_gaps.append("baseUrl")
+    _entry_models = _entry_now.get("models")
+    if isinstance(_entry_models, list):
+        # Keep the operator's rows and repair them in place. A row with an id
+        # and no `name` fails the schema exactly as an empty id does, and is
+        # trivially completable; a row naming no model at all cannot be
+        # repaired into one, so it is dropped and counted.
+        #
+        # The id is TRIMMED into the kept row, not only into the comparison
+        # below. `_llamacpp_have_ids` strips before matching, so a padded id
+        # satisfies the "this row already exists" test and nothing is appended —
+        # while the row that stays in the file keeps its padding, and the
+        # harness matches a row id with a strict `==` against a ref it has
+        # already normalised. The migration would print "Completed", the gateway
+        # would start, and every turn would still end "Unknown model", which is
+        # the exact failure this block exists to remove. Counted for the same
+        # reason `_llamacpp_named_rows` is: on an entry whose baseUrl is already
+        # usable nothing else makes `models` a gap, so an uncounted correction
+        # is computed and never written.
+        for _row in _entry_models:
+            _row_id = _row.get("id") if isinstance(_row, dict) else None
+            if not (isinstance(_row_id, str) and _row_id.strip()):
+                _llamacpp_dropped_rows += 1
+                continue
+            _row = dict(_row)
+            if _row["id"] != _row_id.strip():
+                _row["id"] = _row_id.strip()
+                _llamacpp_trimmed_rows += 1
+            _row_name = _row.get("name")
+            if not (isinstance(_row_name, str) and _row_name.strip()):
+                _row["name"] = _row_id.strip()
+                _llamacpp_named_rows += 1
+            _llamacpp_rows.append(_row)
+    # Missing rows are APPENDED, never a replacement: an entry that lists one
+    # model while `primary`/`fallbacks` name another left the box mute with
+    # "Unknown model" and said nothing, because the entry looked complete.
+    _llamacpp_have_ids = {_r["id"] for _r in _llamacpp_rows}
+    _llamacpp_missing_ids = [i for i in _llamacpp_model_ids if i not in _llamacpp_have_ids]
+    if (
+        not isinstance(_entry_models, list)
+        or _llamacpp_missing_ids
+        or _llamacpp_dropped_rows
+        or _llamacpp_named_rows
+        or _llamacpp_trimmed_rows
+    ):
+        _llamacpp_gaps.append("models")
+
+_clawbox_root = os.environ.get("CLAWBOX_ROOT", "/home/clawbox/clawbox")
+
+if _wants_llamacpp and _llamacpp_gaps and not _llamacpp_model_ids:
+    print(
+        "  Skipped llamacpp provider repair: "
+        + _wants_llamacpp[0]
+        + " names no model id, and a provider row with an empty id fails"
+        + " OpenClaw's schema for the whole config."
     )
+elif _wants_llamacpp and _llamacpp_gaps:
+    # The proxy authenticates openclaw -> Next.js with a per-install bearer
+    # (src/lib/local-ai-token.ts). Writing OUR baseUrl WITHOUT it would trade
+    # "Unknown model" for a 401 on every turn, which is not an improvement, so a
+    # box with no token file is left alone and told why. The guard keys on
+    # whether we are about to point the entry at our proxy, NOT on whether
+    # `apiKey` happens to be absent: an entry naming the operator's own
+    # llama-server needs no token from us, and refusing there would leave their
+    # config invalid over a credential it never wanted.
+    _llamacpp_takes_proxy = "baseUrl" in _llamacpp_gaps
+    _token_path = os.path.join(_clawbox_root, "data", ".local-ai-token")
     try:
         with open(_token_path) as _tf:
             _local_ai_token = _tf.read().strip()
     except OSError:
         _local_ai_token = ""
 
-    if len(_local_ai_token) < 16:
+    if _llamacpp_takes_proxy and len(_local_ai_token) < 16:
         print(
             "  Skipped llamacpp provider repair: "
             + _wants_llamacpp[0]
             + " is configured but "
             + _token_path
             + " is missing or too short, so the proxy would reject every call."
+            + " The entry still has no models.providers.llamacpp.baseUrl, which"
+            + " OpenClaw's schema requires for this provider, so the gateway"
+            + " will refuse this config until that file is restored."
         )
     else:
-        _model_id = _wants_llamacpp[0][len("llamacpp/"):]
-        # A non-numeric override must not abort gateway pre-start: this migration
-        # runs on the path that repairs a mute box, so raising here would turn a
-        # bad env var into a box that never starts at all.
+        # Touch models/providers only on the repair path. A malformed scalar must
+        # not crash ExecStartPre, and an unrelated config must not gain an empty
+        # models key merely because some other migration changed the file. A
+        # value that IS discarded is named, never dropped in silence — the
+        # OpenRouter repair further down says the same thing about the same two
+        # containers, and the two are deliberately not factored into one helper
+        # because each region is extracted and executed on its own by its
+        # regression suite.
+        if not isinstance(_models_now, dict):
+            if _models_now is not None:
+                print("  WARN: models was not an object; replacing it — OpenClaw's schema requires one")
+            _models_now = {}
+            cfg["models"] = _models_now
+        if not isinstance(_providers_now, dict):
+            if _providers_now is not None:
+                print("  WARN: models.providers was not an object; replacing it")
+            _providers_now = {}
+            _models_now["providers"] = _providers_now
+
+        # The tuning below lives in $CLAWBOX_ROOT/.env (install.sh and
+        # install-x64.sh both write it with ensure_env_setting) and NEITHER
+        # gateway unit loads that file: clawbox-gateway.service takes
+        # network.env and discord.env, the x64 unit only Environment= lines.
+        # (Other units do read .env — clawbox-setup, clawbox-embed,
+        # clawbox-browser — which is exactly why llama-server, started under
+        # clawbox-setup, ran at the configured size while this repair, reading
+        # os.environ alone, ALWAYS wrote the 131072 default: OpenClaw believed
+        # 131k, compaction never fired, and a long session died with
+        # context-exceeded.) Reading the few keys we need is deliberately
+        # narrower than adding `EnvironmentFile=-.../.env` to the gateway unit,
+        # which would hand every key in a clawbox-writable file to the
+        # long-running gateway process, CLAWBOX_TEST_MODE included.
+        #
+        # errors="replace" and a bare except: .env is clawbox-writable and one
+        # latin-1 byte in an operator's key would otherwise raise
+        # UnicodeDecodeError out of this heredoc, fail ExecStartPre under
+        # `set -euo pipefail`, and leave the box with no gateway at all.
+        _llamacpp_dotenv = {}
         try:
-            _ctx = int(os.environ.get("LLAMACPP_CONTEXT_WINDOW") or 0)
-        except ValueError:
-            _ctx = 0
-        if _ctx < 16384:
-            _ctx = 131072
+            with open(os.path.join(_clawbox_root, ".env"), encoding="utf-8", errors="replace") as _ef:
+                for _line in _ef:
+                    _line = _line.strip()
+                    if not _line or _line.startswith("#") or "=" not in _line:
+                        continue
+                    _key, _, _value = _line.partition("=")
+                    _key = _key.strip()
+                    if _key.startswith("export "):
+                        _key = _key[len("export "):].strip()
+                    _value = _value.strip()
+                    if len(_value) >= 2 and _value[0] == _value[-1] and _value[0] in ("'", '"'):
+                        _value = _value[1:-1]
+                    _llamacpp_dotenv[_key] = _value
+        except Exception:
+            _llamacpp_dotenv = {}
+
+        def _llamacpp_setting(_name):
+            """The process environment first, then the shipped .env."""
+            _from_env = (os.environ.get(_name) or "").strip()
+            return _from_env if _from_env else _llamacpp_dotenv.get(_name, "").strip()
+
+        def _llamacpp_int(_raw, _minimum, _default):
+            """Number() semantics, not int(): see src/lib/llamacpp.ts.
+
+            int() raises on "32768.0" and "1e5" — both of which the TypeScript
+            side accepts and llama-server is genuinely started with — and the
+            except swallowed it, so the provider silently got the default while
+            the server ran at the configured size. A non-numeric override must
+            still not abort gateway pre-start: this migration runs on the path
+            that repairs a mute box, so raising here would turn a bad env var
+            into a box that never starts at all.
+            """
+            try:
+                _value = int(float(_raw))
+            except (TypeError, ValueError, OverflowError):
+                return _default
+            return _value if _value >= _minimum else _default
+
+        _ctx = _llamacpp_int(_llamacpp_setting("LLAMACPP_CONTEXT_WINDOW"), 16384, 131072)
+        # getLlamaCppMaxTokens(): an absent or unusable value means the context
+        # window, not the 131072 default.
+        _max_tokens_raw = _llamacpp_setting("LLAMACPP_MAX_TOKENS")
+        _max_tokens = _llamacpp_int(_max_tokens_raw, 1, _ctx) if _max_tokens_raw else _ctx
+        # The port is in the unit environment on both installers (this script
+        # defaults and exports it; the x64 unit sets Environment=CLAWBOX_PORT),
+        # and no installer writes it to .env — so it is read from the process
+        # environment alone, unlike the tuning above.
         _proxy_port = (os.environ.get("CLAWBOX_PORT") or os.environ.get("PORT") or "80").strip()
         if not _proxy_port.isdigit() or not 1 <= int(_proxy_port) <= 65535:
             _proxy_port = "80"
@@ -573,24 +765,120 @@ if _wants_llamacpp and not (
             "" if _proxy_port == "80" else ":" + _proxy_port
         )
         _proxy_root = (
-            os.environ.get("CLAWBOX_LOCAL_AI_PROXY_BASE_URL") or _proxy_default
-        ).strip().rstrip("/")
-        _mp["llamacpp"] = {
-            "baseUrl": _proxy_root + "/setup-api/local-ai/llamacpp/v1",
-            "api": "openai-completions",
-            "apiKey": _local_ai_token,
-            "models": [{
-                "id": _model_id,
-                "name": _model_id,
+            _llamacpp_setting("CLAWBOX_LOCAL_AI_PROXY_BASE_URL") or _proxy_default
+        ).rstrip("/")
+        _repaired_entry = dict(_llamacpp_entry) if isinstance(_llamacpp_entry, dict) else {}
+        if "models" in _llamacpp_gaps:
+            _repaired_entry["models"] = _llamacpp_rows + [{
+                "id": _mid,
+                "name": _mid,
                 "reasoning": False,
                 "input": ["text"],
                 "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
                 "contextWindow": _ctx,
-                "maxTokens": _ctx,
-            }],
-        }
-        changed = True
-        print("  Repaired models.providers.llamacpp for " + _wants_llamacpp[0])
+                "maxTokens": _max_tokens,
+            } for _mid in _llamacpp_missing_ids]
+        # The bearer we are about to write is PROVIDER-WIDE. OpenClaw resolves a
+        # row's endpoint as `model.baseUrl ?? provider.baseUrl` and has no
+        # per-model credential slot, so completing this entry while a row keeps
+        # its own baseUrl ON ANOTHER HOST sends this box's local-AI token to
+        # that host on every turn of the row. Such an entry is one we did not
+        # build: leave it, and say what leaving it costs.
+        #
+        # ANOTHER HOST, not merely a row-level baseUrl. There is no ownership
+        # marker on a llamacpp row the way `isOurImageRow` has one for an image
+        # row, so ownership is decided by host: loopback and the proxy's own
+        # authority are this box, and everything else — including a URL that
+        # will not parse, because guessing permissively is the wrong way to be
+        # wrong about a credential — is not. Refusing over a row that points AT
+        # US would cost a gateway for nothing: the entry we decline to complete
+        # still has no provider baseUrl, which OpenClaw's schema requires for
+        # llamacpp (it is not a bundled overlay), so ExecStart refuses the whole
+        # config. Rows are the ones that SURVIVE the repair — a row without an
+        # id is dropped above and `ModelDefinitionSchema` rejects it anyway, so
+        # it can never route a turn.
+        _llamacpp_foreign_row = False
+        if _llamacpp_takes_proxy:
+            import urllib.parse as _lc_url
+
+            def _lc_host(_raw):
+                try:
+                    return (_lc_url.urlsplit(_raw).hostname or "").lower() or None
+                except ValueError:
+                    return None
+
+            _lc_ours = {"127.0.0.1", "localhost", "::1"}
+            _lc_proxy_host = _lc_host(_proxy_root)
+            if _lc_proxy_host:
+                _lc_ours.add(_lc_proxy_host)
+            for _r in (_repaired_entry.get("models") or []):
+                if not isinstance(_r, dict):
+                    continue
+                _rid = _r.get("id")
+                if not (isinstance(_rid, str) and _rid.strip()):
+                    continue
+                _rb = _r.get("baseUrl")
+                if not (isinstance(_rb, str) and _rb.strip()):
+                    continue
+                if _lc_host(_rb.strip()) not in _lc_ours:
+                    _llamacpp_foreign_row = True
+                    break
+
+        if _llamacpp_foreign_row:
+            # The URL itself is never printed: an owner-configured endpoint can
+            # carry user-info or query credentials, and the journal keeps what
+            # it is given.
+            print(
+                "  Skipped llamacpp provider repair: a model row under"
+                " models.providers.llamacpp names its own baseUrl on another"
+                " host, and this box's local-AI token would be the bearer for"
+                " it. The entry still has no models.providers.llamacpp.baseUrl,"
+                " which OpenClaw's schema requires for this provider, so the"
+                " gateway will refuse this config until you set one or remove"
+                " that row's baseUrl."
+            )
+        if _llamacpp_takes_proxy and not _llamacpp_foreign_row:
+            _repaired_entry["baseUrl"] = _proxy_root + "/setup-api/local-ai/llamacpp/v1"
+            # The key travels WITH the baseUrl or not at all: our proxy accepts
+            # only our bearer, so leaving a foreign apiKey beside it would be
+            # the 401-per-turn the guard above exists to prevent.
+            if _repaired_entry.get("apiKey") != _local_ai_token:
+                if isinstance(_repaired_entry.get("apiKey"), str) and _repaired_entry["apiKey"].strip():
+                    print("  Replaced models.providers.llamacpp.apiKey: the entry now points at this box's local-AI proxy, which accepts only its own bearer")
+                _repaired_entry["apiKey"] = _local_ai_token
+        if not isinstance(_llamacpp_entry, dict) and not _llamacpp_foreign_row:
+            # Only on a FRESH entry. `api` is optional in the schema, and an
+            # entry an operator deliberately left api-less routes as
+            # openai-compatible anyway, so injecting it would change nothing but
+            # their file.
+            _repaired_entry["api"] = "openai-completions"
+        if not _llamacpp_foreign_row:
+            _providers_now["llamacpp"] = _repaired_entry
+            changed = True
+            if isinstance(_llamacpp_entry, dict):
+                print(
+                    "  Completed models.providers.llamacpp ("
+                    + ", ".join(_llamacpp_gaps)
+                    + "): OpenClaw's schema requires them"
+                    + (
+                        " — dropped " + str(_llamacpp_dropped_rows) + " model row(s) naming no id"
+                        if _llamacpp_dropped_rows
+                        else ""
+                    )
+                    # A value CHANGED is named for the same reason a value
+                    # discarded is: an id corrected in place is otherwise an
+                    # invisible edit to the operator's own file.
+                    + (
+                        " — trimmed whitespace from " + str(_llamacpp_trimmed_rows) + " model row id(s)"
+                        if _llamacpp_trimmed_rows
+                        else ""
+                    )
+                )
+            else:
+                print(
+                    "  Repaired models.providers.llamacpp for "
+                    + ", ".join(_llamacpp_model_ids)
+                )
 
 # Model migration: legacy ChatGPT-subscription devices can have their active
 # model — or a fallback — stored as `openai/<gpt>` from before the setup UI
@@ -863,10 +1151,42 @@ if isinstance(plugin_entries, dict) and isinstance(channels, dict):
 # through the same baseUrl, so listing just the current default is enough.
 auth_profiles = cfg.get("auth", {}).get("profiles", {}) if isinstance(cfg.get("auth"), dict) else {}
 has_openrouter_auth = isinstance(auth_profiles, dict) and "openrouter:default" in auth_profiles
-models_providers = cfg.setdefault("models", {}).setdefault("providers", {})
+# `models` and `models.providers` are not guaranteed to be objects. A hand-edited
+# or half-written config can leave a scalar in either, and `.setdefault` on a str
+# — or `.get` on the None a `"providers": null` yields — raises AttributeError.
+# This line runs on EVERY config, not only on OpenRouter boxes, and under
+# `set -euo pipefail` an exception here aborts ExecStartPre: the gateway never
+# reaches ExecStart at all. Repair the containers instead, the way the llamacpp
+# repair above already does, and say so rather than silently discarding a value.
+_models_block = cfg.get("models")
+if not isinstance(_models_block, dict):
+    if _models_block is not None:
+        print("  WARN: models was not an object; replacing it — OpenClaw's schema requires one")
+        # Persisted deliberately: the value on disk fails validation as it
+        # stands, so writing the object form IS the repair. Left unpersisted it
+        # would warn on every boot and be undone by the next writer.
+        changed = True
+    _models_block = {}
+    cfg["models"] = _models_block
+models_providers = _models_block.get("providers")
+if not isinstance(models_providers, dict):
+    if models_providers is not None:
+        print("  WARN: models.providers was not an object; replacing it")
+        changed = True
+    models_providers = {}
+    _models_block["providers"] = models_providers
 if has_openrouter_auth and not models_providers.get("openrouter"):
     primary = (cfg.get("agents", {}).get("defaults", {}).get("model", {}) or {}).get("primary", "")
-    default_model = primary[len("openrouter/"):] if isinstance(primary, str) and primary.startswith("openrouter/") else "moonshotai/kimi-k2-0905"
+    # The runtime trims the ref before it checks the prefix, and a bare
+    # "openrouter/" leaves an EMPTY id — which ModelDefinitionSchema rejects
+    # (id.min(1)), failing validation for the whole openclaw.json. OpenRouter
+    # routes any `openrouter/<slug>` through the same baseUrl and this list is
+    # UI-only, so falling back to the bundled default is both safe and honest.
+    default_model = ""
+    if isinstance(primary, str) and primary.strip().startswith("openrouter/"):
+        default_model = primary.strip()[len("openrouter/"):].strip()
+    if not default_model:
+        default_model = "moonshotai/kimi-k2-0905"
     models_providers["openrouter"] = {
         "baseUrl": "https://openrouter.ai/api/v1",
         "api": "openai-completions",
