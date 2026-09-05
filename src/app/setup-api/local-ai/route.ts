@@ -1,25 +1,13 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { promisify } from "util";
-import { execFile as execFileCb } from "child_process";
 import { get, setMany } from "@/lib/config-store";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
-import { readConfig as readOpenClawConfig, inferConfiguredLocalModel, findOpenclawBin, restartGateway, openclawIsAbsent } from "@/lib/openclaw-config";
+import { readConfig as readOpenClawConfig, inferConfiguredLocalModel, restartGateway, runOpenclawConfigSet, openclawIsAbsent } from "@/lib/openclaw-config";
 import { getActiveHarness } from "@/lib/harness";
 import { removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
 
-const execFile = promisify(execFileCb);
-const OPENCLAW_BIN = findOpenclawBin();
 const CLAWBOX_HOME_DIR = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
-
-async function runCommand(cmd: string, args: string[]) {
-  return await execFile(cmd, args, {
-    cwd: CLAWBOX_HOME_DIR,
-    env: { ...process.env, HOME: CLAWBOX_HOME_DIR },
-    timeout: 30_000,
-  });
-}
 
 export async function POST(request: Request) {
   let body: { action?: string };
@@ -68,15 +56,28 @@ export async function POST(request: Request) {
     // refusal, though — the stop and the flag clear above are the steps this
     // click is for, and they landed — so it rides the `warning` channel the
     // panel already paints amber, and a retry re-runs only what is left.
+    //
+    // Through `runOpenclawConfigSet`, not a raw spawn, precisely BECAUSE the
+    // outcome is now shown to the owner: that wrapper retries the
+    // `ConfigMutationConflictError` this route races (it writes while the
+    // gateway is reloading on the stop above), and settles a spawn killed at
+    // its deadline by reading the assignment back off disk — `openclaw config
+    // set` writes early and then spends seconds validating catalogs, so on a
+    // Jetson the value routinely lands inside the window a 30 s timeout kills
+    // in. A hand-rolled `execFile` would have turned both into an amber banner
+    // over a write that succeeded. It also resolves the binary per call, so a
+    // web server that started mid-reinstall does not freeze a stale path.
     let warning: string | null = null;
+    // Set below, answered after the restart: the branch also fires on a
+    // licensed `dual` box running Hermes, where OpenClaw exists and its gateway
+    // does too — so returning from inside it would drop the fallback warning
+    // and skip the restart that makes the clear above take effect.
+    let hermesUnregisterFailed = false;
     if (!openclawIsAbsent()) {
-      const cleared = await runCommand(OPENCLAW_BIN, [
-        "config",
-        "set",
-        "agents.defaults.model.fallbacks",
-        JSON.stringify([]),
-        "--json",
-      ]).then(
+      const cleared = await runOpenclawConfigSet(
+        ["agents.defaults.model.fallbacks", JSON.stringify([]), "--json"],
+        { cwd: CLAWBOX_HOME_DIR, env: { ...process.env, HOME: CLAWBOX_HOME_DIR } },
+      ).then(
         () => true,
         (err) => {
           console.error("[local-ai] Failed to clear the OpenClaw fallback list:", err);
@@ -84,7 +85,11 @@ export async function POST(request: Request) {
         },
       );
       if (!cleared) {
-        warning = "Local AI is stopped, but OpenClaw still lists it as a fallback model. Turn it off again to finish clearing it.";
+        // Says what did not happen, not what the list contains: the route never
+        // checked whether the local model was IN `fallbacks`, and a box running
+        // it as primary with an already-empty list would be told about an entry
+        // that was never there.
+        warning = "Local AI is stopped, but clearing OpenClaw's fallback model list failed. Turn it off again to finish.";
       }
     }
 
@@ -111,16 +116,8 @@ export async function POST(request: Request) {
         console.error("[local-ai] Hermes local provider removal failed:", err);
         return null;
       });
-      if (!removal) {
-        return NextResponse.json(
-          {
-            error: "Local AI was stopped, but Hermes still lists it as a provider. Try turning Local AI off again.",
-            code: "hermes_unregister_failed",
-          },
-          { status: 502 },
-        );
-      }
-      if (removal.wasDefault) {
+      hermesUnregisterFailed = !removal;
+      if (removal?.wasDefault) {
         await setMany({ local_ai_was_default: true });
       }
     }
@@ -130,7 +127,21 @@ export async function POST(request: Request) {
     // add up to the whole budget to an owner's "Turn off Local AI" click.
     await restartGateway({ awaitReady: false }).catch(() => {});
 
-    return NextResponse.json(warning ? { success: true, warning } : { success: true });
+    if (hermesUnregisterFailed) {
+      // The panel paints `error` red on a non-2xx and never looks at `warning`
+      // there, so a box that hit both failures gets both sentences or it gets
+      // one of them told wrongly.
+      const failed = "Local AI was stopped, but Hermes still lists it as a provider. Try turning Local AI off again.";
+      return NextResponse.json(
+        {
+          error: warning ? `${failed} ${warning}` : failed,
+          code: "hermes_unregister_failed",
+        },
+        { status: 502 },
+      );
+    }
+
+    return NextResponse.json({ success: true, ...(warning ? { warning } : {}) });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to disable Local AI" },
