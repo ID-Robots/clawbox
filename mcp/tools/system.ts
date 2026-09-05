@@ -18,6 +18,7 @@ import { HOME, spawnArgv } from "../lib/guard";
 import { json, text, type Registrar, type ToolResult } from "../lib/register";
 import { zBool, zConfirm, zEnumOf, zInt, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
+import { versionsForDevice, type VersionsPayload } from "../lib/versions";
 import { PREFERENCE_LANGUAGES, WALLPAPER_FITS } from "../../src/lib/preference-schema";
 import { deriveProtection, type Protection, type ProtectionInput } from "../../src/lib/clawkeep-protection";
 
@@ -371,7 +372,17 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
     "Check whether a newer ClawBox software version is available, and report the installed version. This only reports — it never installs anything. If an update is waiting, tell the user to install it from Settings -> System Update.",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, openWorld: true, profile: "core" },
-    async () => json(await apiGet("/setup-api/update/versions", { timeoutMs: 20_000 })),
+    // Shaped, not raw: the route always carries an `openclaw` component and
+    // fills its target from the ClawBox pin, so the raw payload names an
+    // OpenClaw version for a device that ships no OpenClaw. Same strip
+    // device_status applies to the same payload — see mcp/lib/versions.ts.
+    async () =>
+      json(
+        versionsForDevice(
+          await apiGet<VersionsPayload>("/setup-api/update/versions", { timeoutMs: 20_000 }),
+          ctx,
+        ),
+      ),
   );
 
   if (ctx.capabilities.journal) {
