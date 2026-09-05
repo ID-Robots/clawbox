@@ -2239,7 +2239,10 @@ persist_update_branch_pin() {
 # the fact, so the trade is the honest message.
 git_with_retry() {
   local attempt=1 max="${CLAWBOX_GIT_RETRIES:-3}" delay="${CLAWBOX_GIT_RETRY_DELAY:-5}"
-  local out rc=0
+  local out rc=0 verb
+  # The subcommand, not "$1": every caller here leads with -c/-C, so naming the
+  # first argument produced "git -C attempt 1/3 failed" in the journal.
+  verb="$(printf '%s\n' "$@" | grep -m1 -E '^(fetch|clone|pull|push|ls-remote)$' || true)"
   while :; do
     if out="$(GIT_TERMINAL_PROMPT=0 git "$@" 2>&1)"; then
       [ -z "$out" ] || printf '%s\n' "$out"
@@ -2248,7 +2251,7 @@ git_with_retry() {
       rc=$?
     fi
     [ "$attempt" -ge "$max" ] && break
-    echo "  git ${1:-} attempt $attempt/$max failed, retrying in ${delay}s..." >&2
+    echo "  git ${verb:-remote} attempt $attempt/$max failed, retrying in ${delay}s..." >&2
     sleep "$delay"
     attempt=$((attempt + 1))
     delay=$((delay * 2))
