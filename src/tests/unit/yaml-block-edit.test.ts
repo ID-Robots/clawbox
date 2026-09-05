@@ -445,6 +445,17 @@ describe("getTopLevelScalar and multi-line quoted values", () => {
     expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value: "111111:AAA", readable: true });
   });
 
+  // A quote that never closes swallows every line after it, and the key's own
+  // line may be one of them. PyYAML raises on the whole document there, so
+  // nothing read past that point is evidence - including the absence of a key.
+  it("says it could not look when a quote never closes", () => {
+    const before = 'TELEGRAM_BOT_TOKEN: 111111:AAA\nnotes: "never closed\n';
+    const after = 'notes: "never closed\nTELEGRAM_BOT_TOKEN: 111111:AAA\n';
+
+    expect(getTopLevelScalar(before, "TELEGRAM_BOT_TOKEN")).toEqual({ value: null, readable: false });
+    expect(getTopLevelScalar(after, "TELEGRAM_BOT_TOKEN")).toEqual({ value: null, readable: false });
+  });
+
   it("does not let a continuation line lower the root indent", () => {
     const text = '  notes: "hello\n hidden: x\n"\n  TELEGRAM_BOT_TOKEN: 111111:AAA\n';
     expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value: "111111:AAA", readable: true });

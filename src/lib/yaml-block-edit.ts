@@ -419,11 +419,17 @@ const ANY_KEY_RE = /^([ \t]*)(?:"[^"]*"|'[^']*'|[^\s#"'][^:#]*?)[ \t]*:(?:[ \t](
  * root mapping's own indent below itself and made the real key line "somebody
  * else's".
  *
+ * `unterminated` is true when a quote is still open at the end of the file.
+ * Everything from it on is text PyYAML never gets to parse — it raises on the
+ * whole document — so the lines beyond it are not evidence of anything, and
+ * swallowing the key line among them would be a confident "no bot" invented out
+ * of a missing quote. The caller degrades instead.
+ *
  * KNOWN LIMIT: only a `key: "…` line is recognised as opening one, which is the
  * shape a mapping value takes; a sequence item that opens a multi-line scalar
  * is not tracked.
  */
-function documentLines(lines: string[]): string[] {
+function documentLines(lines: string[]): { lines: string[]; unterminated: boolean } {
   const kept: string[] = [];
   let open: '"' | "'" | null = null;
   for (const raw of lines) {
@@ -440,7 +446,7 @@ function documentLines(lines: string[]): string[] {
       open = quote;
     }
   }
-  return kept;
+  return { lines: kept, unterminated: open !== null };
 }
 
 /**
@@ -517,7 +523,10 @@ export function getTopLevelScalar(text: string, key: string): TopLevelScalar {
   // A space, a tab or the end of the line after the colon, exactly as
   // ANY_KEY_RE and as PyYAML's block-context `check_value`.
   const line = new RegExp(`^([ \\t]*)(?:"${escaped}"|'${escaped}'|${escaped})[ \\t]*:(?:[ \\t](.*))?$`);
-  const lines = documentLines(text.split(/\r\n|\r|\n/));
+  const { lines, unterminated } = documentLines(text.split(/\r\n|\r|\n/));
+  // A quote that never closes swallows every line after it, and this key's own
+  // line may be one of them — "we could not look", never "there is no bot".
+  if (unterminated) return { value: null, readable: false };
   const root = rootIndentWidth(lines);
   let found: TopLevelScalar = { value: null, readable: true };
   for (const raw of lines) {
