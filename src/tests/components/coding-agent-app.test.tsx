@@ -738,11 +738,12 @@ describe("CodingAgentApp", () => {
         render(<CodingAgentApp />);
         const sidebar = await screen.findByTestId("coding-agent-sidebar");
         expect(within(sidebar).getByTestId("coding-agent-sidebar-home")).toHaveAttribute("aria-current", "page");
-        // With the rail up there is no header row: the rail carries the
-        // app's name, its state and Settings, and the row said them twice.
+        // With the rail up there is no header row — no title, no state chip,
+        // no Settings button: the rail has Settings, the window's title bar
+        // names the app, and the row cost the page a row it needs for files.
         expect(screen.queryByTestId("coding-agent-open-settings")).toBeNull();
-        expect(within(sidebar).getByTestId("coding-agent-state")).toHaveTextContent(t("codingAgent.stateOn"));
-        expect(within(sidebar).getByText(t("codingAgent.title"))).toBeInTheDocument();
+        expect(screen.queryByTestId("coding-agent-state")).toBeNull();
+        expect(within(sidebar).queryByText(t("codingAgent.title"))).toBeNull();
         expect(within(sidebar).getByTestId("coding-agent-sidebar-settings")).toBeInTheDocument();
         // A project entry opens the project's page…
         fireEvent.click(within(await within(sidebar).findByTestId("coding-agent-sidebar-projects")).getByText(SITE_PROJECT.name));

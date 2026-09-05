@@ -1090,22 +1090,7 @@ export default function CodingAgentApp() {
           lists on the pages themselves), and not while the wizard runs. */}
       {wide && view.face !== "wizard" && !liveMode && (
         <aside className={`flex w-[15rem] shrink-0 flex-col border-r ${RAIL_SURFACE} overflow-y-auto`} data-testid="coding-agent-sidebar">
-          {/* The app's name and its state live HERE when the rail is shown:
-              the header row above the page said the same things twice. */}
-          <div className="px-4 pt-4 pb-1 flex items-center gap-2">
-            <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">smart_toy</span>
-            <span className="text-[13px] font-semibold tracking-[-0.01em] text-[var(--text-primary)] truncate">{t("codingAgent.title")}</span>
-            {status && (
-              <span
-                data-testid="coding-agent-state"
-                className={`ml-auto shrink-0 text-[10px] font-semibold uppercase tracking-wider border rounded-full px-1.5 py-0.5 flex items-center gap-1 ${status.enabled ? "text-emerald-400 border-emerald-400/40" : "text-[var(--text-muted)] border-white/20"}`}
-              >
-                <span className={`w-1.5 h-1.5 rounded-full ${status.enabled ? "bg-emerald-400" : "bg-[var(--text-muted)]"}`} aria-hidden="true" />
-                {status.enabled ? t("codingAgent.stateOn") : t("codingAgent.stateOff")}
-              </span>
-            )}
-          </div>
-          <div className="px-3 pt-2 pb-2 space-y-1">
+          <div className="px-3 pt-4 pb-2 space-y-1">
             {!standalone && (
               <button type="button" onClick={openNew} data-testid="coding-agent-sidebar-new" className={`${SIDEBAR_ITEM} text-[var(--text-primary)]`}>
                 <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">add_circle</span>
@@ -1197,8 +1182,11 @@ export default function CodingAgentApp() {
             left-aligned against nothing; paired with Settings it reads as a
             toolbar and the page below it starts clean. */}
         {/* The header row is the narrow window's: with the rail up it would
-            repeat the rail's name, state and Settings, and cost the page a
-            row it needs for files. `liveMode` has no chrome at all. */}
+            repeat the rail's New/Home/Settings and cost the page a row it
+            needs for files — and the window's own title bar already names
+            the app. The owner asked for no name and no state chip in the
+            rail either; the switch is one tap away in Settings. `liveMode`
+            has no chrome at all. */}
         {!wide && !liveMode && (
         <div className="flex items-center justify-between gap-4 pb-3 mb-1 border-b border-white/[0.06]">
           <div className="flex items-center gap-2 min-w-0">
