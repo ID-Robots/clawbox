@@ -78,18 +78,17 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
 
 /**
  * The first JSON array in the text that parses. A fenced block is tried
- * first; otherwise every `[` is a candidate and its matching `]` is found
- * by depth, string-aware — so prose like "Plan [draft]:" or a "[note]"
- * after the array does not swallow the real one the way first-`[` to
- * last-`]` did.
+ * first; otherwise every `[` is a candidate, paired with its `]` in ONE
+ * string-aware pass over the text (a stack of open brackets), so prose like
+ * "Plan [draft]:" or a "[note]" after the array does not swallow the real
+ * one the way first-`[` to last-`]` did — and an unbalanced summary costs a
+ * single scan, not one per candidate.
  */
 function extractArray(text: string): string | null {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
   const bodies = fenced ? [fenced[1], text] : [text];
   for (const body of bodies) {
-    for (let start = body.indexOf("["); start !== -1; start = body.indexOf("[", start + 1)) {
-      const end = matchingBracket(body, start);
-      if (end === -1) continue;
+    for (const [start, end] of bracketPairs(body)) {
       const candidate = body.slice(start, end + 1);
       try {
         if (Array.isArray(JSON.parse(candidate))) return candidate;
@@ -101,11 +100,12 @@ function extractArray(text: string): string | null {
   return null;
 }
 
-/** The index of the `]` that closes the `[` at `start`, skipping strings; -1 when unbalanced. */
-function matchingBracket(text: string, start: number): number {
-  let depth = 0;
+/** Every `[` with the index of the `]` that closes it, in order of the `[`, from one pass that skips strings. */
+function bracketPairs(text: string): Array<[number, number]> {
+  const pairs: Array<[number, number]> = [];
+  const open: Array<{ at: number; ch: string }> = [];
   let inString = false;
-  for (let i = start; i < text.length; i++) {
+  for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (inString) {
       if (ch === "\\") i++;
@@ -113,11 +113,14 @@ function matchingBracket(text: string, start: number): number {
       continue;
     }
     if (ch === '"') inString = true;
-    else if (ch === "[" || ch === "{") depth++;
+    else if (ch === "[" || ch === "{") open.push({ at: i, ch });
     else if (ch === "]" || ch === "}") {
-      depth--;
-      if (depth === 0) return ch === "]" ? i : -1;
+      const top = open.pop();
+      if (!top) continue;
+      if ((ch === "]") !== (top.ch === "[")) { open.length = 0; continue; }
+      if (ch === "]") pairs.push([top.at, i]);
     }
   }
-  return -1;
+  pairs.sort((x, y) => x[0] - y[0]);
+  return pairs;
 }

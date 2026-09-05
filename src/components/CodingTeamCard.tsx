@@ -136,6 +136,8 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
       });
       const data = await res.json().catch(() => null) as { team?: TeamView; error?: string } | null;
       if (!res.ok || !data?.team) throw new Error(data?.error ?? t("codingAgent.team.startFailed"));
+      // A read that started before this write must not land on top of it.
+      request.current++;
       setGoal("");
       setTeams((prev) => [data.team!, ...prev]);
     } catch (err) {
@@ -157,6 +159,7 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
       });
       const data = await res.json().catch(() => null) as { team?: TeamView; error?: string } | null;
       if (!res.ok || !data?.team) throw new Error(data?.error ?? t("codingAgent.team.stopFailed"));
+      request.current++;
       setTeams((prev) => prev.map((x) => (x.id === data.team!.id ? data.team! : x)));
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.team.stopFailed"));
