@@ -465,6 +465,40 @@ export async function disconnectGitHub(): Promise<DisconnectOutcome> {
   return { ok: true };
 }
 
+/**
+ * A folder whose repository already exists on the owner's account: wire
+ * `origin` to it and push the current branch. Answers null when the
+ * repository cannot be read (then the caller reports the create's own
+ * refusal), a refusal when the push is rejected, and the backup otherwise.
+ */
+async function attachExistingRepo(dir: string, fullName: string, branch: string): Promise<BackupOutcome | null> {
+  // The repo is POSITIONAL on gh 2.4.0 (`--repo` is rejected there).
+  const viewed = await run("gh", ["repo", "view", fullName, "--json", "url"], { cwd: dir });
+  if (viewed.code !== 0 || !viewed.stdout) return null;
+  let url: string;
+  try {
+    const parsed = JSON.parse(viewed.stdout) as { url?: unknown };
+    if (typeof parsed.url !== "string" || !/^https:\/\/github\.com\//.test(parsed.url)) return null;
+    url = `${parsed.url.replace(/\/$/, "")}.git`;
+  } catch {
+    return null;
+  }
+  const added = await run("git", ["-C", dir, "remote", "add", "origin", url]);
+  if (added.code !== 0) {
+    return { pushed: false, reason: "failed", detail: failureDetail(added, "Attaching the existing repository") };
+  }
+  const pushed = await run("git", ["-C", dir, "push", "--set-upstream", "origin", branch], { cwd: dir, timeoutMs: PUSH_TIMEOUT_MS });
+  if (pushed.code !== 0) {
+    if (inconclusive(pushed)) return noFinding(pushed, "Pushing to the existing repository", "network");
+    return {
+      pushed: false,
+      reason: "failed",
+      detail: failureDetail(pushed, `Pushing ${branch} to the existing repository ${fullName}`, "The repository on GitHub has a history this folder does not share. Push it from the Terminal, or rename the folder."),
+    };
+  }
+  return { pushed: true, repo: url, created: false, branch };
+}
+
 /** A repository name GitHub will accept, from a folder name. */
 export function repoNameFor(directory: string): string {
   const base = path.basename(path.resolve(directory));
@@ -569,9 +603,19 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
       if (inconclusive(create)) {
         return noFinding(create, "Creating the repository on GitHub", "network");
       }
-      // GitHub itself refusing — a name already taken, a scope missing — IS a
-      // request that cannot be satisfied as it stands. That one keeps its 409,
-      // and failureDetail keeps its message from ever being blank.
+      // The name is already taken ON THIS ACCOUNT: the repository IS the
+      // folder's — a project the box re-created (the harness test remakes its
+      // folder; a restore from a backup does too) whose checkout lost its
+      // remote. Attach it and push, rather than tell the owner to rename a
+      // repository that is theirs. A push GitHub rejects (histories that do
+      // not meet) is still reported, never forced.
+      if (/already exists/i.test(create.stderr + create.stdout) && status.login) {
+        const attached = await attachExistingRepo(dir, `${status.login}/${name}`, branch);
+        if (attached) return attached;
+      }
+      // GitHub itself refusing — a name already taken elsewhere, a scope
+      // missing — IS a request that cannot be satisfied as it stands. That one
+      // keeps its 409, and failureDetail keeps its message from ever being blank.
       return { pushed: false, reason: "failed", detail: failureDetail(create, "Creating the repository on GitHub") };
     }
     created = true;

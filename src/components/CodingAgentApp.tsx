@@ -1519,11 +1519,15 @@ export default function CodingAgentApp() {
           const reviewedBy = runs.find((r) => r.reviewOf === run.id);
           const artifacts = run.artifacts ?? [];
           const artifactsFolded = artifacts.length > ARTIFACT_PREVIEW && artifactsOpenFor !== run.id;
-          const images = artifacts.filter((a) => a.kind === "image");
+          // Folded: the first few of WHATEVER kind — a run with two pictures
+          // and three files shows five entries' worth of the first four, not
+          // two pictures and a hidden rest.
+          const shownArtifacts = artifactsFolded ? artifacts.slice(0, ARTIFACT_PREVIEW) : artifacts;
+          const images = shownArtifacts.filter((a) => a.kind === "image");
           // Clips get a player rather than a link: a run can now record its own
           // narration, and a download is not how you check what it says.
-          const clips = artifacts.filter((a) => a.kind === "audio");
-          const files = artifacts.filter((a) => a.kind !== "image" && a.kind !== "audio");
+          const clips = shownArtifacts.filter((a) => a.kind === "audio");
+          const files = shownArtifacts.filter((a) => a.kind !== "image" && a.kind !== "audio");
           const reportFile = files.find((a) => a.kind === "markdown" && a.name === "report.md") ?? files.find((a) => a.kind === "markdown");
           const helpers = Object.entries(run.subagentsByType ?? {});
           const todos = run.todos ?? [];
@@ -1924,7 +1928,7 @@ export default function CodingAgentApp() {
                   </div>
                   {images.length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-2">
-                      {(artifactsFolded ? images.slice(0, ARTIFACT_PREVIEW) : images).map((a) => (
+                      {images.map((a) => (
                         <a
                           key={a.name}
                           href={artifactUrl(run.id, a.name)}
@@ -1939,7 +1943,7 @@ export default function CodingAgentApp() {
                       ))}
                     </div>
                   )}
-                  {!artifactsFolded && clips.length > 0 && (
+                  {clips.length > 0 && (
                     <div className="mt-2 space-y-1.5" data-testid="coding-agent-artifact-audio">
                       {clips.map((a) => (
                         <div key={a.name} className="flex items-center gap-2 flex-wrap">
@@ -1956,7 +1960,7 @@ export default function CodingAgentApp() {
                       ))}
                     </div>
                   )}
-                  {!artifactsFolded && files.length > 0 && (
+                  {files.length > 0 && (
                     <ul className="mt-2 space-y-0.5">
                       {files.map((a) => (
                         <li key={a.name} className="text-[11px]">

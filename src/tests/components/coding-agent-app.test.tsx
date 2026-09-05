@@ -1466,6 +1466,30 @@ describe("the workspace, the breadcrumb and the live view", () => {
     expect(card).toHaveAttribute("data-folded", "true");
   });
 
+  it("folds mixed evidence by count, not by kind — a clip and a report among the first four are shown", async () => {
+    const run = { ...RUN, artifacts: [
+      { name: "intro.wav", bytes: 4096, kind: "audio" as const },
+      { name: "report.md", bytes: 20, kind: "markdown" as const },
+      { name: "a.png", bytes: 100, kind: "image" as const },
+      { name: "b.png", bytes: 100, kind: "image" as const },
+      { name: "c.png", bytes: 100, kind: "image" as const },
+      { name: "notes.txt", bytes: 10, kind: "text" as const },
+    ] };
+    stubFetch({ enabled: true, readiness: READY }, [run], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+    const card = await screen.findByTestId("coding-agent-artifacts");
+    expect(card).toHaveAttribute("data-folded", "true");
+    expect(within(screen.getByTestId("coding-agent-artifact-audio")).getByLabelText("intro.wav")).toBeInTheDocument();
+    expect(within(card).getByText("report.md")).toBeInTheDocument();
+    expect(card.querySelectorAll("img")).toHaveLength(2);
+    expect(within(card).queryByText("notes.txt")).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-artifacts-toggle"));
+    expect(card.querySelectorAll("img")).toHaveLength(3);
+    expect(within(card).getByText("notes.txt")).toBeInTheDocument();
+  });
+
   it("shows the browser the run drives above its terminal while it runs — a picture only — folds it on request, and not once it settled", async () => {
     stubFetch({ enabled: true, readiness: READY }, [LIVE], { projects: [SITE_PROJECT] });
     const { unmount } = render(<CodingAgentApp />);

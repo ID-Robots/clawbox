@@ -27,8 +27,7 @@ import {
   OPEN_APP_EVENT,
   OPEN_SETTINGS_SECTION_EVENT,
   standaloneSettingsHref,
-  type ChatMessageDetail,
-} from "@/lib/ui-events";
+  type ChatMessageDetail, buildTeamProjectPrompt } from "@/lib/ui-events";
 
 describe("dispatchChatMessage", () => {
   it("dispatches CHAT_MESSAGE_EVENT with the text under detail.text, as dispatchFixError does for its context", () => {
@@ -164,5 +163,32 @@ describe("the memory shard changed signal", () => {
     expect(shard).toHaveLength(1);
     offAgent();
     expect(MEMORY_SHARD_CHANGED_EVENT).toBe("clawbox:memory-shard-changed");
+  });
+});
+
+describe("buildTeamProjectPrompt", () => {
+  const base = { name: "shop", directory: "/home/clawbox/Projects/shop", kind: "folder" as const, folder: "shop" };
+
+  it("asks for a coding TEAM on the project, naming the folder for coding_team_run, and reads as one sentence", () => {
+    const text = buildTeamProjectPrompt({ ...base, instructions: "Add invoices with PDF export." });
+    expect(text).toContain("coding TEAM");
+    expect(text).toContain('directory "/home/clawbox/Projects/shop"');
+    expect(text).toContain("coding_team_run");
+    expect(text).toContain("coding_team_status");
+    expect(text).toContain(": Add invoices with PDF export.\n");
+    expect(text).not.toContain("export..");
+    expect(text).not.toContain("code_project_build");
+  });
+
+  it("names a code project by its id and asks for the rebuild afterwards", () => {
+    const text = buildTeamProjectPrompt({ ...base, kind: "codeProject", directory: "/home/clawbox/clawbox/data/code-projects/shop", instructions: "Add a dark mode" });
+    expect(text).toContain('project_id "shop"');
+    expect(text).toContain("code_project_build");
+  });
+
+  it("keeps a goal that is nothing but periods rather than sending an empty request", () => {
+    const text = buildTeamProjectPrompt({ ...base, instructions: "..." });
+    expect(text).toContain(": ....");
+    expect(text).not.toContain(": .\n");
   });
 });

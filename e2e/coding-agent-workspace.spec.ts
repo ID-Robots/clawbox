@@ -123,7 +123,8 @@ test("a project's page carries its files and changes, and a run's page its bread
   await expect(diff).toContainText("+<h1>Hi</h1>");
   await expect(diff.locator("[data-diff-line=del]")).toHaveText("-<h1>Hello</h1>");
 
-  // The run, from the project's own list.
+  // The run, from the project's own list — the Runs tab.
+  await win.getByTestId("coding-agent-workspace-runs").click();
   await win.getByTestId("coding-agent-details-run-e2e00001").click();
   const runPage = win.getByTestId("coding-agent-run-page");
   await expect(runPage).toBeVisible();

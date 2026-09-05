@@ -297,7 +297,11 @@ export function buildResumeProjectPrompt(req: ResumeProjectRequest): string {
  * with the team switch on, and this is what the card then hands the chat.
  */
 export function buildTeamProjectPrompt(req: Omit<ResumeProjectRequest, "latestRun">): string {
-  const goal = req.instructions.trim().replace(/[.\s]+$/u, "");
+  // Trailing periods come off so the sentence reads as one; a goal that is
+  // nothing but periods keeps what the owner typed rather than becoming an
+  // empty request.
+  const trimmed = req.instructions.trim();
+  const goal = trimmed.replace(/[.\s]+$/u, "") || trimmed;
   const target = req.kind === "codeProject" ? `project_id "${req.folder}"` : `directory "${req.directory}"`;
   return [
     `Run a coding TEAM on the existing ClawBox project "${req.name.trim()}" in ${req.directory}: ${goal}.`,
