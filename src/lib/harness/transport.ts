@@ -262,7 +262,7 @@ export type TurnEvent =
    * last few characters are ever visible.
    *
    * Cumulative is the right way round because the surface's job is to paint the
-   * current state of one bubble, which is what `setStreaming(text)` already
+   * current state of one bubble, which is what `applyStreaming(text)` already
    * does for the gateway. An adapter whose transport speaks in fragments — the
    * Hermes dashboard socket does — accumulates them itself and reports the
    * whole, so the renderer stays the same one for every harness.
