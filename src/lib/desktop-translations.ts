@@ -559,6 +559,8 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "settings.bgLearningHint": "Turning what worked into reusable skills, and reviewing the collection weekly.",
     "settings.bgUnsupported": "This edition has no such job",
     "settings.bgFailed": "The device refused the change.",
+    "settings.bgPending": "Saved — it takes effect when the assistant next restarts.",
+    "settings.bgDegraded": "The device could not be read, so these may not be what it is doing.",
     "settings.providers.unknown": "Unknown",
     "settings.providers.default": "Default",
     "settings.providers.radioGroupLabel": "AI Provider",

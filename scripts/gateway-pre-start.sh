@@ -2616,21 +2616,35 @@ fi
 #                    collection review", which is the `skill-collection-review`
 #                    cron row found enabled in state/openclaw.sqlite.
 #
-# SEEDED, NEVER PINNED. Written only where the key is ABSENT, so a value the
-# owner set — in Settings, in the Control UI, or with the CLI — is never
-# overwritten, and switching one back on is not undone at the next boot. That is
-# the whole difference between an opt-out and a policy, and the reason this
-# cannot be a plain `config set` on every start.
+# SEEDED ONCE PER BOX, AND ONLY THEN. The first boot writes the three opt-outs
+# for the keys the owner has said nothing about; after that this step is done
+# and the harness keys are left alone for ever.
+#
+# NOT "seed whenever the key is absent", which is what this was first written as
+# and is a ONE-WAY switch: turning the check-ins back on means REMOVING
+# `agents.defaults.heartbeat.every` — the core's default cadence is 30 m, or an
+# hour on Anthropic OAuth, and that distinction applies only while the key is
+# unset, so ClawBox has no business freezing it — and an absence gate then reads
+# the owner's "on" as "no opinion". Worse, that write is followed by a gateway
+# restart whose ExecStartPre is THIS SCRIPT, so the seed would put `0m` back
+# before the gateway even started: switch on, panel says on, reload Settings and
+# it is off again, for ever.
+#
+# The record is `data/background-optouts.json`, ClawBox's own file rather than a
+# key in the harness's config, because it is a fact about what CLAWBOX did — and
+# a factory reset empties `data/`, so a box whose `~/.openclaw` was wiped is
+# offered the opt-outs again, which is right.
 #
 # HARNESS FIRST: all three are the core's own documented keys
 # (docs/gateway/heartbeat.md, docs/concepts/dreaming.md, docs/tools/self-learning.md)
 # and they are written through the core's own `config set --batch-json`, which
 # validates against the schema and applies the whole batch or none of it. One
-# CLI start for up to three keys, and only on a box that is missing one — a box
-# already seeded pays nothing.
+# CLI start for up to three keys, and only on a box that has not been seeded — a
+# seeded box pays nothing at all, which matters inside a blocking ExecStartPre.
+CLAWBOX_OPTOUT_STATE="$CLAWBOX_ROOT/data/background-optouts.json"
 if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
-  CLAWBOX_OPTOUT_BATCH="$(python3 - "$OPENCLAW_CONFIG" <<'PY' || true
-import json, sys
+  CLAWBOX_OPTOUT_BATCH="$(CLAWBOX_OPTOUT_STATE="$CLAWBOX_OPTOUT_STATE" python3 - "$OPENCLAW_CONFIG" <<'SEEDPY' || true
+import json, os, sys
 
 # path -> the value ClawBox seeds when the owner has expressed no opinion.
 # `0m` rather than removing the key: the core reads an absent `every` as its own
@@ -2650,6 +2664,16 @@ except (OSError, json.JSONDecodeError):
     print("")
     raise SystemExit(0)
 
+try:
+    with open(os.environ["CLAWBOX_OPTOUT_STATE"], encoding="utf-8") as fh:
+        seeded = set(json.load(fh).get("seeded") or [])
+except (OSError, json.JSONDecodeError):
+    # An absent record is the normal first-boot state. An UNREADABLE one is read
+    # the same way on purpose: the cost is one `config set` of values the config
+    # may already carry, which is a no-op, while reading it as "everything is
+    # seeded" would leave a fresh box with its noisy defaults for good.
+    seeded = set()
+
 def present(path):
     node = cfg
     for part in path:
@@ -2661,10 +2685,10 @@ def present(path):
 batch = [
     {"path": ".".join(path), "value": value}
     for path, value in WANTED
-    if not present(path)
+    if ".".join(path) not in seeded and not present(path)
 ]
 print(json.dumps(batch) if batch else "")
-PY
+SEEDPY
 )"
   if [ -n "$CLAWBOX_OPTOUT_BATCH" ]; then
     # Non-fatal like every other CLI call here: this is a blocking ExecStartPre,
@@ -2672,6 +2696,39 @@ PY
     # gateway. The next boot tries again, because the keys are still absent.
     if timeout -k 5 90 "$OPENCLAW_BIN" config set --batch-json "$CLAWBOX_OPTOUT_BATCH" >/dev/null 2>&1; then
       echo "  Seeded the OpenClaw 2 background-job opt-outs (heartbeat, memory dreaming, self-learning) — Settings can switch any of them back on"
+      # RECORDED ONLY AFTER THE WRITE LANDED, and merged with what is there: a
+      # seed that failed must be offered again next boot, and a box seeded key
+      # by key over several boots must not lose the earlier ones.
+      if ! CLAWBOX_OPTOUT_BATCH="$CLAWBOX_OPTOUT_BATCH" \
+        CLAWBOX_OPTOUT_STATE="$CLAWBOX_OPTOUT_STATE" python3 - <<'STATEPY'
+import json, os, tempfile
+
+path = os.environ["CLAWBOX_OPTOUT_STATE"]
+try:
+    with open(path, encoding="utf-8") as fh:
+        seeded = set(json.load(fh).get("seeded") or [])
+except (OSError, json.JSONDecodeError):
+    seeded = set()
+seeded.update(entry["path"] for entry in json.loads(os.environ["CLAWBOX_OPTOUT_BATCH"]))
+
+directory = os.path.dirname(path) or "."
+os.makedirs(directory, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=directory, prefix=".background-optouts.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w") as fh:
+        json.dump({"seeded": sorted(seeded)}, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+STATEPY
+      then
+        echo "  WARN: could not record the background-job opt-out seeding; the next boot may re-seed a switch the owner has since turned on" >&2
+      fi
     else
       echo "  WARN: could not seed the OpenClaw 2 background-job opt-outs; the box may send unprompted check-ins and spend tokens on background jobs until Settings is used" >&2
     fi

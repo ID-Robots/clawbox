@@ -38,6 +38,10 @@ export default function BackgroundJobsPanel() {
   const [status, setStatus] = useState<BackgroundJobsStatus | null>(null);
   const [busy, setBusy] = useState<BackgroundJobId | null>(null);
   const [failed, setFailed] = useState<BackgroundJobId | null>(null);
+  // The config is right and the running process has not been told: the two are
+  // different facts, and collapsing them into one green tick is the false
+  // success this panel exists to avoid.
+  const [pending, setPending] = useState<BackgroundJobId | null>(null);
 
   // Read once, on mount. `alive` because the answer comes back after an await
   // and a Settings tab is closed by clicking another one; the switches also
@@ -71,8 +75,10 @@ export default function BackgroundJobsPanel() {
       // Only a device-verified change moves the switch. The route reads its own
       // write back off the config before it answers, so an `ok` here is the box
       // saying it changed — not this component assuming it did.
-      if (r.ok && body?.ok === true) setStatus(body);
-      else setFailed(id);
+      if (r.ok && body?.ok === true) {
+        setStatus(body);
+        setPending((body as { restarted?: boolean }).restarted === false ? id : null);
+      } else setFailed(id);
     } catch {
       setFailed(id);
     } finally {
@@ -94,6 +100,12 @@ export default function BackgroundJobsPanel() {
       </div>
       <p className="text-[11px] text-[var(--text-muted)] mb-3 leading-relaxed">{t("settings.bgHelper")}</p>
 
+      {status.degraded && (
+        <p className="text-[11px] text-[var(--amber-ink)] mb-2" data-testid="bg-jobs-degraded">
+          {t("settings.bgDegraded")}
+        </p>
+      )}
+
       <div className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]">
         {ROWS.map((row) => {
           const job = status.jobs.find((j) => j.id === row.id);
@@ -108,6 +120,11 @@ export default function BackgroundJobsPanel() {
                 {job.key && (
                   <span className="block text-[10px] text-[var(--text-muted)] font-mono mt-0.5 break-all">
                     {job.key}
+                  </span>
+                )}
+                {pending === row.id && (
+                  <span className="block text-[11px] text-[var(--text-secondary)] mt-1" data-testid={`bg-job-pending-${row.id}`}>
+                    {t("settings.bgPending")}
                   </span>
                 )}
                 {failed === row.id && (
@@ -126,7 +143,7 @@ export default function BackgroundJobsPanel() {
                   disabled={busy === row.id}
                   data-testid={`bg-job-switch-${row.id}`}
                   onClick={() => void toggle(row.id, !job.enabled)}
-                  className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-50 ${job.enabled ? "bg-[var(--coral)]" : "bg-white/15"}`}
+                  className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-50 ${job.enabled ? "bg-[var(--coral-bright)]" : "bg-white/15"}`}
                 >
                   <span
                     className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${job.enabled ? "left-[22px]" : "left-0.5"}`}

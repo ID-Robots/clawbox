@@ -51,6 +51,7 @@ function block(): string {
 let dir: string;
 let binDir: string;
 let configPath: string;
+let statePath: string;
 
 /** An `openclaw` that applies `config set --batch-json` the way the CLI does. */
 function stubOpenclaw(exitCode = 0) {
@@ -85,6 +86,7 @@ function run(env: Record<string, string> = {}) {
     "set -euo pipefail",
     `OPENCLAW_CONFIG=${JSON.stringify(configPath)}`,
     `OPENCLAW_BIN=${JSON.stringify(path.join(binDir, "openclaw"))}`,
+    `CLAWBOX_ROOT=${JSON.stringify(path.join(dir, "root"))}`,
     'CLAWBOX_OPENCLAW_V2=1',
     block(),
   ].join("\n");
@@ -123,6 +125,8 @@ beforeEach(() => {
   dir = mkdtempSync(path.join(tmpdir(), "clawbox-optout-"));
   binDir = path.join(dir, "bin");
   configPath = path.join(dir, "openclaw.json");
+  statePath = path.join(dir, "root", "data", "background-optouts.json");
+  mkdirSync(path.dirname(statePath), { recursive: true });
   mkdirSync(binDir, { recursive: true });
   writeFileSync(configPath, JSON.stringify({}, null, 2));
   stubOpenclaw();
@@ -163,9 +167,53 @@ d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
     rmSync(path.join(dir, "calls.log"), { force: true });
     const r = run();
     expect(r.status).toBe(0);
-    // No batch to write, so the CLI is never started at all.
+    // No batch to write, so the CLI is never started at all — this runs inside
+    // a blocking ExecStartPre and a CLI cold start is 10-12 s on a Jetson.
     expect(calls()).toBe("");
     expect(r.stdout).not.toContain("Seeded");
+  });
+
+  it("does NOT re-seed a switch the owner turned back on", () => {
+    // THE ONE-WAY-SWITCH BUG. Turning check-ins on removes the key — the core's
+    // own default cadence is what should decide it — and the write is followed
+    // by a gateway restart whose ExecStartPre is this very script. An
+    // absence-gated seed put `0m` straight back, before the gateway started, so
+    // the switch could never be turned on at all.
+    run();
+    expect(at("agents.defaults.heartbeat.every")).toBe("0m");
+
+    writeFileSync(configPath, JSON.stringify({}, null, 2));  // the owner's "on"
+    rmSync(path.join(dir, "calls.log"), { force: true });
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
+    expect(calls()).toBe("");
+  });
+
+  it("records only what actually landed, so a failed seed is offered again", () => {
+    const failed = run({ OC_EXIT: "1" });
+    expect(failed.status).toBe(0);
+    expect(existsSync(statePath)).toBe(false);
+
+    const r = run();
+    expect(r.stdout).toContain("Seeded");
+    expect(at("skills.workshop.autonomous.mode")).toBe("off");
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).seeded).toEqual([
+      "agents.defaults.heartbeat.every",
+      "plugins.entries.memory-core.config.dreaming.enabled",
+      "skills.workshop.autonomous.mode",
+    ]);
+  });
+
+  it("offers them again after a factory reset has emptied data/", () => {
+    run();
+    // `setup/reset` empties DATA_DIR and wipes ~/.openclaw; the record goes with
+    // it, and a box with the core's noisy defaults back gets the opt-outs back.
+    rmSync(statePath, { force: true });
+    writeFileSync(configPath, JSON.stringify({}, null, 2));
+    const r = run();
+    expect(r.stdout).toContain("Seeded");
+    expect(at("agents.defaults.heartbeat.every")).toBe("0m");
   });
 
   it("keeps an owner's explicit `false` for a switch, not just a truthy one", () => {

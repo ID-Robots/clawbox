@@ -1,6 +1,6 @@
 import { getActiveHarness, type Harness } from "@/lib/harness";
 import { patchHermesConfig, readHermesConfigValue } from "@/lib/hermes-config-yaml";
-import { readConfig, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset } from "@/lib/openclaw-config";
+import { readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset } from "@/lib/openclaw-config";
 
 // The three things the box does on its OWN initiative, and the switches for them.
 //
@@ -90,7 +90,13 @@ function valueAt(config: unknown, key: string): unknown {
  * exists because nobody could see.
  */
 async function readOpenclawJobs(): Promise<BackgroundJobsStatus> {
-  const config = await readConfig();
+  // STRICT, never `readConfig`. That one answers `{}` for every read failure
+  // alike — EACCES, a file caught half-written by a concurrent `config set` —
+  // and an absent key here means "the core's own default, which is ON". So an
+  // unreadable config would report all three jobs running AND satisfy the
+  // write-verification below in the ON direction, which is the false success
+  // `readConfigStrict`'s own doc was written about.
+  const config = await readConfigStrict();
   const every = valueAt(config, OPENCLAW_KEYS.checkIns);
   const dreaming = valueAt(config, OPENCLAW_KEYS.memoryReview);
   const mode = valueAt(config, OPENCLAW_KEYS.skillLearning);
@@ -124,9 +130,13 @@ async function readOpenclawJobs(): Promise<BackgroundJobsStatus> {
 
 /** Hermes' own booleans, absent meaning the documented default of `true`. */
 async function readHermesJobs(): Promise<BackgroundJobsStatus> {
+  // NOT `.catch(() => null)`: `null` is what an UNSET key answers, and both of
+  // Hermes' defaults are `true`, so swallowing a read failure here would report
+  // both jobs running and then verify an "on" write against a file nobody could
+  // open. A throw reaches `readBackgroundJobs`, which says `degraded`.
   const [review, curator] = await Promise.all([
-    readHermesConfigValue(HERMES_KEYS.memoryReview as string).catch(() => null),
-    readHermesConfigValue(HERMES_KEYS.skillLearning as string).catch(() => null),
+    readHermesConfigValue(HERMES_KEYS.memoryReview as string),
+    readHermesConfigValue(HERMES_KEYS.skillLearning as string),
   ]);
   const on = (raw: string | null) => (raw === null ? true : raw.trim().toLowerCase() !== "false");
   return {
@@ -182,13 +192,27 @@ async function writeOpenclawJob(id: BackgroundJobId, enabled: boolean): Promise<
       await runOpenclawConfigSet([key, "0m"]);
       return;
     }
-    const present = valueAt(await readConfig(), key) !== undefined;
+    const present = valueAt(await readConfigStrict(), key) !== undefined;
     if (present) await runOpenclawConfigUnset(key);
     return;
   }
   if (id === "memoryReview") {
     await runOpenclawConfigSet([key, enabled ? "true" : "false", "--strict-json"]);
     return;
+  }
+  // TERNARY, not boolean: the core's own values are `off | propose | auto`, and
+  // `propose` means "capture, but let me review every one before it applies".
+  // Switching OFF writes `off` and switching ON writes `auto`, which is the
+  // core's own default — so a box the owner had put on `propose` and then
+  // switched off here comes back as `auto`, a wider setting than he chose. That
+  // is stated rather than hidden: the row's own text says what ON means, and
+  // restoring `propose` would need ClawBox to remember a value the switch has
+  // no way to show. `propose` reads as ON while it is set, and this never
+  // rewrites it — a box already on `propose` is left exactly there.
+  if (enabled) {
+    const current = valueAt(await readConfigStrict(), key);
+    const mode = typeof current === "string" ? current.trim().toLowerCase() : "";
+    if (mode && mode !== "off") return;
   }
   await runOpenclawConfigSet([key, enabled ? "auto" : "off"]);
 }
@@ -231,6 +255,13 @@ export async function setBackgroundJob(
   }
 
   const after = await readBackgroundJobs();
+  // A DEGRADED read is not a verification. It is the box saying it could not
+  // look, and every row in it is a fallback that happens to read as ON — which
+  // would wave an "on" write straight through over a config that still says
+  // otherwise.
+  if (after.degraded) {
+    throw new BackgroundJobError("write_failed", "The device could not confirm the change.");
+  }
   if (after.jobs.find((job) => job.id === id)?.enabled !== enabled) {
     throw new BackgroundJobError("write_failed", "The setting did not change on the device.");
   }
@@ -245,6 +276,13 @@ export async function setBackgroundJob(
  * effect when the gateway next starts rather than claiming it already has.
  */
 export async function applyBackgroundJobRestart(harness: Harness): Promise<boolean> {
+  // HERMES NEEDS NO RESTART, and that is checked rather than assumed. Its
+  // config cache is keyed on the file's own `(mtime_ns, size)`
+  // (`hermes_cli/config.py`, "Cached tuple is (user_mtime_ns, user_size, …)"),
+  // and `is_background_review_enabled()` is asked at each spawn from
+  // `agent/background_review.py` — so a ClawBox write invalidates the cache and
+  // the next turn already obeys it. Read read-only off the installed 0.20.5
+  // package on the Hermes box.
   if (harness === "hermes") return false;
   try {
     await restartGateway();

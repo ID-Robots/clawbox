@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({
-  readConfig: vi.fn(),
+  readConfigStrict: vi.fn(),
   restartGateway: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
   runOpenclawConfigUnset: vi.fn(),
@@ -28,7 +28,7 @@ vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn() }));
 let GET: () => Promise<Response>;
 let POST: (req: Request) => Promise<Response>;
 let getActiveHarness: Mock;
-let readConfig: Mock;
+let readConfigStrict: Mock;
 let restartGateway: Mock;
 let runOpenclawConfigSet: Mock;
 let runOpenclawConfigUnset: Mock;
@@ -53,15 +53,15 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   ({ getActiveHarness } = (await import("@/lib/harness")) as unknown as { getActiveHarness: Mock });
-  ({ readConfig, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset } =
+  ({ readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset } =
     (await import("@/lib/openclaw-config")) as unknown as {
-      readConfig: Mock; restartGateway: Mock; runOpenclawConfigSet: Mock; runOpenclawConfigUnset: Mock;
+      readConfigStrict: Mock; restartGateway: Mock; runOpenclawConfigSet: Mock; runOpenclawConfigUnset: Mock;
     });
   ({ patchHermesConfig, readHermesConfigValue } =
     (await import("@/lib/hermes-config-yaml")) as unknown as { patchHermesConfig: Mock; readHermesConfigValue: Mock });
   ({ hasOwnerSession } = (await import("@/lib/owner-session")) as unknown as { hasOwnerSession: Mock });
   getActiveHarness.mockResolvedValue("openclaw");
-  readConfig.mockResolvedValue({});
+  readConfigStrict.mockResolvedValue({});
   restartGateway.mockResolvedValue(undefined);
   runOpenclawConfigSet.mockResolvedValue(undefined);
   runOpenclawConfigUnset.mockResolvedValue(undefined);
@@ -77,9 +77,9 @@ describe("background-jobs — reading the box", () => {
   });
 
   it("reads 0m as off and any other cadence as on", async () => {
-    readConfig.mockResolvedValue({ agents: { defaults: { heartbeat: { every: "0m" } } } });
+    readConfigStrict.mockResolvedValue({ agents: { defaults: { heartbeat: { every: "0m" } } } });
     expect((await rows()).find((r) => r.id === "checkIns")?.enabled).toBe(false);
-    readConfig.mockResolvedValue({ agents: { defaults: { heartbeat: { every: "30m" } } } });
+    readConfigStrict.mockResolvedValue({ agents: { defaults: { heartbeat: { every: "30m" } } } });
     expect((await rows()).find((r) => r.id === "checkIns")?.enabled).toBe(true);
   });
 
@@ -110,7 +110,7 @@ describe("background-jobs — the switches", () => {
   });
 
   it("writes 0m to switch the check-ins off", async () => {
-    readConfig
+    readConfigStrict
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ agents: { defaults: { heartbeat: { every: "0m" } } } });
     const r = await post({ id: "checkIns", enabled: false });
@@ -121,7 +121,7 @@ describe("background-jobs — the switches", () => {
   it("UNSETS the key to switch them back on, rather than pinning a cadence", async () => {
     // The core's own default is 30 m — an hour on Anthropic OAuth — and that is
     // not a distinction ClawBox has any business freezing.
-    readConfig
+    readConfigStrict
       .mockResolvedValueOnce({ agents: { defaults: { heartbeat: { every: "0m" } } } })
       .mockResolvedValueOnce({ agents: { defaults: { heartbeat: { every: "0m" } } } })
       .mockResolvedValueOnce({});
@@ -133,10 +133,20 @@ describe("background-jobs — the switches", () => {
 
   it("reads the write back and refuses to claim a change that did not land", async () => {
     // The config still says `auto` afterwards: the switch must not answer ok.
-    readConfig.mockResolvedValue({ skills: { workshop: { autonomous: { mode: "auto" } } } });
+    readConfigStrict.mockResolvedValue({ skills: { workshop: { autonomous: { mode: "auto" } } } });
     const r = await post({ id: "skillLearning", enabled: false });
     expect(r.status).toBe(502);
     expect(await r.json()).toMatchObject({ ok: false, code: "write_failed" });
+  });
+
+  it("never verifies against a config the box could not read", async () => {
+    // `readConfigStrict` throws, the status is degraded, and every row in a
+    // degraded status happens to read as ON — so an "on" write would otherwise
+    // wave itself through over a config that still says `0m`.
+    readConfigStrict.mockRejectedValue(new Error("EACCES"));
+    const r = await post({ id: "checkIns", enabled: true });
+    expect(r.status).toBe(502);
+    expect(await r.json()).toMatchObject({ code: "write_failed" });
   });
 
   it("answers 409 for a job this edition does not have", async () => {
@@ -154,13 +164,15 @@ describe("background-jobs — the switches", () => {
     const r = await post({ id: "memoryReview", enabled: false });
     expect(r.status).toBe(200);
     expect(patchHermesConfig).toHaveBeenCalledWith({ set: { "auxiliary.background_review.enabled": "false" } });
-    // Hermes' background review is not the gateway's, so nothing is restarted.
+    // Nothing to restart: Hermes caches its config on the file's own mtime and
+    // size and asks `is_background_review_enabled()` at each spawn, so the next
+    // turn already obeys the write (checked read-only on the box).
     expect(await r.json()).toMatchObject({ restarted: false });
     expect(restartGateway).not.toHaveBeenCalled();
   });
 
   it("says whether the restart happened rather than folding it into the verdict", async () => {
-    readConfig
+    readConfigStrict
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ agents: { defaults: { heartbeat: { every: "0m" } } } });
     restartGateway.mockRejectedValue(new Error("gateway did not come back"));
