@@ -226,8 +226,8 @@ export const DEFAULT_NEW_APP_TEMPLATE: NewAppTemplate = "nextjs";
  * of their own like everything else.
  */
 const SCAFFOLD_SENTENCE: Record<NewAppTemplate, string> = {
-  nextjs: "Scaffold it as a Next.js full-stack app (App Router, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, run it on a free local port, verify it in the browser, and register it on my desktop as a web app pointing at that address, with an icon.",
-  react: "Scaffold it as a React app (Vite, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, serve its production build on a free local port, verify it in the browser, and register it on my desktop as a web app pointing at that address, with an icon.",
+  nextjs: "Scaffold it as a Next.js full-stack app (App Router, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, run it on a free local port under the base path /apps/<folder> (basePath in next.config), write a clawbox.json at the root naming the app and that port so the box serves it at /apps/<folder>/ and puts it on my desktop, verify it in the browser, and give it an icon.",
+  react: "Scaffold it as a React app (Vite, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, serve its production build on a free local port under the base path /apps/<folder> (base in vite.config), write a clawbox.json at the root naming the app and that port so the box serves it at /apps/<folder>/ and puts it on my desktop, verify it in the browser, and give it an icon.",
   app: "Scaffold it as a small HTML/CSS/JS app in a new git folder under my project folder — not as a code project under ClawBox's own data directory — build it with the coding agent, verify it in the browser, and put it on my desktop with an icon.",
   blank: "Scaffold it as a single-page HTML app in a new git folder under my project folder — not as a code project under ClawBox's own data directory — build it with the coding agent, verify it in the browser, and put it on my desktop with an icon.",
 };

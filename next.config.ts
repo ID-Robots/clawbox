@@ -113,7 +113,11 @@ const nextConfig: NextConfig = {
 
     return [
       {
-        source: "/(.*)",
+        // Everything but /apps/<id>/…: a project's own server proxied there
+        // (src/lib/app-proxy.ts) answers with its own headers plus the
+        // sandbox the proxy adds, and the desktop's script-src would refuse
+        // a dev server's eval'd source maps.
+        source: "/((?!apps/).*)",
         headers: [
           { key: "X-Content-Type-Options", value: "nosniff" },
           // X-Frame-Options is obsoleted by CSP frame-ancestors and only

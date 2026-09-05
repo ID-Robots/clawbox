@@ -261,6 +261,18 @@ const PUBLIC_EXACT = new Set([
   "/portal/subscribe",
 ]);
 
+/** `/apps/<id>/…` — see src/lib/app-proxy.ts. The prefix alone, no import: middleware runs on the edge runtime. */
+function isAppProxyPath(pathname: string): boolean {
+  return pathname.startsWith("/apps/") && pathname.length > "/apps/".length;
+}
+
+/** A navigation (a document, a frame) as opposed to a fetch a document makes — the same test app-proxy.ts makes. */
+function isDocumentRequest(headers: Headers): boolean {
+  const dest = headers.get("sec-fetch-dest");
+  if (dest) return dest === "document" || dest === "iframe" || dest === "frame" || dest === "embed" || dest === "object";
+  return (headers.get("accept") ?? "").includes("text/html");
+}
+
 function isPublicPath(pathname: string): boolean {
   if (PUBLIC_EXACT.has(pathname)) return true;
   if (PRE_AUTH_API_PATHS.has(pathname)) return true;
@@ -378,6 +390,19 @@ export async function middleware(request: NextRequest) {
   // bearing SPA shell. Same for `/Manifest.json` and `/SW.JS`. Any gate must
   // decide on the string the router will actually use.
   if (isPublicPath(request.nextUrl.pathname)) {
+    return NextResponse.next();
+  }
+
+  // 2b. A project's own server under /apps/<id>/ (src/lib/app-proxy.ts).
+  // Every DOCUMENT there still needs the owner's session — the line below
+  // this block redirects it to /login like any page. But the document is
+  // served under a CSP sandbox that gives it an opaque origin, so the
+  // requests it then makes for its assets and its own API carry no cookie
+  // at all, and a cookie gate on those would break every proxied app. They
+  // pass, which exposes the app's routes to whoever has the address the way
+  // its port on 0.0.0.0 is exposed on the LAN today — and nothing of the
+  // box's: the proxy reaches the app's port and nothing else.
+  if (isAppProxyPath(request.nextUrl.pathname) && !isDocumentRequest(request.headers)) {
     return NextResponse.next();
   }
 

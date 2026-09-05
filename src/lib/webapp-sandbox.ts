@@ -73,3 +73,20 @@ export const WEBAPP_KV_CLIENT_SNIPPET = `<script>
   };
 })();
 </script>`;
+
+/**
+ * Is this frame source a project's own server proxied under /apps/<id>/ on
+ * THIS origin? Such a document is boxed by the response's own CSP sandbox
+ * (src/lib/app-proxy.ts) and must not ALSO carry the attribute: a sandboxed
+ * frame's navigation sends no cookie, and that document needs the owner's.
+ * Same origin only — a foreign /apps/ path is somebody else's page.
+ */
+export function isProxiedAppUrl(src: string): boolean {
+  try {
+    const u = new URL(src, typeof window === "undefined" ? "http://localhost" : window.location.origin);
+    const origin = typeof window === "undefined" ? "http://localhost" : window.location.origin;
+    return u.origin === origin && /^\/apps\/[a-zA-Z0-9_-]{1,64}(?:\/|$)/.test(u.pathname);
+  } catch {
+    return false;
+  }
+}

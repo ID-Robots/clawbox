@@ -43,8 +43,41 @@ const UPGRADE_ROUTES = [
   { prefix: "/novnc-ws", targetPort: NOVNC_WS_PORT, stripPrefix: true, requireAuth: true },
 ];
 
+// A project's own server under /apps/<id>/ (src/lib/app-proxy.ts): the
+// port is in the app's data/webapps/<id>/meta.json, written when the run
+// settled, or in the project's clawbox.json. Mirrored here in CJS because
+// upgrades never reach Next.js. No auth, like the middleware's rule for the
+// app's own requests: the document that opens the socket has an opaque
+// origin and carries no cookie.
+const APP_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+function readJsonSync(file) {
+  try { return JSON.parse(fs.readFileSync(file, "utf-8")); } catch { return null; }
+}
+function isProxyablePort(port) {
+  return typeof port === "number" && Number.isInteger(port) && port >= 1024 && port <= 65535;
+}
+function resolveAppPort(reqUrl) {
+  const m = /^\/apps\/([^/?]+)/.exec(reqUrl);
+  if (!m || !APP_ID_RE.test(m[1])) return null;
+  const id = m[1];
+  const root = process.env.CLAWBOX_ROOT || __dirname;
+  const meta = readJsonSync(path.join(root, "data", "webapps", id, "meta.json"));
+  if (meta && isProxyablePort(meta.port)) return { port: meta.port, strip: meta.stripBasePath === true, id };
+  const config = readJsonSync(path.join(root, "data", "config.json"));
+  const projects = config && typeof config.coding_agent_default_directory === "string" ? config.coding_agent_default_directory : null;
+  const manifest = projects ? readJsonSync(path.join(projects, id, "clawbox.json")) : null;
+  if (manifest && isProxyablePort(manifest.port)) return { port: manifest.port, strip: manifest.stripBasePath === true, id };
+  return null;
+}
+
 function resolveUpgradeTarget(reqUrl) {
   const path = reqUrl.split("?")[0];
+  const app = resolveAppPort(path);
+  if (app) {
+    const prefix = `/apps/${app.id}`;
+    const stripped = reqUrl.slice(prefix.length);
+    return { targetPort: app.port, url: app.strip ? (!stripped || stripped.startsWith("?") ? `/${stripped}` : stripped) : reqUrl, requireAuth: false };
+  }
   for (const r of UPGRADE_ROUTES) {
     if (path === r.prefix || path.startsWith(r.prefix + "/")) {
       const stripped = reqUrl.slice(r.prefix.length);

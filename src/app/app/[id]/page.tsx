@@ -9,7 +9,7 @@ import { fetchHarness } from "@/lib/client-harness";
 import { apps } from "@/lib/desktop-apps";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { handoffSettingsSection, STANDALONE_SETTINGS_SECTION_PARAM } from "@/lib/ui-events";
-import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
+import { isProxiedAppUrl, WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import type { InstalledMeta } from "@/lib/store-categories";
 import { HARNESS_ONLY_APP_IDS, hiddenAppIdsForHarness } from "@/lib/desktop-app-editions";
@@ -147,7 +147,7 @@ export default function StandaloneAppPage() {
           style={{ width: "100%", height: "100%", border: "none", background: "#fff" }}
           // The one sandbox both pages use; never allow-same-origin — see
           // src/lib/webapp-sandbox.ts for what the frame would otherwise reach.
-          sandbox={WEBAPP_IFRAME_SANDBOX}
+          sandbox={isProxiedAppUrl(src) ? undefined : WEBAPP_IFRAME_SANDBOX}
           data-webapp-id={appId}
           title={meta.name}
         />

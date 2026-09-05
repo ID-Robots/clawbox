@@ -75,6 +75,8 @@ import { memAvailableMb } from "@/lib/mem-available";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
+import { registerServerApp } from "@/lib/app-proxy";
+import { APP_ID_RE } from "@/lib/code-projects";
 import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, webappPath } from "@/lib/code-projects";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
 import {
@@ -3574,6 +3576,7 @@ function startProjectIcon(run: CodingRun): void {
 /** After the commit and the wake: the project's assets, the review pass, the pull request. */
 async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Promise<void> {
   await commitProjectAssets(run);
+  await registerProjectApp(run);
   const review = ended !== null ? "skipped" : await maybeStartReviewPass(run);
   // After the review pass is decided, not before: when one is starting, the
   // pull request waits for it, because the review's own commits belong in it.
@@ -3600,6 +3603,29 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
  * runs out the generation is left running — it still lands the icon, just in a
  * later commit or none — and the run settles.
  */
+/**
+ * A project whose clawbox.json declares a `port` goes on the desktop when a
+ * run in it settles: its icon opens `/apps/<folder>/`, which the box proxies
+ * to that port (src/lib/app-proxy.ts). The manifest IS the registration —
+ * no tool call, no host or port in any link. A review pass or a team's run
+ * re-reads nothing: the run that wrote the manifest did this.
+ */
+async function registerProjectApp(run: CodingRun): Promise<void> {
+  if (run.reviewOf || run.readOnly || run.team) return;
+  const id = path.basename(run.directory);
+  if (!APP_ID_RE.test(id)) return;
+  try {
+    const manifest = await readClawboxManifest(run.directory);
+    if (!manifest?.port) return;
+    if (await registerServerApp({ id, manifest })) {
+      pushProgress(run, `On the desktop as "${manifest.name}", served at /apps/${id}/ from port ${manifest.port}`);
+      persist(true);
+    }
+  } catch (err) {
+    console.error("[coding-agent] project app:", err instanceof Error ? err.message : err);
+  }
+}
+
 async function commitProjectAssets(run: CodingRun): Promise<void> {
   if (!run.media.images || run.reviewOf) return;
   try {

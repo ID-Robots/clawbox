@@ -160,6 +160,16 @@ export { NEW_APP_NAME_MAX };
  * data/webapps — the project folder. Exported so the test can pin the
  * spelling against the one the desktop matches on.
  */
+/**
+ * Open a project's app: the desktop window when it is registered there, the
+ * box's own /apps/<folder>/ in a tab when its manifest names a port and the
+ * desktop has not picked it up yet (src/lib/app-proxy.ts).
+ */
+function openProjectApp(project: Pick<Project, "folder" | "onDesktop" | "app">): void {
+  if (project.onDesktop) dispatchOpenApp(installedAppId(project.folder));
+  else if (project.app?.port) window.open(`/apps/${project.folder}/`, "_blank", "noopener");
+}
+
 export function installedAppId(folder: string): string {
   return `installed-${folder}`;
 }
@@ -1572,14 +1582,16 @@ export default function CodingAgentApp() {
                           : t("codingAgent.noCommits")}
                       </p>
                     </div>
-                    {project.onDesktop && (
+                    {(project.onDesktop || project.app?.port) && (
                       <button
                         type="button"
                         // The desktop registers a deployed web app under
                         // `installed-<folder>` (page.tsx, getAllApps); the
                         // bare folder name matches no app there, and the
-                        // click did nothing at all.
-                        onClick={(e) => { e.stopPropagation(); dispatchOpenApp(installedAppId(project.folder)); }}
+                        // click did nothing at all. A project whose manifest
+                        // declares a port but is not on the desktop yet opens
+                        // at the box's own /apps/<folder>/ in a tab.
+                        onClick={(e) => { e.stopPropagation(); openProjectApp(project); }}
                         data-testid={`coding-agent-open-${project.folder}`}
                         className={BTN_SECONDARY}
                       >
@@ -1744,10 +1756,10 @@ export default function CodingAgentApp() {
                 )}
                 <div className="mt-3 flex flex-wrap items-center gap-1.5" data-testid="coding-agent-run-actions">
                   {runControls(run, "page")}
-                  {project?.onDesktop && (
+                  {project && (project.onDesktop || project.app?.port) && (
                     <button
                       type="button"
-                      onClick={() => dispatchOpenApp(installedAppId(project.folder))}
+                      onClick={() => openProjectApp(project)}
                       className={BTN_SECONDARY}
                     >
                       {t("codingAgent.open")}
