@@ -57,11 +57,87 @@ DEFAULT_VOICE = "af_heart"
 pipeline = None
 pipeline_lock = threading.Lock()
 
+# Can THIS process turn a word it has never seen into phonemes?
+#
+# "ok" / "absent" / "unknown", and the distinction is the point: "unknown" is a
+# shape this could not read, never a verdict about the box.
+phonemiser_state = "unknown"
+
+# Nothing any lexicon holds, so a working espeak fallback phonemises all three
+# and a missing one drops all three. The same words install-voice.sh's
+# kokoro_check_phonemiser uses, deliberately: the two must agree about what
+# "working" means.
+PHONEMISER_PROBE_WORDS = ("zorblattic", "frobnicator", "squibbled")
+# misaki's unknown-token marker (U+2753). It also emits nothing at all when the
+# G2P was built with unk='', so both count as dropped.
+UNKNOWN_PHONEME_MARKER = chr(10067)
+
+
+def phonemiser_verdict(g2p):
+    """"ok" when out-of-vocabulary words phonemise, "absent" when they vanish.
+
+    WHY AT RUNTIME, when install-voice.sh already checks it. That check runs in
+    ANOTHER PROCESS, at install time, and this server builds its own KPipeline
+    later — so the install-time verdict is a probe-once for the life of the box.
+    A `pip install --upgrade`, a wiped ~/.local or a python minor bump can lose
+    espeakng-loader while the stamp, `import kokoro, torch` and this server's
+    own health all stay green, and every out-of-vocabulary word — a name, a
+    brand, "ClawBox" itself — is then dropped from every spoken reply with
+    nothing to show for it.
+    kokoro builds the fallback inside a try/except and degrades to
+    `logger.warning('EspeakFallback not Enabled: OOD words will be skipped')`
+    with `fallback=None`; nothing downstream reads that warning.
+
+    BEHAVIOUR, not structure: it asks for SOMETHING back for a word no lexicon
+    has. `kokoro` is installed unpinned, so a check written against today's
+    attribute names would start failing WORKING boxes the day misaki renames
+    one — anything this cannot read is "unknown" and is never graded.
+    """
+    try:
+        dropped = [
+            word for word in PHONEMISER_PROBE_WORDS
+            if not ((g2p(word)[0] or "").replace(UNKNOWN_PHONEME_MARKER, "").strip())
+        ]
+    except Exception as exc:
+        print(
+            f"WARN: could not exercise the phonemiser ({type(exc).__name__}: {exc}) "
+            "-- not treating that as a verdict",
+            flush=True,
+        )
+        return "unknown"
+    return "absent" if dropped else "ok"
+
+
+def health_payload():
+    """What /health answers. Degraded is still SERVING — see load_model."""
+    return {
+        "status": "degraded" if phonemiser_state == "absent" else "ok",
+        "model": "kokoro-82m",
+        "phonemiser": phonemiser_state,
+    }
+
+
 def load_model():
+    global phonemiser_state
     from kokoro import KPipeline
     print("Loading Kokoro model on GPU...", flush=True)
     p = KPipeline(lang_code='a')
     print(f"Model loaded on {next(p.model.parameters()).device}", flush=True)
+    phonemiser_state = phonemiser_verdict(getattr(p, "g2p", None))
+    if phonemiser_state == "absent":
+        # WARNED, never refused. Dropping out-of-vocabulary words beats not
+        # speaking at all, and a box whose only other engine is the cloud voice
+        # would go silent on a refusal. /health says "degraded" so the fact is
+        # readable from outside this journal.
+        print(
+            "WARN: the espeak phonemiser is unavailable — out-of-vocabulary words "
+            "(names, brands, ClawBox itself) will be DROPPED from speech. "
+            "The espeakng-loader wheel kokoro pulls in is missing or broken; "
+            "reinstall it with the box's voice install.",
+            flush=True,
+        )
+    else:
+        print(f"Phonemiser: {phonemiser_state}", flush=True)
     return p
 
 def generate_audio(text, voice=DEFAULT_VOICE):
@@ -94,7 +170,7 @@ class TTSHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok", "model": "kokoro-82m"}).encode())
+            self.wfile.write(json.dumps(health_payload()).encode())
         else:
             self.send_response(404)
             self.end_headers()
