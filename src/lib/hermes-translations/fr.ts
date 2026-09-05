@@ -495,6 +495,7 @@ export const fr: Record<string, string> = {
   "skills.installUnknownOutcome": "La réponse de l’appareil était trop longue à lire ; on ignore donc si « {name} » a été installée. Vérifiez l’onglet Installées avant de réessayer.",
   "skills.uninstallUnknownOutcome": "La réponse de l’appareil était trop longue à lire ; on ignore donc si « {name} » a été supprimée. Vérifiez l’onglet Installées avant de réessayer.",
   "skills.detailFailed": "Impossible de charger les détails de cette compétence. Réessayez.",
+  "skills.detailNotFound": "Cette compétence n’est ni sur cet appareil ni dans la boutique de compétences : il n’y a rien à afficher.",
   "skills.detailUnavailable": "Hermes n’est pas installé sur cet appareil, les détails de cette compétence ne peuvent donc pas être chargés.",
   "skills.detailDocsFailed": "Impossible de charger la documentation complète de cette compétence. Les informations ci-dessus proviennent de l’appareil.",
   "skills.skillDisabled": "Désactivée",

@@ -14,7 +14,7 @@ import {
   REQUEST_REFUSAL,
   SKILL_DOCS_CLI_TIMEOUT_MS,
 } from "@/lib/hermes-skills";
-import { parseAmbiguousSkills } from "@/lib/hermes-skill-cli-outcome";
+import { parseInspectNoPanel, type AmbiguousSkill } from "@/lib/hermes-skill-cli-outcome";
 import {
   type HubLockEntry,
   findInstalledSkill,
@@ -155,13 +155,15 @@ function parseInspect(stdout: string): ParsedInspect {
 }
 
 /**
- * `inspect <bare name>` can print a disambiguation table instead of a panel
- * ("Multiple skills named 'notion' found" → 11 rows), so the store can offer
- * the choice rather than dead-ending on "not found". `install` prints the same
- * table for the same reason, so the row parsing is shared.
+ * The candidate rows a no-panel `inspect` printed, as the store's own skill
+ * shape. TWO shapes reach here: the disambiguation table ("Multiple skills
+ * named 'notion' found" → 11 rows) and the "did you mean one of these?" list —
+ * both mean "narrow it down", both carry ids, and the store offers either as a
+ * chooser rather than dead-ending on "not found". `install` parses the same two
+ * for the same reason, so the reading of them is shared.
  */
-function parseAmbiguity(stdout: string): HermesSkill[] {
-  return parseAmbiguousSkills(stdout).map(({ identifier, source, trust }) => ({
+function toSkillRows(rows: AmbiguousSkill[]): HermesSkill[] {
+  return rows.map(({ identifier, source, trust }) => ({
     id: identifier,
     name: identifier.split("/").pop() || identifier,
     source,
@@ -396,10 +398,27 @@ async function localDetail(id: string, fromInstalled: boolean): Promise<NextResp
   }
 
   // Catalog metadata only — the body needs the CLI (phase 2).
+  //
+  // With NO record this whole object is a placeholder: every field below reads
+  // `record?.…`, so an id nothing on this device knows produced a
+  // complete-looking skill whose name was the request echoed back —
+  // `?id=totally-made-up-skill-xyz-42` answered 200 with a skill. `catalogMiss`
+  // is that fact, put on the wire.
+  //
+  // It is a flag and not a 404 because this device cannot refuse an id. Its
+  // catalogue is a snapshot the browse route builds once and never rebuilds, so
+  // a skill published since is real and absent from it; and the store opens
+  // details by publisher-written bare NAME too (the related-skill chips), which
+  // is not a key of the index at all. `hermes skills inspect` resolves both —
+  // it is the authority on what exists, and phase 2 already answers its refusal
+  // as a 404. So phase 1 says "nothing here backs this", phase 2 asks Hermes,
+  // and the two together are what let the browser and the agent say "no such
+  // skill" without this device ever guessing it.
   const sourceUrl = record?.sourceUrl;
   const detail: HermesSkillDetail = {
     id,
     name: record?.name || id.split("/").pop() || id,
+    catalogMiss: record ? undefined : true,
     description: record?.description,
     provenanceNote: record?.provenanceNote,
     source: record?.source,
@@ -465,11 +484,32 @@ async function remoteDocs(id: string, signal: AbortSignal): Promise<NextResponse
 
   const { fields, preview, hasSkillPanel } = parseInspect(r.stdout);
   if (!hasSkillPanel) {
-    const candidates = parseAmbiguity(r.stdout);
-    if (candidates.length) {
-      return NextResponse.json({ ambiguous: true, query: id, candidates });
+    // "Exit 0 and no panel" is a CLASS of outcomes, not one — this module's own
+    // vocabulary names them (`hermes-skill-cli-outcome.ts`), and its header
+    // states the rule: the CLI fails to download and exits 0. Only ONE of them
+    // means the skill does not exist, and answering the whole class 404
+    // `not_found` is what lets both consumers say so out loud: the agent is
+    // told "Hermes does not have it, do not guess ids" and the owner that the
+    // skill "isn't on this device or in the skill store". Over a real
+    // `github/*` row opened while the unauthenticated GitHub API is
+    // rate-limited — a state this codebase models explicitly — both are false,
+    // and the second is a claim about the store this device never asked about.
+    const outcome = parseInspectNoPanel(r.stdout);
+    if (outcome.kind === "ambiguous" || outcome.kind === "suggestions") {
+      // Both candidate-bearing shapes answer the same way: the ids are on
+      // stdout, the store already renders them as a chooser and the agent's
+      // refusal already words them. A "did you mean" list dead-ended here while
+      // the install surface has parsed it all along.
+      return NextResponse.json({ ambiguous: true, query: id, candidates: toSkillRows(outcome.candidates) });
     }
-    return NextResponse.json({ error: "Skill not found", code: REQUEST_REFUSAL.notFound }, { status: 404 });
+    if (outcome.kind === "not-found") {
+      return NextResponse.json({ error: "Skill not found", code: REQUEST_REFUSAL.notFound }, { status: 404 });
+    }
+    // A source that could not be reached says nothing about whether the skill
+    // exists. Same answer as a non-zero exit, which both consumers already
+    // treat as a documentation failure rather than an absence.
+    console.error("[hermes-skills] inspect printed no panel and no known outcome");
+    return NextResponse.json({ error: "Could not load skill details", code: "cli_failed" }, { status: 502 });
   }
 
   // ONLY prose survives the Rich panel — list fields (platforms/tags) are

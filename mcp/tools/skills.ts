@@ -279,6 +279,28 @@ const uninstallRules = (name: string, shown = ""): ErrorRule[] => [
   },
 ];
 
+/**
+ * "This device has no Hermes install" — the one CATALOGUE rule the DOCUMENTATION
+ * phase also needs, named so it can be passed on its own.
+ *
+ * `skill_info`'s phase 2 is the only phase that spawns the CLI, so it is the
+ * only one that can answer `502 {code:"cli_missing"}`. Unmapped, that landed in
+ * `describeDocsFailure` as a retryable documentation failure — the wrong advice
+ * for a permanent device state. Handing phase 2 the WHOLE of `CATALOG_RULES`
+ * fixes that and breaks something else: every other 502 code would be
+ * intercepted here too, and `describeDocsFailure`'s own branches — which word
+ * the same facts for a README rather than for the catalogue, and know that
+ * `too_large` can never be retried away — would never run. So phase 2 takes
+ * this rule and nothing else.
+ */
+const CLI_MISSING_RULE: ErrorRule = {
+  status: 502,
+  match: /"code"\s*:\s*"cli_missing"/,
+  code: "NOT_SUPPORTED_HERE",
+  message: "Hermes is not installed on this device, so the skill catalogue cannot be loaded.",
+  next: "Do not retry and do not check the network. Tell the user this device's Hermes install is missing.",
+};
+
 const CATALOG_RULES: ErrorRule[] = [
   // The browse route's 400s. Both tools that install these rules pre-validate
   // with the ROUTE's own checks — `skill_search` calls `isValidQuery` and
@@ -307,13 +329,7 @@ const CATALOG_RULES: ErrorRule[] = [
     message: "Loading the skill catalogue took too long and was stopped.",
     next: "Retry once. If it times out again, tell the user the device is busy right now and to try later.",
   },
-  {
-    status: 502,
-    match: /"code"\s*:\s*"cli_missing"/,
-    code: "NOT_SUPPORTED_HERE",
-    message: "Hermes is not installed on this device, so the skill catalogue cannot be loaded.",
-    next: "Do not retry and do not check the network. Tell the user this device's Hermes install is missing.",
-  },
+  CLI_MISSING_RULE,
   {
     status: 502,
     match: /"code"\s*:\s*"too_large"/,
@@ -964,6 +980,10 @@ export function registerSkillTools(reg: Registrar): void {
       let description = typeof detail.description === "string" ? detail.description : "";
       let documentation = typeof detail.body === "string" ? detail.body : "";
       let docsFailure: DocsFailure | null = null;
+      // Whether phase 2 RAN and returned, which is not the same question as
+      // whether it failed — a phase 2 that was never attempted fails at
+      // nothing. See the guard below.
+      let phase2Answered = false;
       if (detail.needsRemoteDocs === true) {
         // The budget is the route's own CLI cap plus its overhead — see
         // SKILL_DOCS_CLIENT_TIMEOUT_MS. A shorter one aborts before the route
@@ -973,8 +993,31 @@ export function registerSkillTools(reg: Registrar): void {
         try {
           phase2 = await skillsGet<InspectDocs>(
             "/setup-api/hermes/skills/inspect",
-            { query: { id, docs: 1 }, timeoutMs: SKILL_DOCS_CLIENT_TIMEOUT_MS },
+            {
+              query: { id, docs: 1 },
+              timeoutMs: SKILL_DOCS_CLIENT_TIMEOUT_MS,
+              // ONE rule, and deliberately not phase 1's whole set. Phase 2 is
+              // the only phase that SPAWNS the CLI, so it is the only one that
+              // can answer `502 {code:"cli_missing"}` — a Hermes install that
+              // is not there. Unmapped it fell through to describeDocsFailure()
+              // and came back as "the device could not fetch it, offer to try
+              // again", which is the wrong advice for a permanent device state;
+              // mapped, it is the NOT_SUPPORTED_HERE the edition guard already
+              // raises for the same family of fact, and the catch below
+              // re-throws it rather than filing it as a docs failure.
+              //
+              // Every OTHER code stays with describeDocsFailure(), which reads
+              // it off the body and words it for the DOCUMENTATION rather than
+              // for the catalogue — and which knows that `too_large` can never
+              // be retried away. `CATALOG_RULES` here would shadow that branch
+              // and offer a retry that cannot succeed. Phase 1's `404 →
+              // NOT_FOUND` rule must not come here either: it would turn
+              // Hermes' refusal into a docs failure and delete the NOT_FOUND
+              // verdict the guard below depends on.
+              rules: [CLI_MISSING_RULE],
+            },
           );
+          phase2Answered = true;
         } catch (err) {
           // Not every failure here is ABOUT the documentation. An off-Hermes
           // device and a rejected token are the whole tool failing, and a note
@@ -1011,9 +1054,36 @@ export function registerSkillTools(reg: Registrar): void {
       // above has already given the Hermes CLI its chance to resolve it, so a
       // record that STILL carries no description, no documentation and no
       // provenance is not a sparse skill — it is a skill that does not exist.
+      //
+      // ASKED of the route where it answers (TASK-547): `catalogMiss` says in
+      // one field what the four-field test below infers — nothing in the
+      // catalogue and nothing on disk backed this record — and it is the
+      // route's own verdict rather than a guess from what the record happens to
+      // carry. It matters because the catalogue is a snapshot the browse route
+      // builds once and never rebuilds, so a real skill published since is
+      // missing from it, and `related_skills` chips address skills by bare NAME,
+      // which is not a key of it at all. The inferred test stays as the fallback
+      // for a device build that predates the field — absent is not `false`.
       const source = typeof detail.source === "string" ? detail.source : "";
       const trust = typeof detail.trust === "string" ? detail.trust : "";
-      if (!description && !documentation && !source && !trust) {
+      const inferredEmpty = !description && !documentation && !source && !trust;
+      const routeSaidUnbacked = detail.catalogMiss === true;
+      const unbacked = detail.catalogMiss === undefined ? inferredEmpty : routeSaidUnbacked;
+      // Where the ROUTE said `catalogMiss`, a phase 2 that ANSWERED settles the
+      // question in the skill's favour, whatever the delta carried: the route
+      // builds a delta off a real Hermes panel, so a panel with no Description
+      // row and no prose preview is still Hermes saying the skill exists. Only
+      // a phase 2 that refused or failed can leave the record unexplained.
+      // The inferred path keeps its own rule, because a build that predates
+      // `catalogMiss` has nothing else to go on.
+      // `phase2Answered`, never `!docsFailure`: a phase 2 that was never
+      // ATTEMPTED also leaves `docsFailure` null, and reading that as "Hermes
+      // answered" would return an unbacked placeholder as a complete skill —
+      // the exact fabrication this tool exists to stop. Unreachable from this
+      // build's route, which sets `needsRemoteDocs: true` on every record it
+      // marks `catalogMiss`, but the guard must not depend on that.
+      const phase2Settled = routeSaidUnbacked && phase2Answered && !docsFailure;
+      if (unbacked && !phase2Settled) {
         // The guard's premise, stated above, is that phase 2 HAS run: only a
         // lookup that ANSWERED and added nothing proves the skill is not
         // there. A phase 2 that never answered proves nothing, and "do not
@@ -1057,7 +1127,16 @@ export function registerSkillTools(reg: Registrar): void {
         needs_commands: (requirements?.commands ?? []).map((c) => c.name),
         needs_secrets: (requirements?.secrets ?? []).map((sec) => sec.label),
         documentation: framed(documentation.length > 4_000 ? `${documentation.slice(0, 4_000)}…` : documentation),
-        ...(docsFailure ? { documentation_note: docsFailure.note } : {}),
+        // The FLAG beside the sentence (TASK-547). An empty `documentation`
+        // reads as "this skill has none", and after the fix above that is
+        // exactly how a record whose docs lookup timed out — or whose docs
+        // Hermes refused while the CATALOGUE still backs the record — arrives
+        // here with nothing to show. A model that skims past prose still sees
+        // a boolean; `documentation_note` says which of the two it was and
+        // what to do about it.
+        ...(docsFailure
+          ? { documentation_unavailable: true, documentation_note: docsFailure.note }
+          : {}),
       });
     },
   );

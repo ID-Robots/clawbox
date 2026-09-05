@@ -491,6 +491,7 @@ export const sv: Record<string, string> = {
   "skills.installUnknownOutcome": "Enhetens svar var för långt för att läsas, så om ”{name}” installerades är okänt. Kontrollera fliken Installerade innan du försöker igen.",
   "skills.uninstallUnknownOutcome": "Enhetens svar var för långt för att läsas, så om ”{name}” togs bort är okänt. Kontrollera fliken Installerade innan du försöker igen.",
   "skills.detailFailed": "Det gick inte att läsa in den här skillens detaljer. Försök igen.",
+  "skills.detailNotFound": "Den här skillen finns varken på den här enheten eller i skill-butiken, så det finns inget att visa.",
   "skills.detailUnavailable": "Hermes är inte installerat på den här enheten, så den här skillens detaljer kan inte läsas in.",
   "skills.detailDocsFailed": "Det gick inte att läsa in den här skillens fullständiga dokumentation. Uppgifterna ovan kommer från enheten.",
   "skills.skillDisabled": "Avstängd",
