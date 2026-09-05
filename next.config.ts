@@ -73,6 +73,18 @@ const nextConfig: NextConfig = {
   // for this build's entry. Narrowing the sweep is a separate change: parts of
   // it are load-bearing today (`.next/standalone/scripts` comes from it, and
   // system-profile.ts resolves scripts/ from the process cwd).
+  //
+  // The `.git` in that list is the second thing scripts/postbuild.sh sweeps
+  // (TASK-692): 88 MB of it on the OpenClaw box, measured 2026-09-05. Its
+  // companion, the checkout's own `.env`, does not come from the trace at all
+  // and so cannot be excluded here either — Next copies `.env` and
+  // `.env.production` ITSELF, after the trace, in writeStandaloneDirectory()
+  // (next/dist/build/index.js), with no config switch anywhere in that path.
+  // On a box that file is 0600 and holds GOOGLE_OAUTH_CLIENT_SECRET and, where
+  // install.sh was given one, CLAWBOX_AI_API_KEY, so the copy is removed from
+  // the build artifact and its survival fails the build. Nothing loses by it:
+  // systemd hands the real file to clawbox-setup as an EnvironmentFile and
+  // @next/env never overwrites a variable that is already in the environment.
   outputFileTracingExcludes: {
     // No "./" prefix: Next matches these globs relative to the tracing root,
     // and "./data/**" silently matched nothing — the build kept dying on
