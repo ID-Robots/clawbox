@@ -1895,18 +1895,42 @@ export async function ensureLocalAiProxyUrls(): Promise<boolean> {
   // endpoint" into "a refused request on every single turn", which is not an
   // improvement. Only ever alongside a baseUrl WE just wrote: an entry already
   // on the proxy is left exactly as the owner has it.
-  const adoptProxy = (
-    provider: { baseUrl?: string; apiKey?: string } | undefined,
-    proxyUrl: string,
-  ): boolean => {
-    if (!provider || provider.baseUrl === proxyUrl) return false;
+  //
+  // And the bearer is PROVIDER-WIDE. OpenClaw resolves a row's endpoint as
+  // `model.baseUrl ?? provider.baseUrl` (see the `models.providers` type above)
+  // and has no per-model credential slot, so `providers.<p>.apiKey` is the
+  // bearer for every row under the entry. An entry carrying a row on some other
+  // host is therefore one we cannot re-point without mailing this box's
+  // local-AI token to that host on every turn of that row — so it is left
+  // exactly as its owner wrote it. Any row-level `baseUrl` at all disqualifies
+  // it, not only a foreign one: ClawBox writes the endpoint on the PROVIDER and
+  // its rows carry none (the configure route's ollama block and this script's
+  // llamacpp sibling both do), so a row that names its own is per-row routing we
+  // did not build. Same rule `foreignOpenAiRoute` applies to the image
+  // migration: a provider block we did not build is one to leave alone, not to
+  // half-configure.
+  const routesItsOwnRows = (provider: Record<string, unknown>): boolean =>
+    (Array.isArray(provider.models) ? provider.models : []).some((row) =>
+      isPlainObject(row) && typeof row.baseUrl === "string" && row.baseUrl.trim() !== "");
+
+  const adoptProxy = (provider: unknown, proxyUrl: string, id: string): boolean => {
+    // `readConfig()` validates the ROOT object only, so anything at all can be
+    // sitting at `models.providers.<id>` in a hand-edited file. Module code is
+    // strict mode: the assignments below THROW on a primitive, and on an array
+    // they land on named properties that `JSON.stringify` then drops — a repair
+    // reported to the caller and never written. Neither is an entry.
+    if (!isPlainObject(provider) || provider.baseUrl === proxyUrl) return false;
+    if (routesItsOwnRows(provider)) {
+      console.warn(`[openclaw-config] ${id} routes a model row through its own baseUrl; leaving the entry as configured`);
+      return false;
+    }
     provider.baseUrl = proxyUrl;
     provider.apiKey = getLocalAiToken();
     return true;
   };
 
-  if (adoptProxy(providers.llamacpp, getLlamaCppProxyBaseUrl())) changed = true;
-  if (adoptProxy(providers.ollama, getOllamaProxyBaseUrl())) changed = true;
+  if (adoptProxy(providers.llamacpp, getLlamaCppProxyBaseUrl(), "llamacpp")) changed = true;
+  if (adoptProxy(providers.ollama, getOllamaProxyBaseUrl(), "ollama")) changed = true;
 
   if (changed) {
     await writeConfig(config);

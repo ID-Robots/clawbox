@@ -643,6 +643,23 @@ elif _wants_llamacpp and _llamacpp_gaps:
     except OSError:
         _local_ai_token = ""
 
+    # And the bearer we would write is PROVIDER-WIDE. OpenClaw resolves a row's
+    # endpoint as `model.baseUrl ?? provider.baseUrl` and has no per-model
+    # credential slot, so pointing the entry at our proxy and putting this box's
+    # local-AI token beside a row that keeps its OWN baseUrl sends that token to
+    # that host on every turn of the row. Any row-level baseUrl disqualifies the
+    # entry, not only a foreign one: ClawBox writes the endpoint on the PROVIDER
+    # and its rows carry none, so a row that names one is per-row routing we did
+    # not build. Same rule `ensureLocalAiProxyUrls` applies on the TypeScript
+    # side and `foreignOpenAiRoute` applies to the image migration: a provider
+    # block we did not build is one to leave alone, not to half-configure.
+    _llamacpp_rows_route_themselves = any(
+        isinstance(_r, dict)
+        and isinstance(_r.get("baseUrl"), str)
+        and _r["baseUrl"].strip()
+        for _r in (_entry_models if isinstance(_entry_models, list) else [])
+    )
+
     if _llamacpp_takes_proxy and len(_local_ai_token) < 16:
         print(
             "  Skipped llamacpp provider repair: "
@@ -650,6 +667,12 @@ elif _wants_llamacpp and _llamacpp_gaps:
             + " is configured but "
             + _token_path
             + " is missing or too short, so the proxy would reject every call."
+        )
+    elif _llamacpp_takes_proxy and _llamacpp_rows_route_themselves:
+        print(
+            "  Skipped llamacpp provider repair: a model row under"
+            " models.providers.llamacpp names its own baseUrl, and this box's"
+            " local-AI token would be the bearer for it."
         )
     else:
         # Touch models/providers only on the repair path. A malformed scalar must

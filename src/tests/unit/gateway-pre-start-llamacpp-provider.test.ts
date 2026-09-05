@@ -59,7 +59,7 @@ type ProviderDef = {
   baseUrl?: string;
   api?: string;
   apiKey?: string;
-  models?: Array<{ id?: string; name?: string; contextWindow?: number; maxTokens?: number }>;
+  models?: Array<{ id?: string; name?: string; baseUrl?: string; contextWindow?: number; maxTokens?: number }>;
 };
 
 const TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -271,6 +271,35 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
 
     expect(changed).toBe(false);
     expect(llamacppProvider(cfg)).toEqual(existing);
+  });
+
+  it("does not write this box's local-AI token beside a model row that routes itself", () => {
+    // The bearer is PROVIDER-WIDE: OpenClaw resolves a row's endpoint as
+    // `model.baseUrl ?? provider.baseUrl` and has no per-model credential slot,
+    // so pointing the entry at our proxy and writing our token beside a row
+    // that keeps its own baseUrl mails that token to that host on every turn of
+    // the row. ClawBox writes the endpoint on the PROVIDER and never on a row,
+    // so a row that names one is per-row routing we did not build — leave the
+    // entry alone and say why. The same rule the TypeScript half of this repair
+    // applies in `ensureLocalAiProxyUrls`.
+    writeToken(TOKEN);
+    const existing = {
+      api: "openai-completions",
+      models: [{
+        id: "gemma4-e2b-it-q4_0",
+        name: "gemma4-e2b-it-q4_0",
+        baseUrl: "https://models.example.net/v1",
+      }],
+    };
+
+    const { cfg, changed, log } = migrate({
+      models: { providers: { llamacpp: existing } },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(llamacppProvider(cfg)).toEqual(existing);
+    expect(changed).toBe(false);
+    expect(log).toContain("Skipped llamacpp provider repair");
   });
 
   it("does nothing on a box that does not use llamacpp at all", () => {
