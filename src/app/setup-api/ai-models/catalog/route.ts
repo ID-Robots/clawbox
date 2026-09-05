@@ -220,6 +220,47 @@ const FAILED_REFRESH_BACKOFF_MS = 2 * 60_000;
 const changeSeq = new Map<string, number>();
 const publishedSeq = new Map<string, number>();
 
+/**
+ * When each provider last spent a client-facing retry.
+ *
+ * TASK-669. The failed-refresh backoff starts at two minutes and doubles to
+ * the full six-hour interval, which is the right schedule for the BOX's own
+ * retries and was also the only schedule there was. A blip during boot warmup
+ * — the network not up yet, the CLI mid-upgrade — records a wait while nobody
+ * is looking, and the first person to open the picker afterwards is shown the
+ * curated fallback with nothing on the box willing to try again. Before the
+ * change generations landed, any picker open re-forked; now nothing does.
+ *
+ * `?refresh=1` is not the answer, and that is worth writing down because the
+ * card proposed it: the client sends it ONLY as its echo of a provider-set
+ * change (`useProviderCatalog`'s `forceNextLoad`), and by then
+ * `notifyProviderSetChanged` has already cleared the wait server-side. The
+ * plain picker open — the one that finds the box in this state — sends no
+ * parameter at all.
+ *
+ * So the attempt is spent by the REQUEST that finds itself without the box's
+ * own current answer, and it is a MINIMUM GAP rather than a once-ever count.
+ * This process runs for weeks: a single allowance would be burnt by the first
+ * picker open after the boot blip — very likely the one where the uplink is
+ * still coming up — and the provider would then be unreachable for the life of
+ * the server. `src/lib/hermes-model-options.ts` had the same problem on the
+ * other edition and solved it with `EXPLICIT_REFRESH_MIN_GAP_MS`; this is that
+ * primitive.
+ *
+ * The gap is longer than an enumeration (~3 minutes on a Jetson) so a mounted
+ * picker's warming poll cannot chain one fork into the next, and it is cleared
+ * by the two events that make an old failure meaningless — a successful
+ * refresh, and a provider-set change.
+ */
+const CLIENT_RETRY_MIN_GAP_MS = 5 * 60_000;
+const clientRetryAt = new Map<string, number>();
+
+/** May a client-facing retry be spent for this provider now? */
+function clientRetryIsDue(provider: string): boolean {
+  const last = clientRetryAt.get(provider);
+  return last === undefined || Date.now() - last >= CLIENT_RETRY_MIN_GAP_MS;
+}
+
 function currentSeq(provider: string): number {
   return changeSeq.get(provider) ?? 0;
 }
@@ -258,6 +299,10 @@ function recordFailedRefresh(provider: string): void {
 
 function recordSuccessfulRefresh(provider: string): void {
   failedRefreshes.delete(provider);
+  // The gap only exists to ration retries against a FAILING provider. One that
+  // has just answered owes nothing, and the next time it fails the client's
+  // first look should get an attempt.
+  clientRetryAt.delete(provider);
 }
 
 /**
@@ -1046,6 +1091,22 @@ export function refreshInBackground(
      * clear, no running fork's work to discard.
      */
     serveCurrent?: boolean;
+    /**
+     * A CLIENT is looking at this provider and does NOT have the box's own
+     * current answer — the curated fallback, a live list every current
+     * sanitiser rule filters away, or one older than the refresh interval.
+     *
+     * Set by the GET handler, which has already computed exactly that three
+     * lines above the call, and by nothing else. It counts no change and bumps
+     * nothing; all it buys is one attempt against a recorded failure, no more
+     * often than `CLIENT_RETRY_MIN_GAP_MS`.
+     *
+     * Deliberately NOT `isStale`: that includes `refreshFailedLast`, which is
+     * true by construction whenever the wait is running, so gating on it would
+     * fire for every blocked provider including one whose catalogue is
+     * perfectly good.
+     */
+    clientHasNoCurrentAnswer?: boolean;
   } = {},
 ): void {
   // Providers that never touch the CLI (see NO_CLI_ENUMERATION_PROVIDERS);
@@ -1081,14 +1142,52 @@ export function refreshInBackground(
     // changed, so the next attempt must not be made to wait it out. Cleared
     // here rather than after the single-flight check, because the fork in
     // flight is about to be discarded and it is the re-entry that needs the
-    // wait gone.
+    // wait gone. The client-retry gap goes with it, for the same reason: it
+    // describes a box that no longer exists.
     clearFailedRefresh(provider);
+    clientRetryAt.delete(provider);
   }
 
   // Nothing to do: the answer on file is already for the box as it is.
   if (opts.serveCurrent === true && publishedIsCurrent(provider)) return;
 
   if (refreshing.has(provider)) return;
+  // Somebody is looking at a catalogue that is not the box's own current
+  // answer, and the box has decided to wait. Spend one attempt.
+  //
+  // NOT for the two providers that can never enumerate here: `cliMissing` and
+  // the no-enumeration-on-this-core case both `recordFailedRefresh` precisely
+  // so their one log line appears once per backoff window instead of once per
+  // picker open, and `changeCouldMakeItEnumerable` is the question they
+  // already answer.
+  //
+  // NOT while anything else is enumerating. `refreshing` is per-provider, so
+  // it is the only concurrency discipline this file has apart from
+  // `bootWarmup`'s 5 s stagger — and the wizard's provider list re-runs
+  // `useProviderCatalog` on every click, so a walk down anthropic → openai →
+  // google could otherwise start three ~2-core, ~3-minute forks at once on an
+  // Orin. Leaving it unspent is also the honest answer: something IS on its
+  // way, and the response says `warming`.
+  //
+  // The wait is LIFTED, not cleared: `clearFailedRefresh` deletes the entry
+  // and `recordFailedRefresh` then restarts the doubling from its two-minute
+  // floor, so a provider that had climbed to the six-hour cap would re-climb
+  // it through eight more picker-driven forks — and `refreshFailedLast` would
+  // go false for the length of the retry, dropping the `stale` flag off a
+  // payload no device produced. Expiring the deadline while keeping the window
+  // it had reached does neither.
+  if (
+    opts.clientHasNoCurrentAnswer === true
+    && changeCouldMakeItEnumerable
+    && refreshing.size === 0
+    && refreshIsBlocked(provider)
+    && clientRetryIsDue(provider)
+  ) {
+    clientRetryAt.set(provider, Date.now());
+    const failure = failedRefreshes.get(provider);
+    if (failure) failedRefreshes.set(provider, { until: 0, waitMs: failure.waitMs });
+    console.log(`[catalog] ${provider}: a client is waiting on a fallback list, retrying once`);
+  }
   if (refreshIsBlocked(provider)) return;
 
   // Skip a missing binary cleanly rather than fork it for each provider on
@@ -1353,7 +1452,19 @@ export async function GET(req: NextRequest) {
   // on an upgraded box those files hold the curated list a failed enumeration
   // left behind, and nothing else would ever dislodge them.
   if (isStale || !isLivePayload(cached)) {
-    refreshInBackground(provider);
+    // On THIS branch and not only on the nudge below: a cold process whose
+    // boot warmup failed lands here, never on `serveCurrent`, and the plain
+    // picker open carries no `?refresh=1` at all (TASK-669).
+    //
+    // The flag is the question this handler has already answered — is what we
+    // are about to serve the box's own current answer? — rather than a second
+    // derivation of half of it. `servedEmpty` is a live payload the current
+    // sanitiser rules empty out, which is exactly the state that arrives the
+    // first time a filter is tightened; the age term is the box that was off
+    // for three weeks. In both the client is looking at the curated list.
+    refreshInBackground(provider, {
+      clientHasNoCurrentAnswer: !isLivePayload(cached) || servedEmpty || ageMs > REFRESH_INTERVAL_MS,
+    });
   } else if (force) {
     // `?refresh=1` is a NUDGE, not news. The client cannot know the provider
     // set changed — only the write that changed it can, and every such write
