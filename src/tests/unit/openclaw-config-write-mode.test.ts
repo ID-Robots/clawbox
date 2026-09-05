@@ -63,8 +63,11 @@ describe("writeConfig and the mode of openclaw.json", () => {
   });
 
   // A crashed write leaves a `.tmp` behind, and `writeFile`'s own `mode` is
-  // ignored for a file that already exists — so the chmod is not belt and
-  // braces, it is the only thing that fixes the mode on this path.
+  // ignored for a file that already exists — so a writer that merely truncated
+  // it would hold the whole credential file at 0666 for the length of the write
+  // and carry that mode across the rename. Two things stop it now, the `rm`
+  // before the write and the chmod after it; this pins the END STATE, so it
+  // keeps holding if either one is refactored away.
   it("re-secures a stale temp file a crashed write left at 0666", async () => {
     fs.writeFileSync(lib.CONFIG_PATH, "{}", { mode: 0o600 });
     fs.chmodSync(lib.CONFIG_PATH, 0o600);

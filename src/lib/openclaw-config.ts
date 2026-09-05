@@ -926,6 +926,13 @@ async function atomicWriteSessionsFile(filePath: string, data: unknown): Promise
   // conversations, so the mode has to be put back after the rename rather than
   // left to the umask. 0600 like the config: nothing on the device reads an
   // agent's sessions as anyone but its own user.
+  //
+  // NARROWED, not preserved, even though the HARNESS owns this file — beta
+  // wrote it with no mode at all, so the umask decided. The argument that makes
+  // "preserve" right for `hermes-env.ts` (ClawBox only ever puts a value into a
+  // file the harness maintains) does not reach here: this writer replaces the
+  // inode, so there is no mode left to preserve, only one to choose. ClawBox
+  // and the gateway run as the same user on a box, so 0600 costs no reader.
   await writeSecretJsonAtomically(filePath, data);
 }
 

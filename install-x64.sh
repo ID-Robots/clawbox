@@ -777,6 +777,8 @@ c.gateway.controlUi.dangerouslyDisableDeviceAuth=true;
 // force 0600 for that reason; this one must not grow a temp-then-rename
 // without the same chmod, or it will silently widen a 0600 credential file
 // to the umask. The block only runs when openclaw.json already exists.
+// It owes no REPAIR either: writeConfig re-secures this same file to 0600 on
+// the next settings save, on an x64 box as on a Jetson.
 fs.writeFileSync(cfgPath,JSON.stringify(c,null,2));
 NODE
     echo "  OpenClaw config updated"
