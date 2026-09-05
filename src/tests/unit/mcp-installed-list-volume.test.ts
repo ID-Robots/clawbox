@@ -4,8 +4,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * TASK-666 — the two agent-facing "what is on this device" lists against the
  * volume a stocked device actually reaches.
  *
- * Both `skill_list` and `ui_list_apps` carry `maxChars: 6_000`, and the cap is
- * enforced by capText(), which HARD-SLICES the finished string and appends
+ * Both `skill_list` and `ui_list_apps` carried `maxChars: 6_000` when this was
+ * written; both carry `maxChars: LIST_MAX_CHARS` (8 000) as of this PR, and the
+ * fixture volumes below are sized against the NEW number — `STOCKED` crosses
+ * the old cap, `OVERSTOCKED` the new one. The cap itself is still enforced by
+ * capText(), which HARD-SLICES the finished string and appends
  * "narrow the query" — advice neither tool can take, because neither takes an
  * argument. What that costs differs per tool and both are silent:
  *
