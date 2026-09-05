@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import SystemUpdateApp, { componentNeedsUpdate } from "@/components/SystemUpdateApp";
+import SystemUpdateApp, { componentNeedsUpdate, shipsOpenclaw, type VersionInfo } from "@/components/SystemUpdateApp";
 import Image from "next/image";
 import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
@@ -582,14 +582,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
      itself — its run, the beta channel, the branch pin, the force — is the
      System Update page (SystemUpdateApp, embedded), not state of this
      component any more. ── */
-  const [versionInfo, setVersionInfo] = useState<{
-    clawbox: { current: string; target: string | null; updateAvailable?: boolean };
-    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
-    // Both optional: a device that has not been updated yet still answers
-    // /update/versions with the old two-key shape.
-    hermes?: { current: string | null; target: string | null; updateAvailable?: boolean };
-    edition?: "openclaw" | "hermes" | "dual";
-  } | null>(null);
+  // The shape and the per-edition rule come from SystemUpdateApp, the other
+  // reader of this payload. They were restated here, and the two panels had
+  // already drifted three ways by the time TASK-548 lined them up.
+  const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
 
   // Load version info on mount
   useEffect(() => {
@@ -5751,7 +5747,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     actually runs instead; `dual` has both, so it shows both.
                     A server that predates the `edition` field falls through to
                     the OpenClaw row exactly as before. */}
-                {versionInfo?.edition !== "hermes" && (
+                {shipsOpenclaw(versionInfo) && (
                   <div className="flex justify-between text-sm">
                     <span className="text-[var(--text-muted)]">OpenClaw</span>
                     <span className="text-[var(--text-primary)]">{cleanVersion(versionInfo?.openclaw.current) ?? t("settings.notInstalled")}</span>
