@@ -923,7 +923,11 @@ async function listAgentSessionsFiles(agentsDir: string): Promise<string[]> {
 
 async function atomicWriteSessionsFile(filePath: string, data: unknown): Promise<void> {
   const tmp = `${filePath}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(data, null, 2), "utf-8");
+  // Same inode swap as writeConfig, on a file that holds the owner's own
+  // conversations: the mode the harness gave it has to survive our rewrite.
+  const mode = await modeForReplacement(filePath);
+  await fs.writeFile(tmp, JSON.stringify(data, null, 2), { mode, encoding: "utf-8" });
+  await fs.chmod(tmp, mode);
   await fs.rename(tmp, filePath);
 }
 
@@ -1406,10 +1410,35 @@ function existingChannelBlock(
   return isPlainObject(existing) ? existing : {};
 }
 
+/**
+ * The mode a replacement of `file` must carry: the one it has now, 0600 for a
+ * file that is not there yet.
+ *
+ * `rename` swaps the INODE, so a temp file written under the process umask
+ * takes its mode with it and whatever the destination had is gone. Measured on
+ * an OpenClaw box: `~/.openclaw/openclaw.json` is 0600 and the service user's
+ * umask is 0002, so a plain temp-then-rename left the file holding
+ * `channels.telegram.botToken` and the gateway's auth token at 0664 — readable
+ * by every account on the device, from a save that reported success.
+ * `writeFile`'s own `mode` is honoured only when it CREATES the file, so a
+ * stale temp from a crashed write has to be chmod'ed too (same reasoning as
+ * config-store.ts and writeDiscordGatewayEnv).
+ */
+async function modeForReplacement(file: string): Promise<number> {
+  try {
+    return (await fs.stat(file)).mode & 0o777;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    return 0o600;
+  }
+}
+
 export async function writeConfig(config: OpenClawConfig): Promise<void> {
   await fs.mkdir(OPENCLAW_HOME, { recursive: true });
   const tmpPath = CONFIG_PATH + ".tmp";
-  await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), "utf-8");
+  const mode = await modeForReplacement(CONFIG_PATH);
+  await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), { mode, encoding: "utf-8" });
+  await fs.chmod(tmpPath, mode);
   await fs.rename(tmpPath, CONFIG_PATH);
 }
 

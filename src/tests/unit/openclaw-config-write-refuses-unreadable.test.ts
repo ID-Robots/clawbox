@@ -24,6 +24,10 @@ vi.mock("fs/promises", () => ({
     writeFile: vi.fn(),
     rename: vi.fn(),
     mkdir: vi.fn(),
+    // `stat` and `chmod`: writeConfig preserves the mode of the file it
+    // replaces (rename swaps the inode), so a mocked filesystem has to
+    // answer both or every write here fails on the stat.
+    stat: vi.fn(async () => ({ mode: 0o600 })),
     chmod: vi.fn(),
   },
 }));
