@@ -117,6 +117,20 @@ export function foldHome(text, home = os.homedir()) {
   return text.replace(new RegExp(`${escaped}(?=[/\\s'"\`;|&<>()]|$)`, "g"), "~");
 }
 
+/**
+ * `~/clawbox///` -> `~/clawbox`, without a regex.
+ *
+ * `/\/+$/` is a polynomial-ReDoS shape and CodeQL rightly flags it: the input
+ * here is a tool parameter, so a path with thousands of trailing slashes is
+ * something a model can be talked into producing. A loop is linear and says the
+ * same thing.
+ */
+function trimTrailingSlashes(text) {
+  let end = text.length;
+  while (end > 0 && text[end - 1] === "/") end -= 1;
+  return end === text.length ? text : text.slice(0, end);
+}
+
 /** True when `text` at `at` starts a protected root that ends a path segment. */
 function rootAt(text, at, root) {
   if (!text.startsWith(root, at)) return false;
@@ -240,7 +254,7 @@ export function commandDenyReason(command, home = os.homedir()) {
  */
 export function pathDenyReason(candidate, home = os.homedir()) {
   if (typeof candidate !== "string" || !candidate) return null;
-  const text = foldHome(candidate, home).toLowerCase().replace(/\/+$/, "");
+  const text = trimTrailingSlashes(foldHome(candidate, home).toLowerCase());
   for (const allowed of loadTable().writableSubpaths) {
     const at = text.indexOf(allowed.toLowerCase());
     if (at < 0) continue;
