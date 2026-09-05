@@ -83,8 +83,10 @@ function buildFixture() {
   fs.mkdirSync(path.join(standalone, ".next"), { recursive: true });
   fs.writeFileSync(path.join(standalone, "server.js"), "// standalone server\n");
 
-  // scripts/ IS resolved from the process cwd by system-profile.ts and
-  // hermes-image-plugin.ts, so it must survive whatever the data/ removal does.
+  // scripts/ IS resolved from the process cwd — system-profile.ts's
+  // `resolveScript(..., { allowRepoFallback: true })` falls back to
+  // `CLAWBOX_ROOT || process.cwd()` — so it must survive whatever the data/
+  // removal does.
   fs.mkdirSync(path.join(standalone, "scripts"), { recursive: true });
   fs.writeFileSync(path.join(standalone, "scripts", "start-llamacpp.sh"), "#!/bin/sh\n");
 

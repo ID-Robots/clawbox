@@ -51,9 +51,16 @@ const POSTBUILD: string = JSON.parse(
   fs.readFileSync(path.join(REPO, "package.json"), "utf-8"),
 ).scripts.postbuild;
 
+// The real `find`, resolved before the stub below can shadow it: the stub
+// answers the entry lookup only and hands every other call to this one.
+const REAL_FIND = (
+  spawnSync("sh", ["-c", "command -v find"], { encoding: "utf-8" }).stdout ?? ""
+).trim();
+
 const CAN_RUN =
   process.platform !== "win32"
-  && spawnSync("sh", ["-c", "true"], { stdio: "ignore" }).status === 0;
+  && spawnSync("sh", ["-c", "true"], { stdio: "ignore" }).status === 0
+  && REAL_FIND !== "";
 const d = CAN_RUN ? describe : describe.skip;
 
 let tmp: string;
@@ -119,11 +126,28 @@ function sweepParkedBuildIn() {
  * got — and the step is asked what it does with it. A lookup that consults
  * `find` at all is handed the parked entry; a lookup that takes the entry
  * `next build` wrote never runs it.
+ *
+ * It answers the ENTRY lookup only — the one call that names `server.js`. The
+ * step's other `find` sweeps the whole tree for copied `.env`/`.git` files
+ * (TASK-692) and gets the real one: entry SELECTION does not need `find`, that
+ * sweep does, and a stub that answered both would fail the build over a
+ * leftover this fixture never planted.
  */
 function stubFindReturning(rel: string) {
   fs.mkdirSync(stubBin, { recursive: true });
   const stub = path.join(stubBin, "find");
-  fs.writeFileSync(stub, `#!/usr/bin/env bash\nprintf '%s\\n' ${JSON.stringify(rel)}\n`);
+  fs.writeFileSync(
+    stub,
+    `#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = server.js ]; then
+    printf '%s\\n' ${JSON.stringify(rel)}
+    exit 0
+  fi
+done
+exec ${JSON.stringify(REAL_FIND)} "$@"
+`,
+  );
   fs.chmodSync(stub, 0o755);
 }
 
