@@ -1,6 +1,6 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
-import { readFile, rm, writeFile } from "fs/promises";
+import { readFile, realpath, rm, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import path from "path";
 import { get, set, setMany } from "./config-store";
@@ -18,7 +18,7 @@ import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { startRootStep } from "./root-step-runner";
 import { setUpdateLock, clearUpdateLock } from "./update-lock";
-import { collectBuildIdentity } from "./build-identity";
+import { collectBuildIdentity, resolveBuildDir } from "./build-identity";
 import type { AuthProfileEntries } from "./subscription-surface";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
@@ -183,10 +183,40 @@ function rootStepResultFailed(result: string | null): boolean {
   return result !== null && result !== "success";
 }
 
-/** Read .next/BUILD_ID — regenerated on every successful `next build`. */
+/**
+ * Read the BUILD_ID of the build the SERVER RUNS FROM.
+ *
+ * The service runs with cwd `.next/standalone`, so the assets it serves come
+ * from `.next/standalone/.next` — and `.next` "can be a newer half-finished
+ * build", as build-identity.ts's own comment puts it. Reading the wrong tree
+ * would answer "the rebuild produced a new build" about a directory nobody
+ * serves.
+ *
+ * The serving tree is chosen by the ENTRY POINT, not by `resolveBuildDir`.
+ * That helper picks the standalone tree only when its BUILD_ID is present and
+ * otherwise falls back to `.next` — which is precisely the state a failed
+ * rebuild leaves: the standalone tree exists and its BUILD_ID does not. Falling
+ * back there would read a `.next/BUILD_ID` nobody serves, `buildMissing` would
+ * be false, and the continuation would mark the update complete over a box that
+ * cannot boot. `standalone/server.js` is what production-server.js requires, so
+ * its presence is what says which tree is the serving one.
+ *
+ * …and the entry is followed through `realpath` rather than assumed to sit at
+ * `.next/standalone`. `postbuild` (package.json) SEARCHES for it — Next nests
+ * the standalone tree whenever `outputFileTracingRoot` resolves above the
+ * project — copies the assets and the identity stamp beside the real entry, and
+ * symlinks `.next/standalone/server.js` at it. On such a box
+ * `.next/standalone/.next/BUILD_ID` does not exist, so reading the literal path
+ * would answer "" and turn every successful update into "the device restarted
+ * with no build at all": a false failure over a rebuild that worked.
+ */
 async function readBuildId(): Promise<string> {
   try {
-    return (await readFile(path.join(PROJECT_DIR, ".next", "BUILD_ID"), "utf-8")).trim();
+    const entry = path.join(PROJECT_DIR, ".next", "standalone", "server.js");
+    const serving = existsSync(entry)
+      ? path.join(path.dirname(await realpath(entry)), ".next")
+      : await resolveBuildDir(PROJECT_DIR);
+    return (await readFile(path.join(serving, "BUILD_ID"), "utf-8")).trim();
   } catch {
     return "";
   }
@@ -1812,18 +1842,28 @@ async function resumeContinuation(): Promise<boolean> {
   // and restarted anything. Resuming blindly would stamp "Update complete"
   // on a box still running its old build. Demand evidence the rebuild
   // happened: the unit must not sit in `failed`, and the on-disk BUILD_ID
-  // must differ from the one recorded before the rebuild (systemd unit state
-  // resets across reboots, so the Result check alone can be erased by a
-  // power cycle; the BUILD_ID can't). Legacy boolean flags (written by the
-  // previous updater version) carry no build identity — for those only the
-  // unit check applies.
+  // must be present AND differ from the one recorded before the rebuild
+  // (systemd unit state resets across reboots, so the Result check alone can be
+  // erased by a power cycle; the BUILD_ID can't). Legacy boolean flags (written
+  // by the previous updater version) carry no build identity — for those the
+  // unit check and the "is there a build at all" check apply.
   const unitFailed = rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP));
   const recordedBuildId = typeof needsContinuation === "string" ? needsContinuation : null;
-  const buildUnchanged = recordedBuildId !== null && recordedBuildId === (await readBuildId());
-  if (unitFailed || buildUnchanged) {
+  const currentBuildId = await readBuildId();
+  const buildUnchanged = recordedBuildId !== null && recordedBuildId === currentBuildId;
+  // ...and NO build id is never evidence of a build. `do_rebuild` used to
+  // delete `.next` before building, so an OOM-killed build left the box with
+  // nothing — and an absent id compares UNEQUAL to the recorded one, which the
+  // check above read as "the build changed". A box with no dashboard at all
+  // then resumed and stamped itself complete. Measured on the OpenClaw dev box
+  // 2026-09-04, TASK-709.
+  const buildMissing = currentBuildId === "";
+  if (unitFailed || buildUnchanged || buildMissing) {
     const message = unitFailed
       ? (await readRootStepFailure(REBUILD_ROOT_STEP)) ?? "Rebuild failed before the restart"
-      : "The device restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
+      : buildMissing
+        ? "The device restarted with no build at all (.next/BUILD_ID is missing) — see clawbox-root-update@rebuild_reboot logs"
+        : "The device restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
     state = createInitialState(steps);
     state.warnings = await restoreWarnings();
     state.phase = "failed";

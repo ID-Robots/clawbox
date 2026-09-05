@@ -524,6 +524,43 @@ http.Server.prototype.listen = function (...args) {
   return originalListen.apply(this, args);
 };
 
+// A build parked by an update that was killed OUTRIGHT is the box's only build,
+// and until here nothing ever looked for it.
+//
+// install.sh's do_rebuild renames the serving build to `.next-old` before it
+// builds and renames it back when the build fails — but only if that shell
+// survives to do it. An OOM kill that picks the shell (TASK-709: three in one
+// night, `next-build` at 2.1 GB against ollama's 2.3 GB), a power cut or a
+// Ctrl-C leaves no `.next` at all and a perfectly good build under a gitignored
+// directory. install.sh's own `promote_parked_build` cannot help: it runs
+// inside an update, and an update needs THIS server to be up. So the box
+// crash-looped on the missing entry with its build sitting on disk, and every
+// recovery was by hand.
+//
+// Deliberately the last thing before the require, and deliberately narrow: it
+// does nothing at all unless the entry is already missing — i.e. unless this
+// process is about to throw anyway. Everything is best-effort; a failure here
+// must never be the reason the server does not start, and the throw below stays
+// the real error. clawbox-setup runs as the `clawbox` user, which owns both
+// directories (the rename in do_rebuild preserves the inode), and its
+// `Restart=always` means a lost race just tries again in three seconds.
+try {
+  const buildEntry = path.join(__dirname, ".next", "standalone", "server.js");
+  const parkedEntry = path.join(__dirname, ".next-old", "standalone", "server.js");
+  // `lstatSync`, not `existsSync`: for the nested standalone layout `postbuild`
+  // supports, this path is a symlink into `.next` that DANGLES while the tree is
+  // parked, and `existsSync` would call the box's only build absent.
+  const present = (p) => { try { fs.lstatSync(p); return true; } catch { return false; } };
+  if (!present(buildEntry) && present(parkedEntry)) {
+    console.warn("[production-server] No .next build, but .next-old holds one — an update was killed mid-rebuild. Putting it back.");
+    fs.rmSync(path.join(__dirname, ".next"), { recursive: true, force: true });
+    fs.renameSync(path.join(__dirname, ".next-old"), path.join(__dirname, ".next"));
+    console.warn("[production-server] Restored the parked build. Run the update again to get the new one.");
+  }
+} catch (err) {
+  console.warn("[production-server] Could not reclaim a parked build:", err.message);
+}
+
 require("./.next/standalone/server.js");
 
 // After Next has started: the title Next gave this process is ours again

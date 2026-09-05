@@ -1130,7 +1130,12 @@ ensure_node_pty() {
 
   if ! as_clawbox_login "$verify_cmd" &>/dev/null; then
     echo "Error: node-pty is still not loadable after rebuild. Check the node-gyp output above." >&2
-    exit 1
+    # `return`, not `exit`: do_rebuild stops clawbox-setup before it calls this
+    # and has a restore path to run before anything may leave the function. A
+    # bare `exit` from here jumped over it and left the box exactly as TASK-709
+    # describes. Callers that want the old behaviour get it for free — a
+    # non-zero return from a bare call still ends the script under `set -e`.
+    return 1
   fi
 
   echo "  node-pty rebuilt and verified"
@@ -1273,19 +1278,222 @@ free_memory_for_build() {
   echo "  Memory available for the build: ${after} MB (was ${before} MB)"
 }
 
-# Stop the setup service, free memory, clear cache, reinstall, and rebuild
+# Does this build tree carry the entry production-server.js loads?
+#
+# `-e` on its own is not enough: for the nested standalone layout `postbuild`
+# supports, that path is a symlink to an ABSOLUTE path inside `.next`, which
+# dangles while the tree is parked under `.next-old`. `-L` catches it there.
+build_entry_present() {
+  [ -e "$1/standalone/server.js" ] || [ -L "$1/standalone/server.js" ]
+}
+
+# Is there a build on disk that clawbox-setup can actually serve?
+#
+# `bun run build` exiting 0 is not the same thing, and neither is a fresh
+# .next/BUILD_ID: `bun run build` is `next build` PLUS the `postbuild` lifecycle
+# script (package.json), and postbuild is what makes the build servable — it
+# writes build-info.json and copies .next/static, public/ and the server entry
+# into the standalone tree. Next writes BUILD_ID before any of that, and
+# postbuild's own `if [ -n "$SRVJS" ]` guard exits 0 having copied NOTHING when
+# the standalone entry is missing. So a build can be "complete" by BUILD_ID and
+# still leave production-server.js crash-looping on
+# `require("./.next/standalone/server.js")`.
+#
+# Two questions, and the box already owns the answer to the second:
+#   1. the file the service loads exists  — what step_build has always checked;
+#   2. the build on disk was produced from the commit that is checked out —
+#      scripts/verify-build-identity.sh, the one copy of that logic (CI runs it
+#      too, and its header says why a second copy is a bug). It is also what
+#      catches the half-copied postbuild by name.
+verify_build_present() {
+  local project_dir="$1"
+  if [ ! -f "$project_dir/.next/standalone/server.js" ]; then
+    echo "Error: no $project_dir/.next/standalone/server.js — the build produced nothing the dashboard can load" >&2
+    return 1
+  fi
+  if [ ! -f "$project_dir/scripts/verify-build-identity.sh" ]; then
+    # Same call the updater makes and the same verdict it draws: a script that
+    # is not there was not run, which is a warning, not a pass and not a
+    # failure (src/lib/updater.ts runBuildIdentityCheck).
+    echo "  WARNING: scripts/verify-build-identity.sh is missing — the build's identity was not checked" >&2
+    return 0
+  fi
+  if ! bash "$project_dir/scripts/verify-build-identity.sh" --project-dir "$project_dir" --quiet; then
+    echo "Error: the build on disk does not match the checked-out commit" >&2
+    return 1
+  fi
+  return 0
+}
+
+# A build parked by a run that never finished is still the box's only build.
+#
+# set_previous_build_aside renames the serving build to `.next-old` and
+# restore_previous_build puts it back — but only if the shell survives to do it.
+# An OOM kill that picks this shell, a power cut mid-build or an operator's
+# Ctrl-C leaves no `.next` at all and the good build under a gitignored
+# directory nothing else in the tree reads. Reclaim it before anything else
+# runs, or the next rename would delete it.
+promote_parked_build() {
+  local build_dir="${1:-$PROJECT_DIR/.next}" kept_dir="${2:-$PROJECT_DIR/.next-old}"
+  # `-e`, and `-L` beside it: for the nested standalone layout `postbuild`
+  # supports, `.next/standalone/server.js` is a SYMLINK to an absolute path
+  # inside `.next` — which dangles for as long as the tree is parked, so `-f`
+  # would answer "no build here" about the box's only build.
+  build_entry_present "$kept_dir" || return 0
+  build_entry_present "$build_dir" && return 0
+  echo "  Found a build parked by an interrupted rebuild — putting it back" >&2
+  rm -rf "$build_dir"
+  mv "$kept_dir" "$build_dir"
+}
+
+# Keep the build that is serving the box until a new one exists.
+#
+# `rm -rf .next` used to be the first thing do_rebuild did after freeing
+# memory, so any failure past that line left the device with new code and no
+# build: clawbox-setup stopped by the rebuild and never started again, port 80
+# dead — while clawbox-gateway stayed up on 18789 and made the box look
+# half-alive. A rename on the same filesystem costs nothing. `.next-old` is
+# already gitignored, so the updater's `git clean -fd` leaves it alone.
+#
+# Skipped when the filesystem cannot hold two builds at once: on a nearly full
+# eMMC, keeping the old tree would turn an OOM into an ENOSPC, and a build that
+# runs out of disk is a worse outcome than one with no fallback. Said out loud
+# either way, because which of the two happened decides what an operator does
+# next.
+set_previous_build_aside() {
+  local build_dir="$1" kept_dir="$2" need avail
+  rm -rf "$kept_dir"
+  [ -d "$build_dir" ] || return 0
+  need="$(du -sk "$build_dir" 2>/dev/null | awk '{print $1}')"
+  avail="$(df -Pk "$build_dir" 2>/dev/null | awk 'NR==2 {print $4}')"
+  # Each on its own: `$need$avail` concatenated also passes when one of the two
+  # is empty and the other is all digits, and the emptiness test below then has
+  # to compensate for it.
+  case "$need"  in ''|*[!0-9]*) need="" ;; esac
+  case "$avail" in ''|*[!0-9]*) avail="" ;; esac
+  if [ -n "$need" ] && [ -n "$avail" ] && [ "$avail" -lt "$((need * 2))" ]; then
+    echo "  Only ${avail}K free for a ${need}K build — clearing the old one instead of keeping it" >&2
+    rm -rf "$build_dir"
+    return 0
+  fi
+  echo "Setting the current build aside..."
+  mv "$build_dir" "$kept_dir"
+}
+
+# Bring the dashboard back up, and say exactly which build it came up on.
+#
+# Three outcomes, and they are three different sentences because they send an
+# operator to three different places:
+#   - the parked build was put back;
+#   - nothing was ever parked and the build in place is the one that was
+#     already serving (a failure BEFORE the park — `bun install` that could not
+#     reach the registry, a node-pty rebuild that would not link);
+#   - nothing was parked because the filesystem could not hold two builds, and
+#     the tree in place is the build that just FAILED verification. That one is
+#     still started — a dashboard on a suspect build beats a dead box — but it
+#     must never be called a rollback.
+#
+# $3 is 1 when a build actually ran, which is what separates the last two.
+restore_previous_build() {
+  local build_dir="$1" kept_dir="$2" built="${3:-0}" restored=0 waited=0 http_code
+  if [ -d "$kept_dir" ]; then
+    rm -rf "$build_dir"
+    mv "$kept_dir" "$build_dir"
+    restored=1
+  fi
+  if ! build_entry_present "$build_dir"; then
+    echo "  No build to fall back on — the dashboard stays down until this is repaired" >&2
+    return 1
+  fi
+
+  local what="Restored the previous build"
+  if [ "$restored" -eq 0 ]; then
+    if [ "$built" -eq 1 ]; then
+      what="No previous build was kept (the filesystem could not hold two) — the tree in place is the build that just FAILED verification"
+    else
+      what="The serving build was never moved aside"
+    fi
+  fi
+
+  systemctl start clawbox-setup.service 2>/dev/null || true
+
+  # `systemctl is-active` is not the question. clawbox-setup is `Type=simple`
+  # with `Restart=always` (config/clawbox-setup.service), so systemd calls the
+  # unit ACTIVE the moment node is forked — before production-server.js has
+  # reached `require("./.next/standalone/server.js")`. A restored tree that
+  # cannot load would be reported as serving on the very first poll and
+  # crash-loop for the rest of the night under a line saying the opposite.
+  #
+  # The honest question is the one step_validate_services already asks: does the
+  # dashboard answer HTTP on :80? Same form, same accepted codes.
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "  $what, and clawbox-setup was started — but curl is missing, so whether the dashboard answers was NOT checked" >&2
+    return 0
+  fi
+  while [ "$waited" -lt 20 ]; do
+    http_code="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' http://localhost/ 2>/dev/null)" || http_code="000"
+    case "$http_code" in
+      2*|3*)
+        echo "  $what; the dashboard answers on :80 again" >&2
+        return 0
+        ;;
+    esac
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "  $what, but the dashboard did not answer on :80 (last HTTP $http_code) — it is DOWN" >&2
+  return 1
+}
+
+# Stop the setup service, free memory, reinstall, and rebuild — without ever
+# leaving the box with no build at all.
 do_rebuild() {
+  local build_dir="$PROJECT_DIR/.next"
+  local kept_dir="$PROJECT_DIR/.next-old"
+  local rc=0 built=0
+
   echo "Stopping clawbox-setup.service for rebuild..."
   systemctl stop clawbox-setup.service 2>/dev/null || true
+
+  # A build left parked by a run that was killed — an OOM kill that picked this
+  # shell, a power cut, an operator's Ctrl-C — is the box's only build. Claim it
+  # back before the rename below would delete it. After the stop, never before
+  # it: the rename moves the tree the running server is loading from.
+  promote_parked_build "$build_dir" "$kept_dir"
+
   # After the stop, never before it — see free_memory_for_build.
   free_memory_for_build
-  echo "Clearing .next cache..."
-  rm -rf "$PROJECT_DIR/.next"
+
+  # Everything from here to the restore branch runs with the dashboard DOWN, so
+  # no command in the window may leave the function without passing through it —
+  # that is why `ensure_node_pty` returns instead of exiting, and why each step
+  # is a condition rather than a bare statement under `set -e`. `if !` suspends
+  # errexit inside those two, which is safe because each ends in its own
+  # verification: bun install is a single command, and ensure_node_pty finishes
+  # by loading node-pty for real.
   echo "Running bun install..."
-  as_clawbox_login "cd $PROJECT_DIR && $BUN install"
-  ensure_node_pty
-  echo "Running bun build..."
-  as_clawbox_login "cd $PROJECT_DIR && $BUN run build"
+  if ! as_clawbox_login "cd $PROJECT_DIR && $BUN install"; then
+    rc=1
+  elif ! ensure_node_pty; then
+    rc=1
+  else
+    set_previous_build_aside "$build_dir" "$kept_dir"
+    echo "Running bun build..."
+    built=1
+    as_clawbox_login "cd $PROJECT_DIR && $BUN run build" || rc=$?
+    if [ "$rc" -eq 0 ] && ! verify_build_present "$PROJECT_DIR"; then
+      rc=1
+    fi
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    echo "Error: rebuild failed (exit $rc)" >&2
+    restore_previous_build "$build_dir" "$kept_dir" "$built" || true
+    return "$rc"
+  fi
+
+  rm -rf "$kept_dir"
+  echo "  Build complete"
 }
 
 # ── Step Functions ───────────────────────────────────────────────────────────
@@ -1999,13 +2207,14 @@ step_install_bun() {
 
 step_build() {
   cd "$PROJECT_DIR"
+  promote_parked_build
   as_clawbox_login "cd $PROJECT_DIR && $BUN install"
   ensure_node_pty
   as_clawbox_login "cd $PROJECT_DIR && $BUN run build"
-  if [ ! -f "$PROJECT_DIR/.next/standalone/server.js" ]; then
-    echo "Error: Build failed — .next/standalone/server.js not found"
-    exit 1
-  fi
+  # The same two questions do_rebuild asks, through the same helper: an install
+  # that leaves a box unable to load the server is the defect this file already
+  # tested for, and the identity half is the one the box already owns.
+  verify_build_present "$PROJECT_DIR" || exit 1
   echo "  Build complete"
 }
 

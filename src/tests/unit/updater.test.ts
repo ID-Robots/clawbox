@@ -1,15 +1,34 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
 import * as fs from "fs/promises";
+import { existsSync } from "fs";
 
 vi.mock("child_process", () => ({
   exec: vi.fn(),
   execFile: vi.fn(),
 }));
 
+// `realpath` beside `readFile`: readBuildId follows `.next/standalone/server.js`
+// through the link `postbuild` writes for the NESTED standalone layout, so a
+// mock without it would make every case that reaches the entry throw inside
+// readBuildId's `try` and answer "" — i.e. pass for the wrong reason.
 vi.mock("fs/promises", () => ({
   readFile: vi.fn(),
+  realpath: vi.fn(),
 }));
+
+// `existsSync` is how readBuildId decides WHICH tree the server runs from — the
+// standalone entry point, not a BUILD_ID that a failed rebuild may have taken
+// with it. Partial, because `updater.ts` is not the only module in this graph
+// that touches `fs`.
+vi.mock("fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs")>();
+  // The REAL implementation by default — other code in this graph asks whether
+  // real files exist (the build-identity script, for one) and a blanket `false`
+  // would rewrite those tests' subject. Only the case that is about WHICH build
+  // tree the server runs from overrides it.
+  return { ...actual, existsSync: vi.fn(actual.existsSync) };
+});
 
 vi.mock("@/lib/config-store", () => ({
   get: vi.fn(),
@@ -42,7 +61,25 @@ const mockSetMany = vi.mocked(setMany);
 const mockExec = vi.mocked(childProcess.exec);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockReadFile = vi.mocked(fs.readFile);
+const mockRealpath = vi.mocked(fs.realpath);
+const mockExists = vi.mocked(existsSync);
 const mockGatewayUp = vi.mocked(waitForPortOpen);
+
+/**
+ * A box whose rebuild produced a build, and no other readable file.
+ *
+ * These cases mean "there is nothing else on disk to read", and they used to
+ * say it with a blanket ENOENT. An absent `.next/BUILD_ID` is now a failed
+ * rebuild in its own right (TASK-709) — nothing is never evidence of a build —
+ * so the one file that decides whether the continuation may run has to be
+ * stated rather than left to the same rejection as everything else.
+ */
+function mockRebuiltBox(buildId = "rebuilt-build-id"): void {
+  mockReadFile.mockImplementation(async (file) => {
+    if (String(file).endsWith("BUILD_ID")) return `${buildId}\n`;
+    throw new Error("ENOENT");
+  });
+}
 let execFileFallbackResults: Record<string, { stdout: string; stderr: string } | Error> = {};
 
 function setupExecMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
@@ -163,7 +200,17 @@ describe("updater", () => {
     mockGet.mockResolvedValue(undefined);
     mockSet.mockResolvedValue();
     mockSetMany.mockResolvedValue();
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
+    // A box that got through the rebuild has a BUILD_ID; an absent one is now
+    // itself proof the rebuild failed (TASK-709), so the default fixture is a
+    // box that DID build and every case about a missing or unchanged build
+    // says so explicitly.
+    mockReadFile.mockImplementation(async (file) => {
+      if (String(file).endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+      throw new Error("ENOENT");
+    });
+    // The FLAT standalone layout — the entry is where it looks like it is.
+    // The nested one has a case of its own.
+    mockRealpath.mockImplementation((async (p: unknown) => String(p)) as never);
     mockGatewayUp.mockResolvedValue(true);
 
     setupExecMock({
@@ -283,7 +330,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(undefined);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       updater = await import("@/lib/updater");
 
       updater.resetUpdateState();
@@ -322,7 +369,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(undefined);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       updater = await import("@/lib/updater");
 
       updater.resetUpdateState();
@@ -357,7 +404,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(undefined);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       updater = await import("@/lib/updater");
 
       // Drive it through the post-restart continuation: resumes at post_update.
@@ -516,7 +563,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       updater = await import("@/lib/updater");
 
       updater.resetUpdateState();
@@ -548,7 +595,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       mockGatewayUp.mockResolvedValue(false);
       updater = await import("@/lib/updater");
 
@@ -583,7 +630,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       // Health is impossible until BOTH explicit consent and the later system
       // restart occurred. Merely invoking pre-start must never make this green.
       mockGatewayUp.mockImplementation(async () => {
@@ -684,7 +731,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       mockGatewayUp.mockImplementation(async () =>
         mockExecFile.mock.calls.some(([cmd, args]) =>
           cmd === "/usr/bin/sudo"
@@ -725,7 +772,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       updater = await import("@/lib/updater");
 
       updater.resetUpdateState();
@@ -762,6 +809,7 @@ describe("updater", () => {
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
       mockReadFile.mockImplementation(async (file) => {
+        if (String(file).endsWith("BUILD_ID")) return "rebuilt-build-id\n";
         if (String(file).endsWith("/openclaw.json")) {
           return JSON.stringify({
             agents: { defaults: { model: { primary: "openai/gpt-5.6-sol" } } },
@@ -809,7 +857,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       updater = await import("@/lib/updater");
       if (priorRoot === undefined) delete process.env.CLAWBOX_ROOT;
       else process.env.CLAWBOX_ROOT = priorRoot;
@@ -851,7 +899,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       // The gateway only "recovers" once the legacy-state quarantine has run.
       // Tie the probe to that side-effect instead of a fixed false/false/true
       // call sequence: waitForGateway polls in a loop (deadline/interval are 1ms
@@ -895,7 +943,7 @@ describe("updater", () => {
       mockGet.mockResolvedValue(undefined);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
-      mockReadFile.mockRejectedValue(new Error("ENOENT"));
+      mockRebuiltBox();
       updater = await import("@/lib/updater");
 
       updater.resetUpdateState();
@@ -1060,6 +1108,83 @@ describe("updater", () => {
       const state = updater.getUpdateState();
       expect(state.phase).toBe("failed");
       expect(state.error).toContain("without producing a new build");
+    });
+
+    it("reports a failed update when the rebuild left no build at all", async () => {
+      // The hole the BUILD_ID comparison left open. `do_rebuild` deleted
+      // `.next` before building, so an OOM-killed build (measured on the dev
+      // box 2026-09-04, three times in one night) left NO BUILD_ID — and an
+      // ABSENT id compares UNEQUAL to the one recorded before the rebuild, so
+      // "the build changed" read as "the build happened". The update then
+      // resumed and stamped itself complete over a box with no dashboard at
+      // all. Nothing is the one answer that can never be evidence of a build.
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue("build-aaa");
+      mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+
+      const result = await updater.checkContinuation();
+
+      expect(result).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toContain("no build");
+    });
+
+    it("reports a failed update when the SERVING tree lost its build", async () => {
+      // The half a `resolveBuildDir` fallback would miss. A failed rebuild can
+      // leave `.next/standalone/server.js` in place — that is what the service
+      // loads — while the standalone BUILD_ID beside it is gone and a stale
+      // `.next/BUILD_ID` is still there. Reading the fallback tree would answer
+      // about a directory nobody serves, and the update would resume.
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue("build-aaa");
+      mockExists.mockImplementation((file: unknown) => String(file).endsWith("standalone/server.js"));
+      mockReadFile.mockImplementation(async (file) => {
+        // Only the NON-serving tree still has one.
+        if (String(file).endsWith("standalone/.next/BUILD_ID")) {
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        }
+        if (String(file).endsWith("BUILD_ID")) return "build-bbb\n";
+        throw new Error("ENOENT");
+      });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      expect(updater.getUpdateState().phase).toBe("failed");
+    });
+
+    it("reads the nested standalone layout's real build, not the path it links from", async () => {
+      // `postbuild` SEARCHES for the standalone entry (Next nests the tree when
+      // outputFileTracingRoot resolves above the project), copies the assets and
+      // the stamp beside the real one, and symlinks `.next/standalone/server.js`
+      // at it. On such a box `.next/standalone/.next/BUILD_ID` does not exist —
+      // so reading the literal path answers "" and turns a rebuild that WORKED
+      // into "the device restarted with no build at all".
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue("build-aaa");
+      mockExists.mockImplementation((file: unknown) => String(file).endsWith("standalone/server.js"));
+      mockRealpath.mockImplementation((async (p: unknown) =>
+        String(p).replace("/standalone/server.js", "/standalone/nested/app/server.js")) as never);
+      mockReadFile.mockImplementation(async (file) => {
+        if (String(file).endsWith("standalone/nested/app/.next/BUILD_ID")) return "build-bbb\n";
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      });
+
+      // A new build id, read from the tree the service really loads: the
+      // continuation is allowed to run.
+      expect(await updater.checkContinuation()).toBe(true);
+      expect(updater.getUpdateState().phase).not.toBe("failed");
+    });
+
+    it("reports a failed update when a box that had no build still has none", async () => {
+      // Same hole from the other side: a box with nothing to record wrote the
+      // "no-previous-build" sentinel, and after a failed rebuild the empty
+      // BUILD_ID differs from the sentinel too.
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue("no-previous-build");
+      mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+
+      expect(await updater.checkContinuation()).toBe(false);
+      expect(updater.getUpdateState().phase).toBe("failed");
     });
   });
 
