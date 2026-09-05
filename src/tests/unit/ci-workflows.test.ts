@@ -218,10 +218,28 @@ describe("the checks CI runs, and their blocking status", () => {
     // A command counts only where a step RUNS it — its `run:` line or the block
     // scalar under it — so a comment, a step `name:` or an `env:` value does
     // not, and a step moved to a second job leaves this slice entirely.
+    //
+    // The anchor is the run KEY at line start, not `indexOf("run:")`: a step
+    // named `Rerun: …` otherwise anchored the slice inside its own name and
+    // handed the whole step to the search. And it is BOUNDED at the next key at
+    // the same indentation, because a block scalar's lines are indented deeper
+    // while an `env:` or `with:` after `run:` is not — without the bound, a
+    // value under `env:` counted as something the step runs. Both measured.
+    //
+    // Textual, like every other assertion here: a line inside a `run: |` block
+    // that itself began `- name:` would forge a step boundary. Cross-checked
+    // against a parse of the same file — the split yields exactly one piece per
+    // real step, and every anchor lands on a real `run:` key.
     const runsOfEachStep = testJob
       .split("\n").filter((line) => !/^\s*#/.test(line)).join("\n")
-      .split(/^ *- (?=name:|uses:)/m).slice(1)
-      .map((body) => { const at = body.indexOf("run:"); return at === -1 ? "" : body.slice(at); });
+      .split(/^ *- (?=name:|uses:|run:)/m).slice(1)
+      .map((step) => {
+        const key = /^([ \t]*)run:/m.exec(step);
+        if (!key) return "";
+        const fromRun = step.slice(key.index);
+        const next = new RegExp(`^${key[1]}[\\w-]+:`, "m").exec(fromRun.slice(key[0].length));
+        return next ? fromRun.slice(0, key[0].length + next.index) : fromRun;
+      });
 
     for (const command of ["bun run typecheck:mcp", "bun run check:mcp-tools", "bun run lint"]) {
       expect(runsOfEachStep.some((body) => body.includes(command)),
@@ -341,9 +359,16 @@ describe("what the PR-comment jobs render", () => {
     const yml = read(`.github/workflows/${file}`);
     const at = yml.indexOf("\n  comment:\n");
     expect(at, `${file} has no comment job`).toBeGreaterThan(-1);
-    const scriptAt = yml.indexOf("script: |", at);
+    // Bounded at the end of the comment job. `comment` is the last job in all
+    // three files today, but an unbounded search would let a comment job that
+    // LOST its inline script silently pick up the next job's instead of failing
+    // here.
+    const headerEnd = at + "\n  comment:\n".length;
+    const after = /^ {2}[\w-]+:$/m.exec(yml.slice(headerEnd));
+    const job = after ? yml.slice(at, headerEnd + after.index) : yml.slice(at);
+    const scriptAt = job.indexOf("script: |");
     expect(scriptAt, `${file}: the comment job has no inline script`).toBeGreaterThan(-1);
-    const rest = yml.slice(yml.indexOf("\n", scriptAt) + 1).split("\n");
+    const rest = job.slice(job.indexOf("\n", scriptAt) + 1).split("\n");
     const indent = rest[0].length - rest[0].trimStart().length;
     const out: string[] = [];
     for (const line of rest) {
@@ -354,12 +379,19 @@ describe("what the PR-comment jobs render", () => {
     return out.join("\n");
   }
 
-  /** The comment body that script would post, for a given `needs.<job>.result`. */
-  async function render(file: string, env: Record<string, string>): Promise<string> {
+  /**
+   * The comment body that script would post, for a given `needs.<job>.result`.
+   *
+   * `existing` is what the workflow found already on the PR: `undefined` takes
+   * the CREATE path, a body takes the UPDATE path — and the update path is the
+   * one that runs in production on every workflow after the first, and the one
+   * the original defect lived in (the section kept its last "✅ passed").
+   */
+  async function render(file: string, env: Record<string, string>, existing?: string): Promise<string> {
     let posted = "";
     const capture = async ({ body }: { body: string }) => { posted = body; };
     const github = {
-      paginate: async () => [],
+      paginate: async () => (existing === undefined ? [] : [{ id: 1, user: { type: "Bot" }, body: existing }]),
       rest: { issues: { listComments: () => undefined, createComment: capture, updateComment: capture } },
     };
     const context = {
@@ -368,9 +400,16 @@ describe("what the PR-comment jobs render", () => {
       serverUrl: "https://github.com",
       runId: 1,
     };
-    const run = new Function("github", "context", "process",
+    // `actions/github-script` also injects `core`, `exec`, `io` and `glob`.
+    // They are stubbed rather than left undefined so that adding, say, a
+    // `core.summary` line to a comment script makes THAT change fail on its own
+    // merits instead of throwing a ReferenceError that blames the verdict logic
+    // — a false failure in the guard. A script that wrote its verdict to the
+    // summary instead of the comment still fails, on "posted nothing" below.
+    const core = new Proxy({}, { get: () => () => undefined });
+    const run = new Function("github", "context", "process", "core", "exec", "io", "glob",
       `return (async () => {\n${commentScript(file)}\n})()`);
-    await run(github, context, { env });
+    await run(github, context, { env }, core, core, core, core);
     expect(posted, `${file}: the comment job posted nothing`).not.toBe("");
     return posted;
   }
@@ -389,18 +428,29 @@ describe("what the PR-comment jobs render", () => {
     };
   }
 
-  // The env var that carries `needs.<job>.result`, and the section heading.
+  // The env var that carries the outcome, and the section heading.
   const JOBS: [string, string, string][] = [
     ["pr-tests-coverage.yml", "SUITE_OUTCOME", "Tests"],
     ["e2e-tests.yml", "E2E_RESULT", "E2E"],
     ["e2e-install.yml", "E2E_INSTALL_RESULT", "E2E Install"],
   ];
 
+  /**
+   * The environment a real run of that comment job would have.
+   *
+   * `pr-tests-coverage.yml` reads TWO variables — the suite step's outcome and
+   * the job's result — and `needs.test.result` is ALWAYS set in a real run.
+   * Leaving it out rendered a square production cannot produce, and that is
+   * what hid a live false success in the pair of sentences below the verdict.
+   */
+  const envFor = (key: string, outcome: string): Record<string, string> =>
+    key === "SUITE_OUTCOME" ? { SUITE_OUTCOME: outcome, TEST_RESULT: outcome } : { [key]: outcome };
+
   it.each(JOBS)("%s renders a verdict for a run that passed and for one that failed", async (file, key, heading) => {
-    const passed = sectionOf(await render(file, { [key]: "success" }), heading);
+    const passed = sectionOf(await render(file, envFor(key, "success")), heading);
     expect(passed.icon).toBe("✅");
     expect(passed.verdict).toMatch(/^(passed|success)$/);
-    const failed = sectionOf(await render(file, { [key]: "failure" }), heading);
+    const failed = sectionOf(await render(file, envFor(key, "failure")), heading);
     expect(failed.icon).toBe("❌");
     expect(failed.verdict).toMatch(/^(failed|failure)$/);
   });
@@ -412,11 +462,62 @@ describe("what the PR-comment jobs render", () => {
     // TASK-702 added or by a person. Before the `always()` this job was simply
     // skipped on a cancellation and the section kept its previous value, so
     // making it reachable is what makes the false failure reachable.
-    const s = sectionOf(await render(file, { [key]: "cancelled" }), heading);
+    const s = sectionOf(await render(file, envFor(key, "cancelled")), heading);
     expect(s.verdict, "a cancelled run is reported as a failure").not.toMatch(/^(failed|failure)$/);
     expect(s.icon, "a cancelled run carries the failure icon").not.toBe("❌");
     // And it says so, rather than going quiet about which of the two it was.
     expect(s.text.toLowerCase()).toContain("cancel");
+  });
+
+  it("never says the suite passed when it failed", async () => {
+    // The two sentences below the verdict are about a suite that REPORTED, and
+    // they used to fire on either outcome. `SUITE_OUTCOME=failure` with
+    // `TEST_RESULT=cancelled` therefore rendered "❌ Tests — Result: failed"
+    // followed by "The suite passed, then the run was cancelled" — two
+    // contradictory claims, the second of them a false success, in the square a
+    // reader reaches by cancelling the run on seeing the suite go red. Lint
+    // (advisory) and Parse coverage keep the job alive for about two minutes
+    // after the failure, so that window is the normal one.
+    const s = sectionOf(await render("pr-tests-coverage.yml", { SUITE_OUTCOME: "failure", TEST_RESULT: "cancelled" }), "Tests");
+    expect(s.verdict).toBe("failed");
+    expect(s.text, "a failed suite is reported as having passed").not.toContain("The suite passed");
+    expect(s.text.toLowerCase()).toContain("cancel");
+    // The same conflation in the other sentence: over a failed suite, "even
+    // though the suite did" contradicts the verdict one line above it.
+    const bothFailed = sectionOf(await render("pr-tests-coverage.yml", { SUITE_OUTCOME: "failure", TEST_RESULT: "failure" }), "Tests");
+    expect(bothFailed.verdict).toBe("failed");
+    expect(bothFailed.text, "a failed suite is credited with having passed").not.toContain("even though the suite did");
+  });
+
+  it.each(JOBS)("%s updates its own section in place and leaves its siblings alone", async (file, key, heading) => {
+    // The CREATE path is what every case above exercises, because `paginate`
+    // returns nothing. The UPDATE path is the one that runs on every workflow
+    // after the first — and the one the original defect lived in, where the
+    // section kept its last "✅ passed" because the job never ran to replace
+    // it. A verdict that renders correctly and then splices into the wrong
+    // marker is the same stale sentence by another route.
+    const existing = await render(file, envFor(key, "success"));
+    const updated = await render(file, envFor(key, "failure"), existing);
+    expect(sectionOf(updated, heading).verdict).toMatch(/^(failed|failure)$/);
+    // Exactly one section for this job, and every other section carried over
+    // untouched.
+    expect(updated.match(new RegExp(`^## \\S+ ${heading}$`, "gm"))).toHaveLength(1);
+    for (const other of ["Tests", "E2E", "E2E Install"].filter((h) => h !== heading)) {
+      const before = existing.match(new RegExp(`^## \\S+ ${other}$`, "m"));
+      if (before) expect(updated).toContain(before[0]);
+    }
+  });
+
+  it("gives the two E2E comments the same icon for the same result", async () => {
+    // They are the same sentence about two suites and sit in the same PR
+    // comment, so a reader comparing them should not have to decide whether ⏹️
+    // and ⏭️ mean different things. Relational rather than a table of emoji:
+    // the pair has to move together, and neither is pinned to a literal.
+    for (const result of ["success", "failure", "cancelled", "skipped"]) {
+      const tests = sectionOf(await render("e2e-tests.yml", { E2E_RESULT: result }), "E2E");
+      const install = sectionOf(await render("e2e-install.yml", { E2E_INSTALL_RESULT: result }), "E2E Install");
+      expect(install.icon, `the two E2E comments disagree on the icon for a ${result} run`).toBe(tests.icon);
+    }
   });
 
   it("does not blame a later step when the run that passed was cancelled", async () => {
@@ -439,7 +540,7 @@ describe("what the PR-comment jobs render", () => {
   it.each(JOBS)("%s does not call a skipped run a failure either", async (file, key, heading) => {
     // The other non-verdict `always()` lets through: `needs.<job>.result` is
     // `skipped` when the job it reports on never ran at all.
-    const s = sectionOf(await render(file, { [key]: "skipped" }), heading);
+    const s = sectionOf(await render(file, envFor(key, "skipped")), heading);
     expect(s.verdict, "a skipped run is reported as a failure").not.toMatch(/^(failed|failure)$/);
     expect(s.icon, "a skipped run carries the failure icon").not.toBe("❌");
   });

@@ -127,7 +127,7 @@ jobs:
             const result = process.env.E2E_RESULT;
             const passed = result === 'success';
             const failed = result === 'failure';
-            const icon = passed ? '✅' : failed ? '❌' : '⏹️';
+            const icon = passed ? '✅' : failed ? '❌' : result === 'skipped' ? '⏭️' : '⏹️';
             const verdict = passed ? 'passed' : failed ? 'failed' : (result || 'unknown');
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const wrappedSection = `${e2eStart}\n## ${icon} E2E\n- Result: **${verdict}**\n- [View run](${runUrl})\n${e2eEnd}`;

@@ -64,7 +64,7 @@ jobs:
         run: bun run typecheck:mcp
 
       # The tool CONTRACT — name and description limits, flat schemas, and which
-      # tools each edition may register. It builds the surface over four
+      # tools each edition may register. It builds the surface over five
       # postures, so it covers the families a CI runner cannot PROBE and the
       # three tools it is not inside a coding RUN for (see mcp/check-tools.ts);
       # before that it examined a third of the tools and printed OK over the
@@ -212,11 +212,20 @@ jobs:
               section += `\n- The suite did not report: a step before it failed, or the job was cancelled. See the run.`;
             } else if (process.env.TEST_RESULT === 'cancelled') {
               // The same false failure the E2E verdicts carried, one line
-              // further in: `always()` reaches this job during a cancellation,
-              // and a suite that PASSED before the run was stopped would
-              // otherwise be reported as "a later step in it failed".
-              section += `\n- The suite passed, then the run was cancelled — by the job timeout above or by a person. See the run.`;
-            } else if (process.env.TEST_RESULT !== 'success') {
+              // further in: `always()` reaches this job during a cancellation
+              // too, and a suite that reported before the run was stopped would
+              // otherwise be told as "a later step in it failed".
+              //
+              // It names the verdict rather than assuming "passed": the suite
+              // going red is the most likely reason anyone cancels this
+              // workflow — Lint (advisory) and Parse coverage still run for
+              // about two minutes after it — so failure × cancelled is the
+              // square this sentence is most often read in.
+              section += `\n- The suite ${verdict}, then the run was cancelled. See the run.`;
+            } else if (passed && process.env.TEST_RESULT !== 'success') {
+              // Only when the SUITE passed. Over a failed suite the job's own
+              // failure is not news, and "even though the suite did" would be
+              // a second, contradictory claim beside "Result: failed".
               section += `\n- The job did not pass even though the suite did — a later step in it failed. See the run.`;
             }
             if (process.env.COVERAGE_FOUND === 'true') {
