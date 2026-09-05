@@ -774,6 +774,8 @@ describe("CodingAgentApp", () => {
         expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", RUN.id);
         // The run's data sits in the rail beside its story.
         expect(within(screen.getByTestId("coding-agent-run-rail")).getByTestId("coding-agent-run-figures")).toBeInTheDocument();
+        // …but the evidence does not: it has the whole column, under the Agents card.
+        expect(within(screen.getByTestId("coding-agent-run-rail")).queryByTestId("coding-agent-artifacts")).toBeNull();
         // Home brings the front page back.
         fireEvent.click(within(sidebar).getByTestId("coding-agent-sidebar-home"));
         expect(screen.queryByTestId("coding-agent-run-page")).toBeNull();
@@ -1631,6 +1633,8 @@ describe("the workspace, the breadcrumb and the live view", () => {
     fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
     const card = await screen.findByTestId("coding-agent-artifacts");
     expect(card).toHaveAttribute("data-folded", "true");
+    // The pictures are a grid across the column, the file name under each.
+    expect(within(card).getByTestId("coding-agent-artifact-images").className).toContain("grid");
     expect(within(screen.getByTestId("coding-agent-artifact-audio")).getByLabelText("intro.wav")).toBeInTheDocument();
     expect(within(card).getByText("report.md")).toBeInTheDocument();
     expect(card.querySelectorAll("img")).toHaveLength(2);
