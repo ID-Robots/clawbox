@@ -216,6 +216,30 @@ describe("skill_info — an id Hermes could not narrow down", () => {
     expect(out.error.code).toBe("NOT_FOUND");
   });
 
+  it("still describes a skill only HERMES backs, however thin its panel is", async () => {
+    // The other side of the floor, and the false failure it must not become.
+    // A skill published since this device built its catalogue snapshot is real
+    // and unbacked HERE — `catalogMiss` and no source or trust — and Hermes is
+    // the authority that settles it. The route builds a delta off a real panel
+    // with `bodySource`, `bodyTruncated`, `needsRemoteDocs` and `provenance`
+    // always on it, so a panel carrying no Description row and no prose preview
+    // is still Hermes saying the skill exists.
+    twoPhaseAnswers(UNBACKED, {
+      delta: {
+        bodySource: "cli-preview",
+        bodyTruncated: true,
+        needsRemoteDocs: false,
+        provenance: { sourceUrlVerified: false },
+      },
+    });
+
+    const out = await skills().call("skill_info", { id: UNKNOWN_ID });
+
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toContain(UNKNOWN_ID);
+  });
+
   it("propagates a refusal the rules already classified", async () => {
     // `skillsGet` PREPENDS the edition rule, and `api()` turns a matched body
     // into a ToolError before this caller's `.catch` runs — so a phase-2 404
