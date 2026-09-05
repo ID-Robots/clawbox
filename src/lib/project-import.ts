@@ -15,6 +15,8 @@
  *
  * WHAT IS REFUSED
  *
+ * - a source outside the owner's home directory (the one fence that stands
+ *   on its own, checked on the typed path and on the real one);
  * - a source under a credential store or the ClawBox checkout
  *   (`isProtectedFilePath`, and the checkout's `data/` most of all — a copy
  *   of data/ into a folder runs can read would hand every secret to a run);
@@ -50,6 +52,11 @@ export function importFolderName(raw: string): string {
   const base = path.basename(raw.trim()).replace(/\.git$/i, "");
   const clean = trimEdges(base.replace(/[^A-Za-z0-9._-]/g, "-")).slice(0, 64);
   return clean || "project";
+}
+
+/** The root with one trailing separator, for a "begins with the root" check that a root of "/" does not trip. */
+function withSep(root: string): string {
+  return root.endsWith(path.sep) ? root : root + path.sep;
 }
 
 /** Strip leading and trailing dots and dashes — one pass, no backtracking. */
@@ -308,11 +315,11 @@ async function claimTarget(projectsRoot: string, folder: string): Promise<{ ok: 
   const root = path.resolve(projectsRoot);
   const directory = path.resolve(root, folder);
   // Directly inside the project folder and nothing else — the name was made
-  // by importFolderName, and this is the check that stands on its own. Said
-  // with path.relative, so a root of "/" (which the setting's own validator
-  // refuses, but an older stored value could carry) is not tripped by "//".
-  const rel = path.relative(root, directory);
-  if (!rel || rel.startsWith("..") || path.isAbsolute(rel) || rel.includes(path.sep)) {
+  // by importFolderName, and this is the check that stands on its own: the
+  // resolved path must begin with the root plus a separator (a root of "/",
+  // which the setting's validator refuses but an older stored value could
+  // carry, already ends with one) and have the root as its parent.
+  if (!directory.startsWith(withSep(root)) || path.dirname(directory) !== root) {
     return { ok: false, reason: "invalid", detail: "The project's name is not one the project folder can hold." };
   }
   await fs.promises.mkdir(root, { recursive: true }).catch(() => undefined);
@@ -363,11 +370,23 @@ export async function importFolder(input: { source: string; projectsRoot: string
   if (!typed || !path.isAbsolute(typed)) return { ok: false, reason: "invalid", detail: "Give the folder as an absolute path, e.g. /home/clawbox/old-site or ~/old-site." };
   const source = path.resolve(typed);
   const projectsRoot = path.resolve(input.projectsRoot);
+  // A folder under the owner's HOME, and nothing else: that is where their
+  // own work lives (the Files app browses the same tree), and it is the one
+  // fence that stands on its own — said as "begins with home plus a
+  // separator" on the resolved path, before any read of it.
+  const home = path.resolve(os.homedir());
+  if (!source.startsWith(withSep(home))) {
+    return { ok: false, reason: "refused", detail: `Only a folder under ${home} can be imported.` };
+  }
 
   const stat = await fs.promises.stat(source).catch(() => null);
   if (!stat) return { ok: false, reason: "not_found", detail: `There is no folder at ${source}.` };
   if (!stat.isDirectory()) return { ok: false, reason: "not_a_folder", detail: `${source} is a file, not a folder.` };
   const real = await fs.promises.realpath(source).catch(() => source);
+  // The same fence on the REAL path: a link under home to a folder outside it.
+  if (!real.startsWith(withSep(home))) {
+    return { ok: false, reason: "refused", detail: `Only a folder under ${home} can be imported.` };
+  }
   const realRoot = await fs.promises.realpath(projectsRoot).catch(() => projectsRoot);
 
   // The fences, in the order a reader would ask: is it secret, is it ClawBox's
@@ -441,8 +460,13 @@ export async function importGitHubRepo(input: { fullName: string; projectsRoot: 
 
   const folder = importFolderName(fullName.split("/")[1]);
   // A taken name is refused before GitHub is asked anything; the claim
-  // below is still the one that counts.
-  if (await fs.promises.lstat(path.resolve(projectsRoot, folder)).catch(() => null)) {
+  // below is still the one that counts. The same fence as the claim's.
+  const root = path.resolve(projectsRoot);
+  const wanted = path.resolve(root, folder);
+  if (!wanted.startsWith(withSep(root)) || path.dirname(wanted) !== root) {
+    return { ok: false, reason: "invalid", detail: "The project's name is not one the project folder can hold." };
+  }
+  if (await fs.promises.lstat(wanted).catch(() => null)) {
     return { ok: false, reason: "exists", detail: `There is already a "${folder}" in your project folder. Rename or remove it first.` };
   }
 

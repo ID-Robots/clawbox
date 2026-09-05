@@ -128,10 +128,13 @@ describe("importFolder", () => {
     expect(out).toMatchObject({ ok: true, folder: "tilde" });
   });
 
-  it("refuses without a project folder, a relative path, a missing folder and a file", async () => {
+  it("refuses without a project folder, a relative path, a folder outside home, a missing folder and a file", async () => {
     const src = makeSource("s");
     expect(await lib.importFolder({ source: src, projectsRoot: null })).toMatchObject({ ok: false, reason: "no_project_folder" });
     expect(await lib.importFolder({ source: "old-site", projectsRoot: projects })).toMatchObject({ ok: false, reason: "invalid" });
+    // Only the owner's own tree: /tmp and /etc are not theirs to import.
+    expect(await lib.importFolder({ source: os.tmpdir(), projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });
+    expect(await lib.importFolder({ source: "/etc", projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });
     expect(await lib.importFolder({ source: path.join(home, "nope"), projectsRoot: projects })).toMatchObject({ ok: false, reason: "not_found" });
     expect(await lib.importFolder({ source: path.join(src, "README.md"), projectsRoot: projects })).toMatchObject({ ok: false, reason: "not_a_folder" });
   });
@@ -165,6 +168,11 @@ describe("importFolder", () => {
     const out = await lib.importFolder({ source: src, projectsRoot: projects });
     expect(out.ok).toBe(true);
     expect(fs.lstatSync(path.join(projects, "linky", "escape")).isSymbolicLink()).toBe(true);
+  });
+
+  it("refuses a link under home that leads outside it", async () => {
+    fs.symlinkSync(os.tmpdir(), path.join(home, "out"));
+    expect(await lib.importFolder({ source: path.join(home, "out"), projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });
   });
 });
 
