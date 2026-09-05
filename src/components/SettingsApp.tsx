@@ -39,7 +39,9 @@ import { useReconnect } from "@/hooks/useReconnect";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { DISCORD_INVITE_URL } from "@/lib/community";
 import BackgroundJobsPanel from "./BackgroundJobsPanel";
-import { canonicalPluginId } from "@/lib/plugin-repair";
+// From the pure module, never `@/lib/plugin-repair`: that one reads the
+// marker file and would pull `fs` into the browser bundle.
+import { canonicalPluginId } from "@/lib/plugin-repair-id";
 import PluginRepairNotice, { type PluginRepairInfo } from "./PluginRepairNotice";
 
 /* ── Types ── */

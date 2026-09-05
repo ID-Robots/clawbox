@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 
 import { getActiveHarness, type Harness } from "@/lib/harness";
+import { canonicalPluginId, ROW_PLUGIN_IDS } from "@/lib/plugin-repair-id";
 
 // What the boot script could not install or consent, and therefore switched off.
 //
@@ -171,41 +172,6 @@ export async function clearPluginRepair(id: string): Promise<boolean> {
   return true;
 }
 
-/**
- * The bare name of a plugin, whatever spelling it arrived in.
- *
- * The registry keys one plugin under `discord`, `@openclaw/discord` and
- * `openclaw-discord` alike, and `ensureChannelPlugin` enables whichever one it
- * found — so a marker written under one spelling has to be found under any of
- * them, or the badge would be missing from exactly the row it describes.
- */
-export function canonicalPluginId(id: string): string {
-  let name = id;
-  for (const prefix of ["@openclaw/", "openclaw-"]) {
-    if (name.startsWith(prefix)) name = name.slice(prefix.length);
-  }
-  // `@openclaw/deepseek-provider` is the DeepSeek provider plugin; the boot
-  // script marks it as `deepseek`, which is also what `plugins enable` takes.
-  return name.endsWith("-provider") ? name.slice(0, -"-provider".length) : name;
-}
-
-/**
- * Which plugin a Settings row depends on.
- *
- * Not an identity map, because two rows are named after the thing the owner
- * sees rather than after the plugin behind it: ClawBox AI rides the DeepSeek
- * provider on every paired box, and the OpenAI GPT row is served by the Codex
- * harness plugin. A row with no entry here has no plugin that can fail this
- * way, and is never badged.
- */
-export const ROW_PLUGIN_IDS: Readonly<Record<string, string>> = {
-  clawai: "deepseek",
-  deepseek: "deepseek",
-  openai: "codex",
-  discord: "discord",
-  whatsapp: "whatsapp",
-};
-
 /** The repair entry for a provider or channel row id, or null. */
 export function repairFor(repairs: PluginRepairs, rowId: string): PluginRepairEntry | null {
   const wanted = ROW_PLUGIN_IDS[rowId];
@@ -215,3 +181,6 @@ export function repairFor(repairs: PluginRepairs, rowId: string): PluginRepairEn
   }
   return null;
 }
+
+// Re-exported so the server-side callers keep one import.
+export { canonicalPluginId, ROW_PLUGIN_IDS };
