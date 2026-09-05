@@ -1882,6 +1882,66 @@ step_set_hostname() {
   apply_hostname "$(read_configured_hostname)"
 }
 
+# The owner's timezone, as the web server recorded it. TASK-514.
+#
+# PARSED, never sourced — same rule and the same reason as
+# read_configured_hostname: data/ is clawbox-writable and this runs as root from
+# the granted clawbox-root-update@set_timezone.service, so a `.` on this file
+# would be arbitrary root code execution for anything that can already run code
+# as clawbox.
+#
+# read_untrusted_env_value cannot be reused: its character class deliberately
+# excludes `/`, and every IANA zone but `UTC` contains one. The gate here is
+# therefore its own — the same shape rule as src/lib/timezone.ts's
+# isValidTimeZone (Area/Location over a small alphabet, no `..`, no leading
+# `/`) — and then the ONLY authority worth trusting for "is this a real zone":
+# the zoneinfo database on this device.
+read_configured_timezone() {
+  local tz_env="$PROJECT_DIR/data/timezone.env" line tz
+  [ -f "$tz_env" ] || return 0
+  [ -L "$tz_env" ] && return 0
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?TIMEZONE=" "$tz_env" 2>/dev/null)" || return 0
+  tz="${line#*=}"
+  case "$tz" in
+    \"*\") tz="${tz#\"}"; tz="${tz%\"}" ;;
+    \'*\') tz="${tz#\'}"; tz="${tz%\'}" ;;
+  esac
+  case "$tz" in
+    ""|/*|-*|*..*|*[!A-Za-z0-9._/+-]*) return 0 ;;
+  esac
+  # The device's own database is the list; nothing here maintains one.
+  [ -f "/usr/share/zoneinfo/$tz" ] || return 0
+  printf '%s' "$tz"
+}
+
+apply_timezone() {
+  local tz="${1:-}"
+  if [ -z "$tz" ]; then
+    # Not an error: a box whose owner has never answered simply keeps the image
+    # default, and this step is a no-op rather than a red line in the update.
+    echo "  No timezone recorded, leaving the system zone alone"
+    return 0
+  fi
+  if [ "$(timedatectl show -p Timezone --value 2>/dev/null)" = "$tz" ]; then
+    echo "  System timezone already $tz"
+    return 0
+  fi
+  if timedatectl set-timezone "$tz" 2>/dev/null; then
+    echo "  System timezone set to $tz"
+    return 0
+  fi
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, timedatectl unavailable — skipping"
+    return 0
+  fi
+  echo "  Warning: timedatectl set-timezone $tz failed" >&2
+  return 1
+}
+
+step_set_timezone() {
+  apply_timezone "$(read_configured_timezone)"
+}
+
 is_safe_git_ref() {
   local ref="${1:-}"
   [ -n "$ref" ] || return 1
@@ -6974,7 +7034,7 @@ DISPATCH_STEPS=(
   # lock, install Hermes, or repair a Hermes appliance — which is how a Hermes
   # box ended up running edition-blind updates that reinstalled OpenClaw.
   edition_lock edition_foreign_teardown hermes_install hermes_edition
-  network_setup set_hostname setup_config system_config
+  network_setup set_hostname set_timezone setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   directories_permissions captive_portal_dns desktop_theme

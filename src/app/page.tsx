@@ -24,6 +24,7 @@ import ClawKeepApp from "@/components/ClawKeepApp";
 import MemoryShardApp from "@/components/MemoryShardApp";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
+import TimezoneAdopter from "@/components/TimezoneAdopter";
 import type { StoreApp } from "@/components/AppStore";
 import TerminalTabs from "@/components/TerminalTabs";
 import CodingAgentApp from "@/components/CodingAgentApp";
@@ -2957,6 +2958,9 @@ function ChromeDesktopInner() {
 export default function ChromeDesktop() {
   return (
     <I18nProvider>
+      {/* A box already in the field never sees the wizard again, and its
+          timezone was never asked for — see the component. Renders nothing. */}
+      <TimezoneAdopter />
       <ChromeDesktopInner />
     </I18nProvider>
   );

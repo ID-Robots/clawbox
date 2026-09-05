@@ -57,6 +57,11 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   "rebuild_reboot",
   "restart_ap",
   "set_hostname",
+  // The owner's timezone, applied to the OS with `timedatectl set-timezone`.
+  // On WEB_ROOT_STEPS and NOT on UI_ROOT_STEPS, like set_hostname: it is
+  // started only by /setup-api/system/timezone, never by install/run-step, so
+  // the agent's bearer cannot reach it. TASK-514.
+  "set_timezone",
   "vnc_install",
   "vnc_refresh",
 ];
