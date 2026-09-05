@@ -3,7 +3,21 @@
 import { useEffect, useState } from "react";
 
 import { useT } from "@/lib/i18n";
-import type { BackgroundJobId, BackgroundJobsStatus } from "@/lib/background-jobs";
+
+// The route's shape, DECLARED HERE rather than imported from
+// `@/lib/background-jobs`. That module reads the config and therefore drags
+// `fs` and `net` in behind it, and this is a client component: even an
+// `import type` puts this file one edge away from a server-only graph in the
+// bundler's eyes, and the sibling panel in the same tab learned that the
+// expensive way. What crosses this boundary is JSON over a fetch, so the shape
+// belongs to the wire, not to the server module.
+type BackgroundJobId = "checkIns" | "memoryReview" | "skillLearning";
+
+interface BackgroundJobsStatus {
+  harness: string;
+  degraded: boolean;
+  jobs: { id: BackgroundJobId; enabled: boolean; supported: boolean; key: string | null }[];
+}
 
 // The three things the box does on its own initiative (TASK-609).
 //
