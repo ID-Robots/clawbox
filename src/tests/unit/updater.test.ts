@@ -711,6 +711,289 @@ describe("updater", () => {
         .toBe("/tmp/clawbox-updater-openclaw-home/openclaw.json");
     });
 
+    it("records consent for a NON-Codex managed plugin the gateway named", async () => {
+      // TASK-603. The 2026-09-01 outage was `discord`, not `codex`: the core
+      // refuses readiness for any enabled plugin whose declared capability
+      // surface is unconsented, names it, and tells the operator to rerun with
+      // --accept-capabilities. This recovery matched the literal word `codex`,
+      // so the box went through the whole quiesce/pre-start/doctor/restart pass
+      // untouched and the owner was handed that sentence about a CLI he never
+      // ran. `plugins enable <id> --accept-capabilities` is the harness's own
+      // idempotent consent verb — the same one gateway-pre-start.sh uses for
+      // Codex — and it touches no registry, which matters on a box whose
+      // network may be why the update is being repaired.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "Plugin \"discord\" requires capability consent; rerun with --accept-capabilities.\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      // Health is impossible until the consent AND the later restart happened,
+      // so merely running the pre-start can never make this green.
+      mockGatewayUp.mockImplementation(async () => {
+        const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+          `${cmd} ${(args as string[]).join(" ")}`,
+        );
+        const consentIndex = calls.findIndex((call) =>
+          call.includes("plugins enable discord --accept-capabilities"),
+        );
+        const restartIndex = calls.findIndex((call) =>
+          call.includes("systemctl restart clawbox-gateway.service"),
+        );
+        return consentIndex >= 0 && restartIndex > consentIndex;
+      });
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      expect(calls.some((call) => call.includes("plugins enable discord --accept-capabilities")))
+        .toBe(true);
+      // Never a reinstall for this arm: the package is on disk (the gateway
+      // would not be naming it otherwise) and an unpinned npm fetch mid-update
+      // is the failure this repair exists to get out of.
+      expect(calls.some((call) => call.includes("plugins install @openclaw/discord"))).toBe(false);
+    });
+
+    it("repairs EVERY managed plugin the boot journal names, not just the first", async () => {
+      // The journal tail is the whole boot (`journalctl -b`) and the gateway
+      // restarts several times during an update, so a stale line can sit ahead
+      // of the live one. Reading only the first match repaired codex — already
+      // consented by the pre-start — while `getGatewayFailureDetail`, which
+      // scans in reverse, handed the owner the DISCORD sentence. Same call,
+      // two halves disagreeing about which plugin is blocking.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: [
+            'Plugin "codex" requires capability consent; rerun with --accept-capabilities.',
+            "Codex runtime plugin capabilities accepted/current",
+            'Plugin "discord" requires capability consent; rerun with --accept-capabilities.',
+            "",
+          ].join("\n"),
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      mockGatewayUp.mockImplementation(async () =>
+        mockExecFile.mock.calls.some(([cmd, args]) =>
+          `${cmd} ${(args as string[]).join(" ")}`
+            .includes("plugins enable discord --accept-capabilities"),
+        ),
+      );
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      expect(calls.some((call) => call.includes("plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities")))
+        .toBe(true);
+      expect(calls.some((call) => call.includes("plugins enable discord --accept-capabilities")))
+        .toBe(true);
+    });
+
+    it("leaves a managed plugin the OWNER switched off switched off", async () => {
+      // `plugins enable` writes `plugins.entries.<id>.enabled = true`, and the
+      // journal tail predates the pre-start. So an owner who reached for the
+      // Terminal and ran `openclaw plugins disable discord` to get his box back
+      // would have had the channel — and consent in his name — restored by the
+      // next update. The Codex arm has always respected this; the new one must.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: 'Plugin "discord" requires capability consent; rerun with --accept-capabilities.\n',
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      mockReadFile.mockImplementation(async (file) => {
+        const name = String(file);
+        if (name.endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+        if (name.endsWith("openclaw.json")) {
+          return JSON.stringify({ plugins: { entries: { discord: { enabled: false } } } });
+        }
+        throw new Error("ENOENT");
+      });
+      mockGatewayUp.mockResolvedValue(false);
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      expect(calls.some((call) => call.includes("plugins enable discord"))).toBe(false);
+    });
+
+    it("repairs a plugin named twice under different spellings only ONCE", async () => {
+      // One boot's journal can carry both spellings — a restart before the
+      // registry key changed, an alias from `plugins list`. Repairing per raw
+      // name would give the pinned force-install two six-minute budgets back
+      // to back on a Jetson for one plugin.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: [
+            'Plugin "discord" requires capability consent; rerun with --accept-capabilities.',
+            'Plugin "openclaw-discord" requires capability consent; rerun with --accept-capabilities.',
+            "",
+          ].join("\n"),
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      mockGatewayUp.mockImplementation(async () =>
+        mockExecFile.mock.calls.some(([cmd, args]) =>
+          `${cmd} ${(args as string[]).join(" ")}`.includes("plugins enable"),
+        ),
+      );
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      const enables = mockExecFile.mock.calls
+        .map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`)
+        .filter((call) => call.includes("plugins enable"));
+      expect(enables).toHaveLength(1);
+      // The FIRST spelling the journal used — the name the registry answered to
+      // when it refused.
+      expect(enables[0]).toContain("plugins enable discord --accept-capabilities");
+    });
+
+    it("respects an owner-disabled plugin recorded under its ALIAS", async () => {
+      // The journal names the core's own plugin id (`discord`), while
+      // `plugins.entries` can be keyed under the alias `ensureChannelPlugin`
+      // enabled it as (`openclaw-discord`). A literal lookup misses the
+      // owner's explicit `enabled: false` and reads it as "no opinion", so the
+      // repair switches his channel back on with consent granted in his name.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: 'Plugin "discord" requires capability consent; rerun with --accept-capabilities.\n',
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      mockReadFile.mockImplementation(async (file) => {
+        const name = String(file);
+        if (name.endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+        if (name.endsWith("openclaw.json")) {
+          return JSON.stringify({
+            plugins: { entries: { "openclaw-discord": { enabled: false } } },
+          });
+        }
+        throw new Error("ENOENT");
+      });
+      mockGatewayUp.mockResolvedValue(false);
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      expect(calls.some((call) => call.includes("plugins enable discord"))).toBe(false);
+    });
+
+    it("leaves a plugin ClawBox does not manage to its owner", async () => {
+      // Consenting on the owner's behalf is only defensible for a package
+      // ClawBox chose and installed. Something he added from the Terminal has
+      // an owner who can answer for it, and the failure detail still names it.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "Plugin \"weatherbot\" requires capability consent; rerun with --accept-capabilities.\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      mockGatewayUp.mockResolvedValue(false);
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        const state = updater.getUpdateState();
+        expect(state.phase).toBe("failed");
+        expect(state.error).toContain('Plugin "weatherbot" requires capability consent');
+      });
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      expect(calls.some((call) => call.includes("plugins enable weatherbot"))).toBe(false);
+    });
+
     it("continues to doctor and restart when the targeted Codex repair fails", async () => {
       setupExecFileMock({
         "plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities": new Error(

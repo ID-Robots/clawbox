@@ -2963,7 +2963,44 @@ for p in d.get("plugins", []):
         @openclaw/*) spec="$pkg@$TARGET" ;;
       esac
       echo "    - $spec"
-      if ! as_clawbox -H "$OPENCLAW_BIN" plugins install "$spec" --force >/dev/null 2>&1; then
+      # --accept-capabilities, for the plugins CLAWBOX installs and only those.
+      #
+      # OpenClaw 2 refuses to install a managed plugin whose declared capability
+      # surface has not been consented to, and a refresh to a new core target is
+      # exactly when that surface changes. Without the flag this loop's only
+      # outcome on a widened plugin is the WARN below, and the gateway then
+      # refuses readiness with 'Plugin "<id>" requires capability consent' until
+      # somebody runs the CLI by hand (TASK-603).
+      #
+      # But the flag consents to the NEW surface, not to the one already on the
+      # box, so passing it for a plugin the owner installed himself would answer
+      # a widened-capabilities question in his name. Same whitelist and same
+      # reason as CLAWBOX_MANAGED_PLUGIN_IDS in src/lib/updater.ts; anything
+      # else is refreshed without it and says so, so he can rerun the CLI.
+      #
+      # Gated on the INSTALLED generation the way the codex install in
+      # gateway-pre-start.sh is: a v1 pin (OPENCLAW_PIN_VERSION, a documented
+      # rollback override) gives a CLI that rejects the unknown option, and
+      # every iteration would then fail behind the WARN below with no plugin
+      # refreshed at all.
+      #
+      # Matched on the NORMALISED id: the registry can key a plugin as
+      # `openclaw-discord` or `@openclaw/discord`, and the raw name would then
+      # fall through to the default arm and be refreshed without consent —
+      # silently, behind the WARN below. `$spec` keeps the raw name, which is
+      # what the CLI has to be given.
+      local CAP_ARGS=()
+      local PLUGIN_KEY="${plugin#@openclaw/}"
+      PLUGIN_KEY="${PLUGIN_KEY#openclaw-}"
+      case "$PLUGIN_KEY" in
+        codex|deepseek|discord|whatsapp|clawbox-email-directives)
+          openclaw_is_v2 && CAP_ARGS=(--accept-capabilities)
+          ;;
+        *)
+          echo "      (not a ClawBox-managed plugin: refreshed without accepting new capabilities)"
+          ;;
+      esac
+      if ! as_clawbox -H "$OPENCLAW_BIN" plugins install "$spec" --force "${CAP_ARGS[@]}" >/dev/null 2>&1; then
         echo "      WARN: refresh failed (non-fatal; gateway-pre-start will retry on next boot)"
       fi
     done <<< "$INSTALLED_PLUGINS"

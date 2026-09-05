@@ -31,9 +31,18 @@ vi.mock("@/lib/openclaw-config", async () => {
   };
 });
 
+// The installed OpenClaw generation, pinned rather than probed: it decides
+// whether `--accept-capabilities` may be passed at all, and the real reader
+// spawns `openclaw --version`, which would shift every argv index below.
+vi.mock("@/lib/openclaw-deepseek-plugin", () => ({
+  installedOpenclawRelease: vi.fn(async () => "2026.8.1"),
+}));
+
 import { OpenclawSpawnTimeoutError, readConfig, spawnOpenclawCli } from "@/lib/openclaw-config";
+import { installedOpenclawRelease } from "@/lib/openclaw-deepseek-plugin";
 
 const mockSpawn = vi.mocked(spawnOpenclawCli);
+const mockRelease = vi.mocked(installedOpenclawRelease);
 const mockReadConfig = vi.mocked(readConfig);
 
 /** openclaw.json with the given plugin ids switched on in `plugins.entries`. */
@@ -67,6 +76,7 @@ describe("ensureChannelPlugin", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    mockRelease.mockResolvedValue("2026.8.1");
     // Default: the gateway config already carries the entry, so the common path
     // does not shell out to `plugins enable`.
     mockReadConfig.mockResolvedValue(configWithEnabled("discord", "whatsapp"));
@@ -96,7 +106,8 @@ describe("ensureChannelPlugin", () => {
       .mockResolvedValueOnce('Enabled plugin "discord". Restart the gateway to apply.');
 
     expect(await lib.ensureChannelPlugin("discord")).toEqual({ ok: true, installed: false });
-    expect(mockSpawn.mock.calls[1][0]).toEqual(["plugins", "enable", "discord"]);
+    expect(mockSpawn.mock.calls[1][0])
+      .toEqual(["plugins", "enable", "discord", "--accept-capabilities"]);
   });
 
   it("enables under the OWNING plugin's id, not the channel's", async () => {
@@ -107,7 +118,8 @@ describe("ensureChannelPlugin", () => {
 
     await lib.ensureChannelPlugin("discord");
 
-    expect(mockSpawn.mock.calls[1][0]).toEqual(["plugins", "enable", "openclaw-discord"]);
+    expect(mockSpawn.mock.calls[1][0])
+      .toEqual(["plugins", "enable", "openclaw-discord", "--accept-capabilities"]);
   });
 
   it("reports install_failed when the enable fails", async () => {
@@ -130,7 +142,8 @@ describe("ensureChannelPlugin", () => {
     const result = await lib.ensureChannelPlugin("discord");
 
     expect(result).toEqual({ ok: true, installed: true });
-    expect(mockSpawn.mock.calls[1][0]).toEqual(["plugins", "install", "@openclaw/discord"]);
+    expect(mockSpawn.mock.calls[1][0])
+      .toEqual(["plugins", "install", "@openclaw/discord", "--accept-capabilities"]);
     // `plugins install` writes plugins.entries.<id> itself, so no second write.
     expect(mockSpawn).toHaveBeenCalledTimes(2);
   });
@@ -143,7 +156,8 @@ describe("ensureChannelPlugin", () => {
       .mockResolvedValueOnce("ok");
 
     expect(await lib.ensureChannelPlugin("discord")).toEqual({ ok: true, installed: true });
-    expect(mockSpawn.mock.calls[2][0]).toEqual(["plugins", "enable", "discord"]);
+    expect(mockSpawn.mock.calls[2][0])
+      .toEqual(["plugins", "enable", "discord", "--accept-capabilities"]);
   });
 
   it("treats OpenClaw's 'plugin already exists' refusal as installed, not as a failure", async () => {
@@ -179,7 +193,8 @@ describe("ensureChannelPlugin", () => {
     const result = await lib.ensureChannelPlugin("whatsapp");
 
     expect(result).toEqual({ ok: true, installed: true });
-    expect(mockSpawn.mock.calls[1][0]).toEqual(["plugins", "install", "@openclaw/whatsapp"]);
+    expect(mockSpawn.mock.calls[1][0])
+      .toEqual(["plugins", "install", "@openclaw/whatsapp", "--accept-capabilities"]);
   });
 
   it("matches a plugin that OWNS the channel under a different plugin id", async () => {
@@ -282,6 +297,7 @@ describe("readChannelStatus", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    mockRelease.mockResolvedValue("2026.8.1");
     // Default: the gateway config already carries the entry, so the common path
     // does not shell out to `plugins enable`.
     mockReadConfig.mockResolvedValue(configWithEnabled("discord", "whatsapp"));
@@ -369,6 +385,7 @@ describe("waitForChannelConnected", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    mockRelease.mockResolvedValue("2026.8.1");
     // Default: the gateway config already carries the entry, so the common path
     // does not shell out to `plugins enable`.
     mockReadConfig.mockResolvedValue(configWithEnabled("discord", "whatsapp"));
@@ -408,5 +425,109 @@ describe("waitForChannelConnected", () => {
 
     expect(status?.tokenStatus).toBe("configured_unavailable");
     expect(mockSpawn).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * OpenClaw 2 refuses to install OR enable a managed plugin whose declared
+ * capability surface has not been consented to. Verified read-only against the
+ * pinned core (2026.8.1) on an OpenClaw box:
+ *
+ *   dist/capability-consent-*.js — `resolvePluginCapabilityConsent` throws
+ *     ManagedPluginLifecycleError('Plugin "<id>" requires capability consent.
+ *     Use openclaw plugins install or openclaw plugins enable with
+ *     --accept-capabilities, then retry.') unless the install record already
+ *     carries an accepted surface hash for the current manifest.
+ *
+ * `spawnOpenclawCli` runs non-interactively, so there is no consent callback to
+ * answer that prompt: without the flag the refusal is the only outcome. ClawBox
+ * already passes it for the other three plugins it manages (codex and deepseek
+ * in gateway-pre-start.sh, codex again in updater.ts) — the channel plugins are
+ * the ones it was never passed for, which is how a Discord save turned into
+ * "the plugin could not be installed" and, on the update path, into a gateway
+ * that refused readiness (TASK-603).
+ */
+describe("ensureChannelPlugin capability consent", () => {
+  let lib: typeof import("@/lib/openclaw-channels");
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    mockRelease.mockResolvedValue("2026.8.1");
+    mockReadConfig.mockResolvedValue(configWithEnabled("discord", "whatsapp"));
+    lib = await import("@/lib/openclaw-channels");
+  });
+
+  it("accepts the declared capabilities when it installs a channel plugin", async () => {
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "telegram" }]))
+      .mockResolvedValueOnce("Installed plugin: discord.");
+
+    expect(await lib.ensureChannelPlugin("discord")).toEqual({ ok: true, installed: true });
+    expect(mockSpawn.mock.calls[1][0]).toContain("--accept-capabilities");
+  });
+
+  it("accepts them for WhatsApp too — nothing is special-cased to Discord", async () => {
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "telegram" }]))
+      .mockResolvedValueOnce("Installed plugin: whatsapp.");
+
+    expect(await lib.ensureChannelPlugin("whatsapp")).toEqual({ ok: true, installed: true });
+    expect(mockSpawn.mock.calls[1][0]).toContain("--accept-capabilities");
+  });
+
+  it("does NOT pass the flag on an OpenClaw 1 rollback, which rejects it", async () => {
+    // Declared-capability consent arrived with OpenClaw 2. A v1 CLI treats
+    // `--accept-capabilities` as an unknown option and fails the whole command
+    // before any plugin state changes, so passing it unconditionally would
+    // turn every Discord save on a rolled-back box (`OPENCLAW_PIN_VERSION` is
+    // a documented override) into `install_failed` over a plugin that would
+    // have installed. `gateway-pre-start.sh` builds its own capability argv
+    // the same way.
+    mockRelease.mockResolvedValue("2026.7.4");
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "telegram" }]))
+      .mockResolvedValueOnce("Installed plugin: discord.");
+
+    expect(await lib.ensureChannelPlugin("discord")).toEqual({ ok: true, installed: true });
+    expect(mockSpawn.mock.calls[1][0]).toEqual(["plugins", "install", "@openclaw/discord"]);
+  });
+
+  it("passes it when the generation cannot be read — v2 is what every box runs", async () => {
+    mockRelease.mockResolvedValue(null);
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "telegram" }]))
+      .mockResolvedValueOnce("Installed plugin: discord.");
+
+    expect(await lib.ensureChannelPlugin("discord")).toEqual({ ok: true, installed: true });
+    expect(mockSpawn.mock.calls[1][0]).toContain("--accept-capabilities");
+  });
+
+  it("asks the generation ONCE per save, not once per verb", async () => {
+    // A probe memoised for the life of the process would be the probe-once
+    // class; a probe per verb is two `openclaw --version` cold starts on a
+    // Jetson for one save.
+    mockReadConfig.mockResolvedValue(configWithEnabled());
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "telegram" }]))
+      .mockResolvedValueOnce("Installed plugin: discord.")
+      .mockResolvedValueOnce("ok");
+
+    await lib.ensureChannelPlugin("discord");
+
+    expect(mockRelease).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts them on the ENABLE too — the verb that runs on an already-installed plugin", async () => {
+    // The live shape of TASK-603: the package is on disk from an earlier core,
+    // so nothing reinstalls it, and the enable is the only call left to record
+    // the consent the gateway demands before it opens its port.
+    mockReadConfig.mockResolvedValue(configWithEnabled());
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "discord" }]))
+      .mockResolvedValueOnce('Enabled plugin "discord".');
+
+    expect(await lib.ensureChannelPlugin("discord")).toEqual({ ok: true, installed: false });
+    expect(mockSpawn.mock.calls[1][0]).toContain("--accept-capabilities");
   });
 });
