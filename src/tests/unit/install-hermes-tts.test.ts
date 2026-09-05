@@ -372,6 +372,35 @@ describe.skipIf(!hasBash)("the on-device voice is registered with Hermes nativel
         .toMatch(/no on-device engine \(.+\)/);
     });
 
+    it("says what an engineless box is left with even when the selection could not be read", () => {
+      // The one arm of this step that can leave `tts.provider` UNSET on a
+      // first install — and this PR is the one that established that an unset
+      // key is Hermes' Edge cloud, not silence. Its warning says the selection
+      // is "left alone", which reads as "no change" when on an unset key it
+      // means Microsoft. The engine verdict is already in hand here; saying it
+      // costs nothing and is the only thing this step can still tell the
+      // operator on this path.
+      const res = runStep("hermes", {
+        hermesReadFails: true,
+        voiceExit: 13,
+        ttsStatus: "KOKORO=skipped:no-cuda\n",
+      });
+
+      expect(res.out).toMatch(/could not read tts.provider/);
+      expect(res.out, `the missing engine was never mentioned:\n${res.out}`)
+        .toMatch(/no on-device engine \(this board declines Kokoro[^)]*\)/);
+      // What an unread selection can be hiding, and the one command that
+      // settles it.
+      expect(res.out).toMatch(/--step openclaw_tts/);
+    });
+
+    it("says nothing about a missing engine on that path when the engine is there", () => {
+      const res = runStep("hermes", { hermesReadFails: true, voiceExit: 0, ttsStatus: "KOKORO=ready\n" });
+
+      expect(res.out).toMatch(/could not read tts.provider/);
+      expect(res.out).not.toMatch(/no on-device engine/);
+    });
+
     it("still leaves an owner's own provider alone when there is no engine", () => {
       const res = runStep("hermes", {
         voiceExit: 13,
@@ -384,6 +413,19 @@ describe.skipIf(!hasBash)("the on-device voice is registered with Hermes nativel
       // the very definition this block is supposed to keep writing.
       expect(res.hermesCalls.join("\n")).not.toContain("config set tts.provider ");
     });
+  });
+
+  it("does not promise the OpenClaw arm a cloud voice the plan may not include", () => {
+    // The Hermes Note says "on a plan that includes cloud speech" because
+    // gateway-pre-start.sh gates the OpenClaw cloud voice on exactly that
+    // device tier (CLAWBOX_SPEECH_DEVICE_TIER) and refuses to write it below
+    // one. The OpenClaw line beside it promised the voice on the link alone —
+    // two harnesses, one box, two answers, in the same install log.
+    const res = runStep("openclaw", { voiceExit: 13, ttsStatus: "KOKORO=skipped:no-cuda\n" });
+
+    expect(res.out).toMatch(/NO working on-device TTS engine/);
+    expect(res.out, `the cloud voice was promised unconditionally:\n${res.out}`)
+      .toMatch(/on a plan that includes cloud speech/);
   });
 
   it("pins the output format to wav, so no utterance needs ffmpeg", () => {

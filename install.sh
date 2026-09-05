@@ -3551,7 +3551,8 @@ step_openclaw_tts() {
         echo "  # This box has NO working on-device TTS engine." >&2
         echo "  # Kokoro (GPU), the only on-device engine, is absent: ${KOKORO_VERDICT:-no verdict published}" >&2
         echo "  # The cloud voice speaks for this box once it is linked to" >&2
-        echo "  # ClawBox AI; until then spoken requests go unanswered." >&2
+        echo "  # ClawBox AI on a plan that includes cloud speech; until then" >&2
+        echo "  # spoken requests go unanswered." >&2
         echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
         echo "  ############################################################" >&2
         # The e2e-install container has no GPU by construction (it says so
@@ -3802,6 +3803,17 @@ step_openclaw_tts() {
           # is safe to repeat. What is refused here is CHOOSING for an owner
           # whose current choice could not be read.
           echo "  Warning: could not read tts.provider from Hermes — leaving the selection alone rather than overwriting a choice we could not read" >&2
+          # ...and say what "alone" can mean here. This is the one arm of this
+          # step that can leave `tts.provider` UNSET on a first install, and an
+          # unset key is not silence: `tools/tts_tool.py` resolves
+          # `(tts_config.get("provider") or DEFAULT_PROVIDER)` with
+          # DEFAULT_PROVIDER = "edge", so it is Microsoft's cloud voice. The
+          # engine verdict is already in hand; on this path it is the only
+          # thing this step can still tell the operator.
+          if [ "$KOKORO_HAVE" != true ]; then
+            echo "           This box also has no on-device engine ($KOKORO_REASON). If the unread selection is unset, Hermes falls back to its factory Edge cloud rather than staying silent. Re-run once the CLI answers:" >&2
+            echo "           sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
+          fi
         else
         case "$CURRENT_HERMES_TTS" in
           ""|null|edge|"$HERMES_TTS_PROVIDER")
@@ -4013,7 +4025,12 @@ step_openclaw_tts() {
         fi
         ;;
       13)
-        echo "  On-device TTS configured, but this box has NO working on-device TTS engine ($KOKORO_REASON) — the cloud voice speaks for it once the box is linked to ClawBox AI"
+        # "on a plan that includes cloud speech", because gateway-pre-start.sh
+        # gates the OpenClaw cloud voice on exactly that device tier
+        # (CLAWBOX_SPEECH_DEVICE_TIER) and refuses to write it below one — the
+        # same tier the Hermes Note above names. Promising it on the link alone
+        # had the two harnesses answering differently about one box.
+        echo "  On-device TTS configured, but this box has NO working on-device TTS engine ($KOKORO_REASON) — the cloud voice speaks for it once the box is linked to ClawBox AI on a plan that includes cloud speech"
         ;;
       *)
         echo "  On-device TTS configured, but NO engine is confirmed installed ($KOKORO_REASON)"
@@ -6582,7 +6599,7 @@ step_validate_services() {
           if harness_has_no_gpu; then
             echo "  CLAWBOX_TEST_NO_GPU=1, on-device TTS declined ($tts_state) — expected without a GPU, not a failed probe"
           else
-            failed_probe+=("TTS: this box has NO working on-device TTS engine — Kokoro, the only on-device engine, does not apply to this board ($tts_state). The cloud voice speaks for it once the box is linked to ClawBox AI. $tts_fix")
+            failed_probe+=("TTS: this box has NO working on-device TTS engine — Kokoro, the only on-device engine, does not apply to this board ($tts_state). The cloud voice speaks for it once the box is linked to ClawBox AI on a plan that includes cloud speech. $tts_fix")
           fi
           ;;
         failed:?*)
