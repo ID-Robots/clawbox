@@ -50,6 +50,11 @@ const APP = "notes";
 const ctx = (edition: "openclaw" | "hermes"): McpContext => ({
   edition,
   install: edition,
+  // The APP harness (#627). `app_uninstall` asks `installedAppIds(null)` for
+  // the UNFILTERED list — an app this harness cannot open is still the owner's
+  // to remove — so this value does not steer these cases; it is the edition
+  // here so the context is the shape a real box hands the registrar.
+  appHarness: edition,
   profile: "full",
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
   providers: [],
