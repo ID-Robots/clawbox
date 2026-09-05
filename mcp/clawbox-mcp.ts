@@ -50,7 +50,7 @@ import { createRegistrar, type Profile } from "./lib/register";
 import { registerAiTools } from "./tools/ai";
 import { registerBrowserTools } from "./tools/browser";
 import { registerCodingTools } from "./tools/coding";
-import { registerCodingAgentTools } from "./tools/coding-agent";
+import { registerCodingAgentTools, registerCodingTeamTools } from "./tools/coding-agent";
 import { registerDesktopTools } from "./tools/desktop";
 import { registerEmailTools } from "./tools/email";
 import { registerMediaTools } from "./tools/media";
@@ -149,6 +149,7 @@ export async function buildServer(edition: Ed, profile: Profile) {
   registerEmailTools(reg, ctx);
   registerCodingTools(reg);
   registerCodingAgentTools(reg, ctx);
+  registerCodingTeamTools(reg, ctx);
 
   // LAST. It takes over tools/call so that argument-validation failures come
   // back as the { error, code, message, next } envelope instead of the SDK's

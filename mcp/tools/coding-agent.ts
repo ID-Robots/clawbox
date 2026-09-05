@@ -369,3 +369,183 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
     },
   );
 }
+
+// ─── Coding TEAMS ────────────────────────────────────────────────────────────
+//
+// The multi-agent shape of the coding agent (src/lib/coding-team.ts): one
+// goal, a planner that splits it into tasks on a shared board, workers that
+// take the tasks one after another, a reviewer that checks each result, and
+// an audit log of every message. Same family, same switch, same harness —
+// registered beside the run tools for the same reasons.
+
+interface TeamTaskPayload {
+  task_id: string;
+  task_description: string;
+  assigned_to: string | null;
+  status: "pending" | "in_progress" | "complete" | "failed" | "rejected";
+  result: string | null;
+  depends_on: string[];
+  review: { verdict: "accepted" | "rejected"; notes: string } | null;
+  attempts: number;
+}
+
+interface TeamPayload {
+  id: string;
+  goal: string;
+  projectId: string | null;
+  directory: string;
+  status: "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
+  plannerRunId: string | null;
+  tasks: TeamTaskPayload[];
+  log: { ts: number; actor: { kind: string; id?: string }; type: string; message: string }[];
+  alerts: number;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+const MAX_GOAL_CHARS = 4_000;
+
+// The team's own "busy" first: the run rules carry one too, and the first
+// match wins.
+const TEAM_RULES: ErrorRule[] = [
+  {
+    status: 409,
+    match: /"kind":\s*"busy"/,
+    code: "CONFLICT",
+    message: "A coding team is already working on this ClawBox.",
+    next: "Do not start another. Call coding_team_status to follow it, or coding_team_stop only if the user asks.",
+  },
+  ...RUN_RULES,
+];
+
+function describeTeam(team: TeamPayload, withLog: boolean): string {
+  const parts: string[] = [];
+  parts.push(`Team ${team.id}: ${team.status}${team.error ? ` — ${team.error}` : ""}`);
+  parts.push(`Goal: ${redact(firstLine(team.goal, 200))}`);
+  parts.push(`Folder: ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}`);
+  if (team.plannerRunId) parts.push(`Planner run: ${team.plannerRunId}`);
+  if (team.tasks.length === 0) {
+    parts.push(team.status === "planning" ? "The planner is still reading the folder and writing the plan." : "No tasks were posted.");
+  } else {
+    parts.push("Tasks:");
+    for (const t of team.tasks) {
+      const bits = [`${t.task_id} [${t.status}${t.review ? `, ${t.review.verdict}` : ""}]`, redact(firstLine(t.task_description, 120))];
+      if (t.assigned_to) bits.push(`worker ${t.assigned_to}`);
+      if (t.depends_on.length) bits.push(`after ${t.depends_on.join(", ")}`);
+      if (t.result) bits.push(`result: ${redact(firstLine(t.result, 200))}`);
+      parts.push(`- ${bits.join(" — ")}`);
+    }
+  }
+  if (team.alerts > 0) parts.push(`Alerts: ${team.alerts} (see the log).`);
+  if (withLog) {
+    parts.push("Log (newest last):");
+    for (const e of team.log.slice(-20)) {
+      const who = e.actor.kind === "worker" ? `worker ${e.actor.id ?? "?"}` : e.actor.kind;
+      parts.push(`- ${new Date(e.ts).toISOString()} ${who}: ${redact(e.message)}`);
+    }
+  }
+  if (team.status === "planning" || team.status === "working" || team.status === "reviewing") {
+    parts.push("Still working. Tell the user and stop; check again later with coding_team_status.");
+  } else if (team.status === "done") {
+    parts.push("Every task is complete and accepted. Summarise the task results for the user, naming the files.");
+  } else if (team.status === "failed") {
+    parts.push("The team stopped short. Tell the user what failed; a fresh coding_agent_run on the unfinished part is the way on.");
+  }
+  return parts.join("\n");
+}
+
+export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "codingAgent">): void {
+  if (!ctx.codingAgent) return;
+
+  reg.tool(
+    "coding_team_run",
+    "Hand a LARGER goal to a coding team on this ClawBox: a planner splits it into a few tasks, workers do them one after another in separate Claude Code sessions, and a reviewer checks each result — all on a shared board with an audit log. Use it for a goal that spans several parts or files; for one focused change use coding_agent_run instead. The team works in the background inside ONE folder and takes a while; call coding_team_status to follow it.",
+    {
+      goal: zText(MAX_GOAL_CHARS, "What to build or change, as a whole. The planner reads the folder and writes the tasks; give the outcome and any constraints, not a task list."),
+      project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
+      directory: zOptText(512, "A folder inside the owner's project folder to work in (its name, or its absolute path), when it is not a code project."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
+    async ({ goal, project_id, directory }: { goal: string; project_id?: string; directory?: string }) => {
+      const body: Record<string, unknown> = { goal };
+      if (project_id) body.projectId = project_id;
+      if (directory) body.directory = directory;
+      let res: { started?: boolean; team?: TeamPayload };
+      try {
+        res = await apiPost<{ started?: boolean; team?: TeamPayload }>("/setup-api/coding-agent/team", body, { timeoutMs: 20_000, rules: TEAM_RULES });
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 400) {
+          throw new ToolError("BAD_ARGUMENT", routeReason(err) ?? "The ClawBox refused that working folder.", WORKING_FOLDER_NEXT);
+        }
+        throw err;
+      }
+      const team = res.team;
+      if (!res.started || !team?.id) {
+        throw new ToolError("ENDPOINT_DOWN", "The ClawBox did not start the team.", "Call coding_team_status to see whether a team appeared; if not, tell the user and do not retry more than once.");
+      }
+      return text(
+        `Started coding team "${team.id}" in ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}. `
+        + "The planner is reading the folder; workers follow one at a time. This takes a while. "
+        + "Tell the user it is running and stop — check on it later with coding_team_status.",
+      );
+    },
+  );
+
+  reg.tool(
+    "coding_team_status",
+    "Check a coding team started by coding_team_run: the plan, each task's status, worker and result, the alerts, and — once finished — what to tell the user. Leave team_id out to list recent teams.",
+    {
+      team_id: zOptText(40, "The team id, e.g. \"team-k3x9q2ab\". Leave it out to list recent teams."),
+      log: zInt(0, 1, 0, "1 to include the last lines of the team's audit log."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: true, maxChars: STATUS_OUTPUT_CHARS },
+    async ({ team_id, log }: { team_id?: string; log: number }) => {
+      if (!team_id) {
+        const data = await apiGet<{ teams?: TeamPayload[] }>("/setup-api/coding-agent/team", { timeoutMs: 15_000 });
+        const teams = data.teams ?? [];
+        if (!teams.length) return text("There are no coding teams on this ClawBox yet. Start one with coding_team_run.");
+        return json(teams.map((t) => ({
+          team_id: t.id,
+          status: t.status,
+          goal: redact(firstLine(t.goal, 80)),
+          project_id: t.projectId,
+          tasks: t.tasks.length,
+          complete: t.tasks.filter((x) => x.status === "complete").length,
+          alerts: t.alerts,
+        })));
+      }
+      let data: { team?: TeamPayload };
+      try {
+        data = await apiGet<{ team?: TeamPayload }>("/setup-api/coding-agent/team", { query: { id: team_id }, timeoutMs: 15_000 });
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) {
+          throw new ToolError("NOT_FOUND", "There is no coding team with that id on this ClawBox.", "Call coding_team_status without a team_id to list the teams that exist.");
+        }
+        throw err;
+      }
+      if (!data.team) throw new ToolError("NOT_FOUND", "There is no coding team with that id on this ClawBox.", "Call coding_team_status without a team_id to list the teams that exist.");
+      return text(describeTeam(data.team, log === 1));
+    },
+  );
+
+  reg.tool(
+    "coding_team_stop",
+    "Stop a coding team that is still working, and the worker it has in flight. Only call this when the USER asks for it — a team takes many minutes by design.",
+    { team_id: zText(40, "The team id, e.g. \"team-k3x9q2ab\".") },
+    { editions: ["openclaw", "hermes"], readOnly: false },
+    async ({ team_id }: { team_id: string }) => {
+      let data: { team?: TeamPayload };
+      try {
+        data = await apiPost<{ team?: TeamPayload }>("/setup-api/coding-agent/team/stop", { id: team_id }, { timeoutMs: 20_000 });
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) {
+          throw new ToolError("NOT_FOUND", "There is no coding team with that id on this ClawBox.", "Call coding_team_status without a team_id to list the teams that exist.");
+        }
+        throw err;
+      }
+      const team = data.team;
+      return text(team ? `Team ${team.id} is ${team.status}. ${describeTeam(team, false)}` : `Asked the ClawBox to stop team ${team_id}.`);
+    },
+  );
+}
