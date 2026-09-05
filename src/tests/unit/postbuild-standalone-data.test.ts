@@ -52,10 +52,14 @@ let standalone: string;
 /** A standalone tree shaped like the one `next build` leaves behind. */
 function buildFixture() {
   fs.mkdirSync(path.join(tmp, "scripts"), { recursive: true });
-  fs.copyFileSync(
-    path.join(REPO, "scripts", "write-build-info.mjs"),
-    path.join(tmp, "scripts", "write-build-info.mjs"),
-  );
+  // Whatever package.json's postbuild actually invokes has to be in the
+  // fixture: write-build-info.mjs, and the step's own script. Copied, not
+  // linked, so the fixture is self-contained.
+  for (const script of ["write-build-info.mjs", "postbuild.sh"]) {
+    const dest = path.join(tmp, "scripts", script);
+    fs.copyFileSync(path.join(REPO, "scripts", script), dest);
+    fs.chmodSync(dest, 0o755);
+  }
   fs.writeFileSync(path.join(tmp, "package.json"), JSON.stringify({ version: "0.0.0-test" }));
 
   fs.mkdirSync(path.join(tmp, "public"), { recursive: true });

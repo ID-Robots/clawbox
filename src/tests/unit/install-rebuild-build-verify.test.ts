@@ -22,10 +22,12 @@ import path from "node:path";
  *  2. It read `bun run build`'s exit status as the verdict and nothing else.
  *     `bun run build` is `next build` PLUS the `postbuild` lifecycle script,
  *     and postbuild is what makes a build servable — BUILD_ID is written
- *     before any of it, and postbuild's own `if [ -n "$SRVJS" ]` guard exits 0
- *     having copied nothing. So a "successful" build can still leave
+ *     before any of it. So a "successful" build can still leave
  *     production-server.js crash-looping on
- *     `require("./.next/standalone/server.js")`.
+ *     `require("./.next/standalone/server.js")`. (postbuild itself exited 0
+ *     over copies that had not happened until TASK-725; it fails now, and
+ *     scripts/postbuild.sh has that suite. The check here is the one that also
+ *     answers whether the build came from the checked-out commit.)
  *
  * The memory half of the same incident — the build being OOM-killed with
  * ollama, Kokoro and llama.cpp resident — was fixed on beta by

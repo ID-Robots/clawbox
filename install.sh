@@ -1296,13 +1296,16 @@ build_entry_present() {
 #
 # `bun run build` exiting 0 is not the same thing, and neither is a fresh
 # .next/BUILD_ID: `bun run build` is `next build` PLUS the `postbuild` lifecycle
-# script (package.json), and postbuild is what makes the build servable — it
-# writes build-info.json and copies .next/static, public/ and the server entry
-# into the standalone tree. Next writes BUILD_ID before any of that, and
-# postbuild's own `if [ -n "$SRVJS" ]` guard exits 0 having copied NOTHING when
-# the standalone entry is missing. So a build can be "complete" by BUILD_ID and
-# still leave production-server.js crash-looping on
-# `require("./.next/standalone/server.js")`.
+# script (scripts/postbuild.sh), and postbuild is what makes the build servable
+# — it writes build-info.json and copies .next/static, public/ and the server
+# entry into the standalone tree. Next writes BUILD_ID before any of that. So a
+# build can be "complete" by BUILD_ID and still leave production-server.js
+# crash-looping on `require("./.next/standalone/server.js")`.
+#
+# postbuild now fails rather than exiting 0 over a copy that did not happen
+# (TASK-725), which closes the case where it copied nothing at all. The check
+# below stays regardless: it is the only one that also answers whether the
+# build on disk came from the checked-out commit.
 #
 # Two questions, and the box already owns the answer to the second:
 #   1. the file the service loads exists  — what step_build has always checked;
