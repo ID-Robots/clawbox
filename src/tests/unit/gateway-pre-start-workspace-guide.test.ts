@@ -120,6 +120,18 @@ function runHelper(fn: string, file: string): string[] {
   return res.stdout.split("\n").filter((l) => l !== "");
 }
 
+/** The same call, for the helpers whose ANSWER is their exit status. */
+function helperStatus(fn: string, file: string): number | null {
+  const script = [
+    "set -euo pipefail",
+    `CLAWBOX_ROOT=${JSON.stringify(dir)}`,
+    `CLAWBOX_WORKSPACE=${JSON.stringify(path.join(dir, "no-such-workspace"))}`,
+    seedingBlock(),
+    `${fn} ${JSON.stringify(file)} || exit $?`,
+  ].join("\n");
+  return spawnSync("bash", ["-c", script], { encoding: "utf-8" }).status;
+}
+
 /** The same run, asserting the exit code the systemd unit demands. */
 function run(template = TEMPLATE, opts: { prelude?: string[] } = {}): { stdout: string; stderr: string } {
   const res = runRaw(template, opts);
@@ -588,6 +600,14 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
 
       expect(enumerated).toEqual(headings());
       expect(enumerated.length).toBeGreaterThanOrEqual(7);
+
+      // …and the equality above has to be earned, not reached by giving up. An
+      // enumerator whose fences do not balance hides nothing and returns every
+      // `## ` line — which is exactly `headings()`, so this case would go green
+      // over a template the block then REFUSES to top up from: no section
+      // reaches any box again, on every boot, with a journal line for a signal.
+      // Balance is what makes the agreement above mean anything.
+      expect(helperStatus("clawbox_fences_balanced", TEMPLATE)).toBe(0);
     });
 
     it("gives an old guide every heading the shipped template carries", () => {
@@ -744,10 +764,47 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
       );
       writeFileSync(guide, "# Guide\n\n## Real section\n\nBody.\n");
 
-      const { stdout } = runRaw(fenced);
+      // `run`, not `runRaw`: with no exit-status check a block that failed
+      // outright would print no `Appended` line and touch no file, and both
+      // assertions below would pass over it.
+      const { stdout } = run(fenced);
 
       expect(stdout).not.toMatch(/Appended/);
       expect(readFileSync(guide, "utf-8")).not.toContain("Not a heading");
+    });
+
+    it("does not pair a fence with a delimiter of the other character", () => {
+      // ``` and ~~~ open different fences, and a delimiter closes only one of
+      // its own character. Kept in a single list they pair by position, so a
+      // ``` block that QUOTES a ~~~ example has its opener paired with the
+      // quoted ~~~ — and the lines between the two quoted delimiters fall
+      // outside every pair. A heading the template only quotes is then
+      // enumerated as a real section and appended to every box, permanently,
+      // and the example above it is cut in half by the separator. Measured on
+      // the fixture below: "Appended to CLAWBOX.md: First, Not a heading,
+      // Second", exit 0, nothing on stderr. This is the D-H1 mis-pairing one
+      // delimiter character over.
+      const mixed = path.join(dir, "mixed-fence-template.md");
+      writeFileSync(
+        mixed,
+        [
+          "# Guide", "",
+          "## First", "", "Body.", "",
+          "```markdown", "~~~", "## Not a heading", "~~~", "```", "",
+          "## Second", "", "Body two.", "",
+        ].join("\n"),
+      );
+      writeFileSync(guide, "# Guide\n");
+
+      const { stdout, stderr } = run(mixed);
+
+      expect(stdout).toMatch(/Appended to CLAWBOX\.md: First, Second$/m);
+      expect(stderr).not.toMatch(/WARNING/);
+      // The quoted block arrives whole, inside `## First`, rather than split
+      // across a separator the phantom section introduced.
+      expect(readFileSync(guide, "utf-8")).toContain(
+        "```markdown\n~~~\n## Not a heading\n~~~\n```\n",
+      );
     });
 
     it("delivers a section the guide only mentions inside a fenced block", () => {
@@ -795,7 +852,14 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
 
       expect(stdout).toMatch(/Appended to CLAWBOX\.md:.*First.*Second.*Third/);
       expect(stderr).not.toMatch(/WARNING/);
-      expect(readFileSync(guide, "utf-8").match(/^## (First|Second|Third)$/gm)).toHaveLength(3);
+      // As three SECTIONS, each behind its own separator — not three heading
+      // lines. Counting headings alone passes on the pre-fix block: it delivers
+      // "First, Third", and `## Second` still turns up in the file because
+      // `## First`'s extraction over-ran to the next heading it could see and
+      // dragged it along. The separator is what says it arrived as itself.
+      for (const heading of ["First", "Second", "Third"]) {
+        expect(readFileSync(guide, "utf-8")).toContain(`\n---\n\n## ${heading}\n`);
+      }
     });
 
     it("refuses to top up from a template whose fences do not balance", () => {
@@ -1097,6 +1161,11 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     expect(first.stdout).not.toMatch(/Appended/);
     expect(second.stdout).not.toMatch(/Appended/);
     expect(first.stderr).toMatch(/could not read .*AGENTS\.md while looking for/);
+    // ONE line, not one per marker. Both calls ask about the same file for the
+    // same reason, and a duplicate reads as two faults to an operator triaging
+    // a failing eMMC by its journal. The old per-marker blocks had this
+    // property and hoisting them into a shared wrapper dropped it.
+    expect(first.stderr.match(/could not read .*AGENTS\.md while looking for/g)).toHaveLength(1);
     expect(readFileSync(agents, "utf-8")).toBe(existing);
   });
 

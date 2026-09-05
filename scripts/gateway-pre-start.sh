@@ -3260,8 +3260,8 @@ CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 # ONE fence rule, shared by the three helpers below.
 #
 # Prepended to each awk program, so `text[i]` is every line with trailing
-# whitespace and a CR trimmed, `raw[i]` is the line as it stands, and
-# `clawbox_fences()` marks in `hidden[i]` the lines a fence encloses. Trailing
+# whitespace and a CR trimmed and `clawbox_fences()` marks in `hidden[i]` the
+# lines a fence encloses, and sets `unbalanced` when one never closed. Trailing
 # whitespace is trimmed in one place for all three: a heading that differs from
 # the template's only by a trailing space would otherwise be judged absent by
 # one helper and found by another, and the section appended a second time,
@@ -3284,38 +3284,72 @@ CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 # not one word on stderr. The interval form `{0,3}` is not available: mawk 1.3.4
 # does not merely reject it, it aborts with `REcompile() - panic`.
 #
+# A delimiter also closes only a fence opened with the SAME character, and only
+# with a run at least as long — CommonMark again, and the same mis-pairing as
+# above one delimiter character over. These files document markdown, so a ```
+# block quoting a ~~~ example is an ordinary edit; with both characters in one
+# list the ``` opener pairs with the quoted ~~~, the lines between the two
+# quoted delimiters fall outside every pair, and a heading the template only
+# QUOTES is appended to every box as a section of its own. The run-length half
+# is what lets a ```` block quote a ``` one, which is how this template shows
+# markdown inside markdown.
+#
+# CommonMark's third closer rule — that a closer carries no info string, so
+# "```markdown" cannot close "```text" — is deliberately NOT applied. It is the
+# one rule of the three that can only ever turn "unbalanced" into "balanced",
+# and balanced is the answer that HIDES lines. Measured: with it, a guide
+# carrying one stray ``` had the sections appended below it swallowed by that
+# stray on the next boot and appended again, and again — the unbounded growth
+# this whole block exists to stop. The other two rules lean the other way, and
+# leaning toward "read it as prose" is the whole design.
+#
 # And a fence hides only what it CLOSES, which is the whole reason these read
-# the file twice instead of toggling as they go. An odd delimiter count is
+# the file twice instead of toggling as they go. An opener with no closer is
 # ordinary damage in a file the owner and the agent both edit, and a naive
 # toggle makes it catastrophic in BOTH directions: on the destination every
 # heading after the stray delimiter is "missing", the copy this block appends
 # lands in the fenced region too, and the file grows by those sections on EVERY
-# boot; on the template the headings simply stop being enumerated. Unbalanced
-# fences are therefore read as prose, which is what this script did before
-# fences were considered at all — and the two blocks below SAY SO rather than
-# leaving it silent, because "read as prose" on the destination means a heading
-# quoted inside a fence counts as present and its section is withheld.
+# boot; on the template the headings simply stop being enumerated. Such a file
+# is therefore read as prose — nothing is hidden at all, which is what this
+# script did before fences were considered — and the two blocks below SAY SO
+# rather than leaving it silent, because "read as prose" on the destination
+# means a heading quoted inside a fence counts as present and its section is
+# withheld.
 CLAWBOX_FENCE_AWK='
-  function clawbox_fences(   i, j) {
-    if (fences % 2) return
-    for (i = 1; i < fences; i += 2)
-      for (j = fence[i]; j <= fence[i + 1]; j++) hidden[j] = 1
+  function clawbox_fences(   i, j, k, open, pairs, from, to) {
+    open = 0; pairs = 0
+    for (i = 1; i <= fences; i++) {
+      if (!open) { open = i; continue }
+      if (fchar[i] != fchar[open] || flen[i] < flen[open]) continue
+      pairs++; from[pairs] = fence[open]; to[pairs] = fence[i]; open = 0
+    }
+    unbalanced = (open != 0)
+    if (unbalanced) return
+    for (k = 1; k <= pairs; k++)
+      for (j = from[k]; j <= to[k]; j++) hidden[j] = 1
   }
   {
-    raw[NR] = $0
     line = $0; sub(/[ \t\r]+$/, "", line); text[NR] = line
-    if (line ~ /^ *(```|~~~)/ && match(line, /^ */) && RLENGTH < 4) fence[++fences] = NR
+    if (line ~ /^ *(```|~~~)/ && match(line, /^ */) && RLENGTH < 4) {
+      mark = substr(line, RLENGTH + 1)
+      char = substr(mark, 1, 1)
+      run = 1
+      while (substr(mark, run + 1, 1) == char) run++
+      fences++
+      fence[fences] = NR; fchar[fences] = char; flen[fences] = run
+    }
   }
 '
 
 # Do this file'"'"'s fences balance? 0 yes, 1 no, 2 could not be read.
 #
 # Asked once per file rather than folded into the helpers, because the answer is
-# a fact about the FILE and the helpers are called once per heading.
+# a fact about the FILE and the helpers are called once per heading. It is the
+# same pairing the helpers use, not a second rule that could drift from it.
 clawbox_fences_balanced() {
   [ -r "$1" ] || return 2
   awk "$CLAWBOX_FENCE_AWK"'
-    END { exit(fences % 2 ? 1 : 0) }
+    END { clawbox_fences(); exit(unbalanced ? 1 : 0) }
   ' "$1"
 }
 
@@ -3370,6 +3404,11 @@ clawbox_file_has_heading() {
 # template's too ends the topped-up guide on a dangling rule.
 clawbox_guide_section() {
   heading="$2" awk "$CLAWBOX_FENCE_AWK"'
+    # The only helper that reproduces lines rather than matching them, so it is
+    # the only one that keeps a second copy of the file in memory. The shared
+    # prologue builds `text[]`, which is trimmed; a section must be appended to
+    # the box exactly as it is shipped.
+    { raw[NR] = $0 }
     END {
       clawbox_fences()
       for (i = 1; i <= NR && !start; i++)
@@ -3678,16 +3717,28 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   # stripped rootfs, the file losing readability after the test), the way the
   # CLAWBOX.md loop above already does. AGENTS.md is the file the harness
   # injects into every session, under a bootstrap character budget.
+  #
+  # One warning per fault, not one per marker: both calls below ask about the
+  # SAME file for the same reason, so an unreadable AGENTS.md would otherwise
+  # put two lines in the journal, and a duplicate reads as two faults to whoever
+  # is triaging a failing eMMC. The old code had this property and the hoist
+  # into a shared wrapper dropped it.
+  CLAWBOX_AGENTS_UNREADABLE=0
   clawbox_agents_append() {
-    # `local`, or the boot-time value leaks into the second marker's call and a
-    # `case` that never ran reads the first one's answer.
+    # `local` for namespace hygiene beside `clawbox_append_or_rollback`, which
+    # declares its own: the value is assigned on every call, so nothing leaks
+    # between them, but a name this file uses nowhere else should not become a
+    # global that a later block could read.
     local CLAWBOX_AGENTS_SEEN=0
     clawbox_file_has_heading "$CLAWBOX_AGENTS_MD" "$1" || CLAWBOX_AGENTS_SEEN=$?
     case "$CLAWBOX_AGENTS_SEEN" in
       0) return 0 ;;
       1) ;;
       *)
-        echo "  WARNING: could not read $CLAWBOX_AGENTS_MD while looking for '$1'; leaving it as it is" >&2
+        if [ "$CLAWBOX_AGENTS_UNREADABLE" = 0 ]; then
+          CLAWBOX_AGENTS_UNREADABLE=1
+          echo "  WARNING: could not read $CLAWBOX_AGENTS_MD while looking for its markers; leaving it as it is" >&2
+        fi
         return 0
         ;;
     esac
