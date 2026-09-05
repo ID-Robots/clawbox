@@ -1,6 +1,7 @@
 import { hermesConfigGet, hermesConfigGetMany, hermesConfigReadPending } from "@/lib/hermes-config-cache";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { LOCAL_TTS_PROVIDER_ID, type VoiceConfigView } from "@/lib/voice-output";
+import { isClawboxAiToken } from "@/lib/clawai-token";
 
 /**
  * Speech on the Hermes edition, driven through Hermes' OWN TTS pipeline.
@@ -92,6 +93,48 @@ export interface HermesVoiceProbe {
    * under a panel calling it ready.
    */
   cloudHasKey: boolean;
+  /**
+   * Whether that credential is one OF OURS — a `claw_` portal token.
+   *
+   * The other half of "is this slot ours", and the half that survives a move.
+   * `CLAWBOX_AI_PROXY_URL` is env-overridable and expected to change in a
+   * release — `hermes-clawai.ts` says in as many words that a re-link exists to
+   * repair `image_gen.clawai.base_url` when it does — so matching the endpoint
+   * against the CURRENT constant alone reads our own box, linked under the
+   * previous address, as the owner's. The credential beside it says otherwise.
+   *
+   * A presence, never the value: nothing outside `writeHermesCloudTarget` needs
+   * to carry a token around, and an owner's `sk-…` fails this as it should.
+   */
+  cloudKeyIsOurs: boolean;
+  /**
+   * Which of these reads did NOT answer, as opposed to answering "unset".
+   *
+   * `hermes config get` exits the same way for an unset key and for a read
+   * that never completed — a 10 s timeout, an OOM-killed Python start on a
+   * loaded Jetson — and every field above collapses both into `null`/`false`.
+   * A page that re-fetches can live with that; a writer that runs ONCE cannot,
+   * because each of these keys decides something it cannot take back:
+   *
+   *   - `provider`     — replacing a choice we could not read.
+   *   - `cloudRoute`   — `tts.openai` is Hermes' GENERIC OpenAI-compatible
+   *                      slot. An unread empty string read as "unset, so ours"
+   *                      overwrites an owner's own speech server, their key and
+   *                      their model, with every panel unchanged.
+   *   - `cloudKey`     — and the same slot's OTHER occupancy signal. `base_url`
+   *                      is optional for real OpenAI, so an owner using Hermes'
+   *                      own `openai` TTS has a key and no endpoint: the key is
+   *                      then the only thing that says the slot is taken, and
+   *                      an unread one must not be read as an empty one.
+   *   - `localProvider`— an unread definition read as "this box has no
+   *                      on-device voice" sends a working box off-device for
+   *                      good: `step_openclaw_tts` then sees `openai` and
+   *                      preserves it as the owner's choice.
+   *
+   * Free to compute: `hermesConfigReadPending` reads the memo the reads above
+   * have just filled, and spawns nothing.
+   */
+  unread: { provider: boolean; cloudRoute: boolean; cloudKey: boolean; localProvider: boolean };
 }
 
 function trimmed(value: string | undefined): string | null {
@@ -122,7 +165,50 @@ export async function readHermesVoice(): Promise<HermesVoiceProbe> {
     cloudModel: trimmed(values[KEYS.cloudModel]),
     cloudBaseUrl: trimmed(values[KEYS.cloudBaseUrl]),
     cloudHasKey: trimmed(values[KEYS.cloudApiKey]) !== null,
+    cloudKeyIsOurs: isClawboxAiToken(values[KEYS.cloudApiKey] ?? ""),
+    unread: {
+      provider: hermesConfigReadPending(KEYS.provider),
+      cloudRoute: hermesConfigReadPending(KEYS.cloudBaseUrl),
+      cloudKey: hermesConfigReadPending(KEYS.cloudApiKey),
+      // Either half: the type and the command are one definition, and a box
+      // whose `type` answered `command` while the command string timed out is
+      // as unknown as one where neither answered.
+      localProvider: hermesConfigReadPending(KEYS.localType)
+        || hermesConfigReadPending(KEYS.localCommand),
+    },
   };
+}
+
+/**
+ * Is Hermes' `openai` slot OURS — ours to write, and ours to call ClawBox cloud
+ * in a panel?
+ *
+ * ONE rule, two callers, deliberately. `applyClawaiToHermes` asks it before
+ * writing, and `hermesVoiceConfigView` asks it before saying the box speaks
+ * through ClawBox — and those two disagreeing is how a panel comes to report an
+ * owner's own speech server as ours while the writer politely leaves it alone.
+ *
+ * Ownership needs POSITIVE evidence, in three shapes:
+ *
+ *  - the endpoint names our proxy;
+ *  - or the credential is a `claw_` portal token, which is what survives the
+ *    proxy URL moving in a release (a re-link repairs the chat provider's copy
+ *    of that URL for the same reason);
+ *  - or the slot is genuinely EMPTY — no endpoint AND no key. `base_url` is
+ *    optional for real OpenAI, so an unset endpoint alone says nothing: the
+ *    canonical way an owner uses Hermes' generic `openai` slot is their key
+ *    with no URL at all.
+ *
+ * And a read that did not answer is not evidence of anything: `hermes config
+ * get` exits the same way for an unset key and for one an OOM-killed Python
+ * start never answered. Failing closed costs a 401 the Voice panel can fix;
+ * failing open overwrites a speech server someone runs, silently and for good.
+ */
+export function hermesCloudRouteIsOurs(probe: HermesVoiceProbe, proxyUrl: string): boolean {
+  if (probe.unread.cloudRoute || probe.unread.cloudKey) return false;
+  if (probe.cloudKeyIsOurs) return true;
+  if (probe.cloudBaseUrl === null) return !probe.cloudHasKey;
+  return probe.cloudBaseUrl.replace(/\/+$/, "") === proxyUrl.replace(/\/+$/, "");
 }
 
 /**
@@ -163,6 +249,9 @@ export function hermesVoiceConfigView(
   if (probe.localRegistered && probe.localCommand) {
     providers[LOCAL_TTS_PROVIDER_ID] = { command: probe.localCommand };
   }
+  // Whose route is in the slot. Asked with the SAME rule the link path writes
+  // by, so the panel and the writer cannot disagree about one box.
+  const routeIsOurs = proxyUrl !== null && hermesCloudRouteIsOurs(probe, proxyUrl);
   if (token) {
     providers[HERMES_CLOUD_TTS_PROVIDER] = {
       apiKey: token,
@@ -189,7 +278,13 @@ export function hermesVoiceConfigView(
       // is: `proxyUrl` null means "not entitled", and the panel then falls to
       // `cloudCredentialIsUnusable` and its "comes with ClawBox AI Max" line,
       // which is the true statement about such a box.
-      ...(proxyUrl ? { baseUrl: probe.cloudBaseUrl ?? proxyUrl } : {}),
+      //
+      // A FOREIGN endpoint is never shown as ours. The persisted value is read
+      // back only while it is a route we put there; where the owner aimed the
+      // generic slot at their own speech server, this reports the address a
+      // ClawBox WOULD use, so the row offers "switch to ClawBox cloud" rather
+      // than describing their server as if it were ours.
+      ...(proxyUrl ? { baseUrl: (routeIsOurs && probe.cloudBaseUrl) || proxyUrl } : {}),
       ...(probe.cloudVoice ? { voice: probe.cloudVoice } : {}),
       ...(probe.cloudModel ? { model: probe.cloudModel } : {}),
     };
@@ -206,9 +301,18 @@ export function hermesVoiceConfigView(
       // through Microsoft — a cloud the customer never chose and the privacy
       // line never names. Reported as no active engine instead, which is the
       // truth and which also lets Auto move the box onto a real one.
+      // `openai` is dropped for the same reason `edge` is, and it is the same
+      // sentence: a cloud the customer never chose must not be reported as
+      // ClawBox's. On Hermes `openai` is the GENERIC OpenAI-compatible slot, so
+      // a selection pointing at the owner's own speech server was rendered as
+      // "ClawBox cloud, active, with the device token" — the privacy line named
+      // the wrong destination, and re-selecting what looked already active ran
+      // the one write that overwrites their endpoint, key and model. Reported
+      // as no active engine instead, which is true and which leaves the cloud
+      // row selectable as the explicit choice it would be.
       ...(probe.provider === HERMES_LOCAL_TTS_PROVIDER
         ? { provider: LOCAL_TTS_PROVIDER_ID }
-        : probe.provider === HERMES_CLOUD_TTS_PROVIDER
+        : probe.provider === HERMES_CLOUD_TTS_PROVIDER && routeIsOurs
           ? { provider: HERMES_CLOUD_TTS_PROVIDER }
           : {}),
       providers,
@@ -262,7 +366,7 @@ export async function writeHermesCloudTarget(token: string): Promise<void> {
   // whose edition that CLI does not exist.
   const { CLAWBOX_AI_PROXY_URL } = await import("@/lib/harness/credentials");
   await set(KEYS.cloudBaseUrl, CLAWBOX_AI_PROXY_URL);
-  await set(`tts.${HERMES_CLOUD_TTS_PROVIDER}.api_key`, token);
+  await set(KEYS.cloudApiKey, token);
   await set(KEYS.cloudModel, HERMES_CLOUD_TTS_MODEL);
 }
 
@@ -280,6 +384,25 @@ export async function selectHermesEngine(engine: "local" | "cloud", token: strin
     if (!token) throw new HermesTtsWriteError("This box has no ClawBox AI credential to speak with.");
     await writeHermesCloudTarget(token);
   }
+  await selectHermesProvider(engine);
+}
+
+/**
+ * Point `tts.provider` at an engine whose definition is ALREADY on the box.
+ *
+ * The selection half of `selectHermesEngine`, on its own, for the one caller
+ * that has already written the definition itself: the ClawBox AI link path
+ * refreshes `tts.openai.*` on every entitled link — the portal rotates the
+ * token — and then selects. Going back through `selectHermesEngine` there
+ * wrote the same three keys a second time: three more `hermes config set`
+ * spawns (15 s timeout each) inside a request the customer is watching, and a
+ * second chance to throw away a selection the first write had already made
+ * safe.
+ *
+ * So: one writer of `tts.provider`, and the ordering rule above is the
+ * caller's to keep — this writes nothing else, and never a credential.
+ */
+export async function selectHermesProvider(engine: "local" | "cloud"): Promise<void> {
   await set(KEYS.provider, hermesProviderFor(engine));
 }
 
@@ -456,7 +579,19 @@ export async function hermesSpeaksReplies(): Promise<boolean> {
       const [type, command, installed] = await Promise.all([
         hermesConfigGet(KEYS.localType),
         hermesConfigGet(KEYS.localCommand),
-        localTtsEngineInstalled(),
+        // THE rule, in the one place it lives — `hasLocalTtsEngine` (the
+        // Kokoro stamp AND the unit), which `kokoroEntry` and the ClawBox AI
+        // link path apply to the same box. Asking it any other way here is
+        // how the chat turn and the Voice tab came to give one box two
+        // answers; a second derivation under the same name also built the
+        // whole inventory — a `processMemoryBytes` scan and a second
+        // `systemctl --user` pair — to fill in this boolean, on every reply.
+        //
+        // Imported lazily: `local-models` reaches systemd and the filesystem,
+        // and this module is pulled in by the chat turn, which has no other
+        // reason to load it. It fails closed itself, and the catch below
+        // covers the import.
+        import("@/lib/local-models").then((m) => m.hasLocalTtsEngine()),
       ]);
       const script = trimmed(command);
       if (trimmed(type) !== "command" || script === null || !installed) return false;
@@ -540,33 +675,13 @@ export async function speechEntitledTier(): Promise<boolean> {
 }
 
 /**
- * Is an on-device TTS engine actually installed on this box?
- *
- * The same fact the Voice tab's local engine is judged by — `buildTtsInventory()`
- * stats Kokoro's own artefacts — so the chat's promise of a player and the
- * panel's verdict cannot disagree about one box. Imported lazily: `local-models`
- * reaches systemd and the filesystem, and this module is pulled in by the chat
- * turn, which has no other reason to load it.
- *
- * Fails CLOSED, like every other fact behind a capability.
- */
-async function localTtsEngineInstalled(): Promise<boolean> {
-  try {
-    const { buildTtsInventory } = await import("@/lib/local-models");
-    return (await buildTtsInventory()).some((m) => m.kind === "tts" && m.installed);
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Is the command the provider names one this box can actually RUN?
  *
  * Asked through the same helper the Voice tab's `commandPresent` asks it
  * through, so neither surface can decide on its own what "the command is
- * there" means — the divergence the conjunct above this one exists to close.
- * Imported lazily for the reason `localTtsEngineInstalled` gives; it fails
- * closed itself, and this catch covers the import.
+ * there" means — the divergence the engine conjunct beside it exists to
+ * close. Imported lazily for the same reason that one is; it fails closed
+ * itself, and this catch covers the import.
  */
 async function commandRunnable(command: string): Promise<boolean> {
   try {

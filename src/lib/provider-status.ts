@@ -15,6 +15,7 @@
 // scans the response for token-shaped values.
 
 import { getActiveHarness, type Harness } from "@/lib/harness";
+import { isClawboxAiToken } from "@/lib/clawai-token";
 import { hasClawaiToken } from "@/lib/harness/credentials";
 import { readConfig } from "@/lib/openclaw-config";
 import { get as getConfigValue } from "@/lib/config-store";
@@ -280,10 +281,7 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
   return { harness: "hermes", providers, defaultProvider, degraded: payload.stale && !awaitingProbe };
 }
 
-/** The `claw_` prefix is the ClawBox AI portal token format (see clawkeep.ts). */
-export function isClawboxAiToken(value: string): boolean {
-  return value.trim().startsWith("claw_");
-}
+export { isClawboxAiToken } from "@/lib/clawai-token";
 
 /**
  * OpenClaw: `openclaw.json` is the whole answer. A provider is connected when

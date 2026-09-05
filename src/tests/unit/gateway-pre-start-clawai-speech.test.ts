@@ -414,3 +414,20 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts h
     expect(tts.providers?.openai).toEqual({ baseUrl: "https://their.own/voice", model: "x" });
   });
 });
+
+/**
+ * The two editions gate cloud speech on the same device tier. They do it from
+ * two constants — this script's `CLAWBOX_SPEECH_DEVICE_TIER` and
+ * `hermes-tts.ts`'s `CLAWBOX_AI_SPEECH_TIER` — in two languages, because
+ * neither runtime can import the other's. Nothing but this case stops them
+ * drifting into disagreeing about which boxes have a cloud voice.
+ */
+describe("both editions gate cloud speech on the same tier", () => {
+  it("the shell constant and the TypeScript one are the same value", async () => {
+    const { CLAWBOX_AI_SPEECH_TIER } = await import("@/lib/hermes-tts");
+    const src = readFileSync(SCRIPT, "utf-8");
+    const m = src.match(/^CLAWBOX_SPEECH_DEVICE_TIER\s*=\s*"([^"]+)"/m);
+    expect(m, "gateway-pre-start.sh no longer names CLAWBOX_SPEECH_DEVICE_TIER").not.toBeNull();
+    expect(m?.[1]).toBe(CLAWBOX_AI_SPEECH_TIER);
+  });
+});

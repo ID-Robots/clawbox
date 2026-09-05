@@ -36,6 +36,9 @@ vi.mock("@/lib/harness", async (importOriginal) => {
 
 vi.mock("@/lib/hermes-config-cache", () => ({
   hermesConfigGetMany: async (keys: string[]) => Object.fromEntries(keys.map((k) => [k, ""])),
+  // Every key in this fixture ANSWERED: `readHermesVoice` reports which of its
+  // own reads did not, and an unread key is not an unset one.
+  hermesConfigReadPending: () => false,
 }));
 
 vi.mock("@/lib/hermes-cli", () => ({

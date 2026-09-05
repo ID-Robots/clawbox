@@ -71,18 +71,15 @@ vi.mock("@/lib/hermes-config-cache", async (importOriginal) => ({
 }));
 
 /**
- * Kokoro on the disk. The capability asks the same inventory the Voice tab
- * asks, so a box whose engine never installed promises no player — see
- * `localTtsEngineInstalled`. Installed by default here; one case below empties
- * it.
+ * Kokoro on the disk. The capability asks it through `hasLocalTtsEngine` — the
+ * one place the stamp-AND-unit rule lives, and the same one the Voice tab's
+ * own row is built from — so a box whose engine never installed promises no
+ * player. Installed by default here; one case below takes it away.
  */
 let ttsInstalled = true;
 vi.mock("@/lib/local-models", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/local-models")>()),
-  buildTtsInventory: async () =>
-    ttsInstalled
-      ? [{ id: "kokoro", name: "Kokoro", kind: "tts", installed: true }]
-      : [{ id: "kokoro", name: "Kokoro", kind: "tts", installed: false }],
+  hasLocalTtsEngine: async () => ttsInstalled,
 }));
 
 /** Hermes' own speak endpoint. */
