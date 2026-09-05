@@ -1068,7 +1068,14 @@ function ChromeDesktopInner() {
       if (removed?.skillHalfChecked === false) {
         window.dispatchEvent(new CustomEvent("clawbox:toast", {
           detail: {
-            message: "Removed from the desktop. OpenClaw's configuration couldn't be read, so its skills weren't checked — if this app also had a skill, it may still be installed.",
+            // The remedy, not just the problem. The desktop entry has just
+            // been dropped from `installed_apps`, so Settings → Apps will not
+            // list this app any more and there is no route back to it in the
+            // UI: the Terminal is the only way to remove the skill, and the
+            // agent is told exactly that (`mcp/tools/desktop.ts`). This toast
+            // auto-hides after 8 s, so the next step has to be IN it. 227 of
+            // the 280 characters `ToastHost` keeps.
+            message: "Removed from the desktop. OpenClaw's configuration couldn't be read, so its skills weren't checked — if this app also had a skill, it may still be installed. Remove it from the Terminal once the configuration is readable again.",
           },
         }));
       }
