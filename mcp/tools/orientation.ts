@@ -123,6 +123,52 @@ function loadFieldGuide(): string | null {
   }
 }
 
+const EDITION_BLOCK_OPEN = /^<!--\s*edition:([a-z]+)\s*-->\s*$/;
+const EDITION_BLOCK_CLOSE = /^<!--\s*\/edition\s*-->\s*$/;
+
+/**
+ * The field guide with the blocks that belong to the OTHER harness removed.
+ *
+ * TASK-540: `clawbox_context` served Clawbox.md verbatim, so a Hermes agent was
+ * oriented by an OpenClaw script — told it was "the brain of an OpenClaw
+ * ClawBox", handed the address of a gateway that is masked on that SKU and the
+ * path of a config file that does not exist there, and offered `bash`,
+ * `write_file`, `web_search` and the rest of the coding family, none of which
+ * is registered on Hermes (`mcp/tools/coding.ts`). `mcp/clawbox-mcp.ts`
+ * `instructionsFor()` had already branched the server's own stub per edition
+ * for exactly this reason; the field guide is the half that had not.
+ *
+ * ONE document, fenced in place, rather than a second file: two files drift
+ * within a release, and the shared four fifths of this guide is the part that
+ * has to stay identical. Everything outside a fence is served to both.
+ *
+ * Fails CLOSED. An unknown edition name matches nothing and its block is
+ * dropped everywhere, which costs some text; the alternative — serving a block
+ * whose audience could not be established — is how the Hermes agent was told
+ * it had a gateway in the first place.
+ */
+export function fieldGuideForEdition(markdown: string, edition: Ed): string {
+  const kept: string[] = [];
+  // null = outside any fence; false = inside another harness's block.
+  let keeping: boolean | null = null;
+  for (const line of markdown.split("\n")) {
+    const open = EDITION_BLOCK_OPEN.exec(line);
+    if (open) {
+      keeping = open[1] === edition;
+      continue;
+    }
+    if (EDITION_BLOCK_CLOSE.test(line)) {
+      keeping = null;
+      continue;
+    }
+    if (keeping === false) continue;
+    kept.push(line);
+  }
+  // A dropped block leaves the blank lines that surrounded it behind. Markdown
+  // does not care, but the agent pays for every one of them.
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
 interface StatsPayload {
   memory?: { usedPercent?: number };
   storage?: { mountpoint?: string; size?: string; used?: string; avail?: string; usePercent?: number }[];
@@ -406,7 +452,8 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: 24_000 },
     async () => {
-      const guide = loadFieldGuide();
+      const raw = loadFieldGuide();
+      const guide = raw === null ? null : fieldGuideForEdition(raw, ctx.edition);
       const parts: string[] = [];
       if (guide && guide.trim()) parts.push(guide);
       else parts.push(`(The device field guide is not installed on this ClawBox.)`);
