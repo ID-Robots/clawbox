@@ -966,6 +966,12 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
       // The id resolved to several skills, so it names none of them: installing
       // it can only fail. The chooser below is the whole action here.
       <span className="text-sm text-[var(--text-secondary)]">{COPY.ambiguousPickFirst}</span>
+    ) : detail.error?.code === 'not_found' ? (
+      // Hermes has just refused this id outright, which is a STRONGER reason
+      // than the ambiguity above: offering Install for a skill the device says
+      // does not exist is an action that cannot succeed, next to a note saying
+      // so.
+      null
     ) : (
       renderBrowseAction(selected as HermesSkill, 'detail')
     );

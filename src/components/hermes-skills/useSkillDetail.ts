@@ -274,10 +274,19 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
   const heldFor = detailKey(inspectId, fromInstalled);
   const stale = !held || held.key !== heldFor || held.skill.id !== inspectId;
   const fromThisRun = (a: { key: string; run: number }) => a.key === heldFor && a.run === epoch.current;
+  const failure = errorState && fromThisRun(errorState) ? errorState : null;
   return {
     detail: stale ? null : held.skill,
-    phase: stale ? 'meta' : phase,
-    error: errorState && fromThisRun(errorState) ? errorState : null,
+    // `stale` means "nothing held for this selection", which is true both
+    // BEFORE the first answer and after a `not_found` deliberately threw the
+    // placeholder away — and those are opposite states. Reporting the second as
+    // 'meta' made the phase revert for as long as the panel stayed open, which
+    // `SkillDetail` reads as `docsPending` and paints as a documentation
+    // skeleton underneath "there's nothing to show". A spinner that never
+    // resolves beside "this does not exist" is the contradiction this card
+    // exists to remove, so an answered failure is terminal.
+    phase: stale && !failure ? 'meta' : phase,
+    error: failure,
     ambiguous: ambiguous && fromThisRun(ambiguous) && ambiguous.query === inspectId ? ambiguous : null,
     refresh,
   };

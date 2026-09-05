@@ -202,20 +202,6 @@ describe("skill_info — an id Hermes could not narrow down", () => {
     expect(out.error.next).toContain("clawhub/notion-api");
   });
 
-  it("does not report a placeholder when the docs call answered with nothing to add", async () => {
-    // A 200 that carried no body and no description settles nothing, and the
-    // record itself carries no description, no source and no trust: there is
-    // nothing on this device, and nothing from Hermes, that says the skill
-    // exists — only the id the caller typed.
-    twoPhaseAnswers({ skill: { ...UNBACKED.skill, catalogMiss: undefined } }, { delta: {} });
-
-    const out = await skills().call("skill_info", { id: UNKNOWN_ID });
-
-    expect(out.isError).toBe(true);
-    if (!out.isError) return;
-    expect(out.error.code).toBe("NOT_FOUND");
-  });
-
   it("still describes a skill only HERMES backs, however thin its panel is", async () => {
     // The other side of the floor, and the false failure it must not become.
     // A skill published since this device built its catalogue snapshot is real

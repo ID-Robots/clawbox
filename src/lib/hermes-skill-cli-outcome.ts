@@ -341,3 +341,56 @@ export function parseUninstallOutcome(stdout: string, stderr = ''): UninstallOut
   if (UNINSTALL_CANCELLED_RE.test(flat)) return { kind: 'cancelled' };
   return { kind: 'unknown' };
 }
+
+/**
+ * What a `skills inspect` run that printed NO SKILL PANEL actually said.
+ *
+ *   "ambiguous"   — the disambiguation table: several catalogue rows answer to
+ *                   this name, and the ids are on stdout.
+ *   "suggestions" — "No exact match for 'x'. Did you mean one of these?", the
+ *                   other candidate-bearing shape, with its ids on stdout.
+ *   "not-found"   — "No skill named 'x' found in any source." The ONE sentence
+ *                   that means the skill does not exist.
+ *   "unavailable" — everything else: a source that could not be fetched, a rate
+ *                   limit, a shape this parser does not know. The CLI exits 0
+ *                   for all of them (see this module's header: "it fails to
+ *                   download and exits 0"), so an exit code cannot tell them
+ *                   apart and the caller must not read them as an absence.
+ *
+ * Split out from {@link parseInstallOutcome} rather than reusing it whole: that
+ * one also decodes install-only states (`already-installed`, `blocked-*`, the
+ * scan verdict) which cannot occur here, and its `unresolved` kind folds
+ * "no such skill" together with "no source adapter" — a distinction that does
+ * not matter when you are refusing an INSTALL and decides the sentence when you
+ * are answering "does this exist".
+ */
+export type InspectNoPanelKind = 'ambiguous' | 'suggestions' | 'not-found' | 'unavailable';
+
+/** `No skill named 'x' found in any source` — the device's own words for it. */
+const INSPECT_NOT_FOUND_RE = /No skill named '[^']*' found in any source/i;
+/** `No exact match for 'x'. Did you mean one of these?` */
+const INSPECT_SUGGESTIONS_RE = /No exact match for '[^']*'/i;
+
+export function parseInspectNoPanel(
+  stdout: string,
+): { kind: InspectNoPanelKind; candidates: AmbiguousSkill[] } {
+  const raw = (stdout || '').slice(0, MAX_OUTPUT_CHARS);
+  // `rich` hard-wraps at 80 columns off a TTY, so no sentence survives on one
+  // line — the same reason `parseInstallOutcome` flattens before matching.
+  const flat = raw.replace(/\s+/g, ' ');
+
+  const table = parseAmbiguousSkills(raw);
+  if (table.length > 0) return { kind: 'ambiguous', candidates: table };
+
+  if (INSPECT_SUGGESTIONS_RE.test(flat)) {
+    // Read off the un-flattened text: the list is one candidate per line.
+    const candidates = parseSuggestions(raw).map((identifier) => ({ identifier }));
+    if (candidates.length > 0) return { kind: 'suggestions', candidates };
+    // The sentence with no list this parser could read is still "we could not
+    // resolve it", never "it does not exist".
+    return { kind: 'unavailable', candidates: [] };
+  }
+
+  if (INSPECT_NOT_FOUND_RE.test(flat)) return { kind: 'not-found', candidates: [] };
+  return { kind: 'unavailable', candidates: [] };
+}

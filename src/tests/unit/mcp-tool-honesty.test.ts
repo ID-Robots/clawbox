@@ -332,11 +332,20 @@ describe("skill_info — a synthesised record is not a skill", () => {
     return h;
   }
 
-  /** Exactly what the live inspect route returns for an id nobody has heard of. */
+  /**
+   * What the live inspect route returns for an id nobody has heard of.
+   *
+   * `catalogMiss` is the route SAYING SO — nothing on this device backed the
+   * record, so every field below it is a placeholder whose name is the request
+   * echoed back. It was added after this test was written, and the fixture is
+   * updated with it rather than left describing a wire shape no build sends:
+   * the assertion is unchanged, and it is the assertion that matters.
+   */
   const FABRICATED = {
     skill: {
       id: "official/nonexistent-xyz",
       name: "nonexistent-xyz",
+      catalogMiss: true,
       provenance: { sourceUrlVerified: false },
       bodySource: "none",
       bodyTruncated: false,
@@ -345,8 +354,14 @@ describe("skill_info — a synthesised record is not a skill", () => {
   };
 
   it("reports NOT_FOUND rather than inventing a skill", async () => {
-    // Phase 1 fabricates; phase 2 (the CLI) adds nothing.
-    apiGet.mockResolvedValueOnce(FABRICATED).mockResolvedValueOnce({ delta: {} });
+    // Phase 1 fabricates; phase 2 is HERMES REFUSING the id — `hermes skills
+    // inspect` printed neither a skill panel nor a table, which the route
+    // answers 404 `not_found`. That refusal over an unbacked record is the one
+    // thing that settles "this does not exist"; a docs call that merely FAILED
+    // must never be read the same way.
+    apiGet
+      .mockResolvedValueOnce(FABRICATED)
+      .mockRejectedValueOnce(new ApiError(404, JSON.stringify({ error: "Skill not found", code: "not_found" })));
 
     const out = await skills().call("skill_info", { id: "official/nonexistent-xyz" });
     expect(out.isError).toBe(true);
