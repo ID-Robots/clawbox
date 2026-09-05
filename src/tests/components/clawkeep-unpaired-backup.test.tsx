@@ -78,9 +78,12 @@ describe("ClawKeep's backup button when the pairing is gone mid-session", () => 
     fireEvent.click(await screen.findByRole("button", { name: "Back up now" }, { timeout: 5000 }));
 
     expect(await screen.findByText(new RegExp(NOT_PAIRED), {}, { timeout: 5000 })).toBeTruthy();
-    // `BackupResultCard` is the only component that renders the daemon's
-    // `stderrTail`, and "Failed (exit {code})" is its header. Absent, there is
-    // nothing on screen that could print a log line.
+    // `BackupResultCard` was the only component that rendered the daemon's
+    // `stderrTail`, and "Failed (exit {code})" was its header. Since TASK-672
+    // the card has no failure branch at all — a failed backup is a non-2xx
+    // whose sentence goes to the page's error banner — so this now asserts
+    // that the removed header cannot come back rather than that this
+    // particular failure avoided it.
     expect(screen.queryByText(/Failed \(exit/)).toBeNull();
   }, 15_000);
 });
