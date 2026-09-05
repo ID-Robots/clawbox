@@ -30,13 +30,16 @@ export function ratesFor(pricing, model) {
 
 /**
  * Price a run's usage: `byModel` is capture's shape — { model: { input,
- * output, cacheRead, cacheWrite, messages } }. Answers the total, the split
- * by model, and the models that could not be priced (their tokens are still
- * counted in `tokens`).
+ * output, cacheRead, cacheWrite, messages } }. Answers the split by model,
+ * the models that could not be priced (their tokens are still counted in
+ * `tokens`), `pricedUsd` — what the listed models cost — and `totalUsd`,
+ * which is that same number ONLY when every model was listed and null
+ * otherwise: an unpriced model is not free, and a partial sum shown as the
+ * run's cost would say it was.
  */
 export function costOfUsage(byModel, pricing) {
-  /** @type {{ totalUsd: number, byModel: Record<string, { usd: number | null, priced: boolean, tokens: number }>, unpriced: string[], tokens: number }} */
-  const out = { totalUsd: 0, byModel: {}, unpriced: [], tokens: 0 };
+  /** @type {{ totalUsd: number | null, pricedUsd: number, byModel: Record<string, { usd: number | null, priced: boolean, tokens: number }>, unpriced: string[], tokens: number }} */
+  const out = { totalUsd: 0, pricedUsd: 0, byModel: {}, unpriced: [], tokens: 0 };
   if (!byModel || typeof byModel !== "object") return out;
   for (const [model, u] of Object.entries(byModel)) {
     const input = u.input ?? 0;
@@ -52,9 +55,10 @@ export function costOfUsage(byModel, pricing) {
     }
     const usd = (input * rates.input + output * rates.output + cacheRead * rates.cacheRead + cacheWrite * rates.cacheWrite) / PER_MILLION;
     out.byModel[model] = { usd: round6(usd), priced: true, tokens: input + output + cacheRead + cacheWrite };
-    out.totalUsd += usd;
+    out.pricedUsd += usd;
   }
-  out.totalUsd = round6(out.totalUsd);
+  out.pricedUsd = round6(out.pricedUsd);
+  out.totalUsd = out.unpriced.length ? null : out.pricedUsd;
   return out;
 }
 

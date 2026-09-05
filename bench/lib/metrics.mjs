@@ -35,16 +35,26 @@ export function parallelism(samples, wallMs) {
   };
 }
 
-/** One task's line in a cycle, from the capture line, the cost and the parallelism. */
-export function taskFigures({ line, cost, parallel, cycle }) {
+/**
+ * One task's line in a cycle, from the capture line, the cost and the
+ * parallelism. `wallMs` is start to settle; `commitLagMs` how long the commit
+ * took to land after that; `endToEndMs` the two together — the time a person
+ * waited for the work to be on disk, which is what "time to finish" means.
+ */
+export function taskFigures({ line, cost, parallel, cycle, rep = 1 }) {
+  const wallMs = line.wallMs ?? null;
+  const commitLagMs = typeof line.commitLagMs === "number" ? line.commitLagMs : null;
   return {
     cycle,
+    rep,
     task: line.task,
     tier: line.tier,
     runId: line.runId,
     outcome: line.outcome,
     score: line.score ?? null,
-    wallMs: line.wallMs ?? null,
+    wallMs,
+    commitLagMs,
+    endToEndMs: typeof wallMs === "number" ? wallMs + (commitLagMs ?? 0) : null,
     numTurns: line.numTurns ?? 0,
     tokensUsed: line.tokensUsed ?? 0,
     thinkingTokens: line.thinkingTokens ?? 0,
@@ -54,6 +64,7 @@ export function taskFigures({ line, cost, parallel, cycle }) {
     subagentsByType: line.subagentsByType ?? {},
     modelsUsed: line.modelsUsed ?? [],
     costUsd: cost?.totalUsd ?? null,
+    pricedUsd: cost?.pricedUsd ?? null,
     costByModel: cost?.byModel ?? {},
     unpricedModels: cost?.unpriced ?? [],
     parallel,
@@ -66,16 +77,22 @@ export function summarizeCycle(figures) {
   const finished = rows.filter((r) => r.outcome === "completed");
   const scored = rows.filter((r) => typeof r.score === "number");
   const sum = (key) => rows.reduce((n, r) => n + (typeof r[key] === "number" ? r[key] : 0), 0);
-  const costKnown = rows.filter((r) => typeof r.costUsd === "number");
+  const unpriced = [...new Set(rows.flatMap((r) => r.unpricedModels ?? []))];
+  const priced = rows.filter((r) => typeof r.pricedUsd === "number");
+  const pricedUsd = priced.length ? round4(priced.reduce((n, r) => n + r.pricedUsd, 0)) : null;
   return {
     runs: rows.length,
     completed: finished.length,
     successRate: rows.length ? round3(finished.length / rows.length) : 0,
     meanScore: scored.length ? round1(scored.reduce((n, r) => n + r.score, 0) / scored.length) : null,
     wallMs: sum("wallMs"),
+    endToEndMs: sum("endToEndMs"),
     tokensUsed: sum("tokensUsed"),
-    costUsd: costKnown.length ? round4(costKnown.reduce((n, r) => n + r.costUsd, 0)) : null,
-    unpriced: [...new Set(rows.flatMap((r) => r.unpricedModels ?? []))],
+    // The cycle's cost is a number only when every run's was: a priced
+    // subtotal beside unpriced models is reported as that, never as the total.
+    costUsd: unpriced.length || rows.some((r) => r.costUsd === null) ? null : pricedUsd,
+    pricedUsd,
+    unpriced,
     peakActive: rows.reduce((n, r) => Math.max(n, r.parallel?.peakActive ?? 0), 0),
     meanAgentSecondsPerWallSecond: rows.length
       ? round3(rows.reduce((n, r) => n + (r.parallel?.agentSecondsPerWallSecond ?? 1), 0) / rows.length)
@@ -83,16 +100,22 @@ export function summarizeCycle(figures) {
   };
 }
 
+/** A figure's identity across cycles: the task and which repetition of it. */
+export function figureKey(r) {
+  return `${r.task}#${r.rep ?? 1}`;
+}
+
 /**
- * What changed per task between two cycles — the loop's reading. Positive
- * `pct` is up; for wall, tokens and cost that is worse, for score better.
+ * What changed per task (and repetition) between two cycles — the loop's
+ * reading. Positive `pct` is up; for time, tokens and cost that is worse,
+ * for score better.
  */
 export function deltaByTask(previous, current) {
-  const prev = new Map((previous ?? []).map((r) => [r.task, r]));
+  const prev = new Map((previous ?? []).map((r) => [figureKey(r), r]));
   const out = [];
   for (const cur of current ?? []) {
-    const before = prev.get(cur.task);
-    if (!before) { out.push({ task: cur.task, fresh: true }); continue; }
+    const before = prev.get(figureKey(cur));
+    if (!before) { out.push({ task: cur.task, rep: cur.rep ?? 1, fresh: true }); continue; }
     const d = (key, pick = (r) => r[key]) => {
       const a = pick(before);
       const b = pick(cur);
@@ -101,10 +124,12 @@ export function deltaByTask(previous, current) {
     };
     out.push({
       task: cur.task,
+      rep: cur.rep ?? 1,
       fresh: false,
       outcome: { before: before.outcome, after: cur.outcome },
       score: d("score"),
       wallMs: d("wallMs"),
+      endToEndMs: d("endToEndMs"),
       tokensUsed: d("tokensUsed"),
       costUsd: d("costUsd"),
       peakActive: d("peakActive", (r) => r.parallel?.peakActive),

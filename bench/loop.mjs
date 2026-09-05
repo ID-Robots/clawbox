@@ -18,6 +18,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { enable, codingStatus, startRun, stopRun, getRun, waitForCommit, baseUrl } from "./lib/box.mjs";
 import { captureRun } from "./lib/capture.mjs";
 import { costOfUsage, formatUsd, loadPricing } from "./lib/cost.mjs";
+import crypto from "node:crypto";
 import { deltaByTask, formatMs, formatTokens, hints, parallelism, summarizeCycle, taskFigures } from "./lib/metrics.mjs";
 
 const BENCH_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -70,7 +71,8 @@ function seedProject(task, projectsRoot, stamp) {
   fs.mkdirSync(workdir, { recursive: true });
   if (task.seedDir) fs.cpSync(task.seedDir, workdir, { recursive: true });
   for (const [rel, content] of Object.entries(task.outside ?? {})) {
-    const dest = path.resolve(workdir, "..", rel);
+    // The task names the file from its own folder (`../shared-config/…`).
+    const dest = path.resolve(workdir, rel);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, content);
   }
@@ -119,6 +121,11 @@ function readFigures(suiteVersion, label) {
   return fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 }
 
+/** A stamp no two runs share: the second, and four random hex characters after it. */
+function stamp() {
+  return `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${crypto.randomBytes(2).toString("hex")}`;
+}
+
 function pct(d) {
   if (!d || d.pct === null || d.pct === undefined) return "";
   return `${d.pct > 0 ? "+" : ""}${d.pct}%`;
@@ -128,18 +135,21 @@ function writeReport({ suiteVersion, label, figures, summary, deltas, baseline, 
   const lines = [];
   lines.push(`# Bench loop — ${label}`, "");
   lines.push(`Suite v${suiteVersion} · ${summary.runs} run(s) · ${summary.completed} completed (${Math.round(summary.successRate * 100)}%) · mean score ${summary.meanScore ?? "n/a"}`);
-  lines.push(`Wall ${formatMs(summary.wallMs)} · tokens ${formatTokens(summary.tokensUsed)} · cost ${formatUsd(summary.costUsd)} (${pricing.currency}) · peak agents beside the run ${summary.peakActive} · agent-seconds per wall-second ${summary.meanAgentSecondsPerWallSecond ?? "n/a"}`);
-  if (summary.unpriced.length) lines.push(`Unpriced models (set them in bench/pricing.json): ${summary.unpriced.join(", ")}`);
-  lines.push("", "| task | outcome | score | time | turns | tokens | thinking | cost | helpers | peak | agent-s/wall-s | denials |", "|---|---|---|---|---|---|---|---|---|---|---|---|");
+  const costLine = summary.costUsd === null
+    ? `cost n/a — ${formatUsd(summary.pricedUsd)} priced, ${summary.unpriced.length ? `unpriced: ${summary.unpriced.join(", ")} (set them in bench/pricing.json)` : "some runs unpriced"}`
+    : `cost ${formatUsd(summary.costUsd)} (${pricing.currency})`;
+  lines.push(`Time to finish ${formatMs(summary.endToEndMs)} (to settle ${formatMs(summary.wallMs)}, the rest the commit landing) · tokens ${formatTokens(summary.tokensUsed)} · ${costLine} · peak agents beside the run ${summary.peakActive} · agent-seconds per wall-second ${summary.meanAgentSecondsPerWallSecond ?? "n/a"}`);
+  lines.push("", "| task | rep | outcome | score | time | to settle | turns | tokens | thinking | cost | helpers | peak | agent-s/wall-s | denials |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
   for (const r of figures) {
     const helpers = Object.entries(r.subagentsByType).map(([k, n]) => `${n}× ${k}`).join(", ") || "0";
-    lines.push(`| ${r.task} | ${r.outcome} | ${r.score ?? "n/a"} | ${formatMs(r.wallMs)} | ${r.numTurns} | ${formatTokens(r.tokensUsed)} | ${formatTokens(r.thinkingTokens)} | ${formatUsd(r.costUsd)} | ${helpers} | ${r.parallel.peakActive} | ${r.parallel.agentSecondsPerWallSecond} | ${r.permissionDenials} |`);
+    const cost = r.costUsd === null ? `n/a (${formatUsd(r.pricedUsd)} priced)` : formatUsd(r.costUsd);
+    lines.push(`| ${r.task} | ${r.rep ?? 1} | ${r.outcome} | ${r.score ?? "n/a"} | ${formatMs(r.endToEndMs)} | ${formatMs(r.wallMs)} | ${r.numTurns} | ${formatTokens(r.tokensUsed)} | ${formatTokens(r.thinkingTokens)} | ${cost} | ${helpers} | ${r.parallel.peakActive} | ${r.parallel.agentSecondsPerWallSecond} | ${r.permissionDenials} |`);
   }
   if (deltas) {
-    lines.push("", `## Against ${baseline}`, "", "| task | outcome | score | time | tokens | cost | peak agents | agent-s/wall-s |", "|---|---|---|---|---|---|---|---|");
+    lines.push("", `## Against ${baseline}`, "", "| task | rep | outcome | score | time | tokens | cost | peak agents | agent-s/wall-s |", "|---|---|---|---|---|---|---|---|---|");
     for (const d of deltas) {
-      if (d.fresh) { lines.push(`| ${d.task} | new | | | | | | |`); continue; }
-      lines.push(`| ${d.task} | ${d.outcome.before} → ${d.outcome.after} | ${pct(d.score)} | ${pct(d.wallMs)} | ${pct(d.tokensUsed)} | ${pct(d.costUsd)} | ${pct(d.peakActive)} | ${pct(d.agentSecondsPerWallSecond)} |`);
+      if (d.fresh) { lines.push(`| ${d.task} | ${d.rep} | new | | | | | | |`); continue; }
+      lines.push(`| ${d.task} | ${d.rep} | ${d.outcome.before} → ${d.outcome.after} | ${pct(d.score)} | ${pct(d.endToEndMs)} | ${pct(d.tokensUsed)} | ${pct(d.costUsd)} | ${pct(d.peakActive)} | ${pct(d.agentSecondsPerWallSecond)} |`);
     }
   }
   const h = hints(figures);
@@ -154,13 +164,12 @@ async function runCycle({ args, suite, tasks, label, projectsRoot, pricing }) {
   const figures = [];
   const plan = tasks.flatMap((t) => Array.from({ length: args.repeat }, (_, i) => ({ task: t, rep: i + 1 })));
   for (const { task, rep } of plan) {
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const workdir = seedProject(task, projectsRoot, stamp);
+    const workdir = seedProject(task, projectsRoot, stamp());
     console.log(`\n▶ ${task.id} rep ${rep} as project ${path.basename(workdir)}`);
     const started = await startRun({ task: task.brief, directory: workdir });
     if (started.status !== 202 || !started.json?.run) {
       console.error(`  run refused: ${started.status} ${started.text.slice(0, 300)}`);
-      figures.push({ cycle: label, task: task.id, tier: task.tier, runId: null, outcome: "not-started", score: null, wallMs: null, numTurns: 0, tokensUsed: 0, thinkingTokens: 0, filesTouched: 0, permissionDenials: 0, subagentsTotal: 0, subagentsByType: {}, modelsUsed: [], costUsd: null, costByModel: {}, unpricedModels: [], parallel: parallelism([], 0) });
+      figures.push(taskFigures({ line: { task: task.id, tier: task.tier, runId: null, outcome: "not-started", wallMs: null, subagentsByType: {}, modelsUsed: [] }, cost: null, parallel: parallelism([], 0), cycle: label, rep }));
       if (started.status === 409 && started.json?.kind === "busy") { console.error("  a run is already in progress — one at a time; stopping this cycle."); break; }
       continue;
     }
@@ -191,10 +200,10 @@ async function runCycle({ args, suite, tasks, label, projectsRoot, pricing }) {
     fs.writeFileSync(path.join(runDir, "samples.json"), JSON.stringify(samples, null, 2));
     const cost = costOfUsage(line.usageByModel, pricing);
     const parallel = parallelism(samples, wallMs);
-    const fig = taskFigures({ line, cost, parallel, cycle: label });
+    const fig = taskFigures({ line, cost, parallel, cycle: label, rep });
     figures.push(fig);
     fs.appendFileSync(path.join(RESULTS_DIR, suite.suiteVersion, `loop-${label}.jsonl`), JSON.stringify(fig) + "\n");
-    console.log(`  ${outcome} in ${formatMs(wallMs)} — score ${score ? `${score.score}/100` : "n/a"}, ${formatTokens(line.tokensUsed)} tok, ${formatUsd(cost.totalUsd)}, peak ${parallel.peakActive} helper(s), agent-s/wall-s ${parallel.agentSecondsPerWallSecond}`);
+    console.log(`  ${outcome} in ${formatMs(fig.endToEndMs)} (${formatMs(wallMs)} to settle) — score ${score ? `${score.score}/100` : "n/a"}, ${formatTokens(line.tokensUsed)} tok, ${cost.totalUsd === null ? `cost n/a (${formatUsd(cost.pricedUsd)} priced)` : formatUsd(cost.totalUsd)}, peak ${parallel.peakActive} helper(s), agent-s/wall-s ${parallel.agentSecondsPerWallSecond}`);
     if (cost.unpriced.length) console.log(`  unpriced: ${cost.unpriced.join(", ")} — set bench/pricing.json`);
   }
   return figures;
@@ -239,13 +248,15 @@ async function main() {
   if (args.baseline && !previous) console.error(`no figures for baseline ${args.baseline}; comparing from the first cycle on`);
   let anyFailed = false;
   for (let c = 1; c <= args.cycles; c++) {
-    const label = `${baseLabel}-c${c}-${new Date().toISOString().slice(0, 10)}`;
+    // The label carries the second, so a second invocation on the same day
+    // never appends to an earlier cycle's figures or overwrites its report.
+    const label = `${baseLabel}-c${c}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
     console.log(`\n== cycle ${c}/${args.cycles}: ${label} ==`);
     const figures = await runCycle({ args, suite, tasks, label, projectsRoot, pricing });
     const summary = summarizeCycle(figures);
     const deltas = previous ? deltaByTask(previous, figures) : null;
     const report = writeReport({ suiteVersion: suite.suiteVersion, label, figures, summary, deltas, baseline: previousLabel, pricing });
-    console.log(`\n== ${label}: ${summary.completed}/${summary.runs} completed, mean score ${summary.meanScore ?? "n/a"}, ${formatMs(summary.wallMs)}, ${formatTokens(summary.tokensUsed)} tok, ${formatUsd(summary.costUsd)} → ${path.relative(BENCH_DIR, report)}`);
+    console.log(`\n== ${label}: ${summary.completed}/${summary.runs} completed, mean score ${summary.meanScore ?? "n/a"}, ${formatMs(summary.endToEndMs)}, ${formatTokens(summary.tokensUsed)} tok, ${summary.costUsd === null ? `cost n/a (${formatUsd(summary.pricedUsd)} priced)` : formatUsd(summary.costUsd)} → ${path.relative(BENCH_DIR, report)}`);
     for (const h of hints(figures)) console.log(`  → ${h}`);
     if (figures.some((f) => f.outcome !== "completed")) anyFailed = true;
     previous = figures;

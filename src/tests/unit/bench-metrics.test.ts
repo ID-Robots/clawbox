@@ -6,12 +6,12 @@
  */
 import { describe, expect, it } from "vitest";
 import { costOfUsage, formatUsd, loadPricing, ratesFor } from "../../../bench/lib/cost.mjs";
-import { deltaByTask, formatMs, formatTokens, hints, parallelism, summarizeCycle, taskFigures } from "../../../bench/lib/metrics.mjs";
+import { deltaByTask, figureKey, formatMs, formatTokens, hints, parallelism, summarizeCycle, taskFigures } from "../../../bench/lib/metrics.mjs";
 
 const PRICING = { currency: "USD", models: { "deepseek-v4-pro[1m]": { input: 1, output: 2, cacheRead: 0.1 }, "deepseek-v4-flash": { input: 0.1, output: 0.2 } } };
 
 describe("cost", () => {
-  it("prices each model's tokens per million, cache rates falling back to input, and flags a model the table lacks", () => {
+  it("prices each model's tokens per million, cache rates falling back to input, and answers no TOTAL while a model is unpriced", () => {
     const cost = costOfUsage({
       "deepseek-v4-pro[1m]": { input: 1_000_000, output: 500_000, cacheRead: 2_000_000, cacheWrite: 100_000, messages: 10 },
       "deepseek-v4-flash": { input: 3_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0, messages: 4 },
@@ -21,13 +21,18 @@ describe("cost", () => {
     expect(cost.byModel["deepseek-v4-pro[1m]"]).toEqual({ usd: 2.3, priced: true, tokens: 3_600_000 });
     expect(cost.byModel["deepseek-v4-flash"]).toEqual({ usd: 0.5, priced: true, tokens: 4_000_000 });
     expect(cost.byModel["gpt-mystery"]).toEqual({ usd: null, priced: false, tokens: 20 });
-    expect(cost.totalUsd).toBe(2.8);
+    // The priced subtotal is there; the total is not a number, because the
+    // unpriced model is not free.
+    expect(cost.pricedUsd).toBe(2.8);
+    expect(cost.totalUsd).toBeNull();
     expect(cost.unpriced).toEqual(["gpt-mystery"]);
     expect(cost.tokens).toBe(7_600_020);
+    const all = costOfUsage({ "deepseek-v4-flash": { input: 1_000_000, output: 0 } }, PRICING);
+    expect(all).toMatchObject({ totalUsd: 0.1, pricedUsd: 0.1, unpriced: [] });
   });
 
   it("answers nothing for no usage, and rates only for a complete row", () => {
-    expect(costOfUsage(null, PRICING)).toEqual({ totalUsd: 0, byModel: {}, unpriced: [], tokens: 0 });
+    expect(costOfUsage(null, PRICING)).toEqual({ totalUsd: 0, pricedUsd: 0, byModel: {}, unpriced: [], tokens: 0 });
     expect(ratesFor(PRICING, "deepseek-v4-flash")).toEqual({ input: 0.1, output: 0.2, cacheRead: 0.1, cacheWrite: 0.1 });
     expect(ratesFor({ models: { broken: { input: "1" } } }, "broken")).toBeNull();
     expect(loadPricing("/nonexistent/pricing.json")).toEqual({ currency: "USD", models: {} });
@@ -63,21 +68,44 @@ describe("parallelism", () => {
 
 describe("a cycle's figures", () => {
   const line = (over: Record<string, unknown>) => ({
-    task: "m-01", tier: "M", runId: "run-1", outcome: "completed", score: 90, wallMs: 300_000, numTurns: 20, tokensUsed: 1_000_000, thinkingTokens: 100_000,
+    task: "m-01", tier: "M", runId: "run-1", outcome: "completed", score: 90, wallMs: 300_000, commitLagMs: 2_000, numTurns: 20, tokensUsed: 1_000_000, thinkingTokens: 100_000,
     filesTouched: 8, permissionDenials: 0, subagentsTotal: 2, subagentsByType: { explorer: 1, reviewer: 1 }, modelsUsed: ["deepseek-v4-pro[1m]"], usageByModel: null, ...over,
   });
-  const fig = (over: Record<string, unknown>, parallel = parallelism([], 0)) =>
-    taskFigures({ line: line(over), cost: costOfUsage({ "deepseek-v4-flash": { input: 1_000_000, output: 0 } }, PRICING), parallel, cycle: "c1" });
+  const fig = (over: Record<string, unknown>, parallel = parallelism([], 0), rep = 1) =>
+    taskFigures({ line: line(over), cost: costOfUsage({ "deepseek-v4-flash": { input: 1_000_000, output: 0 } }, PRICING), parallel, cycle: "c1", rep });
 
-  it("sums a cycle and reads the change per task against the cycle before", () => {
+  it("keeps the commit lag apart from the time to settle, and adds the two up as the time to finish", () => {
+    const f = fig({ wallMs: 300_000, commitLagMs: 2_000 });
+    expect(f).toMatchObject({ wallMs: 300_000, commitLagMs: 2_000, endToEndMs: 302_000, rep: 1 });
+    expect(fig({ commitLagMs: null }).endToEndMs).toBe(300_000);
+    expect(fig({ wallMs: null }).endToEndMs).toBeNull();
+  });
+
+  it("sums a cycle and reads the change per task and repetition against the cycle before", () => {
     const before = [fig({ task: "a", wallMs: 100_000, tokensUsed: 1000, score: 80 }), fig({ task: "b", outcome: "failed", score: 20 })];
     const after = [fig({ task: "a", wallMs: 50_000, tokensUsed: 1500, score: 90 }), fig({ task: "b", score: 70 }), fig({ task: "c" })];
     const summary = summarizeCycle(after);
-    expect(summary).toMatchObject({ runs: 3, completed: 3, successRate: 1, meanScore: 83.3, costUsd: 0.3, unpriced: [] });
+    expect(summary).toMatchObject({ runs: 3, completed: 3, successRate: 1, meanScore: 83.3, costUsd: 0.3, pricedUsd: 0.3, unpriced: [], endToEndMs: 656_000 });
     const d = deltaByTask(before, after);
-    expect(d[0]).toMatchObject({ task: "a", wallMs: { before: 100_000, after: 50_000, pct: -50 }, tokensUsed: { pct: 50 }, score: { pct: 12.5 } });
+    expect(d[0]).toMatchObject({ task: "a", rep: 1, wallMs: { before: 100_000, after: 50_000, pct: -50 }, endToEndMs: { before: 102_000, after: 52_000 }, tokensUsed: { pct: 50 }, score: { pct: 12.5 } });
     expect(d[1].outcome).toEqual({ before: "failed", after: "completed" });
-    expect(d[2]).toEqual({ task: "c", fresh: true });
+    expect(d[2]).toEqual({ task: "c", rep: 1, fresh: true });
+  });
+
+  it("compares a repeated task by its repetition, never by the last one alone", () => {
+    const before = [fig({ task: "a", wallMs: 100_000 }, undefined, 1), fig({ task: "a", wallMs: 200_000 }, undefined, 2)];
+    const after = [fig({ task: "a", wallMs: 110_000 }, undefined, 1), fig({ task: "a", wallMs: 100_000 }, undefined, 2)];
+    expect(figureKey(before[1])).toBe("a#2");
+    const d = deltaByTask(before, after);
+    expect(d.map((x) => [x.rep, x.wallMs?.pct])).toEqual([[1, 10], [2, -50]]);
+  });
+
+  it("answers no cycle cost while any run has an unpriced model", () => {
+    const unpriced = taskFigures({ line: line({ task: "u" }), cost: costOfUsage({ mystery: { input: 10, output: 0 } }, PRICING), parallel: parallelism([], 0), cycle: "c1" });
+    const summary = summarizeCycle([fig({ task: "a" }), unpriced]);
+    expect(summary.costUsd).toBeNull();
+    expect(summary.pricedUsd).toBe(0.1);
+    expect(summary.unpriced).toEqual(["mystery"]);
   });
 
   it("hints at what to look at, and only from the numbers", () => {
