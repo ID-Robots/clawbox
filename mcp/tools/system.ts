@@ -162,6 +162,18 @@ function coercePreference(key: string, value: string): string | number {
 // not REGISTERED on Hermes (see the registrations below); backup_status stays,
 // because the agent still has to be able to answer "do you back up?" honestly.
 const BACKUP_RULES: ErrorRule[] = [
+  // Ordered: the first match wins, so the two 409s that mean different things
+  // are told apart by the `code` in the body before the general one is reached.
+  // Since TASK-672 the daemon's whole `EXIT_*` taxonomy reaches this tool as a
+  // real status instead of a 200 with `ok:false`, and none of these failures is
+  // worth retrying — every one of them needs the owner.
+  {
+    status: 409,
+    match: /"code"\s*:\s*"needs_passphrase"/,
+    code: "CONFLICT",
+    message: "Cloud backup needs an encryption passphrase before it can run.",
+    next: "Tell the user to set one in Settings -> Backup. Do not retry.",
+  },
   {
     status: 409,
     code: "CONFLICT",
@@ -173,6 +185,36 @@ const BACKUP_RULES: ErrorRule[] = [
     code: "NOT_SUPPORTED_HERE",
     message: "Cloud backup is not available on this device.",
     next: "Tell the user it is not set up, and do not call the backup tools again this session.",
+  },
+  {
+    status: 401,
+    code: "CONFLICT",
+    message: "ClawKeep rejected this device's pairing — it was probably removed at the portal.",
+    next: "Tell the user to pair the device again in Settings -> Backup. Do not retry.",
+  },
+  {
+    status: 402,
+    code: "CONFLICT",
+    message: "This ClawKeep plan does not allow that backup.",
+    next: "Tell the user what their plan does not cover. Do not retry.",
+  },
+  {
+    status: 507,
+    code: "CONFLICT",
+    message: "The ClawKeep account is out of space.",
+    next: "Tell the user to free some snapshots or upgrade the plan. Do not retry.",
+  },
+  {
+    status: 504,
+    code: "ENDPOINT_DOWN",
+    message: "The backup could not reach the ClawKeep portal, or ran out of time.",
+    next: "Do not start another one. Call backup_status, and tell the user what it reports.",
+  },
+  {
+    status: 502,
+    code: "ENDPOINT_DOWN",
+    message: "The backup did not finish.",
+    next: "Do not start another one. Call backup_status, and tell the user what it reports.",
   },
 ];
 
@@ -647,20 +689,21 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
       }
       // An unpaired box is a 409 `not_paired`, which BACKUP_RULES above turns
       // into CONFLICT + "tell the user to pair it in Settings -> Backup".
-      // Everything else the daemon can fail at still comes back as HTTP 200
-      // with ok:false and the reason in stderrTail; a 200 never raises, so the
-      // tool used to return prose with no isError flag — a failed backup that
-      // reads as a success. Hence the explicit check below.
-      const body = await apiPost<{ ok?: boolean; exitCode?: number; stderrTail?: string }>(
+      // Since TASK-672 every OTHER daemon failure is a real status too, so it
+      // raises here rather than arriving as a 200 with `ok:false` and the
+      // reason buried in `stderrTail` — a failed backup that read as a
+      // success. The check below is what is left of that: a 200 must now mean
+      // the backup finished, and anything else in one is a server this tool
+      // does not understand.
+      const body = await apiPost<{ ok?: boolean; exitCode?: number }>(
         "/setup-api/clawkeep/backup",
         { ...(label ? { label } : {}) },
         { timeoutMs: 180_000, rules: BACKUP_RULES },
       );
       if (body.ok !== true) {
-        const reason = (body.stderrTail || "").trim().split("\n").filter(Boolean).pop();
         throw new ToolError(
           "ENDPOINT_DOWN",
-          `The backup did not run${reason ? `: ${reason}` : "."}`,
+          "The backup did not run.",
           "Do not start another one. Call backup_status, and tell the user what it reports.",
         );
       }

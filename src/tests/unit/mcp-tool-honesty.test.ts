@@ -783,23 +783,62 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     expect(JSON.parse(out.text).paired).toBe(true);
   });
 
-  it("reports a failed backup as a failure, with the reason the route carried", async () => {
-    // A backup that RAN and failed still answers 200 with ok:false, so nothing
-    // throws. (The unpaired case is no longer one of these — the route refuses
-    // it with 409, which BACKUP_RULES maps to CONFLICT.)
-    apiPost.mockResolvedValue({
-      exitCode: 1,
-      ok: false,
-      stdoutTail: "",
-      stderrTail: "openclaw backup create failed: no space left on device",
-    });
+  it("reports a failed backup as a failure, from the status the route now answers", async () => {
+    // Since TASK-672 a backup that RAN and failed is a real status carrying one
+    // owner-facing sentence and a stable `code` — not a 200 with `ok:false` and
+    // the daemon's raw log line in `stderrTail`, which is what the agent used
+    // to relay to the owner, device paths and all.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        502,
+        JSON.stringify({ error: "The backup did not finish", code: "backup_failed" }),
+      ),
+    );
 
     const out = await system("openclaw").call("backup_now", {});
     expect(out.isError).toBe(true);
     if (!out.isError) return;
-    expect(out.error.message).toMatch(/did not run/i);
-    expect(out.error.message).toMatch(/no space left on device/);
-    expect(out.error.next).toMatch(/do not start another one/i);
+    expect(out.error.message).toMatch(/did not finish|did not run/i);
+    expect(out.error.next).toBeTruthy();
+  });
+
+  it("tells the owner to re-pair when the portal revoked this device mid-backup", async () => {
+    // `EXIT_AUTH_REVOKED` (3) is the case no local check can see: the token
+    // file is still on disk, so the pre-flight passes and the daemon only
+    // learns of the revoke from the portal's 401. Retrying is pointless, so
+    // the rule has to say so.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        401,
+        JSON.stringify({
+          error: "ClawKeep authorisation was rejected — pair this device again",
+          code: "pairing_revoked",
+        }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/pairing/i);
+    expect(out.error.next).toMatch(/pair the device again/i);
+    expect(out.error.next).toMatch(/do not retry/i);
+  });
+
+  it("tells the owner the account is full rather than retrying into it", async () => {
+    apiPost.mockRejectedValue(
+      new ApiError(
+        507,
+        JSON.stringify({ error: "The ClawKeep account is out of space", code: "quota_full" }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.message).toMatch(/out of space/i);
+    expect(out.error.next).toMatch(/do not retry/i);
   });
 
   it("tells the agent to get the box paired when backup_now hits an unpaired one", async () => {

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { ClawKeepError, clawKeepErrorBody, runBackup } from "@/lib/clawkeep";
+import { ClawKeepError, backupExitError, clawKeepErrorBody, runBackup } from "@/lib/clawkeep";
 
 export const dynamic = "force-dynamic";
 
@@ -18,13 +18,13 @@ export const dynamic = "force-dynamic";
 // returning that exit code inside a 200 body made a backup that never began
 // arrive as a success.
 //
-// 65 is not the only pre-run exit — `daemon.py` returns 64 for a bad config
-// before it reaches the token at all. A non-zero `exitCode` in a 200 body
-// therefore means the daemon was started and did not succeed — or, for the two
-// codes the bridge synthesises itself, that it could not be started at all
-// (127, spawn error) or was killed by our own timer (124). Either way the
-// backup did not happen. Classifying the rest of the daemon's `EXIT_*`
-// taxonomy into HTTP statuses is a separate change to the backup result path.
+// Every OTHER non-zero exit is classified too (TASK-672). `backupExitError`
+// maps the daemon's own `EXIT_*` taxonomy — plus the two codes the bridge
+// synthesises itself, 124 for our kill timer and 127 for a daemon that could
+// not be started — onto a status, a stable `code` and one owner-facing
+// sentence. No failure leaves here as 2xx, and none of them carries
+// `stderrTail`: that is the daemon's log line, written for an operator, and it
+// has put an absolute device path in front of the customer.
 export async function POST(request: NextRequest) {
   try {
     let body: unknown = {};
@@ -63,10 +63,22 @@ export async function POST(request: NextRequest) {
       label = obj.label;
     }
     const result = await runBackup({ idle, label });
+    const failure = backupExitError(result.exitCode);
+    if (failure) {
+      // The daemon's output stays in the server log, where an operator can
+      // read it; the owner gets the sentence and the code.
+      console.warn(
+        `[clawkeep] backup exited ${result.exitCode}: ${result.stderr.slice(-2000)}`,
+      );
+      return NextResponse.json(
+        { ...clawKeepErrorBody(failure, "Backup failed"), exitCode: result.exitCode },
+        { status: failure.status, headers: { "Cache-Control": "no-store" } },
+      );
+    }
     return NextResponse.json(
       {
         exitCode: result.exitCode,
-        ok: result.exitCode === 0,
+        ok: true,
         stdoutTail: result.stdout.slice(-2000),
         stderrTail: result.stderr.slice(-2000),
       },

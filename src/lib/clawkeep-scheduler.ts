@@ -14,7 +14,13 @@
  * if the device boots after a long outage).
  */
 
-import { computeNextRunMs, readSchedule, runBackup, type ClawKeepSchedule } from "@/lib/clawkeep";
+import {
+  backupExitError,
+  computeNextRunMs,
+  readSchedule,
+  runBackup,
+  type ClawKeepSchedule,
+} from "@/lib/clawkeep";
 
 let armed: NodeJS.Timeout | null = null;
 let armedFor: number = 0;
@@ -46,9 +52,15 @@ function fireBackup(): void {
       // disabled on `!daemonInstalled`, so nobody can even try by hand.
       if (result.exitCode !== 0) {
         const tail = result.stderr.trim().slice(-500);
+        // Same classification the route answers with (TASK-672), so an
+        // operator reading this log and an owner reading the panel are told
+        // the same thing about the same run.
+        const classified = backupExitError(result.exitCode);
         console.warn(
           "[clawkeep-scheduler] auto-backup failed:",
-          `clawkeepd exited ${result.exitCode}${tail ? ` — ${tail}` : ""}`,
+          `clawkeepd exited ${result.exitCode}`
+            + (classified ? ` (${classified.code}: ${classified.message})` : "")
+            + (tail ? ` — ${tail}` : ""),
         );
       }
     })

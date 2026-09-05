@@ -130,8 +130,14 @@ interface PairPollResponse {
   error?: string;
 }
 
+/**
+ * A backup that WORKED. Since TASK-672 a failed run is a non-2xx carrying one
+ * owner-facing sentence and a stable `code`, so `jsonOrError` throws it into
+ * the page's error banner — the same place every other ClawKeep failure lands
+ * — instead of this card rendering `ok:false` over the daemon's raw log line.
+ */
 interface BackupResponse {
-  ok: boolean;
+  ok: true;
   exitCode: number;
   stdoutTail: string;
   stderrTail: string;
@@ -1406,18 +1412,10 @@ function SystemCard({ status }: { status: ClawKeepStatus }) {
 
 function BackupResultCard({ result }: { result: BackupResponse }) {
   const { t } = useT();
-  const tail = result.stderrTail || result.stdoutTail || t("clawkeep.result.noOutput");
+  const tail = result.stdoutTail || result.stderrTail || t("clawkeep.result.noOutput");
   return (
-    <div
-      className={`${CARD} ${
-        result.ok ? "border-emerald-500/30 bg-emerald-500/5" : "border-red-500/30 bg-red-500/5"
-      }`}
-    >
-      <h2 className="font-semibold">
-        {result.ok
-          ? t("clawkeep.result.backupOk")
-          : t("clawkeep.result.backupFailed", { code: result.exitCode })}
-      </h2>
+    <div className={`${CARD} border-emerald-500/30 bg-emerald-500/5`}>
+      <h2 className="font-semibold">{t("clawkeep.result.backupOk")}</h2>
       <pre className="mt-2 text-[11px] font-mono text-gray-200/90 whitespace-pre-wrap max-h-48 overflow-auto bg-[var(--bg-elevated)] p-2 rounded">
         {tail}
       </pre>
