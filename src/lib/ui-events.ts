@@ -51,31 +51,30 @@ export const OPEN_SETTINGS_SECTION_EVENT = "clawbox:open-settings-section";
  */
 export const OPEN_CODING_RUN_EVENT = "clawbox:open-coding-run";
 
-/** How the run should open: `live` is the run page's Live view — the
- *  browser the run drives and its terminal, filling the window. */
+/** How the run should open: `maximize` brings the window full-screen. */
 export interface OpenCodingRunOptions {
-  live?: boolean;
+  maximize?: boolean;
 }
 
-type PendingRunWindow = Window & { __clawboxPendingCodingRun?: unknown; __clawboxPendingCodingRunLive?: unknown };
+type PendingRunWindow = Window & { __clawboxPendingCodingRun?: unknown };
 
-/** The two handoffs WITHOUT opening the app — for a desktop that opens it itself. */
-export function handoffCodingRun(runId: string, opts: OpenCodingRunOptions = {}): void {
+/** The handoff WITHOUT opening the app — for a desktop that opens it itself. */
+export function handoffCodingRun(runId: string): void {
   if (typeof window === "undefined") return;
   const w = window as PendingRunWindow;
   w.__clawboxPendingCodingRun = runId;
-  w.__clawboxPendingCodingRunLive = opts.live === true;
-  window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId, live: opts.live === true } }));
+  window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId } }));
 }
 
 /**
  * Open the Coding Agent app on a run. `maximize` opens (or brings) the window
  * full-screen: the chat's View button lands the owner on the run's page with
- * the whole desktop for it — and with `live`, in the page's Live view.
+ * the whole desktop for it. (The page's separate Live view is gone: the run
+ * page itself carries the browser preview, the terminal and the timeline.)
  */
-export function dispatchOpenCodingRun(runId: string, opts: { maximize?: boolean } & OpenCodingRunOptions = {}): void {
+export function dispatchOpenCodingRun(runId: string, opts: OpenCodingRunOptions = {}): void {
   if (typeof window === "undefined") return;
-  handoffCodingRun(runId, { live: opts.live });
+  handoffCodingRun(runId);
   dispatchOpenApp("coding", { maximize: opts.maximize });
 }
 
@@ -88,14 +87,6 @@ export function takePendingCodingRun(): string | null {
   return id;
 }
 
-/** Whether the handed-off run asked for the Live view; taken exactly once. */
-export function takePendingCodingRunLive(): boolean {
-  if (typeof window === "undefined") return false;
-  const w = window as PendingRunWindow;
-  const live = w.__clawboxPendingCodingRunLive === true;
-  delete w.__clawboxPendingCodingRunLive;
-  return live;
-}
 
 
 /**

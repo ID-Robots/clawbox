@@ -788,7 +788,10 @@ describe("CodingAgentApp", () => {
       await screen.findByTestId("coding-agent-run-page");
       const terminal = await screen.findByTestId("coding-agent-run-terminal");
       expect(within(terminal).getByTestId("terminal-mock")).toHaveAttribute("data-command", expect.stringContaining("coding-run-preview"));
-      expect(screen.queryByTestId("coding-agent-run-activity")).toBeNull();
+      // The timeline sits ABOVE the summary while the run works too, live.
+      const timeline = screen.getByTestId("coding-agent-run-activity");
+      expect(timeline).toHaveAttribute("data-live", "true");
+      expect(timeline.compareDocumentPosition(screen.getByText(t("codingAgent.summaryTitle"))) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       // The floating "Live view" is gone from the page's controls.
       expect(screen.queryByTestId("coding-agent-live-run-k3x9q2ab")).toBeNull();
       unmount();
@@ -799,7 +802,42 @@ describe("CodingAgentApp", () => {
       fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
       await screen.findByTestId("coding-agent-run-page");
       expect(screen.queryByTestId("coding-agent-run-terminal")).toBeNull();
-      expect(await screen.findByTestId("coding-agent-run-activity")).toBeInTheDocument();
+      const settled = await screen.findByTestId("coding-agent-run-activity");
+      expect(settled).not.toHaveAttribute("data-live");
+      // The chat card's chips: a command line is a command chip.
+      expect(within(settled).getByTestId("coding-agent-run-activity-steps").querySelector("li")).toHaveAttribute("data-kind", "command");
+    });
+
+    it("lists every agent on the run's page — the run itself, the helpers still out, and the ones back with how long they took", async () => {
+      const run = {
+        ...RUN, status: "running", completedAt: null, summary: null,
+        subagentsTotal: 3, subagentsActive: 1, subagentsByType: { explorer: 1, reviewer: 2 },
+        activeSubagents: [{ type: "reviewer", description: "Review the toggle", startedAt: Date.now() - 65_000 }],
+        subagents: [
+          { type: "explorer", description: "Map the components folder", startedAt: Date.now() - 300_000, endedAt: Date.now() - 240_000, refused: false },
+          { type: "reviewer", description: "A workflow the CLI refused", startedAt: Date.now() - 200_000, endedAt: Date.now() - 199_000, refused: true },
+        ],
+      };
+      stubFetch({ enabled: true, readiness: READY }, [run], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+      const card = await screen.findByTestId("coding-agent-run-agents");
+      // Working: the run and its live helper. Finished: the two back.
+      expect(screen.getByTestId("coding-agent-run-agents-count").textContent).toContain(t("codingAgent.agentsWorking", { n: 2 }));
+      expect(screen.getByTestId("coding-agent-run-agents-count").textContent).toContain(t("codingAgent.agentsFinished", { n: 2 }));
+      expect(within(card).getByText(t("codingAgent.agentMain"))).toBeInTheDocument();
+      const live = within(card).getAllByTestId("coding-agent-subagent-live");
+      expect(live).toHaveLength(1);
+      expect(live[0].textContent).toContain("Review the toggle");
+      expect(live[0].textContent).toContain("1m 5s");
+      const done = within(card).getAllByTestId("coding-agent-subagent-done");
+      // Newest first: the refused one, then the explorer with its minute.
+      expect(done).toHaveLength(2);
+      expect(done[0]).toHaveAttribute("data-refused", "true");
+      expect(done[0].textContent).toContain(t("codingAgent.helperRefused"));
+      expect(done[1].textContent).toContain("Map the components folder");
+      expect(done[1].textContent).toContain(t("codingAgent.helperFor", { t: "1m 0s" }));
     });
 
     it("opens a run's own page from its row: figures, summary, files and evidence, and Back returns", async () => {
@@ -1510,7 +1548,7 @@ describe("the workspace, the breadcrumb and the live view", () => {
     expect(within(card).getByText("notes.txt")).toBeInTheDocument();
   });
 
-  it("shows the browser the run drives above its terminal while it runs — a picture only — folds it on request, and not once it settled", async () => {
+  it("offers the browser the run drives folded above its terminal — a picture only, unfolded on request — and not once it settled", async () => {
     stubFetch({ enabled: true, readiness: READY }, [LIVE], { projects: [SITE_PROJECT] });
     const { unmount } = render(<CodingAgentApp />);
     await openRuns();
@@ -1518,20 +1556,22 @@ describe("the workspace, the breadcrumb and the live view", () => {
     await screen.findByTestId("coding-agent-run-page");
     const preview = await screen.findByTestId("coding-agent-browser-preview");
     const terminal = screen.getByTestId("coding-agent-run-terminal");
+    // Above the terminal, one under the other — never side by side.
     expect(preview.compareDocumentPosition(terminal) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByTestId("coding-agent-live-row")).toBeNull();
+    // Folded by default: the screen is mounted only once asked for.
+    expect(within(preview).queryByTestId("vnc-mock")).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-browser-preview-toggle"));
     const screenMock = within(preview).getByTestId("vnc-mock");
     expect(screenMock).toHaveAttribute("data-view-only", "true");
     expect(screenMock).toHaveAttribute("data-paste", "hidden");
-    // The two share a row while both are showing (side by side in a wide
-    // window); with the preview folded the terminal has the row to itself.
-    const row = screen.getByTestId("coding-agent-live-row");
-    expect(row).toHaveAttribute("data-side-by-side", "true");
-    expect(within(row).getByTestId("coding-agent-run-terminal")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("coding-agent-browser-preview-toggle"));
     expect(within(preview).queryByTestId("vnc-mock")).toBeNull();
-    expect(row).not.toHaveAttribute("data-side-by-side");
-    fireEvent.click(screen.getByTestId("coding-agent-browser-preview-toggle"));
-    expect(within(preview).getByTestId("vnc-mock")).toBeInTheDocument();
+    // No Watch live on the page: the terminal card has Open in Terminal,
+    // and the separate Live view is gone with it.
+    expect(screen.queryByTestId("coding-agent-terminal-run-k3x9q2ab")).toBeNull();
+    expect(screen.getByTestId("coding-agent-run-terminal-open")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-agent-run-live-view")).toBeNull();
     unmount();
 
     stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
@@ -1543,41 +1583,4 @@ describe("the workspace, the breadcrumb and the live view", () => {
     expect(screen.queryByTestId("coding-agent-run-live-view")).toBeNull();
   });
 
-  it("fills the page with the browser and the terminal in Live view, hides the rail, and comes back", async () => {
-    stubFetch({ enabled: true, readiness: READY }, [LIVE], { projects: [SITE_PROJECT] });
-    render(<CodingAgentApp />);
-    await openRuns();
-    fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
-    await screen.findByTestId("coding-agent-run-rail");
-    fireEvent.click(screen.getByTestId("coding-agent-run-live-view"));
-    const page = screen.getByTestId("coding-agent-run-page");
-    expect(page).toHaveAttribute("data-live-view", "true");
-    const live = screen.getByTestId("coding-agent-live-view");
-    expect(within(live).getByTestId("vnc-mock")).toHaveAttribute("data-view-only", "true");
-    expect(within(live).getByTestId("terminal-mock")).toHaveAttribute("data-command", expect.stringContaining("coding-run-preview"));
-    expect(screen.queryByTestId("coding-agent-run-rail")).toBeNull();
-    expect(screen.queryByTestId("coding-agent-summary")).toBeNull();
-    // Stop is still at hand — the view is where the owner watches a run.
-    expect(screen.getByTestId("coding-agent-stop-run-k3x9q2ab")).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("coding-agent-run-live-view"));
-    expect(screen.getByTestId("coding-agent-run-page")).not.toHaveAttribute("data-live-view");
-    expect(await screen.findByTestId("coding-agent-run-rail")).toBeInTheDocument();
-  });
-
-  it("opens straight into Live view when the chat's View button asks for it, cold and while already open", async () => {
-    stubFetch({ enabled: true, readiness: READY }, [LIVE], { projects: [SITE_PROJECT] });
-    // Cold: the handoff was parked before the app mounted.
-    (window as Window & { __clawboxPendingCodingRun?: string }).__clawboxPendingCodingRun = LIVE.id;
-    (window as Window & { __clawboxPendingCodingRunLive?: boolean }).__clawboxPendingCodingRunLive = true;
-    render(<CodingAgentApp />);
-    expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-live-view", "true");
-    // Off, then asked again while up.
-    fireEvent.click(screen.getByTestId("coding-agent-run-live-view"));
-    expect(screen.getByTestId("coding-agent-run-page")).not.toHaveAttribute("data-live-view");
-    act(() => { window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId: LIVE.id, live: true } })); });
-    await waitFor(() => expect(screen.getByTestId("coding-agent-run-page")).toHaveAttribute("data-live-view", "true"));
-    // A plain open lands on the normal page.
-    act(() => { window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId: LIVE.id } })); });
-    await waitFor(() => expect(screen.getByTestId("coding-agent-run-page")).not.toHaveAttribute("data-live-view"));
-  });
 });

@@ -16,6 +16,7 @@ import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD, CAR
 import { startHarnessTest } from "@/lib/coding-agent-harness-test";
 import { openNewAppCard } from "@/lib/ui-events";
 import { githubRepoName, githubWebUrl } from "@/lib/github-url";
+import CodingRunTimeline from "./CodingRunTimeline";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 // The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
 // keys, translated in every locale, rather than a second English-only one.
@@ -30,7 +31,6 @@ import {
   onCodingAgentChanged,
   onStandaloneAppPage,
   takePendingCodingRun,
-  takePendingCodingRunLive,
 } from "@/lib/ui-events";
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
 import TerminalApp from "./TerminalApp";
@@ -92,7 +92,11 @@ interface Run {
   subagentsByType?: Record<string, number>;
   modelsUsed?: string[];
   lastActivityAt?: number;
+  /** The model the run started with, as the runner recorded it. */
+  model?: string | null;
   activeSubagents?: { type: string; description: string; startedAt: number }[];
+  /** The helpers that came back: what each did, when, and whether it was refused. */
+  subagents?: { type: string; description: string; startedAt: number; endedAt: number; refused: boolean }[];
   /** The commit this run's work was recorded as — what a backup would push. */
   commit?: string | null;
   thinkingTokens?: number;
@@ -157,6 +161,14 @@ export function installedAppId(folder: string): string {
 /** One page of runs. The list is open by default now, so it has to be paged
  *  rather than unbounded — a long history should not push the settings off
  *  the top of the window. */
+/** "12s" / "3m 4s" — how long a helper has been out, or took. */
+function elapsedShort(from: number, to: number): string {
+  const sec = Math.max(0, Math.round((to - from) / 1000));
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  return `${m}m ${sec - m * 60}s`;
+}
+
 /** How many pictures a run's evidence card shows before it asks to be unfolded. */
 const ARTIFACT_PREVIEW = 4;
 const RUNS_PAGE = 10;
@@ -319,9 +331,11 @@ export default function CodingAgentApp() {
   // terminal, filling the window. Keyed by the run rather than a flag, so
   // opening another run lands on its normal page and a run that settles
   // simply falls out of the view (the toggle exists only while it is live).
-  const [liveViewFor, setLiveViewFor] = useState<string | null>(null);
   // The browser preview above a live run's terminal, shown or folded.
-  const [browserPreview, setBrowserPreview] = useState(true);
+  // The browser the run drives, folded by default: the terminal is what the
+  // page is for, and the picture was a half-page strip of Chromium's chrome
+  // most of the time. One tap unfolds it above the terminal.
+  const [browserPreview, setBrowserPreview] = useState(false);
   /** The markdown artifact open in the preview dialog, if any. */
   const [report, setReport] = useState<{ runId: string; name: string } | null>(null);
   // The run whose whole evidence list is unfolded. A run that screenshots
@@ -577,22 +591,19 @@ export default function CodingAgentApp() {
    */
   useEffect(() => {
     const pending = takePendingCodingRun();
-    const pendingLive = takePendingCodingRunLive();
     // A handoff parked on `window` before this window existed; the effect is
     // the one place it can be read, and reading it is one render.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (pending) { setOpenRunId(pending); setPage("home"); setLiveViewFor(pendingLive ? pending : null); }
+    if (pending) { setOpenRunId(pending); setPage("home"); }
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ runId?: unknown; live?: unknown }>).detail;
+      const detail = (e as CustomEvent<{ runId?: unknown }>).detail;
       const id = detail?.runId;
       if (typeof id === "string" && id) {
         // The dispatcher also parks the id on `window` for a cold open; this
         // window is up, so take it back rather than leave it for a later mount.
         takePendingCodingRun();
-        takePendingCodingRunLive();
         setOpenRunId(id);
         setPage("home");
-        setLiveViewFor(detail?.live === true ? id : null);
       }
     };
     window.addEventListener(OPEN_CODING_RUN_EVENT, handler);
@@ -756,7 +767,6 @@ export default function CodingAgentApp() {
    *  route lists that folder, so a run always has a project page to live on
    *  (the sidebar's recent runs reach every run). */
   // Live view: only for the run whose page is open, and only while it runs.
-  const liveMode = openRun !== null && liveViewFor === openRun.id && isLive(openRun.status);
 
   const visibleRuns = useMemo(() => (
     openProject ? runs.filter((r) => runBelongsTo(r, openProject)) : []
@@ -847,27 +857,12 @@ export default function CodingAgentApp() {
    *  the way out of it, the terminal, the backup. */
   /** The Live view switch: only while the run runs, since the view is the
    *  browser it drives and the terminal it writes. */
-  const liveToggle = (run: Run) => {
-    if (!isLive(run.status)) return null;
-    const on = liveViewFor === run.id;
-    return (
-      <button
-        type="button"
-        onClick={() => setLiveViewFor(on ? null : run.id)}
-        aria-pressed={on}
-        data-testid="coding-agent-run-live-view"
-        className={on ? BTN_PRIMARY : BTN_SECONDARY}
-      >
-        <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">{on ? "close_fullscreen" : "open_in_full"}</span>
-        {on ? t("codingAgent.liveViewExit") : t("codingAgent.liveViewMode")}
-      </button>
-    );
-  };
-
   const runControls = (run: Run, where: "row" | "page") => {
     const action = RUN_ACTION[run.status];
-    const canOpenTerminal = Boolean(run.sessionId || (run.status === "running" && run.transcriptPath));
-    const terminalLabel = run.status === "running" ? t("codingAgent.openLive") : t("codingAgent.openResume");
+    // Resume in a terminal is for a run that has STOPPED; a live run's
+    // transcript is on its page already, with its own Open in Terminal.
+    const canOpenTerminal = Boolean(run.sessionId) && run.status !== "running";
+    const terminalLabel = t("codingAgent.openResume");
     const small = where === "row" && action;
     const secondary = small ? `${RUN_BUTTON} border-white/10 text-[var(--text-primary)] hover:bg-white/5` : BTN_SECONDARY;
     return (
@@ -948,7 +943,7 @@ export default function CodingAgentApp() {
         visibleRuns.length === 0 ? (
           <p className="text-xs text-[var(--text-muted)] mt-2 px-1">{t("codingAgent.noRuns")}</p>
         ) : (
-          <ul className="mt-2 grid gap-2 @3xl:grid-cols-2 items-start" data-testid="coding-agent-runs">
+          <ul className="mt-2 flex flex-col gap-2" data-testid="coding-agent-runs">
             {visibleRuns.slice(0, runsShown).map((run) => {
               const tone = RUN_TONE[run.status];
               // A draft has not run: its startedAt is when it was drafted
@@ -1125,7 +1120,7 @@ export default function CodingAgentApp() {
           Settings, the projects, the recent runs. Only when the window is
           wide enough to spare it (the phone and a small window keep the
           lists on the pages themselves), and not while the wizard runs. */}
-      {wide && view.face !== "wizard" && !liveMode && (
+      {wide && view.face !== "wizard" && (
         <aside className={`flex w-[15rem] shrink-0 flex-col border-r ${RAIL_SURFACE} overflow-y-auto`} data-testid="coding-agent-sidebar">
           <div className="px-3 pt-4 pb-2 space-y-1">
             {!standalone && (
@@ -1212,7 +1207,7 @@ export default function CodingAgentApp() {
           intro centres itself in it. min-h-0 keeps the scroll on the parent. */}
       {/* A run's page is data — figures, files, a summary, an activity log —
           and reads better wide; the home and project pages stay a column. */}
-      <div className={`mx-auto w-full ${view.face === "run" ? (liveMode ? "max-w-none" : "max-w-6xl") : view.face === "project" ? "max-w-none" : "max-w-2xl"} px-5 py-4 flex-1 flex flex-col min-h-0`}>
+      <div className={`mx-auto w-full ${view.face === "run" ? "max-w-6xl" : view.face === "project" ? "max-w-none" : "max-w-2xl"} px-5 py-4 flex-1 flex flex-col min-h-0`}>
 
         {/* One row: what this is, whether it is on, and everything you can do
             from here. The primary action used to sit on its own line below,
@@ -1224,9 +1219,8 @@ export default function CodingAgentApp() {
             the app. The owner asked for no name and no state chip in the
             rail either; the switch is one tap away in Settings. The setup
             WIZARD has no rail at any width, so it keeps the row: without it
-            a wide window on the wizard had no way to Settings at all.
-            `liveMode` has no chrome at all. */}
-        {(!wide || view.face === "wizard") && !liveMode && (
+            a wide window on the wizard had no way to Settings at all. */}
+        {(!wide || view.face === "wizard") && (
         <div className="flex items-center justify-between gap-4 pb-3 mb-1 border-b border-white/[0.06]">
           <div className="flex items-center gap-2 min-w-0">
             <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }} aria-hidden="true">smart_toy</span>
@@ -1537,57 +1531,6 @@ export default function CodingAgentApp() {
           const activity = run.progress.slice(-ACTIVITY_SHOWN);
           const title = run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 160);
           const fullTask = !run.reviewOf && run.task.trim() !== firstLine(run.task, 160) ? run.task : null;
-          const liveCommand = run.transcriptPath
-            ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.directory, live: true })
-            : null;
-          if (liveMode) {
-            // Live view: the browser the run drives and its terminal, and
-            // nothing else — the figures, the plan and the log are one tap
-            // away on the normal page, and the window is the screen.
-            return (
-              <div className="mt-1 pb-2 flex-1 min-h-0 flex flex-col" data-testid="coding-agent-run-page" data-run-id={run.id} data-live-view="true">
-                <CodingAgentBreadcrumb
-                  crumbs={[
-                    { label: t("codingAgent.projectsTitle"), onClick: () => { setOpenRunId(null); setOpenProjectDir(null); }, testId: "coding-agent-crumb-projects" },
-                    ...(project ? [{ label: project.name, onClick: () => { setOpenRunId(null); setOpenProjectDir(project.directory); }, testId: "coding-agent-crumb-project" }] : []),
-                    { label: title },
-                  ]}
-                  onBack={() => { setOpenRunId(null); if (project) setOpenProjectDir(project.directory); }}
-                  backLabel={project ? t("codingAgent.backTo", { name: project.name }) : t("codingAgent.back")}
-                navLabel={t("codingAgent.breadcrumbLabel")}
-                  backTestId="coding-agent-run-back"
-                  trailing={<>{runControls(run, "page")}{liveToggle(run)}</>}
-                />
-                <div className="mt-2 flex items-center gap-2 flex-wrap">
-                  <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${tone.chip}`}>{statusLabel(run.status)}</span>
-                  <h2 className="text-xs font-medium text-[var(--text-secondary)] truncate min-w-0" data-testid="coding-agent-run-title">{title}</h2>
-                  <RunProgressBar
-                    estimate={estimateRunProgress(run, now)}
-                    color={tone.color}
-                    timeLeft={t("codingAgent.timeLeft")}
-                    testId={`coding-agent-progress-${run.id}`}
-                    className="ml-auto w-48"
-                  />
-                </div>
-                {/* Wide: the browser on the left and the terminal on the
-                    right, each the window's full height — stacked, the
-                    browser sat letterboxed in a strip half the screen wide
-                    with the terminal squeezed under it. Narrow: stacked. */}
-                <div className="mt-2 flex-1 min-h-0 grid grid-rows-2 gap-2 @3xl:grid-rows-1 @3xl:grid-cols-2" data-testid="coding-agent-live-view">
-                  <div className="min-h-0 rounded-xl border border-white/10 overflow-hidden bg-black" data-testid="coding-agent-browser-preview">
-                    <VNCApp viewOnly pasteButton="hidden" />
-                  </div>
-                  <div className="min-h-0 rounded-xl border border-emerald-400/20 overflow-hidden flex flex-col" style={{ background: "#0d0d0d" }} data-testid="coding-agent-run-terminal">
-                    {liveCommand ? (
-                      <TerminalApp key={run.id} initialCommand={liveCommand} />
-                    ) : (
-                      <p className="px-4 py-3 text-[11px] text-[var(--text-muted)]">{t("codingAgent.liveWaiting")}</p>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          }
           return (
             <div className="mt-4 pb-6" data-testid="coding-agent-run-page" data-run-id={run.id}>
               <CodingAgentBreadcrumb
@@ -1600,7 +1543,6 @@ export default function CodingAgentApp() {
                 backLabel={project ? t("codingAgent.backTo", { name: project.name }) : t("codingAgent.back")}
                 navLabel={t("codingAgent.breadcrumbLabel")}
                 backTestId="coding-agent-run-back"
-                trailing={liveToggle(run)}
               />
 
               {/* The header: what this run is, how it stands, and everything
@@ -1736,19 +1678,12 @@ export default function CodingAgentApp() {
                 <div className="min-w-0">
               {/* While the run works: the browser it drives, on the device's
                   own screen — a picture only, so a click here cannot steer a
-                  page the run is on — folded away with one tap — and its
-                  terminal, the transcript tailed live where the activity log
-                  used to be. Side by side when the window has the width and
-                  both are showing; one under the other otherwise. Once the
-                  run has settled, the log (below) is the record. */}
-              {isLive(run.status) && (() => {
-                const command = run.transcriptPath
-                  ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.directory, live: true })
-                  : null;
-                const sideBySide = browserPreview && command !== null;
-                return (
-              <div className={sideBySide ? "@3xl:grid @3xl:grid-cols-2 @3xl:gap-3 @3xl:items-stretch" : ""} data-testid="coding-agent-live-row" data-side-by-side={sideBySide || undefined}>
-                <div className={`mt-3 rounded-xl border border-white/10 overflow-hidden flex flex-col bg-black ${sideBySide ? "@3xl:h-[480px]" : ""}`} data-testid="coding-agent-browser-preview">
+                  page the run is on — folded by default and unfolded with one
+                  tap ABOVE its terminal, the transcript tailed live where the
+                  activity log otherwise sits. Once the run has settled, the
+                  timeline below is the record. */}
+              {isLive(run.status) && (
+                <div className="mt-3 rounded-xl border border-white/10 overflow-hidden flex flex-col bg-black" data-testid="coding-agent-browser-preview" data-open={browserPreview || undefined}>
                   <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.06] bg-black/30 shrink-0">
                     <span className="material-symbols-rounded text-sky-300" style={{ fontSize: 16 }} aria-hidden="true">web</span>
                     <p className={`${SECTION_LABEL} !mb-0`}>{t("codingAgent.browserPreviewTitle")}</p>
@@ -1764,13 +1699,17 @@ export default function CodingAgentApp() {
                     </button>
                   </div>
                   {browserPreview && (
-                    <div className={`h-[280px] ${sideBySide ? "@3xl:h-auto @3xl:flex-1 @3xl:min-h-0" : ""}`}>
+                    <div className="h-[360px]">
                       <VNCApp viewOnly pasteButton="hidden" />
                     </div>
                   )}
                 </div>
-                {command && (
-                  <div className="mt-3 rounded-xl border border-emerald-400/20 overflow-hidden flex flex-col" style={{ height: 480, background: "#0d0d1a" }} data-testid="coding-agent-run-terminal">
+              )}
+              {isLive(run.status) && run.transcriptPath && (() => {
+                const command = livePreviewCommand({ transcriptPath: run.transcriptPath ?? null, sessionId: run.sessionId ?? null, directory: run.directory, live: true });
+                if (!command) return null;
+                return (
+                  <div className="mt-3 rounded-xl border border-emerald-400/20 overflow-hidden flex flex-col" style={{ height: 460, background: "#0d0d1a" }} data-testid="coding-agent-run-terminal">
                     <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.06] bg-black/30 shrink-0">
                       <span className="material-symbols-rounded text-emerald-400" style={{ fontSize: 16 }} aria-hidden="true">terminal</span>
                       <p className={`${SECTION_LABEL} !mb-0`}>{t("codingAgent.livePreviewTitle")}</p>
@@ -1791,10 +1730,12 @@ export default function CodingAgentApp() {
                       <TerminalApp key={run.id} initialCommand={command} />
                     </div>
                   </div>
-                )}
-              </div>
                 );
               })()}
+
+              {/* The timeline: every step the runner recorded, drawn the way
+                  the chat's card draws its live work, live or settled. */}
+              <CodingRunTimeline lines={activity} live={isLive(run.status)} />
 
               {/* The summary is the run's closing message, and that is
                   markdown. Drawn through the chat's renderer, which builds
@@ -1844,16 +1785,41 @@ export default function CodingAgentApp() {
                 </div>
               )}
 
-              {/* Which helpers are out right now. */}
-              {(run.activeSubagents?.length ?? 0) > 0 && (
-                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`}>
-                  <p className={SECTION_LABEL}>{t("codingAgent.helpersTitle")}</p>
+              {/* The agents: the run itself and every helper it sent out —
+                  the ones still working, and the ones back with how long
+                  they took. The owner asked to see how many and what each
+                  did, not a count. */}
+              {((run.activeSubagents?.length ?? 0) > 0 || (run.subagents?.length ?? 0) > 0 || (run.subagentsTotal ?? 0) > 0) && (
+                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-agents">
+                  <p className={SECTION_LABEL}>
+                    {t("codingAgent.agentsTitle")}
+                    <span className="normal-case tracking-normal font-normal text-[var(--text-secondary)]" data-testid="coding-agent-run-agents-count">
+                      {t("codingAgent.agentsWorking", { n: isLive(run.status) ? 1 + (run.activeSubagents?.length ?? 0) : 0 })}
+                      {" · "}
+                      {t("codingAgent.agentsFinished", { n: (run.subagents?.length ?? 0) + (isLive(run.status) ? 0 : 1) })}
+                      {(run.subagentsTotal ?? 0) > 0 && ` · ${helpers.map(([k, n]) => `${n}× ${k}`).join(", ")}`}
+                    </span>
+                  </p>
                   <ul className="mt-2 space-y-1" data-testid="coding-agent-active-subagents">
+                    <li className="flex items-start gap-2 text-[11px]">
+                      <span className={`material-symbols-rounded shrink-0 ${isLive(run.status) ? "text-amber-400 animate-pulse" : "text-[var(--text-muted)]"}`} style={{ fontSize: 13 }} aria-hidden="true">{isLive(run.status) ? "sync" : "check_circle"}</span>
+                      <span className="text-[var(--text-primary)] font-medium shrink-0">{t("codingAgent.agentMain")}</span>
+                      <span className="text-[var(--text-muted)] break-words min-w-0">{run.model ?? run.modelsUsed?.[0] ?? ""}{started ? ` · ${duration(run)}` : ""}</span>
+                    </li>
                     {run.activeSubagents?.map((a, i) => (
-                      <li key={i} className="flex items-start gap-2 text-[11px]">
+                      <li key={`live-${i}`} className="flex items-start gap-2 text-[11px]" data-testid="coding-agent-subagent-live">
                         <span className="material-symbols-rounded text-sky-400 animate-pulse shrink-0" style={{ fontSize: 13 }} aria-hidden="true">sync</span>
                         <span className="text-sky-300 font-medium shrink-0">{a.type}</span>
                         <span className="text-[var(--text-muted)] break-words min-w-0">{a.description}</span>
+                        <span className="ml-auto shrink-0 text-[var(--text-muted)]">{t("codingAgent.helperFor", { t: elapsedShort(a.startedAt, now) })}</span>
+                      </li>
+                    ))}
+                    {[...(run.subagents ?? [])].reverse().map((a, i) => (
+                      <li key={`done-${i}`} className="flex items-start gap-2 text-[11px]" data-testid="coding-agent-subagent-done" data-refused={a.refused || undefined}>
+                        <span className={`material-symbols-rounded shrink-0 ${a.refused ? "text-amber-400" : "text-emerald-400/80"}`} style={{ fontSize: 13 }} aria-hidden="true">{a.refused ? "block" : "check_circle"}</span>
+                        <span className={`font-medium shrink-0 ${a.refused ? "text-amber-300" : "text-emerald-300/90"}`}>{a.type}</span>
+                        <span className="text-[var(--text-muted)] break-words min-w-0">{a.description}</span>
+                        <span className="ml-auto shrink-0 text-[var(--text-muted)]">{a.refused ? t("codingAgent.helperRefused") : t("codingAgent.helperFor", { t: elapsedShort(a.startedAt, a.endedAt) })}</span>
                       </li>
                     ))}
                   </ul>
@@ -1867,21 +1833,6 @@ export default function CodingAgentApp() {
                 </div>
               )}
 
-              {/* The newest steps, as the runner recorded them — the record
-                  once the run has settled. */}
-              {activity.length > 0 && !(isLive(run.status) && run.transcriptPath) && (
-                <details className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-activity" open={isLive(run.status)}>
-                  <summary className={`${SECTION_LABEL} cursor-pointer list-none`}>
-                    {t("codingAgent.activityTitle")}
-                    <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{activity.length}</span>
-                  </summary>
-                  <ol className="mt-2 space-y-0.5 font-mono text-[11px] text-[var(--text-muted)] max-h-72 overflow-y-auto">
-                    {activity.map((line, i) => (
-                      <li key={i} className="break-words whitespace-pre-wrap">{line}</li>
-                    ))}
-                  </ol>
-                </details>
-              )}
                 </div>
                 <aside className="min-w-0" data-testid="coding-agent-run-rail">
               {/* The figures. */}

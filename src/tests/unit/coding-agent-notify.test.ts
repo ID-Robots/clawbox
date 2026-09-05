@@ -58,7 +58,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     deniedActions: [],
     effort: "max",
     subagentsActive: 0,
-    activeSubagents: [],
+    activeSubagents: [], subagents: [],
     subagentsTotal: 0,
     commit: null,
     pr: null,

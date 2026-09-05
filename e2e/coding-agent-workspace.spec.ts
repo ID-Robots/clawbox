@@ -4,7 +4,7 @@ import { installClawboxMocks } from "./helpers/clawbox";
 // The Coding Agent app's project page and run page, on a real desktop against
 // a mocked device: a project's files and changes beside its runs (the Claude
 // Code web layout), the one breadcrumb every page but home carries, the
-// browser preview above a live run's terminal, and the Live view that fills
+// browser preview folded above a live run's terminal, the timeline, and
 // the window with both. The routes the workspace reads are answered here
 // rather than in the shared helper, because this is the only spec that walks
 // them and the helper's device has no projects on purpose.
@@ -129,16 +129,16 @@ test("a project's page carries its files and changes, and a run's page its bread
   const runPage = win.getByTestId("coding-agent-run-page");
   await expect(runPage).toBeVisible();
   await expect(win.getByTestId("coding-agent-crumb-project")).toHaveText("My Site");
-  await expect(win.getByTestId("coding-agent-browser-preview")).toBeVisible();
+  // The browser preview, folded above the terminal; the timeline above the summary.
+  const preview = win.getByTestId("coding-agent-browser-preview");
+  await expect(preview).toBeVisible();
+  await expect(preview).not.toHaveAttribute("data-open", "true");
+  await win.getByTestId("coding-agent-browser-preview-toggle").click();
+  await expect(preview).toHaveAttribute("data-open", "true");
   await expect(win.getByTestId("coding-agent-run-terminal")).toBeVisible();
-
-  // Live view: the screen over the terminal, nothing else.
-  await win.getByTestId("coding-agent-run-live-view").click();
-  await expect(runPage).toHaveAttribute("data-live-view", "true");
-  await expect(win.getByTestId("coding-agent-live-view")).toBeVisible();
-  await expect(win.getByTestId("coding-agent-run-rail")).toHaveCount(0);
-  await win.getByTestId("coding-agent-run-live-view").click();
+  await expect(win.getByTestId("coding-agent-run-activity")).toBeVisible();
   await expect(win.getByTestId("coding-agent-run-rail")).toBeVisible();
+  await expect(win.getByTestId("coding-agent-run-live-view")).toHaveCount(0);
 
   // Back leads to the project, and the first crumb home.
   await win.getByTestId("coding-agent-run-back").click();

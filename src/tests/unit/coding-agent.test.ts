@@ -388,6 +388,8 @@ describe("a run", () => {
     expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain("Ultracode is on");
     for (const rule of lib.BASH_DENYLIST) expect(argv).not.toContain(rule);
     expect(argv).toContain("--disallowedTools");
+    // A run may read what it put in /tmp; the rule is the last of the allowed list.
+    expect(argv.slice(argv.indexOf("--allowedTools") + 1, argv.indexOf("--disallowedTools"))).toContain(lib.TMP_READ_RULE);
     expect(argv).toContain("--agents");
     // The credential folders and this checkout's secrets are denied to
     // Read/Edit/Write — but never the run's own folder under data/, because a

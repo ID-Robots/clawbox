@@ -68,7 +68,7 @@ export const BTN_DANGER =
 export const SEGMENTED_TRACK = "flex w-full gap-1 p-1 rounded-lg bg-black/30";
 
 export const SEGMENT =
-  "flex-1 rounded-lg px-2 py-1.5 text-xs font-medium capitalize border-none cursor-pointer"
+  "flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-medium capitalize border-none cursor-pointer"
   + " transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
   + " focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--coral-ring)]"
   + " disabled:opacity-50 disabled:cursor-not-allowed";
