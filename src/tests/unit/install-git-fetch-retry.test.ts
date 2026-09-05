@@ -31,18 +31,26 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const REPO = path.resolve(__dirname, "../../..");
 const INSTALL_SH = fs.readFileSync(path.join(REPO, "install.sh"), "utf-8");
+// force-update.sh carries its own copy of the same shape: it is the recovery
+// script an owner runs when the in-app update cannot, so it must not be able to
+// hang on the box it is recovering either.
+const FORCE_UPDATE_SH = fs.readFileSync(path.join(REPO, "scripts", "force-update.sh"), "utf-8");
 
 const CAN_RUN =
   process.platform !== "win32"
   && spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0;
 const d = CAN_RUN ? describe : describe.skip;
 
-function extractShellFunction(name: string): string {
-  const start = INSTALL_SH.indexOf(`${name}() {`);
-  if (start < 0) throw new Error(`${name} not found in install.sh`);
-  const end = INSTALL_SH.indexOf("\n}", start);
+function extractShellFunctionFrom(source: string, name: string): string {
+  const start = source.indexOf(`${name}() {`);
+  if (start < 0) throw new Error(`${name} not found`);
+  const end = source.indexOf("\n}", start);
   if (end < 0) throw new Error(`${name} has no closing brace`);
-  return `${INSTALL_SH.slice(start, end)}\n}`;
+  return `${source.slice(start, end)}\n}`;
+}
+
+function extractShellFunction(name: string): string {
+  return extractShellFunctionFrom(INSTALL_SH, name);
 }
 
 const ANON_REFUSAL = "fatal: could not read Username for 'https://github.com': No such device or address";
@@ -95,6 +103,132 @@ function runFetch(refusals: number): { status: number; output: string; attempts:
     .filter(Boolean).length;
   return { status: r.status ?? -1, output: `${r.stdout ?? ""}${r.stderr ?? ""}`, attempts };
 }
+
+/**
+ * The retry knobs as an operator may actually have exported them.
+ *
+ * `git` always refuses here, so a loop that never breaks never returns — which
+ * is why this runs under `timeout`: rc 124 is the DEFECT being measured, not a
+ * hung suite.
+ */
+function runFetchWithKnobs(knobs: Record<string, string>): {
+  status: number;
+  output: string;
+  attempts: number;
+} {
+  const script = [
+    "set -euo pipefail",
+    `ATTEMPTS=${JSON.stringify(attemptLog)}`,
+    "git() {",
+    "  printf 'git %s\\n' \"$*\" >> \"$ATTEMPTS\"",
+    `  printf '%s\\n' ${JSON.stringify(ANON_REFUSAL)} >&2`,
+    "  return 128",
+    "}",
+    "sleep() { :; }",
+    extractShellFunction("git_retryable_failure"),
+    extractShellFunction("git_with_retry"),
+    `git_with_retry -C ${JSON.stringify(tmp)} fetch origin || echo "rc=$?"`,
+  ].join("\n");
+
+  const r = spawnSync("timeout", ["10", "bash", "-c", script], {
+    encoding: "utf-8",
+    env: testEnv({ PATH: process.env.PATH ?? "", ...knobs }),
+  });
+  const attempts = fs
+    .readFileSync(attemptLog, "utf-8")
+    .split("\n")
+    .filter(Boolean).length;
+  return { status: r.status ?? -1, output: `${r.stdout ?? ""}${r.stderr ?? ""}`, attempts };
+}
+
+/** force-update.sh's inline twin, with `run_as_clawbox` and `sleep` stubbed. */
+function runForceFetch(gitSays: string, knobs: Record<string, string> = {}): {
+  status: number;
+  output: string;
+  attempts: number;
+} {
+  const script = [
+    "set -euo pipefail",
+    `ATTEMPTS=${JSON.stringify(attemptLog)}`,
+    'GIT="git"',
+    "run_as_clawbox() {",
+    "  printf 'fetch\\n' >> \"$ATTEMPTS\"",
+    `  printf '%s\\n' ${JSON.stringify(gitSays)} >&2`,
+    "  return 128",
+    "}",
+    "sleep() { :; }",
+    extractShellFunctionFrom(FORCE_UPDATE_SH, "git_retryable_failure"),
+    extractShellFunctionFrom(FORCE_UPDATE_SH, "fetch_with_retry"),
+    'fetch_with_retry || echo "rc=$?"',
+  ].join("\n");
+
+  const r = spawnSync("timeout", ["10", "bash", "-c", script], {
+    encoding: "utf-8",
+    env: testEnv({ PATH: process.env.PATH ?? "", ...knobs }),
+  });
+  const attempts = fs
+    .readFileSync(attemptLog, "utf-8")
+    .split("\n")
+    .filter(Boolean).length;
+  return { status: r.status ?? -1, output: `${r.stdout ?? ""}${r.stderr ?? ""}`, attempts };
+}
+
+d("a retry knob an operator got wrong cannot hang the update", () => {
+  it("clamps a non-numeric attempt count instead of looping for ever", () => {
+    // `[ "$attempt" -ge "$max" ]` with a non-numeric `max` makes `[` itself
+    // fail — "integer expression expected" — every iteration, so the loop
+    // never reaches its break and the step burns its whole budget on a
+    // refusal that will not clear. rc 124 below is `timeout` killing it.
+    const r = runFetchWithKnobs({ CLAWBOX_GIT_RETRIES: "invalid" });
+
+    expect(r.status, "the retry loop never exited").not.toBe(124);
+    expect(r.attempts).toBe(3);
+    expect(r.output).toContain("attempt 1/3");
+    expect(r.output).not.toMatch(/integer expression expected/);
+  });
+
+  it("clamps a non-numeric delay, so the backoff stays a number of seconds", () => {
+    // `sleep` is stubbed here, but on a box it is real and `set -e` is on: a
+    // garbage delay makes `sleep` fail and takes the whole install.sh down.
+    const r = runFetchWithKnobs({ CLAWBOX_GIT_RETRY_DELAY: "soon" });
+
+    expect(r.status).not.toBe(124);
+    expect(r.output).toContain("retrying in 3s");
+  });
+
+  it("keeps a deliberate override working", () => {
+    const r = runFetchWithKnobs({ CLAWBOX_GIT_RETRIES: "2", CLAWBOX_GIT_RETRY_DELAY: "7" });
+
+    expect(r.attempts).toBe(2);
+    expect(r.output).toContain("attempt 1/2");
+    expect(r.output).toContain("retrying in 7s");
+  });
+});
+
+d("scripts/force-update.sh retries the same way, or does not retry at all", () => {
+  it("clamps a non-numeric attempt count instead of looping for ever", () => {
+    const r = runForceFetch(ANON_REFUSAL, { CLAWBOX_GIT_RETRIES: "invalid" });
+
+    expect(r.status, "the retry loop never exited").not.toBe(124);
+    expect(r.attempts).toBe(3);
+  });
+
+  it("retries GitHub's anonymous refusal", () => {
+    const r = runForceFetch(ANON_REFUSAL);
+
+    expect(r.attempts).toBe(3);
+    expect(r.output).toMatch(/GitHub refused this device's anonymous request/);
+  });
+
+  it("does not retry a failure asking again cannot fix", () => {
+    // The recovery script is run by an owner who is already stuck. Spending
+    // 3 s + 6 s of backoff on a broken remote before saying so is time taken
+    // from someone waiting at the box.
+    const r = runForceFetch("fatal: 'origin' does not appear to be a git repository");
+
+    expect(r.attempts).toBe(1);
+  });
+});
 
 d("install.sh survives GitHub refusing an anonymous fetch", () => {
   it("retries a refused fetch instead of failing the update on the first attempt", () => {

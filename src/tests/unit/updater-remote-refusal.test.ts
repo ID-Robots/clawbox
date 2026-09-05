@@ -68,13 +68,20 @@ const ANON_REFUSAL = "fatal: could not read Username for 'https://github.com': N
 const SHA = "1111111111111111111111111111111111111111";
 
 type Result = { stdout: string; stderr: string } | Error;
+/** A sequence answers successive calls in order, then repeats its last entry. */
+type Answer = Result | Result[];
 
 /** Every `execFile` argv this run issued, joined for matching. */
 let argvLog: string[] = [];
 
-function install(results: Record<string, Result>): void {
+function install(results: Record<string, Answer>): void {
   const answer = (key: string): Result | undefined => {
-    for (const k of Object.keys(results)) if (key.includes(k)) return results[k];
+    for (const k of Object.keys(results)) {
+      if (!key.includes(k)) continue;
+      const value = results[k];
+      if (!Array.isArray(value)) return value;
+      return value.length > 1 ? value.shift() : value[0];
+    }
     return undefined;
   };
 
@@ -138,8 +145,14 @@ beforeEach(() => {
   process.env.GATEWAY_HEALTH_WAIT_MS = "1";
   process.env.GATEWAY_RECOVERY_WAIT_MS = "1";
   process.env.GATEWAY_WAIT_INTERVAL_MS = "1";
-  // The retry backoff must not turn a unit test into a wall-clock wait.
+  // The retry backoff must not turn a unit test into a wall-clock wait. BOTH
+  // knobs: the version-check delay defaults to 1200 ms and two of these cases
+  // sleep on it twice, which spent over half of vitest's 5 s default before any
+  // test work — the flake class src/tests/unit/test-timeout-hygiene.test.ts
+  // exists to prevent, and which it cannot see here because this file mocks
+  // child_process instead of spawning one.
   process.env.UPDATER_REMOTE_RETRY_DELAY_MS = "1";
+  process.env.UPDATER_REMOTE_CHECK_RETRY_DELAY_MS = "1";
   vi.mocked(get).mockResolvedValue(undefined);
   vi.mocked(set).mockResolvedValue();
   vi.mocked(setMany).mockResolvedValue();
@@ -161,6 +174,7 @@ afterEach(() => {
   delete process.env.GATEWAY_RECOVERY_WAIT_MS;
   delete process.env.GATEWAY_WAIT_INTERVAL_MS;
   delete process.env.UPDATER_REMOTE_RETRY_DELAY_MS;
+  delete process.env.UPDATER_REMOTE_CHECK_RETRY_DELAY_MS;
 });
 
 describe("a refused anonymous fetch is not 'up to date'", () => {
@@ -219,6 +233,72 @@ describe("a refused anonymous fetch is not 'up to date'", () => {
 
     expect(info.remote?.reachable).toBe(true);
     expect(countArgv("fetch --quiet origin beta")).toBe(1);
+  });
+});
+
+describe("the call the answer depends on is the one that is retried", () => {
+  /**
+   * `ls-remote` is the AUTHORITATIVE half of the version check: the tag list is
+   * read from origin's answer, not from the local refs the tag fetch updates.
+   * It got one attempt while the advisory fetch above it got two, so a single
+   * refused `ls-remote` made every surface say "couldn't reach the update
+   * server" — and `TARGET_VERSION_CACHE_TTL` kept that answer for 60 s.
+   */
+  it("retries a refused ls-remote instead of reporting no target version", async () => {
+    install({
+      "fetch --quiet origin beta": { stdout: "", stderr: "" },
+      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
+      "ls-remote": [new Error(ANON_REFUSAL), { stdout: `${SHA}\trefs/tags/v1.2.3\n`, stderr: "" }],
+      "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
+      "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },
+      openclaw: { stdout: "1.0.0", stderr: "" },
+    });
+    const updater = await import("@/lib/updater");
+
+    const target = await updater.getTargetVersion();
+
+    expect(target).toBe("v1.2.3");
+    expect(countArgv("ls-remote")).toBe(2);
+  });
+
+  it("spends the retry on ls-remote rather than on the advisory tag fetch", async () => {
+    // The anonymous allowance is what is being refused, so the budget stays
+    // where it was: the discarded call asks once, the one the answer is read
+    // from asks twice.
+    install({
+      "fetch --quiet origin beta": { stdout: "", stderr: "" },
+      "fetch --quiet --tags origin": new Error(ANON_REFUSAL),
+      "ls-remote": { stdout: `${SHA}\trefs/tags/v1.2.3\n`, stderr: "" },
+      "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
+      "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },
+      openclaw: { stdout: "1.0.0", stderr: "" },
+    });
+    const updater = await import("@/lib/updater");
+
+    const target = await updater.getTargetVersion();
+
+    expect(target).toBe("v1.2.3");
+    expect(countArgv("fetch --quiet --tags origin")).toBe(1);
+    expect(countArgv("ls-remote")).toBe(1);
+  });
+
+  it("still says the remote is unreachable when every ls-remote is refused", async () => {
+    install({
+      "fetch --quiet origin beta": { stdout: "", stderr: "" },
+      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
+      "ls-remote": new Error(ANON_REFUSAL),
+      "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
+      "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },
+      openclaw: { stdout: "1.0.0", stderr: "" },
+    });
+    const updater = await import("@/lib/updater");
+
+    const info = await updater.getVersionInfo();
+
+    expect(await updater.getTargetVersion()).toBeNull();
+    expect(info.remote?.reachable).toBe(false);
+    expect(info.remote?.refusedAnonymously).toBe(true);
+    expect(countArgv("ls-remote")).toBe(2);
   });
 });
 
@@ -343,5 +423,6 @@ describe("what the refusal is called", () => {
     await updater.getVersionInfo();
 
     expect(countArgv("fetch --quiet origin beta")).toBe(1);
+    expect(countArgv("ls-remote")).toBe(1);
   });
 });
