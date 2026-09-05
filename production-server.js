@@ -638,46 +638,49 @@ try {
   // the box comes back on the build the update was replacing.
   //
   // So the rebuild says so: set_previous_build_aside stamps the tree it parks
-  // with its own PID and boot id. Only a stamp that can be PROVEN live refuses
-  // the reclaim — anything else, absent (every build parked before this
-  // existed) or unparseable or from another boot or naming a process that is
-  // gone, leaves this block behaving exactly as it did before the stamp
-  // existed. That is the safe direction to fail in: a mid-build reclaim costs
-  // one failed update, while a stamp wrongly believed live costs a
-  // crash-looping box with its only build on disk — the state this whole block
-  // was added to end.
+  // with its PID, the boot id, and that process's start time. Only a stamp that
+  // can be PROVEN to name a running rebuild refuses the reclaim — anything
+  // else, absent (every build parked before this existed) or of another shape
+  // or from another boot or naming a process that is gone, leaves this block
+  // behaving exactly as it did before the stamp existed. That is the safe
+  // direction to fail in: a mid-build reclaim costs one failed update, while a
+  // stamp wrongly believed live costs a crash-looping box with its only build
+  // on disk — the state this whole block was added to end.
   //
-  // A PID that is alive is only proof that SOME process holds that number, and
-  // within one boot a number can be reused. It cannot be reused in time to
-  // matter here: this block runs on every clawbox-setup start, so a rebuild
-  // that dies is seen ~3 s later by the `Restart=always` restart it caused —
-  // millions of process creations before `kernel.pid_max` could wrap.
+  // All three fields, because none of them identifies a process on its own. A
+  // PID means nothing across boots, and within a boot it is REUSED: a number
+  // that has been handed to something unrelated would hold the reclaim off for
+  // as long as that process lives, which is the brick this exists to prevent.
+  // Start time (field 22 of /proc/<pid>/stat) is what pins the number to one
+  // process. Reading /proc is also how liveness is answered — the entry is
+  // world-readable, so this needs no permission over root's rebuild shell.
   const OWNER_STAMP = ".rebuild-pid";
   const stampPath = path.join(parkedDir, OWNER_STAMP);
   const readTrimmed = (p) => { try { return fs.readFileSync(p, "utf-8").trim(); } catch { return ""; } };
+  /** Field 22 of /proc/<pid>/stat, or "" if that process is not there. */
+  const startTimeOf = (pid) => {
+    const stat = readTrimmed(`/proc/${pid}/stat`);
+    // Field 2 is the command, parenthesised and free to contain spaces and
+    // parens of its own, so read from after the LAST ") ": field 3 is then
+    // index 0 and field 22 is index 19.
+    const cut = stat.lastIndexOf(") ");
+    if (cut < 0) return "";
+    return stat.slice(cut + 2).split(" ")[19] ?? "";
+  };
   const rebuildOwnerPid = () => {
-    // Exactly two fields, and a PID that is nothing but digits.
-    // `Number.parseInt` accepts "123junk" and destructuring ignores a third
-    // field, so either would let a stamp this file cannot vouch for refuse the
+    // Exactly three fields, and a PID that is nothing but digits.
+    // `Number.parseInt` accepts "123junk" and destructuring ignores extra
+    // fields, so either would let a stamp this file cannot vouch for refuse the
     // reclaim — the expensive direction, per the paragraph above.
     const fields = readTrimmed(stampPath).split(/\s+/);
-    if (fields.length !== 2 || !/^[1-9][0-9]*$/.test(fields[0])) return 0;
-    const [rawPid, stampBootId] = fields;
+    if (fields.length !== 3 || !/^[1-9][0-9]*$/.test(fields[0])) return 0;
+    const [rawPid, stampBootId, stampStartTime] = fields;
     const pid = Number(rawPid);
     if (!Number.isSafeInteger(pid)) return 0;
-    // A PID is only meaningful within the boot that issued it: a power cut
-    // mid-build leaves the stamp behind, and after the reboot that number can
-    // belong to anything. No rebuild survives a reboot.
     const bootId = readTrimmed("/proc/sys/kernel/random/boot_id");
     if (!bootId || bootId !== stampBootId) return 0;
-    try {
-      process.kill(pid, 0);
-      return pid;
-    } catch (err) {
-      // EPERM: alive, but not ours to signal. do_rebuild runs as root and this
-      // server as `clawbox`, so EPERM is the ordinary answer about a live rebuild.
-      return err.code === "EPERM" ? pid : 0;
-    }
+    if (!stampStartTime || startTimeOf(pid) !== stampStartTime) return 0;
+    return pid;
   };
 
   if (!present(buildEntry) && present(parkedEntry)) {

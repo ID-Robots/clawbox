@@ -220,9 +220,12 @@ function run(scenario: Scenario = {}): Run {
   const probeOwner = [
     'OWNER_FILE="$1/.next-old/.rebuild-pid"',
     'if [ -f "$OWNER_FILE" ]; then',
-    '  read -r OWNER_PID OWNER_BOOT < "$OWNER_FILE"',
+    // The same three questions production-server.js asks, in the same order.
+    '  read -r OWNER_PID OWNER_BOOT OWNER_START REST < "$OWNER_FILE"',
     '  THIS_BOOT=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)',
-    '  if [ -n "$OWNER_BOOT" ] && [ "$OWNER_BOOT" = "$THIS_BOOT" ] && kill -0 "$OWNER_PID" 2>/dev/null; then',
+    '  LIVE_START=$(sed -e "s/^.*) //" "/proc/$OWNER_PID/stat" 2>/dev/null | awk "{print \\$20}")',
+    '  if [ -z "$REST" ] && [ -n "$OWNER_BOOT" ] && [ "$OWNER_BOOT" = "$THIS_BOOT" ] \\',
+    '     && [ -n "$OWNER_START" ] && [ "$OWNER_START" = "$LIVE_START" ]; then',
     '    printf "live %s\\n" "$OWNER_PID" > ' + JSON.stringify(ownerProbe),
     "  else",
     '    printf "stale %s\\n" "$OWNER_PID" > ' + JSON.stringify(ownerProbe),

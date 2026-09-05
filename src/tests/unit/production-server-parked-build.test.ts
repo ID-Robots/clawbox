@@ -38,8 +38,26 @@ function bootId(): string {
   return id;
 }
 
+/**
+ * Field 22 of /proc/<pid>/stat — the process's start time. Read the same way
+ * the shipped block reads it: from after the LAST ") ", because field 2 is the
+ * command and may contain spaces and parens of its own.
+ */
+function startTimeOf(pid: number): string {
+  let stat: string;
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf-8").trim();
+  } catch {
+    return "";
+  }
+  const cut = stat.lastIndexOf(") ");
+  return cut < 0 ? "" : stat.slice(cut + 2).split(" ")[19] ?? "";
+}
+
 /** What install.sh's set_previous_build_aside writes into the tree it parks. */
-const ownerStamp = (pid: number): string => `${pid} ${bootId()}\n`;
+function ownerStamp(pid: number, startTime = startTimeOf(pid) || "1"): string {
+  return `${pid} ${bootId()} ${startTime}\n`;
+}
 const START = "// A build parked by an update that was killed OUTRIGHT";
 const END = 'require("./.next/standalone/server.js");';
 
@@ -253,7 +271,7 @@ describe("production-server.js reclaims a parked build at boot", () => {
     writeBuild(kept, "parked-build-id");
     writeFileSync(
       path.join(kept, OWNER_STAMP),
-      `${process.pid} 00000000-0000-4000-8000-000000000000\n`,
+      `${process.pid} 00000000-0000-4000-8000-000000000000 ${startTimeOf(process.pid)}\n`,
       "utf-8",
     );
 
@@ -264,12 +282,11 @@ describe("production-server.js reclaims a parked build at boot", () => {
     expect(existsSync(path.join(projectDir, ".next-old"))).toBe(false);
   });
 
-  it("refuses for a live owner this process may not signal", () => {
-    // The branch that actually runs on a device: do_rebuild is root and this
-    // server is `clawbox`, so `process.kill(pid, 0)` answers EPERM rather than
-    // succeeding, and EPERM means alive. pid 1 stands in for it — owned by
-    // root, always running. (A suite run AS root takes the success branch
-    // instead and asserts the same outcome, which is why there is no skip.)
+  it("refuses for a live owner this process does not own", () => {
+    // The shape that actually runs on a device: do_rebuild is root and this
+    // server is `clawbox`, so the owner is another user's process. pid 1 stands
+    // in for it — root-owned, always running, and its /proc entry readable by
+    // anyone, which is why the check reads /proc rather than sending a signal.
     const kept = path.join(projectDir, ".next-old");
     writeBuild(kept, "parked-build-id");
     writeFileSync(path.join(kept, OWNER_STAMP), ownerStamp(1), "utf-8");
@@ -281,13 +298,33 @@ describe("production-server.js reclaims a parked build at boot", () => {
     expect(r.warnings.join(" ")).toMatch(/rebuild is in progress/);
   });
 
+  it("reclaims when the stamped PID has been handed to another process", () => {
+    // The reuse case, which a PID and a boot id alone cannot see: the rebuild
+    // died, its number was allocated again, and `kill(pid, 0)` would answer
+    // "alive" about a stranger — holding the reclaim off for as long as that
+    // process lives, on a box whose only build is the parked one. The start
+    // time is what tells the two apart, so here it is a live PID from this boot
+    // whose process started at a different moment.
+    const kept = path.join(projectDir, ".next-old");
+    writeBuild(kept, "parked-build-id");
+    const wrongStart = String(Number(startTimeOf(process.pid) || "1") + 1);
+    writeFileSync(path.join(kept, OWNER_STAMP), ownerStamp(process.pid, wrongStart), "utf-8");
+
+    const r = runReclaim(projectDir);
+
+    expect(r.threw).toBeNull();
+    expect(buildId(projectDir)).toBe("parked-build-id");
+    expect(existsSync(path.join(projectDir, ".next-old"))).toBe(false);
+    expect(r.warnings.join(" ")).toMatch(/names no live rebuild/);
+  });
+
   it("reclaims, and says so, when the stamp cannot be read as an owner", () => {
     // A stamp that is there but proves nothing — truncated, garbled, written by
     // a shell that could not read the boot id. Reclaiming is right, but a guard
     // that is silently inoperative must not look like one that never fired.
     const kept = path.join(projectDir, ".next-old");
     writeBuild(kept, "parked-build-id");
-    writeFileSync(path.join(kept, OWNER_STAMP), `not-a-pid ${bootId()}\n`, "utf-8");
+    writeFileSync(path.join(kept, OWNER_STAMP), `not-a-pid ${bootId()} 1\n`, "utf-8");
 
     const r = runReclaim(projectDir);
 
@@ -297,8 +334,9 @@ describe("production-server.js reclaims a parked build at boot", () => {
   });
 
   it.each([
-    ["a pid with trailing junk", (b: string) => `123junk ${b}`],
-    ["a third field", (b: string) => `1 ${b} trailing`],
+    ["a pid with trailing junk", (b: string) => `123junk ${b} 1`],
+    ["a fourth field", (b: string) => `1 ${b} 1 trailing`],
+    ["no start time", (b: string) => `1 ${b}`],
     ["only a pid", () => "1"],
   ])("reclaims when the stamp has %s", (_name, make) => {
     // Only a stamp this file can vouch for may refuse the reclaim. One writer

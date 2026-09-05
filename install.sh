@@ -1386,11 +1386,13 @@ promote_parked_build() {
 # would imply a safety this function cannot provide. Two rebuilds at once are
 # unsupported end to end. It only strips the stamp off the tree it promotes.
 #
-# The boot id is not decoration. A power cut mid-build, one of the very cases
-# these helpers exist for, leaves the stamp on disk, and after the reboot that
-# PID can belong to any unrelated process — which would make the reclaim refuse
-# forever and re-create the crash loop it was added to end. No rebuild survives
-# a reboot.
+# It takes three fields, because a PID alone identifies nothing. A power cut
+# mid-build — one of the very cases these helpers exist for — leaves the stamp
+# on disk, and the number in it can later belong to some unrelated process:
+# across a reboot, which the boot id settles because no rebuild survives one,
+# and within a boot, because PIDs are reused. Either would make the reclaim
+# refuse forever and re-create the crash loop it was added to end, so the stamp
+# also carries this process's start time and the reader requires all three.
 #
 # The stamp lives INSIDE the parked tree, so it cannot outlive it and needs no
 # entry of its own in .gitignore (`.next-old/` is already there).
@@ -1416,14 +1418,23 @@ set_previous_build_aside() {
   # with no owner. `$$` is this script's PID — the process whose death is what
   # "the rebuild died" means.
   #
-  # An empty boot id is a stamp no reader can ever match, so it is the same
-  # outcome as no stamp at all — the reclaim behaves exactly as it did before
-  # the stamp existed. That is the safe direction to fail in, but it is not
-  # silent: a guard that is quietly inoperative is worse than one that is
-  # absent, so both halves take the same warning.
-  local boot_id=""
+  # A field this shell cannot fill is a stamp no reader can ever match, so it is
+  # the same outcome as no stamp at all — the reclaim behaves exactly as it did
+  # before the stamp existed. That is the safe direction to fail in, but it is
+  # not silent: a guard that is quietly inoperative is worse than one that is
+  # absent, so every half takes the same warning.
+  #
+  # start_time is field 22 of /proc/<pid>/stat, the process's start in clock
+  # ticks since boot — what makes the PID name one process rather than a number
+  # that will be handed out again. Field 2 is the command, parenthesised and
+  # free to contain spaces and parens of its own, so everything up to the LAST
+  # ") " is dropped first; field 3 is then $1 and field 22 is $20.
+  local boot_id="" start_time=""
   boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || boot_id=""
-  if [ -z "$boot_id" ] || ! printf '%s %s\n' "$$" "$boot_id" > "$build_dir/.rebuild-pid"; then
+  start_time="$(sed -e 's/^.*) //' "/proc/$$/stat" 2>/dev/null | awk '{print $20}')" || start_time=""
+  case "$start_time" in ''|*[!0-9]*) start_time="" ;; esac
+  if [ -z "$boot_id" ] || [ -z "$start_time" ] \
+     || ! printf '%s %s %s\n' "$$" "$boot_id" "$start_time" > "$build_dir/.rebuild-pid"; then
     echo "  Warning: could not record this rebuild as the owner of the build it is parking — a dashboard restarting mid-build may reclaim it" >&2
   fi
   mv "$build_dir" "$kept_dir"
