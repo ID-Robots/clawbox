@@ -4,6 +4,7 @@ import * as childProcess from "child_process";
 import fsp from "fs/promises";
 import type { ChildProcess } from "child_process";
 import { EventEmitter } from "events";
+import { getProviderCatalog, OPENAI_DEFAULT_MODEL_ID } from "@/lib/provider-models";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
@@ -395,7 +396,71 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.success).toBe(true);
 
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
-    expect(commands).toContain("config set agents.defaults.model.primary openai/gpt-5");
+    expect(commands).toContain("config set agents.defaults.model.primary openai/gpt-5.4");
+  });
+
+  // A save that carries no `model` lands on the PROVIDERS table's cold start,
+  // and that table is hand-maintained beside three other lists of the same
+  // ids. It had already drifted: openai's entry was `openai/gpt-5`, an id
+  // neither OPENAI_MODELS nor any live enumeration on the pinned core (2026.8.1)
+  // carries — it exists only as an OpenRouter slug. The CLI refuses that
+  // reference against the enabled plugins' catalogs, the route falls through to
+  // setPrimaryModelWithoutCatalogValidation and answers 200, and nothing
+  // surfaces it until the owner's first turn fails. The picker never offers it,
+  // so there is no second chance to notice.
+  //
+  // Driven through the route rather than pinned against a copy of the table:
+  // PROVIDERS is module-private, and what matters is the id the box is actually
+  // left on.
+  //
+  // What this still catches, precisely: a cold start the provider's own picker
+  // list does not carry. It cannot constrain WHICH curated id is chosen — a
+  // cold start of `gpt-5.5-pro` would sail through — and for the three
+  // providers whose two tables now resolve from one exported symbol the
+  // `defaultModelId` half is structurally true. It stays because it is the half
+  // that fails the day a table is edited back to a hand-written id.
+  //
+  // clawai is excluded on purpose: its refs are `deepseek/…`, so the provider
+  // assertion below could not hold, and its ids come from
+  // CLAWBOX_AI_*_MODEL_ID, which a deploy-time env var can move.
+  describe("cold-start defaults", () => {
+    const coldStarts: ReadonlyArray<{ provider: string; apiKey: string }> = [
+      { provider: "anthropic", apiKey: "sk-ant-test" },
+      { provider: "openai", apiKey: "sk-openai-test" },
+      { provider: "google", apiKey: "AIza-test" },
+      { provider: "openrouter", apiKey: "sk-or-test" },
+    ];
+
+    it.each(coldStarts)(
+      "$provider lands on a model its curated catalogue carries",
+      async ({ provider, apiKey }) => {
+        const res = await configurePost(jsonRequest({ provider, apiKey }));
+        // A route that writes the primary and then refuses would otherwise pass
+        // here: the assertions below only read the recorded `config set` calls.
+        expect(res.status).toBe(200);
+
+        const commands = configSetCommands(
+          vi.mocked(runOpenclawConfigSet),
+          vi.mocked(runOpenclawConfigSetBatch),
+        );
+        const primary = commands
+          .map((c) => /^config set agents\.defaults\.model\.primary (.+)$/.exec(c)?.[1])
+          .filter((v): v is string => Boolean(v))
+          .at(-1);
+        expect(primary).toBeDefined();
+
+        const parsed = parseFullyQualifiedModelImpl(primary!);
+        expect(parsed).not.toBeNull();
+        expect(parsed!.provider).toBe(provider);
+
+        const catalog = getProviderCatalog(provider);
+        expect(catalog).not.toBeNull();
+        // Both halves matter: the id has to be renderable by the picker, and
+        // the two tables have to agree on which id is the cold start.
+        expect(catalog!.models.map((m) => m.id)).toContain(parsed!.modelId);
+        expect(catalog!.defaultModelId).toBe(parsed!.modelId);
+      },
+    );
   });
 
   it("refuses an unknown authMode before any write", async () => {
@@ -847,11 +912,18 @@ describe("POST /setup-api/ai-models/configure", () => {
   // going to the ChatGPT account — and once the sign-in is removed, the
   // app-server has no credential and every turn dies on the Cloudflare
   // challenge with no ClawBox surface that can undo it.
+  // The armed model in these three fixtures is the OpenAI cold start itself —
+  // an API-key save that carries no model writes exactly this ref, which is why
+  // it is the one that can still be armed for Codex. Derived, not spelt: the
+  // literal `openai/gpt-5` sat here for the same reason it sat in the PROVIDERS
+  // table, and a bump would silently strand these cases on a dead id again.
+  const COLD_START_REF = `openai/${OPENAI_DEFAULT_MODEL_ID}`;
+
   it("clears the Codex runtime arm on an OpenAI API-key save", async () => {
     mockReadOpenClawConfig.mockResolvedValue({
       auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
       agents: {
-        defaults: { models: { "openai/gpt-5": { agentRuntime: { id: "codex" } } } },
+        defaults: { models: { [COLD_START_REF]: { agentRuntime: { id: "codex" } } } },
       },
     } as never);
 
@@ -859,7 +931,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(vi.mocked(runOpenclawConfigUnset)).toHaveBeenCalledWith(
-      'agents.defaults.models["openai/gpt-5"].agentRuntime',
+      `agents.defaults.models["${COLD_START_REF}"].agentRuntime`,
       expect.anything(),
     );
   });
@@ -876,7 +948,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockReadOpenClawConfig.mockResolvedValue({
       auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
       agents: {
-        defaults: { models: { "openai/gpt-5": { agentRuntime: { id: "codex" } } } },
+        defaults: { models: { [COLD_START_REF]: { agentRuntime: { id: "codex" } } } },
       },
     } as never);
     vi.mocked(runOpenclawConfigUnset).mockRejectedValue(new Error("unset failed"));
@@ -885,7 +957,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.warning).toMatch(/still routes openai\/gpt-5 through your ChatGPT account/);
+    expect(body.warning).toContain(`still routes ${COLD_START_REF} through your ChatGPT account`);
   });
 
   it("leaves the arm alone when the save IS the subscription", async () => {
@@ -2096,6 +2168,95 @@ describe("POST /setup-api/ai-models/configure", () => {
   // PROCESSES and the number of times a path is written, not about wall clock,
   // because those are the two things that regressed and the only two a unit
   // test can hold.
+  describe("what the answer says when the primary is written past the catalog check", () => {
+    // The silence that hid `openai/gpt-5`: the route wrote a primary the CLI
+    // had just refused, logged one console.warn nobody reads, and answered a
+    // clean {success:true} — so Settings said "Configured" and the owner found
+    // out on the first turn.
+    //
+    // The refusal on its own is NOT the event. It is a documented normal state
+    // (a placeholder key, a plugin on its first boot, a provider entry this
+    // same request writes later), and warning on it would put an amber line
+    // under every ordinary save — a warning on the happy path is a warning
+    // nobody reads, which is the failure this is meant to end rather than
+    // repeat. What makes it an event is the ID being in no list the box has.
+    const refuseThePrimary = (ref: string) =>
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(
+        new Error(
+          `Cannot set model reference "${ref}" at agents.defaults.model.primary: Unable to refresh provider catalog`,
+        ),
+      );
+
+    it("names an id that is in no catalogue this box has", async () => {
+      // `openai/gpt-5` itself: the id TASK-705 is about, in a provider whose
+      // curated catalogue the box carries in-process, so the answer does not
+      // depend on an enumeration having run.
+      refuseThePrimary("openai/gpt-5");
+      const res = await configurePost(jsonRequest({
+        provider: "openai",
+        apiKey: "sk-test-openai-key",
+        model: "gpt-5",
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.success).toBe(true);
+      // The id is named — a warning that does not say which one sends the
+      // owner nowhere. Read off the batch rather than restated, so it is the
+      // id actually written.
+      const refusedOps = vi.mocked(runOpenclawConfigSetBatch).mock.calls[0][0] as Array<[string, string]>;
+      const written = refusedOps.find(([p]) => p === "agents.defaults.model.primary")?.[1];
+      expect(written).toBe("openai/gpt-5");
+      expect(body.warning).toContain(written!);
+      expect(body.warning).toContain("no model list");
+    });
+
+    it("stays quiet when the refused id is one the box does carry", async () => {
+      // The cold start after this PR: `openai/gpt-5.4` is in OPENAI_MODELS, and
+      // the refusal is the placeholder-key contract doing exactly what it is
+      // documented to do. An amber line here is the false failure.
+      refuseThePrimary("openai/gpt-5.4");
+      const res = await configurePost(jsonRequest({
+        provider: "openai",
+        apiKey: "sk-test-openai-key",
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.success).toBe(true);
+      expect(body.warning).toBeUndefined();
+    });
+
+    it("stays quiet for a provider whose model list the box cannot know", async () => {
+      // deepseek/llamacpp/ollama have no curated catalogue, and on a cold box
+      // no enumeration either. UNKNOWN is not "this id does not exist" — the
+      // ClawBox AI first-boot save is the single most common producer of the
+      // refusal, and it is always over one of our own constants.
+      refuseThePrimary("deepseek/deepseek-v4-pro");
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.success).toBe(true);
+      expect(body.warning).toBeUndefined();
+    });
+
+    it("still writes the primary past the refusal in every one of those cases", async () => {
+      // The warning is a report, not a gate: whatever it decides, the box must
+      // end up on the model the owner asked for.
+      refuseThePrimary("openai/gpt-5");
+      await configurePost(jsonRequest({
+        provider: "openai",
+        apiKey: "sk-test-openai-key",
+        model: "gpt-5",
+      }));
+      expect(vi.mocked(setPrimaryModelWithoutCatalogValidation)).toHaveBeenCalledWith("openai/gpt-5");
+    });
+  });
+
   describe("how many openclaw processes first-run setup costs", () => {
     function invocationCount(): number {
       return (
@@ -2139,6 +2300,18 @@ describe("POST /setup-api/ai-models/configure", () => {
       const retryPaths = (batches[1][0] as Array<[string, string]>).map(([p]) => p);
       expect(retryPaths).not.toContain("agents.defaults.model.primary");
       expect(vi.mocked(setPrimaryModelWithoutCatalogValidation)).toHaveBeenCalledWith(primaryOp?.[1]);
+    });
+
+    it("says nothing extra when the catalog accepted the primary", async () => {
+      // A clean save must not grow a warning nobody needs.
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.warning).toBeUndefined();
     });
 
     it("stores an API key through the CLI's auth store, key on stdin, no doctor", async () => {

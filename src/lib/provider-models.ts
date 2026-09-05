@@ -179,6 +179,45 @@ export const OPENAI_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "Fast, cheap." },
 ] as const;
 
+/**
+ * The OpenAI model this box lands on when nothing named one.
+ *
+ * The twin of ANTHROPIC_DEFAULT_MODEL_ID above, and for the same reason: the
+ * two routes that WRITE `agents.defaults.model.primary` for an API-key save
+ * that carried no model — ai-models/configure's PROVIDERS table and
+ * chat/model's DEFAULT_PROVIDER_MODELS — used to each hold their own copy, and
+ * they had drifted. configure's was `gpt-5`, which is in neither the list above
+ * nor any live enumeration on the pinned core (2026.8.1); it exists only as an
+ * OpenRouter slug. The CLI refuses that reference against the enabled plugins'
+ * catalogs, the route falls through to setPrimaryModelWithoutCatalogValidation
+ * and still answers 200, and the picker never offers the id — so nothing
+ * surfaced it until the owner's first turn failed. TASK-705.
+ *
+ * Measured read-only on the OpenClaw dev box, 2026-09-04, on the pinned core
+ * (2026.8.1): `openclaw models list --provider openai --all --json` answers
+ * eleven rows — gpt-5.4, -mini, -nano, -pro, gpt-5.5, gpt-5.5-pro, the three
+ * gpt-5.6 and gpt-6-astra, plus the image SKU. `gpt-5.4` is there; `gpt-5` is
+ * not.
+ *
+ * This is the WRITE path's cold start, and it is not the same answer as the
+ * READ path's. `openclaw models list` does tag one row `default` per provider,
+ * the catalog route prefers that tag over the curated `defaultModelId`
+ * (ai-models/catalog/route.ts), and on a stock 2026.8.1 host the tagged openai
+ * row is `gpt-5.6-sol` — so a picker can legitimately show `gpt-5.6-sol` while
+ * a save that names no model writes this id. That divergence is real and known;
+ * what it is NOT is the TASK-705 defect, because both are ids the box can run.
+ * Preferring the catalog route's cached `defaultModelId` here would close it and
+ * is the right next step, but it changes what every cold-start save writes for
+ * every provider and belongs in its own change with its own device proof. The
+ * dev box measured above carries no `default` tag on any openai row (the only
+ * tag present was `configured`), which is why the first version of this comment
+ * claimed the divergence could not occur.
+ *
+ * Hermes never reads it: there the recommendation comes from the harness's own
+ * `/api/model/recommended-default` (src/lib/hermes-model-options.ts).
+ */
+export const OPENAI_DEFAULT_MODEL_ID = "gpt-5.4";
+
 // ChatGPT-subscription (Codex) models. `codex` is the UI id for the
 // subscription; the models themselves are written as `openai/<id>` — OpenClaw
 // 2 retired the `codex` provider id (`openai-codex` before 2026.6), see
@@ -213,6 +252,19 @@ export const GOOGLE_MODELS: readonly ProviderModelOption[] = [
   { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite", hint: "Fastest, budget-friendly." },
   { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", hint: "Complex reasoning." },
 ] as const;
+
+/**
+ * The Google model this box lands on when nothing named one.
+ *
+ * The third of the trio, added for the same reason as the other two: the
+ * configure route's PROVIDERS table, chat/model's DEFAULT_PROVIDER_MODELS and
+ * PROVIDER_CATALOGS each spelled this id by hand, and `chat/model`'s copy is
+ * not display-only — `POST /setup-api/providers/default` reads the model off
+ * that row and writes it to `agents.defaults.model.primary`. Bumping the id in
+ * two of the three places would have pointed every Google turn at a model the
+ * box cannot resolve.
+ */
+export const GOOGLE_DEFAULT_MODEL_ID = "gemini-2.5-flash";
 
 // ClawBox AI tiers — surfaced via the secondary model picker after
 // consolidating Flash/Pro into one "ClawBox AI" provider row in the
@@ -388,7 +440,7 @@ export const PROVIDER_CATALOGS = Object.freeze({
   openai: {
     provider: "openai",
     models: OPENAI_MODELS,
-    defaultModelId: "gpt-5.4",
+    defaultModelId: OPENAI_DEFAULT_MODEL_ID,
     allowCustom: true,
   },
   codex: {
@@ -404,7 +456,7 @@ export const PROVIDER_CATALOGS = Object.freeze({
   google: {
     provider: "google",
     models: GOOGLE_MODELS,
-    defaultModelId: "gemini-2.5-flash",
+    defaultModelId: GOOGLE_DEFAULT_MODEL_ID,
     allowCustom: true,
   },
   openrouter: {

@@ -77,13 +77,12 @@ export async function readSubscriptionSurfaceIds(
   // route already wrote", which is exactly the list the pickers were stamped
   // from. Making this one bail too would take the guard back to UNKNOWN on
   // every box and stop refusing ids that are in no catalogue at all.
-  try {
-    const raw = await fsp.readFile(path.join(CACHE_DIR, `${surfaceProvider}.json`), "utf8");
-    const parsed = JSON.parse(raw) as CachedSurface;
-    if (!Array.isArray(parsed.models)) return null;
-    const ids = parsed.models
-      .map((m) => m?.id)
-      .filter((id): id is string => typeof id === "string" && id.length > 0);
+  {
+    const ids = await readCachedCatalogueIds(surfaceProvider);
+    // A missing, unreadable or half-written cache is UNKNOWN here — this
+    // answer REFUSES models, and the header above says why that must never be
+    // decided by the curated list alone.
+    if (ids === null) return null;
     // Union the CURATED catalogue for the surface provider, because that is
     // what the picker renders whenever the catalog route has no live
     // enumeration to serve: a cold start, or a box whose provider is not
@@ -110,10 +109,53 @@ export async function readSubscriptionSurfaceIds(
       ids.push(model.id);
     }
     return new Set(ids);
+  }
+}
+
+/**
+ * The catalog route's cached enumeration for `provider`, or null when there is
+ * no readable one.
+ *
+ * The file read only — the two callers below draw OPPOSITE conclusions from an
+ * absent cache and each states its own, which is why the policy is not in here.
+ * Read-only and spawn-free: the catalog route owns enumerating and refreshing
+ * (`openclaw models list` takes ~3 minutes on a Jetson).
+ */
+async function readCachedCatalogueIds(provider: string): Promise<string[] | null> {
+  try {
+    const raw = await fsp.readFile(path.join(CACHE_DIR, `${provider}.json`), "utf8");
+    const parsed = JSON.parse(raw) as CachedSurface;
+    if (!Array.isArray(parsed.models)) return null;
+    return parsed.models
+      .map((m) => m?.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
   } catch {
-    // Missing, unreadable, or half-written cache. Unknown, not "no".
     return null;
   }
+}
+
+/**
+ * Every model id this box HAS for `provider` — the cached live enumeration and
+ * the curated catalogue together — or null when it has neither.
+ *
+ * The opposite null policy to `readSubscriptionSurfaceIds` above, deliberately,
+ * because the two answers are used for opposite things. That one REFUSES a
+ * model, so a cold cache must not narrow it to the curated three. This one only
+ * decides whether to TELL SOMEONE an id looks wrong, so a curated catalogue on
+ * its own is a perfectly good list to judge against — and the cold box with no
+ * enumeration yet is exactly the state the cold-start default is written in
+ * (TASK-705, where the id written was in no openai catalogue anywhere).
+ *
+ * Null is still UNKNOWN and still means "say nothing": a provider with no
+ * curated catalogue and no enumeration — llamacpp, ollama, deepseek — cannot
+ * be judged at all, and a caller that read null as "the id does not exist"
+ * would report a defect about every one of them.
+ */
+export async function readKnownModelIds(provider: string): Promise<Set<string> | null> {
+  const cached = await readCachedCatalogueIds(provider);
+  const curated = getProviderCatalog(provider)?.models ?? [];
+  const ids = [...(cached ?? []), ...curated.map((m) => m.id)];
+  return ids.length > 0 ? new Set(ids) : null;
 }
 
 /**
