@@ -66,6 +66,18 @@ describe("install.sh plugin refresh", () => {
     expect(guard).toContain("codex|deepseek|discord|whatsapp|clawbox-email-directives)");
   });
 
+  it("matches the whitelist on the NORMALISED plugin id", () => {
+    // `plugins list --json` can key the Discord plugin as `openclaw-discord` or
+    // `@openclaw/discord`. The raw name would fall through the case to the
+    // default arm and be refreshed without consent — silently, behind the WARN
+    // — while `$spec` still has to carry the raw name for the CLI.
+    const built = LINES.findIndex((l) => l.includes("CAP_ARGS=(--accept-capabilities)"));
+    const region = LINES.slice(Math.max(0, built - 8), built).join("\n");
+    expect(region).toContain("${plugin#@openclaw/}");
+    expect(region).toContain("${PLUGIN_KEY#openclaw-}");
+    expect(region).toContain('case "$PLUGIN_KEY" in');
+  });
+
   it("has no `plugins install` or `plugins enable` that skips consent entirely", () => {
     // The invariant this PR is about: every ClawBox-driven use of either verb
     // either carries the flag or carries the argv that may hold it. install.sh

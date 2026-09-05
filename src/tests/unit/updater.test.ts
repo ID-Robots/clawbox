@@ -864,6 +864,52 @@ describe("updater", () => {
       expect(calls.some((call) => call.includes("plugins enable discord"))).toBe(false);
     });
 
+    it("respects an owner-disabled plugin recorded under its ALIAS", async () => {
+      // The journal names the core's own plugin id (`discord`), while
+      // `plugins.entries` can be keyed under the alias `ensureChannelPlugin`
+      // enabled it as (`openclaw-discord`). A literal lookup misses the
+      // owner's explicit `enabled: false` and reads it as "no opinion", so the
+      // repair switches his channel back on with consent granted in his name.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: 'Plugin "discord" requires capability consent; rerun with --accept-capabilities.\n',
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      mockReadFile.mockImplementation(async (file) => {
+        const name = String(file);
+        if (name.endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+        if (name.endsWith("openclaw.json")) {
+          return JSON.stringify({
+            plugins: { entries: { "openclaw-discord": { enabled: false } } },
+          });
+        }
+        throw new Error("ENOENT");
+      });
+      mockGatewayUp.mockResolvedValue(false);
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      expect(calls.some((call) => call.includes("plugins enable discord"))).toBe(false);
+    });
+
     it("leaves a plugin ClawBox does not manage to its owner", async () => {
       // Consenting on the owner's behalf is only defensible for a package
       // ClawBox chose and installed. Something he added from the Terminal has

@@ -2983,8 +2983,16 @@ for p in d.get("plugins", []):
       # rollback override) gives a CLI that rejects the unknown option, and
       # every iteration would then fail behind the WARN below with no plugin
       # refreshed at all.
+      #
+      # Matched on the NORMALISED id: the registry can key a plugin as
+      # `openclaw-discord` or `@openclaw/discord`, and the raw name would then
+      # fall through to the default arm and be refreshed without consent —
+      # silently, behind the WARN below. `$spec` keeps the raw name, which is
+      # what the CLI has to be given.
       local CAP_ARGS=()
-      case "$plugin" in
+      local PLUGIN_KEY="${plugin#@openclaw/}"
+      PLUGIN_KEY="${PLUGIN_KEY#openclaw-}"
+      case "$PLUGIN_KEY" in
         codex|deepseek|discord|whatsapp|clawbox-email-directives)
           openclaw_is_v2 && CAP_ARGS=(--accept-capabilities)
           ;;

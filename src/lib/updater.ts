@@ -1094,10 +1094,18 @@ async function pluginConsentRepairIsAllowed(pluginId: string): Promise<boolean> 
   const entries = plugins.entries && typeof plugins.entries === "object"
     ? plugins.entries as Record<string, unknown>
     : {};
-  const entry = entries[pluginId] && typeof entries[pluginId] === "object"
-    ? entries[pluginId] as Record<string, unknown>
-    : null;
-  return entry?.enabled !== false;
+  // Matched on the NORMALISED id, not the literal one. The journal names the
+  // core's own plugin id while `plugins.entries` can be keyed under the alias
+  // `ensureChannelPlugin` writes (`openclaw-discord`), and a lookup that missed
+  // the alias would read an owner's explicit `enabled: false` as "no opinion"
+  // and switch his channel back on.
+  const wanted = normalizeManagedPluginId(pluginId);
+  return !Object.entries(entries).some(([key, entry]) =>
+    normalizeManagedPluginId(key) === wanted
+    && !!entry
+    && typeof entry === "object"
+    && (entry as Record<string, unknown>).enabled === false,
+  );
 }
 
 /**

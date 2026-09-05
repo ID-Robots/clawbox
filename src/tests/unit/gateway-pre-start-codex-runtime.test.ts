@@ -291,6 +291,29 @@ describe("gateway-pre-start.sh managed-plugin capability consent", () => {
     expect(runManagedConsentFlow({ entries: { weatherbot: { enabled: true } } })).toEqual([]);
   });
 
+  it("recognises the plugin under the alias the registry may have keyed it as", () => {
+    // `ensureChannelPlugin` enables the plugin under the id `plugins list`
+    // reports, which can be `openclaw-discord` or `@openclaw/discord`. Matching
+    // the literal key would skip an enabled alias and leave the gateway
+    // blocked on the very consent refusal this block exists to clear — and the
+    // CLI has to be given the configured key back, because that is the name
+    // the registry answers to.
+    expect(runManagedConsentFlow({
+      entries: {
+        "openclaw-discord": { enabled: true },
+        "@openclaw/whatsapp": { enabled: true },
+      },
+    })).toEqual([
+      "plugins enable openclaw-discord --accept-capabilities",
+      "plugins enable @openclaw/whatsapp --accept-capabilities",
+    ]);
+  });
+
+  it("respects a disabled ALIAS as it respects a disabled canonical entry", () => {
+    expect(runManagedConsentFlow({ entries: { "openclaw-discord": { enabled: false } } }))
+      .toEqual([]);
+  });
+
   it("does nothing on OpenClaw 1, which has no capability consent", () => {
     expect(runManagedConsentFlow({ v2: false, entries: { discord: { enabled: true } } }))
       .toEqual([]);

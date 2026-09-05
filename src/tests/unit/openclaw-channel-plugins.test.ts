@@ -31,9 +31,18 @@ vi.mock("@/lib/openclaw-config", async () => {
   };
 });
 
+// The installed OpenClaw generation, pinned rather than probed: it decides
+// whether `--accept-capabilities` may be passed at all, and the real reader
+// spawns `openclaw --version`, which would shift every argv index below.
+vi.mock("@/lib/openclaw-deepseek-plugin", () => ({
+  installedOpenclawRelease: vi.fn(async () => "2026.8.1"),
+}));
+
 import { OpenclawSpawnTimeoutError, readConfig, spawnOpenclawCli } from "@/lib/openclaw-config";
+import { installedOpenclawRelease } from "@/lib/openclaw-deepseek-plugin";
 
 const mockSpawn = vi.mocked(spawnOpenclawCli);
+const mockRelease = vi.mocked(installedOpenclawRelease);
 const mockReadConfig = vi.mocked(readConfig);
 
 /** openclaw.json with the given plugin ids switched on in `plugins.entries`. */
@@ -67,6 +76,7 @@ describe("ensureChannelPlugin", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    mockRelease.mockResolvedValue("2026.8.1");
     // Default: the gateway config already carries the entry, so the common path
     // does not shell out to `plugins enable`.
     mockReadConfig.mockResolvedValue(configWithEnabled("discord", "whatsapp"));
@@ -287,6 +297,7 @@ describe("readChannelStatus", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    mockRelease.mockResolvedValue("2026.8.1");
     // Default: the gateway config already carries the entry, so the common path
     // does not shell out to `plugins enable`.
     mockReadConfig.mockResolvedValue(configWithEnabled("discord", "whatsapp"));
@@ -374,6 +385,7 @@ describe("waitForChannelConnected", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    mockRelease.mockResolvedValue("2026.8.1");
     // Default: the gateway config already carries the entry, so the common path
     // does not shell out to `plugins enable`.
     mockReadConfig.mockResolvedValue(configWithEnabled("discord", "whatsapp"));
@@ -441,6 +453,7 @@ describe("ensureChannelPlugin capability consent", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    mockRelease.mockResolvedValue("2026.8.1");
     mockReadConfig.mockResolvedValue(configWithEnabled("discord", "whatsapp"));
     lib = await import("@/lib/openclaw-channels");
   });
@@ -461,6 +474,48 @@ describe("ensureChannelPlugin capability consent", () => {
 
     expect(await lib.ensureChannelPlugin("whatsapp")).toEqual({ ok: true, installed: true });
     expect(mockSpawn.mock.calls[1][0]).toContain("--accept-capabilities");
+  });
+
+  it("does NOT pass the flag on an OpenClaw 1 rollback, which rejects it", async () => {
+    // Declared-capability consent arrived with OpenClaw 2. A v1 CLI treats
+    // `--accept-capabilities` as an unknown option and fails the whole command
+    // before any plugin state changes, so passing it unconditionally would
+    // turn every Discord save on a rolled-back box (`OPENCLAW_PIN_VERSION` is
+    // a documented override) into `install_failed` over a plugin that would
+    // have installed. `gateway-pre-start.sh` builds its own capability argv
+    // the same way.
+    mockRelease.mockResolvedValue("2026.7.4");
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "telegram" }]))
+      .mockResolvedValueOnce("Installed plugin: discord.");
+
+    expect(await lib.ensureChannelPlugin("discord")).toEqual({ ok: true, installed: true });
+    expect(mockSpawn.mock.calls[1][0]).toEqual(["plugins", "install", "@openclaw/discord"]);
+  });
+
+  it("passes it when the generation cannot be read — v2 is what every box runs", async () => {
+    mockRelease.mockResolvedValue(null);
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "telegram" }]))
+      .mockResolvedValueOnce("Installed plugin: discord.");
+
+    expect(await lib.ensureChannelPlugin("discord")).toEqual({ ok: true, installed: true });
+    expect(mockSpawn.mock.calls[1][0]).toContain("--accept-capabilities");
+  });
+
+  it("asks the generation ONCE per save, not once per verb", async () => {
+    // A probe memoised for the life of the process would be the probe-once
+    // class; a probe per verb is two `openclaw --version` cold starts on a
+    // Jetson for one save.
+    mockReadConfig.mockResolvedValue(configWithEnabled());
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "telegram" }]))
+      .mockResolvedValueOnce("Installed plugin: discord.")
+      .mockResolvedValueOnce("ok");
+
+    await lib.ensureChannelPlugin("discord");
+
+    expect(mockRelease).toHaveBeenCalledTimes(1);
   });
 
   it("accepts them on the ENABLE too — the verb that runs on an already-installed plugin", async () => {

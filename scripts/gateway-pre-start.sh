@@ -2302,6 +2302,21 @@ if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
   MANAGED_ENABLED_PLUGINS="$(python3 - "$OPENCLAW_CONFIG" <<'MANAGEDPY' || true
 import json, sys
 MANAGED = ("deepseek", "discord", "whatsapp", "clawbox-email-directives")
+
+
+def canonical(name):
+    """`@openclaw/discord` and `openclaw-discord` are the same plugin as `discord`.
+
+    The registry keys a plugin under any of the three and `ensureChannelPlugin`
+    enables it under whichever one it found, so matching the literal key would
+    skip an enabled alias and leave the gateway blocked on its consent refusal.
+    """
+    for prefix in ("@openclaw/", "openclaw-"):
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
 try:
     with open(sys.argv[1], encoding="utf-8") as fh:
         entries = (json.load(fh).get("plugins") or {}).get("entries") or {}
@@ -2309,10 +2324,13 @@ except (OSError, json.JSONDecodeError):
     raise SystemExit(0)
 if not isinstance(entries, dict):
     raise SystemExit(0)
-for name in MANAGED:
-    entry = entries.get(name)
+# The CONFIGURED key is what `plugins enable` is given — the alias is the name
+# the registry answers to — while MANAGED is matched on the canonical one.
+for key, entry in entries.items():
+    if not isinstance(key, str) or canonical(key) not in MANAGED:
+        continue
     if isinstance(entry, dict) and entry.get("enabled") is True:
-        print(name)
+        print(key)
 MANAGEDPY
 )"
   for MANAGED_PLUGIN in $MANAGED_ENABLED_PLUGINS; do
