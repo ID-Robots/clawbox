@@ -708,6 +708,27 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
       expect(readFileSync(guide, "utf-8").match(/^## Skills *$/gm)).toHaveLength(2);
     });
 
+    it("does not top a guide up again and again below a stray fence", () => {
+      // A guide whose ``` lines do not balance — ordinary damage in a file the
+      // owner and the agent both edit. Track the fences anyway and everything
+      // after the stray delimiter is judged fenced, so the sections are
+      // "missing", the copies appended land after it too, and the guide grows
+      // by them on every boot. That is this block's own defect, arriving
+      // through the fence rule. Second boot appends nothing: that is the whole
+      // assertion.
+      const current = readFileSync(TEMPLATE, "utf-8");
+      const cut = current.indexOf("\n## Coding agent");
+      expect(cut).toBeGreaterThan(0);
+      writeFileSync(guide, `${current.slice(0, cut)}\n\n\`\`\`\n`);
+
+      const first = run();
+      const second = run();
+
+      expect(first.stdout).toMatch(/Appended to CLAWBOX\.md:.*Coding agent/);
+      expect(second.stdout).not.toMatch(/Appended/);
+      expect(readFileSync(guide, "utf-8").match(/^## Coding agent/gm)).toHaveLength(1);
+    });
+
     it("does not add a second copy of a section whose heading has trailing whitespace", () => {
       // What a markdown hard line break, a prettier pass or a hand edit leaves.
       // The old substring match tolerated it; a whole-line match must normalise
@@ -915,6 +936,28 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
 
     expect(stdout).not.toMatch(/Appended/);
     expect(readFileSync(agents, "utf-8")).toBe(existing);
+  });
+
+  it("does not take a marker quoted inside a fence as the marker", () => {
+    // The destination-side fence rule, on the file the harness injects into
+    // every session. An AGENTS.md that quotes the pointer inside a ``` block —
+    // the agent showing the owner what ClawBox writes — is not carrying it, and
+    // reading the quote as the marker withholds the pointer for good.
+    writeFileSync(
+      agents,
+      "# AGENTS\n\n```markdown\n## ClawBox integration\n```\n\n"
+        + "## System actions on this ClawBox\n\nMine.\n",
+    );
+
+    const first = run();
+    const second = run();
+
+    expect(first.stdout).toContain("Appended CLAWBOX.md reference to AGENTS.md");
+    expect(first.stdout).not.toContain("Appended the system-actions rule");
+    // Once, and only once however many times the gateway starts: the quoted one
+    // stays where it was and the real one is found on the next boot.
+    expect(second.stdout).not.toMatch(/Appended/);
+    expect(readFileSync(agents, "utf-8").match(/^## ClawBox integration$/gm)).toHaveLength(2);
   });
 
   it("does not take a longer heading of the owner's as its own marker", () => {
