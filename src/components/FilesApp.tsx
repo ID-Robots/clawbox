@@ -134,7 +134,7 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
   // Hidden by default — matches every desktop file manager. Persisted across
   // window reopens so the user's choice sticks. Reading lazily inside
   // useState's initializer guards against SSR (no `window` until mount).
-  const [showHidden, setShowHidden] = useState<boolean>(() => {
+  const [showHidden, setShowHiddenState] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem("clawbox.files.showHidden") === "1";
   });
@@ -146,15 +146,24 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
   // so the write happened once per render attempt rather than once per click.
   // It is idempotent, which is exactly why it went unnoticed. See
   // src/tests/unit/state-updater-purity.test.ts.
+  //
+  // The raw setter is renamed out of reach and every write goes through
+  // `applyShowHidden`, so the mirror cannot be left behind by a writer that
+  // forgets the ref line. A mirror kept in step by a convention is an invisible
+  // LOST write, and the purity rule cannot see one: it reports side effects
+  // INSIDE an updater, never a missing ref advance outside one.
   const showHiddenRef = useRef(showHidden);
+  const applyShowHidden = useCallback((next: boolean) => {
+    showHiddenRef.current = next;
+    setShowHiddenState(next);
+  }, []);
   const toggleShowHidden = useCallback(() => {
     const next = !showHiddenRef.current;
-    showHiddenRef.current = next;
-    setShowHidden(next);
+    applyShowHidden(next);
     if (typeof window !== "undefined") {
       window.localStorage.setItem("clawbox.files.showHidden", next ? "1" : "0");
     }
-  }, []);
+  }, [applyShowHidden]);
   const [selected, setSelected] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogState>({ type: null });
   const [dragOver, setDragOver] = useState(false);

@@ -221,14 +221,21 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   isSleepingRef.current = isSleeping
 
   // Hidden state (persisted) + context menu
-  const [hidden, setHidden] = useState(() => {
+  const [hidden, setHiddenState] = useState(() => {
     if (typeof window === 'undefined') return false
     return kv.get('clawbox-mascot-hidden') === '1'
   })
   // Mirrors `hidden` so the show/hide event handlers can read it without a
   // dependency and without an updater. Seeded from the same initializer, and
-  // advanced by every writer on the line before its state write.
+  // advanced by `applyHidden` — the only writer, because the raw setter is
+  // renamed out of reach. A mirror advanced by convention is an invisible lost
+  // write, and the purity rule cannot see one: it reports side effects INSIDE
+  // an updater, never a missing ref advance outside one.
   const hiddenRef = useRef(hidden)
+  const applyHidden = useCallback((next: boolean) => {
+    hiddenRef.current = next
+    setHiddenState(next)
+  }, [])
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
   const ctxOpenedAt = useRef(0)
 
@@ -1494,20 +1501,18 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     // `set`.
     const showHandler = () => {
       if (!hiddenRef.current) return
-      hiddenRef.current = false
-      setHidden(false)
+      applyHidden(false)
       kv.remove('clawbox-mascot-hidden')
     }
     const hideHandler = () => {
       if (hiddenRef.current) return
-      hiddenRef.current = true
-      setHidden(true)
+      applyHidden(true)
       kv.set('clawbox-mascot-hidden', '1')
     }
     window.addEventListener('clawbox-show-mascot', showHandler)
     window.addEventListener('clawbox-hide-mascot', hideHandler)
     return () => { window.removeEventListener('clawbox-show-mascot', showHandler); window.removeEventListener('clawbox-hide-mascot', hideHandler) }
-  }, [])
+  }, [applyHidden])
 
   if (!mounted) return null // avoid hydration mismatch — render only on client
   if (hidden) return null
@@ -1858,7 +1863,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
             </button>
           )}
           <button
-            onClick={() => { hiddenRef.current = true; setHidden(true); kv.set('clawbox-mascot-hidden', '1'); setCtxMenu(null); window.dispatchEvent(new Event('clawbox-hide-mascot')) }}
+            onClick={() => { applyHidden(true); kv.set('clawbox-mascot-hidden', '1'); setCtxMenu(null); window.dispatchEvent(new Event('clawbox-hide-mascot')) }}
             className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400"
           >
             <span className="text-base">👁️‍🗨️</span> Hide mascot

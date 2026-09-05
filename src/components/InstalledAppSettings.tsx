@@ -86,8 +86,16 @@ interface InstalledAppSettingsProps {
 export default function InstalledAppSettings({ appId, storeApp, icon, onUninstall }: InstalledAppSettingsProps) {
   const { t } = useT();
   const SETTINGS_KEY = `clawbox-app-settings-${appId}`;
-  const [settings, setSettings] = useState<Record<string, string | boolean>>({});
+  const [settings, setSettingsState] = useState<Record<string, string | boolean>>({});
+  // Mirror + its ONLY writer. The raw setter is renamed out of reach so the ref
+  // cannot be left behind by a writer that forgets to advance it — an invisible
+  // lost write, and one the purity rule cannot see, since it reports side
+  // effects INSIDE an updater rather than a missing ref advance outside one.
   const settingsRef = useRef(settings);
+  const applySettings = useCallback((next: Record<string, string | boolean>) => {
+    settingsRef.current = next;
+    setSettingsState(next);
+  }, []);
   const [saving, setSaving] = useState(false);
   // "connected" = backend actually wrote the skill's config (the button then
   // says "Saved to skill config" — that is a file write, never a probed
@@ -157,12 +165,9 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
   useEffect(() => {
     kv.init().then(() => {
       const stored = kv.getJSON<Record<string, string | boolean>>(SETTINGS_KEY);
-      if (stored) {
-        settingsRef.current = stored;
-        setSettings(stored);
-      }
+      if (stored) applySettings(stored);
     });
-  }, [SETTINGS_KEY]);
+  }, [SETTINGS_KEY, applySettings]);
 
   const appSettings = buildSettings(appId, skillInfo);
   // The publisher namespace is what makes a ClawHub URL real; when the store
@@ -182,11 +187,10 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
   // them. See src/tests/unit/state-updater-purity.test.ts.
   const updateSetting = useCallback((key: string, value: string | boolean) => {
     const next = { ...settingsRef.current, [key]: value };
-    settingsRef.current = next;
-    setSettings(next);
+    applySettings(next);
     kv.setJSON(SETTINGS_KEY, next);
     setSaveResult("idle");
-  }, [SETTINGS_KEY]);
+  }, [SETTINGS_KEY, applySettings]);
 
   const [toggleError, setToggleError] = useState(false);
 
