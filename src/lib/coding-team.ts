@@ -352,6 +352,13 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
     worktree = { path: made.path, branch: made.branch };
     directory = made.path;
   }
+  // The owner may have stopped the team while the worktree was being made:
+  // a run started now would have no id on the team yet, so Stop could not
+  // reach it. Nothing starts; the worktree goes back.
+  if (team.stopRequested) {
+    if (worktree) await removeWorktree(board.directory, worktree.path);
+    return;
+  }
 
   let run: CodingRun;
   try {

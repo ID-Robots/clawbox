@@ -190,6 +190,24 @@ describe("a planner that wrote prose", () => {
   });
 });
 
+describe("a stop that lands while a worker is being made", () => {
+  it("starts no worker and gives the worktree back", async () => {
+    outcomes = [{ summary: PARALLEL_PLAN }];
+    let boardId = "";
+    // The owner stops the team while the first worker's worktree is being added.
+    plumbing.addWorkerWorktree.mockImplementationOnce(async (dir: string, teamId: string, taskId: string, attempt: number) => {
+      team.stopTeam(boardId);
+      return { ok: true, path: `${dir}/.clawbox/worktrees/${taskId}-${attempt}`, branch: `clawbox/${teamId}-${taskId}-${attempt}` };
+    });
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    boardId = board.id;
+    const done = await finished(board.id);
+    expect(done.status).toBe("stopped");
+    expect(starts.filter((s) => (s.team as { role: string }).role === "worker")).toHaveLength(0);
+    expect(plumbing.removeWorktree).toHaveBeenCalledWith("/home/clawbox/Projects/site", "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1");
+  });
+});
+
 describe("many agents at once", () => {
   it("starts every task whose dependencies are done side by side, each in its own worktree, and merges each home", async () => {
     // A worker settles on its third wait, so two of them overlap.
