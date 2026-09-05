@@ -163,7 +163,14 @@ export type PluginsEnabledState =
  */
 export function decodePluginsEnabledJson(stdout: string): PluginsEnabledState {
   const text = (stdout || "").trim();
-  if (!text || /^config key not set/i.test(text)) return { kind: "list", names: [] };
+  // AN UNSET KEY AND A SILENT COMMAND ARE NOT THE SAME ANSWER. The CLI's own
+  // "Config key not set" says what the key holds — nothing — and a list may be
+  // started from it. An exit 0 with EMPTY stdout says only that the command
+  // printed nothing; read as `[]` the merge answers `["clawai"]` and the caller
+  // writes it over whatever is really stored, unloading every plugin the
+  // customer installed. That is `unreadable`, which the caller leaves alone.
+  if (/^config key not set/i.test(text)) return { kind: "list", names: [] };
+  if (!text) return { kind: "unreadable" };
   let value: unknown;
   try {
     value = JSON.parse(text);

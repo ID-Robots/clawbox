@@ -119,11 +119,24 @@ describe("plugins.enabled", () => {
   });
 
   it("starts a list when the key has never been set", () => {
-    // What the CLI prints for an unset key, verbatim.
+    // What the CLI prints for an unset key, verbatim. THAT is an empty list:
+    // the CLI said what it holds, and it holds nothing.
     expect(mergePluginsEnabled(decodePluginsEnabledJson("Config key not set: plugins.enabled"))).toEqual([
       HERMES_IMAGE_PLUGIN_NAME,
     ]);
-    expect(mergePluginsEnabled(decodePluginsEnabledJson(""))).toEqual([HERMES_IMAGE_PLUGIN_NAME]);
+  });
+
+  it("does not read an exit-0 SILENCE as an empty list", () => {
+    // A command that printed NOTHING has not said the key is empty, and this
+    // decoder is the one that decides whether the value gets REPLACED: read as
+    // `[]` the merge answers `["clawai"]`, which is then written over whatever
+    // the key really held — silently unloading every plugin the customer
+    // installed, the exact outcome `enableHermesImageGeneration` says it must
+    // never cause. "Could not ask" is the only honest reading of silence, and
+    // an `unreadable` is left strictly alone.
+    expect(decodePluginsEnabledJson("").kind).toBe("unreadable");
+    expect(decodePluginsEnabledJson("   \n").kind).toBe("unreadable");
+    expect(mergePluginsEnabled(decodePluginsEnabledJson(""))).toBeNull();
   });
 
   it("writes nothing when ours is already listed", () => {

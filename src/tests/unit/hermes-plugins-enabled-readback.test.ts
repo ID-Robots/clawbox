@@ -550,12 +550,17 @@ describe("a failure that establishes nothing takes nothing away", () => {
     expect(unsets()).not.toContain("image_gen.provider");
   });
 
-  it("believes hermes over the list when the plugin is explicitly disabled", async () => {
-    // `plugins.disabled` is a deny-list that wins over `plugins.enabled`
-    // (`_plugin_status`, hermes_cli/plugins_cmd.py:1930-1936). The allow-list
-    // here is a perfectly good list naming us, so every type check ClawBox
-    // could make on it says "loadable" — and Hermes still loads nothing. This
-    // is why the proof is Hermes' own answer rather than our reading of a key.
+  /**
+   * A box whose `plugins.enabled` holds `stored` and whose `plugins.disabled`
+   * names our plugin, so Hermes' own listing reports it `disabled`.
+   *
+   * `plugins.disabled` is a deny-list that WINS over `plugins.enabled`
+   * (`_plugin_status`, hermes_cli/plugins_cmd.py:1930-1936), so every type check
+   * ClawBox could make on the allow-list says "loadable" and Hermes still loads
+   * nothing. That is why the proof is Hermes' own answer rather than our reading
+   * of a key — and why it has to be asked on BOTH paths below.
+   */
+  function boxWithUsDenied(stored: string[]): void {
     boxThatDraws(async (args) => {
       if (isPluginsListing(args)) {
         return {
@@ -568,8 +573,75 @@ describe("a failure that establishes nothing takes nothing away", () => {
       }
       if (args[1] === "get" && args[2] === "plugins.enabled") {
         return args.includes("--json")
-          ? { code: 0, stdout: JSON.stringify(["weather"]), stderr: "" }
-          : { code: 0, stdout: "- weather\n", stderr: "" };
+          ? { code: 0, stdout: JSON.stringify(stored), stderr: "" }
+          : { code: 0, stdout: stored.map((v) => `- ${v}`).join("\n") + "\n", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+  }
+
+  it("believes hermes over the list when the plugin is explicitly disabled", async () => {
+    // The allow-list does not name us yet, so a WRITE is needed and the listing
+    // is consulted on the way out of it.
+    boxWithUsDenied(["weather"]);
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(claimedItCanDraw()).toBe(false);
+    expect(unsets()).toContain("image_gen.provider");
+  });
+
+  it("believes hermes over the list on a box that needs no write at all", async () => {
+    // THE FIELD STATE, and the one this whole round exists for: a healthy
+    // linked box already names us in a real list, so `mergePluginsEnabled`
+    // answers null and there is nothing to write. That must not be read as
+    // "loadable" — nothing has been asked yet. The deny-list is the case where
+    // the difference is visible: with no write there is no `writePluginsEnabled`
+    // to consult the listing, and the claim would be made over a plugin Hermes
+    // refuses to load, which is TASK-701's exact symptom.
+    boxWithUsDenied([HERMES_IMAGE_PLUGIN_NAME, "clawbox_email_directives"]);
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(wrotePluginsEnabled(), "the list already names us: nothing to write").toBe(false);
+    expect(claimedItCanDraw()).toBe(false);
+    expect(unsets()).toContain("image_gen.provider");
+  });
+
+  it("asks hermes on the no-write path even when the answer is yes", async () => {
+    // The counterweight: the same no-write path on a box where the plugin IS
+    // enabled must still reach `image_gen.provider`. A guard that answered
+    // "unproved" for every healthy box would take image generation away from
+    // the whole fleet.
+    boxThatDraws(async (args) => {
+      if (isPluginsListing(args)) return pluginsListing([HERMES_IMAGE_PLUGIN_NAME]);
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return args.includes("--json")
+          ? { code: 0, stdout: JSON.stringify([HERMES_IMAGE_PLUGIN_NAME]), stderr: "" }
+          : { code: 0, stdout: `- ${HERMES_IMAGE_PLUGIN_NAME}\n`, stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(wrotePluginsEnabled()).toBe(false);
+    expect(claimedItCanDraw()).toBe(true);
+    expect(unsets()).not.toContain("image_gen.provider");
+  });
+
+  it("keeps drawing on the no-write path when hermes cannot be asked", async () => {
+    // 127: the `hermes` shim while `step_hermes_install` rebuilds the venv under
+    // it. Nothing was established, so the claim standing on disk is neither
+    // re-made nor taken away — the same rule the write path follows.
+    boxThatDraws(async (args) => {
+      if (isPluginsListing(args)) {
+        return { code: 127, stdout: "", stderr: "hermes: command not found" };
+      }
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return args.includes("--json")
+          ? { code: 0, stdout: JSON.stringify([HERMES_IMAGE_PLUGIN_NAME]), stderr: "" }
+          : { code: 0, stdout: `- ${HERMES_IMAGE_PLUGIN_NAME}\n`, stderr: "" };
       }
       return { code: 0, stdout: "", stderr: "" };
     });
@@ -577,7 +649,55 @@ describe("a failure that establishes nothing takes nothing away", () => {
     await applyClawaiToHermes("claw_token_abc", "flash");
 
     expect(claimedItCanDraw()).toBe(false);
-    expect(unsets()).toContain("image_gen.provider");
+    expect(unsets()).not.toContain("image_gen.provider");
+  });
+
+  it("does not overwrite the customer's plugins over a silent plain read", async () => {
+    // The `--json`-less build, where nothing can prove the type and the write
+    // is therefore made unproved: a `config get` that exits 0 and prints
+    // NOTHING must not be read as an empty list, or the merge writes
+    // `["clawai"]` over whatever the key holds and unloads every plugin the
+    // customer installed.
+    boxThatDraws(async (args) => {
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return args.includes("--json")
+          ? { code: 2, stdout: "", stderr: "Error: no such option: --json" }
+          : { code: 0, stdout: "", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(wrotePluginsEnabled()).toBe(false);
+    expect(unsets()).not.toContain("image_gen.provider");
+  });
+
+  it("still links a FIRST box whose hermes has no `plugins list --json`", async () => {
+    // The feature now rests on one subcommand flag, and a build that lacks it
+    // could be asked nothing — so a box being linked for the FIRST time would
+    // silently never gain image generation, where beta gave it unconditionally.
+    // A flag that does not exist is a PERMANENT property of the build, not a
+    // moment, and it is the same exemption `config get --json` already gets:
+    // where no machine-readable question can be put, the box keeps the feature
+    // it would have had. (A box linked before keeps its claim either way —
+    // nothing here withdraws.)
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (isPluginsListing(args)) {
+        return { code: 2, stdout: "", stderr: "Error: no such option: --json" };
+      }
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return args.includes("--json")
+          ? { code: 0, stdout: JSON.stringify([HERMES_IMAGE_PLUGIN_NAME]), stderr: "" }
+          : { code: 0, stdout: `- ${HERMES_IMAGE_PLUGIN_NAME}\n`, stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(claimedItCanDraw()).toBe(true);
+    expect(unsets()).not.toContain("image_gen.provider");
   });
 
   it("still withdraws on the one answer that establishes the plugin cannot load", async () => {

@@ -1057,7 +1057,16 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
       );
     }
     const merged = mergePluginsEnabled(state);
-    loadable = merged ? await writePluginsEnabled(merged, typed) : true;
+    // NULL IS "NOTHING TO WRITE", NEVER "NOTHING TO ASK". The key already names
+    // us in a real list — the state of every healthy linked box — so the write
+    // is skipped; but the allow-list is not the only thing Hermes gates on, and
+    // deriving "loadable" from it here would be the same inference this whole
+    // path exists to stop making. `plugins.disabled` names us and every type
+    // check on `plugins.enabled` still says yes. So the prover runs on both
+    // paths: the write path asks it after the write, this one asks it directly.
+    loadable = merged
+      ? await writePluginsEnabled(merged, typed)
+      : await hermesConfirmsPluginLoadable(typed);
   } catch (err) {
     if (err instanceof PluginsEnabledDisproved) await withdrawImageProviderClaim();
     throw err;
@@ -1075,12 +1084,11 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
   ];
   for (const args of describes) await runOrThrow(args);
   if (!loadable) {
-    // The write exited 0 and the CLI never answered the question that would
-    // prove it. Not a failure worth throwing over, and not proof either — so
-    // no new claim is made, no old one is taken away, and the next link asks
-    // again.
+    // Hermes never answered the question that would prove it loads the plugin.
+    // Not a failure worth throwing over, and not proof either — so no new claim
+    // is made, no old one is taken away, and the next link asks again.
     console.warn(
-      "[hermes/clawai] plugins.enabled could not be proved to hold a list — image generation left as it was",
+      "[hermes/clawai] hermes did not confirm the plugin is loadable — image generation left as it was",
     );
     return;
   }
@@ -1147,6 +1155,17 @@ async function readPluginsEnabledFromCli(): Promise<{ state: PluginsEnabledState
     "[hermes/clawai] this hermes does not answer `config get --json`;"
     + " plugins.enabled is merged from the plain rendering and its type is not proved",
   );
+  // The SIBLING of the silence rule in `decodePluginsEnabledJson`, and it
+  // matters just as much here: this build cannot be asked the typed question,
+  // so `writePluginsEnabled` arms the backend without a listing to prove it,
+  // and the merge that runs first would write `["clawai"]` over whatever the
+  // key really holds. An exit 0 that printed NOTHING is not "the list is
+  // empty"; the unset key arrives on the branch above, as a non-zero exit
+  // saying "Config key not set" (or those words in the rendering), and only
+  // that is read as an empty list.
+  if (plainRead.code === 0 && !plainRead.stdout?.trim()) {
+    return { state: { kind: "unreadable" }, typed: false };
+  }
   return {
     state: decodePluginsEnabledPlain(plainRead.code === 0 ? plainRead.stdout : ""),
     typed: false,
@@ -1245,28 +1264,58 @@ async function writePluginsEnabled(names: string[], typed: boolean): Promise<boo
       "hermes stored plugins.enabled as text, so no plugin would load — image generation left off",
     );
   }
-  // ASK HERMES, do not re-derive its answer. `hermes plugins list --json` runs
-  // `_get_enabled_set()` itself — the very function the loader uses — so its
-  // verdict cannot disagree with what will actually load, the way a type
-  // inference over `config get` can.
+  return hermesConfirmsPluginLoadable(typed);
+}
+
+/**
+ * Will Hermes LOAD our plugin? The one prover, for both paths.
+ *
+ * ASK HERMES, do not re-derive its answer. `hermes plugins list --json` runs
+ * `_get_enabled_set()` itself — the very function the loader uses — so its
+ * verdict cannot disagree with what will actually load, the way a type
+ * inference over `config get` can. And it is the ONLY thing that catches
+ * `plugins.disabled`, a deny-list that wins over `plugins.enabled` and leaves
+ * every reading of the allow-list saying "loadable" over a plugin Hermes
+ * refuses. That is why the caller asks this even when it wrote nothing: an
+ * allow-list that already names us is a reason to skip the WRITE, never a
+ * reason to skip the QUESTION.
+ *
+ * @param typed whether this build answered `config get --json` at all.
+ * @returns true when Hermes reports the plugin enabled — false when the
+ *          question could not be put on a build that can otherwise be asked
+ *          machine-readable questions. Throws `PluginsEnabledDisproved` when
+ *          Hermes answers that it will not load it.
+ */
+async function hermesConfirmsPluginLoadable(typed: boolean): Promise<boolean> {
   const verdict = await hermesReportsPluginEnabled(HERMES_IMAGE_PLUGIN_NAME);
   if (verdict === "enabled") return true;
   if (verdict === "not-enabled") {
     // ANSWERED, and the answer is no: the value stored is not a list Hermes
     // can load us from, or `plugins.disabled` names us. This is the proof.
     throw new PluginsEnabledDisproved(
-      "hermes does not report the plugin as enabled after the write",
+      "hermes does not report the plugin as enabled",
     );
+  }
+  if (verdict === "no-such-question") {
+    // This build HAS no listing to ask, so no link of it will ever prove
+    // anything — and refusing the feature on that would take image generation
+    // away from a first link for good, where beta gave it unconditionally.
+    // Exempted exactly as a build without `config get --json` is.
+    console.warn(
+      "[hermes/clawai] this hermes does not answer `plugins list --json`;"
+      + " image generation is armed without that proof",
+    );
+    return true;
   }
   // A QUESTION THAT COULD NOT BE ASKED IS NOT A WRITE THAT FAILED. 126, 127 and
   // a signalled `null` are the shell's codes for the `hermes` shim while
   // `step_hermes_install` rebuilds the venv under it — nothing was parsed, and
-  // the write above still exited 0 with no coercion warning. Suppressing image
+  // any write above still exited 0 with no coercion warning. Suppressing image
   // generation for the whole link over that is the false-failure shape; the
   // sibling repair answers `unverified` and tries again for the same reason.
   console.warn(
     "[hermes/clawai] hermes could not be asked whether the plugin is enabled;"
-    + " the write exited 0 and is left as written, unproved",
+    + " what is on disk is left exactly as it is, unproved",
   );
   // A build that answers NEITHER machine-readable question cannot be asked at
   // all — a permanent property rather than a moment — and refusing the feature
@@ -1276,8 +1325,14 @@ async function writePluginsEnabled(names: string[], typed: boolean): Promise<boo
   return !typed;
 }
 
-/** What Hermes itself says about a plugin, or that it could not be asked. */
-type HermesPluginVerdict = "enabled" | "not-enabled" | "cannot-ask";
+/**
+ * What Hermes itself says about a plugin, or why it could not be asked.
+ *
+ * `cannot-ask` and `no-such-question` are kept apart because they are a moment
+ * and a permanent property of the build: a shim exiting 127 will answer at the
+ * next link, a subcommand flag that does not exist never will.
+ */
+type HermesPluginVerdict = "enabled" | "not-enabled" | "cannot-ask" | "no-such-question";
 
 /**
  * Would Hermes load this plugin? ASKED, not inferred.
@@ -1302,7 +1357,16 @@ type HermesPluginVerdict = "enabled" | "not-enabled" | "cannot-ask";
  */
 async function hermesReportsPluginEnabled(name: string): Promise<HermesPluginVerdict> {
   const listed = await runHermesCli(["plugins", "list", "--json"], { timeoutMs: 15_000 });
-  if (!hermesCliAnswered(listed) || listed.code !== 0) return "cannot-ask";
+  if (!hermesCliAnswered(listed) || listed.code !== 0) {
+    // A build without this flag can never answer, however often it is asked —
+    // the same permanent property `config get --json` is exempted for, matched
+    // on the same wording. Told apart from a transient failure because the
+    // caller owes those two different things.
+    return hermesCliAnswered(listed)
+      && UNSUPPORTED_OPTION_RE.test(`${listed.stdout ?? ""}\n${listed.stderr ?? ""}`)
+      ? "no-such-question"
+      : "cannot-ask";
+  }
   let rows: unknown;
   try {
     rows = JSON.parse(listed.stdout);

@@ -549,6 +549,50 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(imageProvider()).toBe("fal");
   });
 
+  it("arms nothing while plugins.disabled names the backend", () => {
+    // The deny-list WINS over the allow-list (`_plugin_status`,
+    // hermes_cli/plugins_cmd.py:1930-1936) — it is the very state the link
+    // path's withdrawal exists for, and the type repair does not change it.
+    // Re-arming here would put back, unattended, exactly the claim a proof had
+    // just taken away, on a box where Hermes still loads nothing.
+    fs.writeFileSync(
+      configPath,
+      `plugins:\n  enabled: '["clawai"]'\n  disabled:\n    - clawai\n`,
+    );
+    installImageBackend();
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(enabledPlugins()).toEqual(["clawai", PLUGIN]); // the type repair still happens
+    expect(imageProvider()).toBeUndefined();
+    expect(r.stdout).toMatch(/disabled/);
+  });
+
+  it("arms nothing when plugins.disabled is a shape it cannot read", () => {
+    // Declining costs one Settings → Save, which re-asks Hermes directly.
+    // Re-arming over a deny-list nobody could read would be a claim made on a
+    // guess, and this key is the one that turns the composer button on.
+    fs.writeFileSync(
+      configPath,
+      `plugins:\n  enabled: '["clawai"]'\n  disabled: 7\n`,
+    );
+    installImageBackend();
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(imageProvider()).toBeUndefined();
+  });
+
+  it("still arms when plugins.disabled names somebody else", () => {
+    // The counterweight: a deny-list that is not about us must not cost the
+    // repair its re-arm.
+    fs.writeFileSync(
+      configPath,
+      `plugins:\n  enabled: '["clawai"]'\n  disabled: '["weather"]'\n`,
+    );
+    installImageBackend();
+    run();
+    expect(imageProvider()).toBe("clawai");
+  });
+
   it("arms nothing when the backend's files are not on the box", () => {
     // "named in config, nothing to load" is the false success this script
     // guards against everywhere else.
