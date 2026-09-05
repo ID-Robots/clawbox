@@ -21,7 +21,12 @@ if [ ! -f "$PROJECT_DIR/install.sh" ]; then
   (
     cd "$SRC_DIR"
     # Using tar avoids rsync as a dependency and handles dotfiles cleanly.
-    tar --exclude=node_modules --exclude=.next --exclude=.git/logs -cf - . \
+    # `--exclude=.next` is an exact-name match and does NOT cover `.next-old`,
+    # the build install.sh parks during a rebuild — seeding one into the
+    # container would hand production-server.js a parked build to reclaim on
+    # first boot. `.dockerignore` keeps it out of the image too; the pair has to
+    # stay in step.
+    tar --exclude=node_modules --exclude=.next --exclude=.next-old --exclude=.git/logs -cf - . \
       | (cd "$PROJECT_DIR" && tar -xf -)
   )
   chown -R clawbox:clawbox "$PROJECT_DIR"
