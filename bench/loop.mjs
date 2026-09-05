@@ -21,6 +21,7 @@ import { costOfUsage, formatUsd, loadPricing } from "./lib/cost.mjs";
 import crypto from "node:crypto";
 import { deltaByTask, formatMs, formatTokens, hints, parallelism, summarizeCycle, taskFigures } from "./lib/metrics.mjs";
 import { appendFigure, readFigures as readFiguresFile } from "./lib/figures-file.mjs";
+import { outsidePath } from "./lib/outside.mjs";
 
 const BENCH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const TASKS_DIR = path.join(BENCH_DIR, "tasks");
@@ -72,8 +73,8 @@ function seedProject(task, projectsRoot, stamp) {
   fs.mkdirSync(workdir, { recursive: true });
   if (task.seedDir) fs.cpSync(task.seedDir, workdir, { recursive: true });
   for (const [rel, content] of Object.entries(task.outside ?? {})) {
-    // The task names the file from its own folder (`../shared-config/…`).
-    const dest = path.resolve(workdir, rel);
+    // Beside the project, never in it: see bench/lib/outside.mjs.
+    const dest = outsidePath(workdir, rel);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, content);
   }

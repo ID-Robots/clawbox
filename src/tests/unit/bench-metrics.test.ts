@@ -10,6 +10,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { appendFigure, readFigures } from "../../../bench/lib/figures-file.mjs";
+import { outsidePath } from "../../../bench/lib/outside.mjs";
 import { deltaByTask, figureKey, formatMs, formatTokens, hints, parallelism, summarizeCycle, taskFigures } from "../../../bench/lib/metrics.mjs";
 
 const PRICING = { currency: "USD", models: { "deepseek-v4-pro[1m]": { input: 1, output: 2, cacheRead: 0.1 }, "deepseek-v4-flash": { input: 0.1, output: 0.2 } } };
@@ -157,5 +158,13 @@ describe("the cycle's figures on disk", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("a task's outside files", () => {
+  it("land beside the project, never in it, whether the key says ../ or not", () => {
+    expect(outsidePath("/home/clawbox/Projects/bench-s-02", "shared-config/limits.json")).toBe("/home/clawbox/Projects/shared-config/limits.json");
+    expect(outsidePath("/home/clawbox/Projects/bench-s-02", "../shared-config/limits.json")).toBe("/home/clawbox/Projects/shared-config/limits.json");
+    expect(() => outsidePath("/home/clawbox/Projects/bench-s-02", "bench-s-02/inside.json")).toThrow(/inside the project/);
   });
 });
