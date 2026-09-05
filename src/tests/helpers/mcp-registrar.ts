@@ -2,11 +2,17 @@
  * A Registrar that captures tool handlers instead of wiring them to an MCP
  * transport, so a unit test can call a tool the way the agent does.
  *
- * `call()` reproduces exactly what mcp/lib/register.ts does around a handler —
- * a throw becomes the { error, code, message, next } envelope with isError set
- * — because "what does the agent actually see" is the property these tests are
- * about. A handler that throws and a handler that returns cheerful prose are
- * indistinguishable if you only inspect the return value.
+ * `call()` reproduces what mcp/lib/register.ts does AROUND a handler — the
+ * output cap, and a throw becoming the { error, code, message, next } envelope
+ * with isError set — because "what does the agent actually see" is the property
+ * these tests are about. A handler that throws and a handler that returns
+ * cheerful prose are indistinguishable if you only inspect the return value,
+ * and so are an answer that fits its cap and one the device would have sliced.
+ *
+ * One thing it deliberately does NOT reproduce: the dispatcher validates
+ * arguments with `z.object(entry.shape).safeParse()` before the handler, and
+ * this calls the handler directly, so a test may pass an argument a device
+ * would refuse with BAD_ARGUMENT. Say what you mean in the fixture.
  */
 
 import type { ToolErrorEnvelope } from "../../../mcp/lib/errors";
