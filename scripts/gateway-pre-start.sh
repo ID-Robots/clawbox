@@ -3251,6 +3251,21 @@ CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 # through escape processing: a heading that ever grew a backslash would quietly
 # stop matching and the section would go missing with no warning.
 
+# Does this file carry that line, whole, ignoring trailing whitespace and a CR?
+#
+# `grep -qxF` cannot do it: a CRLF file stores the marker as `## X\r`, which an
+# exact whole-line match misses — and the block then appends on EVERY boot and
+# the file grows without bound, which is the failure this whole-line matching
+# was introduced to prevent rather than to cause. One rule for both paths.
+clawbox_file_has_line() {
+  [ -r "$1" ] || return 2
+  wanted="$2" awk '
+    { line = $0; sub(/[ \t\r]+$/, "", line) }
+    line == ENVIRON["wanted"] { found = 1; exit }
+    END { exit(found ? 0 : 1) }
+  ' "$1"
+}
+
 # Every `## ` heading in a markdown file, in order.
 #
 # Fenced blocks are skipped: this template is markdown that documents markdown
@@ -3280,7 +3295,8 @@ clawbox_guide_has_heading() {
   [ -r "$1" ] || return 2
   heading="$2" awk '
     { line = $0; sub(/[ \t\r]+$/, "", line) }
-    line == ENVIRON["heading"] { found = 1; exit }
+    line ~ /^(```|~~~)/ { fence = !fence; next }
+    !fence && line == ENVIRON["heading"] { found = 1; exit }
     END { exit(found ? 0 : 1) }
   ' "$1"
 }
@@ -3569,7 +3585,7 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   # session, under a bootstrap character budget.
   if [ -f "$CLAWBOX_AGENTS_MD" ] && [ ! -r "$CLAWBOX_AGENTS_MD" ]; then
     echo "  WARNING: could not read $CLAWBOX_AGENTS_MD; leaving it as it is" >&2
-  elif [ -f "$CLAWBOX_AGENTS_MD" ] && ! grep -qxF "$CLAWBOX_AGENTS_POINTER" "$CLAWBOX_AGENTS_MD"; then
+  elif [ -f "$CLAWBOX_AGENTS_MD" ] && ! clawbox_file_has_line "$CLAWBOX_AGENTS_MD" "$CLAWBOX_AGENTS_POINTER"; then
     # Guarded like the two appends below, and for the same reason: this one has
     # always been bare, so a read-only AGENTS.md aborted pre-start under
     # `set -euo pipefail` and the gateway never started — over a pointer
@@ -3600,7 +3616,7 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   # Readability and whole-line, for the reason above. No second warning: the
   # pointer block a few lines up has already printed one for the same file.
   if [ -f "$CLAWBOX_AGENTS_MD" ] && [ -r "$CLAWBOX_AGENTS_MD" ] \
-    && ! grep -qxF "$CLAWBOX_AGENTS_RULE" "$CLAWBOX_AGENTS_MD"; then
+    && ! clawbox_file_has_line "$CLAWBOX_AGENTS_MD" "$CLAWBOX_AGENTS_RULE"; then
     printf -v CLAWBOX_AGENTS_RULE_TEXT '\n\n%s\n\nRestarting the OpenClaw gateway is not yours to do from a chat turn: the gateway hosts this session, so the restart kills the reply before it lands. It is rarely needed either — saving a setting under Settings -> Providers, Voice or Channels restarts it. Say that, and name the setting.\n\nA device restart or shutdown IS yours when the owner asks in their own words: `system_power`, `confirm: true`, with their reason. Their own control is the power menu in the desktop tray, not Settings -> System.\n\nNever queue an `operator_approval` proposal for any of this. ClawBox renders no approval card, so a queued proposal is shown to nobody; a parked one is answered with `openclaw approvals pending` / `openclaw approvals resolve` from the Terminal app. `CLAWBOX.md` has the long form.\n' "$CLAWBOX_AGENTS_RULE"
     if clawbox_append_or_rollback "$CLAWBOX_AGENTS_MD" "$CLAWBOX_AGENTS_RULE_TEXT"; then
       echo "  Appended the system-actions rule to AGENTS.md"

@@ -690,6 +690,24 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
       expect(readFileSync(guide, "utf-8")).not.toContain("Not a heading");
     });
 
+    it("delivers a section the guide only mentions inside a fenced block", () => {
+      // The destination side of the same rule. A guide that quotes a heading
+      // inside a ``` fence — an owner pasting an example, or the guide
+      // documenting itself — does not CARRY that section, and reading the
+      // fenced line as the marker would withhold it for good.
+      const current = readFileSync(TEMPLATE, "utf-8");
+      writeFileSync(
+        guide,
+        current.replace("\n## Skills\n", "\n```markdown\n## Skills\n```\n"),
+      );
+
+      const { stdout } = run();
+
+      expect(stdout).toMatch(/Appended to CLAWBOX\.md:.*Skills/);
+      // The real one arrives; the quoted one is left where it was.
+      expect(readFileSync(guide, "utf-8").match(/^## Skills *$/gm)).toHaveLength(2);
+    });
+
     it("does not add a second copy of a section whose heading has trailing whitespace", () => {
       // What a markdown hard line break, a prettier pass or a hand edit leaves.
       // The old substring match tolerated it; a whole-line match must normalise
@@ -882,6 +900,20 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     expect(first.stdout).not.toMatch(/Appended/);
     expect(second.stdout).not.toMatch(/Appended/);
     expect(first.stderr).toMatch(/could not read .*AGENTS\.md/);
+    expect(readFileSync(agents, "utf-8")).toBe(existing);
+  });
+
+  it("does not re-append to a CRLF AGENTS.md on every boot", () => {
+    // A whole-line match that is byte-exact misses `## ClawBox integration\r`,
+    // so a CRLF file was appended to on EVERY boot and grew without bound —
+    // the failure whole-line matching was introduced to prevent, not cause.
+    const existing = "# AGENTS\r\n\r\n## ClawBox integration\r\n\r\nSee `CLAWBOX.md`.\r\n"
+      + "## System actions on this ClawBox\r\n\r\nMine.\r\n";
+    writeFileSync(agents, existing);
+
+    const { stdout } = run();
+
+    expect(stdout).not.toMatch(/Appended/);
     expect(readFileSync(agents, "utf-8")).toBe(existing);
   });
 
