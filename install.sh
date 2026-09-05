@@ -3307,13 +3307,55 @@ try {
 }
 if (!cfg.channels) cfg.channels = {};
 const { dmPolicy: _dm, allowFrom: _af, ...rest } = cfg.channels.telegram || {};
-cfg.channels.telegram = { ...rest, enabled: true, botToken };
+// OpenClaw's OWN value wins. This block exists to re-register the channel on a
+// fresh ~/.openclaw (a factory reset, a new image) out of the only copy that
+// survived it. ClawBox's data/config.json is a MIRROR its configure route
+// happens to write, and channels.telegram.botToken is what the gateway polls
+// and what every ClawBox panel now reads (src/lib/telegram-bot-identity.ts) —
+// so copying the mirror over a bot the owner re-pointed with `openclaw config
+// set` silently restored an older one at the next update. The
+// dmPolicy/allowFrom strip above still runs either way.
+// A channel may carry its credential as an env REFERENCE under `token`
+// ({source:"env",…}) instead of a literal botToken — the shape
+// src/lib/telegram-bot-identity.ts recognises and refuses to guess at. Writing
+// the mirror as a botToken BESIDE that reference restores an older bot under a
+// re-pointed one exactly as overwriting botToken did.
+const existingToken = typeof rest.botToken === "string" ? rest.botToken.trim() : "";
+// `token: null` and `token: ""` are an UNSET reference, not a credential: the
+// control UI and `openclaw config set --json` both write null for a cleared
+// value. Counting them as a bot made the installer skip the restore on the one
+// path this block exists for - a factory reset, where ClawBox's mirror is the
+// only surviving copy - and print that it kept a bot, leaving the channel
+// enabled with nothing behind it for the gateway to poll.
+const openclawHasBot =
+  existingToken !== "" || (rest.token !== undefined && rest.token !== null && rest.token !== "");
+cfg.channels.telegram = openclawHasBot ? { ...rest, enabled: true } : { ...rest, enabled: true, botToken };
 fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+// `rename` replaces the INODE, so the temp file's mode is the one that
+// survives. openclaw.json holds channels.telegram.botToken and the gateway's
+// auth token and is 0600 on a box; the service user's umask is 0002, so a plain
+// writeFileSync left it 0664 — world-readable, silently, on every install and
+// every update. 0600 unconditionally rather than the mode it happens to have,
+// so a box already sitting at that 0664 is repaired instead of preserved; this
+// is also what OpenClaw's own CLI created the file with, and what
+// src/lib/openclaw-config.ts writeConfig now forces on the same file. The stale
+// temp is removed first and chmod'ed after, because `mode` is ignored for a
+// file that already exists (a .tmp from a crashed run).
 const tmp = `${cfgPath}.tmp`;
-fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
+fs.rmSync(tmp, { force: true });
+fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+try {
+  fs.chmodSync(tmp, 0o600);
+} catch {
+  // best-effort; a failed chmod must not fail the install
+}
 fs.renameSync(tmp, cfgPath);
+process.stderr.write(
+  openclawHasBot
+    ? "  Telegram channel registered (kept the bot OpenClaw already holds)\n"
+    : "  Telegram channel registered from ClawBox's saved token\n",
+);
 NODE
-      echo "  Telegram channel registered"
     fi
   fi
 

@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { getAll } from "@/lib/config-store";
 import { inferConfiguredLocalModel, readConfig as readOpenClawConfig, type OpenClawConfig } from "@/lib/openclaw-config";
+import { getActiveHarness } from "@/lib/harness";
 import { hasValidSession, readSetupGateFacts } from "@/lib/route-auth";
+import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 
 export const dynamic = "force-dynamic";
 
@@ -16,9 +18,26 @@ export async function GET(request: Request) {
   const authenticated = await hasValidSession(request);
 
   try {
-    const [config, openclawConfig] = await Promise.all([
-      getAll(),
+    // Awaited first, and not in the Promise.all below, so the Telegram read can
+    // be handed the snapshot this response is already rendering from rather than
+    // repeating the same synchronous read — and so the two cannot disagree about
+    // one file within one response. It costs nothing in wall time: `getAll()`
+    // wraps a synchronous read.
+    const config = await getAll();
+    const [openclawConfig, telegramBot] = await Promise.all([
       readOpenClawConfig().catch(() => ({} as OpenClawConfig)),
+      // Which bot this box chats with, asked of the store the running edition
+      // keeps it in — the harness's own on BOTH editions — so a box paired
+      // through the harness's own CLI no longer re-enters the wizard to be
+      // walked through setting up the bot it already answers on.
+      //
+      // Only for a caller that will actually be shown the flag — this route is
+      // public and on a 3 s tray poll, and an anonymous poller must not pay for
+      // a read whose answer it never receives. It stays a plain file read
+      // either way: no probe belongs on this route.
+      authenticated
+        ? getActiveHarness().then((harness) => readActiveTelegramBot(harness, config))
+        : Promise.resolve(null),
     ]);
     const hasExplicitLocalAiFlag = Object.prototype.hasOwnProperty.call(config, "local_ai_configured");
     const inferredLocal = inferConfiguredLocalModel(openclawConfig);
@@ -67,7 +86,7 @@ export async function GET(request: Request) {
       local_ai_model: localAiModel,
       ai_model_configured: !!config.ai_model_configured,
       ai_model_provider: liveCloudProvider || config.ai_model_provider || null,
-      telegram_configured: !!config.telegram_bot_token,
+      telegram_configured: !!telegramBot?.token,
     } : publicFields, {
       headers: {
         "Cache-Control": "no-store",

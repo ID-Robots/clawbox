@@ -141,6 +141,62 @@ describe("SetupWizard", () => {
     expect(screen.getByTestId("progress-step")).toHaveTextContent("5");
   });
 
+  // `telegram_configured` changed meaning: it used to be written only by the
+  // wizard's own Telegram step, and it now reports that SOME HARNESS on this box
+  // holds a bot — which a restore with ~/.openclaw or ~/.hermes intact answers
+  // `true` before the wizard has been through a screen. Ending the wizard on it
+  // alone skipped the AI-model step and marked setup complete on a box whose
+  // agent cannot answer.
+  it("does not finish the wizard on a harness bot when the AI model step is unfinished", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/setup/status") {
+        return jsonResponse({
+          setup_complete: false,
+          wifi_configured: true,
+          update_completed: true,
+          password_configured: true,
+          ai_model_configured: false,
+          local_ai_configured: false,
+          telegram_configured: true,
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    render(<SetupWizard />);
+
+    expect(await screen.findByTestId("mock-primary-ai")).toBeInTheDocument();
+    expect(screen.getByTestId("progress-step")).toHaveTextContent("4");
+  });
+
+  it("still finishes the wizard on a bot once every earlier step is done", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/setup/status") {
+        return jsonResponse({
+          setup_complete: false,
+          wifi_configured: true,
+          update_completed: true,
+          password_configured: true,
+          ai_model_configured: true,
+          local_ai_configured: false,
+          telegram_configured: true,
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    render(<SetupWizard />);
+
+    // The COMPLETION overlay, not the absence of the Telegram step: `currentStep`
+    // starts at 1 and `TelegramStep` renders only at 5, so `telegram-next` is
+    // already absent at mount and a `waitFor` on it passes on its first tick,
+    // before /setup-api/setup/status has been handled at all — asserting nothing
+    // about the gate this test exists for.
+    expect(await screen.findByTestId("setup-completion-overlay")).toBeInTheDocument();
+  });
+
   it("persists setup progress when advancing to the next step", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input.toString();
