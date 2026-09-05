@@ -208,6 +208,22 @@ describe("a trailing comment beside a quoted value", () => {
     },
   );
 
+  // PyYAML needs no space between the closing quote and the `#` — the flow
+  // scalar has ended. Requiring one made this "we could not look", which is a
+  // permanent 503 on the approvals gate over a config that is fine.
+  it("reads a comment written flush against the closing quote", () => {
+    expect(getTopLevelScalar(`TELEGRAM_BOT_TOKEN: "${TOKEN}"# main bot\n`, "TELEGRAM_BOT_TOKEN")).toEqual({
+      value: TOKEN,
+      readable: true,
+    });
+  });
+
+  // ...and the separator goes back on when the value is rewritten, because
+  // `newvalue# c` is a value, not a value plus a comment.
+  it("setYamlPath re-separates a comment that was flush against the quote", () => {
+    expect(setYamlPath(`api_key: "old"# the key\n`, ["api_key"], "new")).toBe(`api_key: new # the key\n`);
+  });
+
   // A `#` INSIDE the quotes is data, which is the case the splitter was
   // protecting and must keep protecting.
   it("keeps a # that is inside the quotes", () => {
@@ -259,6 +275,24 @@ describe("getTopLevelScalar on a value it cannot resolve", () => {
       value: null,
       readable: true,
     });
+  });
+
+  // YAML lets the whole root mapping sit at one uniform indent, and PyYAML
+  // reads it as top-level. Anchoring at column 0 answered a confident "this box
+  // has no bot" for such a file — the fail-open, one spelling further out.
+  it("reads a root mapping that is uniformly indented", () => {
+    expect(
+      getTopLevelScalar("  TELEGRAM_BOT_TOKEN: 111111:AAH\n  other: 1\n", "TELEGRAM_BOT_TOKEN"),
+    ).toEqual({ value: "111111:AAH", readable: true });
+  });
+
+  // ...without turning a genuinely NESTED key of the same name into the
+  // answer: a skills block may carry its own, and the bridge exports only the
+  // root mapping's scalars.
+  it("still ignores a nested key when the root mapping is at column 0", () => {
+    expect(
+      getTopLevelScalar("skills:\n  config:\n    TELEGRAM_BOT_TOKEN: 111111:AAH\nmodel: x\n", "TELEGRAM_BOT_TOKEN"),
+    ).toEqual({ value: null, readable: true });
   });
 
   it("reads an absent key as an absent value, confidently", () => {

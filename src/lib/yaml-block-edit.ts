@@ -29,6 +29,12 @@
  * raises {@link YamlEditUnsupported} rather than guessing. Callers are expected
  * to fall back to the Hermes CLI on that signal: losing the comments is bad,
  * corrupting the config is worse.
+ *
+ * That contract belongs to the EDITING half. {@link getTopLevelScalar} is a
+ * reader, and a reader may not raise on a construct somewhere else in the file:
+ * none of those is evidence about the key it was asked for, and a caller would
+ * have to turn the refusal into one. It never throws; it answers a third state
+ * (`readable: false`) for a value it cannot name, and only for THAT key.
  */
 
 export class YamlEditUnsupported extends Error {}
@@ -188,8 +194,15 @@ function splitTrailingComment(inline: string): { value: string; comment: string;
     if (end === -1) return { value: inline, comment: "", closed: false };
     const rest = inline.slice(end + 1);
     if (rest === "") return { value: inline, comment: "", closed: true };
-    if (!/^\s+#/.test(rest)) return { value: inline, comment: "", closed: false };
-    return { value: inline.slice(0, end + 1), comment: rest, closed: true };
+    // No space needed before the `#`: the flow scalar ended at the quote, and
+    // PyYAML — what Hermes' own bridge loads config.yaml with — reads
+    // `KEY: "tok"# c` as `tok`. Requiring one made that line "we could not
+    // look", which is a permanent 503 on the approvals gate over a config that
+    // is fine. A separator is put BACK on the way out, because the editor
+    // rewrites the value and `newvalue# c` is a value, not a comment.
+    if (!/^[ \t]*#/.test(rest)) return { value: inline, comment: "", closed: false };
+    const comment = rest.startsWith("#") ? ` ${rest}` : rest;
+    return { value: inline.slice(0, end + 1), comment, closed: true };
   }
   const m = /^(.*?)(\s+#.*)$/.exec(inline);
   if (!m) return { value: inline, comment: "", closed: true };
@@ -302,6 +315,34 @@ export interface TopLevelScalar {
 /** Value shapes whose first character changes what the value IS. */
 const OPAQUE_VALUE_RE = /^[|>!&*{[]/;
 
+/** Any `key:` line, whatever its depth, with its indent captured. */
+const ANY_KEY_RE = /^([ \t]*)(?:"[^"]*"|'[^']*'|[^\s#"'][^:#]*?)[ \t]*:(?:[ \t].*)?$/;
+
+/**
+ * The indent of the document's ROOT mapping — 0 for every file a machine wrote.
+ *
+ * "A top-level key is a line at column 0" is very nearly true and not quite:
+ * YAML lets the whole root mapping sit at one uniform indent, and PyYAML reads
+ * `  TELEGRAM_BOT_TOKEN: …\n  other: 1\n` as a top-level key. Anchoring at
+ * column 0 answered a confident "this box has no bot" for that file — the same
+ * fail-open as missing a quoted key, one spelling further out.
+ *
+ * The shallowest `key:` line in the file is that indent, because a nested key
+ * is by definition deeper than its parent. Block-scalar content and comments
+ * cannot lower it: content sits deeper than the key that opens it, and a
+ * comment-only line matches nothing here.
+ */
+function rootIndentWidth(lines: string[]): number {
+  let width: number | null = null;
+  for (const raw of lines) {
+    const m = ANY_KEY_RE.exec(raw);
+    if (!m) continue;
+    if (m[1].length === 0) return 0;
+    if (width === null || m[1].length < width) width = m[1].length;
+  }
+  return width ?? 0;
+}
+
 /** One inline value, as {@link getTopLevelScalar} resolves it. */
 function readInlineScalar(inline: string): TopLevelScalar {
   // `KEY:` and `KEY: # note` are both a YAML null, which Hermes' bridge does
@@ -324,8 +365,10 @@ function readInlineScalar(inline: string): TopLevelScalar {
  * treating them as "we could not look" is what a caller then has to turn into a
  * refusal.
  *
- * The question is answerable without them, because a top-level key IS a line at
- * column 0. Quoted spellings count — PyYAML, which is what Hermes' own env
+ * The question is answerable without them, because a top-level key is a line at
+ * the ROOT MAPPING'S OWN INDENT — column 0 in every file a machine wrote, and
+ * whatever uniform indent a hand-edited one uses (see rootIndentWidth). Quoted
+ * spellings count — PyYAML, which is what Hermes' own env
  * bridge loads the file with, reads `"KEY":` and `'KEY':` as the same key, and
  * missing them would answer a confident "not defined" over a defined one. The
  * LAST occurrence wins, as PyYAML's mapping constructor does. A key that opens
@@ -340,12 +383,17 @@ function readInlineScalar(inline: string): TopLevelScalar {
  */
 export function getTopLevelScalar(text: string, key: string): TopLevelScalar {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const line = new RegExp(`^(?:"${escaped}"|'${escaped}'|${escaped})[ \\t]*:(.*)$`);
+  const line = new RegExp(`^([ \\t]*)(?:"${escaped}"|'${escaped}'|${escaped})[ \\t]*:(.*)$`);
+  const lines = text.split(/\r\n|\r|\n/);
+  const root = rootIndentWidth(lines);
   let found: TopLevelScalar = { value: null, readable: true };
-  for (const raw of text.split(/\r\n|\r|\n/)) {
+  for (const raw of lines) {
     const m = line.exec(raw);
-    if (!m) continue;
-    found = readInlineScalar(m[1].trim());
+    // Deeper than the root mapping is somebody else's key — a skills block may
+    // legitimately carry its own TELEGRAM_BOT_TOKEN, and the bridge exports
+    // only top-level scalars.
+    if (!m || m[1].length !== root) continue;
+    found = readInlineScalar(m[2].trim());
   }
   return found;
 }
