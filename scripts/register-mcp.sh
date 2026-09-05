@@ -739,10 +739,17 @@ if [ "$EMAIL_HOOK_INSTALLED" = "1" ]; then
   # REFUSED branch below fires on rc=1, which only an ERROR finding produces —
   # report order can put three WARNs ahead of it, and quoting those instead
   # drops the one sentence that says what to fix.
-  EMAIL_HOOK_REASON="$(printf '%s\n' "$EMAIL_HOOK_DOCTOR" | grep -m 3 -E '^[[:space:]]*ERROR:' | tr '\n' ' ' | cut -c1-300)" \
+  # INDENTED, both of them: the doctor prints its own findings as "  ERROR: …"
+  # and "  WARN: …", while the capture is 2>&1 and the doctor imports the whole
+  # agent in a blank sandboxed HERMES_HOME — where one missing optional
+  # dependency puts Python's default logging format on stderr FLUSH LEFT
+  # ("ERROR:hermes_cli.x:…"). With `*` that line wins the errors-first
+  # preference below and the boot log quotes a cause the branch did not fire
+  # on, dropping the sentence that names the hook.
+  EMAIL_HOOK_REASON="$(printf '%s\n' "$EMAIL_HOOK_DOCTOR" | grep -m 3 -E '^[[:space:]]+ERROR:' | tr '\n' ' ' | cut -c1-300)" \
     || EMAIL_HOOK_REASON=""
   [ -n "$EMAIL_HOOK_REASON" ] \
-    || EMAIL_HOOK_REASON="$(printf '%s\n' "$EMAIL_HOOK_DOCTOR" | grep -m 3 -E '^[[:space:]]*WARN:' | tr '\n' ' ' | cut -c1-300)" \
+    || EMAIL_HOOK_REASON="$(printf '%s\n' "$EMAIL_HOOK_DOCTOR" | grep -m 3 -E '^[[:space:]]+WARN:' | tr '\n' ' ' | cut -c1-300)" \
     || EMAIL_HOOK_REASON=""
   [ -n "$EMAIL_HOOK_REASON" ] || EMAIL_HOOK_REASON="$EMAIL_HOOK_DETAIL"
   # One flattened copy of the report, and every match below is against it.

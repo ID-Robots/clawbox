@@ -492,6 +492,33 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(r.stdout).not.toContain("loaded and registered its outbound hook");
   });
 
+  it("quotes the doctor's own finding, not a flush-left logging line", () => {
+    // The capture is 2>&1 and the doctor imports the whole agent in a blank
+    // sandboxed HERMES_HOME, so one missing optional dependency puts Python's
+    // default `%(levelname)s:%(name)s:%(message)s` on stderr FLUSH LEFT. The
+    // doctor prints its OWN findings indented two spaces ("  WARN: …",
+    // "  ERROR: …"), so requiring at least one leading space is what keeps the
+    // ERRORS-first preference on verdict lines.
+    //
+    // Unanchored, the logging line wins that preference and the boot log hands
+    // the operator a cause the branch did not fire on — while dropping the one
+    // sentence that names the hook. That is the same "names the wrong cause"
+    // shape the rest of this change exists to end.
+    doctorRc = 0;
+    doctorStderr = "ERROR:hermes_cli.telemetry:could not reach the catalog index\n";
+    doctorOutput = [
+      "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+      "  WARN: manifest declares hook 'transform_llm_output' but registration did not add it",
+      "  registrations: 0 tool(s), 0 hook(s)",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
+    expect(r.stdout).toContain("transform_llm_output");
+    expect(r.stdout).not.toContain("hermes_cli.telemetry");
+  });
+
   it("still reads it when rich wraps the sentence across two lines", () => {
     // `rich.Console` wraps at 80 columns off a tty, and the manifest WARN
     // visibly wrapped on the box — so the sentence the verdict depends on
