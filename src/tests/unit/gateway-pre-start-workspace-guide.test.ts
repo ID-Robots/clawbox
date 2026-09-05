@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -78,20 +78,31 @@ let guide: string;
  * of these tests is what those options do to a failure.
  *
  * `template` overrides the guide the block copies from, for the case where the
- * template no longer carries the section the marker names.
+ * template no longer carries the section the marker names. `prelude` puts lines
+ * in front of the block — shell functions that shadow a binary, for the cases
+ * where what fails is the tool the block reaches for.
  */
-function runRaw(template = TEMPLATE): { status: number | null; stdout: string; stderr: string } {
+function runRaw(
+  template = TEMPLATE,
+  opts: { prelude?: string[] } = {},
+): { status: number | null; stdout: string; stderr: string } {
   const root = mkdtempSync(path.join(dir, "root-"));
   mkdirSync(path.join(root, "config"), { recursive: true });
   writeFileSync(path.join(root, "config/clawbox-workspace-guide.md"), readFileSync(template, "utf-8"));
-  const script = `set -euo pipefail\nCLAWBOX_ROOT=${JSON.stringify(root)}\nCLAWBOX_WORKSPACE=${JSON.stringify(workspace)}\n${seedingBlock()}`;
+  const script = [
+    "set -euo pipefail",
+    ...(opts.prelude ?? []),
+    `CLAWBOX_ROOT=${JSON.stringify(root)}`,
+    `CLAWBOX_WORKSPACE=${JSON.stringify(workspace)}`,
+    seedingBlock(),
+  ].join("\n");
   const res = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
 /** The same run, asserting the exit code the systemd unit demands. */
-function run(template = TEMPLATE): { stdout: string; stderr: string } {
-  const res = runRaw(template);
+function run(template = TEMPLATE, opts: { prelude?: string[] } = {}): { stdout: string; stderr: string } {
+  const res = runRaw(template, opts);
   if (res.status !== 0) {
     throw new Error(`pre-start block exited ${res.status}\n${res.stdout}\n${res.stderr}`);
   }
@@ -630,7 +641,7 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     // bits, so `[ -r ]` is true, the file reads fine and there is nothing to
     // assert. A root container would otherwise report this as a pass.
     it.skipIf(process.getuid?.() === 0)("warns and changes nothing when the guide cannot be read", () => {
-      // `grep`/`awk` answer exit 2 on an unreadable file, which reads as
+      // `awk` answers exit 2 on an unreadable file, which reads as
       // "the heading is not there" — so a 0200 CLAWBOX.md was re-appended to on
       // EVERY boot, growing without bound, while the file itself could never be
       // checked. A file this block cannot read is a file it must not top up.
@@ -706,6 +717,49 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
       expect(stdout).toMatch(/Appended to CLAWBOX\.md:.*Skills/);
       // The real one arrives; the quoted one is left where it was.
       expect(readFileSync(guide, "utf-8").match(/^## Skills *$/gm)).toHaveLength(2);
+    });
+
+    it("still delivers every section when the template's fences do not balance", () => {
+      // An indented closing fence is valid CommonMark — it is what a fence
+      // inside a list item looks like — and it does not match at column 0. A
+      // fence rule that toggled as it went would leave the rest of the template
+      // "fenced": section after section would fail to arrive, exit 0, and not
+      // one word about it, which is this card's own defect on the SOURCE side.
+      // The "no '## ' headings at all" warning cannot catch it either; it fires
+      // only when the count reaches zero.
+      const odd = path.join(dir, "odd-fence-template.md");
+      writeFileSync(
+        odd,
+        [
+          "# Guide", "", "## First", "", "Body.", "",
+          "```text", "example", "  ```", "",
+          "## Second", "", "Body two.", "",
+        ].join("\n"),
+      );
+      writeFileSync(guide, "# Guide\n");
+
+      const { stdout, stderr } = run(odd);
+
+      expect(stdout).toMatch(/Appended to CLAWBOX\.md:.*First.*Second/);
+      expect(stderr).not.toMatch(/WARNING/);
+      const after = readFileSync(guide, "utf-8");
+      expect(after).toContain("Body two.");
+      expect(after.match(/^## (First|Second)$/gm)).toHaveLength(2);
+    });
+
+    it("says so when CLAWBOX.md is a directory, instead of seeding into it", () => {
+      // `-f` alone answers "seed it" about a directory and `install SRC DIR`
+      // copies INTO it: a "Seeded CLAWBOX.md" success line on every boot,
+      // forever, with no guide on the box at all.
+      mkdirSync(guide, { recursive: true });
+
+      const first = run();
+      const second = run();
+
+      expect(first.stdout).not.toMatch(/Seeded|Appended/);
+      expect(second.stdout).not.toMatch(/Seeded|Appended/);
+      expect(first.stderr).toMatch(/exists and is not a regular file/);
+      expect(readdirSync(guide)).toEqual([]);
     });
 
     it("does not top a guide up again and again below a stray fence", () => {
@@ -935,6 +989,28 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     const { stdout } = run();
 
     expect(stdout).not.toMatch(/Appended/);
+    expect(readFileSync(agents, "utf-8")).toBe(existing);
+  });
+
+  it("does not grow an AGENTS.md whose marker check could not run", () => {
+    // The helper answers 0 present / 1 absent / 2 could not be read, and `!`
+    // collapses that to two: everything non-zero becomes "absent" and the block
+    // appends. `-r` closes only the measured mode-0200 door — an EIO on a
+    // failing eMMC, or `awk` missing from a stripped rootfs, walks straight
+    // past it and adds ~1 KB per boot to the file the harness injects into
+    // every session, each one printed as a success.
+    const existing = "# AGENTS\n\nBe helpful.\n";
+    writeFileSync(agents, existing);
+
+    const first = runRaw(TEMPLATE, { prelude: ["awk() { return 2; }"] });
+    const second = runRaw(TEMPLATE, { prelude: ["awk() { return 2; }"] });
+
+    // Boot safety first: this runs as ExecStartPre with no leading `-`.
+    expect(first.status).toBe(0);
+    expect(second.status).toBe(0);
+    expect(first.stdout).not.toMatch(/Appended/);
+    expect(second.stdout).not.toMatch(/Appended/);
+    expect(first.stderr).toMatch(/could not read .*AGENTS\.md while looking for/);
     expect(readFileSync(agents, "utf-8")).toBe(existing);
   });
 

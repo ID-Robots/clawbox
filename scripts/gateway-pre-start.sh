@@ -3246,27 +3246,66 @@ CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 # The trade this takes, deliberately and per the card: an owner who DELETED a
 # section gets it back on the next gateway start. The alternative is what the
 # box has today — sections that never arrive at all, with nothing that says so.
+# Whole-line matching cuts the same way in both directions, and both are the
+# trade: `## Skills and other things` no longer satisfies `## Skills` (the old
+# substring match said it did, and would have withheld that section forever),
+# and a heading the agent DEMOTED to `### Skills` no longer satisfies it either,
+# so such a box gets one copy of the section back — once, because the appended
+# copy is found on the next boot.
 #
 # Values reach awk through the environment rather than `-v`, which runs them
 # through escape processing: a heading that ever grew a backslash would quietly
 # stop matching and the section would go missing with no warning.
 
+# ONE fence rule, shared by the three helpers below.
+#
+# Prepended to each awk program, so `text[i]` is every line with trailing
+# whitespace and a CR trimmed, `raw[i]` is the line as it stands, and
+# `clawbox_fences()` marks in `hidden[i]` the lines a fence encloses. Trailing
+# whitespace is trimmed in one place for all three: a heading that differs from
+# the template's only by a trailing space would otherwise be judged absent by
+# one helper and found by another, and the section appended a second time,
+# permanently.
+#
+# Fenced `## ` lines do not count. This template is markdown that documents
+# markdown and shell, and the destinations are the owner's and the agent's to
+# edit: a ``` block quoting a heading would otherwise be enumerated as a phantom
+# section on the source side, and read as the section already being present on
+# the destination side.
+#
+# But a fence hides only what it CLOSES, and that is the whole reason these read
+# the file twice instead of toggling as they go. An odd number of column-0
+# delimiters is ordinary damage — an indented closing fence is valid CommonMark
+# and does not match at column 0 — and a naive toggle makes it catastrophic in
+# BOTH directions: on the destination every heading after the stray delimiter is
+# "missing", the copy this block appends lands in the fenced region too, and the
+# file grows by those sections on EVERY boot; on the template the headings
+# simply stop being enumerated, and the box is told nothing while section after
+# section fails to arrive — this card's own defect, on the source side, with the
+# "no '## ' headings at all" warning firing only if the count reaches zero.
+# Unbalanced fences are therefore read as prose, which is what this script did
+# before fences were considered at all.
+CLAWBOX_FENCE_AWK='
+  function clawbox_fences(   i, j) {
+    if (fences % 2) return
+    for (i = 1; i < fences; i += 2)
+      for (j = fence[i]; j <= fence[i + 1]; j++) hidden[j] = 1
+  }
+  {
+    raw[NR] = $0
+    line = $0; sub(/[ \t\r]+$/, "", line); text[NR] = line
+    if (line ~ /^(```|~~~)/) fence[++fences] = NR
+  }
+'
+
 # Every `## ` heading in a markdown file, in order.
-#
-# Fenced blocks are skipped: this template is markdown that documents markdown
-# and shell, so a ``` fence containing a `## ` line is a live trap — it would be
-# enumerated as a phantom heading and its "section" extracted from inside the
-# fence to the next real heading, then appended to every box's guide. Harmless
-# while the old code named one heading by hand; not harmless now.
-#
-# Trailing whitespace is trimmed here and in the comparison below, together: a
-# heading that differs from the template's only by a trailing space would
-# otherwise be judged absent and the section appended a second time, permanently.
 clawbox_guide_headings() {
-  awk '
-    { line = $0; sub(/[ \t\r]+$/, "", line) }
-    line ~ /^(```|~~~)/ { fence = !fence; next }
-    !fence && line ~ /^## +[^ ]/ { print line }
+  awk "$CLAWBOX_FENCE_AWK"'
+    END {
+      clawbox_fences()
+      for (i = 1; i <= NR; i++)
+        if (!hidden[i] && text[i] ~ /^## +[^ ]/) print text[i]
+    }
   ' "$1"
 }
 
@@ -3274,40 +3313,24 @@ clawbox_guide_headings() {
 #
 # One helper for BOTH destinations — CLAWBOX.md's sections and AGENTS.md's two
 # markers — so the two files cannot come to disagree about what "already there"
-# means. `grep -qxF`, which the AGENTS.md blocks used, cannot do the job: a CRLF
-# file stores the marker as `## X\r`, an exact whole-line match misses it, and
-# the block then appends on EVERY boot and the file grows without bound — the
-# failure whole-line matching exists to prevent rather than to cause.
+# means. The AGENTS.md blocks used `grep -qF`, a SUBSTRING match, which read
+# `### ClawBox integration notes` as the marker and withheld the pointer for
+# good; whole-line is the correction. And whole-line is exactly what a bare
+# `grep -qxF` cannot do here, because a CRLF file stores the marker as
+# `## X\r`: an exact match misses it, the block appends on EVERY boot and the
+# file grows without bound — so the CR is normalised on both sides, in one
+# place, for both files.
 #
 # Three answers, not two: 0 present, 1 absent, 2 could not be read. `awk` returns
 # 2 for a file it cannot open, and reading that as "absent" is how an unreadable
 # destination gets appended to — the defect the readability guard above exists to
 # stop, through a door that guard cannot cover once the loop is running.
 #
-# Headings quoted inside a fence do not count — an owner or the agent pasting
-# an example of a heading is not carrying that section, and reading the quote as
-# the marker withholds the section for good.
-#
-# But ONLY when the fences balance, which is why this reads the whole file
-# instead of answering on the first match. These two files are the agent's and
-# the owner's to edit, and an odd number of ``` lines is ordinary damage. Track
-# it anyway and the region after the stray delimiter is judged fenced — so every
-# heading in it is "missing", the copy this block appends lands in it too, and
-# the file grows by those sections on EVERY boot. That is the unbounded growth
-# this whole block exists to stop, arriving through the fence rule instead of
-# through `grep`. Unbalanced fences are therefore read as prose: the worst that
-# costs is the behaviour this script had before fences were considered at all.
 clawbox_file_has_heading() {
   [ -r "$1" ] || return 2
-  heading="$2" awk '
-    {
-      line = $0; sub(/[ \t\r]+$/, "", line); text[NR] = line
-      if (line ~ /^(```|~~~)/) fence[++fences] = NR
-    }
+  heading="$2" awk "$CLAWBOX_FENCE_AWK"'
     END {
-      if (fences % 2 == 0)
-        for (i = 1; i < fences; i += 2)
-          for (j = fence[i]; j <= fence[i + 1]; j++) hidden[j] = 1
+      clawbox_fences()
       for (i = 1; i <= NR; i++)
         if (!hidden[i] && text[i] == ENVIRON["heading"]) exit 0
       exit 1
@@ -3325,20 +3348,17 @@ clawbox_file_has_heading() {
 # dropped, because the append supplies its own separator and carrying the
 # template's too ends the topped-up guide on a dangling rule.
 clawbox_guide_section() {
-  heading="$2" awk '
-    { line = $0; sub(/[ \t\r]+$/, "", line) }
-    line ~ /^(```|~~~)/ { fence = !fence }
-    line == ENVIRON["heading"] && !fence { inside = 1; lines[++n] = $0; next }
-    inside && !fence && line ~ /^## / { exit }
-    inside { lines[++n] = $0 }
+  heading="$2" awk "$CLAWBOX_FENCE_AWK"'
     END {
-      while (n > 0) {
-        tail = lines[n]
-        sub(/\r$/, "", tail)
-        if (tail != "" && tail != "---") break
-        n--
-      }
-      for (i = 1; i <= n; i++) print lines[i]
+      clawbox_fences()
+      for (i = 1; i <= NR && !start; i++)
+        if (!hidden[i] && text[i] == ENVIRON["heading"]) start = i
+      if (!start) exit 0
+      last = NR
+      for (i = start + 1; i <= NR && last == NR; i++)
+        if (!hidden[i] && text[i] ~ /^## /) last = i - 1
+      while (last > start && (text[last] == "" || text[last] == "---")) last--
+      for (i = start; i <= last; i++) print raw[i]
     }
   ' "$1"
 }
@@ -3469,6 +3489,14 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   # prevented, with no warning at all.
   if [ ! -r "$CLAWBOX_GUIDE_SRC" ]; then
     echo "  WARNING: could not read $CLAWBOX_GUIDE_SRC; leaving CLAWBOX.md as it is" >&2
+  elif [ -e "$CLAWBOX_GUIDE_DST" ] && [ ! -f "$CLAWBOX_GUIDE_DST" ]; then
+    # `-f` alone says "seed it" about a DIRECTORY, and `install SRC DIR` copies
+    # INTO it: two boots, two "Seeded CLAWBOX.md" success lines, a
+    # CLAWBOX.md/clawbox-workspace-guide.md nobody reads, and no guide on the
+    # box ever — a success printed on every boot, forever. A socket or a
+    # dangling symlink is the same shape. Nothing here can fix that path, so it
+    # says so instead of reporting work it did not do.
+    echo "  WARNING: $CLAWBOX_GUIDE_DST exists and is not a regular file; leaving it as it is" >&2
   elif [ ! -f "$CLAWBOX_GUIDE_DST" ]; then
     if install -m 644 "$CLAWBOX_GUIDE_SRC" "$CLAWBOX_GUIDE_DST"; then
       echo "  Seeded CLAWBOX.md in OpenClaw workspace"
@@ -3488,7 +3516,7 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
       echo "  WARNING: could not seed CLAWBOX.md in the OpenClaw workspace" >&2
     fi
   elif [ ! -r "$CLAWBOX_GUIDE_DST" ]; then
-    # `grep` and `awk` answer exit 2 on a file they cannot read, which reads as
+    # `awk` answers exit 2 on a file it cannot read, which reads as
     # "the heading is not there" — so a 0200 CLAWBOX.md was appended to on EVERY
     # boot, growing without bound, while the file itself could never be checked.
     # A file this block cannot read is a file it must not top up.
@@ -3590,55 +3618,65 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   # and every box in the field already carries it verbatim (it has not changed
   # since it was introduced), so no box receives a second copy.
   CLAWBOX_AGENTS_POINTER="## ClawBox integration"
-  # `-r` as well as `-f`, and the whole-line helper rather than a `grep -qF`
-  # substring: the same two corrections the CLAWBOX.md loop above needed, and
-  # they matter MORE here. `grep` answers exit 2 on a file it cannot read, which
-  # reads as "the marker is not there" —
-  # and mode 0200 denies the read while PERMITTING the write, so the append
-  # succeeded and the box grew AGENTS.md by ~1 KB on every single boot, each one
-  # reported as a success. AGENTS.md is the file the harness injects into every
-  # session, under a bootstrap character budget.
+  # One readability test for both blocks, and one `case` over the helper's THREE
+  # answers.
+  #
+  # `! clawbox_file_has_heading …` would collapse them to two, and reading
+  # "could not be read" as "the marker is absent" is how this file grew by ~1 KB
+  # on every single boot, each one printed as a success — mode 0200 denies the
+  # read while PERMITTING the write. `-r` closes that measured door; the `case`
+  # closes the rest of them (an EIO on a failing eMMC, `awk` missing from a
+  # stripped rootfs, the file losing readability after the test), the way the
+  # CLAWBOX.md loop above already does. AGENTS.md is the file the harness
+  # injects into every session, under a bootstrap character budget.
+  clawbox_agents_append() {
+    CLAWBOX_AGENTS_SEEN=0
+    clawbox_file_has_heading "$CLAWBOX_AGENTS_MD" "$1" || CLAWBOX_AGENTS_SEEN=$?
+    case "$CLAWBOX_AGENTS_SEEN" in
+      0) return 0 ;;
+      1) ;;
+      *)
+        echo "  WARNING: could not read $CLAWBOX_AGENTS_MD while looking for '$1'; leaving it as it is" >&2
+        return 0
+        ;;
+    esac
+    # Guarded, and not a bare append: a read-only AGENTS.md used to abort
+    # pre-start under `set -euo pipefail` and the gateway never started — over a
+    # pointer sentence. Advisory text must never hold up the gateway; the next
+    # start retries.
+    if clawbox_append_or_rollback "$CLAWBOX_AGENTS_MD" "$2"; then
+      echo "  $3"
+    else
+      echo "  WARNING: $4" >&2
+    fi
+  }
   if [ -f "$CLAWBOX_AGENTS_MD" ] && [ ! -r "$CLAWBOX_AGENTS_MD" ]; then
     echo "  WARNING: could not read $CLAWBOX_AGENTS_MD; leaving it as it is" >&2
-  elif [ -f "$CLAWBOX_AGENTS_MD" ] && ! clawbox_file_has_heading "$CLAWBOX_AGENTS_MD" "$CLAWBOX_AGENTS_POINTER"; then
-    # Guarded like the two appends below, and for the same reason: this one has
-    # always been bare, so a read-only AGENTS.md aborted pre-start under
-    # `set -euo pipefail` and the gateway never started — over a pointer
-    # sentence. Reachable whenever the file exists without the marker.
+  elif [ -f "$CLAWBOX_AGENTS_MD" ]; then
     printf -v CLAWBOX_AGENTS_POINTER_TEXT '\n\n%s\n\nSee `CLAWBOX.md` for device-specific conventions: where user-installed skills live, how to control the desktop Chromium via `browser_*` tools, how to install/uninstall skills through the App Store, and which system actions are the owner'"'"'s.\n' "$CLAWBOX_AGENTS_POINTER"
-    if clawbox_append_or_rollback "$CLAWBOX_AGENTS_MD" "$CLAWBOX_AGENTS_POINTER_TEXT"; then
-      echo "  Appended CLAWBOX.md reference to AGENTS.md"
-    else
-      echo "  WARNING: could not append the CLAWBOX.md reference to AGENTS.md" >&2
-    fi
-  fi
+    clawbox_agents_append "$CLAWBOX_AGENTS_POINTER" "$CLAWBOX_AGENTS_POINTER_TEXT" \
+      "Appended CLAWBOX.md reference to AGENTS.md" \
+      "could not append the CLAWBOX.md reference to AGENTS.md"
 
-  # THE RULE ITSELF GOES IN AGENTS.md, not only in CLAWBOX.md.
-  #
-  # OpenClaw's workspace file map (docs/concepts/agent-workspace.md, verified in
-  # the pinned 2026.8.1 package) injects AGENTS.md, SOUL.md, USER.md,
-  # IDENTITY.md, BOOT.md, BOOTSTRAP.md and memory/ at the start of every
-  # session — and describes AGENTS.md as "operating instructions ... good place
-  # for rules". CLAWBOX.md is NOT in that set: it is read only if the agent
-  # chooses to open it, prompted by the pointer above. A behavioural
-  # prohibition that the model may never load is not a prohibition, which is
-  # how TASK-612 could otherwise have shipped green and reproduced unchanged.
-  #
-  # Its own marker, deliberately not the "CLAWBOX.md" one: that pointer is
-  # already present on every box in the field, so anything guarded by it can
-  # never be delivered again.
-  CLAWBOX_AGENTS_RULE="## System actions on this ClawBox"
-  # Readability and whole-line, for the reason above. No second warning: the
-  # pointer block a few lines up has already printed one for the same file.
-  if [ -f "$CLAWBOX_AGENTS_MD" ] && [ -r "$CLAWBOX_AGENTS_MD" ] \
-    && ! clawbox_file_has_heading "$CLAWBOX_AGENTS_MD" "$CLAWBOX_AGENTS_RULE"; then
+    # THE RULE ITSELF GOES IN AGENTS.md, not only in CLAWBOX.md.
+    #
+    # OpenClaw's workspace file map (docs/concepts/agent-workspace.md, verified
+    # in the pinned 2026.8.1 package) injects AGENTS.md, SOUL.md, USER.md,
+    # IDENTITY.md, BOOT.md, BOOTSTRAP.md and memory/ at the start of every
+    # session — and describes AGENTS.md as "operating instructions ... good
+    # place for rules". CLAWBOX.md is NOT in that set: it is read only if the
+    # agent chooses to open it, prompted by the pointer above. A behavioural
+    # prohibition that the model may never load is not a prohibition, which is
+    # how TASK-612 could otherwise have shipped green and reproduced unchanged.
+    #
+    # Its own marker, deliberately not the "CLAWBOX.md" one: that pointer is
+    # already present on every box in the field, so anything guarded by it can
+    # never be delivered again.
+    CLAWBOX_AGENTS_RULE="## System actions on this ClawBox"
     printf -v CLAWBOX_AGENTS_RULE_TEXT '\n\n%s\n\nRestarting the OpenClaw gateway is not yours to do from a chat turn: the gateway hosts this session, so the restart kills the reply before it lands. It is rarely needed either — saving a setting under Settings -> Providers, Voice or Channels restarts it. Say that, and name the setting.\n\nA device restart or shutdown IS yours when the owner asks in their own words: `system_power`, `confirm: true`, with their reason. Their own control is the power menu in the desktop tray, not Settings -> System.\n\nNever queue an `operator_approval` proposal for any of this. ClawBox renders no approval card, so a queued proposal is shown to nobody; a parked one is answered with `openclaw approvals pending` / `openclaw approvals resolve` from the Terminal app. `CLAWBOX.md` has the long form.\n' "$CLAWBOX_AGENTS_RULE"
-    if clawbox_append_or_rollback "$CLAWBOX_AGENTS_MD" "$CLAWBOX_AGENTS_RULE_TEXT"; then
-      echo "  Appended the system-actions rule to AGENTS.md"
-    else
-      # Advisory text must never hold up the gateway; the next start retries.
-      echo "  WARNING: could not append the system-actions rule to AGENTS.md" >&2
-    fi
+    clawbox_agents_append "$CLAWBOX_AGENTS_RULE" "$CLAWBOX_AGENTS_RULE_TEXT" \
+      "Appended the system-actions rule to AGENTS.md" \
+      "could not append the system-actions rule to AGENTS.md"
   fi
 
   # --- clawbox language re-apply ---
