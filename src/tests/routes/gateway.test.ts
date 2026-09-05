@@ -11,6 +11,15 @@ vi.mock("@/lib/gateway-proxy", () => ({
   proxyGatewayRequest: vi.fn(),
 }));
 
+// PINNED, not inherited. The route's Hermes gate answers 404 for EVERY path,
+// so on a runner whose /etc/clawbox/edition.env or CLAWBOX_EDITION says hermes
+// every 404 assertion below would pass from that gate — even with the
+// namespace check deleted. The branch under test is the OpenClaw one.
+vi.mock("@/lib/edition-source", async (orig) => ({
+  ...(await orig<typeof import("@/lib/edition-source")>()),
+  readEdition: () => "openclaw" as const,
+}));
+
 import { getAll } from "@/lib/config-store";
 import { proxyGatewayRequest, redirectToSetup, serveGatewayHTML } from "@/lib/gateway-proxy";
 import { NextResponse } from "next/server";
@@ -164,6 +173,89 @@ describe("GET /[...gateway] (catch-all route)", () => {
     expect(res.status).toBe(404);
     expect(mockProxyGatewayRequest).not.toHaveBeenCalled();
     expect(mockServeGatewayHTML).not.toHaveBeenCalled();
+  });
+
+  /**
+   * TASK-631 (F-29). The guard above tested `startsWith("/setup-api/")`, with
+   * the slash, so ClawBox's own namespace ROOT fell through it — and a
+   * navigation is answered with the Control UI shell, into which
+   * `serveGatewayHTML` injects the gateway token for an owner session.
+   *
+   * Measured on an OpenClaw box at beta head c2b1a44b, owner-authenticated:
+   *
+   *   GET /setup-api        -> 200 text/html, Control UI, token script present
+   *   GET /setup-api/       -> 308 to /setup-api, then the same
+   *   GET /portal           -> 200 text/html, Control UI, token script present
+   *   GET /portal/nope      -> same
+   *   GET /login-api/nope   -> same
+   *   GET /setup-api/nope   -> 404 text/plain   (the half already fixed)
+   *
+   * `/api` and `/assets` are deliberately NOT in this list: those are the
+   * GATEWAY's namespaces, which this route exists to serve.
+   */
+  const CLAWBOX_OWNED_UNMATCHED: [string, "api" | "page"][] = [
+    ["http://localhost/setup-api", "api"],
+    ["http://localhost/setup-api/nope", "api"],
+    ["http://localhost/Setup-Api/nope", "api"],
+    ["http://localhost/login-api/nope", "api"],
+    ["http://localhost/portal", "page"],
+    ["http://localhost/portal/nope", "page"],
+    ["http://localhost/Portal/nope", "page"],
+    ["http://localhost/setup/nope", "page"],
+    ["http://localhost/login/nope", "page"],
+    ["http://localhost/updating/nope", "page"],
+    ["http://localhost/app", "page"],
+    ["http://localhost/app/x/y", "page"],
+  ];
+
+  it.each(CLAWBOX_OWNED_UNMATCHED)(
+    "answers 404 for %s rather than the gateway shell",
+    async (url, kind) => {
+      mockGetAll.mockResolvedValue({ setup_complete: true });
+
+      // The browser's own navigation metadata — the shape that gets the shell
+      // and therefore the token.
+      const res = await gatewayGet(
+        createRequest(url, { "sec-fetch-mode": "navigate", accept: "text/html" }),
+      );
+
+      expect(res.status).toBe(404);
+      expect(mockServeGatewayHTML).not.toHaveBeenCalled();
+      expect(mockProxyGatewayRequest).not.toHaveBeenCalled();
+      // The SHAPE, not just the status: code asked for the endpoint
+      // namespaces, so code is answered.
+      if (kind === "api") {
+        expect(res.headers.get("content-type")).toContain("application/json");
+        await expect(res.json()).resolves.toEqual({ error: "Not found" });
+      } else {
+        expect(res.headers.get("content-type")).toContain("text/plain");
+        await expect(res.text()).resolves.toBe("Not found");
+      }
+    },
+  );
+
+  it("still serves the shell for the gateway's OWN namespaces", async () => {
+    // The other half of the boundary: a prefix test that swallowed /api or
+    // /assets would break the Control UI this route exists to serve.
+    mockGetAll.mockResolvedValue({ setup_complete: true });
+
+    await gatewayGet(
+      createRequest("http://localhost/chat/main", { "sec-fetch-mode": "navigate" }),
+    );
+
+    expect(mockServeGatewayHTML).toHaveBeenCalled();
+  });
+
+  it("does not swallow a path that merely STARTS with an owned prefix", async () => {
+    // `/setupsomething` is not under `/setup`. The match is on a segment
+    // boundary, which is also why `/setup-api` never folded into `/setup`.
+    mockGetAll.mockResolvedValue({ setup_complete: true });
+
+    await gatewayGet(
+      createRequest("http://localhost/setupsomething", { "sec-fetch-mode": "navigate" }),
+    );
+
+    expect(mockServeGatewayHTML).toHaveBeenCalled();
   });
 
   it("returns 500 on error", async () => {
