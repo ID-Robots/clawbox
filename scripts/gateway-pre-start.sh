@@ -2496,105 +2496,6 @@ print("0" if isinstance(codex, dict) and codex.get("enabled") is False else "1")
 PY
 )"
 fi
-CODEX_SHOULD_LOAD="$NEEDS_CODEX_PLUGIN"
-if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_PLUGIN_ENABLED" = "1" ]; then
-  CODEX_SHOULD_LOAD=1
-fi
-# Also check the nested peer-dep symlink. `openclaw plugins install
-# codex` writes `<codex>/node_modules/openclaw -> <global openclaw>`
-# alongside the package.json; if that symlink is missing or dangling
-# (partial install, openclaw upgrade that cleared the nested
-# node_modules, manual cleanup) the codex plugin loads but its
-# top-level imports fail at runtime with:
-#   Error: Cannot find package 'openclaw' imported from
-#   .../@openclaw/codex/dist/shared-client-…js
-# Checking only the package.json misses that broken state. `-e`
-# follows symlinks, so it catches both "missing" and "dangling".
-# `--force` on install rebuilds the symlink without reinstalling
-# unnecessary content when the package directory is already there.
-CODEX_PEER_DEP="$CODEX_PLUGIN_DIR/node_modules/openclaw/package.json"
-CODEX_NEEDS_INSTALL=0
-CODEX_INSTALL_REASON=""
-if [ "$CODEX_SHOULD_LOAD" = "1" ]; then
-  # The direct nested peer symlink is only one valid resolution shape. Trust a
-  # positive registry dependency verdict across managed, project, and global
-  # layouts; treating a healthy parent-resolved plugin as broken launches a
-  # needless reinstall in ExecStartPre, which an updater restart can kill
-  # mid-transaction and leave SQLite locked.
-  if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] || {
-    [ "$CODEX_REGISTRY_DEPS_OK" != "1" ] && [ ! -e "$CODEX_PEER_DEP" ];
-  }; then
-    CODEX_NEEDS_INSTALL=1
-    CODEX_INSTALL_REASON="missing or peer-dep broken"
-  elif [ -n "$OPENCLAW_TARGET" ]; then
-    # Version-skew guard. Older builds ran `plugins install codex`, which
-    # resolves @latest — so the codex plugin drifts ahead of the pinned core
-    # and every Codex chat crashes with "_diagnosticRuntime.
-    # createDiagnosticTraceContextFromActiveScope is not a function" (the
-    # newer plugin calls a runtime API the pinned core doesn't expose).
-    # Reinstall only when the BASE version actually differs.
-    #
-    # Republish-tolerant compare: npm republishes the SAME release with a
-    # -N / -beta.N build suffix (2026.7.1 -> 2026.7.1-1 -> 2026.7.1-2). Those
-    # share the same runtime API as their base version, so an exact-string
-    # `!=` compare would flag `2026.7.1-1` vs pinned `2026.7.1` as a skew and
-    # reinstall the plugin — synchronously, on the gateway boot path — on
-    # EVERY boot. On a Jetson with slow/blocked npm that stalls startup and
-    # the gateway never comes online ("Update failed / gateway still offline").
-    # Strip the build suffix and compare only MAJOR.MINOR.PATCH: a real
-    # API-skew (plugin 2026.7.2 vs core 2026.7.1) still triggers a reinstall,
-    # a mere republish does not.
-    CODEX_INSTALLED_VER=$(python3 -c "import json; print(json.load(open('$CODEX_PLUGIN_DIR/package.json')).get('version',''))" 2>/dev/null || echo "")
-    CODEX_INSTALLED_BASE="${CODEX_INSTALLED_VER%%-*}"
-    OPENCLAW_TARGET_BASE="${OPENCLAW_TARGET%%-*}"
-    if [ "$CODEX_INSTALLED_BASE" != "$OPENCLAW_TARGET_BASE" ]; then
-      CODEX_NEEDS_INSTALL=1
-      CODEX_INSTALL_REASON="base version $CODEX_INSTALLED_VER != core target $OPENCLAW_TARGET"
-    fi
-  fi
-fi
-if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
-  echo "  Installing/repairing @openclaw/codex runtime plugin ($CODEX_INSTALL_REASON)…"
-  # Pin to the core target via the full scoped npm spec; fall back to the
-  # bare alias only when the pin is unknown, so a needed repair still happens.
-  CODEX_SPEC="codex"
-  [ -n "$OPENCLAW_TARGET" ] && CODEX_SPEC="@openclaw/codex@$OPENCLAW_TARGET"
-  CODEX_CAPABILITY_ARGS=()
-  if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
-    CODEX_CAPABILITY_ARGS=(--accept-capabilities)
-  fi
-  # Hard time-box this install. gateway-pre-start.sh runs as a BLOCKING
-  # ExecStartPre for clawbox-gateway.service, so an npm install that hangs
-  # (slow/blocked/offline registry on a Jetson) would keep the gateway from
-  # ever reaching "listening" — which is exactly the "gateway won't start
-  # after update" failure. Best-effort: if the install fails OR times out we
-  # log a warning and let the gateway start anyway. Codex is one provider;
-  # a degraded Codex is far better than a dead box, and the next boot (or a
-  # manual `openclaw plugins install`) can still repair it.
-  if timeout 120 "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force "${CODEX_CAPABILITY_ARGS[@]}" >/dev/null 2>&1; then
-    echo "  Codex runtime plugin installed/repaired ($CODEX_SPEC)"
-  else
-    echo "  WARN: 'openclaw plugins install $CODEX_SPEC' failed or timed out; Codex chats will fail until resolved (gateway will still start)"
-  fi
-elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
-  # OpenClaw 2 added declared-capability consent to managed plugins. A plugin
-  # migrated from 2026.7 may already have the right package, peer dependency,
-  # and version — so every repair check above passes — while its install record
-  # has no accepted surface hash. The gateway then refuses readiness with
-  # "Plugin codex requires capability consent" forever. `enable` is the
-  # idempotent local operation for this exact state: it records the current
-  # reviewed surface when needed and otherwise leaves an already-enabled,
-  # already-consented plugin unchanged. Time-box because this is ExecStartPre.
-  # A v1 install can leave Codex enabled even after the owner switches primary
-  # auth to another provider. V2 verifies every enabled/default-enabled plugin
-  # before opening its port, so consent it even when no Codex model is selected.
-  if timeout 60 "$OPENCLAW_BIN" plugins enable codex --accept-capabilities </dev/null >/dev/null 2>&1; then
-    echo "  Codex runtime plugin capabilities accepted/current"
-  else
-    echo "  WARN: could not confirm Codex plugin capabilities; gateway readiness may remain blocked"
-  fi
-fi
-
 # ── OpenClaw 2's three background jobs, opted out of ONCE ───────────────────
 #
 # TASK-609, owner ruling 2026-09-03. The 2026.8.1 upgrade switches three things
@@ -2732,6 +2633,105 @@ STATEPY
     else
       echo "  WARN: could not seed the OpenClaw 2 background-job opt-outs; the box may send unprompted check-ins and spend tokens on background jobs until Settings is used" >&2
     fi
+  fi
+fi
+
+CODEX_SHOULD_LOAD="$NEEDS_CODEX_PLUGIN"
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_PLUGIN_ENABLED" = "1" ]; then
+  CODEX_SHOULD_LOAD=1
+fi
+# Also check the nested peer-dep symlink. `openclaw plugins install
+# codex` writes `<codex>/node_modules/openclaw -> <global openclaw>`
+# alongside the package.json; if that symlink is missing or dangling
+# (partial install, openclaw upgrade that cleared the nested
+# node_modules, manual cleanup) the codex plugin loads but its
+# top-level imports fail at runtime with:
+#   Error: Cannot find package 'openclaw' imported from
+#   .../@openclaw/codex/dist/shared-client-…js
+# Checking only the package.json misses that broken state. `-e`
+# follows symlinks, so it catches both "missing" and "dangling".
+# `--force` on install rebuilds the symlink without reinstalling
+# unnecessary content when the package directory is already there.
+CODEX_PEER_DEP="$CODEX_PLUGIN_DIR/node_modules/openclaw/package.json"
+CODEX_NEEDS_INSTALL=0
+CODEX_INSTALL_REASON=""
+if [ "$CODEX_SHOULD_LOAD" = "1" ]; then
+  # The direct nested peer symlink is only one valid resolution shape. Trust a
+  # positive registry dependency verdict across managed, project, and global
+  # layouts; treating a healthy parent-resolved plugin as broken launches a
+  # needless reinstall in ExecStartPre, which an updater restart can kill
+  # mid-transaction and leave SQLite locked.
+  if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] || {
+    [ "$CODEX_REGISTRY_DEPS_OK" != "1" ] && [ ! -e "$CODEX_PEER_DEP" ];
+  }; then
+    CODEX_NEEDS_INSTALL=1
+    CODEX_INSTALL_REASON="missing or peer-dep broken"
+  elif [ -n "$OPENCLAW_TARGET" ]; then
+    # Version-skew guard. Older builds ran `plugins install codex`, which
+    # resolves @latest — so the codex plugin drifts ahead of the pinned core
+    # and every Codex chat crashes with "_diagnosticRuntime.
+    # createDiagnosticTraceContextFromActiveScope is not a function" (the
+    # newer plugin calls a runtime API the pinned core doesn't expose).
+    # Reinstall only when the BASE version actually differs.
+    #
+    # Republish-tolerant compare: npm republishes the SAME release with a
+    # -N / -beta.N build suffix (2026.7.1 -> 2026.7.1-1 -> 2026.7.1-2). Those
+    # share the same runtime API as their base version, so an exact-string
+    # `!=` compare would flag `2026.7.1-1` vs pinned `2026.7.1` as a skew and
+    # reinstall the plugin — synchronously, on the gateway boot path — on
+    # EVERY boot. On a Jetson with slow/blocked npm that stalls startup and
+    # the gateway never comes online ("Update failed / gateway still offline").
+    # Strip the build suffix and compare only MAJOR.MINOR.PATCH: a real
+    # API-skew (plugin 2026.7.2 vs core 2026.7.1) still triggers a reinstall,
+    # a mere republish does not.
+    CODEX_INSTALLED_VER=$(python3 -c "import json; print(json.load(open('$CODEX_PLUGIN_DIR/package.json')).get('version',''))" 2>/dev/null || echo "")
+    CODEX_INSTALLED_BASE="${CODEX_INSTALLED_VER%%-*}"
+    OPENCLAW_TARGET_BASE="${OPENCLAW_TARGET%%-*}"
+    if [ "$CODEX_INSTALLED_BASE" != "$OPENCLAW_TARGET_BASE" ]; then
+      CODEX_NEEDS_INSTALL=1
+      CODEX_INSTALL_REASON="base version $CODEX_INSTALLED_VER != core target $OPENCLAW_TARGET"
+    fi
+  fi
+fi
+if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
+  echo "  Installing/repairing @openclaw/codex runtime plugin ($CODEX_INSTALL_REASON)…"
+  # Pin to the core target via the full scoped npm spec; fall back to the
+  # bare alias only when the pin is unknown, so a needed repair still happens.
+  CODEX_SPEC="codex"
+  [ -n "$OPENCLAW_TARGET" ] && CODEX_SPEC="@openclaw/codex@$OPENCLAW_TARGET"
+  CODEX_CAPABILITY_ARGS=()
+  if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+    CODEX_CAPABILITY_ARGS=(--accept-capabilities)
+  fi
+  # Hard time-box this install. gateway-pre-start.sh runs as a BLOCKING
+  # ExecStartPre for clawbox-gateway.service, so an npm install that hangs
+  # (slow/blocked/offline registry on a Jetson) would keep the gateway from
+  # ever reaching "listening" — which is exactly the "gateway won't start
+  # after update" failure. Best-effort: if the install fails OR times out we
+  # log a warning and let the gateway start anyway. Codex is one provider;
+  # a degraded Codex is far better than a dead box, and the next boot (or a
+  # manual `openclaw plugins install`) can still repair it.
+  if timeout 120 "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force "${CODEX_CAPABILITY_ARGS[@]}" >/dev/null 2>&1; then
+    echo "  Codex runtime plugin installed/repaired ($CODEX_SPEC)"
+  else
+    echo "  WARN: 'openclaw plugins install $CODEX_SPEC' failed or timed out; Codex chats will fail until resolved (gateway will still start)"
+  fi
+elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
+  # OpenClaw 2 added declared-capability consent to managed plugins. A plugin
+  # migrated from 2026.7 may already have the right package, peer dependency,
+  # and version — so every repair check above passes — while its install record
+  # has no accepted surface hash. The gateway then refuses readiness with
+  # "Plugin codex requires capability consent" forever. `enable` is the
+  # idempotent local operation for this exact state: it records the current
+  # reviewed surface when needed and otherwise leaves an already-enabled,
+  # already-consented plugin unchanged. Time-box because this is ExecStartPre.
+  # A v1 install can leave Codex enabled even after the owner switches primary
+  # auth to another provider. V2 verifies every enabled/default-enabled plugin
+  # before opening its port, so consent it even when no Codex model is selected.
+  if timeout 60 "$OPENCLAW_BIN" plugins enable codex --accept-capabilities </dev/null >/dev/null 2>&1; then
+    echo "  Codex runtime plugin capabilities accepted/current"
+  else
+    echo "  WARN: could not confirm Codex plugin capabilities; gateway readiness may remain blocked"
   fi
 fi
 

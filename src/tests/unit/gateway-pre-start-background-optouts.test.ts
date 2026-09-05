@@ -41,7 +41,12 @@ const d = hasPython3 && hasBash ? describe : describe.skip;
 function block(): string {
   const src = readFileSync(SCRIPT, "utf-8");
   const from = "# ── OpenClaw 2's three background jobs, opted out of ONCE ";
-  const to = "# ── Capability consent for the OTHER ClawBox-managed plugins ";
+  // Ends where the Codex flow begins. The block sits ABOVE that on purpose:
+  // `gateway-pre-start-codex-runtime.test.ts` extracts from
+  // `CODEX_SHOULD_LOAD=` to the managed-consent banner and runs it under
+  // `set -euo pipefail` with only its own variables, so a block of ours inside
+  // that slice failed on an unbound `CLAWBOX_ROOT` — six of its cases at once.
+  const to = 'CODEX_SHOULD_LOAD="$NEEDS_CODEX_PLUGIN"';
   const start = src.indexOf(from);
   const end = src.indexOf(to, start);
   if (start < 0 || end < 0) throw new Error("the background-job opt-out block is not in gateway-pre-start.sh");
