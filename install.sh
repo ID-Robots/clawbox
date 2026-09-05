@@ -1913,8 +1913,14 @@ step_set_hostname() {
 read_configured_timezone() {
   local tz_env="$PROJECT_DIR/data/timezone.env" line tz
   local zoneinfo="${CLAWBOX_ZONEINFO_DIR:-/usr/share/zoneinfo}"
+  # SYMLINK first, and loudly. `[ -f ]` follows the link, so a link to a real
+  # file passed that test and only then hit the `-L` check; a dangling one
+  # failed `-f` outright. Both answered 1 — "nothing recorded" — which is the
+  # one outcome step_set_timezone treats as a legitimate no-op and exits 0 on.
+  # data/ is clawbox-writable and this runs as root: a link planted where the
+  # route writes a plain file is tampering, not silence.
+  [ -L "$tz_env" ] && return 2
   [ -f "$tz_env" ] || return 1
-  [ -L "$tz_env" ] && return 1
   line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?TIMEZONE=" "$tz_env" 2>/dev/null)" || return 1
   tz="${line#*=}"
   case "$tz" in
@@ -1980,11 +1986,13 @@ step_set_timezone() {
     1) echo "  No timezone recorded, leaving the system zone alone" ;;
     *)
       # A value WAS recorded and this device will not take it — a newer zone
-      # name than its tzdata, a spelling its filesystem does not match, or
-      # something that is not a zone at all. Failing loudly is the point: this
-      # used to print "no timezone recorded" and exit 0, so every layer above
-      # reported the change as applied while the box stayed on Etc/UTC.
-      echo "Error: the recorded timezone is not one this device carries — leaving the system zone alone." >&2
+      # name than its tzdata, a spelling its filesystem does not match,
+      # something that is not a zone at all, or a symlink standing where the
+      # route writes a plain file. Failing loudly is the point: this used to
+      # print "no timezone recorded" and exit 0, so every layer above reported
+      # the change as applied while the box stayed on Etc/UTC.
+      echo "Error: data/timezone.env is not a plain file, or its zone is not one this device carries." >&2
+      echo "       Leaving the system zone alone." >&2
       return 1
       ;;
   esac

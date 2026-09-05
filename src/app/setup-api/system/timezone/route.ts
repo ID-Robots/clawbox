@@ -74,9 +74,17 @@ export async function POST(request: Request) {
     );
   }
 
+  // `request.json()` resolves for `null`, `"Europe/Sofia"`, `5` and `[]` just
+  // as happily as for an object, so the declared type does not hold at runtime.
+  // Reading `.timezone` off `null` throws, and the framework turns that into a
+  // bare 500 where this route documents a 400.
   let body: { timezone?: unknown; adopt?: unknown };
   try {
-    body = await request.json();
+    const parsed: unknown = await request.json();
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    }
+    body = parsed as { timezone?: unknown; adopt?: unknown };
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
@@ -117,9 +125,22 @@ export async function POST(request: Request) {
   // root code execution for anything that can already run code as clawbox.
   // read_configured_timezone re-validates the value on the root side against
   // this device's own zoneinfo database. TASK-445.
+  //
+  // A read-only, full or otherwise refusing `data/` used to escape as a bare
+  // 500 with no shape and no log line. Nothing has been recorded and no root
+  // step has run yet at this point, so the honest answer is that the zone was
+  // not saved — and returning here keeps it that way.
   const envPath = timezoneEnvPath();
-  await fs.mkdir(path.dirname(envPath), { recursive: true });
-  await fs.writeFile(envPath, `TIMEZONE=${tz}\n`, { mode: 0o600 });
+  try {
+    await fs.mkdir(path.dirname(envPath), { recursive: true });
+    await fs.writeFile(envPath, `TIMEZONE=${tz}\n`, { mode: 0o600 });
+  } catch (err) {
+    console.error("[timezone] Failed to write the timezone env file:", err);
+    return NextResponse.json(
+      { error: "The timezone could not be saved on this device." },
+      { status: 500 },
+    );
+  }
 
   // Recorded as REQUESTED before either half runs, and as APPLIED only after
   // the harness leg lands. The two keys are what stops a failed apply from
