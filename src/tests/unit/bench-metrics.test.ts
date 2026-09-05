@@ -100,6 +100,14 @@ describe("a cycle's figures", () => {
     expect(d.map((x) => [x.rep, x.wallMs?.pct])).toEqual([[1, 10], [2, -50]]);
   });
 
+  it("keeps the cycle's cost a number when a run never started — zero usage is zero cost, not unknown", () => {
+    const notStarted = taskFigures({ line: { task: "b", tier: "S", runId: null, outcome: "not-started", wallMs: null, subagentsByType: {}, modelsUsed: [] }, cost: costOfUsage(null, PRICING), parallel: parallelism([], 0), cycle: "c1" });
+    expect(notStarted).toMatchObject({ costUsd: 0, pricedUsd: 0, unpricedModels: [] });
+    const summary = summarizeCycle([fig({ task: "a" }), notStarted]);
+    expect(summary.costUsd).toBe(0.1);
+    expect(summary.completed).toBe(1);
+  });
+
   it("answers no cycle cost while any run has an unpriced model", () => {
     const unpriced = taskFigures({ line: line({ task: "u" }), cost: costOfUsage({ mystery: { input: 10, output: 0 } }, PRICING), parallel: parallelism([], 0), cycle: "c1" });
     const summary = summarizeCycle([fig({ task: "a" }), unpriced]);

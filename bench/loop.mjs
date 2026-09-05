@@ -121,9 +121,9 @@ function readFigures(suiteVersion, label) {
   return fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 }
 
-/** A stamp no two runs share: the second, and four random hex characters after it. */
+/** A stamp no two runs share: the second, and 128 random bits after it. */
 function stamp() {
-  return `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${crypto.randomBytes(2).toString("hex")}`;
+  return `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${crypto.randomBytes(16).toString("hex")}`;
 }
 
 function pct(d) {
@@ -169,7 +169,9 @@ async function runCycle({ args, suite, tasks, label, projectsRoot, pricing }) {
     const started = await startRun({ task: task.brief, directory: workdir });
     if (started.status !== 202 || !started.json?.run) {
       console.error(`  run refused: ${started.status} ${started.text.slice(0, 300)}`);
-      figures.push(taskFigures({ line: { task: task.id, tier: task.tier, runId: null, outcome: "not-started", wallMs: null, subagentsByType: {}, modelsUsed: [] }, cost: null, parallel: parallelism([], 0), cycle: label, rep }));
+      // A run that never started spent nothing: zero usage priced as zero,
+      // so the cycle's cost stays a number rather than "n/a".
+      figures.push(taskFigures({ line: { task: task.id, tier: task.tier, runId: null, outcome: "not-started", wallMs: null, subagentsByType: {}, modelsUsed: [] }, cost: costOfUsage(null, pricing), parallel: parallelism([], 0), cycle: label, rep }));
       if (started.status === 409 && started.json?.kind === "busy") { console.error("  a run is already in progress — one at a time; stopping this cycle."); break; }
       continue;
     }
@@ -248,9 +250,9 @@ async function main() {
   if (args.baseline && !previous) console.error(`no figures for baseline ${args.baseline}; comparing from the first cycle on`);
   let anyFailed = false;
   for (let c = 1; c <= args.cycles; c++) {
-    // The label carries the second, so a second invocation on the same day
-    // never appends to an earlier cycle's figures or overwrites its report.
-    const label = `${baseLabel}-c${c}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
+    // The label carries the stamp, so a second invocation — even in the same
+    // second — never appends to an earlier cycle's figures or overwrites its report.
+    const label = `${baseLabel}-c${c}-${stamp()}`;
     console.log(`\n== cycle ${c}/${args.cycles}: ${label} ==`);
     const figures = await runCycle({ args, suite, tasks, label, projectsRoot, pricing });
     const summary = summarizeCycle(figures);
