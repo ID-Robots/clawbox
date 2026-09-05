@@ -210,8 +210,8 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     const writes = lines.filter((line) =>
       /^(if |elif )?(install|cp|mv|tee|truncate|rm)\b/.test(line)
       // The rollback is two commands on two lines — `if ! truncate …` and the
-      // continued `&& ! dd of=…` — and without this the six-line minimum would
-      // still be met with BOTH of them deleted.
+      // continued `&& ! python3 -c '… os.truncate …'` — and without this the
+      // write-count floor would still be met with BOTH of them deleted.
       || /^(if\s+)?!\s*truncate\b/.test(line)
       || /^&&\s*!\s*python3\b/.test(line)
       || />>/.test(line)
@@ -233,14 +233,14 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
 
     // Sanity: the filter has to be finding this block's write sites, or an
     // empty `unguarded` would prove nothing. The floor is the REAL count, not a
-    // token one — at six, three of these could have been deleted outright and
-    // this test would still have passed. They are, today:
+    // token one. The eight write sites are, today:
     //   1 the helper's own `printf >>`
     //   2 `truncate -s`, 3 the `python3 os.truncate` fallback
     //   4 the `install` seed, 5 its failure-branch `rm -f`
     //   6-8 the three `clawbox_append_or_rollback` calls
     expect(writes.length).toBeGreaterThanOrEqual(8);
-    // Both rollback verbs, by name: a six-line count can be met without them.
+    // Both rollback verbs, by name: the write-count floor can be met
+    // without them.
     expect(writes.join("\n")).toMatch(/truncate -s/);
     expect(writes.join("\n")).toMatch(/os\.truncate/);
     expect(unguarded).toEqual([]);
