@@ -145,15 +145,21 @@ fi
 # The checkout's own `.env` and `.git`, for the same reason and by the same
 # rule — but swept from the WHOLE tree, not just beside the entry.
 #
-# Two different routes put them there and neither can be closed in
-# next.config.ts (the measurement is recorded there):
+# Two different routes put them there, and only one of them has a native
+# switch (the measurement for both is recorded in next.config.ts):
 #
 #   * `.env` and `.env.production` are copied by Next ITSELF, outside the
 #     trace: writeStandaloneDirectory() walks `loadedEnvFiles` and copyFile()s
 #     exactly those two names (next/dist/build/index.js), with no config switch.
+#     This sweep is the only thing that removes them.
 #   * `.git` rides in on the instrumentation trace — the same whole-project
 #     asset directory that brings `.next-old` in above. Read off the OpenClaw
-#     box on 2026-09-05: `.next/standalone/.git` was 88 MB.
+#     box on 2026-09-05: `.next/standalone/.git` was 88 MB. That trace IS
+#     reachable by `outputFileTracingExcludes` (only middleware's is not), so
+#     `.git/**` is excluded there now and this sweep should find nothing —
+#     kept because no real build has been measured with that line in place,
+#     and because a post-condition that fails the build is worth more than an
+#     exclude nobody would notice regressing.
 #
 # On a box the checkout `.env` is 0600 and holds GOOGLE_OAUTH_CLIENT_SECRET
 # and, where install.sh was given one, CLAWBOX_AI_API_KEY. Nothing reads the
@@ -165,10 +171,14 @@ fi
 # provider keys) lands at `.next/standalone/e2e-install/.env.test`, two levels
 # down. `node_modules` is pruned — packages ship `.env` fixtures of their own,
 # and failing a build over one would be a false failure.
+# Every pattern quoted, including the three that need no quoting today: this
+# script runs with the project root as cwd, where `.env` and `.git` both exist,
+# so one added `*` in an unquoted word would be expanded by the shell against
+# the checkout before `find` ever saw it.
 env_and_git_copies() {
   find "$STANDALONE" \
-    -name node_modules -prune \
-    -o \( -name .env -o -name '.env.*' -o -name .git \) -prune "$@"
+    -name 'node_modules' -prune \
+    -o \( -name '.env' -o -name '.env.*' -o -name '.git' \) -prune "$@"
 }
 
 # `|| true` so the check below is what reports a failed removal, rather than

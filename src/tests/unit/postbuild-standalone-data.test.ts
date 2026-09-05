@@ -30,10 +30,14 @@ import path from "path";
  * TASK-692 gave the checkout's own `.env` (0600 on a box — the file systemd
  * hands to clawbox-setup, holding GOOGLE_OAUTH_CLIENT_SECRET and, where
  * install.sh was given one, CLAWBOX_AI_API_KEY), every `.env.*` beside it and
- * `.git` the same treatment. Neither can be excluded through Next's own
- * mechanism: `writeStandaloneDirectory()` copies `.env`/`.env.production`
- * outside the trace with no switch, and `.git` arrives on the instrumentation
- * trace, which `outputFileTracingExcludes` does not reach. Removing them costs
+ * `.git` the same treatment. Only ONE of the two has a native switch:
+ * `writeStandaloneDirectory()` copies `.env`/`.env.production` outside the
+ * trace with no config key on that path, so the sweep is the only thing that
+ * removes those; `.git` arrives on the instrumentation trace, which
+ * `outputFileTracingExcludes` DOES reach (see next.config.ts), so it is
+ * excluded there and swept here as the enforced post-condition — these cases
+ * plant the copies by hand, so they pin the sweep whatever the trace does.
+ * Removing them costs
  * the box nothing — @next/env never overwrites a variable systemd has already
  * set — and the sweep is depth-unbounded because that trace copies whole
  * project subdirectories, `.env` files and all.
@@ -83,10 +87,14 @@ function buildFixture() {
   fs.mkdirSync(path.join(standalone, ".next"), { recursive: true });
   fs.writeFileSync(path.join(standalone, "server.js"), "// standalone server\n");
 
-  // scripts/ IS resolved from the process cwd — system-profile.ts's
-  // `resolveScript(..., { allowRepoFallback: true })` falls back to
-  // `CLAWBOX_ROOT || process.cwd()` — so it must survive whatever the data/
-  // removal does.
+  // scripts/ IS resolved from the process cwd, so it must survive whatever the
+  // data/ removal does. Two readers today: system-profile.ts:81
+  // (`resolveScript(..., { allowRepoFallback: true })` → `CLAWBOX_ROOT ||
+  // process.cwd()`), which stays a cwd reader; and hermes-image-plugin.ts:99,
+  // which is one until PR #697 moves it to `resolveConfigRoot()`. Both are
+  // named because the invariant is "something still resolves scripts/ from the
+  // cwd", and dropping the second early would lose the record if #697 changes
+  // shape.
   fs.mkdirSync(path.join(standalone, "scripts"), { recursive: true });
   fs.writeFileSync(path.join(standalone, "scripts", "start-llamacpp.sh"), "#!/bin/sh\n");
 

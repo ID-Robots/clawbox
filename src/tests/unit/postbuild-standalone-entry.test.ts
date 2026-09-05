@@ -53,6 +53,14 @@ const POSTBUILD: string = JSON.parse(
 
 // The real `find`, resolved before the stub below can shadow it: the stub
 // answers the entry lookup only and hands every other call to this one.
+//
+// It has to be an ABSOLUTE path, and that is a hard condition rather than a
+// tidiness rule: `command -v` prints a BARE NAME for a shell function or alias,
+// and the stub is first on PATH, so `exec find "$@"` on a bare name re-enters
+// the stub forever. That loop sits inside `spawnSync`, which blocks the worker
+// synchronously — `testTimeout` cannot interrupt it, so the symptom would be a
+// hung CI job rather than a failing test. A `sh` that reads `$ENV`/`BASH_ENV`
+// is the way in; skipping the suite is the safe answer.
 const REAL_FIND = (
   spawnSync("sh", ["-c", "command -v find"], { encoding: "utf-8" }).stdout ?? ""
 ).trim();
@@ -60,7 +68,7 @@ const REAL_FIND = (
 const CAN_RUN =
   process.platform !== "win32"
   && spawnSync("sh", ["-c", "true"], { stdio: "ignore" }).status === 0
-  && REAL_FIND !== "";
+  && REAL_FIND.startsWith("/");
 const d = CAN_RUN ? describe : describe.skip;
 
 let tmp: string;
@@ -132,6 +140,14 @@ function sweepParkedBuildIn() {
  * (TASK-692) and gets the real one: entry SELECTION does not need `find`, that
  * sweep does, and a stub that answered both would fail the build over a
  * leftover this fixture never planted.
+ *
+ * That narrows the negative control, deliberately and with a limit worth
+ * knowing: a lookup reintroduced in a DIFFERENT shape — matching `server*.js`,
+ * or a `-path`/`-regex` form that never passes the bare word — would fall
+ * through to the real `find`, which prunes `.next-old*` here and hands back the
+ * right entry, so both cases would pass while the regression was live. The
+ * shape this pins is the one the defect had (TASK-725: `find … -name
+ * node_modules -prune -o -name server.js -print -quit`), which carries it.
  */
 function stubFindReturning(rel: string) {
   fs.mkdirSync(stubBin, { recursive: true });
