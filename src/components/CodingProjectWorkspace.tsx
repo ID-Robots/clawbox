@@ -187,6 +187,10 @@ function FilesPane({ query, live, directory, paneClass, fill }: { query: string;
   // before it replaces them, never opened over them.
   const [pendingOpen, setPendingOpen] = useState<string | null>(null);
   const [filesBusy, setFilesBusy] = useState(false);
+  // Which opening of a file the editor shows: a save answers for the
+  // opening it started under, and one that lands after another file took
+  // the pane is dropped rather than written over it.
+  const opening = useRef(0);
 
   const load = useCallback(async (rel: string) => {
     try {
@@ -225,6 +229,7 @@ function FilesPane({ query, live, directory, paneClass, fill }: { query: string;
       const res = await fetch(`/setup-api/coding-agent/tree?${query}&file=${encodeURIComponent(rel)}`, { cache: "no-store" });
       const data = await res.json().catch(() => null) as { file?: TreeFile; error?: string } | null;
       if (!res.ok || !data?.file) throw new Error(data?.error ?? t("codingAgent.workspaceError"));
+      opening.current += 1;
       setFile(data.file);
       setDraft(data.file.binary || data.file.truncated ? null : data.file.content);
       setSaved(false);
@@ -244,6 +249,7 @@ function FilesPane({ query, live, directory, paneClass, fill }: { query: string;
 
   const save = useCallback(async () => {
     if (!file || !dirty || draft === null || saving) return;
+    const mine = opening.current;
     setSaving(true);
     setSaveError(null);
     try {
@@ -255,9 +261,11 @@ function FilesPane({ query, live, directory, paneClass, fill }: { query: string;
       });
       const data = await res.json().catch(() => null) as { file?: { path: string; size: number }; error?: string } | null;
       if (!res.ok || !data?.file) throw new Error(data?.error ?? t("codingAgent.fileSaveFailed"));
+      if (opening.current !== mine) return;
       setFile({ ...file, content: draft, size: data.file.size });
       setSaved(true);
     } catch (err) {
+      if (opening.current !== mine) return;
       setSaveError(err instanceof Error ? err.message : t("codingAgent.fileSaveFailed"));
     } finally {
       setSaving(false);

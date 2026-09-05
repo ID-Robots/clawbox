@@ -77,16 +77,32 @@ export default function CodeEditor({ value, onChange, language, onSave, autoFocu
     }
     if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
       // Tab indents rather than walking the focus: a code editor whose Tab
-      // key leaves the editor is not one. Shift+Tab takes one indent back.
+      // key leaves the editor is not one. At a caret or over one line's
+      // selection it inserts; over lines it indents every line the
+      // selection touches and keeps the selection over them. Shift+Tab
+      // takes one indent back the same way.
       e.preventDefault();
-      const { selectionStart, selectionEnd } = el;
-      if (e.shiftKey) {
-        const lineStart = el.value.lastIndexOf("\n", selectionStart - 1) + 1;
-        const leading = /^ {1,2}/.exec(el.value.slice(lineStart))?.[0] ?? "";
-        if (!leading) return;
-        el.setRangeText("", lineStart, lineStart + leading.length, "preserve");
-        const caret = Math.max(lineStart, selectionStart - leading.length);
-        el.setSelectionRange(caret, Math.max(caret, selectionEnd - leading.length));
+      const { selectionStart, selectionEnd, value } = el;
+      const spansLines = selectionStart !== selectionEnd && value.slice(selectionStart, selectionEnd).includes("\n");
+      if (e.shiftKey || spansLines) {
+        const firstLine = value.lastIndexOf("\n", selectionStart - 1) + 1;
+        // A selection that ends right after a newline does not touch the next line.
+        const endProbe = selectionEnd > selectionStart && value[selectionEnd - 1] === "\n" ? selectionEnd - 1 : selectionEnd;
+        const nextBreak = value.indexOf("\n", endProbe);
+        const blockEnd = nextBreak === -1 ? value.length : nextBreak;
+        const lines = value.slice(firstLine, blockEnd).split("\n");
+        let firstDelta = 0;
+        let total = 0;
+        const next = lines.map((line, i) => {
+          const delta = e.shiftKey ? -(/^ {1,2}/.exec(line)?.[0].length ?? 0) : INDENT.length;
+          if (i === 0) firstDelta = delta;
+          total += delta;
+          return e.shiftKey ? line.slice(-delta) : INDENT + line;
+        }).join("\n");
+        if (total === 0) return;
+        el.setRangeText(next, firstLine, blockEnd, "preserve");
+        const start = Math.max(firstLine, selectionStart + firstDelta);
+        el.setSelectionRange(start, Math.max(start, selectionEnd + total));
       } else {
         el.setRangeText(INDENT, selectionStart, selectionEnd, "end");
       }

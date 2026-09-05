@@ -7,6 +7,43 @@ import { requireSession } from "@/lib/route-auth";
 export const dynamic = "force-dynamic";
 
 /**
+ * How many bytes a PUT body may be: the write cap with room for JSON's own
+ * overhead (a newline is two characters escaped, a control character six).
+ * Route handlers have no body limit of their own, and `request.json()`
+ * would buffer the whole thing before the content's cap could be applied.
+ */
+export const MAX_PUT_BODY_BYTES = MAX_TREE_WRITE_BYTES * 4 + 16 * 1024;
+
+/** The JSON body, read chunk by chunk under the cap — never buffered whole first. */
+async function readCappedJson(request: Request, maxBytes: number): Promise<{ ok: true; body: unknown } | { ok: false; status: 400 | 413 }> {
+  const declared = Number(request.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > maxBytes) return { ok: false, status: 413 };
+  if (!request.body) return { ok: false, status: 400 };
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return { ok: false, status: 413 };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { ok: false, status: 400 };
+  }
+  try {
+    return { ok: true, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) };
+  } catch {
+    return { ok: false, status: 400 };
+  }
+}
+
+/**
  * The project page's file explorer.
  *
  * GET ?projectId=<id> | ?directory=<abs>            → the project's root listing
@@ -68,12 +105,13 @@ export async function PUT(request: Request) {
   if (!(await hasOwnerSession(request))) {
     return NextResponse.json({ error: "Editing a project's files needs a signed-in browser session.", kind: "owner_only" }, { status: 403 });
   }
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid request body", kind: "invalid" }, { status: 400 });
+  const read = await readCappedJson(request, MAX_PUT_BODY_BYTES);
+  if (!read.ok) {
+    return read.status === 413
+      ? NextResponse.json({ error: "The file is too large to save from here.", kind: "too_large" }, { status: 413 })
+      : NextResponse.json({ error: "Invalid request body", kind: "invalid" }, { status: 400 });
   }
+  const body = read.body;
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return NextResponse.json({ error: "Invalid request body", kind: "invalid" }, { status: 400 });
   }

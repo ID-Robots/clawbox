@@ -169,6 +169,15 @@ describe("writing a file", () => {
     expect(fs.readFileSync(path.join(project, "src", "app.js"), "utf8")).toBe("x");
   });
 
+  it("replaces the file in one rename — its mode kept, no sibling left behind, the old text whole until then", async () => {
+    fs.chmodSync(path.join(project, "src", "app.js"), 0o640);
+    const before = fs.readdirSync(path.join(project, "src"));
+    expect(await writeProjectFile(project, "src/app.js", "saved\n")).toEqual({ ok: true, path: "src/app.js", size: 6 });
+    expect(fs.readdirSync(path.join(project, "src"))).toEqual(before);
+    expect(fs.statSync(path.join(project, "src", "app.js")).mode & 0o777).toBe(0o640);
+    expect(fs.readFileSync(path.join(project, "src", "app.js"), "utf8")).toBe("saved\n");
+  });
+
   it("creates nothing: a name that is not there is a 404, not a new file", async () => {
     expect(await writeProjectFile(project, "src/new.js", "x")).toEqual({ ok: false, status: 404 });
     expect(fs.existsSync(path.join(project, "src", "new.js"))).toBe(false);

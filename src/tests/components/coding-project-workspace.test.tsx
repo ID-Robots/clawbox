@@ -68,7 +68,7 @@ let calls: string[];
 /** Every PUT's parsed body, in order. */
 let saves: unknown[];
 
-function stubDevice(opts: { changes?: unknown; log?: unknown[]; tree?: unknown; noGit?: boolean; saveFails?: boolean; filesOutside?: boolean } = {}) {
+function stubDevice(opts: { changes?: unknown; log?: unknown[]; tree?: unknown; noGit?: boolean; saveFails?: boolean; filesOutside?: boolean; holdSave?: Promise<void> } = {}) {
   calls = [];
   saves = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -78,6 +78,7 @@ function stubDevice(opts: { changes?: unknown; log?: unknown[]; tree?: unknown; 
     if (url === "/setup-api/coding-agent/tree" && init?.method === "PUT") {
       const body = JSON.parse(String(init.body));
       saves.push(body);
+      if (opts.holdSave) await opts.holdSave;
       if (opts.saveFails) return json({ error: "No such file in the project", kind: "not_found" }, 404);
       return json({ file: { path: body.file, size: body.content.length } });
     }
@@ -219,6 +220,33 @@ describe("the Files tab", () => {
     fireEvent.click(await within(view).findByTestId("coding-agent-file-discard"));
     await waitFor(() => expect(within(view).getByTestId("coding-agent-file-editor-input")).toHaveValue("console.log(1)\nconsole.log(2)\n"));
     expect(saves).toEqual([]);
+  });
+
+  it("drops a save that lands after its file was discarded for another — the newer file is never overwritten by it", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    stubDevice({ holdSave: held });
+    render(<CodingProjectWorkspace query="projectId=site" live={false} />);
+    const tree = await screen.findByTestId("coding-agent-file-tree");
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-README.md"));
+    const input = await screen.findByTestId("coding-agent-file-editor-input");
+    const view = screen.getByTestId("coding-agent-file-view");
+    fireEvent.change(input, { target: { value: "# late" } });
+    fireEvent.click(within(view).getByTestId("coding-agent-file-save"));
+    await waitFor(() => expect(saves).toHaveLength(1));
+    // While the save is in flight: another file, over the unsaved state, discarded.
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-src"));
+    fireEvent.click(await within(tree).findByTestId("coding-agent-tree-src/app.js"));
+    fireEvent.click(await within(view).findByTestId("coding-agent-file-discard"));
+    await waitFor(() => expect(within(view).getByTestId("coding-agent-file-editor-input")).toHaveValue("console.log(1)\nconsole.log(2)\n"));
+    release();
+    // The stale save answers now; the pane still shows app.js, unchanged, with no "Saved".
+    await new Promise((r) => setTimeout(r, 20));
+    expect(view.textContent).toContain("src/app.js");
+    expect(view.textContent).not.toContain("README.md");
+    expect(within(view).getByTestId("coding-agent-file-editor-input")).toHaveValue("console.log(1)\nconsole.log(2)\n");
+    expect(within(view).queryByTestId("coding-agent-file-saved")).toBeNull();
+    expect(view).not.toHaveAttribute("data-dirty");
   });
 
   it("shows a cut file read-only — a save would lose its tail — and warns while a run works in the folder", async () => {

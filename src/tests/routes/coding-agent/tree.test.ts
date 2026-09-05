@@ -173,3 +173,23 @@ describe("saving a file", () => {
     expect(fs.readFileSync(path.join(root, "outside.txt"), "utf8")).toBe("no\n");
   });
 });
+
+describe("the body cap", () => {
+  it("refuses a body past MAX_PUT_BODY_BYTES with 413 before parsing it, by its length and by what it streams", async () => {
+    const { MAX_PUT_BODY_BYTES } = await import("@/app/setup-api/coding-agent/tree/route");
+    const huge = JSON.stringify({ projectId: "site", file: "src/app.js", content: "x".repeat(MAX_PUT_BODY_BYTES) });
+    const declared = await PUT(new Request("http://localhost/setup-api/coding-agent/tree", { method: "PUT", headers: { host: "localhost", "content-type": "application/json", "content-length": String(huge.length) }, body: huge }));
+    expect(declared.status).toBe(413);
+    // No content-length: the stream itself is cut at the cap.
+    const streamed = await PUT(new Request("http://localhost/setup-api/coding-agent/tree", {
+      method: "PUT",
+      headers: { host: "localhost", "content-type": "application/json" },
+      body: new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(huge)); c.close(); } }),
+      // @ts-expect-error -- undici needs duplex for a stream body
+      duplex: "half",
+    }));
+    expect(streamed.status).toBe(413);
+    expect(resolveWorkingDirectory).not.toHaveBeenCalled();
+    expect(fs.readFileSync(path.join(project, "src", "app.js"), "utf8")).toBe("console.log(1)\n");
+  });
+});

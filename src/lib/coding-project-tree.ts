@@ -18,6 +18,7 @@
  * does that, and the Files app can.
  */
 
+import crypto from "crypto";
 import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
@@ -227,11 +228,15 @@ export async function readProjectFile(projectDir: string, rel: string): Promise<
 
 /**
  * The owner's edit, saved over a file that is already in the project. The
- * same walk as the read — component by component, no link followed, the
- * descriptor checked to be a plain file before a byte moves — then truncate
- * and write through that descriptor: the file written is the file checked.
- * No file is created (O_CREAT is never set), so a typo in the name is a 404,
- * not a new file; a folder, a link and the project root are refused alike.
+ * parent folder is reached by the same walk as a read — component by
+ * component, no link followed — and the target is inspected through it
+ * (a plain file, and its mode) with O_NOFOLLOW. The new text then lands in
+ * a SIBLING first: created fresh (O_EXCL) with the target's own mode,
+ * written and fsync'ed, and given the target's name in one rename — so a
+ * disk that fills halfway through leaves the old file whole rather than
+ * empty. No file is created under the owner's name (a typo is a 404, not a
+ * new file); a folder, a link and the project root are refused alike; the
+ * sibling is removed on any failure.
  */
 export async function writeProjectFile(projectDir: string, rel: string, content: string): Promise<{ ok: true; path: string; size: number } | WriteRefusal> {
   const bytes = Buffer.from(content, "utf8");
@@ -239,22 +244,43 @@ export async function writeProjectFile(projectDir: string, rel: string, content:
   const resolved = await resolveInsideProject(projectDir, rel);
   if (!resolved.ok) return resolved;
   if (!resolved.rel) return { ok: false, status: 404 };
-  let fd: number | null = null;
+  const slash = resolved.rel.lastIndexOf("/");
+  const parentRel = slash === -1 ? "" : resolved.rel.slice(0, slash);
+  const name = slash === -1 ? resolved.rel : resolved.rel.slice(slash + 1);
+  let dirFd: number | null = null;
+  let tmpName: string | null = null;
   try {
-    fd = openThroughDescriptors(resolved.root, resolved.rel, "file", "write");
-    const stat = fs.fstatSync(fd);
-    if (!stat.isFile()) return { ok: false, status: 404 };
-    fs.ftruncateSync(fd, 0);
-    let written = 0;
-    while (written < bytes.length) {
-      written += fs.writeSync(fd, bytes, written, bytes.length - written, written);
+    dirFd = openThroughDescriptors(resolved.root, parentRel, "directory");
+    const viaDir = `/proc/self/fd/${dirFd}`;
+    const targetFd = fs.openSync(path.join(viaDir, name), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    let mode: number;
+    try {
+      const stat = fs.fstatSync(targetFd);
+      if (!stat.isFile()) return { ok: false, status: 404 };
+      mode = stat.mode & 0o777;
+    } finally {
+      fs.closeSync(targetFd);
     }
-    fs.fsyncSync(fd);
+    tmpName = `.${name}.clawbox-save-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+    const tmpFd = fs.openSync(path.join(viaDir, tmpName), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, mode);
+    try {
+      let written = 0;
+      while (written < bytes.length) {
+        written += fs.writeSync(tmpFd, bytes, written, bytes.length - written, written);
+      }
+      fs.fsyncSync(tmpFd);
+    } finally {
+      fs.closeSync(tmpFd);
+    }
+    fs.renameSync(path.join(viaDir, tmpName), path.join(viaDir, name));
+    tmpName = null;
+    try { fs.fsyncSync(dirFd); } catch { /* the rename is on disk either way; the folder's sync is best effort */ }
     return { ok: true, path: resolved.rel, size: bytes.length };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     return { ok: false, status: code === "EACCES" || code === "EPERM" ? 403 : 404 };
   } finally {
-    if (fd !== null) { try { fs.closeSync(fd); } catch { /* already closed */ } }
+    if (tmpName !== null && dirFd !== null) { try { fs.unlinkSync(path.join(`/proc/self/fd/${dirFd}`, tmpName)); } catch { /* never made */ } }
+    if (dirFd !== null) { try { fs.closeSync(dirFd); } catch { /* already closed */ } }
   }
 }

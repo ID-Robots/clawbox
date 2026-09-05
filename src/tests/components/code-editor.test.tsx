@@ -58,6 +58,31 @@ describe("CodeEditor", () => {
     expect(onSave).toHaveBeenCalledTimes(2);
   });
 
+  it("indents every line a selection spans on Tab, keeps the selection over them, and takes them back on Shift+Tab", () => {
+    const onChange = vi.fn();
+    render(<CodeEditor value={"a\nb\nc"} onChange={onChange} language={null} testId="ed" />);
+    const input = screen.getByTestId("ed-input") as HTMLTextAreaElement;
+    // "a\nb" selected: both lines indented, the selection still over them, c untouched.
+    input.setSelectionRange(0, 3);
+    fireEvent.keyDown(input, { key: "Tab" });
+    expect(onChange).toHaveBeenLastCalledWith("  a\n  b\nc");
+    expect([input.selectionStart, input.selectionEnd]).toEqual([2, 7]);
+    // Back again over the same two lines.
+    fireEvent.keyDown(input, { key: "Tab", shiftKey: true });
+    expect(onChange).toHaveBeenLastCalledWith("a\nb\nc");
+    expect([input.selectionStart, input.selectionEnd]).toEqual([0, 3]);
+    // A selection ending right after a newline leaves the next line alone.
+    input.value = "a\nb\nc";
+    input.setSelectionRange(0, 2);
+    fireEvent.keyDown(input, { key: "Tab" });
+    expect(onChange).toHaveBeenLastCalledWith("  a\nb\nc");
+    // A selection inside one line is replaced, the way a caret inserts.
+    input.value = "abc";
+    input.setSelectionRange(1, 2);
+    fireEvent.keyDown(input, { key: "Tab" });
+    expect(onChange).toHaveBeenLastCalledWith("a  c");
+  });
+
   it("takes one indent back on Shift+Tab", () => {
     const onChange = vi.fn();
     render(<CodeEditor value={"    x"} onChange={onChange} language={null} testId="ed" />);
