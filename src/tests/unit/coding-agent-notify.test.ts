@@ -79,6 +79,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     todos: [],
     exitCode: 0,
     media: { images: true, audio: true },
+    reviewPass: false,
     mediaGenerated: { images: 0, audio: 0 },
     pgid: null,
     leftover: false,

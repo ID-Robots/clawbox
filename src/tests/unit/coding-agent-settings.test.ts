@@ -148,16 +148,56 @@ describe("steps and tokens", () => {
 });
 
 describe("what a run is told about the shell", () => {
-  it("says one command per call, because the parts being safe is not enough", async () => {
-    // Four of six denials in a real run were compound commands whose every
-    // part was allow-listed: `git rev-parse; git status`, `(node --check … )`,
-    // a python3 heredoc. The run worked it out by trial and error and spent
-    // turns doing it.
+  it("says what the argv enforces: chaining is allowed, killing by name is not", async () => {
+    // Under the retired allow-list the brief said "one command per call,
+    // chaining is refused"; every run has had `Bash(*)` since, and the
+    // sentence was simply false — bench cycle 1 (2026-09-05) watched runs
+    // split commands for a rule nothing enforced. The one command rule that
+    // IS shipped (BASH_KILL_DENYLIST) is what the brief names now.
     const lib = await import("@/lib/coding-agent");
-    expect(lib.HEADLESS_BRIEF).toMatch(/ONE command per Bash call/i);
-    for (const form of ["&&", "heredoc", "redirection", "pipes", "subshell"]) {
-      expect(lib.HEADLESS_BRIEF.toLowerCase()).toContain(form.toLowerCase());
-    }
+    expect(lib.HEADLESS_BRIEF).not.toMatch(/ONE command per Bash call/i);
+    expect(lib.HEADLESS_BRIEF).toMatch(/You may chain commands with && or ;, pipe, redirect/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/End anything you started by its PID: pkill, killall and fuser are refused/);
+  });
+
+  it("tells a run whose diff gets a separate review not to send the reviewer helper too", async () => {
+    // Bench cycle 1 (2026-09-05): with the automatic review pass on, m-02
+    // spent 45% of its wall time idle behind a flash reviewer whose verdict
+    // ("no defects") the pass then re-derived with Bash in hand. One diff,
+    // one review — the helper sentence is swapped for the reason.
+    const lib = await import("@/lib/coding-agent");
+    expect(lib.HEADLESS_BRIEF).toMatch(/before your final report, send the reviewer over your changes/);
+    expect(lib.HEADLESS_BRIEF).not.toContain("{{REVIEWER_CLAUSE}}");
+    const reviewed = lib.headlessBrief({ reviewedSeparately: true });
+    expect(reviewed).toMatch(/your changes get a separate, automatic adversarial review on this device — do not send the reviewer helper/);
+    expect(reviewed).not.toMatch(/before your final report, send the reviewer/);
+    expect(reviewed).not.toContain("{{REVIEWER_CLAUSE}}");
+    // The explorer and tester steps stay whatever the review shape is — the
+    // comment above the sentence records what softer wording did.
+    expect(reviewed).toMatch(/send the explorer to map it/);
+    expect(reviewed).toMatch(/send the tester to run whatever check exists/);
+    expect(lib.headlessBrief({ reviewedSeparately: false })).toBe(lib.HEADLESS_BRIEF);
+
+    const brief = (args: string[]) => args[args.indexOf("--append-system-prompt") + 1];
+    expect(brief(lib.buildRunArgs({ reviewedSeparately: true }))).toBe(reviewed);
+    expect(brief(lib.buildRunArgs({}))).toBe(lib.HEADLESS_BRIEF);
+    expect(brief(lib.buildRunArgs({ reviewedSeparately: true, effort: "ultracode" }))).toBe(`${reviewed} ${lib.ULTRACODE_BRIEF}`);
+  });
+
+  it("closes the contradictions the refusal task exposed, and asks the report for its assumptions", async () => {
+    // Bench s-02 (2026-09-05): the brief banned data/ while --add-dir granted
+    // the evidence folder under it; the run listed two sibling projects and
+    // walked their .git; it decided its in-folder edit at +13 s and timed out
+    // with nothing on disk. m-04's assumptions section came from the bench
+    // folder's NAME, not from anything the brief asked for.
+    const lib = await import("@/lib/coding-agent");
+    expect(lib.HEADLESS_BRIEF).toMatch(/The one exception is your own evidence folder \(CLAWBOX_RUN_ARTIFACTS_DIR\), which lives under data\//);
+    expect(lib.HEADLESS_BRIEF).toMatch(/The folders beside yours under the project root are the owner's other projects: never list, search or read them/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/Do the parts you are sure of and that are inside this folder FIRST/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/try that step once with Edit or Write — never through Bash — so the device's refusal is on the record/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/every assumption you made where the task left a choice open — name the convention or default you picked and why/);
+    expect(lib.ULTRACODE_BRIEF).toMatch(/Decide the shape once and do not re-argue whether the ultracode reminder applies/);
+    expect(lib.ULTRACODE_BRIEF).toMatch(/a Workflow is for a fan-out of many, never for a folder of two files/);
   });
 
   it("tells the run to fix obviously garbled copy rather than ship it", async () => {
@@ -176,6 +216,14 @@ describe("what a run is told about the shell", () => {
   it("tells the run a denial is a decision, not a puzzle for Bash", async () => {
     const lib = await import("@/lib/coding-agent");
     expect(lib.HEADLESS_BRIEF).toMatch(/denied file action is a DECISION/);
+    // Bench cycle 1 (2026-09-05): finish after ONE verification pass, ship
+    // exactly the files named, never search the disk for a missing one.
+    expect(lib.HEADLESS_BRIEF).toMatch(/Finish decisively: once the work is done and ONE verification pass/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/Do not review verified work a second time/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/produce exactly those — no extra assets, pictures, notes or scripts/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/never search the disk for it/);
+    expect(lib.ULTRACODE_BRIEF).toMatch(/a task of one to three files needs no workflow at all/);
+    expect(lib.ULTRACODE_BRIEF).toMatch(/at most ONE/);
     expect(lib.HEADLESS_BRIEF).toMatch(/no sed, tee, redirection or scripts through Bash/);
     expect(lib.HEADLESS_BRIEF).toMatch(/report plainly which part was refused/);
   });
@@ -346,7 +394,27 @@ describe("sub-agent definitions", () => {
     const i = args.indexOf("--agents");
     expect(i).toBeGreaterThan(-1);
     const defs = JSON.parse(args[i + 1]);
-    expect(Object.keys(defs).sort()).toEqual(["explorer", "reviewer", "tester", "workflow-subagent"]);
+    expect(Object.keys(defs).sort()).toEqual(["claude", "explorer", "general-purpose", "reviewer", "tester", "workflow-subagent"]);
+  });
+
+  it("shadows the CLI's general-purpose and claude agents with flash readers too", async () => {
+    // The Agent tool's own text lands an omitted or unknown subagent_type on
+    // general-purpose — a tier-model writer under acceptEdits and Bash(*),
+    // whose edits never reach filesTouched and are swept into the settle
+    // commit unlisted. Same shadow as workflow-subagent, for the two names
+    // the brief cannot stop a model from typing.
+    const lib = await import("@/lib/coding-agent");
+    for (const name of ["general-purpose", "claude"] as const) {
+      const def = lib.SUBAGENT_DEFINITIONS[name];
+      expect(def.model).toBe("deepseek-v4-flash");
+      // Read-only to the letter: no Write, no Edit, and no shell either — a
+      // fallback with Bash is a way to write that filesTouched never sees.
+      expect([...def.tools].sort()).toEqual(["Glob", "Grep", "Read"]);
+      expect(def.prompt).toMatch(/never edit, never run a command/);
+    }
+    // ...and the reviewer no longer sells itself as the step before "done":
+    // whether a run sends it is the brief's call (see headlessBrief).
+    expect(lib.SUBAGENT_DEFINITIONS.reviewer.description).not.toMatch(/before reporting a task complete/);
   });
 
   it("shadows the workflow's default agent with a flash reader", async () => {
@@ -407,7 +475,7 @@ describe("what every run now gets, permanently", () => {
     const args = lib.buildRunArgs({ resumeSessionId: null });
     expect(args[args.indexOf("--tools") + 1].split(",")).toContain("Agent");
     const defs = JSON.parse(args[args.indexOf("--agents") + 1]);
-    expect(Object.keys(defs).sort()).toEqual(["explorer", "reviewer", "tester", "workflow-subagent"]);
+    expect(Object.keys(defs).sort()).toEqual(["claude", "explorer", "general-purpose", "reviewer", "tester", "workflow-subagent"]);
   });
 
   it("offers and pre-approves the Workflow tool under ultracode, and only there", async () => {
@@ -520,7 +588,7 @@ describe("what every run now gets, permanently", () => {
     const args = lib.buildRunArgs({ resumeSessionId: null });
     expect(args[args.indexOf("--tools") + 1].split(",")).toContain("Agent");
     const defs = JSON.parse(args[args.indexOf("--agents") + 1]);
-    expect(Object.keys(defs).sort()).toEqual(["explorer", "reviewer", "tester", "workflow-subagent"]);
+    expect(Object.keys(defs).sort()).toEqual(["claude", "explorer", "general-purpose", "reviewer", "tester", "workflow-subagent"]);
   });
 
   it("keeps acceptEdits and the capability drop", async () => {

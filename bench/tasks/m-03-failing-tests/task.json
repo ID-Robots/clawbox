@@ -1,5 +1,6 @@
 {
   "id": "m-03-failing-tests",
+  "projectName": "shiftboard",
   "tier": "M",
   "title": "Test-driven fix: seeded failing tests must go green",
   "timeoutMinutes": 15,
