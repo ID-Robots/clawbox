@@ -96,7 +96,7 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
   const when = (i: number) => {
     if (!timed) return null;
     const clock = clockOf(i);
-    const since = startedAt ? sinceStart(times[i], startedAt) : null;
+    const since = startedAt !== undefined ? sinceStart(times[i], startedAt) : null;
     return [clock, since].filter(Boolean).join(" · ") || null;
   };
   const label = (step: ProgressDescription) => (step.labelKey ? t(STEP_KEY[step.labelKey]) : step.label);
@@ -160,7 +160,7 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
                   <span className={full ? "whitespace-normal break-words" : "truncate"}>{full && step.kind === "text" ? line : label(step)}</span>
                   {detail(step) && <span className={`opacity-75 ${full ? "whitespace-normal break-all" : "truncate"}`}>{detail(step)}</span>}
                 </span>
-                {timed && startedAt && (
+                {timed && startedAt !== undefined && (
                   // Always on: when a step happened is part of the step.
                   <time
                     dateTime={new Date(times[i]).toISOString()}
