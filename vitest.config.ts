@@ -50,8 +50,10 @@ export default defineConfig({
       // an openclaw.json point OPENCLAW_HOME at their own fixture dir.
       OPENCLAW_HOME: path.join(os.tmpdir(), `clawbox-test-openclaw-${process.pid}`),
       // `CLAWBOX_OPENCLAW_HOME` OUTRANKS the line above wherever this repo
-      // resolves OpenClaw's home, and install.sh bakes it into the web-server
-      // unit — so on a device the floor was only half a floor: a suite run
+      // resolves OpenClaw's home, and a device carries it: `install-x64.sh`
+      // bakes it into the web-server unit (`:1104`) and `src/lib/updater.ts`
+      // (`:971`) exports it into every gateway pre-start child — so on a
+      // device the floor was only half a floor: a suite run
       // from a shell carrying it reads the box's real openclaw.json past the
       // fixture, and `apps/uninstall`'s route tests would then `fs.rm` under
       // the box's REAL workspace and stay green. Emptied rather than pointed

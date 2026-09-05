@@ -616,7 +616,12 @@ describe("openclaw-config", () => {
       // to this key. Left literal, `~/clawd` resolved to a `~` directory under
       // the server's own working directory — a delete target no configuration
       // on the box names.
-      const originalHome = process.env.HOME;
+      // Through `saveEnv` like the rest of the file: `process.env` coerces an
+      // assignment to a string, so restoring an UNSET `HOME` by assignment
+      // would write the literal "undefined" — truthy — and every later
+      // `process.env.HOME || …` in this worker would resolve under a directory
+      // of that name, far from the file that caused it.
+      const restore = saveEnv("HOME");
       process.env.HOME = "/test/home";
       try {
         mockFsSync.readFileSync.mockReturnValue(
@@ -627,7 +632,7 @@ describe("openclaw-config", () => {
 
         expect(result).toBe("/test/home/clawd");
       } finally {
-        process.env.HOME = originalHome;
+        restore();
       }
     });
 

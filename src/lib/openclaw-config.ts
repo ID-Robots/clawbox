@@ -2814,9 +2814,11 @@ function readConfiguredWorkspace(): string | undefined {
  * absolute value, but joins a RELATIVE one — and its own default — against
  * `$HOME/.openclaw` (`:3138,3147`) rather than the `CLAWBOX_OPENCLAW_HOME` /
  * `OPENCLAW_HOME` override its config path already honours (`:27`). The two
- * agree on every shipped box, because install.sh sets `HOME` and
- * `CLAWBOX_OPENCLAW_HOME` side by side; they are not the same expression, and
- * the shell side is out of this route's scope to change.
+ * agree on every shipped box: on ARM (`install.sh`) neither override is set,
+ * so both sides are `$HOME/.openclaw`, and on x64 `install-x64.sh:1100,1104`
+ * sets `HOME` and `CLAWBOX_OPENCLAW_HOME` to the matching pair. They are not
+ * the same expression, and the shell side is out of this route's scope to
+ * change.
  */
 function resolveWorkspaceValue(workspace: string): string {
   const home = process.env.HOME || "/home/clawbox";
@@ -2829,10 +2831,11 @@ function resolveWorkspaceValue(workspace: string): string {
 /** The workspace when the config names none: the current path, else the legacy one. */
 function wellKnownWorkspace(): string {
   // Under OpenClaw's home, the same one the config was read from — not a
-  // second `$HOME/.openclaw` spelling. install.sh sets `HOME` and
-  // `CLAWBOX_OPENCLAW_HOME` side by side, so the two agree on a shipped box by
-  // convention only; keyed on `$HOME` this line would resolve a DELETE target
-  // from a directory the box's own config does not live in.
+  // second `$HOME/.openclaw` spelling. The two agree on a shipped box by
+  // convention only (`install-x64.sh:1100,1104` sets `HOME` and
+  // `CLAWBOX_OPENCLAW_HOME` to a matching pair; on ARM neither override
+  // exists); keyed on `$HOME` this line would resolve a DELETE target from a
+  // directory the box's own config does not live in.
   const openclawWorkspace = path.join(openclawHome(), "workspace");
   if (fsSync.existsSync(openclawWorkspace)) return openclawWorkspace;
   // The legacy workspace is a HOME-relative path in its own right, never a

@@ -97,9 +97,13 @@ beforeEach(() => {
  * is now the current one.
  */
 async function settleBackgroundRefresh(logs: string[]): Promise<void> {
+  // Well past vitest's default 1 s: the fork is a mocked `spawn` resolving on
+  // a microtask, so this budget is never spent — but on a loaded four-worker
+  // runner a 1 s ceiling would turn the teardown crash this replaced into an
+  // intermittent RED test, which is the same flake wearing different clothes.
   await vi.waitFor(() => {
     expect(logs.some((line) => line.startsWith("[catalog] refreshed openai"))).toBe(true);
-  });
+  }, { timeout: 5_000 });
   // Two turns of the macrotask queue for the awaits after that log.
   for (let i = 0; i < 2; i++) await new Promise((resolve) => setImmediate(resolve));
 }
