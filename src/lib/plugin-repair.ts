@@ -1,8 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
 
-import { DATA_DIR } from "@/lib/config-store";
-
 // What the boot script could not install or consent, and therefore switched off.
 //
 // WHY THIS FILE EXISTS (TASK-606, owner ruling 2026-09-03, option a). OpenClaw 2
@@ -37,8 +35,26 @@ import { DATA_DIR } from "@/lib/config-store";
 // gets an empty map. That is inertness by construction rather than by an
 // edition test: an absent file is not an error.
 
-/** Where the boot script writes it. One file, one owner. */
-export const PLUGIN_REPAIR_PATH = path.join(DATA_DIR, "plugin-repair.json");
+/**
+ * Where the boot script writes it. One file, one owner.
+ *
+ * Resolved from the environment the way `scripts/gateway-pre-start.sh` resolves
+ * `$CLAWBOX_ROOT/data/plugin-repair.json`, and deliberately NOT through
+ * `config-store`'s `DATA_DIR`, which would otherwise be this module's only
+ * import: 114 suites mock `@/lib/config-store` with just the keys they use, and
+ * a module-scope `path.join(DATA_DIR, …)` throws at IMPORT time under such a
+ * mock — so every route that transitively reaches this file would fail to load
+ * in tests that have nothing to do with it. `plugin-repair-path.test.ts` holds
+ * the two derivations to the same answer in a suite that mocks neither.
+ *
+ * A function rather than a constant, because a test sets `CLAWBOX_ROOT` and
+ * re-imports; a constant frozen at first import would answer for the wrong box.
+ */
+export function pluginRepairPath(): string {
+  const root = process.env.CLAWBOX_ROOT
+    || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
+  return path.join(root, "data", "plugin-repair.json");
+}
 
 /** Which step failed. The Retry re-runs exactly that step. */
 export type PluginRepairStage = "install" | "consent";
@@ -63,7 +79,7 @@ export interface PluginRepairEntry {
 
 export type PluginRepairs = Record<string, PluginRepairEntry>;
 
-function parseEntry(id: string, raw: unknown): PluginRepairEntry | null {
+function parseEntry(key: string, raw: unknown): PluginRepairEntry | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   const stage = r.stage === "install" || r.stage === "consent" ? r.stage : null;
@@ -71,6 +87,12 @@ function parseEntry(id: string, raw: unknown): PluginRepairEntry | null {
   const reason = typeof r.reason === "string" && r.reason.trim() ? r.reason.trim() : null;
   if (!reason) return null;
   const atMs = typeof r.atMs === "number" && Number.isFinite(r.atMs) ? r.atMs : 0;
+  // The RECORD's own id wins over the map key. The boot script writes the two
+  // the same, but this id is what the Retry hands to `openclaw plugins`, and
+  // reading it off the key would silently rewrite a spelling the harness needs
+  // (`@openclaw/deepseek-provider` filed under `deepseek`) into one it may not
+  // resolve. The key is the fallback for a row written before the field.
+  const id = typeof r.id === "string" && r.id.trim() ? r.id.trim() : key;
   return { id, stage, reason, atMs, disabled: r.disabled === true };
 }
 
@@ -87,7 +109,7 @@ function parseEntry(id: string, raw: unknown): PluginRepairEntry | null {
 export async function readPluginRepairs(): Promise<PluginRepairs> {
   let raw: string;
   try {
-    raw = await fs.readFile(PLUGIN_REPAIR_PATH, "utf-8");
+    raw = await fs.readFile(pluginRepairPath(), "utf-8");
   } catch {
     return {};
   }
@@ -119,10 +141,11 @@ export async function clearPluginRepair(id: string): Promise<boolean> {
   const current = await readPluginRepairs();
   if (!current[id]) return false;
   delete current[id];
-  const tmp = `${PLUGIN_REPAIR_PATH}.tmp.${process.pid}`;
-  await fs.mkdir(path.dirname(PLUGIN_REPAIR_PATH), { recursive: true });
+  const target = pluginRepairPath();
+  const tmp = `${target}.tmp.${process.pid}`;
+  await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.writeFile(tmp, `${JSON.stringify(current, null, 2)}\n`, "utf-8");
-  await fs.rename(tmp, PLUGIN_REPAIR_PATH);
+  await fs.rename(tmp, target);
   return true;
 }
 

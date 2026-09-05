@@ -409,6 +409,7 @@ export interface UpdateState {
 
 export { RESTART_STEP_ID } from "./update-constants";
 import { RESTART_STEP_ID } from "./update-constants";
+import { clearPluginRepair } from "./plugin-repair";
 
 // Ceiling for the rebuild/restart hand-off: bun build alone runs minutes on a
 // Jetson, plus the config/redeploy steps before it and the reboot after.
@@ -1686,6 +1687,11 @@ async function recordPluginCapabilityConsent(pluginId: string): Promise<void> {
       ["plugins", "enable", pluginId, "--accept-capabilities"],
       { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
     );
+    // The OTHER repair path for the same state (TASK-606). A marker the boot
+    // script wrote and only the boot script cleared would leave a permanent
+    // "Needs repair" badge on a plugin this update just consented — the false
+    // failure that costs a support ticket over a box that is now fine.
+    await clearPluginRepair(pluginId).catch(() => false);
   } catch (err) {
     // Best effort, like the Codex branch above: the clean restart and the
     // positive port probe decide the result, and this must not replace a
