@@ -89,18 +89,30 @@ No CDN links — the device may be offline.
 ## An app that runs its own server
 
 A project with its own server (a Next.js app on a port, a game engine) is
-still opened from a desktop icon: register a webapp (webapp_create, or the
-project's build) whose HTML sends the frame to the server, on the BOX'S OWN
-HOST — never localhost, which is the phone or laptop the desktop is viewed
-from. Write the server's real port NUMBER where 4199 is below — the HTML is
-stored as submitted, and a name like PORT would be a ReferenceError in the
-browser:
-  <script>location.replace(location.protocol + "//" + location.hostname + ":4199/");</script>
-The desktop frames the box's own host on any port. Keep the server listening
-on 0.0.0.0, and say in the reply which port it serves on. To stop or restart
-a server YOU started, use its PID (the one \`node …\` printed, or \`$!\`) —
-never pkill, killall or fuser: ClawBox's own web server is a Next.js server
-too, and \`pkill -f next-server\` takes the box down with your run.`;
+reached THROUGH the box, never by its port: the box serves it under
+/apps/<folder>/ on its own origin, so the desktop icon works on the LAN, over
+the tunnel, and after the tunnel's address changes — a link that names a host
+or a port is dead the next morning. Three things make it work:
+
+1. Write clawbox.json at the project's root, the ClawBox app manifest:
+     { "name": "Tinder Clone", "description": "…", "kind": "server", "port": 4230, "start": "bun run dev" }
+   The box reads the port from it and puts the app on the desktop when the
+   run settles; the same file marks the repository as a ClawBox app.
+2. Serve the app under the base path /apps/<folder> — the path reaches it
+   unchanged. Next.js: basePath: "/apps/<folder>" in next.config; Vite:
+   base: "/apps/<folder>/"; Express: app.use("/apps/<folder>", router).
+   An app that must serve at "/" with relative links may say
+   "stripBasePath": true in the manifest instead.
+3. Keep the server listening on 127.0.0.1 at that port, started from inside
+   the project folder (the box proxies only a server of the project's own,
+   and nothing else needs to reach the port), and say in the reply which
+   port it serves on and that it opens at /apps/<folder>/.
+
+Never write location.hostname or a port into an HTML redirect: the desktop
+frames /apps/<folder>/ itself. To stop or restart a server YOU started,
+use its PID (the one \`node …\` printed, or \`$!\`) — never pkill, killall or fuser:
+ClawBox's own web server is a Next.js server too, and \`pkill -f next-server\`
+takes the box down with your run.`;
 
 function loadFieldGuide(): string | null {
   try {

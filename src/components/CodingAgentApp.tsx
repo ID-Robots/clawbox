@@ -34,6 +34,7 @@ import {
   takePendingCodingRun,
 } from "@/lib/ui-events";
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
+import ImportProjectPanel, { type ImportResult } from "./ImportProjectPanel";
 import TerminalApp from "./TerminalApp";
 import VNCApp from "./VNCApp";
 import CodingAgentBreadcrumb from "./CodingAgentBreadcrumb";
@@ -145,6 +146,8 @@ interface Project {
   /** The project's own icon, once the box has drawn one; null while it has not. */
   iconUrl?: string | null;
   latestRun: Pick<Run, "id" | "status" | "task" | "startedAt" | "completedAt"> | null;
+  /** The project's clawbox.json, when it is a ClawBox app (src/lib/clawbox-manifest.ts). */
+  app?: { name: string; description: string | null; kind: string | null; port: number | null } | null;
 }
 
 // The wizard's name bound lives with the wizard now (NewAppWizardCard); it is
@@ -158,6 +161,25 @@ export { NEW_APP_NAME_MAX };
  * data/webapps — the project folder. Exported so the test can pin the
  * spelling against the one the desktop matches on.
  */
+/**
+ * Put a project whose clawbox.json names a port on the desktop — the box
+ * checks that the project's own server is listening first
+ * (src/lib/app-proxy.ts) — and answer the refusal's sentence when it is not.
+ */
+async function addProjectToDesktop(directory: string): Promise<string | null> {
+  try {
+    const res = await fetch("/setup-api/coding-agent/projects/desktop", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ directory }),
+    });
+    const data = await res.json().catch(() => ({})) as { error?: string };
+    return res.ok ? null : (data.error || "Could not add the app to the desktop.");
+  } catch {
+    return "Could not add the app to the desktop.";
+  }
+}
+
 export function installedAppId(folder: string): string {
   return `installed-${folder}`;
 }
@@ -394,6 +416,8 @@ export default function CodingAgentApp() {
   // over whichever project was open, so Back returns there.
   const [page, setPage] = useState<"home" | "settings">("home");
   const [openProjectDir, setOpenProjectDir] = useState<string | null>(null);
+  /** The Import panel on the home face: GitHub or a folder on the box. */
+  const [importOpen, setImportOpen] = useState(false);
   /** Bumped when this window changed the open project's git state itself
    *  (a backup), so the git block re-reads without a new commit. */
   const [gitVersion, setGitVersion] = useState(0);
@@ -437,6 +461,20 @@ export default function CodingAgentApp() {
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  /**
+   * The Open button of a project row and page: the desktop window when the
+   * app is registered there; otherwise — a clawbox.json naming a port — the
+   * box is asked to put it on the desktop first, and the row's next read
+   * shows Open.
+   */
+  const openOrAddProject = async (project: Pick<Project, "folder" | "directory" | "onDesktop" | "app">) => {
+    if (project.onDesktop) { dispatchOpenApp(installedAppId(project.folder)); return; }
+    if (!project.app?.port) return;
+    const failed = await addProjectToDesktop(project.directory);
+    window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: failed ? { message: failed, type: "error" } : { message: t("codingAgent.addedToDesktop", { name: project.app.name }), type: "success" } }));
+    if (!failed) void load();
+  };
 
   // The settings live in another window now. Re-read the box when Settings
   // says it saved something — the chip, the checklist and a run's Backup
@@ -1431,7 +1469,39 @@ export default function CodingAgentApp() {
                 </span>
               )}
             </h2>
+            {/* Bringing in what already exists: one of the owner's GitHub
+                repositories, or a folder on the box. Offered on the standalone
+                page too — nothing here needs the chat. */}
+            <button
+              type="button"
+              onClick={() => setImportOpen((v) => !v)}
+              aria-expanded={importOpen}
+              className={BTN_SECONDARY}
+              data-testid="coding-agent-import-toggle"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">download</span>
+              {t("codingAgent.importButton")}
+            </button>
           </div>
+
+          {importOpen && (
+            <ImportProjectPanel
+              onClose={() => setImportOpen(false)}
+              onOpenSettings={() => { disarmClear(); setImportOpen(false); setPage("settings"); }}
+              onImported={(result: ImportResult) => {
+                setImportOpen(false);
+                const name = result.project?.name ?? result.folder;
+                const lines = [t("codingAgent.importDone", { name })];
+                if (result.skipped.length > 0) lines.push(t("codingAgent.importSkipped", { folders: result.skipped.join(", ") }));
+                window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: lines.join(" "), type: "success" } }));
+                // The row is on the next read; the page opens on the folder
+                // now, and the project page reads its own git line.
+                void load();
+                setOpenRunId(null);
+                setOpenProjectDir(result.directory);
+              }}
+            />
+          )}
 
           {standalone && (
             <p className="mt-2 px-1 text-[11px] text-[var(--text-muted)]" data-testid="coding-agent-new-needs-desktop">
@@ -1512,6 +1582,17 @@ export default function CodingAgentApp() {
                             {t("codingAgent.onDesktop")}
                           </span>
                         )}
+                        {/* A clawbox.json makes the folder a ClawBox APP, not
+                            just a folder with history. */}
+                        {project.app && (
+                          <span
+                            className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--coral-bright)] border-[var(--coral-bright)]/40"
+                            title={project.app.description ?? undefined}
+                            data-testid={`coding-agent-app-chip-${project.folder}`}
+                          >
+                            {t("codingAgent.clawboxApp")}
+                          </span>
+                        )}
                         {running && (
                           <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-amber-400 border-amber-400/40">
                             {t("codingAgent.runInProgress")}
@@ -1524,18 +1605,20 @@ export default function CodingAgentApp() {
                           : t("codingAgent.noCommits")}
                       </p>
                     </div>
-                    {project.onDesktop && (
+                    {(project.onDesktop || project.app?.port) && (
                       <button
                         type="button"
                         // The desktop registers a deployed web app under
                         // `installed-<folder>` (page.tsx, getAllApps); the
                         // bare folder name matches no app there, and the
-                        // click did nothing at all.
-                        onClick={(e) => { e.stopPropagation(); dispatchOpenApp(installedAppId(project.folder)); }}
+                        // click did nothing at all. A project whose manifest
+                        // declares a port but is not on the desktop yet is
+                        // put there first (the box checks its server is up).
+                        onClick={(e) => { e.stopPropagation(); void openOrAddProject(project); }}
                         data-testid={`coding-agent-open-${project.folder}`}
                         className={BTN_SECONDARY}
                       >
-                        {t("codingAgent.open")}
+                        {project.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
                       </button>
                     )}
                     <span className="material-symbols-rounded text-[var(--text-muted)] opacity-60 shrink-0 self-center" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
@@ -1696,13 +1779,14 @@ export default function CodingAgentApp() {
                 )}
                 <div className="mt-3 flex flex-wrap items-center gap-1.5" data-testid="coding-agent-run-actions">
                   {runControls(run, "page")}
-                  {project?.onDesktop && (
+                  {project && (project.onDesktop || project.app?.port) && (
                     <button
                       type="button"
-                      onClick={() => dispatchOpenApp(installedAppId(project.folder))}
+                      onClick={() => void openOrAddProject(project)}
                       className={BTN_SECONDARY}
+                      data-testid="coding-agent-project-open-app"
                     >
-                      {t("codingAgent.open")}
+                      {project.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
                     </button>
                   )}
                 </div>

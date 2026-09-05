@@ -74,6 +74,9 @@ import { type CodingRunStatus, isCodingRunStatus, isHeld, isLive } from "@/lib/c
 import { memAvailableMb } from "@/lib/mem-available";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
+import { readClawboxManifest } from "@/lib/clawbox-manifest";
+import { registerServerApp } from "@/lib/app-proxy";
+import { APP_ID_RE } from "@/lib/code-projects";
 import { taskTitle } from "@/lib/task-title";
 import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, webappPath } from "@/lib/code-projects";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
@@ -1311,6 +1314,12 @@ export interface CodingProject {
   iconUrl: string | null;
   /** The newest run that worked in this folder, if any has. */
   latestRun: Pick<CodingRun, "id" | "status" | "task" | "startedAt" | "completedAt"> | null;
+  /**
+   * The project's clawbox.json, when it carries one: what makes it a ClawBox
+   * APP rather than a folder with history (src/lib/clawbox-manifest.ts). A
+   * `port` here is what `/apps/<folder>/` is proxied to.
+   */
+  app: { name: string; description: string | null; kind: string | null; port: number | null } | null;
 }
 
 /**
@@ -1426,13 +1435,14 @@ async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate
   // and a folder a run has worked in by that run, as long as it still exists.
   const workedIn = fromRun === true && self?.isDirectory() === true;
   if (!hasGit && !workedIn && !(kind === "codeProject" && metaName !== null)) return null;
-  const [commit, onDesktop, hasIcon, real] = await Promise.all([
+  const [commit, onDesktop, hasIcon, manifest, real] = await Promise.all([
     // Only a folder with its own history is asked. `git log` in one without
     // walks UP to the nearest repository — for a code project, ClawBox's own
     // checkout — and would present the OS's last commit as the app's.
     hasGit ? lastCommit(directory) : Promise.resolve(null),
     isOnDesktop(folder),
     hasProjectIcon(folder),
+    readClawboxManifest(directory),
     // A run records the folder it worked in symlink-resolved; match both
     // spellings so a project reached through a link still shows its run.
     fs.promises.realpath(directory).catch(() => directory),
@@ -1455,6 +1465,7 @@ async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate
       latestRun: run
         ? { id: run.id, status: run.status, task: run.task, startedAt: run.startedAt, completedAt: run.completedAt }
         : null,
+      app: manifest ? { name: manifest.name, description: manifest.description, kind: manifest.kind, port: manifest.port } : null,
     },
   };
 }
@@ -3703,6 +3714,7 @@ function startProjectIcon(run: CodingRun): void {
 /** After the commit and the wake: the project's assets, the review pass, the pull request. */
 async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Promise<void> {
   await commitProjectAssets(run);
+  await registerProjectApp(run);
   const review = ended !== null ? "skipped" : await maybeStartReviewPass(run);
   // After the review pass is decided, not before: when one is starting, the
   // pull request waits for it, because the review's own commits belong in it.
@@ -3729,6 +3741,30 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
  * runs out the generation is left running — it still lands the icon, just in a
  * later commit or none — and the run settles.
  */
+/**
+ * A project whose clawbox.json declares a `port` goes on the desktop when a
+ * run in it settles: its icon opens `/apps/<folder>/`, which the box proxies
+ * to that port (src/lib/app-proxy.ts). The manifest IS the registration —
+ * no tool call, no host or port in any link. A review pass or a team's run
+ * re-reads nothing: the run that wrote the manifest did this.
+ */
+async function registerProjectApp(run: CodingRun): Promise<void> {
+  if (run.reviewOf || run.readOnly || run.team) return;
+  const id = path.basename(run.directory);
+  if (!APP_ID_RE.test(id)) return;
+  try {
+    const manifest = await readClawboxManifest(run.directory);
+    if (!manifest?.port) return;
+    const outcome = await registerServerApp({ id, directory: run.directory, manifest });
+    pushProgress(run, outcome.ok
+      ? `On the desktop as "${manifest.name}", served at /apps/${id}/ from port ${manifest.port}`
+      : `Not on the desktop yet: clawbox.json names port ${manifest.port}, but ${outcome.detail.charAt(0).toLowerCase()}${outcome.detail.slice(1)}`);
+    persist(true);
+  } catch (err) {
+    console.error("[coding-agent] project app:", err instanceof Error ? err.message : err);
+  }
+}
+
 async function commitProjectAssets(run: CodingRun): Promise<void> {
   if (!run.media.images || run.reviewOf) return;
   try {

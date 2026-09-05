@@ -261,6 +261,18 @@ const PUBLIC_EXACT = new Set([
   "/portal/subscribe",
 ]);
 
+/** `/apps/<id>/…` — see src/lib/app-proxy.ts. The prefix alone, no import: middleware runs on the edge runtime. */
+function isAppProxyPath(pathname: string): boolean {
+  return pathname.startsWith("/apps/") && pathname.length > "/apps/".length;
+}
+
+/** A navigation (a document, a frame) as opposed to a fetch a document makes — the same test app-proxy.ts makes. */
+function isDocumentRequest(headers: Headers): boolean {
+  const dest = headers.get("sec-fetch-dest");
+  if (dest) return dest === "document" || dest === "iframe" || dest === "frame" || dest === "embed" || dest === "object";
+  return (headers.get("accept") ?? "").includes("text/html");
+}
+
 function isPublicPath(pathname: string): boolean {
   if (PUBLIC_EXACT.has(pathname)) return true;
   if (PRE_AUTH_API_PATHS.has(pathname)) return true;
@@ -334,6 +346,21 @@ async function verifySessionCookie(cookie: string, expectedGen: number): Promise
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname.toLowerCase();
 
+  // 0. The trailing-slash redirect Next used to do itself before anything
+  // here ran (skipTrailingSlashRedirect in next.config.ts): kept, first, for
+  // PAGE paths — never a proxied app's under /apps/<id>/, whose base path
+  // carries the slash on purpose (src/lib/app-proxy.ts), and never an API
+  // path, which the gates below judge as typed (a `/setup-api/gateway/`
+  // must not dodge the exact-match list by way of a redirect).
+  {
+    const raw = request.nextUrl.pathname;
+    if (raw.length > 1 && raw.endsWith("/") && !isAppProxyPath(raw) && !raw.startsWith("/setup-api/") && !raw.startsWith("/api/") && !raw.startsWith("/_next/")) {
+      const url = request.nextUrl.clone();
+      url.pathname = raw.replace(/\/+$/, "") || "/";
+      return NextResponse.redirect(url, 308);
+    }
+  }
+
   // 1. Captive portal detection
   if (REDIRECT_PATHS.has(pathname)) {
     return NextResponse.redirect(PORTAL_URL, 302);
@@ -378,6 +405,19 @@ export async function middleware(request: NextRequest) {
   // bearing SPA shell. Same for `/Manifest.json` and `/SW.JS`. Any gate must
   // decide on the string the router will actually use.
   if (isPublicPath(request.nextUrl.pathname)) {
+    return NextResponse.next();
+  }
+
+  // 2b. A project's own server under /apps/<id>/ (src/lib/app-proxy.ts).
+  // Every DOCUMENT there still needs the owner's session — the line below
+  // this block redirects it to /login like any page. But the document is
+  // served under a CSP sandbox that gives it an opaque origin, so the
+  // requests it then makes for its assets and its own API carry no cookie
+  // at all, and a cookie gate on those would break every proxied app. They
+  // pass, which exposes the app's routes to whoever has the address the way
+  // its port on 0.0.0.0 is exposed on the LAN today — and nothing of the
+  // box's: the proxy reaches the app's port and nothing else.
+  if (isAppProxyPath(request.nextUrl.pathname) && !isDocumentRequest(request.headers)) {
     return NextResponse.next();
   }
 
