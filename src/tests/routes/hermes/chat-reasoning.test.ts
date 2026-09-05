@@ -30,6 +30,10 @@ vi.mock("@/lib/hermes-model-options", async (importOriginal) => {
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/tmp/clawbox-chat-reasoning-test",
   get: vi.fn(),
+  // The settle path records which provider answered. Without a `set` here that
+  // write throws inside the recorder's own catch and is silently swallowed, so
+  // the suite would exercise it against a store that cannot accept it.
+  set: vi.fn(),
 }));
 
 import { spawn } from "child_process";
@@ -144,9 +148,12 @@ describe("/setup-api/hermes/chat — reasoning levels reaching the CLI", () => {
 
     expect(res.status).toBe(200);
     expect(argvFlag("--reasoning")).toBe("high");
-    // No config-store read: only the two-state provider needs to know the
-    // runtime, and every other turn must skip that lookup.
-    expect(mockGet).not.toHaveBeenCalled();
+    // The runtime lookup is skipped: only the two-state provider needs to know
+    // it, and every other turn must not pay for it. Named rather than counted,
+    // because the dashboard leg legitimately reads one other key — the
+    // verification marks (src/lib/provider-verified.ts). Only the WRITE there is
+    // debounced; the read happens per turn.
+    expect(mockGet).not.toHaveBeenCalledWith("local_ai_provider");
   });
 });
 

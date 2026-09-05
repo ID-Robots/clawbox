@@ -5,6 +5,7 @@ import { runHermesCli } from "@/lib/hermes-cli";
 import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
+import { forgetProviderVerified } from "@/lib/provider-verified";
 
 // Store an API key for a Hermes inference provider via `hermes auth add`. Hermes
 // keeps the credential in its own pooled-auth store (~/.hermes), NOT ClawBox's
@@ -57,6 +58,15 @@ export async function POST(request: Request) {
   // still say what the agent's `ai_set_provider` enum was built from. See
   // `provider-mcp-refresh.ts` for why the enum is not advisory.
   const providersBefore = await readUsableProviderIds();
+
+  // BEFORE the credential lands, for the same reason `providersBefore` is taken
+  // here: after the write there is no moment at which the old fact is still
+  // true. A turn this provider served proves something about the key that was
+  // on disk THEN, and this route is about to replace it — so the row goes back
+  // to "not checked" until something answers on the new one. Losing a mark to a
+  // save that then fails is always safe; the next turn earns it back.
+  // See src/lib/provider-verified.ts.
+  await forgetProviderVerified(provider);
 
   try {
     const r = await runHermesCli(

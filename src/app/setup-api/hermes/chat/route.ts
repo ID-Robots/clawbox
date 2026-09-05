@@ -48,6 +48,7 @@ import {
   readHermesTurn,
   readHermesUsageMarks,
 } from "@/lib/harness/hermes-turn-record";
+import { recordProviderVerified } from "@/lib/provider-verified";
 import {
   adoptHermesGeneratedImages,
   reclaimImageMentions,
@@ -574,6 +575,15 @@ async function servedPair(
   const model = source.model || "";
   const provider = source.provider
     || (model && usageBefore ? await billedProviderFor(sessionId, model, usageBefore) : "");
+  // A COMPLETED TURN IS THE EXERCISE (TASK-583), and this is the one place on
+  // the route where the provider is EVIDENCE rather than a label: it is either
+  // the transport's own frame for this turn or what the harness recorded as
+  // having billed it. Deliberately not in `settleTurn`, which the CLI leg also
+  // reaches — `cliServedPair` can fall back to `hermes config get
+  // model.provider`, which is what the box is CONFIGURED with and would mark a
+  // provider that never served anything. Only when one was actually named:
+  // marking off a blank would make "verified" mean "a turn happened".
+  if (provider) await recordProviderVerified(provider);
   return {
     ...(model ? { model } : {}),
     ...(provider ? { provider } : {}),

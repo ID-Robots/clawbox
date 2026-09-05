@@ -27,6 +27,7 @@ import {
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
+import { forgetProviderVerified } from "@/lib/provider-verified";
 
 // Applying ClawBox AI to a HERMES device, in one place.
 //
@@ -123,6 +124,12 @@ export async function applyClawaiToHermes(
     throw new ClawaiApplyError("Sign in to ClawBox AI first to get a device token.");
   }
   const model = clawaiModelForTier(tier);
+  // BEFORE the first write. The token is about to change — an account switch, a
+  // re-pair, a rotated device token — and the step loop below can throw after
+  // `providers.clawai.api_key` has already landed, which would leave the new
+  // token on disk beside a mark asserting the old one worked. A mark lost to a
+  // failed apply is always safe. See src/lib/provider-verified.ts.
+  await forgetProviderVerified(CLAWAI_PROVIDER);
 
   // Read BEFORE anything is written, because the refresh at the bottom needs to
   // know whether this call is what turned drawing on. `hermesConfigGet` is keyed
