@@ -31,6 +31,7 @@
  * somewhere is a separate decision the owner makes.
  */
 
+import fsp from "fs/promises";
 import path from "path";
 import {
   type ChildResult,
@@ -337,4 +338,306 @@ export async function lastCommit(dir: string): Promise<LastCommit | null> {
   if (r.code !== 0 || !r.stdout) return null;
   const [subject = "", seconds = ""] = r.stdout.split("\n");
   return parseLastCommit(subject, seconds);
+}
+
+// ─── The project page's workspace: what changed, and the diff of one file ────
+//
+// Read-only, every one of them, and through the same argv runner as the
+// commits above: a path from the page and a ref from the URL are both outside
+// input. A ref is admitted only in the two spellings the page ever sends — a
+// hex sha or HEAD — because a "ref" is also where an argv option would go
+// (`--output=` writes a file), and a file name always travels after `--`.
+
+export type ChangeStatus = "modified" | "added" | "deleted" | "untracked" | "conflict";
+
+export interface ChangedFile {
+  /** Relative to the project folder, forward slashes, the way git prints it. */
+  path: string;
+  status: ChangeStatus;
+  /** Lines added / removed; null for a binary file or a count git did not give. */
+  additions: number | null;
+  deletions: number | null;
+}
+
+export interface GitChanges {
+  files: ChangedFile[];
+  additions: number;
+  deletions: number;
+  /** True when the listing was cut at MAX_CHANGED_FILES. */
+  truncated: boolean;
+  /** False for a folder with no repository, a ref that is not one, or a git
+   *  that could not answer — the page says "no changes to show" rather than
+   *  drawing an empty list as a clean tree. */
+  available: boolean;
+}
+
+export interface CommitSummary {
+  sha: string;
+  subject: string;
+  /** Unix milliseconds. */
+  date: number;
+}
+
+export interface FileDiff {
+  path: string;
+  /** A unified diff, as `git diff` prints it, without colour. */
+  diff: string;
+  truncated: boolean;
+  binary: boolean;
+}
+
+/** The page lists this many files at most; a run does not touch more. */
+const MAX_CHANGED_FILES = 500;
+/** An untracked file larger than this is listed without a line count. */
+const MAX_UNTRACKED_COUNT_BYTES = 1_000_000;
+/** Only this many untracked files get a line count per read; the rest read null. */
+const MAX_UNTRACKED_COUNTED = 50;
+/** How many untracked files are read at once. */
+const COUNT_CONCURRENCY = 8;
+/** One file's diff is cut here — the page renders it, the Terminal has the rest. */
+const MAX_DIFF_CHARS = 200_000;
+
+const UNAVAILABLE: GitChanges = { files: [], additions: 0, deletions: 0, truncated: false, available: false };
+
+/** The two spellings of a ref the page sends: a hex sha, or HEAD. */
+export function isSafeGitRef(ref: string): boolean {
+  return /^(HEAD|[0-9a-f]{7,64})$/.test(ref);
+}
+
+/**
+ * A file path the way the page names one: relative, forward slashes, no `..`
+ * segment, nothing absolute. Null for anything else. `path.posix.normalize`
+ * folds `./a//b` to `a/b` so a path git printed and a path the page built
+ * from it compare equal.
+ */
+export function safeProjectRelativePath(file: string): string | null {
+  if (!file || file.includes("\0")) return null;
+  const rel = path.posix.normalize(file.replace(/\\/g, "/"));
+  if (rel === "." || rel === "" || path.posix.isAbsolute(rel)) return null;
+  if (rel.split("/").some((seg) => seg === "..")) return null;
+  return rel.replace(/^\.\//, "");
+}
+
+/**
+ * The most recent commits, newest first, for the workspace's "which change"
+ * picker. Empty for a folder with no history — that is an answer.
+ */
+export async function gitLog(dir: string, limit = 30): Promise<CommitSummary[]> {
+  const r = await git(path.resolve(dir), ["log", `--max-count=${Math.max(1, Math.min(200, limit))}`, "--format=%H%x1f%s%x1f%ct"]);
+  if (r.code !== 0 || !r.stdout) return [];
+  const out: CommitSummary[] = [];
+  for (const line of r.stdout.split("\n")) {
+    const [sha = "", subject = "", ct = ""] = line.split("\x1f");
+    const ts = Number(ct.trim());
+    if (!/^[0-9a-f]{40,64}$/.test(sha) || !Number.isFinite(ts) || ts <= 0) continue;
+    out.push({ sha, subject: subject.trim(), date: ts * 1000 });
+  }
+  return out;
+}
+
+/**
+ * What changed: the working tree against HEAD when `ref` is absent (a run in
+ * flight, or work nobody committed), or one commit's own changes when `ref`
+ * names it — which is how the page shows what a finished run did, since a run
+ * commits its work the moment it settles and leaves the tree clean.
+ */
+export async function gitChanges(dir: string, ref?: string | null): Promise<GitChanges> {
+  const d = path.resolve(dir);
+  if (ref) return isSafeGitRef(ref) ? commitChanges(d, ref) : UNAVAILABLE;
+  return workingTreeChanges(d);
+}
+
+/** HEAD when there is one; the empty tree otherwise, so a fresh `git init`
+ *  diffs as "everything added" instead of failing on a HEAD that is not there. */
+async function baseTree(d: string): Promise<string | null> {
+  const head = await git(d, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+  if (head.code === 0) return "HEAD";
+  const empty = await git(d, ["hash-object", "-t", "tree", "/dev/null"]);
+  return empty.code === 0 && /^[0-9a-f]{40,64}$/.test(empty.stdout) ? empty.stdout : null;
+}
+
+async function workingTreeChanges(d: string): Promise<GitChanges> {
+  // Porcelain v2, deliberately: every v2 record starts with a letter or digit,
+  // where v1's " M path" starts with the space runChild's trim() would eat.
+  const status = await git(d, ["status", "--porcelain=v2", "-z", "--untracked-files=all", "--no-renames"]);
+  if (status.code !== 0) return UNAVAILABLE;
+  const base = await baseTree(d);
+  if (!base) return UNAVAILABLE;
+  const counts = new Map<string, { additions: number | null; deletions: number | null }>();
+  // `-z` on every read: the status already answers raw NUL-terminated paths,
+  // and without it numstat quotes `café.txt` (core.quotePath), so the two
+  // would never match and the count would go missing.
+  const numstat = await git(d, ["diff", "--numstat", "--no-renames", "-z", base, "--"]);
+  if (numstat.code === 0) parseNumstat(numstat.stdout, counts);
+
+  const files: ChangedFile[] = [];
+  const uncounted: ChangedFile[] = [];
+  let truncated = false;
+  for (const record of status.stdout.split("\0")) {
+    if (!record) continue;
+    const parsed = parsePorcelainV2(record);
+    if (!parsed) continue;
+    if (files.length >= MAX_CHANGED_FILES) { truncated = true; break; }
+    const c = counts.get(parsed.path);
+    const file: ChangedFile = {
+      path: parsed.path,
+      status: parsed.status,
+      additions: c ? c.additions : null,
+      deletions: c ? c.deletions : parsed.status === "untracked" ? 0 : null,
+    };
+    if (!c && parsed.status === "untracked") uncounted.push(file);
+    files.push(file);
+  }
+  // Untracked files are counted by hand — the first MAX_UNTRACKED_COUNTED of
+  // them, a few at a time: the list is re-read every five seconds while a run
+  // writes, and a generated folder must not turn that into a scan.
+  const toCount = uncounted.slice(0, MAX_UNTRACKED_COUNTED);
+  for (let i = 0; i < toCount.length; i += COUNT_CONCURRENCY) {
+    const batch = toCount.slice(i, i + COUNT_CONCURRENCY);
+    const lines = await Promise.all(batch.map((f) => countLines(path.join(d, f.path))));
+    batch.forEach((f, j) => { f.additions = lines[j]; });
+  }
+  files.sort((a, b) => a.path.localeCompare(b.path));
+  return { files, ...totals(files), truncated, available: true };
+}
+
+async function commitChanges(d: string, ref: string): Promise<GitChanges> {
+  const [numstat, names] = await Promise.all([
+    git(d, ["diff-tree", "--no-commit-id", "--numstat", "--no-renames", "-r", "--root", "-z", ref]),
+    git(d, ["diff-tree", "--no-commit-id", "--name-status", "--no-renames", "-r", "--root", "-z", ref]),
+  ]);
+  if (numstat.code !== 0 || names.code !== 0) return UNAVAILABLE;
+  const counts = new Map<string, { additions: number | null; deletions: number | null }>();
+  parseNumstat(numstat.stdout, counts);
+  const files: ChangedFile[] = [];
+  let truncated = false;
+  // `--name-status -z`: the status letter and the path are each NUL-terminated.
+  const tokens = names.stdout.split("\0");
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    const letter = tokens[i];
+    const file = tokens[i + 1];
+    if (!file) continue;
+    if (files.length >= MAX_CHANGED_FILES) { truncated = true; break; }
+    const c = counts.get(file);
+    files.push({
+      path: file,
+      status: letter.startsWith("A") ? "added" : letter.startsWith("D") ? "deleted" : "modified",
+      additions: c ? c.additions : null,
+      deletions: c ? c.deletions : null,
+    });
+  }
+  files.sort((a, b) => a.path.localeCompare(b.path));
+  return { files, ...totals(files), truncated, available: true };
+}
+
+/**
+ * One file's diff — against HEAD (or the empty tree) when `ref` is absent,
+ * with an untracked file shown as wholly added the way the page's list already
+ * counts it; one commit's change to the file when `ref` names it. Null when
+ * the path is not one the page may ask about, or git had nothing to say.
+ */
+export async function gitFileDiff(dir: string, file: string, ref?: string | null): Promise<FileDiff | null> {
+  const d = path.resolve(dir);
+  const rel = safeProjectRelativePath(file);
+  if (!rel) return null;
+  let r: ChildResult;
+  if (ref) {
+    if (!isSafeGitRef(ref)) return null;
+    r = await git(d, ["show", "--format=", "--no-color", "--no-renames", ref, "--", rel]);
+  } else {
+    const base = await baseTree(d);
+    if (!base) return null;
+    r = await git(d, ["diff", "--no-color", "--no-renames", base, "--", rel]);
+    if (r.code === 0 && !r.stdout) {
+      // Nothing changed under that name against the base. For a TRACKED file
+      // that is the answer (an empty diff); for an untracked one the file is
+      // shown against nothing — `--no-index` exits 1 when the two differ,
+      // which is the answer, not a failure.
+      const tracked = await git(d, ["ls-files", "--error-unmatch", "--", rel]);
+      if (tracked.code !== 0) {
+        // Not tracked and not on disk either: there is no such file.
+        const exists = await fsp.stat(path.join(d, rel)).then((s) => s.isFile(), () => false);
+        if (!exists) return null;
+        const fresh = await git(d, ["diff", "--no-color", "--no-index", "--", "/dev/null", rel]);
+        if (fresh.code === 0 || fresh.code === 1) r = { ...fresh, code: 0 };
+      }
+    }
+  }
+  if (r.code !== 0) return null;
+  const binary = /^Binary files .* differ$/m.test(r.stdout);
+  const truncated = r.stdout.length > MAX_DIFF_CHARS;
+  return { path: rel, diff: truncated ? r.stdout.slice(0, MAX_DIFF_CHARS) : r.stdout, truncated, binary };
+}
+
+/** `1 XY sub mH mI mW hH hI path`, `u XY sub m1 m2 m3 mW h1 h2 h3 path`, `? path`. */
+function parsePorcelainV2(record: string): { path: string; status: ChangeStatus } | null {
+  if (record.startsWith("? ")) return { path: record.slice(2), status: "untracked" };
+  if (record.startsWith("u ")) {
+    const fields = record.split(" ");
+    return fields.length > 10 ? { path: fields.slice(10).join(" "), status: "conflict" } : null;
+  }
+  if (record.startsWith("1 ")) {
+    const fields = record.split(" ");
+    if (fields.length < 9) return null;
+    const xy = fields[1];
+    const file = fields.slice(8).join(" ");
+    if (xy.includes("D")) return { path: file, status: "deleted" };
+    if (xy.includes("A")) return { path: file, status: "added" };
+    return { path: file, status: "modified" };
+  }
+  return null;
+}
+
+/** `added<TAB>deleted<TAB>path<NUL>`, with `-` for a binary file. */
+function parseNumstat(out: string, into: Map<string, { additions: number | null; deletions: number | null }>): void {
+  for (const record of out.split("\0")) {
+    const [a = "", b = "", file = ""] = record.split("\t");
+    if (!file) continue;
+    const additions = a === "-" ? null : Number(a);
+    const deletions = b === "-" ? null : Number(b);
+    into.set(file, {
+      additions: additions === null || Number.isFinite(additions) ? additions : null,
+      deletions: deletions === null || Number.isFinite(deletions) ? deletions : null,
+    });
+  }
+}
+
+function totals(files: ChangedFile[]): { additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  for (const f of files) {
+    additions += f.additions ?? 0;
+    deletions += f.deletions ?? 0;
+  }
+  return { additions, deletions };
+}
+
+/** Lines in an untracked text file, so the list can say "+12" for it the way
+ *  it does for a tracked one; null for a binary or a file too big to count. */
+async function countLines(abs: string): Promise<number | null> {
+  // One open handle, stat'ed and read through it — never stat-then-read, so
+  // the file that is counted is the file that was checked.
+  let handle: fsp.FileHandle | null = null;
+  try {
+    handle = await fsp.open(abs, "r");
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > MAX_UNTRACKED_COUNT_BYTES) return null;
+    const buf = Buffer.alloc(Math.min(stat.size, MAX_UNTRACKED_COUNT_BYTES));
+    let got = 0;
+    while (got < buf.length) {
+      const { bytesRead } = await handle.read(buf, got, buf.length - got, got);
+      if (bytesRead === 0) break;
+      got += bytesRead;
+    }
+    const bytes = buf.subarray(0, got);
+    if (bytes.subarray(0, 8192).includes(0)) return null;
+    if (bytes.length === 0) return 0;
+    let n = 0;
+    for (let i = bytes.indexOf(10); i !== -1; i = bytes.indexOf(10, i + 1)) n++;
+    return bytes[bytes.length - 1] === 10 ? n : n + 1;
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
 }

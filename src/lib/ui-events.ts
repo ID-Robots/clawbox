@@ -43,31 +43,50 @@ export const OPEN_SETTINGS_SECTION_EVENT = "clawbox:open-settings-section";
  */
 export const OPEN_CODING_RUN_EVENT = "clawbox:open-coding-run";
 
+/** How the run should open: `live` is the run page's Live view — the
+ *  browser the run drives and its terminal, filling the window. */
+export interface OpenCodingRunOptions {
+  live?: boolean;
+}
+
+type PendingRunWindow = Window & { __clawboxPendingCodingRun?: unknown; __clawboxPendingCodingRunLive?: unknown };
+
 /** The two handoffs WITHOUT opening the app — for a desktop that opens it itself. */
-export function handoffCodingRun(runId: string): void {
+export function handoffCodingRun(runId: string, opts: OpenCodingRunOptions = {}): void {
   if (typeof window === "undefined") return;
-  (window as Window & { __clawboxPendingCodingRun?: string }).__clawboxPendingCodingRun = runId;
-  window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId } }));
+  const w = window as PendingRunWindow;
+  w.__clawboxPendingCodingRun = runId;
+  w.__clawboxPendingCodingRunLive = opts.live === true;
+  window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId, live: opts.live === true } }));
 }
 
 /**
  * Open the Coding Agent app on a run. `maximize` opens (or brings) the window
  * full-screen: the chat's View button lands the owner on the run's page with
- * the whole desktop for it.
+ * the whole desktop for it — and with `live`, in the page's Live view.
  */
-export function dispatchOpenCodingRun(runId: string, opts: { maximize?: boolean } = {}): void {
+export function dispatchOpenCodingRun(runId: string, opts: { maximize?: boolean } & OpenCodingRunOptions = {}): void {
   if (typeof window === "undefined") return;
-  handoffCodingRun(runId);
-  dispatchOpenApp("coding", opts);
+  handoffCodingRun(runId, { live: opts.live });
+  dispatchOpenApp("coding", { maximize: opts.maximize });
 }
 
 /** The run handed off before the app mounted, taken exactly once. */
 export function takePendingCodingRun(): string | null {
   if (typeof window === "undefined") return null;
-  const w = window as Window & { __clawboxPendingCodingRun?: unknown };
+  const w = window as PendingRunWindow;
   const id = typeof w.__clawboxPendingCodingRun === "string" ? w.__clawboxPendingCodingRun : null;
   delete w.__clawboxPendingCodingRun;
   return id;
+}
+
+/** Whether the handed-off run asked for the Live view; taken exactly once. */
+export function takePendingCodingRunLive(): boolean {
+  if (typeof window === "undefined") return false;
+  const w = window as PendingRunWindow;
+  const live = w.__clawboxPendingCodingRunLive === true;
+  delete w.__clawboxPendingCodingRunLive;
+  return live;
 }
 
 

@@ -308,6 +308,34 @@ describe("BrowserApp", () => {
     }
   });
 
+  it("carries ONE header: the state, Close, Paste to VNC, Open in VNC and Settings in a row, and no title bar above it", async () => {
+    const { findByTestId, queryByText, getByTestId } = render(<BrowserApp />);
+    const header = await findByTestId("browser-header");
+    for (const id of ["browser-state", "browser-close", "browser-paste", "browser-open-vnc", "browser-open-settings"]) {
+      expect(header.contains(getByTestId(id)), id).toBe(true);
+    }
+    // The title bar repeated the window's own title; it is gone.
+    expect(queryByText("Browser Integration")).toBeNull();
+    // The paste button no longer floats over the screen.
+    expect(document.querySelectorAll('[title="vnc.pasteToRemote"]')).toHaveLength(1);
+  });
+
+  it("opens the screen's paste dialog from the header's Paste to VNC button", async () => {
+    const { findByTestId, findByRole } = render(<BrowserApp />);
+    fireEvent.click(await findByTestId("browser-paste"));
+    expect(await findByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("shows Back where Settings was on the settings page, and none of the browser controls", async () => {
+    const { findByTestId, queryByTestId } = render(<BrowserApp />);
+    fireEvent.click(await findByTestId("browser-open-settings"));
+    const header = await findByTestId("browser-header");
+    expect(header.contains(await findByTestId("browser-settings-back"))).toBe(true);
+    expect(queryByTestId("browser-paste")).toBeNull();
+    expect(queryByTestId("browser-close")).toBeNull();
+    expect(queryByTestId("browser-open-vnc")).toBeNull();
+  });
+
   it("switches to the settings page and back", async () => {
     const { findByTestId, queryByTestId } = render(<BrowserApp />);
 

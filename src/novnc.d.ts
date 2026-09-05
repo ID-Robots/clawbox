@@ -12,6 +12,8 @@ declare module "@novnc/novnc" {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     removeEventListener(type: string, listener: (e: any) => void): void;
     scaleViewport: boolean;
+    /** A picture only: input events are not sent to the server. */
+    viewOnly: boolean;
     resizeSession: boolean;
     clipViewport: boolean;
     showDotCursor: boolean;

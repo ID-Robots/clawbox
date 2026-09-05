@@ -29,9 +29,13 @@ import {
   onCodingAgentChanged,
   onStandaloneAppPage,
   takePendingCodingRun,
+  takePendingCodingRunLive,
 } from "@/lib/ui-events";
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
 import TerminalApp from "./TerminalApp";
+import VNCApp from "./VNCApp";
+import CodingAgentBreadcrumb from "./CodingAgentBreadcrumb";
+import CodingProjectWorkspace from "./CodingProjectWorkspace";
 import { livePreviewCommand } from "@/lib/coding-run-preview";
 import { copyToClipboard } from "@/lib/clipboard";
 import type { AgentStatus, Effort, GitHubState } from "./CodingAgentSettingsPanel";
@@ -305,6 +309,13 @@ export default function CodingAgentApp() {
   const [error, setError] = useState<string | null>(null);
   /** The run whose own page is open — a page now, not a row that unfolds. */
   const [openRunId, setOpenRunId] = useState<string | null>(null);
+  // The run whose page is in Live view — the browser it drives over its
+  // terminal, filling the window. Keyed by the run rather than a flag, so
+  // opening another run lands on its normal page and a run that settles
+  // simply falls out of the view (the toggle exists only while it is live).
+  const [liveViewFor, setLiveViewFor] = useState<string | null>(null);
+  // The browser preview above a live run's terminal, shown or folded.
+  const [browserPreview, setBrowserPreview] = useState(true);
   /** The markdown artifact open in the preview dialog, if any. */
   const [report, setReport] = useState<{ runId: string; name: string } | null>(null);
   // Runs are behind a button: the answer to "is this on and does it work" is
@@ -553,18 +564,22 @@ export default function CodingAgentApp() {
    */
   useEffect(() => {
     const pending = takePendingCodingRun();
+    const pendingLive = takePendingCodingRunLive();
     // A handoff parked on `window` before this window existed; the effect is
     // the one place it can be read, and reading it is one render.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (pending) { setOpenRunId(pending); setPage("home"); }
+    if (pending) { setOpenRunId(pending); setPage("home"); setLiveViewFor(pendingLive ? pending : null); }
     const handler = (e: Event) => {
-      const id = (e as CustomEvent<{ runId?: unknown }>).detail?.runId;
+      const detail = (e as CustomEvent<{ runId?: unknown; live?: unknown }>).detail;
+      const id = detail?.runId;
       if (typeof id === "string" && id) {
         // The dispatcher also parks the id on `window` for a cold open; this
         // window is up, so take it back rather than leave it for a later mount.
         takePendingCodingRun();
+        takePendingCodingRunLive();
         setOpenRunId(id);
         setPage("home");
+        setLiveViewFor(detail?.live === true ? id : null);
       }
     };
     window.addEventListener(OPEN_CODING_RUN_EVENT, handler);
@@ -704,6 +719,9 @@ export default function CodingAgentApp() {
    *  every run works in a folder inside the project folder, and the projects
    *  route lists that folder, so a run always has a project page to live on
    *  (the sidebar's recent runs reach every run). */
+  // Live view: only for the run whose page is open, and only while it runs.
+  const liveMode = openRun !== null && liveViewFor === openRun.id && isLive(openRun.status);
+
   const visibleRuns = useMemo(() => (
     openProject ? runs.filter((r) => runBelongsTo(r, openProject)) : []
   ), [runs, openProject]);
@@ -791,6 +809,25 @@ export default function CodingAgentApp() {
 
   /** The row's and the page's run controls: the held run's first action and
    *  the way out of it, the terminal, the backup. */
+  /** The Live view switch: only while the run runs, since the view is the
+   *  browser it drives and the terminal it writes. */
+  const liveToggle = (run: Run) => {
+    if (!isLive(run.status)) return null;
+    const on = liveViewFor === run.id;
+    return (
+      <button
+        type="button"
+        onClick={() => setLiveViewFor(on ? null : run.id)}
+        aria-pressed={on}
+        data-testid="coding-agent-run-live-view"
+        className={on ? BTN_PRIMARY : BTN_SECONDARY}
+      >
+        <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">{on ? "close_fullscreen" : "open_in_full"}</span>
+        {on ? t("codingAgent.liveViewExit") : t("codingAgent.liveViewMode")}
+      </button>
+    );
+  };
+
   const runControls = (run: Run, where: "row" | "page") => {
     const action = RUN_ACTION[run.status];
     const canOpenTerminal = Boolean(run.sessionId || (run.status === "running" && run.transcriptPath));
@@ -1041,7 +1078,7 @@ export default function CodingAgentApp() {
           Settings, the projects, the recent runs. Only when the window is
           wide enough to spare it (the phone and a small window keep the
           lists on the pages themselves), and not while the wizard runs. */}
-      {wide && view.face !== "wizard" && (
+      {wide && view.face !== "wizard" && !liveMode && (
         <aside className="flex w-[15rem] shrink-0 flex-col border-r border-white/[0.06] bg-black/[0.18] overflow-y-auto" data-testid="coding-agent-sidebar">
           <div className="px-3 pt-4 pb-2 space-y-1">
             {!standalone && (
@@ -1128,7 +1165,7 @@ export default function CodingAgentApp() {
           intro centres itself in it. min-h-0 keeps the scroll on the parent. */}
       {/* A run's page is data — figures, files, a summary, an activity log —
           and reads better wide; the home and project pages stay a column. */}
-      <div className={`mx-auto w-full ${view.face === "run" ? "max-w-6xl" : "max-w-2xl"} px-5 py-4 flex-1 flex flex-col min-h-0`}>
+      <div className={`mx-auto w-full ${view.face === "run" ? (liveMode ? "max-w-none" : "max-w-6xl") : "max-w-2xl"} px-5 py-4 flex-1 flex flex-col min-h-0`}>
 
         {/* One row: what this is, whether it is on, and everything you can do
             from here. The primary action used to sit on its own line below,
@@ -1172,26 +1209,36 @@ export default function CodingAgentApp() {
           {/* The settings live IN this app: one button, on the desktop and on
               /app/coding alike, so a phone that landed here from "Open in new
               tab" reaches the switch without a desktop listening. */}
-          {/* ONE control, in the header where it is aligned with the cards
-              below it. It used to be a Settings button here plus a separate
-              Back pill floating above the settings page — two affordances for
-              one axis, and the pill lined up with nothing. */}
-          <button
-            type="button"
-            onClick={() => { disarmClear(); setPage(view.face === "settings" ? "home" : "settings"); }}
-            data-testid={view.face === "settings" ? "coding-agent-settings-back" : "coding-agent-open-settings"}
-            aria-expanded={view.face === "settings"}
-            className={OPEN_SETTINGS_CLASS}
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
-              {view.face === "settings" ? "arrow_back" : "settings"}
-            </span>
-            {view.face === "settings" ? t("codingAgent.back") : t("codingAgent.openSettings")}
-          </button>
+          {/* Settings opens from here. The way BACK is the breadcrumb every
+              page but home carries (CodingAgentBreadcrumb) — one shape for
+              the settings page, a project's and a run's, where three
+              differently styled pills used to float — so this button never
+              has to flip between two meanings. */}
+          {view.face !== "settings" && (
+            <button
+              type="button"
+              onClick={() => { disarmClear(); setPage("settings"); }}
+              data-testid="coding-agent-open-settings"
+              className={OPEN_SETTINGS_CLASS}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">settings</span>
+              {t("codingAgent.openSettings")}
+            </button>
+          )}
           </div>
         </div>
 
-        {view.face === "settings" && (
+        {view.face === "settings" && (<>
+          <CodingAgentBreadcrumb
+            crumbs={[
+              { label: t("codingAgent.navHome"), onClick: () => { disarmClear(); setPage("home"); }, testId: "coding-agent-crumb-home" },
+              { label: t("codingAgent.openSettings") },
+            ]}
+            onBack={() => { disarmClear(); setPage("home"); }}
+            backLabel={t("codingAgent.back")}
+            navLabel={t("codingAgent.breadcrumbLabel")}
+            backTestId="coding-agent-settings-back"
+          />
           <div className="mt-3" data-testid="coding-agent-embedded-settings">
             <CodingAgentSettingsPanel />
             {/* Three owner tools, one row, symmetric: equal columns, so the
@@ -1246,7 +1293,7 @@ export default function CodingAgentApp() {
               </div>
             </div>
           </div>
-        )}
+        </>)}
 
         {view.face === "wizard" && status && (
           <CodingAgentSetupWizard
@@ -1384,22 +1431,6 @@ export default function CodingAgentApp() {
                           ? <>{firstLine(project.lastCommit.subject, 80)} · {timeAgo(project.lastCommit.date, t)}</>
                           : t("codingAgent.noCommits")}
                       </p>
-                      {/* The folder name is what a run is given and what the
-                          owner types into a chat, so it is one tap to copy. */}
-                      <button
-                        type="button"
-                        onClick={(e) => { e.stopPropagation(); void copyFolder(project.folder); }}
-                        title={t("codingAgent.copyFolder")}
-                        aria-label={t("codingAgent.copyFolder")}
-                        data-testid={`coding-agent-copy-${project.folder}`}
-                        className="mt-0.5 flex items-center gap-1 text-[11px] font-mono text-[var(--text-muted)] opacity-70 hover:opacity-100 hover:text-white"
-                      >
-                        {project.folder}
-                        <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">
-                          {copiedFolder === project.folder ? "check" : "content_copy"}
-                        </span>
-                        {copiedFolder === project.folder && <span className="font-sans">{t("codingAgent.copied")}</span>}
-                      </button>
                     </div>
                     {project.onDesktop && (
                       <button
@@ -1415,6 +1446,7 @@ export default function CodingAgentApp() {
                         {t("codingAgent.open")}
                       </button>
                     )}
+                    <span className="material-symbols-rounded text-[var(--text-muted)] opacity-60 shrink-0 self-center" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
                   </li>
                 );
               })}
@@ -1443,17 +1475,67 @@ export default function CodingAgentApp() {
           const activity = run.progress.slice(-ACTIVITY_SHOWN);
           const title = run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 160);
           const fullTask = !run.reviewOf && run.task.trim() !== firstLine(run.task, 160) ? run.task : null;
+          const liveCommand = run.transcriptPath
+            ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.directory, live: true })
+            : null;
+          if (liveMode) {
+            // Live view: the browser the run drives and its terminal, and
+            // nothing else — the figures, the plan and the log are one tap
+            // away on the normal page, and the window is the screen.
+            return (
+              <div className="mt-1 pb-2 flex-1 min-h-0 flex flex-col" data-testid="coding-agent-run-page" data-run-id={run.id} data-live-view="true">
+                <CodingAgentBreadcrumb
+                  crumbs={[
+                    { label: t("codingAgent.projectsTitle"), onClick: () => { setOpenRunId(null); setOpenProjectDir(null); }, testId: "coding-agent-crumb-projects" },
+                    ...(project ? [{ label: project.name, onClick: () => { setOpenRunId(null); setOpenProjectDir(project.directory); }, testId: "coding-agent-crumb-project" }] : []),
+                    { label: title },
+                  ]}
+                  onBack={() => { setOpenRunId(null); if (project) setOpenProjectDir(project.directory); }}
+                  backLabel={project ? t("codingAgent.backTo", { name: project.name }) : t("codingAgent.back")}
+                navLabel={t("codingAgent.breadcrumbLabel")}
+                  backTestId="coding-agent-run-back"
+                  trailing={<>{runControls(run, "page")}{liveToggle(run)}</>}
+                />
+                <div className="mt-2 flex items-center gap-2 flex-wrap">
+                  <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${tone.chip}`}>{statusLabel(run.status)}</span>
+                  <h2 className="text-xs font-medium text-[var(--text-secondary)] truncate min-w-0" data-testid="coding-agent-run-title">{title}</h2>
+                  <RunProgressBar
+                    estimate={estimateRunProgress(run, now)}
+                    color={tone.color}
+                    timeLeft={t("codingAgent.timeLeft")}
+                    testId={`coding-agent-progress-${run.id}`}
+                    className="ml-auto w-48"
+                  />
+                </div>
+                <div className="mt-2 flex-1 min-h-0 grid grid-rows-2 gap-2" data-testid="coding-agent-live-view">
+                  <div className="min-h-0 rounded-xl border border-white/10 overflow-hidden bg-black" data-testid="coding-agent-browser-preview">
+                    <VNCApp viewOnly pasteButton="hidden" />
+                  </div>
+                  <div className="min-h-0 rounded-xl border border-emerald-400/20 overflow-hidden flex flex-col" style={{ background: "#0d0d0d" }} data-testid="coding-agent-run-terminal">
+                    {liveCommand ? (
+                      <TerminalApp key={run.id} initialCommand={liveCommand} />
+                    ) : (
+                      <p className="px-4 py-3 text-[11px] text-[var(--text-muted)]">{t("codingAgent.liveWaiting")}</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          }
           return (
             <div className="mt-4 pb-6" data-testid="coding-agent-run-page" data-run-id={run.id}>
-              <button
-                type="button"
-                onClick={() => setOpenRunId(null)}
-                data-testid="coding-agent-run-back"
-                className="mb-2 flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-muted)] hover:bg-white/5"
-              >
-                <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">arrow_back</span>
-                {openProject ? openProject.name : t("codingAgent.back")}
-              </button>
+              <CodingAgentBreadcrumb
+                crumbs={[
+                  { label: t("codingAgent.projectsTitle"), onClick: () => { setOpenRunId(null); setOpenProjectDir(null); }, testId: "coding-agent-crumb-projects" },
+                  ...(project ? [{ label: project.name, onClick: () => { setOpenRunId(null); setOpenProjectDir(project.directory); }, testId: "coding-agent-crumb-project" }] : []),
+                  { label: title },
+                ]}
+                onBack={() => { setOpenRunId(null); if (project) setOpenProjectDir(project.directory); }}
+                backLabel={project ? t("codingAgent.backTo", { name: project.name }) : t("codingAgent.back")}
+                navLabel={t("codingAgent.breadcrumbLabel")}
+                backTestId="coding-agent-run-back"
+                trailing={liveToggle(run)}
+              />
 
               {/* The header: what this run is, how it stands, and everything
                   you can do to it. */}
@@ -1577,6 +1659,33 @@ export default function CodingAgentApp() {
                   Claude Code web layout, in short. Narrow: one column. */}
               <div className="@3xl:grid @3xl:grid-cols-[minmax(0,1fr)_296px] @3xl:gap-4 @3xl:items-start">
                 <div className="min-w-0">
+              {/* While the run works: the browser it drives, on the device's
+                  own screen — a picture only, so a click here cannot steer a
+                  page the run is on — folded away with one tap. */}
+              {isLive(run.status) && (
+                <div className="mt-3 rounded-xl border border-white/10 overflow-hidden flex flex-col bg-black" data-testid="coding-agent-browser-preview">
+                  <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.06] bg-white/[0.03] shrink-0">
+                    <span className="material-symbols-rounded text-sky-300" style={{ fontSize: 16 }} aria-hidden="true">web</span>
+                    <p className={`${SECTION_LABEL} !mb-0`}>{t("codingAgent.browserPreviewTitle")}</p>
+                    <span className="ml-auto" />
+                    <button
+                      type="button"
+                      onClick={() => setBrowserPreview((v) => !v)}
+                      aria-expanded={browserPreview}
+                      data-testid="coding-agent-browser-preview-toggle"
+                      className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 text-[var(--text-muted)] hover:bg-white/5 cursor-pointer"
+                    >
+                      {browserPreview ? t("codingAgent.browserPreviewHide") : t("codingAgent.browserPreviewShow")}
+                    </button>
+                  </div>
+                  {browserPreview && (
+                    <div style={{ height: 280 }}>
+                      <VNCApp viewOnly pasteButton="hidden" />
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* While the run works: its terminal, embedded — the transcript
                   tailed live where the activity log used to be. Once it has
                   settled, the log (below) is the record. */}
@@ -1808,94 +1917,103 @@ export default function CodingAgentApp() {
         })()}
 
         {/* One project, expanded: its data, its git state, its runs. */}
-        {view.face === "project" && (<>
-          <div className="mt-4" data-testid="coding-agent-project-page">
-            <button
-              type="button"
-              onClick={() => setOpenProjectDir(null)}
-              data-testid="coding-agent-project-back"
-              className="mb-2 flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-muted)] hover:bg-white/5"
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">arrow_back</span>
-              {t("codingAgent.back")}
-            </button>
-            <div className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-3">
+        {view.face === "project" && (() => {
+          const p = view.project;
+          const projectQuery = p.kind === "codeProject"
+            ? `projectId=${encodeURIComponent(p.folder)}`
+            : `directory=${encodeURIComponent(p.directory)}`;
+          const projectLive = runs.some((r) => runBelongsTo(r, p) && isLive(r.status));
+          const lastSubject = git?.lastCommit?.subject ?? p.lastCommit?.subject ?? null;
+          const lastDate = git?.lastCommit?.date ?? p.lastCommit?.date ?? null;
+          return (<>
+            <CodingAgentBreadcrumb
+              crumbs={[
+                { label: t("codingAgent.projectsTitle"), onClick: () => setOpenProjectDir(null), testId: "coding-agent-crumb-projects" },
+                { label: p.name },
+              ]}
+              onBack={() => setOpenProjectDir(null)}
+              backLabel={t("codingAgent.back")}
+            navLabel={t("codingAgent.breadcrumbLabel")}
+              backTestId="coding-agent-project-back"
+            />
+            <div className="mt-3" data-testid="coding-agent-project-page">
+              {/* One row: who this is and what it is. The folder under it is
+                  one tap to copy — the home row no longer carries that. */}
               <div className="flex items-center gap-2 flex-wrap">
-                {/* The same picture as the row it was opened from, one size up. */}
-                <ProjectIcon project={view.project} size="w-7 h-7" />
-                <span className="text-sm font-semibold text-[var(--text-primary)] break-words">{view.project.name}</span>
-                {view.project.kind === "codeProject" && (
+                <ProjectIcon project={p} size="w-7 h-7" />
+                <h2 className="text-sm font-semibold text-[var(--text-primary)] break-words">{p.name}</h2>
+                {p.kind === "codeProject" && (
                   <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--text-muted)] border-white/20">
                     {t("codingAgent.codeProject")}
                   </span>
                 )}
-                {view.project.onDesktop && (
+                {p.onDesktop && (
                   <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-sky-300 border-sky-400/40">
                     {t("codingAgent.onDesktop")}
                   </span>
                 )}
-                {view.project.onDesktop && (
+                {projectLive && (
+                  <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-amber-400 border-amber-400/40">
+                    {t("codingAgent.runInProgress")}
+                  </span>
+                )}
+                {p.onDesktop && (
                   <button
                     type="button"
-                    onClick={() => dispatchOpenApp(installedAppId(view.project.folder))}
+                    onClick={() => dispatchOpenApp(installedAppId(p.folder))}
                     className={`${BTN_SECONDARY} ml-auto`}
                   >
                     {t("codingAgent.open")}
                   </button>
                 )}
               </div>
-              {/* Shows the absolute directory, so that is what it copies —
-                  the home row copies the bare folder name it shows. */}
               <button
                 type="button"
-                onClick={() => void copyFolder(view.project.directory)}
+                onClick={() => void copyFolder(p.directory)}
                 title={t("codingAgent.copyFolder")}
                 aria-label={t("codingAgent.copyFolder")}
                 data-testid="coding-agent-project-copy"
                 className="mt-1 flex items-center gap-1 text-[11px] font-mono text-[var(--text-muted)] opacity-70 hover:opacity-100 hover:text-white"
               >
-                {view.project.directory}
+                {p.directory}
                 <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">
-                  {copiedFolder === view.project.directory ? "check" : "content_copy"}
+                  {copiedFolder === p.directory ? "check" : "content_copy"}
                 </span>
-                {copiedFolder === view.project.directory && <span className="font-sans">{t("codingAgent.copied")}</span>}
+                {copiedFolder === p.directory && <span className="font-sans">{t("codingAgent.copied")}</span>}
               </button>
-              {/* The git block: where the project stands, and whether it has
-                  reached GitHub yet — the store road starts there. */}
-              <div className="mt-2 rounded-lg bg-black/20 border border-[var(--border-subtle)] px-2.5 py-2 text-[11px]" data-testid="coding-agent-git-info">
-                <p className="flex items-center gap-2 text-[var(--text-primary)]">
-                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 14 }} aria-hidden="true">account_tree</span>
-                  {t("codingAgent.gitTitle")}
-                  {git?.branch && <span className="font-mono text-[var(--text-muted)]">{git.branch}</span>}
-                  {git && <span className="text-[var(--text-muted)]">· {t("codingAgent.gitCommits", { n: git.commits })}</span>}
-                </p>
-                <p className="mt-1 text-[var(--text-muted)] break-all">
-                  {git?.lastCommit
-                    ? <>{firstLine(git.lastCommit.subject, 90)} · {timeAgo(git.lastCommit.date, t)}</>
-                    : (view.project.lastCommit ? <>{firstLine(view.project.lastCommit.subject, 90)} · {timeAgo(view.project.lastCommit.date, t)}</> : t("codingAgent.noCommits"))}
-                </p>
-                <p className="mt-1 break-all">
+              {/* The git state on ONE line: branch, commits, the newest
+                  commit, and whether the folder has reached GitHub — the
+                  store road starts there. */}
+              <div className="mt-2 flex items-center gap-x-2 gap-y-1 flex-wrap text-[11px] text-[var(--text-muted)]" data-testid="coding-agent-git-info">
+                <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">account_tree</span>
+                {git?.branch && <span className="font-mono text-[var(--text-primary)]">{git.branch}</span>}
+                {git && <span>{t("codingAgent.gitCommits", { n: git.commits })}</span>}
+                <span className="break-all">
+                  {lastSubject && lastDate ? <>{firstLine(lastSubject, 70)} · {timeAgo(lastDate, t)}</> : t("codingAgent.noCommits")}
+                </span>
+                <span className="ml-auto break-all">
                   {git?.remote
                     ? <span className="font-mono text-emerald-400/90">{git.remote}</span>
-                    : <span className="text-[var(--text-muted)]">{t("codingAgent.gitNoRemote")}</span>}
-                </p>
-                {github?.connected && (git?.lastCommit || view.project.lastCommit) && (
+                    : <span>{t("codingAgent.gitNoRemote")}</span>}
+                </span>
+                {github?.connected && (git?.lastCommit || p.lastCommit) && (
                   <button
                     type="button"
-                    onClick={() => void backup({ projectId: view.project.kind === "codeProject" ? view.project.folder : null, directory: view.project.directory }, `project-${view.project.folder}`)}
-                    disabled={busy === `backup-project-${view.project.folder}`}
+                    onClick={() => void backup({ projectId: p.kind === "codeProject" ? p.folder : null, directory: p.directory }, `project-${p.folder}`)}
+                    disabled={busy === `backup-project-${p.folder}`}
                     data-testid="coding-agent-project-backup"
-                    className={`${BTN_BASE} mt-2 border border-emerald-400/40 bg-emerald-400/[0.07] text-emerald-400 hover:bg-emerald-400/[0.14]`}
+                    className={`${BTN_BASE} border border-emerald-400/40 bg-emerald-400/[0.07] text-emerald-400 hover:bg-emerald-400/[0.14]`}
                   >
-                    {busy === `backup-project-${view.project.folder}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
+                    {busy === `backup-project-${p.folder}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
                   </button>
                 )}
               </div>
+              {/* The folder itself, and what changed in it. */}
+              <CodingProjectWorkspace key={projectQuery} query={projectQuery} live={projectLive} />
             </div>
-          </div>
-
-        {runsSection}
-        </>)}
+            {runsSection}
+          </>);
+        })()}
 
         {error && <div className="mt-3"><StatusMessage type="error" message={error} /></div>}
       </div>

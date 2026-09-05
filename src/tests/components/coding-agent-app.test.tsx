@@ -30,6 +30,13 @@ vi.mock("@/components/TerminalApp", () => ({
 vi.mock("@/lib/i18n", () => ({
   useT: () => ({ locale: "en", t }),
 }));
+// noVNC never connects in jsdom; the run page only needs to know it embedded
+// the screen, and that it embedded it as a picture (view-only, no paste).
+vi.mock("@/components/VNCApp", () => ({
+  default: ({ viewOnly, pasteButton }: { viewOnly?: boolean; pasteButton?: string }) => (
+    <div data-testid="vnc-mock" data-view-only={String(Boolean(viewOnly))} data-paste={pasteButton ?? "overlay"} />
+  ),
+}));
 
 const READY = { ready: true, wrapperInstalled: true, claudeInstalled: true, clawaiConnected: true, problems: [] as string[] };
 const NOT_READY = {
@@ -84,6 +91,10 @@ function stubFetch(
     git?: { branch: string | null; commits: number; remote: string | null; lastCommit: { subject: string; date: number } | null };
     /** The GitHub account, as GET /setup-api/coding-agent/git answers without a query. */
     github?: Record<string, unknown>;
+    /** The project's root listing, as the tree route answers it. */
+    tree?: { entries: { name: string; type: "file" | "directory"; size: number | null; modified: string | null }[] };
+    /** What changed, as `git?…&changes=1` answers it. */
+    changes?: Record<string, unknown>;
   } = {},
 ) {
   let runs = runsArg;
@@ -134,9 +145,16 @@ function stubFetch(
     }
     if (url.startsWith("/setup-api/coding-agent/runs")) return json({ runs });
     if (url.startsWith("/setup-api/coding-agent/projects")) return json(projects);
+    if (url.startsWith("/setup-api/coding-agent/tree?")) {
+      return json({ listing: { path: "", truncated: false, ...(opts.tree ?? { entries: [] }) } });
+    }
     if (url.startsWith("/setup-api/coding-agent/git?")) {
-      // The route answers `{ git }` for the one project the query names.
+      // The route answers `{ git }` for the one project the query names, and
+      // `{ changes, log }` when the workspace's Changes tab asks.
       gitReads.push(url);
+      if (url.includes("changes=1")) {
+        return json({ changes: opts.changes ?? { available: true, truncated: false, additions: 0, deletions: 0, files: [] }, log: [] });
+      }
       return json({ git: opts.git ?? { branch: null, commits: 0, remote: null, lastCommit: null } });
     }
     if (url === "/setup-api/coding-agent/git" && init?.method === "POST") {
@@ -1131,16 +1149,23 @@ describe("projects", () => {
     expect((await screen.findByAltText(PROJECT.name)).parentElement).toHaveClass("w-7", "h-7");
   });
 
-  it("copies the folder name — the name a run is given — on one tap", async () => {
+  it("keeps the home row to a name, a commit line and a chevron — the folder copy lives on the project page", async () => {
+    // The home list is the way IN: what a row carries is what tells the
+    // projects apart. The folder path, the git line and the copy button
+    // are the project page's, one tap further.
     stubFetch({ enabled: true, readiness: READY }, [], { projects: [PROJECT] });
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     try {
       render(<CodingAgentApp />);
-      const copy = await screen.findByTestId("coding-agent-copy-site");
-      expect(copy.textContent).toContain("site");
+      const row = await screen.findByTestId("coding-agent-project-site");
+      expect(screen.queryByTestId("coding-agent-copy-site")).toBeNull();
+      expect(row.textContent).not.toContain(PROJECT.directory);
+      fireEvent.click(row);
+      const copy = await screen.findByTestId("coding-agent-project-copy");
+      expect(copy.textContent).toContain(PROJECT.directory);
       fireEvent.click(copy);
-      await waitFor(() => expect(writeText).toHaveBeenCalledWith("site"));
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith(PROJECT.directory));
       expect(await screen.findByText(translations.en["codingAgent.copied"])).toBeInTheDocument();
     } finally {
       Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
@@ -1287,5 +1312,131 @@ describe("the New app hand-off", () => {
     } finally {
       window.removeEventListener(NEW_APP_EVENT, onNewApp);
     }
+  });
+});
+
+describe("the workspace, the breadcrumb and the live view", () => {
+  const LIVE = { ...RUN, status: "running", completedAt: null, summary: null, transcriptPath: "/home/clawbox/.claude-ds/projects/x/s.jsonl", progress: ["$ npm test"] };
+
+  it("carries the project's files and changes on its page, and reads the changes only once that tab is opened", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [], {
+      projects: [SITE_PROJECT],
+      tree: { entries: [{ name: "src", type: "directory", size: null, modified: null }, { name: "index.html", type: "file", size: 120, modified: null }] },
+      changes: { available: true, truncated: false, additions: 4, deletions: 0, files: [{ path: "index.html", status: "modified", additions: 4, deletions: 0 }] },
+    });
+    render(<CodingAgentApp />);
+    fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+    await screen.findByTestId("coding-agent-project-page");
+    const tree = await screen.findByTestId("coding-agent-file-tree");
+    await within(tree).findByTestId("coding-agent-tree-index.html");
+    expect(within(tree).getByTestId("coding-agent-tree-src")).toBeInTheDocument();
+    // The git block read once; the Changes tab has not asked yet.
+    await waitFor(() => expect(gitReads).toEqual(["/setup-api/coding-agent/git?projectId=site"]));
+
+    fireEvent.click(screen.getByTestId("coding-agent-workspace-changes"));
+    await screen.findByTestId("coding-agent-change-index.html");
+    expect(gitReads).toContain("/setup-api/coding-agent/git?projectId=site&changes=1");
+    expect(screen.getByTestId("coding-agent-change-totals").textContent).toContain(t("codingAgent.filesChanged", { n: 1 }));
+  });
+
+  it("names the trail above a run — Projects › project › run — and Back leads to the project, even for a run handed in from outside", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await screen.findByTestId("coding-agent-project-site");
+    // Handed in the way the chat's card and the finish card do it: no
+    // project page was opened first.
+    act(() => { window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId: RUN.id } })); });
+    await screen.findByTestId("coding-agent-run-page");
+    const crumbs = screen.getByTestId("coding-agent-breadcrumb");
+    expect(within(crumbs).getByTestId("coding-agent-crumb-projects").textContent).toBe(t("codingAgent.projectsTitle"));
+    expect(within(crumbs).getByTestId("coding-agent-crumb-project").textContent).toBe(SITE_PROJECT.name);
+    expect(within(crumbs).getByText("Add a dark mode toggle")).toHaveAttribute("aria-current", "page");
+    // The arrow says where it goes, for a screen reader too.
+    expect(screen.getByTestId("coding-agent-run-back")).toHaveAttribute("aria-label", t("codingAgent.backTo", { name: SITE_PROJECT.name }));
+    fireEvent.click(screen.getByTestId("coding-agent-run-back"));
+    expect(screen.queryByTestId("coding-agent-run-page")).toBeNull();
+    expect(await screen.findByTestId("coding-agent-project-page")).toBeInTheDocument();
+    // And the first crumb goes all the way home.
+    fireEvent.click(screen.getByTestId("coding-agent-crumb-projects"));
+    expect(screen.queryByTestId("coding-agent-project-page")).toBeNull();
+    expect(await screen.findByTestId("coding-agent-project-site")).toBeInTheDocument();
+  });
+
+  it("uses the same breadcrumb on the settings page, with the header's Settings button gone while it is open", async () => {
+    stubFetch({ enabled: true, readiness: READY });
+    render(<CodingAgentApp />);
+    fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
+    await screen.findByTestId("coding-agent-embedded-settings");
+    expect(screen.queryByTestId("coding-agent-open-settings")).toBeNull();
+    const crumbs = screen.getByTestId("coding-agent-breadcrumb");
+    expect(within(crumbs).getByText(t("codingAgent.openSettings"))).toHaveAttribute("aria-current", "page");
+    fireEvent.click(within(crumbs).getByTestId("coding-agent-crumb-home"));
+    expect(screen.queryByTestId("coding-agent-embedded-settings")).toBeNull();
+    expect(await screen.findByTestId("coding-agent-open-settings")).toBeInTheDocument();
+  });
+
+  it("shows the browser the run drives above its terminal while it runs — a picture only — folds it on request, and not once it settled", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [LIVE], { projects: [SITE_PROJECT] });
+    const { unmount } = render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+    await screen.findByTestId("coding-agent-run-page");
+    const preview = await screen.findByTestId("coding-agent-browser-preview");
+    const terminal = screen.getByTestId("coding-agent-run-terminal");
+    expect(preview.compareDocumentPosition(terminal) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const screenMock = within(preview).getByTestId("vnc-mock");
+    expect(screenMock).toHaveAttribute("data-view-only", "true");
+    expect(screenMock).toHaveAttribute("data-paste", "hidden");
+    fireEvent.click(screen.getByTestId("coding-agent-browser-preview-toggle"));
+    expect(within(preview).queryByTestId("vnc-mock")).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-browser-preview-toggle"));
+    expect(within(preview).getByTestId("vnc-mock")).toBeInTheDocument();
+    unmount();
+
+    stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+    await screen.findByTestId("coding-agent-run-page");
+    expect(screen.queryByTestId("coding-agent-browser-preview")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-run-live-view")).toBeNull();
+  });
+
+  it("fills the page with the browser and the terminal in Live view, hides the rail, and comes back", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [LIVE], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+    await screen.findByTestId("coding-agent-run-rail");
+    fireEvent.click(screen.getByTestId("coding-agent-run-live-view"));
+    const page = screen.getByTestId("coding-agent-run-page");
+    expect(page).toHaveAttribute("data-live-view", "true");
+    const live = screen.getByTestId("coding-agent-live-view");
+    expect(within(live).getByTestId("vnc-mock")).toHaveAttribute("data-view-only", "true");
+    expect(within(live).getByTestId("terminal-mock")).toHaveAttribute("data-command", expect.stringContaining("coding-run-preview"));
+    expect(screen.queryByTestId("coding-agent-run-rail")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-summary")).toBeNull();
+    // Stop is still at hand — the view is where the owner watches a run.
+    expect(screen.getByTestId("coding-agent-stop-run-k3x9q2ab")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("coding-agent-run-live-view"));
+    expect(screen.getByTestId("coding-agent-run-page")).not.toHaveAttribute("data-live-view");
+    expect(await screen.findByTestId("coding-agent-run-rail")).toBeInTheDocument();
+  });
+
+  it("opens straight into Live view when the chat's View button asks for it, cold and while already open", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [LIVE], { projects: [SITE_PROJECT] });
+    // Cold: the handoff was parked before the app mounted.
+    (window as Window & { __clawboxPendingCodingRun?: string }).__clawboxPendingCodingRun = LIVE.id;
+    (window as Window & { __clawboxPendingCodingRunLive?: boolean }).__clawboxPendingCodingRunLive = true;
+    render(<CodingAgentApp />);
+    expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-live-view", "true");
+    // Off, then asked again while up.
+    fireEvent.click(screen.getByTestId("coding-agent-run-live-view"));
+    expect(screen.getByTestId("coding-agent-run-page")).not.toHaveAttribute("data-live-view");
+    act(() => { window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId: LIVE.id, live: true } })); });
+    await waitFor(() => expect(screen.getByTestId("coding-agent-run-page")).toHaveAttribute("data-live-view", "true"));
+    // A plain open lands on the normal page.
+    act(() => { window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId: LIVE.id } })); });
+    await waitFor(() => expect(screen.getByTestId("coding-agent-run-page")).not.toHaveAttribute("data-live-view"));
   });
 });
