@@ -183,19 +183,23 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
       ["-c", "import json,sys,yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1])) or {}))", path.join(dir, "plugin.yaml")],
       { encoding: "utf-8" },
     );
-    const declared = ((JSON.parse(manifest) as { provides_hooks?: string[] }).provides_hooks ?? [])
-      .slice()
-      .sort();
+    // De-duplicated on both sides. The scan is a regex over the module TEXT —
+    // docstrings and comments included, and this package documents itself — so
+    // an example call in a docstring, or a hook registered on two code paths,
+    // would otherwise fail the pin on a plugin that is perfectly correct.
+    const unique = (names: string[]) => [...new Set(names)].sort();
+    const declared = unique((JSON.parse(manifest) as { provides_hooks?: string[] }).provides_hooks ?? []);
     // Every module in the package, not just __init__.py: a hook registered from
     // a sibling would otherwise be invisible to the pin while the "found at
     // least one" guard below still passed on the one it did see.
-    const registered = fs.readdirSync(dir)
-      .filter((f) => f.endsWith(".py"))
-      .flatMap((f) => [
-        ...fs.readFileSync(path.join(dir, f), "utf-8")
-          .matchAll(/register_hook\(\s*["']([a-z0-9_]+)["']/g),
-      ].map((m) => m[1]))
-      .sort();
+    const registered = unique(
+      fs.readdirSync(dir)
+        .filter((f) => f.endsWith(".py"))
+        .flatMap((f) => [
+          ...fs.readFileSync(path.join(dir, f), "utf-8")
+            .matchAll(/register_hook\(\s*["']([a-z0-9_]+)["']/g),
+        ].map((m) => m[1])),
+    );
 
     expect(registered.length).toBeGreaterThan(0);
     expect(declared).toEqual(registered);
@@ -328,12 +332,36 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
   it("verifies the plugin LOADED on every boot, not once at install", () => {
     run();
     const calls = fs.readFileSync(path.join(home, "calls.log"), "utf-8");
-    expect(calls).toContain(`plugins doctor ${PLUGIN}`);
+    // `--ci` INCLUDED in the assertion, not just the subcommand: the whole
+    // verdict below is the CLI's own exit status, and without the flag the
+    // doctor exits 0 over an error report. A substring match on
+    // `plugins doctor <id>` is satisfied by a call that never asks for it.
+    expect(calls).toContain(`plugins doctor ${PLUGIN} --ci`);
 
     // Second boot, nothing to write — the check still runs.
     fs.writeFileSync(path.join(home, "calls.log"), "");
     run();
-    expect(fs.readFileSync(path.join(home, "calls.log"), "utf-8")).toContain(`plugins doctor ${PLUGIN}`);
+    expect(fs.readFileSync(path.join(home, "calls.log"), "utf-8")).toContain(
+      `plugins doctor ${PLUGIN} --ci`,
+    );
+  });
+
+  it("treats a hermes too old for --ci as unknown, not as a defect", () => {
+    // argparse's shape for an unrecognised flag: usage on stderr, exit 2, and
+    // no report at all. It must reach the NOTE arm — saying "directives will
+    // still reach channels" about a box whose hook is registered and working is
+    // the false failure this block's own comment forbids.
+    doctorRc = 2;
+    doctorOutput = "";
+    doctorStderr = [
+      "usage: hermes plugins doctor [-h] [target]",
+      "hermes plugins doctor: error: unrecognized arguments: --ci",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/NOTE.*could not verify/);
+    expect(r.stdout).not.toMatch(/WARNING/);
   });
 
   it("says so when the plugin registered no hook", () => {
@@ -345,22 +373,6 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
     expect(r.stdout).toContain("0 hook(s)");
-  });
-
-  it("does not read 11 hook(s) as the one hook it asked for", () => {
-    // `*"1 hook(s)"*` is a substring match, and "11 hook(s)" contains it. The
-    // count IS the evidence here — Hermes' doctor prints counts and never the
-    // hook NAMES (hermes_cli/plugin_dev.py renders "registrations: N tool(s),
-    // M hook(s)"), which is why the OpenClaw twin's name check has no
-    // equivalent on this side — so a pattern that does not pin the number is
-    // the same false success the block exists to catch. Unreachable while the
-    // plugin registers exactly one hook; reachable the moment it registers
-    // eleven, or twenty-one.
-    doctorOutput = "  OK: registration passed\n  registrations: 0 tool(s), 11 hook(s)\n";
-    const r = run();
-    expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
-    expect(r.stdout).not.toMatch(/loaded and registered its outbound hook/);
   });
 
   it("does not call a doctor that REFUSED the plugin a success", () => {
@@ -403,18 +415,36 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(r.stdout).not.toMatch(/WARNING/);
   });
 
+  it("does not call an EXTRA hook a missing one", () => {
+    // The count was never the question, and reading it as one cuts both ways:
+    // `*"1 hook(s)"*` also matched "11 hook(s)" (a false SUCCESS), and pinning
+    // the number made a plugin that registers ours plus a second hook read as a
+    // failed registration (a false FAILURE, on a box where the directives are
+    // being stripped correctly). With the manifest declaring our hook, the
+    // doctor answers the real question by name and the count is not consulted.
+    doctorOutput = [
+      "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+      "  WARN: registration adds hook 'telemetry_x' not listed in provides_hooks",
+      "  OK: runtime discovery, manifest parsing, import, and registration passed",
+      "  registrations: 0 tool(s), 2 hook(s)",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("loaded and registered its outbound hook");
+    expect(r.stdout).not.toMatch(/WARNING/);
+  });
+
   it("does not read 11 hook(s) as the one hook it asked for", () => {
-    // `*"1 hook(s)"*` is a substring match, and "11 hook(s)" contains it. The
-    // count IS the evidence here — Hermes' doctor prints counts, and the only
-    // line that ever names a hook is the provides_hooks mismatch WARN below —
-    // so a pattern that does not pin the number is the same false success the
-    // block exists to catch. Unreachable while the plugin registers exactly one
-    // hook; reachable the moment it registers eleven, or twenty-one.
+    // The original finding, kept as its own case: eleven hooks and no
+    // "declares … did not add it" line means ours IS among them, so this is a
+    // healthy box — and beta called it healthy too, for the wrong reason (the
+    // substring). What must never happen is the count deciding anything.
     doctorOutput = "  OK: registration passed\n  registrations: 0 tool(s), 11 hook(s)\n";
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
-    expect(r.stdout).not.toMatch(/loaded and registered its outbound hook/);
+    expect(r.stdout).toContain("loaded and registered its outbound hook");
+    expect(r.stdout).not.toMatch(/WARNING/);
   });
 
   it("still matches the one hook when the count line is wrapped or reordered", () => {
@@ -433,12 +463,20 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     }
   });
 
-  it("reads the one line that names a hook as the name check it is", () => {
+  it("reads the one line that names OUR hook as the name check it is", () => {
     // The Hermes equivalent of the OpenClaw twin's `"reply_payload_sending" in
-    // names`: the doctor compares provides_hooks against what register() added,
-    // in both directions, and warns BY NAME on either mismatch. It catches what
-    // no count can — a register() that adds a different valid hook still prints
-    // "1 hook(s)" with no error at all, and the directives reach channels.
+    // names`. The doctor warns in BOTH directions and only one of them means
+    // anything here: `manifest declares hook 'transform_llm_output' but
+    // registration did not add it` (plugin_dev.py:342) says ours is missing.
+    // The other — `registration adds hook X not listed in provides_hooks`
+    // (:343) — says we registered something EXTRA, which is not a defect at
+    // all. Note that only the :343 text contains the string `provides_hooks`,
+    // so a branch keyed on that word sees exactly the harmless direction and
+    // never the harmful one.
+    //
+    // This catches what no count can: a register() that adds a DIFFERENT valid
+    // hook still prints "1 hook(s)" with no error, and the directives reach
+    // channels.
     doctorOutput = [
       "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
       "  WARN: registration adds hook 'reply_payload_sending' not listed in provides_hooks",
@@ -449,8 +487,65 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     ].join("\n");
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/WARNING.*manifest does not declare/);
+    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
     expect(r.stdout).toContain("transform_llm_output");
+    expect(r.stdout).not.toContain("loaded and registered its outbound hook");
+  });
+
+  it("still reads it when rich wraps the sentence across two lines", () => {
+    // `rich.Console` wraps at 80 columns off a tty, and the manifest WARN
+    // visibly wrapped on the box — so the sentence the verdict depends on
+    // arrives in two pieces. Matching the raw capture is how a reflow becomes a
+    // false verdict; the whole report is flattened to single spaces first.
+    doctorOutput = [
+      "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+      "  WARN: manifest declares hook 'transform_llm_output' but registration",
+      "did not add it",
+      "  registrations: 0 tool(s), 1 hook(s)",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
+  });
+
+  it("does not call a healthy report a refusal over an unrelated exit code", () => {
+    // `--ci` is documented as "exit non-zero when validation reports an error"
+    // and raises SystemExit(1) for exactly that. Another non-zero code over a
+    // report that says the plugin is fine — a BrokenPipeError at interpreter
+    // flush, a teardown raise on a loaded Jetson, a SIGINT during a restart —
+    // says nothing about the hook, and beta logged success for this same input.
+    doctorRc = 120;
+    doctorOutput = [
+      "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+      "  OK: runtime discovery, manifest parsing, import, and registration passed",
+      "  registrations: 0 tool(s), 1 hook(s)",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/NOTE.*unknown here/);
+    expect(r.stdout).not.toMatch(/WARNING/);
+  });
+
+  it("quotes the ERROR that produced the refusal, not the warnings ahead of it", () => {
+    // Report order can put several WARN findings before the ERROR that makes
+    // `--ci` exit 1, and quoting those instead drops the one sentence that says
+    // what to fix — in the branch that needs it most.
+    doctorRc = 1;
+    doctorOutput = [
+      "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+      "  WARN: registration adds hook 'a' not listed in provides_hooks",
+      "  WARN: registration adds hook 'b' not listed in provides_hooks",
+      "  WARN: registration adds hook 'c' not listed in provides_hooks",
+      "  ERROR: registered unknown hook 'not_a_real_hook'",
+      "  registrations: 0 tool(s), 4 hook(s)",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/WARNING.*REFUSED/);
+    expect(r.stdout).toContain("registered unknown hook");
   });
 
   it("still calls a clean one-hook registration a success", () => {

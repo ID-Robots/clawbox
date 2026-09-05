@@ -223,6 +223,12 @@ chmod 600 "$MCP_TOKEN_FILE" 2>/dev/null || true
 # actually deliver it. The stale `__pycache__` goes with them, because Python
 # will happily import a `.pyc` whose source no longer exists.
 EMAIL_HOOK_PLUGIN="clawbox_email_directives"
+# The one hook this plugin registers, and — since the manifest now DECLARES it —
+# the name `hermes plugins doctor` compares against what register() actually
+# added. That comparison is the Hermes equivalent of the OpenClaw twin's
+# `"reply_payload_sending" in names` check (gateway-pre-start.sh), and it is why
+# the verdict below is a name test rather than a count.
+EMAIL_HOOK_NAME="transform_llm_output"
 EMAIL_HOOK_SRC="$PROJECT_DIR/scripts/hermes-plugins/$EMAIL_HOOK_PLUGIN"
 # `HERMES_HOME` first, exactly like Hermes' own `get_hermes_home()` and like
 # `hermesHome()` in src/lib/hermes-env.ts — NOT `dirname $HERMES_CONFIG`. With
@@ -680,10 +686,11 @@ fi
 # `plugins doctor` is the honest one — it really imports the plugin in a
 # sandboxed temporary HERMES_HOME and prints what registered
 # (hermes_cli/plugin_dev.py:84-107). Three signals are read from it, in order:
-# the CLI's own `--ci` exit status (an error verdict), the `provides_hooks`
-# mismatch WARN (the only line that names a hook), and the count. "0 hook(s)"
-# means the file loaded but the hook did not register, which is precisely the
-# state nothing else on the box would report.
+# the CLI's own `--ci` exit status (an error verdict); the doctor's own
+# declared-vs-registered comparison, which names OUR hook when registration did
+# not add it (hermes_cli/plugin_dev.py:342); and, for a box still carrying a
+# manifest that declares nothing, "0 hook(s)" — the file loaded and registered
+# nothing at all, which is precisely the state nothing else on the box reports.
 #
 # EVERY BOOT, not once behind a marker — the same reasoning as the browser
 # toolset above. The state lives in Hermes' own tree, so a marker in ClawBox's
@@ -726,9 +733,24 @@ if [ "$EMAIL_HOOK_INSTALLED" = "1" ]; then
   # the branch gets cut off — the branch would then report a defect and discard
   # the one sentence that says what to fix. Falls back to the head when the
   # doctor said nothing marked.
-  EMAIL_HOOK_REASON="$(printf '%s\n' "$EMAIL_HOOK_DOCTOR" | grep -E '^[[:space:]]*(ERROR|WARN):' | head -3 | tr '\n' ' ' | cut -c1-300)" \
+  # ERRORS FIRST, and `grep -m 3` rather than `| head -3`: under `pipefail` a
+  # `head` that closes the pipe early makes the whole pipeline 141, and the `||`
+  # then throws away the reason it had just computed. Errors first because the
+  # REFUSED branch below fires on rc=1, which only an ERROR finding produces —
+  # report order can put three WARNs ahead of it, and quoting those instead
+  # drops the one sentence that says what to fix.
+  EMAIL_HOOK_REASON="$(printf '%s\n' "$EMAIL_HOOK_DOCTOR" | grep -m 3 -E '^[[:space:]]*ERROR:' | tr '\n' ' ' | cut -c1-300)" \
+    || EMAIL_HOOK_REASON=""
+  [ -n "$EMAIL_HOOK_REASON" ] \
+    || EMAIL_HOOK_REASON="$(printf '%s\n' "$EMAIL_HOOK_DOCTOR" | grep -m 3 -E '^[[:space:]]*WARN:' | tr '\n' ' ' | cut -c1-300)" \
     || EMAIL_HOOK_REASON=""
   [ -n "$EMAIL_HOOK_REASON" ] || EMAIL_HOOK_REASON="$EMAIL_HOOK_DETAIL"
+  # One flattened copy of the report, and every match below is against it.
+  # `rich.Console` wraps at 80 columns off a tty, so any line — the count, or a
+  # finding sentence — can arrive split across two. Squeezing all whitespace to
+  # single spaces once heals every one of them, and matching the raw capture
+  # instead is how a reflow turns into a false verdict.
+  EMAIL_HOOK_FLAT="$(printf '%s' "$EMAIL_HOOK_DOCTOR" | tr -s '[:space:]' ' ')" || EMAIL_HOOK_FLAT=""
   # The exit STATUS is read before the words. By the time `timeout` kills it the
   # doctor has usually printed its banner, and on the text alone that banner IS
   # the "ran and refused" branch below — so a wedged CLI would print a hard
@@ -755,45 +777,72 @@ if [ "$EMAIL_HOOK_INSTALLED" = "1" ]; then
   if [ "$EMAIL_HOOK_DOCTOR_RC" = "124" ] || [ "$EMAIL_HOOK_DOCTOR_RC" = "137" ]; then
     log "NOTE: 'hermes plugins doctor' answered $EMAIL_HOOK_DOCTOR_RC — the ${HERMES_CLI_TIMEOUT}s ceiling (SIGTERM, then SIGKILL 5s later), a kill from outside, or the CLI's own exit code — so $EMAIL_HOOK_PLUGIN is installed and enabled but whether its hook registered is unknown here. hermes had printed: $EMAIL_HOOK_DETAIL"
   else
-    case "$EMAIL_HOOK_DOCTOR" in
+    case "$EMAIL_HOOK_FLAT" in
       *"registrations:"*|*"Plugin Doctor"*|*"registration failed"*)
         # The doctor RAN. Everything below is about WHAT it said; a CLI that
         # printed no report at all falls to the NOTE arm instead, which is what
         # keeps an unknown-flag or a too-old `hermes` from reading as a defect.
-        if [ "$EMAIL_HOOK_DOCTOR_RC" != "0" ]; then
-          # The harness's own verdict, not a word this script looked for.
+        if [ "$EMAIL_HOOK_DOCTOR_RC" = "1" ]; then
+          # The harness's own verdict, not a word this script looked for. ONE,
+          # not "any non-zero": `--ci` is documented as "exit non-zero when
+          # validation reports an error" and raises SystemExit(1) for exactly
+          # that (hermes_cli/plugins_cmd.py cmd_plugin_doctor). Another non-zero
+          # code from a run that still printed a healthy report — a
+          # BrokenPipeError at interpreter flush, a teardown raise on a loaded
+          # Jetson, a SIGINT during a restart — says nothing about the hook, and
+          # calling it a refusal would be a false failure on a working box.
           log "WARNING: the doctor REFUSED $EMAIL_HOOK_PLUGIN — EMAIL: directives will still reach channels. hermes plugins doctor said: $EMAIL_HOOK_REASON"
+        elif [ "$EMAIL_HOOK_DOCTOR_RC" != "0" ]; then
+          log "NOTE: 'hermes plugins doctor' printed a report for $EMAIL_HOOK_PLUGIN and then exited $EMAIL_HOOK_DOCTOR_RC — not the error verdict --ci defines, so whether its hook registered is unknown here. hermes had printed: $EMAIL_HOOK_REASON"
         else
-          case "$EMAIL_HOOK_DOCTOR" in
-            *"provides_hooks"*)
-              # The one line in this output that names a HOOK. The doctor
-              # compares the manifest's `provides_hooks` against what register()
-              # actually added, in both directions, and warns by name on either
-              # mismatch — so this is the Hermes equivalent of the OpenClaw
-              # twin's `"reply_payload_sending" in names` check, and it catches
-              # what no count can: a register() that adds a DIFFERENT valid hook
-              # still says "1 hook(s)" with no error at all.
-              log "WARNING: $EMAIL_HOOK_PLUGIN registered hooks its manifest does not declare — EMAIL: directives may still reach channels. hermes plugins doctor said: $EMAIL_HOOK_REASON"
+          case "$EMAIL_HOOK_FLAT" in
+            *"declares hook '$EMAIL_HOOK_NAME' but registration did not add it"*)
+              # THE name check, and the reason the manifest half of this change
+              # exists. Declaring `provides_hooks` makes the doctor compare what
+              # was declared against what register() actually added and warn BY
+              # NAME when ours is missing (hermes_cli/plugin_dev.py:342) — the
+              # Hermes equivalent of the OpenClaw twin's `"reply_payload_sending"
+              # in names`. It catches what no count can: a register() that adds a
+              # DIFFERENT valid hook still prints "1 hook(s)" with no error.
+              #
+              # This direction ONLY. The opposite finding at :343 ("registration
+              # adds hook X not listed in provides_hooks") means we registered
+              # something EXTRA, which says nothing about ours being missing —
+              # warning on it would put "directives may still reach channels" in
+              # the boot log of a box where they are being stripped correctly.
+              log "WARNING: $EMAIL_HOOK_PLUGIN did not register its hook — EMAIL: directives will still reach channels. hermes plugins doctor said: $EMAIL_HOOK_REASON"
               ;;
-            *[!0-9]"1 hook(s)"*)
-              # Anchored on the LEFT of the number and nothing else. `*"1
-              # hook(s)"*` also matched "11 hook(s)" — and 21, and 31 — which is
-              # the same false-success class this block exists to catch, since
-              # the count is the evidence. Borrowing the neighbouring "tool(s), "
-              # token would pin it too, but it couples the healthy match to a
-              # DIFFERENT number: this output goes through rich.Console, which
-              # wraps at 80 columns off a tty, and the WARN line visibly wrapped
-              # on the box. `*[!0-9]*` is this codebase's own idiom for the job
-              # (scripts/gateway-pre-start.sh).
+            *" 0 hook(s)"*)
+              # The one thing the name check cannot see: a box still carrying a
+              # manifest that declares nothing — the boot before this change's
+              # plugin.yaml lands. Nothing declared means no comparison and no
+              # warning, so "it registered nothing at all" is the only evidence
+              # left. Left-anchored on the space, which is what keeps it off the
+              # "0" inside "10 hook(s)"; the flattened capture is what makes a
+              # wrapped count line one string again.
+              log "WARNING: $EMAIL_HOOK_PLUGIN did not register its hook — EMAIL: directives will still reach channels. hermes plugins doctor said: $EMAIL_HOOK_REASON"
+              ;;
+            *"registration failed"*)
+              # The doctor said so in as many words, without an error verdict
+              # to go with it. Kept as its own arm: it carries no `registrations:`
+              # line, so neither of the two checks above can see it.
+              log "WARNING: $EMAIL_HOOK_PLUGIN did not register its hook — EMAIL: directives will still reach channels. hermes plugins doctor said: $EMAIL_HOOK_REASON"
+              ;;
+            *"registrations:"*)
+              # No error verdict, and the doctor did not say our hook is
+              # missing — with the manifest declaring it, that IS the check.
+              # The count is deliberately not consulted here: a plugin that
+              # registers ours PLUS a second hook prints "2 hook(s)" and is
+              # perfectly healthy, and matching `1 hook(s)` called that a defect
+              # (while also reading "11 hook(s)" as a success — the bug this
+              # change was opened for; it is gone because the count is gone).
               log "$EMAIL_HOOK_PLUGIN loaded and registered its outbound hook"
               ;;
             *)
-              # The doctor ran, found no error, and still did not report our one
-              # hook: it registered a count that is not one. That IS the defect,
-              # and it is the one nothing else on the box reports — `plugins
-              # list` reads "enabled" straight back out of the config it was
-              # written into (hermes_cli/plugins_cmd.py:1931).
-              log "WARNING: $EMAIL_HOOK_PLUGIN did not register its hook — EMAIL: directives will still reach channels. hermes plugins doctor said: $EMAIL_HOOK_DETAIL"
+              # A report with no registration line at all. `format_text()` always
+              # prints one, so this is a shape this script does not understand —
+              # and an unread verdict is not a healthy one.
+              log "WARNING: $EMAIL_HOOK_PLUGIN did not register its hook — EMAIL: directives will still reach channels. hermes plugins doctor said: $EMAIL_HOOK_REASON"
               ;;
           esac
         fi
