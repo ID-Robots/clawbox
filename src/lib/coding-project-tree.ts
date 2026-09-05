@@ -82,8 +82,8 @@ export async function resolveInsideProject(
     if (isProtectedFilePath(real)) return { ok: false, status: 404 };
     if (realRel.split(path.sep).some((seg) => SKIPPED_DIRS.has(seg))) return { ok: false, status: 404 };
     // `abs` is where the path really points (checked above); `lexical` is the
-    // path as spelled, which the readers open WITHOUT following a link — so a
-    // link planted at the name is refused rather than read through.
+    // path as spelled. Neither is opened by name afterwards: the readers reach
+    // `rel` from `root` one descriptor at a time (openThroughDescriptors).
     return { ok: true, root, abs: real, lexical: candidate, rel: cleaned };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
@@ -91,22 +91,52 @@ export async function resolveInsideProject(
   }
 }
 
+/**
+ * Open `rel` under `root` the way openat(2) would: the root first, then every
+ * component through the descriptor of the one before it, each opened with
+ * O_NOFOLLOW (and O_DIRECTORY for all but a file at the end). No component
+ * of the path is ever resolved by name against the live filesystem after the
+ * checks above — a run working in this folder can replace an ancestor with a
+ * link between the check and the read, and this walk would then refuse it
+ * (ELOOP) rather than read through it. `/proc/self/fd/<n>/<name>` names a
+ * child of an OPEN directory, whatever the path is swapped for meanwhile.
+ *
+ * Returns the descriptor of the target; the caller closes it.
+ */
+function openThroughDescriptors(root: string, rel: string, target: "directory" | "file"): number {
+  const parts = rel === "" ? [] : rel.split("/");
+  let fd = fs.openSync(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  try {
+    for (let i = 0; i < parts.length; i++) {
+      const last = i === parts.length - 1;
+      const flags = last && target === "file"
+        ? fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
+        : fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW;
+      const next = fs.openSync(path.join(`/proc/self/fd/${fd}`, parts[i]), flags);
+      fs.closeSync(fd);
+      fd = next;
+    }
+    return fd;
+  } catch (err) {
+    try { fs.closeSync(fd); } catch { /* already closed */ }
+    throw err;
+  }
+}
+
 /** One folder's entries, folders first, `.git` left out, links skipped. */
 export async function listProjectDir(projectDir: string, rel: string): Promise<({ ok: true } & TreeListing) | TreeRefusal> {
   const resolved = await resolveInsideProject(projectDir, rel);
   if (!resolved.ok) return resolved;
-  // ONE handle for the folder, opened without following a link, and every
-  // read below goes through it (`/proc/self/fd/<n>` names the open directory
-  // itself, whatever the path is swapped for afterwards). A run works in this
-  // folder and could plant a symlink between the check above and the walk;
-  // opened this way, the walk stays on the folder that was checked. Read
-  // entry by entry and stop past the cap: a generated folder with a hundred
-  // thousand files must not be allocated whole — this runs on the appliance.
+  // ONE handle for the folder, reached component by component without
+  // following a link (openThroughDescriptors), and every read below goes
+  // through it. Read entry by entry and stop past the cap: a generated
+  // folder with a hundred thousand files must not be allocated whole — this
+  // runs on the appliance.
   const entries: TreeEntry[] = [];
   let truncated = false;
   let fd: number | null = null;
   try {
-    fd = fs.openSync(resolved.lexical, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    fd = openThroughDescriptors(resolved.root, resolved.rel, "directory");
     const viaFd = `/proc/self/fd/${fd}`;
     const dir = await fsp.opendir(viaFd);
     try {
@@ -152,19 +182,20 @@ export async function readProjectFile(projectDir: string, rel: string): Promise<
   const resolved = await resolveInsideProject(projectDir, rel);
   if (!resolved.ok) return resolved;
   if (!resolved.rel) return { ok: false, status: 404 };
-  let handle: fsp.FileHandle | null = null;
+  let fd: number | null = null;
   try {
-    // One open handle, opened without following a link and stat'ed and read
-    // through it: never stat-then-open, so the file that is read is the file
-    // that was checked, and a link planted in its place is refused.
-    handle = await fsp.open(resolved.lexical, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    const stat = await handle.stat();
+    // One descriptor, reached component by component without following a
+    // link, stat'ed and read through it: never stat-then-open by name, so
+    // the file that is read is the file that was checked, and a link planted
+    // anywhere in its path is refused.
+    fd = openThroughDescriptors(resolved.root, resolved.rel, "file");
+    const stat = fs.fstatSync(fd);
     if (!stat.isFile()) return { ok: false, status: 404 };
     const want = Math.min(stat.size, MAX_TREE_FILE_BYTES);
     const buf = Buffer.alloc(want);
     let got = 0;
     while (got < want) {
-      const { bytesRead } = await handle.read(buf, got, want - got, got);
+      const bytesRead = fs.readSync(fd, buf, got, want - got, got);
       if (bytesRead === 0) break;
       got += bytesRead;
     }
@@ -182,6 +213,6 @@ export async function readProjectFile(projectDir: string, rel: string): Promise<
     const code = (err as NodeJS.ErrnoException)?.code;
     return { ok: false, status: code === "EACCES" || code === "EPERM" ? 403 : 404 };
   } finally {
-    await handle?.close().catch(() => {});
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* already closed */ } }
   }
 }

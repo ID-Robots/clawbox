@@ -114,7 +114,10 @@ describe("reading a file", () => {
   });
 
   it("refuses the project root, a folder, a link out, a protected file, and a climb", async () => {
-    for (const bad of ["", ".", "src", "escape.txt", "readme-link.md", "up/outside.txt", "secrets/token", "../outside.txt", "/etc/passwd"]) {
+    // `alias/util.js`: the link is an ANCESTOR, and the target is inside the
+    // project — containment passes, and the walk still refuses it, because no
+    // component of a path is followed.
+    for (const bad of ["", ".", "src", "escape.txt", "readme-link.md", "alias/util.js", "up/outside.txt", "secrets/token", "../outside.txt", "/etc/passwd"]) {
       const out = await readProjectFile(project, bad);
       expect(out.ok, bad).toBe(false);
     }
@@ -129,6 +132,24 @@ describe("resolving", () => {
     expect(r.abs).toBe(fs.realpathSync(project));
     const s = await resolveInsideProject(project, "./src/../src/lib");
     expect(s).toMatchObject({ ok: true, rel: "src/lib" });
+  });
+
+  it("refuses a path whose ancestor became a link after the check — the reviewer's race, replayed", async () => {
+    // What a run in the folder could do between the check and the read:
+    // replace `src` with a link to a folder outside the project. Reached one
+    // descriptor at a time with O_NOFOLLOW, the walk stops at the link.
+    const outside = path.join(root, "elsewhere", "child");
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, "note.txt"), "outside\n");
+    fs.mkdirSync(path.join(project, "src", "child"), { recursive: true });
+    fs.writeFileSync(path.join(project, "src", "child", "note.txt"), "inside\n");
+    const resolved = await resolveInsideProject(project, "src/child/note.txt");
+    expect(resolved.ok).toBe(true);
+    fs.rmSync(path.join(project, "src"), { recursive: true });
+    fs.symlinkSync(path.join(root, "elsewhere"), path.join(project, "src"));
+    const out = await readProjectFile(project, "src/child/note.txt");
+    expect(out.ok).toBe(false);
+    expect(await listProjectDir(project, "src/child")).toEqual({ ok: false, status: 404 });
   });
 
   it("refuses a project folder that is not there", async () => {
