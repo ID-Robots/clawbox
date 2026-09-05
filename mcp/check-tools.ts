@@ -35,6 +35,8 @@ import { contractViolations, type RegisteredToolInfo } from "./lib/register";
 // The directory the probes actually spawn in — imported, not restated: a third
 // copy of that path is a third thing to keep in step with the other two.
 import { DEFAULT_CWD } from "./lib/guard";
+// The production reader, so the run fixture below cannot drift from it.
+import { runMedia } from "./lib/run-context";
 // The TYPE, so the postures below are checked against the interface they
 // override. Excess-property checking does not apply through a variable or a
 // spread, so without an annotation a renamed or misspelt field type-checks
@@ -43,7 +45,7 @@ import { DEFAULT_CWD } from "./lib/guard";
 // back to this host's probed value and take its tool family out of the check
 // with it — `bun run typecheck:mcp`, which this workflow now runs, fails until
 // both postures name it.
-import type { McpContext } from "./lib/context";
+import type { Capabilities, McpContext } from "./lib/context";
 // Where the device API probes are aimed, for the note at the end: three of the
 // seven answer over HTTP rather than by spawning, and saying they failed
 // "because of the cwd" sends the reader to the wrong place.
@@ -63,8 +65,16 @@ import type { Ed } from "./lib/register";
  * postures silently fell back to this host's probed value — the exact silence
  * the totality was introduced against. Measured: `canSpeak: boolean` fails
  * `typecheck:mcp` with TS2741; `canSpeak?: boolean` did not, until this.
+ *
+ * …and `Required<>` is SHALLOW, so `capabilities` needs its own: it is a nested
+ * interface, and an optional field added THERE would leave both postures
+ * carrying a `capabilities` object without the key — so `ALL_CAPABILITIES`, the
+ * "every capability on" posture, would silently have it off, a family gated on
+ * it would register in no posture at all, and the gate equality could not see
+ * it either (absent from `enabled` and `disabled` alike).
  */
-type Posture = Required<Omit<McpContext, "edition" | "install" | "profile" | "appHarness">>;
+type Posture = Required<Omit<McpContext, "edition" | "install" | "profile" | "appHarness">>
+  & { capabilities: Required<Capabilities> };
 
 const HERMES_ONLY = ["skill_search", "skill_list", "skill_info", "skill_install", "skill_uninstall", "ai_list_models", "ai_set_provider", "ai_set_model"];
 // backup_list / backup_now are here because ClawKeep archives the OpenClaw
@@ -284,6 +294,19 @@ async function check(): Promise<void> {
     const { reg: fullReg } = await buildServer(edition, "full", edition, ALL_CAPABILITIES);
     const enabled = fullReg.list();
 
+    // The DUAL install, whose tool DESCRIPTIONS differ: `device_status` says
+    // the device's default provider is "not necessarily the one answering this
+    // chat" there and "which is also what the chat runs" elsewhere
+    // (mcp/tools/orientation.ts). Description length and banned phrases are
+    // exactly what `contractViolations` checks, so until `install` became an
+    // argument that variant could only be built on a box that already had the
+    // dual SKU installed — i.e. nowhere this check runs. Same hole the two
+    // `ai_set_provider` variants had; it feeds the contract set below and
+    // nothing else, because the gate and matrix questions are about a single
+    // resolved edition.
+    const { reg: dualReg } = await buildServer(edition, "full", edition, ALL_CAPABILITIES, "dual");
+    const dual = dualReg.list();
+
     // Every gate the other way round. It carries the one tool that registers
     // where the box CANNOT do the thing (`image_generate`), and it is what the
     // negative half of each assertion below is made against.
@@ -298,6 +321,19 @@ async function check(): Promise<void> {
     Object.assign(process.env, RUN_ENV);
     let inRun: RegisteredToolInfo[];
     try {
+      // The fixture has to enable every media word the production reader knows,
+      // or a family gated on a word it does not name is absent from `inRun`
+      // (never built) AND from `enabled` (run-only), so `runExtra` is empty and
+      // the checker prints OK over a shipped tool it has never seen — verbatim
+      // the silence RUN_ONLY_TOOLS was introduced against. Asked of `runMedia`
+      // itself rather than restated here.
+      const off = Object.entries(runMedia()).filter(([, on]) => !on).map(([word]) => word);
+      if (off.length) {
+        problems.push(
+          `${edition}: RUN_ENV.CLAWBOX_RUN_MEDIA does not enable [${off.join(", ")}], so the run `
+          + "posture never builds the tools gated on them — add the word to RUN_ENV",
+        );
+      }
       const { reg: runReg } = await buildServer(edition, "browser", edition, ALL_CAPABILITIES);
       inRun = runReg.list();
     } finally {
@@ -318,7 +354,7 @@ async function check(): Promise<void> {
     // `schemaShapeViolations` exists to catch, a name-keyed run still printed
     // "Tool contract OK". One `toJSONSchema` per tool per posture; the whole
     // run is about a second.
-    for (const tool of [...enabled, ...disabled, ...probed, ...inRun]) {
+    for (const tool of [...enabled, ...disabled, ...probed, ...inRun, ...dual]) {
       const emitted = emittedSchema(tool);
       const key = `${tool.name}\u0000${tool.description}\u0000${emitted}`;
       if (seen.has(key)) continue;
@@ -401,11 +437,17 @@ async function check(): Promise<void> {
       `\n${edition}: ${real.length} tools, ${(bytes / 1024).toFixed(1)} KB of tools/list payload`
       + ` (union of all postures: ${tools.length} tools, ${(schemaBytes(tools) / 1024).toFixed(1)} KB)`,
     );
+    // The rows are the UNION, while the headline counts what a real box gets, so
+    // the two disagree by however many tools exist only in another posture
+    // (`image_generate` today). Marked rather than left for a reader to
+    // rediscover by counting.
+    const realNames = new Set(real.map((t) => t.name));
     for (const t of tools) {
       const flags = [
         t.opts.readOnly ? "read-only" : "writes",
         t.opts.destructive ? "destructive" : "",
         t.opts.profile === "core" ? "core" : "",
+        realNames.has(t.name) ? "" : "(other posture only)",
       ].filter(Boolean).join(" ");
       console.log(`  ${t.name.padEnd(22)} ${flags}`);
     }
@@ -421,6 +463,30 @@ async function check(): Promise<void> {
   // HTTP calls to the device's own API, not spawns, so naming the spawn cwd
   // beside them sent the reader to look at the wrong thing: they answer false
   // here because there is no dashboard at API_BASE.
+  // …and the two lists are held against what was actually recorded, because a
+  // note is only honest if it cannot go quiet. Every other set comparison in
+  // this file became an equality; a probe added to `probeResults` and forgotten
+  // in both constants would be reported nowhere, and the run would read as if
+  // this host had exercised it — a false success inside the paragraph written
+  // to prevent one.
+  const declaredProbes = new Set([...SPAWN_PROBES, ...API_PROBES]);
+  for (const [edition, results] of Object.entries(probeResults)) {
+    const unnamed = Object.keys(results).filter((n) => !declaredProbes.has(n));
+    if (unnamed.length) {
+      problems.push(
+        `${edition}: probe(s) [${unnamed.join(", ")}] are recorded but named in neither SPAWN_PROBES `
+        + "nor API_PROBES, so the note below could never mention them",
+      );
+    }
+  }
+  // The other direction, over every edition at once: `providers` is recorded on
+  // Hermes only by design, so a per-edition check here would false-fail.
+  const everRecorded = new Set(Object.values(probeResults).flatMap((r) => Object.keys(r)));
+  const stale = [...declaredProbes].filter((n) => !everRecorded.has(n));
+  if (stale.length) {
+    problems.push(`probe(s) [${stale.join(", ")}] are named in SPAWN_PROBES/API_PROBES but no edition records them`);
+  }
+
   const noteLines = Object.entries(probeResults).flatMap(([edition, results]) => {
     const failed = (names: readonly string[]) => names.filter((n) => results[n] === false);
     const spawns = failed(SPAWN_PROBES);

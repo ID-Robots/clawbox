@@ -148,19 +148,29 @@ function instructionsFor(edition: Ed, profile: Profile): string {
  * that disagreed with its own registrar. The checker already restricts itself
  * this way (`Posture` in mcp/check-tools.ts); saying it in the signature closes
  * it for every caller.
+ *
+ * `install` is a parameter for the same reason, and it did not used to be: it
+ * was read from `/etc/clawbox/edition.env` here, so the surface a `dual` box
+ * registers could not be built anywhere it is not already installed — not on
+ * CI, not on a single-edition box. `device_status` emits a DIFFERENT
+ * description on `dual` (mcp/tools/orientation.ts), and description length and
+ * banned phrases are exactly what the contract checks, so that variant shipped
+ * unexamined — the same hole the two `ai_set_provider` variants had. It
+ * defaults to the installed edition, so the running server is unchanged.
  */
 export async function buildServer(
   edition: Ed,
   profile: Profile,
   appHarness: Ed | null,
   overrides?: Partial<Omit<McpContext, "edition" | "install" | "profile" | "appHarness">>,
+  install: McpContext["install"] = installEdition(),
 ) {
   // The app list is a different question from the tool set — see
   // `resolveAppHarness` — but it is answered by the SAME probe, taken once in
   // `main()` and handed down. Asking again here made a dual box put two
   // requests to /setup-api/harness/active at every startup, each with its own
   // 3 s timeout, and let the two collapse a silence in opposite directions.
-  const probed = await buildContext(edition, installEdition(), profile, appHarness);
+  const probed = await buildContext(edition, install, profile, appHarness);
   const ctx: McpContext = overrides ? { ...probed, ...overrides } : probed;
   const server = new McpServer(
     { name: "clawbox", version: VERSION },
@@ -210,7 +220,7 @@ async function main(): Promise<void> {
   );
 }
 
-// mcp/check-tools.ts imports buildServer to diff the two editions' tool lists;
+// mcp/check-tools.ts imports buildServer to build four postures per edition and diff the tool lists;
 // it sets this first so importing this module does not claim stdio.
 if (process.env.CLAWBOX_MCP_NO_AUTOSTART !== "1") {
   main().catch((err) => {
