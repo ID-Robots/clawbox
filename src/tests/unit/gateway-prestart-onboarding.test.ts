@@ -65,6 +65,30 @@ function runBlock(name: string, env: Record<string, string>) {
   return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 
+/**
+ * The same block under a file-size cap, so `install` stops PART WAY.
+ *
+ * A full Jetson eMMC is the realistic shape and ENOSPC cannot be produced in a
+ * unit test; `ulimit -f` produces the same partial write with the same non-zero
+ * return. `trap "" XFSZ` is what makes it a return value rather than a signal —
+ * without it the kernel kills the shell and the block never sees the failure it
+ * is supposed to handle. Bash scales `-f` by 1024, not the POSIX 512.
+ */
+function runBlockCapped(name: string, env: Record<string, string>, blocks: number) {
+  const script = path.join(dir, "block-capped.sh");
+  fs.writeFileSync(
+    script,
+    `set -euo pipefail\ntrap "" XFSZ\nulimit -f ${blocks}\n${block(name)}\n`,
+    "utf-8",
+  );
+  const res = spawnSync("bash", [script], {
+    encoding: "utf-8",
+    cwd: REPO,
+    env: { ...process.env, ...env } as NodeJS.ProcessEnv,
+  });
+  return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+}
+
 const read = (f: string) => (fs.existsSync(f) ? fs.readFileSync(f, "utf-8") : null);
 
 // ── The ritual ClawBox ships ─────────────────────────────────────────────────
@@ -175,6 +199,33 @@ describe("gateway-pre-start: the bootstrap seed", () => {
     const run = runBlock("clawbox bootstrap seed", { CLAWBOX_ROOT: path.join(dir, "nowhere"), CLAWBOX_WORKSPACE: ws() });
     expect(run.status).toBe(0);
     expect(fs.existsSync(bootstrap())).toBe(false);
+  }, SHELL_TIMEOUT_MS);
+
+  it("leaves no fragment when the seed stops part way", () => {
+    // The same partial-write hole the CLAWBOX.md seed closes, in the same verb,
+    // and worse here: the guard is `[ ! -e ]`, which a fragment satisfies
+    // FOREVER. The block's own rule is that a BOOTSTRAP.md already on disk is
+    // adopted verbatim, so a truncated ritual would be run once, deleted by the
+    // agent when it thought it was done, and the owner would never be asked
+    // their name — permanently, on the first-boot and post-factory-reset path
+    // where a full eMMC actually bites.
+    fs.mkdirSync(ws());
+    const run = runBlockCapped("clawbox bootstrap seed", { CLAWBOX_ROOT: REPO, CLAWBOX_WORKSPACE: ws() }, 1);
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).toMatch(/could not seed BOOTSTRAP\.md/);
+    expect(fs.existsSync(bootstrap())).toBe(false);
+  }, SHELL_TIMEOUT_MS);
+
+  it("seeds the whole ritual on the next boot after a part-way seed", () => {
+    // The half that makes the removal worth anything: the retry must land.
+    fs.mkdirSync(ws());
+    runBlockCapped("clawbox bootstrap seed", { CLAWBOX_ROOT: REPO, CLAWBOX_WORKSPACE: ws() }, 1);
+
+    const run = seed();
+
+    expect(run.status).toBe(0);
+    expect(read(bootstrap())).toBe(fs.readFileSync(TEMPLATE, "utf-8"));
   }, SHELL_TIMEOUT_MS);
 
   it("does not fail when the workspace cannot be created", () => {

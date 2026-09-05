@@ -3192,6 +3192,18 @@ if [ -r "$CLAWBOX_BOOTSTRAP_SRC" ] \
     && install -m 644 "$CLAWBOX_BOOTSTRAP_SRC" "$CLAWBOX_BOOTSTRAP_DST"; then
     echo "  Seeded ClawBox's BOOTSTRAP.md into a fresh OpenClaw workspace"
   else
+    # The same partial-write hole the CLAWBOX.md seed below closes, in the same
+    # verb, and its consequence is worse. `install` that stops part way — ENOSPC
+    # on a full eMMC, the first-boot and post-factory-reset path — leaves a
+    # fragment, and the guard above is `[ ! -e ]`, which a fragment satisfies
+    # FOREVER. The script's own rule is that a BOOTSTRAP.md already on disk is
+    # adopted verbatim, so OpenClaw would run the birth sequence against a ritual
+    # cut off mid-sentence, delete the file when it thinks it is done, and stamp
+    # the workspace complete: the owner is never asked their name, permanently,
+    # with no second chance. The enclosing `[ ! -e "$CLAWBOX_BOOTSTRAP_DST" ]`
+    # proves the file did not exist before this attempt, so removing it destroys
+    # nothing and the next boot re-seeds from scratch.
+    rm -f "$CLAWBOX_BOOTSTRAP_DST" 2>/dev/null || true
     # Not fatal, and not silent: OpenClaw still runs its own introduction, it
     # just will not ask the owner their name.
     echo "  WARNING: could not seed BOOTSTRAP.md; OpenClaw will use its own ritual" >&2
@@ -3214,8 +3226,10 @@ fi
 CLAWBOX_GUIDE_SRC="$CLAWBOX_ROOT/config/clawbox-workspace-guide.md"
 CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 # The heading of the section an already-seeded CLAWBOX.md is topped up with,
-# and the marker that says it is already there. Matched with `grep -qF` and
-# `index(...) == 1`, so it must be the literal start of the heading line.
+# and the marker that says it is already there. Matched with `grep -qF` and, in
+# the awk below, a WHOLE-LINE `==` against the heading — deliberately, for the
+# reason stated at that awk: a prefix match would let
+# `## System actions and restarts (advanced)` swallow every section after it.
 CLAWBOX_GUIDE_TOPUP="## System actions and restarts"
 
 # Append to a file so that a write which stops PART WAY leaves nothing behind.
@@ -3244,10 +3258,38 @@ CLAWBOX_GUIDE_TOPUP="## System actions and restarts"
 # the option that closes it, at the cost of a full copy at peak on the one
 # occasion there is no room for one.
 #
-# The destination must already exist; all three callers guarantee it (the seed
-# branch runs only when it does not, and the AGENTS.md blocks test `-f` first).
-# A missing file is still handled rather than assumed: there is nothing to
-# measure, so the rollback is a removal.
+# The destination must already exist, and that is the CONTRACT rather than a
+# case to handle: the seed branch runs only when it does not, and the two
+# AGENTS.md blocks test `-f` first. An "it was absent, so remove it" branch was
+# tried and removed — it is unreachable from every caller, and the one line in
+# it that could run is the only line here able to delete a file the helper did
+# not create (`[ -e ]` is false for a DANGLING SYMLINK, `printf >>` follows the
+# link and creates its target, and the removal would then take the link and
+# orphan the fragment: the opposite of a rollback).
+#
+# Single-writer, and that is a precondition, not a coincidence: `truncate -s`
+# restores a length measured before the write, so anything a second writer
+# appended in that window is discarded. Safe here because this runs in
+# `ExecStartPre` with the gateway — and therefore the agent and its file tools —
+# stopped. A caller that runs while the agent is live must not use it.
+# The size of a file in bytes, or "" when it cannot be read.
+#
+# Two syscall paths, because the number decides whether a rollback happens at
+# all: `wc -c` opens and reads, `stat` does not, so a file that is present but
+# unopenable (mode 0222) still answers. Note the redirection ORDER — bash
+# applies them left to right, so `< "$f" 2>/dev/null` opens BEFORE stderr is
+# silenced and a "Permission denied" line reaches the gateway journal on a boot
+# where nothing went wrong.
+clawbox_file_size() {
+  local size=""
+  [ -e "$1" ] || return 0
+  size="$(wc -c 2>/dev/null < "$1" || true)"
+  size="${size//[![:digit:]]/}"
+  [ -n "$size" ] || size="$(stat -c %s "$1" 2>/dev/null || true)"
+  size="${size//[![:digit:]]/}"
+  printf '%s' "$size"
+}
+
 clawbox_append_or_rollback() {
   local dest="$1" payload="$2" before="" after=""
   # A no-op append that reports success is the failure mode this whole block
@@ -3260,24 +3302,13 @@ clawbox_append_or_rollback() {
   fi
   # Measured BEFORE the write, and a length that could not be read is a length
   # this must never truncate to: with no number the only safe outcome is to
-  # leave the file as the failed write left it and say so.
-  if [ -e "$dest" ]; then
-    before="$(wc -c < "$dest" 2>/dev/null || true)"
-    before="${before//[![:digit:]]/}"
-  else
-    before="absent"
-  fi
+  # leave the file as the failed write left it and say what to do about it.
+  before="$(clawbox_file_size "$dest")"
   if printf '%s' "$payload" >> "$dest"; then
     return 0
   fi
   if [ -z "$before" ]; then
-    echo "  WARNING: could not measure $dest before a failed append; a partial write may remain" >&2
-    return 1
-  fi
-  if [ "$before" = "absent" ]; then
-    # Nothing to roll back TO. The file is either absent (the open failed) or a
-    # fragment this call created; either way removing it is the rollback.
-    rm -f "$dest" 2>/dev/null || true
+    echo "  WARNING: could not measure $dest before a failed append. Check it for a truncated '${payload%%$'\n'*}' section; deleting the file lets the next gateway start rebuild it." >&2
     return 1
   fi
   # A write that failed at OPEN — EACCES on a 0444 file, EROFS on a rootfs
@@ -3285,8 +3316,7 @@ clawbox_append_or_rollback() {
   # the same reason. Warning about a file that is byte-identical to what it was
   # sends an operator triaging a real disk fault to inspect a guide that is
   # fine, on every boot. Ask the file before saying anything about it.
-  after="$(wc -c < "$dest" 2>/dev/null || true)"
-  after="${after//[![:digit:]]/}"
+  after="$(clawbox_file_size "$dest")"
   if [ -n "$after" ] && [ "$after" = "$before" ]; then
     return 1
   fi
@@ -3303,7 +3333,8 @@ clawbox_append_or_rollback() {
   return 1
 }
 # EVERY write in this block — the appends through the helper above included —
-# is guarded, and that is a boot requirement rather than a matter of taste: config/clawbox-gateway.service runs this script as
+# is guarded, and that is a boot requirement rather than a matter of taste:
+# config/clawbox-gateway.service runs this script as an
 # `ExecStartPre=` with no leading `-`, so under `set -euo pipefail` a failing
 # write here is the unit's failure. With Restart=always and RestartSec=5 the
 # gateway would burn StartLimitBurst=20 in about a hundred seconds and then sit

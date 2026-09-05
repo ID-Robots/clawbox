@@ -110,7 +110,7 @@ function run(template = TEMPLATE): { stdout: string; stderr: string } {
 function runCapped(
   bytes: number,
   template = TEMPLATE,
-  opts: { hideTruncate?: boolean } = {},
+  opts: { hideTruncate?: boolean; hidePython?: boolean } = {},
 ): { status: number | null; stdout: string; stderr: string } {
   const root = mkdtempSync(path.join(dir, "root-"));
   mkdirSync(path.join(root, "config"), { recursive: true });
@@ -122,6 +122,14 @@ function runCapped(
     // A rootfs without coreutils' `truncate`: the shell function shadows the
     // binary, so the helper falls through to its python3 fallback.
     ...(opts.hideTruncate ? ["truncate() { return 127; }"] : []),
+    // …and both of them gone, which is the only way to reach the helper's
+    // "could not roll it back" warning. Two divergences from a real ENOSPC are
+    // worth knowing when reading these fixtures: the shipped script sets no
+    // XFSZ trap (correct — ENOSPC raises no signal, only `ulimit -f` does), and
+    // under the cap the rollback verbs themselves always succeed, which is why
+    // the failed-rollback branch needs a shadow of its own rather than falling
+    // out of any capped run.
+    ...(opts.hidePython ? ["python3() { return 127; }"] : []),
     `ulimit -f ${blocks}`,
     `CLAWBOX_ROOT=${JSON.stringify(root)}`,
     `CLAWBOX_WORKSPACE=${JSON.stringify(workspace)}`,
@@ -221,12 +229,17 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
       // but the exception is `rm`'s alone. `printf … >> "$f" || true` would
       // otherwise pass this audit while printing a success line over a failed
       // write, which is the class the audit exists to catch.
-      && !/^rm\b.*\|\|\s*true$/.test(line));
+      && !/^rm -f "\$[A-Za-z_][A-Za-z0-9_]*" 2>\/dev\/null \|\| true$/.test(line));
 
-    // Sanity: the filter has to be finding this block's write sites — the seed,
-    // the three appends, the helper's own redirection and its two rollback
-    // verbs — or an empty `unguarded` would prove nothing.
-    expect(writes.length).toBeGreaterThanOrEqual(6);
+    // Sanity: the filter has to be finding this block's write sites, or an
+    // empty `unguarded` would prove nothing. The floor is the REAL count, not a
+    // token one — at six, three of these could have been deleted outright and
+    // this test would still have passed. They are, today:
+    //   1 the helper's own `printf >>`
+    //   2 `truncate -s`, 3 the `python3 os.truncate` fallback
+    //   4 the `install` seed, 5 its failure-branch `rm -f`
+    //   6-8 the three `clawbox_append_or_rollback` calls
+    expect(writes.length).toBeGreaterThanOrEqual(8);
     // Both rollback verbs, by name: a six-line count can be met without them.
     expect(writes.join("\n")).toMatch(/truncate -s/);
     expect(writes.join("\n")).toMatch(/os\.truncate/);
@@ -404,6 +417,64 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     expect(res.stderr).toContain("could not append");
     expect(res.stderr).not.toContain("could not roll");
     expect(readFileSync(guide, "utf-8")).toBe(older);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("measures a destination it cannot open, and says nothing about it", () => {
+    // Two things at once, both in the false-failure class.
+    //
+    // The number decides whether a rollback happens at all, and `wc -c` needs
+    // to OPEN the file: on a present-but-unopenable destination the helper had
+    // no length and left the fragment. `stat` does not open, so it still
+    // answers.
+    //
+    // And the redirection ORDER: bash applies them left to right, so
+    // `wc -c < "$f" 2>/dev/null` opens BEFORE stderr is silenced and a
+    // "Permission denied" line reached the gateway journal on a boot where
+    // nothing had gone wrong — in the file an operator triaging a real disk
+    // fault is reading.
+    const target = path.join(dir, "unopenable.md");
+    writeFileSync(target, "0123456789");
+    chmodSync(target, 0o222);
+
+    const script = [
+      "set -euo pipefail",
+      `CLAWBOX_ROOT=${JSON.stringify(dir)}`,
+      // A workspace that does not exist, so the block defines its helpers and
+      // runs none of its own writes.
+      `CLAWBOX_WORKSPACE=${JSON.stringify(path.join(dir, "nowhere"))}`,
+      seedingBlock(),
+      `clawbox_file_size ${JSON.stringify(target)}`,
+    ].join("\n");
+    const res = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+
+    expect(res.status).toBe(0);
+    expect(res.stdout).toBe("10");
+    expect(res.stderr).toBe("");
+  });
+
+  it("says the fragment is still there when NEITHER rollback verb can run", () => {
+    // The one operator-facing line in the helper that no other case reaches:
+    // both verbs shadowed, so the rollback itself fails. Without a fixture of
+    // its own the message could be malformed, or the `if ! … && ! …` chain
+    // inverted, and every other case would stay green.
+    //
+    // The three things that matter here are the three the helper promises: the
+    // boot survives, the failure is NOT reported as a success, and the file is
+    // named as suspect rather than claimed clean.
+    const older = padToJustUnderABlock(readFileSync(TEMPLATE, "utf-8").split(`\n---\n\n${HEADING}`)[0]);
+    writeFileSync(guide, older);
+
+    const res = runCapped(Buffer.byteLength(older) + 64, TEMPLATE, {
+      hideTruncate: true,
+      hidePython: true,
+    });
+
+    expect(res.status).toBe(0);
+    expect(res.stderr).toContain("could not roll");
+    expect(res.stderr).toContain(guide);
+    expect(res.stdout).not.toContain("Appended the system-actions section");
+    // …and it really is still cut: the warning is not itself a false failure.
+    expect(readFileSync(guide, "utf-8").length).toBeGreaterThan(older.length);
   });
 
   it("appends the whole section on the next boot after a part-way write", () => {
