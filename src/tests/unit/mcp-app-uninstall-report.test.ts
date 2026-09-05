@@ -186,6 +186,36 @@ describe("app_uninstall — what the agent is told", () => {
     expect(out.error.next).toMatch(/app_uninstall/);
   });
 
+  it("reads the 500's two facts whatever order the route serialises them in", async () => {
+    // The rule that carries "the skill folder had already been removed" wants
+    // BOTH `code` and `skillRemoved`, and a forward scan between them makes the
+    // sentence depend on the order of an object literal in
+    // `src/app/setup-api/apps/uninstall/route.ts` that nothing pins. Move
+    // `skillRemoved` above `code` — a shared failure-body helper would — and
+    // the agent falls through to "nothing is known to have been removed" over a
+    // box whose skill folder is already gone: the exact false report the second
+    // rule exists to avoid making.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        500,
+        JSON.stringify({
+          ok: false,
+          skillRemoved: true,
+          error: "The uninstall failed after the app's skill folder had already been removed, so the app is only partly gone. Try again.",
+          retryable: true,
+          code: "uninstall_failed",
+        }),
+      ),
+    );
+
+    const out = await uninstall();
+
+    expect(out.isError).toBe(true);
+    if (!out.isError) throw new Error("unreachable");
+    expect(out.error.message).toMatch(/partly/i);
+    expect(out.error.message).not.toMatch(/nothing is known to have been removed/i);
+  });
+
   it("does not invent a half-removed skill folder in the 500 where none was touched", async () => {
     // The same 500, with the route reporting that no skill folder went. On the
     // hermes SKU no skills path is ever resolved, so "its skill folder may

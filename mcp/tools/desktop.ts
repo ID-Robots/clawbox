@@ -337,7 +337,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
             : "Call ui_list_apps and use an id from its installed_apps list, without the \"installed-\" prefix.",
         );
       }
-      const removed = (await apiPost<{ skillRemoved?: boolean | null }>(
+      const removed = await apiPost<{ skillRemoved?: boolean | null; skillHalfChecked?: boolean }>(
         "/setup-api/apps/uninstall",
         { appId: app_id },
         {
@@ -385,12 +385,17 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
             // the skill folder had already been removed"), and one "may already
             // be gone" sentence for both would claim a half-removed skill on
             // the hermes SKU, where no skills path is ever resolved. The first
-            // rule wants BOTH fields, in the order the route serialises them —
-            // if that body is ever reshaped it falls through to the second,
-            // which is true of every `uninstall_failed`.
+            // rule wants BOTH fields and asks for them as two INDEPENDENT
+            // lookaheads: a forward scan would have tied this sentence to the
+            // order of an object literal in the route that nothing pins, so
+            // moving `skillRemoved` above `code` there — a shared failure-body
+            // helper would — silently dropped to the second rule. That fallback
+            // is a DEGRADED answer, not an equally true one: "nothing is known
+            // to have been removed" is false of a `uninstall_failed` carrying
+            // `skillRemoved: true`, which is the whole reason there are two.
             {
               status: 500,
-              match: /"code"\s*:\s*"uninstall_failed"[\s\S]*?"skillRemoved"\s*:\s*true/,
+              match: /(?=[\s\S]*"code"\s*:\s*"uninstall_failed")(?=[\s\S]*"skillRemoved"\s*:\s*true)/,
               code: "ENDPOINT_DOWN",
               message: "The ClawBox failed part-way through the uninstall, after the app's skill folder had already been removed: the app is only partly gone and is still on the desktop.",
               next: "Call app_uninstall once more — the rest of the cleanup is repeatable. If it fails again, tell the user the app's skill is already deleted while the app is still on the desktop, and quote what the device said.",
@@ -404,7 +409,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
             },
           ],
         },
-      )) as { skillRemoved?: boolean | null; skillHalfChecked?: boolean } | undefined;
+      );
       // Anything but a 2xx has thrown by here, so the desktop entry IS gone.
       // The SKILL half depends on what was there. `skillRemoved: false` — the
       // id is in the desktop's list and no skill of that name was on disk — is
