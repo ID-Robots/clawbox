@@ -124,6 +124,21 @@ function readConfig(): OpenclawConfig {
   return JSON.parse(readFileSync(configPath, "utf-8"));
 }
 
+/**
+ * The stderr lines about the EMAIL: plugin, dropping the path guard's.
+ *
+ * `block()` extracts the shared installer and BOTH plugins it installs, so the
+ * path guard's own lines ride along in every run here. They are another
+ * suite's subject; an assertion about "did this block stay quiet" has to be
+ * about this block.
+ */
+function emailHookLines(stderr: string): string {
+  return stderr
+    .split("\n")
+    .filter((line) => !line.includes("clawbox-path-guard"))
+    .join("\n");
+}
+
 function installed(): string[] {
   const target = path.join(openclawHome, "extensions", PLUGIN_ID);
   return existsSync(target) ? readdirSync(target).sort() : [];
@@ -433,7 +448,12 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     expect(r.stderr).toMatch(/WARNING.*may not be discovered at all/);
     // The CLI's own words, so an operator can tell which refusal this was.
     expect(r.stderr).toContain("unknown plugin: clawbox-email-directives");
-    expect(r.stderr).not.toMatch(/NOTE/);
+    // A definite refusal is not an "unknown" verdict — this block must not
+    // ALSO print one of its two NOTE lines over it. Scoped to this plugin's own
+    // lines: the extract now carries the path guard's install too (see
+    // `block()`), and that one says NOTE when the test PATH has no node, which
+    // is a fact about the harness rather than about this refusal.
+    expect(emailHookLines(r.stderr)).not.toMatch(/NOTE/);
   });
 
   it("calls a CLI that answered with something that is not JSON a defect", () => {
