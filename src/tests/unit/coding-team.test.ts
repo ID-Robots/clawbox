@@ -230,6 +230,9 @@ describe("a worker in the project itself whose commit failed", () => {
     expect(done.status).toBe("done");
     expect(done.tasks.find((t) => t.task_id === "t1")!.attempts).toBe(2);
     expect(done.log.some((e) => e.type === "review" && /NOT COMMITTED: fatal: index.lock exists/.test(e.message))).toBe(true);
+    // The alert is what the card counts and what MAX_ALERTS adds up.
+    expect(done.alerts).toBe(1);
+    expect(done.log.some((e) => e.type === "alert" && /Commit failed for t1 \(run-\w+\): fatal: index.lock exists/.test(e.message))).toBe(true);
     expect(plumbing.mergeWorkerBranch).not.toHaveBeenCalled();
   });
 });

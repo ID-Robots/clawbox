@@ -46,8 +46,23 @@ function mintCookie() {
   }
 }
 
+/**
+ * A credential that will not become right by asking again: none at all, a
+ * refused password, a login with no cookie in it. Callers that retry
+ * transport failures must let this one through — the login limiter's shared
+ * bucket locks everyone out after five failures.
+ */
+export class CredentialError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CredentialError";
+    this.permanent = true;
+  }
+}
+
 let cachedCookie = null;
-export async function ownerCookie() {
+/** `signal` bounds the one login request a password credential makes. */
+export async function ownerCookie(signal) {
   if (cachedCookie) return cachedCookie;
   if (process.env.CLAWBOX_COOKIE) return (cachedCookie = process.env.CLAWBOX_COOKIE.trim());
   const minted = mintCookie();
@@ -59,34 +74,37 @@ export async function ownerCookie() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ password: process.env.CLAWBOX_PASSWORD, duration: 21600 }),
+      ...(signal ? { signal } : {}),
     });
-    if (!res.ok) throw new Error(`login failed: ${res.status} ${await res.text()}`);
+    if (!res.ok) throw new CredentialError(`login failed: ${res.status} ${await res.text()}`);
     const setCookie = res.headers.get("set-cookie") ?? "";
     const m = setCookie.match(/clawbox_session=([^;]+)/);
-    if (!m) throw new Error("login succeeded but no clawbox_session cookie came back");
+    if (!m) throw new CredentialError("login succeeded but no clawbox_session cookie came back");
     return (cachedCookie = m[1]);
   }
-  throw new Error(
+  throw new CredentialError(
     "No owner credential: run on the box (data/.session-secret readable), or set CLAWBOX_COOKIE or CLAWBOX_PASSWORD.",
   );
 }
 
 async function request(method, apiPath, { body, auth, timeoutMs } = {}) {
+  // Node's fetch has no timeout of its own: a request that hangs would hold
+  // the loop past any deadline it was given. The signal is made BEFORE the
+  // credential is resolved, so a login the credential needs is bounded too.
+  const signal = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined;
   const headers = { accept: "application/json" };
   if (body !== undefined) headers["content-type"] = "application/json";
-  if (auth === "owner") headers.cookie = `clawbox_session=${await ownerCookie()}`;
+  if (auth === "owner") headers.cookie = `clawbox_session=${await ownerCookie(signal)}`;
   else {
     const bearer = readBearer();
     if (bearer) headers.authorization = `Bearer ${bearer}`;
-    else headers.cookie = `clawbox_session=${await ownerCookie()}`;
+    else headers.cookie = `clawbox_session=${await ownerCookie(signal)}`;
   }
   const res = await fetch(`${baseUrl()}${apiPath}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
-    // Node's fetch has no timeout of its own: a request that hangs would
-    // hold the loop past any deadline it was given.
-    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
+    ...(signal ? { signal } : {}),
   });
   const text = await res.text();
   let json = null;
@@ -128,14 +146,22 @@ export async function liveRuns(timeoutMs = 30_000) {
 export async function waitForIdle(deadlineMs = 10 * 60_000, everyMs = 5_000) {
   const until = Date.now() + deadlineMs;
   for (;;) {
-    // A poll that failed is not an answer: asked again, never read as idle.
+    const remaining = until - Date.now();
+    if (remaining <= 0) return false;
+    // A poll that failed is not an answer: asked again, never read as idle —
+    // unless the credential itself is wrong, which asking again cannot fix
+    // and the login limiter would punish. Each poll, and the pause after
+    // it, stays inside what is left of the deadline.
     let live = null;
-    // Each poll is bounded by what is left of the deadline, so a stalled
-    // request cannot hold the loop past it.
-    try { live = await liveRuns(Math.max(1_000, Math.min(30_000, until - Date.now()))); } catch { /* asked again below */ }
+    try {
+      live = await liveRuns(Math.min(30_000, remaining));
+    } catch (err) {
+      if (err?.permanent) throw err;
+    }
     if (live !== null && live.length === 0) return true;
-    if (Date.now() >= until) return false;
-    await new Promise((r) => setTimeout(r, everyMs));
+    const left = until - Date.now();
+    if (left <= 0) return false;
+    await new Promise((r) => setTimeout(r, Math.min(everyMs, left)));
   }
 }
 
