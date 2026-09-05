@@ -175,7 +175,14 @@ function run(scenario: Scenario = {}): Run {
 
   mkdirSync(projectDir, { recursive: true });
   if (previousBuild === "servable") writeBuild(path.join(projectDir, ".next"), "old-build-id");
-  if (parkedBuild === "servable") writeBuild(path.join(projectDir, ".next-old"), "parked-build-id");
+  if (parkedBuild === "servable") {
+    writeBuild(path.join(projectDir, ".next-old"), "parked-build-id");
+    // With the stamp the earlier, killed run left on it. Without this the
+    // `rm -f "$build_dir/.rebuild-pid"` promote_parked_build performs has
+    // nothing to strip, and the case asserting it does would pass with that
+    // line deleted.
+    writeFileSync(path.join(projectDir, ".next-old", ".rebuild-pid"), "999999 stale-boot\n", "utf-8");
+  }
   if (parkedBuild === "nested-entry") {
     const kept = path.join(projectDir, ".next-old");
     writeBuild(kept, "parked-build-id", false);
@@ -463,9 +470,23 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
     const r = run({ build: "oom-killed", startWorks: false });
 
     expect(r.status).not.toBe(0);
-    expect(r.systemctl.some((l) => /^systemctl start clawbox-setup/.test(l))).toBe(true);
+    expect(r.systemctl.some((l) => /^systemctl restart clawbox-setup/.test(l))).toBe(true);
     expect(r.stderr).toMatch(/it is DOWN/);
     expect(r.stderr).not.toMatch(/answers on :80/);
+  });
+
+  it("restarts clawbox-setup rather than starting it, so a latched unit is replaced", () => {
+    // `start` on an already-active unit is a no-op, and the unit CAN be active
+    // here: clawbox-gateway.service's `Wants=clawbox-setup.service` pulls it
+    // back up mid-rebuild, and its own `Restart=always` latches it onto
+    // whatever tree exists once `next build` writes the standalone entry. A
+    // `start` would then leave the box serving the build that just failed
+    // verification while this function reported a rollback.
+    const r = run({ build: "succeeds", identity: "drift" });
+
+    expect(r.status).not.toBe(0);
+    expect(r.systemctl.some((l) => l === "systemctl restart clawbox-setup.service")).toBe(true);
+    expect(r.systemctl.some((l) => l === "systemctl start clawbox-setup.service")).toBe(false);
   });
 
   it("says the dashboard answers when the restore really comes up", () => {
@@ -598,9 +619,15 @@ describe("do_rebuild says who owns the build it parks", () => {
   it("leaves no owner behind on the build it promotes", () => {
     // Same rename, the other direction: promote_parked_build claims a tree an
     // earlier killed run left behind, and that tree carries that run's stamp.
-    const r = run({ previousBuild: "none", parkedBuild: "servable", build: "succeeds" });
+    //
+    // `bunInstall: "fails"` so the run ENDS on the promoted tree — it aborts
+    // before the park, so nothing writes a fresh stamp and nothing deletes
+    // `.next-old` afterwards. With a successful build both of those would make
+    // the assertion true no matter what promote did.
+    const r = run({ previousBuild: "none", parkedBuild: "servable", bunInstall: "fails" });
 
-    expect(r.status).toBe(0);
+    expect(r.status).not.toBe(0);
+    expect(r.buildId).toBe("parked-build-id");
     expect(r.ownerLeftBehind).toBe(false);
   });
 

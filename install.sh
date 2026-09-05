@@ -1187,10 +1187,15 @@ llamacpp_pid_if_running() {
 # with the box on a half-written .next and a step painted red.
 #
 # Called from do_rebuild AFTER clawbox-setup.service is stopped, and that order
-# is what makes the free hold: the gateway reaches ollama and llama.cpp through
+# is what lets the free hold: the gateway reaches ollama and llama.cpp through
 # the web server's own proxy (src/lib/local-ai-runtime.ts), so with the web
-# server down nothing can pull a model back in behind us for the length of the
-# build.
+# server down nothing can pull a model back in behind us.
+#
+# "With the web server down" is best-effort, not a guarantee, and it is worth
+# knowing which: clawbox-gateway.service carries `Wants=clawbox-setup.service`,
+# so a gateway (re)start during the build starts the unit do_rebuild had just
+# stopped and the proxy is reachable again. The stop still removes the common
+# case; it does not fence the window.
 #
 # Stop, never disable — the same rule the idle standby follows, and the reason
 # it is safe: every engine here is meant to come back on demand. An update that
@@ -1366,14 +1371,20 @@ promote_parked_build() {
 # next.
 #
 # The park also stamps the tree it sets aside — `.rebuild-pid`, holding this
-# script's PID and the boot id. Both reclaims (promote_parked_build here and the
-# boot-time one in production-server.js) fire on a single fact: no
-# `.next/standalone/server.js`, but a `.next-old/standalone/server.js`. That is
-# ALSO the ordinary state of a rebuild in flight, for the whole length of the
-# build, because the rename below happens first and `next build` writes the
-# standalone entry last. The stamp is what separates "the rebuild died and left
-# its build here" — reclaim it — from "a rebuild is running and this is its
-# fallback" — leave it alone.
+# script's PID and the boot id — for production-server.js's boot-time reclaim to
+# read. That reclaim fires on a single fact: no `.next/standalone/server.js`,
+# but a `.next-old/standalone/server.js`. That is ALSO the ordinary state of a
+# rebuild in flight, for the whole length of the build, because the rename below
+# happens first and `next build` writes the standalone entry last. The stamp is
+# what separates "the rebuild died and left its build here" — reclaim it — from
+# "a rebuild is running and this is its fallback" — leave it alone.
+#
+# promote_parked_build, the reclaim in THIS file, deliberately does not read it.
+# It runs once at the top of do_rebuild, before any park of its own, so a live
+# stamp there could only mean a second rebuild running concurrently — and the
+# very next thing do_rebuild does is `rm -rf "$kept_dir"`, so a guard there
+# would imply a safety this function cannot provide. Two rebuilds at once are
+# unsupported end to end. It only strips the stamp off the tree it promotes.
 #
 # The boot id is not decoration. A power cut mid-build, one of the very cases
 # these helpers exist for, leaves the stamp on disk, and after the reboot that
@@ -1403,11 +1414,16 @@ set_previous_build_aside() {
   # Before the rename, not after: the stamp and the park then arrive together,
   # so there is no instant in which a restarting dashboard sees a parked build
   # with no owner. `$$` is this script's PID — the process whose death is what
-  # "the rebuild died" means. An unreadable boot id writes an empty second
-  # field, which no reader can match: the reclaim then behaves exactly as it did
-  # before the stamp existed, which is the safe direction to fail in.
-  if ! printf '%s %s\n' "$$" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" \
-      > "$build_dir/.rebuild-pid"; then
+  # "the rebuild died" means.
+  #
+  # An empty boot id is a stamp no reader can ever match, so it is the same
+  # outcome as no stamp at all — the reclaim behaves exactly as it did before
+  # the stamp existed. That is the safe direction to fail in, but it is not
+  # silent: a guard that is quietly inoperative is worse than one that is
+  # absent, so both halves take the same warning.
+  local boot_id=""
+  boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || boot_id=""
+  if [ -z "$boot_id" ] || ! printf '%s %s\n' "$$" "$boot_id" > "$build_dir/.rebuild-pid"; then
     echo "  Warning: could not record this rebuild as the owner of the build it is parking — a dashboard restarting mid-build may reclaim it" >&2
   fi
   mv "$build_dir" "$kept_dir"
@@ -1452,7 +1468,15 @@ restore_previous_build() {
     fi
   fi
 
-  systemctl start clawbox-setup.service 2>/dev/null || true
+  # `restart`, not `start`: `start` on a unit that is already active is a no-op,
+  # and the unit CAN be active here. do_rebuild stopped it, but
+  # clawbox-gateway.service carries `Wants=clawbox-setup.service`, so any
+  # gateway (re)start pulls it back up mid-rebuild — and once `next build` has
+  # written the standalone entry, the restart loop latches onto whatever tree is
+  # in place. A `start` would then be a no-op over a process serving the build
+  # that just FAILED verification, curl would answer 200 from it, and the line
+  # below would report a rollback that never happened.
+  systemctl restart clawbox-setup.service 2>/dev/null || true
 
   # `systemctl is-active` is not the question. clawbox-setup is `Type=simple`
   # with `Restart=always` (config/clawbox-setup.service), so systemd calls the
@@ -1496,6 +1520,12 @@ do_rebuild() {
   # shell, a power cut, an operator's Ctrl-C — is the box's only build. Claim it
   # back before the rename below would delete it. After the stop, never before
   # it: the rename moves the tree the running server is loading from.
+  #
+  # The stop is what makes that ordering worth having, but it does not keep the
+  # dashboard down for the length of the rebuild — clawbox-gateway.service's
+  # `Wants=clawbox-setup.service` starts it again on any gateway (re)start. That
+  # is why the park stamps the tree it sets aside, and why the two `systemctl`
+  # calls that end a rebuild use `restart` rather than `start`.
   promote_parked_build "$build_dir" "$kept_dir"
 
   # After the stop, never before it — see free_memory_for_build.
@@ -5865,8 +5895,15 @@ step_chpasswd() {
 
 step_rebuild() {
   do_rebuild
-  echo "Starting clawbox-setup.service..."
-  systemctl start clawbox-setup.service
+  # `restart`, not `start`, for the reason spelled out in
+  # restore_previous_build: the unit can already be active, latched by its own
+  # `Restart=always` onto the tree that existed the moment `next build` wrote
+  # the standalone entry — which is BEFORE postbuild copied .next/static,
+  # public/ and build-info.json beside it. `start` is a no-op over that process
+  # and would leave the box serving a half-copied build. step_rebuild_reboot is
+  # saved by the reboot that follows it; this step is not.
+  echo "Restarting clawbox-setup.service..."
+  systemctl restart clawbox-setup.service
 }
 
 step_restart() {

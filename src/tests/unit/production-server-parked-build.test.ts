@@ -264,6 +264,38 @@ describe("production-server.js reclaims a parked build at boot", () => {
     expect(existsSync(path.join(projectDir, ".next-old"))).toBe(false);
   });
 
+  it("refuses for a live owner this process may not signal", () => {
+    // The branch that actually runs on a device: do_rebuild is root and this
+    // server is `clawbox`, so `process.kill(pid, 0)` answers EPERM rather than
+    // succeeding, and EPERM means alive. pid 1 stands in for it — owned by
+    // root, always running. (A suite run AS root takes the success branch
+    // instead and asserts the same outcome, which is why there is no skip.)
+    const kept = path.join(projectDir, ".next-old");
+    writeBuild(kept, "parked-build-id");
+    writeFileSync(path.join(kept, OWNER_STAMP), ownerStamp(1), "utf-8");
+
+    const r = runReclaim(projectDir);
+
+    expect(r.threw).toBeNull();
+    expect(existsSync(path.join(kept, "standalone", "server.js"))).toBe(true);
+    expect(r.warnings.join(" ")).toMatch(/rebuild is in progress/);
+  });
+
+  it("reclaims, and says so, when the stamp cannot be read as an owner", () => {
+    // A stamp that is there but proves nothing — truncated, garbled, written by
+    // a shell that could not read the boot id. Reclaiming is right, but a guard
+    // that is silently inoperative must not look like one that never fired.
+    const kept = path.join(projectDir, ".next-old");
+    writeBuild(kept, "parked-build-id");
+    writeFileSync(path.join(kept, OWNER_STAMP), `not-a-pid ${bootId()}\n`, "utf-8");
+
+    const r = runReclaim(projectDir);
+
+    expect(r.threw).toBeNull();
+    expect(buildId(projectDir)).toBe("parked-build-id");
+    expect(r.warnings.join(" ")).toMatch(/names no live rebuild/);
+  });
+
   it("reclaims a parked build that carries no stamp at all", () => {
     // Every build parked before this stamp existed, and every one parked by a
     // shell that could not write it, has none. Absent must mean "nobody is
@@ -274,5 +306,7 @@ describe("production-server.js reclaims a parked build at boot", () => {
 
     expect(r.threw).toBeNull();
     expect(buildId(projectDir)).toBe("parked-build-id");
+    // …and nothing is said about a stamp that was never there.
+    expect(r.warnings.join(" ")).not.toMatch(/names no live rebuild/);
   });
 });

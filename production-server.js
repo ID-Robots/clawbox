@@ -646,10 +646,17 @@ try {
   // one failed update, while a stamp wrongly believed live costs a
   // crash-looping box with its only build on disk — the state this whole block
   // was added to end.
+  //
+  // A PID that is alive is only proof that SOME process holds that number, and
+  // within one boot a number can be reused. It cannot be reused in time to
+  // matter here: this block runs on every clawbox-setup start, so a rebuild
+  // that dies is seen ~3 s later by the `Restart=always` restart it caused —
+  // millions of process creations before `kernel.pid_max` could wrap.
   const OWNER_STAMP = ".rebuild-pid";
+  const stampPath = path.join(parkedDir, OWNER_STAMP);
   const readTrimmed = (p) => { try { return fs.readFileSync(p, "utf-8").trim(); } catch { return ""; } };
   const rebuildOwnerPid = () => {
-    const [rawPid, stampBootId] = readTrimmed(path.join(parkedDir, OWNER_STAMP)).split(/\s+/);
+    const [rawPid, stampBootId] = readTrimmed(stampPath).split(/\s+/);
     const pid = Number.parseInt(rawPid, 10);
     if (!Number.isInteger(pid) || pid <= 0) return 0;
     // A PID is only meaningful within the boot that issued it: a power cut
@@ -672,12 +679,28 @@ try {
     if (owner) {
       console.warn(`[production-server] No .next build yet — a rebuild is in progress (pid ${owner}), leaving .next-old alone.`);
     } else {
+      // Said out loud when a stamp is there but proves nothing — stale, from
+      // another boot, or unreadable. Reclaiming is right in all three cases,
+      // but a guard that is silently inoperative (a future UMask on the
+      // root-update unit would do it) must not look like one that never fired.
+      if (present(stampPath)) {
+        console.warn("[production-server] .next-old carries a rebuild stamp that names no live rebuild — treating the parked build as abandoned.");
+      }
       console.warn("[production-server] No .next build, but .next-old holds one — an update was killed mid-rebuild. Putting it back.");
       fs.rmSync(path.join(__dirname, ".next"), { recursive: true, force: true });
       fs.renameSync(parkedDir, path.join(__dirname, ".next"));
-      // The stamp named the run that died; it must not stay in the tree we serve.
-      fs.rmSync(path.join(__dirname, ".next", OWNER_STAMP), { force: true });
       console.warn("[production-server] Restored the parked build. Run the update again to get the new one.");
+      // Its own try, deliberately: the reclaim is already done by the line
+      // above, and `force` swallows ENOENT but not EACCES or EIO. Letting one
+      // reach the catch below would report "Could not reclaim a parked build"
+      // over a reclaim that succeeded — a false failure in the line an
+      // operator triages from.
+      try {
+        fs.rmSync(path.join(__dirname, ".next", OWNER_STAMP), { force: true });
+      } catch {
+        // A stale stamp inside the restored tree is inert: the next park
+        // overwrites it, and nothing else reads it there.
+      }
     }
   }
 } catch (err) {
