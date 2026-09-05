@@ -40,6 +40,17 @@ vi.mock("@/lib/hermes-skill-index", async (importOriginal) => {
   return { ...actual, getCatalogRecord: vi.fn(async () => undefined) };
 });
 
+// Left unmocked, `findInstalledSkill` walks the REAL ~/.hermes/skills: it passes
+// here and in CI because that directory is absent, and would flip the second
+// case below to the installed branch on a Hermes DEVICE — which is where the
+// working rules say to run the suites. The whole point of this PR is that the
+// device is the authority, so its own test must not depend on the host's skill
+// directory.
+vi.mock("@/lib/hermes-skills-server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/hermes-skills-server")>();
+  return { ...actual, findInstalledSkill: vi.fn(async () => null) };
+});
+
 import { getCatalogRecord, type CatalogRecord } from "@/lib/hermes-skill-index";
 
 const mockRecord = vi.mocked(getCatalogRecord);

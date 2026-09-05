@@ -160,3 +160,86 @@ describe("skill_info — an id nothing on the device backs", () => {
     expect(out.text).toContain("official/pdf");
   });
 });
+
+/**
+ * The third 200-shaped outcome of phase 2, and the one the tool did not model.
+ *
+ * `hermes skills inspect <bare name>` prints a DISAMBIGUATION TABLE instead of a
+ * skill panel when several catalogue rows match, and the route answers that as a
+ * 200 `{ ambiguous, query, candidates }` (inspect/route.ts, `remoteDocs`). Read
+ * only through `phase2?.delta`, it is neither a refusal nor a failure — so the
+ * phase-1 PLACEHOLDER was handed to the agent as a real skill: the name is the
+ * requested id echoed back, with no description, no source and no trust. That is
+ * TASK-547's symptom verbatim, reached by the very input phase 2 exists to
+ * resolve, since the store opens details by publisher-written bare NAME.
+ */
+describe("skill_info — an id Hermes could not narrow down", () => {
+  /** Phase 1 answers `phase1`; the docs call ANSWERS with `docs`. */
+  function twoPhaseAnswers(phase1: unknown, docs: unknown) {
+    apiGet.mockImplementation(async (_route: string, opts: { query?: Record<string, unknown> }) =>
+      opts?.query?.docs ? docs : phase1,
+    );
+  }
+
+  it("refuses an ambiguous name with its candidates instead of inventing a skill", async () => {
+    twoPhaseAnswers(
+      { skill: { ...UNBACKED.skill, id: "notion", name: "notion" } },
+      {
+        ambiguous: true,
+        query: "notion",
+        candidates: [{ id: "official/notion" }, { id: "clawhub/notion-api" }],
+      },
+    );
+
+    const out = await skills().call("skill_info", { id: "notion" });
+
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    // The same answer phase 1's own ambiguity branch gives, so one device state
+    // cannot produce two stories.
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.next).toContain("official/notion");
+    expect(out.error.next).toContain("clawhub/notion-api");
+  });
+
+  it("does not report a placeholder when the docs call answered with nothing to add", async () => {
+    // A 200 that carried no body and no description settles nothing, and the
+    // record itself carries no description, no source and no trust: there is
+    // nothing on this device, and nothing from Hermes, that says the skill
+    // exists — only the id the caller typed.
+    twoPhaseAnswers({ skill: { ...UNBACKED.skill, catalogMiss: undefined } }, { delta: {} });
+
+    const out = await skills().call("skill_info", { id: UNKNOWN_ID });
+
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("NOT_FOUND");
+  });
+
+  it("propagates a refusal the rules already classified", async () => {
+    // `skillsGet` PREPENDS the edition rule, and `api()` turns a matched body
+    // into a ToolError before this caller's `.catch` runs — so a phase-2 404
+    // carrying `not_hermes` is not an `ApiError`, fails the `instanceof` test,
+    // and was bucketed as "the device could not look that skill up", swallowing
+    // a NOT_SUPPORTED_HERE the agent has to act on.
+    twoPhases(UNBACKED, new ApiError(404, JSON.stringify({ error: "Not found", code: "not_hermes" })));
+
+    const out = await skills().call("skill_info", { id: UNKNOWN_ID });
+
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("NOT_SUPPORTED_HERE");
+  });
+
+  it("does not read a 404 that is not a not-found as Hermes refusing the id", async () => {
+    // Status alone is not the refusal: only `code: "not_found"` is the route
+    // saying `hermes skills inspect` printed neither a panel nor a table.
+    twoPhases(UNBACKED, new ApiError(404, JSON.stringify({ error: "Nope", code: "something_else" })));
+
+    const out = await skills().call("skill_info", { id: UNKNOWN_ID });
+
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).not.toBe("NOT_FOUND");
+  });
+});
