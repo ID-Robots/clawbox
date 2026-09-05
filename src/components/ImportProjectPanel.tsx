@@ -140,7 +140,7 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
           {t("codingAgent.importTitle")}
         </h3>
         <button type="button" onClick={onClose} className={BTN_SECONDARY} data-testid="coding-agent-import-close">
-          {t("codingAgent.cancel")}
+          {t("cancel")}
         </button>
       </div>
 
@@ -173,7 +173,7 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
           {repos.kind === "error" && (
             <div className="flex flex-wrap items-center gap-2">
               <p className="text-[11px] text-red-400" role="alert">{repos.message}</p>
-              <button type="button" onClick={() => void loadRepos()} className={BTN_SECONDARY}>{t("codingAgent.retry")}</button>
+              <button type="button" onClick={() => void loadRepos()} className={BTN_SECONDARY}>{t("retry")}</button>
             </div>
           )}
           {repos.kind === "ready" && (

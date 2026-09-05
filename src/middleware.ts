@@ -346,6 +346,21 @@ async function verifySessionCookie(cookie: string, expectedGen: number): Promise
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname.toLowerCase();
 
+  // 0. The trailing-slash redirect Next used to do itself before anything
+  // here ran (skipTrailingSlashRedirect in next.config.ts): kept, first, for
+  // PAGE paths — never a proxied app's under /apps/<id>/, whose base path
+  // carries the slash on purpose (src/lib/app-proxy.ts), and never an API
+  // path, which the gates below judge as typed (a `/setup-api/gateway/`
+  // must not dodge the exact-match list by way of a redirect).
+  {
+    const raw = request.nextUrl.pathname;
+    if (raw.length > 1 && raw.endsWith("/") && !isAppProxyPath(raw) && !raw.startsWith("/setup-api/") && !raw.startsWith("/api/") && !raw.startsWith("/_next/")) {
+      const url = request.nextUrl.clone();
+      url.pathname = raw.replace(/\/+$/, "") || "/";
+      return NextResponse.redirect(url, 308);
+    }
+  }
+
   // 1. Captive portal detection
   if (REDIRECT_PATHS.has(pathname)) {
     return NextResponse.redirect(PORTAL_URL, 302);

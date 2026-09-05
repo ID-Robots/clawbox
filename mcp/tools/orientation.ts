@@ -107,10 +107,10 @@ or a port is dead the next morning. Three things make it work:
    which port it serves on and that it opens at /apps/<folder>/.
 
 Never write location.hostname or a port into an HTML redirect: the desktop
-frames /apps/<folder>/ itself. To stop or restart a server YOU started, use
-its PID (the one \`node …\` printed, or \`$!\`) —
-never pkill, killall or fuser: ClawBox's own web server is a Next.js server
-too, and \`pkill -f next-server\` takes the box down with your run.`;
+frames /apps/<folder>/ itself. To stop or restart a server YOU started,
+use its PID (the one \`node …\` printed, or \`$!\`) — never pkill, killall or fuser:
+ClawBox's own web server is a Next.js server too, and \`pkill -f next-server\`
+takes the box down with your run.`;
 
 function loadFieldGuide(): string | null {
   try {

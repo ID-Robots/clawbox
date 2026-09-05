@@ -48,8 +48,22 @@ import { githubStatus } from "@/lib/coding-github";
 /** A folder name the project folder will take, from a repository or folder name. */
 export function importFolderName(raw: string): string {
   const base = path.basename(raw.trim()).replace(/\.git$/i, "");
-  const clean = base.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 64);
+  const clean = trimEdges(base.replace(/[^A-Za-z0-9._-]/g, "-")).slice(0, 64);
   return clean || "project";
+}
+
+/** Strip leading and trailing dots and dashes — one pass, no backtracking. */
+function trimEdges(name: string): string {
+  let start = 0;
+  let end = name.length;
+  while (start < end && (name[start] === "-" || name[start] === ".")) start++;
+  while (end > start && (name[end - 1] === "-" || name[end - 1] === ".")) end--;
+  return name.slice(start, end);
+}
+
+/** One line for the log: a user-typed value can carry a newline that would forge a second entry. */
+function forLog(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200);
 }
 
 /** Folders left behind on a copy — rebuilt by an install, not part of the project. */
@@ -212,7 +226,12 @@ export type ImportOutcome =
 
 /** A free name in the project folder, or the refusal. */
 async function claimTarget(projectsRoot: string, folder: string): Promise<{ ok: true; directory: string } | { ok: false; reason: ImportReason; detail: string }> {
-  const directory = path.join(projectsRoot, folder);
+  const directory = path.resolve(projectsRoot, folder);
+  // Directly inside the project folder and nothing else — the name was made
+  // by importFolderName, and this is the check that stands on its own.
+  if (!directory.startsWith(projectsRoot + path.sep) || path.dirname(directory) !== projectsRoot) {
+    return { ok: false, reason: "invalid", detail: "The project's name is not one the project folder can hold." };
+  }
   const existing = await fs.promises.lstat(directory).catch(() => null);
   if (existing) return { ok: false, reason: "exists", detail: `There is already a "${folder}" in your project folder. Rename or remove it first.` };
   return { ok: true, directory };
@@ -304,7 +323,7 @@ export async function importFolder(input: { source: string; projectsRoot: string
     return { ok: false, reason: "failed", detail: `Copying the folder failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400) };
   }
   const repo = await ensureRepository(target.directory, source);
-  if (repo.detail) console.error(`[coding-agent] import of ${source}: ${repo.detail}`);
+  if (repo.detail) console.error(`[coding-agent] import of ${forLog(source)}: ${forLog(repo.detail)}`);
   return { ok: true, directory: target.directory, folder, initialized: repo.initialized, skipped };
 }
 

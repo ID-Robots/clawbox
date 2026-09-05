@@ -89,27 +89,45 @@ export function parseClawboxManifest(text: string): ClawboxManifest | null {
   };
 }
 
-/** The manifest in `directory`, or null when there is none worth the name. */
+/**
+ * The manifest in `directory`, or null when there is none worth the name.
+ * Read through ONE open handle — the size is checked on the handle, never
+ * on a separate stat the file could change under — and never past the cap.
+ */
 export async function readClawboxManifest(directory: string): Promise<ClawboxManifest | null> {
   const file = path.join(directory, CLAWBOX_MANIFEST_FILE);
+  let handle: fs.promises.FileHandle | null = null;
   try {
-    const stat = await fs.promises.stat(file);
+    handle = await fs.promises.open(file, "r");
+    const stat = await handle.stat();
     if (!stat.isFile() || stat.size > MANIFEST_MAX_BYTES) return null;
-    return parseClawboxManifest(await fs.promises.readFile(file, "utf-8"));
+    const buffer = Buffer.alloc(MANIFEST_MAX_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > MANIFEST_MAX_BYTES) return null;
+    return parseClawboxManifest(buffer.subarray(0, bytesRead).toString("utf-8"));
   } catch {
     return null;
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 
 /** The synchronous read for the one caller that cannot await (production-server.js's upgrade router mirrors it). */
 export function readClawboxManifestSync(directory: string): ClawboxManifest | null {
   const file = path.join(directory, CLAWBOX_MANIFEST_FILE);
+  let fd: number | null = null;
   try {
-    const stat = fs.statSync(file);
+    fd = fs.openSync(file, "r");
+    const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size > MANIFEST_MAX_BYTES) return null;
-    return parseClawboxManifest(fs.readFileSync(file, "utf-8"));
+    const buffer = Buffer.alloc(MANIFEST_MAX_BYTES + 1);
+    const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    if (bytesRead > MANIFEST_MAX_BYTES) return null;
+    return parseClawboxManifest(buffer.subarray(0, bytesRead).toString("utf-8"));
   } catch {
     return null;
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* closed */ } }
   }
 }
 

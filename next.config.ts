@@ -18,6 +18,11 @@ const APP_VERSION = (() => {
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // Next's own trailing-slash redirect (`/x/` → 308 `/x`) is switched off
+  // so `/apps/<id>/` — the base path a proxied app is served under, which
+  // a Vite dev server insists on with the slash — reaches the proxy as
+  // typed; the middleware keeps that redirect for every other path.
+  skipTrailingSlashRedirect: true,
   serverExternalPackages: ["better-sqlite3", "busboy", "sharp"],
   // sharp's native addon dlopen()s libvips at runtime, so Next's file tracing
   // — which follows `require`/`import` — never sees the shared object and

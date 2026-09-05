@@ -61,7 +61,8 @@ export async function POST(request: Request) {
   }
   if (!out.ok) return NextResponse.json({ error: out.detail, kind: out.reason }, { status: STATUS[out.reason] });
 
-  console.error(`[coding-agent] imported ${b.source === "github" ? b.repo : b.path} as ${out.directory}`);
+  // The folder made, never the value typed: a typed path can carry a newline.
+  console.error(`[coding-agent] imported from ${b.source === "github" ? "GitHub" : "a folder"} as ${out.directory}`);
   const { projects } = await listProjects();
   const project = projects.find((p) => p.directory === out.directory) ?? null;
   return NextResponse.json({ project, directory: out.directory, folder: out.folder, initialized: out.initialized, skipped: out.skipped });
