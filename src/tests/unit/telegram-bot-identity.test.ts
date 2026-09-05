@@ -229,6 +229,68 @@ describe("readActiveTelegramBot", () => {
     expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: HERMES_BOT, known: true });
   });
 
+  // A hand-written line is exactly where a quoted value and a trailing comment
+  // meet, and PyYAML reads all three of these as the same token. Reading the
+  // quotes and the comment back as part of the value made the token fail the
+  // `<bot id>:<secret>` check, and the answer became a confident `{token: null,
+  // known: true}` — the same fail-open this module exists to close, in another
+  // spelling.
+  it.each([
+    ["double-quoted", `TELEGRAM_BOT_TOKEN: "${HERMES_BOT}"  # main bot`],
+    ["single-quoted", `TELEGRAM_BOT_TOKEN: '${HERMES_BOT}'  # main bot`],
+    ["unquoted", `TELEGRAM_BOT_TOKEN: ${HERMES_BOT}  # main bot`],
+    ["quoted key and value", `"TELEGRAM_BOT_TOKEN": "${HERMES_BOT}" # main bot`],
+  ])("reads a %s config.yaml value that carries a trailing comment", async (_name, line) => {
+    writeHermesConfigYaml(`model: openrouter/some-model\n${line}\n`);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: HERMES_BOT, known: true });
+  });
+
+  // Hermes' bridge exports a block scalar into the environment like any other
+  // string, so the gateway polls it — this reader simply cannot name it. That is
+  // "we could not look", never "this box has no bot".
+  it("says known:false for a config.yaml value it cannot resolve", async () => {
+    writeHermesConfigYaml(`TELEGRAM_BOT_TOKEN: |\n  ${HERMES_BOT}\n`);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: false });
+  });
+
+  // The reverse: the guard must not refuse for ever over a key that is simply
+  // written empty, which YAML reads as null and the bridge does not export.
+  it("stays known for a config.yaml key written with no value", async () => {
+    writeHermesConfigYaml(`TELEGRAM_BOT_TOKEN:\n`);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: true });
+  });
+
+  // An EMPTY .env value is an answer, not a gap: load_dotenv puts the key in
+  // os.environ and the config.yaml pass skips keys the environment carries. So
+  // the gateway polls nothing, and reporting the config.yaml bot as this box's
+  // would have been a false `configured: true` on every panel.
+  it("does not fall through to config.yaml when .env defines the key as empty", async () => {
+    fs.writeFileSync(path.join(hermesHome, ".env"), "TELEGRAM_BOT_TOKEN=\n", { mode: 0o600 });
+    writeHermesConfigYaml(`TELEGRAM_BOT_TOKEN: ${MIRROR_BOT}\n`);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: true });
+  });
+
+  // ~/.hermes as a regular file (a bad restore, a stray touch): the .env reader
+  // forgives ENOTDIR, and the config.yaml reader has to forgive it the same way
+  // or the two halves disagree and every approvals-bot save answers 503 for
+  // good over a path that holds nothing at all.
+  it("stays known when ~/.hermes is a file rather than a directory", async () => {
+    const stray = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-bot-identity-stray-"));
+    const notADir = path.join(stray, "hermes-home");
+    fs.writeFileSync(notADir, "not a directory\n");
+    process.env.HERMES_HOME = notADir;
+    try {
+      expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: true });
+    } finally {
+      process.env.HERMES_HOME = hermesHome;
+      fs.rmSync(stray, { recursive: true, force: true });
+    }
+  });
+
   // The fallback is read off the column-0 lines, not by parsing the document, so
   // a construct the line editor does not model elsewhere in the file cannot turn
   // into "we could not look" — which both save gates would then have to act on.
@@ -327,6 +389,20 @@ describe("readTelegramBotsInUse", () => {
     writeOpenClawToken(OPENCLAW_BOT);
 
     expect(await identity.readTelegramBotsInUse()).toEqual({ ids: ["111111"], known: true });
+  });
+
+  // ...but only when something on the device actually SAID which edition this
+  // is. With no lock file and no CLAWBOX_EDITION, "openclaw" is this module's
+  // own guess, and discarding a Hermes store's `known: false` on the strength
+  // of a guess is the fail-open one layer below the one this guard closes: a
+  // Hermes box with a missing lock, a root-owned ~/.hermes/.env and no mirror
+  // would answer `{ids: [], known: true}` and wave its own bot through.
+  it("counts both stores when nothing on the device names the edition", async () => {
+    delete process.env.CLAWBOX_EDITION;
+    makeUnreadable(path.join(hermesHome, ".env"));
+    writeOpenClawToken(OPENCLAW_BOT);
+
+    expect(await identity.readTelegramBotsInUse()).toEqual({ ids: ["111111"], known: false });
   });
 
   it("still consults both stores on a dual box, where both harnesses ARE installed", async () => {

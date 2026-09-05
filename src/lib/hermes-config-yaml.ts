@@ -82,7 +82,15 @@ async function readConfigText(file: string): Promise<{ text: string; mode: numbe
     const [text, stat] = await Promise.all([fs.readFile(file, "utf-8"), fs.stat(file)]);
     return { text, mode: stat.mode & 0o777, existed: true };
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+    // ENOENT: no config.yaml. ENOTDIR: a component of the path is a file, so
+    // there is no ~/.hermes directory to hold one either. Both mean "nothing
+    // configured yet" — and both have to be forgiven HERE, because readHermesEnv
+    // already forgives them: a ~/.hermes that is a regular file otherwise left
+    // the .env half of the reader saying `known: true` and this half saying
+    // `known: false`, which is a permanent 503 on every approvals-bot save over
+    // a path that holds nothing at all.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
       return { text: "", mode: CONFIG_MODE, existed: false };
     }
     throw err;
@@ -219,18 +227,23 @@ export async function patchHermesConfig(patch: HermesConfigPatch): Promise<Herme
  * apart: see telegram-bot-identity.ts, where "we could not find out" is the
  * only answer allowed to make a save gate refuse.
  *
- * `known: false` therefore means the FILE could not be read, and nothing else.
- * Reading the value goes through {@link getTopLevelScalar}, which answers from
- * the column-0 lines alone rather than parsing the document, so a shape the
- * line editor does not model somewhere else in the file cannot turn into a
- * refusal here.
+ * `known: false` therefore means "we could not look" — the file did not open,
+ * or the key is there carrying a value this reader cannot name. Reading the
+ * value goes through {@link getTopLevelScalar}, which answers from the column-0
+ * lines alone rather than parsing the document, so a shape the line editor does
+ * not model somewhere ELSE in the file cannot turn into a refusal here: only
+ * this key's own value can.
  */
 export async function readHermesConfigTopLevelScalar(
   key: string,
 ): Promise<{ value: string | null; known: boolean }> {
   try {
     const { text } = await readConfigText(hermesConfigPath());
-    return { value: getTopLevelScalar(text, key).value, known: true };
+    // `readable` carries the third state out: a key defined with a value this
+    // reader cannot resolve is a credential the bridge still exports, so it is
+    // "we could not look", never "there is no bot".
+    const scalar = getTopLevelScalar(text, key);
+    return { value: scalar.value, known: scalar.readable };
   } catch (err) {
     // The message only — this file holds credentials, and Node puts the failing
     // path into the error it hands over.

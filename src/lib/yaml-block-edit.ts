@@ -140,16 +140,60 @@ function findEntry(lines: string[], start: number, end: number, indent: number, 
   return scanBlock(lines, start, end, indent).find((e) => e.key === key) ?? null;
 }
 
-/** Value text plus any trailing `# comment` we must preserve when rewriting. */
-function splitTrailingComment(inline: string): { value: string; comment: string } {
-  if (inline.startsWith('"') || inline.startsWith("'")) {
-    // A `#` inside a quoted scalar is data, not a comment. Not worth parsing
-    // quoting rules for: the caller replaces the whole value anyway.
-    return { value: inline, comment: "" };
+/**
+ * Where a quoted scalar ends, or -1 when it never closes on this line.
+ *
+ * Double quotes escape with a backslash, single quotes by doubling — the same
+ * two rules {@link parseYamlScalar} undoes.
+ */
+function endOfQuotedScalar(inline: string, quote: '"' | "'"): number {
+  for (let i = 1; i < inline.length; i += 1) {
+    const ch = inline[i];
+    if (quote === '"' && ch === "\\") {
+      i += 1;
+      continue;
+    }
+    if (ch !== quote) continue;
+    if (quote === "'" && inline[i + 1] === "'") {
+      i += 1;
+      continue;
+    }
+    return i;
+  }
+  return -1;
+}
+
+/**
+ * Value text plus any trailing `# comment` we must preserve when rewriting.
+ *
+ * A `#` INSIDE a quoted scalar is data, so the closing quote is found first and
+ * only the remainder is searched for a comment. Giving up on the whole line
+ * instead — which is what this did, on the grounds that the editor replaces the
+ * value anyway — was false in both directions. It cost the EDITOR the comment it
+ * exists to preserve, and it made the two READERS below answer
+ * `TOKEN: "…"  # main bot` with quotes-plus-comment: for a credential that is a
+ * confident "this box has nothing here" over a box that has one, which is the
+ * fail-open `telegram-bot-identity.ts` exists to close, reached through the
+ * value instead of through the key.
+ *
+ * `closed` is false only when a quoted run does not end cleanly on this line —
+ * an unterminated quote, or text after the closing one. The split cannot be
+ * trusted there, and a reader has to treat it as a value it could not name
+ * rather than as a value.
+ */
+function splitTrailingComment(inline: string): { value: string; comment: string; closed: boolean } {
+  const quote = inline[0];
+  if (quote === '"' || quote === "'") {
+    const end = endOfQuotedScalar(inline, quote);
+    if (end === -1) return { value: inline, comment: "", closed: false };
+    const rest = inline.slice(end + 1);
+    if (rest === "") return { value: inline, comment: "", closed: true };
+    if (!/^\s+#/.test(rest)) return { value: inline, comment: "", closed: false };
+    return { value: inline.slice(0, end + 1), comment: rest, closed: true };
   }
   const m = /^(.*?)(\s+#.*)$/.exec(inline);
-  if (!m) return { value: inline, comment: "" };
-  return { value: m[1].trimEnd(), comment: m[2] };
+  if (!m) return { value: inline, comment: "", closed: true };
+  return { value: m[1].trimEnd(), comment: m[2], closed: true };
 }
 
 /**
@@ -242,10 +286,31 @@ export function getYamlPath(text: string, path: string[]): string | null {
 
 /** One top-level entry as {@link getTopLevelScalar} reads it. */
 export interface TopLevelScalar {
-  /** A line at column 0 names this key. */
-  present: boolean;
-  /** Its inline scalar, or null when the key opens a block instead. */
+  /** The key's top-level scalar, or null when it has none we can read. */
   value: string | null;
+  /**
+   * False when a line at column 0 DOES define this key, with a value this
+   * reader cannot resolve to a scalar: a block scalar (`|`, `>`), a tag, an
+   * anchor or alias, a flow collection, or a quote that does not close. `value`
+   * is null then, and it means "there is something here and we cannot name it"
+   * — a different fact from "the key is not defined", and the only one of the
+   * two a save gate may act on.
+   */
+  readable: boolean;
+}
+
+/** Value shapes whose first character changes what the value IS. */
+const OPAQUE_VALUE_RE = /^[|>!&*{[]/;
+
+/** One inline value, as {@link getTopLevelScalar} resolves it. */
+function readInlineScalar(inline: string): TopLevelScalar {
+  // `KEY:` and `KEY: # note` are both a YAML null, which Hermes' bridge does
+  // not export — confidently nothing, not "we could not look".
+  if (inline === "" || inline.startsWith("#")) return { value: null, readable: true };
+  if (OPAQUE_VALUE_RE.test(inline)) return { value: null, readable: false };
+  const split = splitTrailingComment(inline);
+  if (!split.closed) return { value: null, readable: false };
+  return { value: parseYamlScalar(split.value), readable: true };
 }
 
 /**
@@ -264,18 +329,23 @@ export interface TopLevelScalar {
  * bridge loads the file with, reads `"KEY":` and `'KEY':` as the same key, and
  * missing them would answer a confident "not defined" over a defined one. The
  * LAST occurrence wins, as PyYAML's mapping constructor does. A key that opens
- * a nested block is `present` with a null value: Hermes' bridge exports only
- * scalars, so there is nothing there for it to export either.
+ * a nested block reads as no value at all: Hermes' bridge exports only scalars,
+ * so there is nothing there for it to export either.
+ *
+ * What it will NOT do is guess. A value shape it cannot resolve — a block
+ * scalar, a tag, an anchor, a flow collection — still reaches the gateway
+ * through the bridge, so answering `null` for one would be the same confident
+ * "nothing here" that missing a quoted key was. Those come back `readable:
+ * false` and the caller degrades instead of deciding.
  */
 export function getTopLevelScalar(text: string, key: string): TopLevelScalar {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const line = new RegExp(`^(?:"${escaped}"|'${escaped}'|${escaped})[ \\t]*:(.*)$`);
-  let found: TopLevelScalar = { present: false, value: null };
+  let found: TopLevelScalar = { value: null, readable: true };
   for (const raw of text.split(/\r\n|\r|\n/)) {
     const m = line.exec(raw);
     if (!m) continue;
-    const inline = splitTrailingComment(m[1].trim()).value;
-    found = { present: true, value: inline === "" ? null : parseYamlScalar(inline) };
+    found = readInlineScalar(m[1].trim());
   }
   return found;
 }

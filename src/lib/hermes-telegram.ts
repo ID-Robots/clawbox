@@ -339,11 +339,18 @@ export interface HermesTelegramToken {
   known: boolean;
 }
 
-/** ~/.hermes/.env's answer, tri-state like the whole of this reader. */
-async function envToken(): Promise<HermesTelegramToken> {
+/**
+ * ~/.hermes/.env's answer, tri-state like the whole of this reader.
+ *
+ * `value` is null ONLY when the key is absent from the file — an empty
+ * `TELEGRAM_BOT_TOKEN=` comes back as `""`, because that is a key the bridge
+ * puts in os.environ and the config.yaml pass then skips. Collapsing the two
+ * would send the reader on to a config.yaml copy the gateway is not using and
+ * report that bot as this box's.
+ */
+async function envToken(): Promise<{ value: string | null; known: boolean }> {
   try {
-    const token = await getHermesEnvValue(HERMES_TELEGRAM_TOKEN_KEY);
-    return { token: token || null, known: true };
+    return { value: await getHermesEnvValue(HERMES_TELEGRAM_TOKEN_KEY), known: true };
   } catch (err) {
     // An unreadable .env — EACCES after a root-owned write, EIO on a failing
     // eMMC, a directory where the file should be. Reporting "no bot" here is
@@ -357,7 +364,7 @@ async function envToken(): Promise<HermesTelegramToken> {
       "[telegram] ~/.hermes/.env could not be read; Hermes' bot is unknown:",
       err instanceof Error ? err.message : err,
     );
-    return { token: null, known: false };
+    return { value: null, known: false };
   }
 }
 
@@ -389,13 +396,13 @@ async function envToken(): Promise<HermesTelegramToken> {
  * different answers and only one of them may be acted on.
  */
 export async function readHermesTelegramToken(): Promise<HermesTelegramToken> {
-  // Sequential, not concurrent: .env answering ends the question, because that
-  // is what the bridge puts in the environment and config.yaml cannot override
-  // it. Reading the fallback anyway would spend a file read on every panel poll
-  // for a value that is discarded — and log a complaint about a config.yaml
-  // nothing was going to use.
+  // Sequential, not concurrent: .env DEFINING the key ends the question — that
+  // is what the bridge puts in the environment, and config.yaml cannot override
+  // it, empty value included. Reading the fallback anyway would spend a file
+  // read on every panel poll for a value that is discarded — and log a
+  // complaint about a config.yaml nothing was going to use.
   const env = await envToken();
-  if (env.token !== null) return env;
+  if (env.value !== null) return { token: env.value || null, known: env.known };
   const yaml = await readHermesConfigTopLevelScalar(HERMES_TELEGRAM_TOKEN_KEY);
   return { token: yaml.value, known: env.known && yaml.known };
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   formatYamlScalar,
+  getTopLevelScalar,
   getYamlPath,
   setYamlPath,
   unsetYamlPath,
@@ -167,5 +168,103 @@ describe("hasYamlPath", () => {
 
   it("is true for an ordinary key with a value", () => {
     expect(hasYamlPath(text, ["security", "tirith_path"])).toBe(true);
+  });
+});
+
+/**
+ * A trailing `# comment` beside a QUOTED value.
+ *
+ * The comment splitter was written for the editor, which replaces the whole
+ * value, so it deliberately gave up on a value that opens with a quote and
+ * handed the caller the quote, the value and the comment as one string. The
+ * readers below inherited that: `TOKEN: "…"  # main bot` — a line a hand-fed
+ * config is exactly where you find — read back as `"…"  # main bot`, which is
+ * not the value anybody wrote and, for a credential, is a confident "this box
+ * has nothing here" over a box that has one.
+ *
+ * PyYAML — what Hermes' own env bridge loads config.yaml with — reads every
+ * shape below as the same value, so this is the table the readers owe it.
+ */
+describe("a trailing comment beside a quoted value", () => {
+  const TOKEN = "111111:AAHrealBotSecret_abc";
+
+  const cases: Array<[string, string]> = [
+    ["plain", `TELEGRAM_BOT_TOKEN: ${TOKEN}\n`],
+    ["plain with a trailing comment", `TELEGRAM_BOT_TOKEN: ${TOKEN}  # main bot\n`],
+    ["double-quoted", `TELEGRAM_BOT_TOKEN: "${TOKEN}"\n`],
+    ["double-quoted with a trailing comment", `TELEGRAM_BOT_TOKEN: "${TOKEN}"  # main bot\n`],
+    ["single-quoted with a trailing comment", `TELEGRAM_BOT_TOKEN: '${TOKEN}'  # main bot\n`],
+    ["quoted key AND quoted value with a comment", `"TELEGRAM_BOT_TOKEN": "${TOKEN}" # main bot\n`],
+  ];
+
+  it.each(cases)("getTopLevelScalar reads the value out of a %s line", (_name, text) => {
+    expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN").value).toBe(TOKEN);
+  });
+
+  it.each(cases.filter(([name]) => !name.startsWith("quoted key")))(
+    "getYamlPath reads the value out of a %s line",
+    (_name, text) => {
+      expect(getYamlPath(text, ["TELEGRAM_BOT_TOKEN"])).toBe(TOKEN);
+    },
+  );
+
+  // A `#` INSIDE the quotes is data, which is the case the splitter was
+  // protecting and must keep protecting.
+  it("keeps a # that is inside the quotes", () => {
+    expect(getTopLevelScalar(`api_key: "a#b c"  # not part of it\n`, "api_key").value).toBe("a#b c");
+    expect(getYamlPath(`api_key: 'a#b'\n`, ["api_key"])).toBe("a#b");
+  });
+
+  // The editor's own reason for the special case: a rewrite must not eat the
+  // comment beside the value it replaces.
+  it("setYamlPath preserves the comment beside a quoted value it replaces", () => {
+    const out = setYamlPath(`api_key: "old"  # the key\n`, ["api_key"], "new");
+    expect(out).toBe(`api_key: new  # the key\n`);
+  });
+});
+
+/**
+ * "There is a value here and we cannot name it" is not "there is nothing here".
+ *
+ * Hermes' env bridge exports config.yaml's top-level SCALARS into the
+ * environment, so a key holding a block scalar or a tagged value does reach the
+ * gateway — this reader just cannot resolve it. Answering `null` there is the
+ * same confident "no bot" as missing a quoted key, so the shapes it cannot read
+ * are reported as unreadable and the caller degrades instead of deciding.
+ */
+describe("getTopLevelScalar on a value it cannot resolve", () => {
+  it.each([
+    ["a literal block scalar", "TELEGRAM_BOT_TOKEN: |\n  111111:AAH\n"],
+    ["a folded block scalar", "TELEGRAM_BOT_TOKEN: >\n  111111:AAH\n"],
+    ["a tagged value", 'TELEGRAM_BOT_TOKEN: !!str "111111:AAH"\n'],
+    ["an alias", "TELEGRAM_BOT_TOKEN: *token\n"],
+    ["an anchor", "TELEGRAM_BOT_TOKEN: &token 111111:AAH\n"],
+    ["a flow mapping", "TELEGRAM_BOT_TOKEN: { source: env }\n"],
+    ["an unterminated quote", 'TELEGRAM_BOT_TOKEN: "111111:AAH\n'],
+  ])("says it could not read %s", (_name, text) => {
+    expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value: null, readable: false });
+  });
+
+  // A key written with no value at all is a YAML null, which the bridge does
+  // not export — that IS "nothing here", confidently.
+  it("reads a key with no value as an absent value, confidently", () => {
+    expect(getTopLevelScalar("TELEGRAM_BOT_TOKEN:\n", "TELEGRAM_BOT_TOKEN")).toEqual({
+      value: null,
+      readable: true,
+    });
+  });
+
+  it("reads a key that opens a nested block as an absent value, confidently", () => {
+    expect(getTopLevelScalar("skills:\n  TELEGRAM_BOT_TOKEN: x\n", "TELEGRAM_BOT_TOKEN")).toEqual({
+      value: null,
+      readable: true,
+    });
+  });
+
+  it("reads an absent key as an absent value, confidently", () => {
+    expect(getTopLevelScalar("model: openrouter/x\n", "TELEGRAM_BOT_TOKEN")).toEqual({
+      value: null,
+      readable: true,
+    });
   });
 });
