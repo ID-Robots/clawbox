@@ -643,23 +643,6 @@ elif _wants_llamacpp and _llamacpp_gaps:
     except OSError:
         _local_ai_token = ""
 
-    # And the bearer we would write is PROVIDER-WIDE. OpenClaw resolves a row's
-    # endpoint as `model.baseUrl ?? provider.baseUrl` and has no per-model
-    # credential slot, so pointing the entry at our proxy and putting this box's
-    # local-AI token beside a row that keeps its OWN baseUrl sends that token to
-    # that host on every turn of the row. Any row-level baseUrl disqualifies the
-    # entry, not only a foreign one: ClawBox writes the endpoint on the PROVIDER
-    # and its rows carry none, so a row that names one is per-row routing we did
-    # not build. Same rule `ensureLocalAiProxyUrls` applies on the TypeScript
-    # side and `foreignOpenAiRoute` applies to the image migration: a provider
-    # block we did not build is one to leave alone, not to half-configure.
-    _llamacpp_rows_route_themselves = any(
-        isinstance(_r, dict)
-        and isinstance(_r.get("baseUrl"), str)
-        and _r["baseUrl"].strip()
-        for _r in (_entry_models if isinstance(_entry_models, list) else [])
-    )
-
     if _llamacpp_takes_proxy and len(_local_ai_token) < 16:
         print(
             "  Skipped llamacpp provider repair: "
@@ -667,12 +650,9 @@ elif _wants_llamacpp and _llamacpp_gaps:
             + " is configured but "
             + _token_path
             + " is missing or too short, so the proxy would reject every call."
-        )
-    elif _llamacpp_takes_proxy and _llamacpp_rows_route_themselves:
-        print(
-            "  Skipped llamacpp provider repair: a model row under"
-            " models.providers.llamacpp names its own baseUrl, and this box's"
-            " local-AI token would be the bearer for it."
+            + " The entry still has no models.providers.llamacpp.baseUrl, which"
+            + " OpenClaw's schema requires for this provider, so the gateway"
+            + " will refuse this config until that file is restored."
         )
     else:
         # Touch models/providers only on the repair path. A malformed scalar must
@@ -781,7 +761,66 @@ elif _wants_llamacpp and _llamacpp_gaps:
                 "contextWindow": _ctx,
                 "maxTokens": _max_tokens,
             } for _mid in _llamacpp_missing_ids]
+        # The bearer we are about to write is PROVIDER-WIDE. OpenClaw resolves a
+        # row's endpoint as `model.baseUrl ?? provider.baseUrl` and has no
+        # per-model credential slot, so completing this entry while a row keeps
+        # its own baseUrl ON ANOTHER HOST sends this box's local-AI token to
+        # that host on every turn of the row. Such an entry is one we did not
+        # build: leave it, and say what leaving it costs.
+        #
+        # ANOTHER HOST, not merely a row-level baseUrl. There is no ownership
+        # marker on a llamacpp row the way `isOurImageRow` has one for an image
+        # row, so ownership is decided by host: loopback and the proxy's own
+        # authority are this box, and everything else — including a URL that
+        # will not parse, because guessing permissively is the wrong way to be
+        # wrong about a credential — is not. Refusing over a row that points AT
+        # US would cost a gateway for nothing: the entry we decline to complete
+        # still has no provider baseUrl, which OpenClaw's schema requires for
+        # llamacpp (it is not a bundled overlay), so ExecStart refuses the whole
+        # config. Rows are the ones that SURVIVE the repair — a row without an
+        # id is dropped above and `ModelDefinitionSchema` rejects it anyway, so
+        # it can never route a turn.
+        _llamacpp_foreign_row = False
         if _llamacpp_takes_proxy:
+            import urllib.parse as _lc_url
+
+            def _lc_host(_raw):
+                try:
+                    return (_lc_url.urlsplit(_raw).hostname or "").lower() or None
+                except ValueError:
+                    return None
+
+            _lc_ours = {"127.0.0.1", "localhost", "::1"}
+            _lc_proxy_host = _lc_host(_proxy_root)
+            if _lc_proxy_host:
+                _lc_ours.add(_lc_proxy_host)
+            for _r in (_repaired_entry.get("models") or []):
+                if not isinstance(_r, dict):
+                    continue
+                _rid = _r.get("id")
+                if not (isinstance(_rid, str) and _rid.strip()):
+                    continue
+                _rb = _r.get("baseUrl")
+                if not (isinstance(_rb, str) and _rb.strip()):
+                    continue
+                if _lc_host(_rb.strip()) not in _lc_ours:
+                    _llamacpp_foreign_row = True
+                    break
+
+        if _llamacpp_foreign_row:
+            # The URL itself is never printed: an owner-configured endpoint can
+            # carry user-info or query credentials, and the journal keeps what
+            # it is given.
+            print(
+                "  Skipped llamacpp provider repair: a model row under"
+                " models.providers.llamacpp names its own baseUrl on another"
+                " host, and this box's local-AI token would be the bearer for"
+                " it. The entry still has no models.providers.llamacpp.baseUrl,"
+                " which OpenClaw's schema requires for this provider, so the"
+                " gateway will refuse this config until you set one or remove"
+                " that row's baseUrl."
+            )
+        if _llamacpp_takes_proxy and not _llamacpp_foreign_row:
             _repaired_entry["baseUrl"] = _proxy_root + "/setup-api/local-ai/llamacpp/v1"
             # The key travels WITH the baseUrl or not at all: our proxy accepts
             # only our bearer, so leaving a foreign apiKey beside it would be
@@ -790,30 +829,31 @@ elif _wants_llamacpp and _llamacpp_gaps:
                 if isinstance(_repaired_entry.get("apiKey"), str) and _repaired_entry["apiKey"].strip():
                     print("  Replaced models.providers.llamacpp.apiKey: the entry now points at this box's local-AI proxy, which accepts only its own bearer")
                 _repaired_entry["apiKey"] = _local_ai_token
-        if not isinstance(_llamacpp_entry, dict):
+        if not isinstance(_llamacpp_entry, dict) and not _llamacpp_foreign_row:
             # Only on a FRESH entry. `api` is optional in the schema, and an
             # entry an operator deliberately left api-less routes as
             # openai-compatible anyway, so injecting it would change nothing but
             # their file.
             _repaired_entry["api"] = "openai-completions"
-        _providers_now["llamacpp"] = _repaired_entry
-        changed = True
-        if isinstance(_llamacpp_entry, dict):
-            print(
-                "  Completed models.providers.llamacpp ("
-                + ", ".join(_llamacpp_gaps)
-                + "): OpenClaw's schema requires them"
-                + (
-                    " — dropped " + str(_llamacpp_dropped_rows) + " model row(s) naming no id"
-                    if _llamacpp_dropped_rows
-                    else ""
+        if not _llamacpp_foreign_row:
+            _providers_now["llamacpp"] = _repaired_entry
+            changed = True
+            if isinstance(_llamacpp_entry, dict):
+                print(
+                    "  Completed models.providers.llamacpp ("
+                    + ", ".join(_llamacpp_gaps)
+                    + "): OpenClaw's schema requires them"
+                    + (
+                        " — dropped " + str(_llamacpp_dropped_rows) + " model row(s) naming no id"
+                        if _llamacpp_dropped_rows
+                        else ""
+                    )
                 )
-            )
-        else:
-            print(
-                "  Repaired models.providers.llamacpp for "
-                + ", ".join(_llamacpp_model_ids)
-            )
+            else:
+                print(
+                    "  Repaired models.providers.llamacpp for "
+                    + ", ".join(_llamacpp_model_ids)
+                )
 
 # Model migration: legacy ChatGPT-subscription devices can have their active
 # model — or a fallback — stored as `openai/<gpt>` from before the setup UI

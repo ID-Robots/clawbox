@@ -253,7 +253,63 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
     });
 
     expect(changed).toBe(false);
-    expect(log).toContain("Skipped llamacpp provider repair");
+    expect(log).toContain("is missing or too short");
+    // ...and the journal says what the skip costs: the entry is left with no
+    // provider baseUrl, which OpenClaw's schema requires for llamacpp, so
+    // ExecStart refuses the whole config rather than merely losing a model.
+    expect(log).toContain("gateway will refuse this config");
+  });
+
+  it("completes the entry when a row names THIS box rather than another host", () => {
+    // Loopback and our own proxy are where the bearer already goes. Refusing
+    // there buys no security and costs a gateway: the entry is left with no
+    // provider baseUrl, which OpenClaw's schema requires for llamacpp, so
+    // ExecStart refuses the config outright.
+    writeToken(TOKEN);
+    const { cfg, changed, log } = migrate({
+      models: {
+        providers: {
+          llamacpp: {
+            api: "openai-completions",
+            models: [
+              { id: "own-server", name: "own-server", baseUrl: "http://127.0.0.1:8080/v1" },
+              {
+                id: "gemma4-e2b-it-q4_0",
+                name: "gemma4-e2b-it-q4_0",
+                baseUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+              },
+            ],
+          },
+        },
+      },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(changed).toBe(true);
+    expect(llamacppProvider(cfg).baseUrl).toBe("http://127.0.0.1/setup-api/local-ai/llamacpp/v1");
+    expect(llamacppProvider(cfg).apiKey).toBe(TOKEN);
+    expect(log).not.toContain("another host");
+  });
+
+  it("ignores a row OpenClaw's own schema rejects when deciding that", () => {
+    // A row with no id is dropped by this very repair and rejected by
+    // `ModelDefinitionSchema`, so it can never route a turn — letting it veto
+    // the repair would be the same false failure one shape over.
+    writeToken(TOKEN);
+    const { cfg, changed } = migrate({
+      models: {
+        providers: {
+          llamacpp: {
+            api: "openai-completions",
+            models: [{ name: "no id here", baseUrl: "https://models.example.net/v1" }],
+          },
+        },
+      },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(changed).toBe(true);
+    expect(llamacppProvider(cfg).baseUrl).toBe("http://127.0.0.1/setup-api/local-ai/llamacpp/v1");
   });
 
   it("leaves an existing llamacpp provider untouched", () => {
@@ -299,7 +355,14 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
 
     expect(llamacppProvider(cfg)).toEqual(existing);
     expect(changed).toBe(false);
-    expect(log).toContain("Skipped llamacpp provider repair");
+    // Named by its own sentence, not by the shared prefix: the empty-id skip
+    // and the missing-token skip open with the same words, so a prefix match
+    // would pass if a regression fired the wrong branch.
+    expect(log).toContain("names its own baseUrl on another host");
+    // ...and the journal says what the skip costs, because the entry it
+    // declines to complete has no provider baseUrl and OpenClaw's schema
+    // requires one for llamacpp — the gateway refuses the whole config.
+    expect(log).toContain("gateway will refuse this config");
   });
 
   it("does nothing on a box that does not use llamacpp at all", () => {

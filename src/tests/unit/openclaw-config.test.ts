@@ -892,6 +892,50 @@ describe("openclaw-config", () => {
       expect(mockFs.writeFile).not.toHaveBeenCalled();
     });
 
+    it("still adopts the proxy when a row names THIS box", async () => {
+      // A row on loopback or on our own proxy is not somewhere the bearer could
+      // leak to — it is where the bearer already goes. Refusing there would be a
+      // false failure, and on the boot-migration side it leaves the entry with
+      // no provider baseUrl at all, which OpenClaw's schema rejects for this
+      // provider: a dead gateway bought for no security at all.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: {
+              baseUrl: "http://127.0.0.1:8080/v1",
+              models: [
+                { id: "own-server", baseUrl: "http://127.0.0.1:8080/v1" },
+                { id: "on-the-proxy", baseUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1" },
+              ],
+            },
+          },
+        },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(true);
+      const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+      expect(written.models.providers.llamacpp.baseUrl)
+        .toBe("http://127.0.0.1/setup-api/local-ai/llamacpp/v1");
+    });
+
+    it("ignores a row OpenClaw's own schema would reject when deciding that", async () => {
+      // `ModelDefinitionSchema` requires a non-empty `id`, so a row without one
+      // can never route a turn and its baseUrl cannot receive anything. Letting
+      // it veto the repair would be the same false failure one shape over.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: {
+              baseUrl: "http://127.0.0.1:8080/v1",
+              models: [{ name: "no id here", baseUrl: "https://models.example.net/v1" }],
+            },
+          },
+        },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(true);
+    });
+
     it("skips writes when local AI providers already point at the proxy", async () => {
       mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
         models: {
