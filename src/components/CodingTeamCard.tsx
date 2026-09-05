@@ -204,7 +204,7 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
       <div className="mt-2 flex flex-col @md:flex-row @md:items-center gap-3">
         <CodingTeamTree
           workers={team?.agents && team.agents.workers > 0 ? team.agents.workers : 3}
-          reviewer={team?.agents ? team.agents.reviewers > 0 || active : true}
+          reviewer
           activeWorkers={team ? team.tasks.filter((x) => x.status === "in_progress").length : 0}
           className="shrink-0 @md:w-[22rem]"
         />

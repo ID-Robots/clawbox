@@ -20,7 +20,7 @@ import { useT } from "@/lib/i18n";
 export interface CodingTeamTreeProps {
   /** Worker nodes drawn, 1–5; a board with more is drawn with five. */
   workers?: number;
-  /** Whether a reviewer node is drawn. */
+  /** Whether a reviewer node is drawn: every team has the role, so the card always draws it. */
   reviewer?: boolean;
   /** How many of the workers are at work right now — those pulse faster. */
   activeWorkers?: number;
