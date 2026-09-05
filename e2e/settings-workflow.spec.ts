@@ -233,7 +233,11 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   // settle before deciding which shape this window has.
   const rail = codingWindow.getByTestId("coding-agent-sidebar");
   const stateChip = codingWindow.getByTestId("coding-agent-state");
-  const hasRail = await rail.waitFor({ timeout: 5000 }).then(() => true, () => false);
+  // Presence, not visibility, is the discriminator: the row is drawn iff
+  // there is no rail. Give the observer a moment to report the width.
+  await expect(codingWindow.getByTestId("coding-agent-sidebar-settings").or(codingWindow.getByTestId("coding-agent-open-settings")).first()).toBeAttached();
+  await page.waitForTimeout(1500);
+  const hasRail = (await rail.count()) > 0;
   if (!hasRail) await expect(stateChip).toContainText("Off");
   await (hasRail ? codingWindow.getByTestId("coding-agent-sidebar-settings") : codingWindow.getByTestId("coding-agent-open-settings")).click();
   const codingAgent = codingWindow.getByTestId("coding-agent-settings-panel");
