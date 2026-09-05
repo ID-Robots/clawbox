@@ -1593,7 +1593,11 @@ function ChromeDesktopInner() {
         const res = await fetch("/setup-api/telegram/pairing?poll=1", { cache: "no-store" });
         if (res.ok) {
           const data = await res.json();
-          if (data.configured && Array.isArray(data.pending)) {
+          // `unknown` is not "no bot": the route could not read this device's
+          // Telegram credential, and it still answers with the pairing store,
+          // which is a different file. Reading that third state as an empty
+          // list is what cleared a waiting access request off every screen.
+          if ((data.configured || data.unknown) && Array.isArray(data.pending)) {
             const dismissed = loadDismissedPairCodes();
             const expired = expiredPairCodesRef.current;
             setPairingRequests(

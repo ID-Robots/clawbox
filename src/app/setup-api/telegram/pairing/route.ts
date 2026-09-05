@@ -100,9 +100,20 @@ export async function GET(request: Request) {
   try {
     const harness = await getActiveHarness();
     const state = await isConfigured(harness);
-    if (!state.configured) {
+    // Only a CONFIDENT "this box has no bot" short-circuits. An `unknown` used
+    // to take this branch too, and the desktop's 20 s poller reads an empty
+    // `pending` as "nothing is waiting" and clears the pairing popup — so an
+    // unreadable ~/.hermes/.env (root-owned after a `sudo hermes config set`,
+    // which the gateway survives because it loaded the token at start) silently
+    // hid a household member's access request from everyone. Worse than beta,
+    // which raised a 500 here and left the poller's list alone.
+    //
+    // Nothing below needs the credential: the pairing store and the allowlist
+    // are separate files the harness writes, so the honest answer to "we could
+    // not read the token" is still to say what is waiting.
+    if (!state.configured && !state.unknown) {
       return NextResponse.json(
-        { configured: false, unknown: state.unknown, approved: [], pending: [] },
+        { configured: false, unknown: false, approved: [], pending: [] },
         { headers: { "Cache-Control": "no-store" } },
       );
     }
@@ -126,7 +137,7 @@ export async function GET(request: Request) {
       pending = await listTelegramPairingRequests();
     }
     return NextResponse.json(
-      { configured: true, approved, pending },
+      { configured: state.configured, unknown: state.unknown, approved, pending },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {

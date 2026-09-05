@@ -102,6 +102,25 @@ describe("/setup-api/telegram/pairing", () => {
     expect(body.approved).toEqual([{ id: "6057319791" }]);
   });
 
+  // The third state, on the OpenClaw arm: an openclaw.json this box could not
+  // read is not a box with nothing to show. The pairing store is a separate
+  // file, so the pending list is still the honest answer — and the desktop
+  // poller reads an empty one as "clear the popup".
+  it("GET still answers with the pairing store when openclaw.json could not be read", async () => {
+    mockGet.mockResolvedValue(null);
+    mockReadConfigStrict.mockRejectedValue(new Error("EACCES: permission denied"));
+    mockReadPending.mockResolvedValue([{ code: "ABCD1234", id: "123456789", name: "Krasimir" }]);
+
+    const res = await GET(getReq("http://localhost/setup-api/telegram/pairing?poll=1"));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.configured).toBe(false);
+    expect(body.unknown).toBe(true);
+    expect(body.pending).toEqual([{ code: "ABCD1234", id: "123456789", name: "Krasimir" }]);
+    expect(body.approved).toEqual([{ id: "6057319791" }]);
+  });
+
   it("GET returns the approved list and skips the slow pending CLI by default", async () => {
     const res = await GET(getReq());
     const body = await res.json();

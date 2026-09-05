@@ -141,11 +141,14 @@ describe("/setup-api/telegram/pairing on Hermes", () => {
   });
 
   // A store this box could not read is not a box with nothing to show. The
-  // desktop polls this route every 20 s for the pairing popup, so collapsing the
-  // two would hide a household member's request behind the same empty answer a
-  // box with no bot gives — and beta at least said something (a 500 out of
-  // hermesSecretsPresent) where the empty answer says nothing at all.
-  it("marks the empty answer unknown when the harness store could not be read", async () => {
+  // desktop polls this route every 20 s for the pairing popup, and an empty
+  // `pending` is what clears it — so a `sudo hermes config set` that left
+  // ~/.hermes/.env root-owned hid a household member's request from every
+  // screen while the gateway, which loaded the token at start, went on writing
+  // requests into the pairing store. Beta at least raised a 500 here, which the
+  // poller ignored. The credential is not needed to answer: the pairing store
+  // and the allowlist are separate files.
+  it("still answers with the pairing store when the harness store could not be read", async () => {
     mockGet.mockResolvedValue(undefined);
     mockHermesToken.mockResolvedValue({ token: null, known: false });
 
@@ -153,7 +156,10 @@ describe("/setup-api/telegram/pairing on Hermes", () => {
 
     expect(body.configured).toBe(false);
     expect(body.unknown).toBe(true);
-    expect(body.pending).toEqual([]);
+    expect(body.pending).toEqual([
+      { code: REQUEST_ID, id: "123456789", name: "Krasimir Kralev" },
+    ]);
+    expect(body.approved).toEqual([{ id: "555000111", name: "Yanko" }]);
   });
 
   it("uses the authoritative CLI for the Settings check", async () => {
