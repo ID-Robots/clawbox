@@ -127,14 +127,14 @@ function stubFindReturning(rel: string) {
   fs.chmodSync(stub, 0o755);
 }
 
-function runPostbuild() {
+function runPostbuild(env: Record<string, string> = {}) {
   return spawnSync("sh", ["-c", POSTBUILD], {
     cwd: tmp,
     encoding: "utf-8",
     // write-build-info.mjs resolves its project dir from CLAWBOX_ROOT first,
     // and the suite sets that globally to a shared temp path — point it at the
     // fixture so the stamp lands where the postbuild step looks for it.
-    env: { ...process.env, CLAWBOX_ROOT: tmp, PATH: `${stubBin}:${process.env.PATH ?? ""}` },
+    env: { ...process.env, CLAWBOX_ROOT: tmp, PATH: `${stubBin}:${process.env.PATH ?? ""}`, ...env },
   });
 }
 
@@ -192,6 +192,24 @@ d("postbuild entry selection", () => {
     expect(fs.existsSync(path.join(nested, ".next", "build-info.json"))).toBe(true);
     expect(fs.realpathSync(path.join(standalone, "server.js")))
       .toBe(fs.realpathSync(path.join(nested, "server.js")));
+  });
+
+  it("stamps the build it is building, whatever CLAWBOX_ROOT says", () => {
+    // write-build-info.mjs resolves its project dir from CLAWBOX_ROOT and this
+    // step copies `.next/build-info.json` out of the build directory. A shell
+    // that exports CLAWBOX_ROOT at some other path — a dev box, a test runner —
+    // used to send the stamp somewhere else and leave the copy to print a
+    // warning; under `set -e` that would be a build that cannot complete, and
+    // playwright.config.ts's webServer starts with `bun run build`.
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-elsewhere-"));
+    try {
+      const res = runPostbuild({ CLAWBOX_ROOT: elsewhere });
+      expect(res.status, res.stderr).toBe(0);
+      expect(fs.existsSync(path.join(standalone, ".next", "build-info.json"))).toBe(true);
+      expect(fs.existsSync(path.join(elsewhere, ".next"))).toBe(false);
+    } finally {
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    }
   });
 
   it("removes a parked build that the file trace swept into the standalone output", () => {

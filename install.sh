@@ -1373,6 +1373,17 @@ promote_parked_build() {
 # either way, because which of the two happened decides what an operator does
 # next.
 #
+# The real peak is closer to THREE builds, not two, and an operator triaging an
+# ENOSPC here needs to know it: Next's instrumentation trace sweeps the project
+# root, so while `next build` runs it also copies the parked tree into the new
+# standalone output (TASK-725; scripts/postbuild.sh deletes that copy, but only
+# once the build has finished). The threshold is deliberately still `need * 2`.
+# Raising it to 3 would delete the old build on any box between 2x and 3x free
+# — trading a failed update that ROLLS BACK (the ENOSPC build fails, the parked
+# tree goes back, the box serves) for a build with no fallback at all, which is
+# the brick #632 exists to prevent. The fix for the peak is to narrow the sweep,
+# not to park less often.
+#
 # The park also stamps the tree it sets aside — `.rebuild-pid`, holding this
 # script's PID and the boot id — for production-server.js's boot-time reclaim to
 # read. That reclaim fires on a single fact: no `.next/standalone/server.js`,
@@ -1490,6 +1501,13 @@ restore_previous_build() {
   # in place. A `start` would then be a no-op over a process serving the build
   # that just FAILED verification, curl would answer 200 from it, and the line
   # below would report a rollback that never happened.
+  # `reset-failed` first, as both gateway recovery paths do. The reclaim in
+  # production-server.js is now correctly refused for the length of the build,
+  # so clawbox-setup crash-loops on `require`ing a build that is not there yet;
+  # a unit that has hit its start limit answers `restart` with "Start request
+  # repeated too quickly", and `|| true` would carry that into the poll below
+  # and report the dashboard DOWN over a rollback that had worked.
+  systemctl reset-failed clawbox-setup.service 2>/dev/null || true
   systemctl restart clawbox-setup.service 2>/dev/null || true
 
   # `systemctl is-active` is not the question. clawbox-setup is `Type=simple`
@@ -5130,12 +5148,13 @@ step_gateway_legacy_state_recovery() {
 
   as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
   systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
-  # `restart`, as the first attempt above already does. This branch is reached
-  # when the gateway is not LISTENING, which is not the same as not running: a
-  # unit that is active and refusing to bind — the symptom this whole function
-  # exists for — makes `start` a no-op, so the files just quarantined would
-  # never be re-read and the port check below would fail over a recovery that
-  # was never attempted.
+  # `restart`, as the first attempt above already does. The stop before the
+  # quarantine loop does NOT make `start` safe here: `doctor --fix` on the line
+  # above writes config and brings the gateway back itself, so by this point the
+  # unit can be up again — and up without binding is the very symptom this
+  # function exists for. `start` over that is a no-op, the files just
+  # quarantined are never re-read, and the port check below reports a failure
+  # over a recovery that was never attempted.
   systemctl restart clawbox-gateway.service || true
   sleep 12
 
@@ -5923,6 +5942,10 @@ step_rebuild() {
   # and would leave the box serving a half-copied build. step_rebuild_reboot is
   # saved by the reboot that follows it; this step is not.
   echo "Restarting clawbox-setup.service..."
+  # `reset-failed` for the same reason as in restore_previous_build: the unit
+  # crash-loops for the length of every rebuild now, and a latched start limit
+  # would turn this restart into a failure over a build that is fine.
+  systemctl reset-failed clawbox-setup.service 2>/dev/null || true
   systemctl restart clawbox-setup.service
 }
 

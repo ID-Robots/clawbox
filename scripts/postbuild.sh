@@ -53,19 +53,14 @@ STANDALONE=".next/standalone"
 
 fail() { echo "postbuild: $*" >&2; exit 1; }
 
-node scripts/write-build-info.mjs
+# CLAWBOX_ROOT pinned to the build's own directory: write-build-info.mjs resolves
+# its project dir from that variable first, and a shell that exports it at some
+# other path (a dev box, a test runner) would write the stamp into a tree this
+# build knows nothing about — which under `set -e` is now a failed build rather
+# than a warning. The stamp belongs to the build in this directory.
+CLAWBOX_ROOT="$PWD" node scripts/write-build-info.mjs
 
 [ -d "$STANDALONE" ] || fail "no $STANDALONE — next build wrote no standalone output (next.config.ts sets output: \"standalone\")"
-
-# A parked previous build swept in by the trace above is a second, complete
-# build inside this one — hundreds of MB on an eMMC, and a second `server.js`
-# for anything that goes looking. It is a copy; the real parked tree is
-# `$PROJECT_DIR/.next-old` and is not touched here.
-for swept in "$STANDALONE"/.next-old*; do
-  [ -e "$swept" ] || continue
-  echo "postbuild: removing $swept — a parked previous build was traced into the standalone output" >&2
-  rm -rf "$swept"
-done
 
 # Where the entry is, asked of Next rather than guessed at.
 #
@@ -73,7 +68,7 @@ done
 # `path.relative(outputFileTracingRoot, dir)`
 # (next/dist/build/index.js:1107) — the exact segment `copyTracedFiles` joins
 # under `.next/standalone` when it writes the entry
-# (next/dist/build/utils.js:990). It is "" for this repo, because
+# (next/dist/build/utils.js:1107). It is "" for this repo, because
 # `outputFileTracingRoot` is unset and therefore the project directory; it is
 # the app's path below the tracing root for the nested layout Next produces
 # when that root is a parent (a monorepo). Either way Next has already
@@ -117,6 +112,21 @@ SDIR="$(dirname "$SRVJS")"
 # tree's own `.next`. If it is not there, $SDIR is not a standalone root and
 # copying into it would write a build nothing can serve.
 [ -d "$SDIR/.next" ] || fail "$SRVJS is not a standalone entry — $SDIR/.next does not exist"
+
+# A parked previous build swept in by the trace is a second, complete build
+# inside this one — hundreds of MB on an eMMC, and a second `server.js` for
+# anything that goes looking. It is a copy; the real parked tree is
+# `$PROJECT_DIR/.next-old` and is not touched here.
+#
+# After the entry is chosen, not before: the search above must be able to
+# refuse a parked entry on its own (that is what its `-prune` is for), and in
+# the nested layout the copy lands beside the entry rather than at the top of
+# the standalone tree, so both places are swept.
+for swept in "$STANDALONE"/.next-old* "$SDIR"/.next-old*; do
+  [ -e "$swept" ] || continue
+  echo "postbuild: removing $swept — a parked previous build was traced into the standalone output" >&2
+  rm -rf "$swept"
+done
 
 # data/ first, before the copies, because this is the one removal whose failure
 # has to be reported by name: it holds the owner's live state and 0600 secrets
