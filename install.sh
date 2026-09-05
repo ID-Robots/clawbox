@@ -4974,10 +4974,21 @@ step_nm_dispatcher() {
     echo "  Skipping NM dispatcher: $SRC missing"
     return
   fi
-  mkdir -p "$DISPATCHER_DIR"
-  cp "$SRC" "$DEST"
-  chown root:root "$DEST"
-  chmod 0755 "$DEST"
+  # Every line below claims only what it has just done. step_post_update calls
+  # this step as `step_nm_dispatcher || echo "  Warning: …"`, and bash suspends
+  # `set -e` for the whole dynamic extent of a function run in a condition
+  # context — so on the in-app update path, the one every field box takes, an
+  # unchecked failure here would print "installed" over a file that never
+  # landed, and the `||` warning would never fire because the function still
+  # returned 0 from its last echo. Same rule step_systemd_services states for
+  # itself, for the same reason.
+  if ! mkdir -p "$DISPATCHER_DIR" \
+     || ! cp "$SRC" "$DEST" \
+     || ! chown root:root "$DEST" \
+     || ! chmod 0755 "$DEST"; then
+    echo "  Warning: could not install the NetworkManager failover dispatcher at $DEST" >&2
+    return 1
+  fi
   # The dispatcher is useless without the waiter it defers the gateway restart
   # to, and the waiter must be the ROOT-OWNED copy — root runs it. Installed
   # here as well as in install_root_libexec so an in-app UPDATE, which runs
@@ -4985,10 +4996,20 @@ step_nm_dispatcher() {
   # than a new dispatcher pointing at nothing.
   local WAITER_SRC="$PROJECT_DIR/scripts/gateway-restart-when-online.sh"
   if [ -f "$WAITER_SRC" ]; then
-    install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR"
-    install_root_file "$WAITER_SRC" "$ROOT_LIBEXEC_DIR/gateway-restart-when-online.sh"
-    echo "  Deferred gateway-restart helper installed"
+    # install_root_file returns 1 on both its failure paths and leaves the
+    # PREVIOUS copy in place, so an unreported failure is not "no waiter" but a
+    # STALE one — worse, and invisible until a network event logs the
+    # dispatcher's own "missing or not executable" line.
+    if install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR" \
+       && install_root_file "$WAITER_SRC" "$ROOT_LIBEXEC_DIR/gateway-restart-when-online.sh"; then
+      echo "  Deferred gateway-restart helper installed"
+    else
+      echo "  Warning: could not install the deferred gateway-restart helper — the failover will not restart the gateway" >&2
+      return 1
+    fi
   else
+    # A checkout without the script is degraded, not broken: the dispatcher
+    # still fails over to WiFi. Reported, and not claimed as installed.
     echo "  Warning: $WAITER_SRC missing — the failover will not restart the gateway"
   fi
   echo "  NetworkManager failover dispatcher installed"

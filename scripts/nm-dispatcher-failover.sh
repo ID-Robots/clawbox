@@ -52,7 +52,7 @@ restart_gateway_when_online() {
   fi
   # PATH first so a test harness can stand in for it, then the absolute paths,
   # because a dispatcher's PATH is NM's and not a login shell's.
-  local setsid_bin=""
+  local setsid_bin="" candidate
   setsid_bin="$(command -v setsid 2>/dev/null || true)"
   if [ -z "$setsid_bin" ]; then
     for candidate in /usr/bin/setsid /bin/setsid; do
@@ -92,6 +92,18 @@ fi
 # subscribes to both actions in config/99-clawbox-avahi-reload.
 case "$ACTION" in
   connectivity-change)
+    # `FULL` and nothing less — and this is NOT the waiter's rule inverted. The
+    # waiter is lenient about NM's verdict because it decides whether a restart
+    # can SUCCEED, and a LAN that hijacks connectivity-check.ubuntu.com would
+    # otherwise veto every restart for ever. This arm decides whether an event
+    # is worth ASKING about, and `full` is NM's only positive statement:
+    # `portal`, `limited` and `unknown` mean "not decided". Asking on those
+    # would hand the waiter a request on every flap of a connectivity check
+    # that is already known to be unreliable here — and because the waiter
+    # accepts a working ping whatever NM thinks, each flap on a healthy box
+    # would bounce a healthy gateway mid-conversation. A box whose LAN never
+    # lets NM say `full` still has the arms that do not depend on NM's opinion:
+    # `up`, and the DHCP lease below.
     if [ "${CONNECTIVITY_STATE:-}" = "FULL" ]; then
       restart_gateway_when_online "NetworkManager reports full connectivity"
     fi

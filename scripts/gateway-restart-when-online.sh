@@ -64,9 +64,9 @@ log() { logger -t "$LOG_TAG" -- "$*"; }
 # The Hermes SKU stops, disables and MASKS clawbox-gateway.service
 # (install.sh's step_edition_gateway_state), and its own agent never has
 # sockets to drop — so on that edition there is nothing here to do and a
-# two-minute wait would be pure noise in the journal. Resolved from the
-# root-owned edition lock, the same authority every other edition decision
-# uses, with the unit's actual presence as the final word.
+# two-minute wait would be pure noise in the journal. Decided from the unit's
+# own load state below: systemd's answer about the unit this script would act
+# on, which needs no second source of truth about the edition.
 UNIT="${CLAWBOX_GATEWAY_UNIT:-clawbox-gateway.service}"
 
 # `full` is NetworkManager's own verdict and the only authoritative yes. Every
@@ -124,10 +124,18 @@ positive_int() {
 ONLINE_TIMEOUT="$(positive_int "${CLAWBOX_ONLINE_TIMEOUT:-}" 120)"
 ONLINE_POLL="$(positive_int "${CLAWBOX_ONLINE_POLL:-}" 3)"
 
+# `list-unit-files` is the wrong question: it LISTS a masked unit, so it answers
+# "present" on the one edition this guard exists for. Measured read-only on the
+# Hermes box: `clawbox-gateway.service masked enabled`, exit 0.
+#
+# LoadState is the answer that separates them — `loaded` for a unit systemd
+# would act on, `masked` for the Hermes edition's, `not-found` where it was
+# never installed — and it is also right when systemctl is absent entirely,
+# which is equally "no gateway here". Anything but `loaded` means there is
+# nothing to restart: not an error, and not worth a journal line per network
+# event.
 if [ "${CLAWBOX_SKIP_UNIT_CHECK:-0}" != "1" ] \
-   && ! systemctl list-unit-files "$UNIT" >/dev/null 2>&1; then
-  # Not an error and not worth a journal line per network event: this edition
-  # simply has no such unit.
+   && [ "$(systemctl show -p LoadState --value "$UNIT" 2>/dev/null)" != "loaded" ]; then
   exit 0
 fi
 

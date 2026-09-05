@@ -54,8 +54,14 @@ interface BoxOptions {
   defaultRoute?: boolean;
   /** Whether `ping` succeeds. */
   pingWorks?: boolean;
-  /** Whether the gateway unit exists at all (false = the Hermes edition). */
-  unitExists?: boolean;
+  /**
+   * What `systemctl` reports for the gateway unit's LoadState:
+   * `loaded` (the OpenClaw edition), `masked` (the Hermes edition, which stops,
+   * disables and MASKS it), or `not-found` (no such unit at all). A boolean
+   * could not tell the middle case from the first, which is exactly how the
+   * Hermes edition went untested.
+   */
+  unitLoadState?: "loaded" | "masked" | "not-found";
   /** Whether `curl` is on PATH for the HTTPS half of the probe. */
   curlWorks?: boolean;
   /** Drop a re-arm marker once, from inside the poll loop. */
@@ -113,13 +119,25 @@ exit ${opts.pingWorks ? 0 : 1}`);
 echo "curl $*" >> ${JSON.stringify(calls)}
 exit ${opts.curlWorks ? 0 : 1}`);
 
+  // Modelled on the real systemctl for BOTH questions, because the difference
+  // between them is the defect: a masked unit is still LISTED, so
+  // `list-unit-files` answers "present" on the Hermes edition, and only
+  // LoadState tells a masked unit from a live one.
+  const loadState = opts.unitLoadState ?? "loaded";
   stub("systemctl", `
 echo "systemctl $*" >> ${JSON.stringify(calls)}
 case "$1" in
   # try-restart is a no-op on a stopped unit and reports success either way —
   # exactly what the real one does, and why the script uses it.
   try-restart) exit 0 ;;
-  list-unit-files) exit ${opts.unitExists === false ? 1 : 0} ;;
+  # Only a unit that is not installed at all goes unlisted. Verbatim shape of
+  # what the Hermes box prints: "clawbox-gateway.service masked enabled".
+  list-unit-files)
+    ${loadState === "not-found"
+      ? "exit 1"
+      : `echo "clawbox-gateway.service ${loadState === "masked" ? "masked" : "enabled"} enabled"`}
+    ;;
+  show) echo ${JSON.stringify(loadState)} ;;
   *) exit 0 ;;
 esac`);
 
@@ -161,8 +179,8 @@ function env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   };
 }
 
-function runDispatcher(iface: string, action: string): void {
-  const r = spawnSync("bash", [DISPATCHER, iface, action], { env: env(), encoding: "utf-8", timeout: 25_000 });
+function runDispatcher(iface: string, action: string, extraEnv: Record<string, string> = {}): void {
+  const r = spawnSync("bash", [DISPATCHER, iface, action], { env: env(extraEnv), encoding: "utf-8", timeout: 25_000 });
   expect(r.status).toBe(0);
 }
 
@@ -268,15 +286,49 @@ describe("Ethernet failover does not restart the gateway into a dead network", (
     expect(restarts()).toBe(0);
   });
 
-  it("does nothing at all on an edition with no gateway unit", () => {
-    // Hermes stops, disables and MASKS clawbox-gateway.service, and its agent
-    // never has sockets to drop. A two-minute wait there is pure journal noise.
-    makeBox({ connectivity: ["none"], unitExists: false });
+  it("does nothing at all on an edition where the unit was never installed", () => {
+    makeBox({ connectivity: ["none"], unitLoadState: "not-found" });
 
     runWaiter("Ethernet 'eth0' down", { CLAWBOX_SKIP_UNIT_CHECK: "0" });
 
     expect(restarts()).toBe(0);
     expect(journal()).toBe("");
+  });
+
+  it("does nothing at all on the Hermes edition, where the unit is MASKED rather than absent", () => {
+    // The Hermes SKU stops, disables and MASKS clawbox-gateway.service, and its
+    // agent never has sockets to drop — so there is nothing here to do.
+    //
+    // But a masked unit is still LISTED. Measured read-only on the Hermes box:
+    // `systemctl list-unit-files clawbox-gateway.service` prints
+    // "clawbox-gateway.service masked enabled" and exits 0. A guard reading
+    // that exit status therefore fires on no edition at all: every
+    // NetworkManager event on Hermes — eth up/down, WiFi up, dhcp4-change,
+    // connectivity-change — started a waiter that ended either in a
+    // `try-restart` on a masked unit and a "restart request … failed" journal
+    // line about a box where nothing is wrong, or in a full 120 s wait. The
+    // false-failure class, on the edition the shared-tools rule says this must
+    // work on.
+    //
+    // `full` connectivity, so a guard that does not fire restarts immediately
+    // rather than after a wait — the failure is the restart, not the delay.
+    makeBox({ connectivity: ["full"], unitLoadState: "masked" });
+
+    runWaiter("Ethernet 'eth0' up", { CLAWBOX_SKIP_UNIT_CHECK: "0" });
+
+    expect(restarts()).toBe(0);
+    expect(journal()).toBe("");
+  });
+
+  it("still restarts on the edition that does have a live gateway unit", () => {
+    // The other half of the guard, and the reason it reads LoadState rather
+    // than simply refusing: a check that skipped every edition would silence
+    // GH #529's fix on the edition that needs it.
+    makeBox({ connectivity: ["full"], unitLoadState: "loaded" });
+
+    runWaiter("Ethernet 'eth0' up", { CLAWBOX_SKIP_UNIT_CHECK: "0" });
+
+    expect(restarts()).toBe(1);
   });
 
   it("takes a request that arrived while it was waiting rather than losing it", () => {
@@ -403,5 +455,164 @@ describe("the dispatcher hands the restart to the waiter rather than firing it",
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(restarts()).toBe(0);
     expect(deferred()).toHaveLength(0);
+  });
+
+  it("ignores every transition of the box's own recovery AP", async () => {
+    // The AP is not a network this box got onto — it is the one it is
+    // offering, with no default route. ap-watchdog.sh re-raises it every ~20 s
+    // while setup is incomplete, so without this skip each of those would start
+    // a full wait, take the lock, and drop a genuine Ethernet request meanwhile.
+    makeBox({ connectivity: ["full"] });
+
+    runDispatcher("wlan0", "up", { CONNECTION_ID: "ClawBox-Setup" });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(deferred()).toHaveLength(0);
+    expect(restarts()).toBe(0);
+  });
+
+  it("asks for the restart when a DHCP lease lands after an association", async () => {
+    // The lease arrives a second or two after the `up` the interface arm sees,
+    // which is precisely why `up` alone was not enough.
+    makeBox({ connectivity: ["full"] });
+
+    runDispatcher("wlan0", "dhcp4-change");
+
+    const asked = await deferredEventually(1);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("DHCP lease on 'wlan0'");
+  });
+
+  it("asks for the restart when NetworkManager itself confirms full connectivity", async () => {
+    // The upstream-router-reboot shape: carrier never drops, so there is no
+    // up/down and no new lease, and this is the only event that fires.
+    makeBox({ connectivity: ["full"] });
+
+    runDispatcher("eth0", "connectivity-change", { CONNECTIVITY_STATE: "FULL" });
+
+    const asked = await deferredEventually(1);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("full connectivity");
+  });
+
+  it("does not ask on a connectivity state NetworkManager has not resolved", async () => {
+    // Deliberate, and not the waiter's rule inverted. The waiter is lenient
+    // about NM's verdict because it decides whether a restart can SUCCEED. This
+    // arm decides whether an event is worth ASKING about, and `full` is NM's
+    // only positive statement — `portal`, `limited` and `unknown` mean "not
+    // decided". Since the waiter accepts a working ping whatever NM thinks,
+    // dispatching on those would bounce a healthy gateway mid-conversation
+    // every time a flaky connectivity check flapped.
+    makeBox({ connectivity: ["full"] });
+
+    runDispatcher("eth0", "connectivity-change", { CONNECTIVITY_STATE: "LIMITED" });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(deferred()).toHaveLength(0);
+  });
+});
+
+/**
+ * The installer half of the same feature. The dispatcher is inert without the
+ * root-owned waiter it defers the restart to, so `step_nm_dispatcher` installs
+ * both — and it is called from `step_post_update`, the path every field box
+ * takes on an in-app update, as
+ *
+ *     step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"
+ *
+ * Bash suspends `set -e` for the whole dynamic extent of a function run in a
+ * condition context, so on that path a failed install is not fatal and not even
+ * visible unless the step says so itself. These run the REAL function out of
+ * install.sh in both shapes.
+ */
+describe("the installer reports what it actually installed", () => {
+  const INSTALL_SH = readFileSync(path.join(REPO, "install.sh"), "utf-8");
+
+  /** The house pattern: lift the real function out of install.sh and run it. */
+  function shellFunction(name: string): string {
+    const start = INSTALL_SH.indexOf(`${name}() {`);
+    if (start < 0) throw new Error(`${name} not found in install.sh`);
+    const end = INSTALL_SH.indexOf("\n}", start);
+    if (end < 0) throw new Error(`${name} has no closing brace`);
+    return INSTALL_SH.slice(start, end + 2);
+  }
+
+  function runStep(opts: { waiterInstallFails?: boolean; shape: "update" | "fresh" }) {
+    const project = path.join(root, "project");
+    const dispatcherDir = path.join(root, "dispatcher.d");
+    const libexec = path.join(root, "root-libexec");
+    mkdirSync(path.join(project, "scripts"), { recursive: true });
+    copyFileSync(DISPATCHER, path.join(project, "scripts", "nm-dispatcher-failover.sh"));
+    copyFileSync(WAITER, path.join(project, "scripts", "gateway-restart-when-online.sh"));
+
+    const body = shellFunction("step_nm_dispatcher")
+      .replace("/etc/NetworkManager/dispatcher.d", dispatcherDir);
+
+    const script = [
+      // install.sh's own options, which are half of what this is about.
+      "set -euo pipefail",
+      `PROJECT_DIR=${JSON.stringify(project)}`,
+      `ROOT_LIBEXEC_DIR=${JSON.stringify(libexec)}`,
+      // Not root in a test: ownership is not what is under test here.
+      "chown() { :; }",
+      // The step's only `install` call is `install -d … "$ROOT_LIBEXEC_DIR"`.
+      "install() { for a; do :; done; mkdir -p \"$a\"; }",
+      opts.waiterInstallFails
+        ? "install_root_file() { return 1; }"
+        : "install_root_file() { cp \"$1\" \"$2\"; }",
+      body,
+      opts.shape === "update"
+        // Verbatim from step_post_update.
+        ? 'step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"'
+        : "step_nm_dispatcher",
+    ].join("\n");
+
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", timeout: 25_000 });
+    return { status: r.status, out: `${r.stdout}${r.stderr}`, libexec };
+  }
+
+  it("does not claim the deferred-restart helper is installed when it is not", () => {
+    // The false-success class. `install_root_file` returns 1 on both of its
+    // failure paths — a full or read-only /usr — and leaves the PREVIOUS copy
+    // in place, so the operator is told a new waiter landed while a stale one,
+    // or none, is what the dispatcher will call.
+    makeBox();
+
+    const r = runStep({ waiterInstallFails: true, shape: "update" });
+
+    expect(r.out).not.toContain("Deferred gateway-restart helper installed");
+    expect(r.out).toContain("could not install the deferred gateway-restart helper");
+  });
+
+  it("reports the failed step to step_post_update instead of returning success", () => {
+    // Without this the `|| echo "Warning: nm_dispatcher step failed"` in
+    // step_post_update can never fire: the function returned 0 from its last
+    // echo, so the update path reported a clean step over a missing waiter.
+    makeBox();
+
+    const r = runStep({ waiterInstallFails: true, shape: "update" });
+
+    expect(r.out).toContain("nm_dispatcher step failed");
+    expect(r.out).not.toContain("NetworkManager failover dispatcher installed");
+  });
+
+  it("still aborts the fresh install, where a failure is fatal by design", () => {
+    makeBox();
+
+    const r = runStep({ waiterInstallFails: true, shape: "fresh" });
+
+    expect(r.status).not.toBe(0);
+  });
+
+  it("installs both halves and says so when the install really succeeds", () => {
+    makeBox();
+
+    const r = runStep({ shape: "update" });
+
+    expect(r.status).toBe(0);
+    expect(r.out).toContain("Deferred gateway-restart helper installed");
+    expect(r.out).toContain("NetworkManager failover dispatcher installed");
+    expect(r.out).not.toContain("Warning");
+    expect(existsSync(path.join(r.libexec, "gateway-restart-when-online.sh"))).toBe(true);
   });
 });
