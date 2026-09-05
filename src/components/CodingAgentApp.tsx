@@ -34,6 +34,7 @@ import {
   takePendingCodingRun,
 } from "@/lib/ui-events";
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
+import ImportProjectPanel, { type ImportResult } from "./ImportProjectPanel";
 import TerminalApp from "./TerminalApp";
 import VNCApp from "./VNCApp";
 import CodingAgentBreadcrumb from "./CodingAgentBreadcrumb";
@@ -144,6 +145,8 @@ interface Project {
   /** The project's own icon, once the box has drawn one; null while it has not. */
   iconUrl?: string | null;
   latestRun: Pick<Run, "id" | "status" | "task" | "startedAt" | "completedAt"> | null;
+  /** The project's clawbox.json, when it is a ClawBox app (src/lib/clawbox-manifest.ts). */
+  app?: { name: string; description: string | null; kind: string | null; port: number | null } | null;
 }
 
 // The wizard's name bound lives with the wizard now (NewAppWizardCard); it is
@@ -394,6 +397,8 @@ export default function CodingAgentApp() {
   // over whichever project was open, so Back returns there.
   const [page, setPage] = useState<"home" | "settings">("home");
   const [openProjectDir, setOpenProjectDir] = useState<string | null>(null);
+  /** The Import panel on the home face: GitHub or a folder on the box. */
+  const [importOpen, setImportOpen] = useState(false);
   /** Bumped when this window changed the open project's git state itself
    *  (a backup), so the git block re-reads without a new commit. */
   const [gitVersion, setGitVersion] = useState(0);
@@ -1431,7 +1436,39 @@ export default function CodingAgentApp() {
                 </span>
               )}
             </h2>
+            {/* Bringing in what already exists: one of the owner's GitHub
+                repositories, or a folder on the box. Offered on the standalone
+                page too — nothing here needs the chat. */}
+            <button
+              type="button"
+              onClick={() => setImportOpen((v) => !v)}
+              aria-expanded={importOpen}
+              className={BTN_SECONDARY}
+              data-testid="coding-agent-import-toggle"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">download</span>
+              {t("codingAgent.importButton")}
+            </button>
           </div>
+
+          {importOpen && (
+            <ImportProjectPanel
+              onClose={() => setImportOpen(false)}
+              onOpenSettings={() => { disarmClear(); setImportOpen(false); setPage("settings"); }}
+              onImported={(result: ImportResult) => {
+                setImportOpen(false);
+                const name = result.project?.name ?? result.folder;
+                const lines = [t("codingAgent.importDone", { name })];
+                if (result.skipped.length > 0) lines.push(t("codingAgent.importSkipped", { folders: result.skipped.join(", ") }));
+                window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: lines.join(" "), type: "success" } }));
+                // The row is on the next read; the page opens on the folder
+                // now, and the project page reads its own git line.
+                void load();
+                setOpenRunId(null);
+                setOpenProjectDir(result.directory);
+              }}
+            />
+          )}
 
           {standalone && (
             <p className="mt-2 px-1 text-[11px] text-[var(--text-muted)]" data-testid="coding-agent-new-needs-desktop">
@@ -1510,6 +1547,17 @@ export default function CodingAgentApp() {
                         {project.onDesktop && (
                           <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-sky-300 border-sky-400/40">
                             {t("codingAgent.onDesktop")}
+                          </span>
+                        )}
+                        {/* A clawbox.json makes the folder a ClawBox APP, not
+                            just a folder with history. */}
+                        {project.app && (
+                          <span
+                            className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--coral-bright)] border-[var(--coral-bright)]/40"
+                            title={project.app.description ?? undefined}
+                            data-testid={`coding-agent-app-chip-${project.folder}`}
+                          >
+                            {t("codingAgent.clawboxApp")}
                           </span>
                         )}
                         {running && (

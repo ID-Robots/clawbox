@@ -358,3 +358,18 @@ describe("GET projects", () => {
     });
   });
 });
+
+describe("a ClawBox app among the projects", () => {
+  it("carries its clawbox.json as `app`, and a folder without one carries null", async () => {
+    // The manifest is what makes a folder an APP rather than a folder with
+    // history: the row gets a chip, and a `port` is what /apps/<folder>/ is
+    // proxied to.
+    const app = makeRepo("tinder-clone", { commit: "first" });
+    fs.writeFileSync(path.join(app, "clawbox.json"), JSON.stringify({ name: "Tinder Clone", description: "Swipe", kind: "server", port: 4230 }));
+    makeRepo("plain", { commit: "first" });
+    const { projects } = await body();
+    const byFolder = Object.fromEntries(projects.map((p) => [p.folder, p]));
+    expect(byFolder["tinder-clone"].app).toEqual({ name: "Tinder Clone", description: "Swipe", kind: "server", port: 4230 });
+    expect(byFolder["plain"].app).toBeNull();
+  });
+});

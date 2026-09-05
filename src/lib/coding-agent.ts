@@ -74,6 +74,7 @@ import { type CodingRunStatus, isCodingRunStatus, isHeld, isLive } from "@/lib/c
 import { memAvailableMb } from "@/lib/mem-available";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
+import { readClawboxManifest } from "@/lib/clawbox-manifest";
 import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, webappPath } from "@/lib/code-projects";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
 import {
@@ -1266,6 +1267,12 @@ export interface CodingProject {
   iconUrl: string | null;
   /** The newest run that worked in this folder, if any has. */
   latestRun: Pick<CodingRun, "id" | "status" | "task" | "startedAt" | "completedAt"> | null;
+  /**
+   * The project's clawbox.json, when it carries one: what makes it a ClawBox
+   * APP rather than a folder with history (src/lib/clawbox-manifest.ts). A
+   * `port` here is what `/apps/<folder>/` is proxied to.
+   */
+  app: { name: string; description: string | null; kind: string | null; port: number | null } | null;
 }
 
 /**
@@ -1381,13 +1388,14 @@ async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate
   // and a folder a run has worked in by that run, as long as it still exists.
   const workedIn = fromRun === true && self?.isDirectory() === true;
   if (!hasGit && !workedIn && !(kind === "codeProject" && metaName !== null)) return null;
-  const [commit, onDesktop, hasIcon, real] = await Promise.all([
+  const [commit, onDesktop, hasIcon, manifest, real] = await Promise.all([
     // Only a folder with its own history is asked. `git log` in one without
     // walks UP to the nearest repository — for a code project, ClawBox's own
     // checkout — and would present the OS's last commit as the app's.
     hasGit ? lastCommit(directory) : Promise.resolve(null),
     isOnDesktop(folder),
     hasProjectIcon(folder),
+    readClawboxManifest(directory),
     // A run records the folder it worked in symlink-resolved; match both
     // spellings so a project reached through a link still shows its run.
     fs.promises.realpath(directory).catch(() => directory),
@@ -1410,6 +1418,7 @@ async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate
       latestRun: run
         ? { id: run.id, status: run.status, task: run.task, startedAt: run.startedAt, completedAt: run.completedAt }
         : null,
+      app: manifest ? { name: manifest.name, description: manifest.description, kind: manifest.kind, port: manifest.port } : null,
     },
   };
 }
