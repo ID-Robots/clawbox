@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
+import { saveEnv } from "@/tests/helpers/env";
 
 /**
  * `?refresh=1` is not a read. It busts Hermes' per-provider disk cache and fans
@@ -66,6 +70,8 @@ const PAYLOAD = {
 
 let session: SessionFixture;
 let GET: (req: Request) => Promise<Response>;
+let hermesHome: string;
+let restoreEnv: () => void;
 
 function request(query: string, authed: boolean): Request {
   return new Request(`http://localhost/setup-api/hermes/models${query}`, {
@@ -74,6 +80,17 @@ function request(query: string, authed: boolean): Request {
 }
 
 beforeEach(async () => {
+  // `readProviderVerified` drops any mark older than the mtime of Hermes' own
+  // pooled credential store (`$HERMES_HOME/auth.json`) — the anti-probe-once
+  // rule for keys written outside this process. Without an isolated home the
+  // marks below are read against whatever `~/.hermes/auth.json` the HOST has,
+  // so the fixed instants here expire on every real Hermes box (its store is
+  // dated the owner's last key change) while passing on a dev PC and in CI,
+  // which have no such file. An empty directory makes the store unaskable,
+  // which is the "nothing has been rotated" case these assertions mean.
+  restoreEnv = saveEnv("HERMES_HOME");
+  hermesHome = mkdtempSync(path.join(tmpdir(), "clawbox-models-refresh-hermes-"));
+  process.env.HERMES_HOME = hermesHome;
   session = installSessionFixture();
   getModelOptionsMock.mockReset();
   getModelOptionsMock.mockResolvedValue(PAYLOAD);
@@ -89,6 +106,8 @@ beforeEach(async () => {
 
 afterEach(() => {
   session.cleanup();
+  restoreEnv();
+  rmSync(hermesHome, { recursive: true, force: true });
 });
 
 describe("GET /setup-api/hermes/models", () => {
