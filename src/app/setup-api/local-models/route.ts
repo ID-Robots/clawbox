@@ -10,7 +10,7 @@ import {
 } from "@/lib/local-models";
 import { getDefaultLlamaCppModel, getLlamaCppBaseUrl } from "@/lib/llamacpp";
 import { getLlamaCppProvisioningStatus, resolveConfiguredLlamaCppAlias } from "@/lib/llamacpp-server";
-import { getOllamaBaseUrl } from "@/lib/local-ai-runtime";
+import { getEmbedProvisioningStatus } from "@/lib/embed-server";
 import { peekMemoryStatus } from "@/lib/clawkeep-memory";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
 
@@ -42,15 +42,16 @@ async function probes(): Promise<InventoryProbes> {
   // boot, and this route is polled every five seconds by a panel that must
   // open at once. A cold peek starts that probe and answers null.
   const memory = embeddingsSupported ? peekMemoryStatus() : null;
-  const [provisioning, servedModel, configuredAlias] = await Promise.all([
+  const [provisioning, servedModel, configuredAlias, embedProvisioning] = await Promise.all([
     getLlamaCppProvisioningStatus(alias).catch(() => null),
     llamaCppRunning(llamaBase),
     // The same resolution the wake path uses, so "starts when needed" is
     // claimed exactly when the proxy would in fact start it.
     resolveConfiguredLlamaCppAlias().catch(() => null),
+    // Two stats: the binary and the GGUF. The unit itself is read by the row.
+    embeddingsSupported ? getEmbedProvisioningStatus().catch(() => null) : Promise.resolve(null),
   ]);
   return {
-    ollamaBaseUrl: getOllamaBaseUrl(),
     llamacpp: {
       installed: !!provisioning?.installed,
       running: servedModel !== null,
@@ -64,6 +65,10 @@ async function probes(): Promise<InventoryProbes> {
       provider: memory?.provider || null,
       model: memory?.model || null,
       local: memory?.location === "local",
+      engine: {
+        installed: !!embedProvisioning?.installed,
+        modelBytes: embedProvisioning?.modelBytes ?? null,
+      },
     },
   };
 }

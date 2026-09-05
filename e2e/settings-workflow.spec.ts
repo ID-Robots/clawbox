@@ -81,18 +81,19 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   // Local-only mode is offered once the box has a local model to route to.
   await expect(localAi.getByTestId("local-ai-local-only")).toHaveAttribute("aria-checked", "false");
 
-  const ollamaRow = localAi.getByTestId("local-model-ollama");
-  await expect(ollamaRow.getByText("On", { exact: true })).toBeVisible();
-  await expect(ollamaRow.getByText(/Disk 609 MB/)).toBeVisible();
-  // Ollama serves extra models; it is not the on-device provider row, so it
-  // carries no role.
-  await expect(ollamaRow.getByTestId("local-model-role-ollama")).toHaveCount(0);
-  // The row's control is its menu. Turning the service off goes through the
-  // route and the row re-renders from what the route answers — not
-  // optimistically — so "Off" here means the round trip happened.
-  await ollamaRow.getByRole("button", { name: "More actions for Ollama" }).click();
-  await ollamaRow.getByRole("menuitem", { name: "Disable" }).click();
-  await expect(ollamaRow.getByText("Off", { exact: true })).toBeVisible();
+  // The Ollama row is gone: the memory embedder runs on llama.cpp, and Ollama
+  // was retired from the provider picker before that.
+  await expect(localAi.getByTestId("local-model-ollama")).toHaveCount(0);
+
+  // Memory search is the embedder's own row: Qwen 3 on this box's llama.cpp,
+  // woken by the proxy on the first search and asleep in between. It carries
+  // no role and no switch — Memory Shard owns it — only the pointer there.
+  const memoryRow = localAi.getByTestId("local-model-embeddings");
+  await expect(memoryRow.getByText("Qwen 3 via llama.cpp")).toBeVisible();
+  await expect(memoryRow.getByText(/Disk 609 MB/)).toBeVisible();
+  await expect(memoryRow.getByTestId("local-model-role-embeddings")).toHaveCount(0);
+  await expect(memoryRow.getByTestId("local-model-menu-embeddings")).toHaveCount(0);
+  await expect(memoryRow.getByTestId("local-model-manage-embeddings")).toBeVisible();
 
   await expect(localAi.getByTestId("local-ai-group-tts").getByRole("heading", { name: "Voice (text to speech)" })).toBeVisible();
   const kokoroRow = localAi.getByTestId("local-model-kokoro");

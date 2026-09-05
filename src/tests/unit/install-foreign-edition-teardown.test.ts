@@ -498,6 +498,7 @@ function healthyOpenclaw(): Record<string, string> {
     "clawbox-codex-auth-sync.timer": "enabled:active",
     "clawbox-heartbeat.service": "static:inactive",
     "clawbox-browser.service": "disabled:inactive",
+    "clawbox-embed.service": "static:inactive",
     "clawbox-tunnel.service": "disabled:inactive",
     "clawbox-root-update@.service": "static:inactive",
     "clawbox-ap-watchdog.service": "static:inactive",
@@ -548,6 +549,7 @@ d("the validator now says what to run, not just what is wrong", () => {
     // The teardown adds no checks — the healthy line must not move.
     const r = runValidator("openclaw", healthyOpenclaw());
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/All 16 checks healthy/);
+    // 17 with clawbox-embed.service among the installed-but-on-demand units.
+    expect(r.stdout).toMatch(/All 17 checks healthy/);
   });
 });

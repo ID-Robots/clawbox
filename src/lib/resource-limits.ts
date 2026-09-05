@@ -17,6 +17,8 @@ export interface ResourceLimits {
   /** Total physical RAM of the target device, MiB. Documentation only. */
   memTotalMiB: number;
   ollama: { memoryHigh: string; memoryMax: string };
+  /** clawbox-embed.service — the memory-search embedder on llama.cpp. */
+  embed: { memoryHigh: string; memoryMax: string };
   browser: { memoryHigh: string; memoryMax: string };
   desktop: { memoryHigh: string; memoryMax: string };
   ollamaNumParallel: number;
@@ -26,6 +28,7 @@ export interface ResourceLimits {
 export const RESOURCE_LIMITS: ResourceLimits = {
   memTotalMiB: 7607,
   ollama: { memoryHigh: "5G", memoryMax: "5632M" },
+  embed: { memoryHigh: "2560M", memoryMax: "3072M" },
   browser: { memoryHigh: "1200M", memoryMax: "1536M" },
   desktop: { memoryHigh: "1400M", memoryMax: "2048M" },
   ollamaNumParallel: 2,
@@ -47,6 +50,8 @@ export const RESOURCE_LIMIT_KEYS: Record<string, string | number> = {
   CLAWBOX_MEM_TOTAL_MIB: RESOURCE_LIMITS.memTotalMiB,
   CLAWBOX_OLLAMA_MEMORY_HIGH: RESOURCE_LIMITS.ollama.memoryHigh,
   CLAWBOX_OLLAMA_MEMORY_MAX: RESOURCE_LIMITS.ollama.memoryMax,
+  CLAWBOX_EMBED_MEMORY_HIGH: RESOURCE_LIMITS.embed.memoryHigh,
+  CLAWBOX_EMBED_MEMORY_MAX: RESOURCE_LIMITS.embed.memoryMax,
   CLAWBOX_BROWSER_MEMORY_HIGH: RESOURCE_LIMITS.browser.memoryHigh,
   CLAWBOX_BROWSER_MEMORY_MAX: RESOURCE_LIMITS.browser.memoryMax,
   CLAWBOX_DESKTOP_MEMORY_HIGH: RESOURCE_LIMITS.desktop.memoryHigh,

@@ -350,6 +350,22 @@ describe("middleware", () => {
     });
 
     it.each([
+      "/setup-api/local-ai/llamacpp/v1/chat/completions",
+      "/setup-api/local-ai/ollama/api/chat",
+      "/setup-api/local-ai/embed/v1/embeddings",
+    ])("passes %s through with no session — the proxy verifies its own bearer", async (p) => {
+      // OpenClaw is a separate process with no cookie. A 401 from here would
+      // trip its auth-failure cooldown; for the embed prefix it would also
+      // fail every memory search, since its embedding client gives a refused
+      // request three attempts inside two seconds and then gives up.
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+      const response = await mod.middleware(createRequest(p));
+      expect(response.status).toBe(200);
+    });
+
+    it.each([
       "/setup-api/wifi/scan",
       "/setup-api/wifi/connect",
       "/setup-api/update/status",

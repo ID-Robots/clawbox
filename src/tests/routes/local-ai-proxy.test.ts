@@ -6,6 +6,12 @@ vi.mock("@/lib/llamacpp", () => ({
   getLlamaCppBaseUrl: vi.fn(() => "http://127.0.0.1:8080/v1"),
 }));
 
+vi.mock("@/lib/embed-server", () => ({
+  getEmbedBaseUrl: vi.fn(() => "http://127.0.0.1:8081/v1"),
+  getEmbedRootUrl: vi.fn(() => "http://127.0.0.1:8081"),
+  getEmbedBatch: vi.fn(() => 1024),
+}));
+
 vi.mock("@/lib/local-ai-runtime", () => ({
   beginLocalAiUse: vi.fn(),
   endLocalAiUse: vi.fn(),
@@ -265,5 +271,138 @@ describe("ollama chat-completions reasoning rewrite", () => {
     );
 
     expect(calls.some((c) => c.url.endsWith("/api/show"))).toBe(false);
+  });
+});
+
+/**
+ * The memory embedder's proxy: OpenClaw's `memory.search.remote` points here.
+ * It is the wake path (ensureLocalAiReady before every request) and the place
+ * the qwen3 query instruction — which OpenClaw's ollama adapter used to add
+ * and its openai-compatible adapter does not — is restored for queries.
+ */
+describe("the memory embedder proxy", () => {
+  const QUERY_PREFIX = "Instruct: Given a user query, retrieve relevant memory notes and documents\nQuery:";
+
+  /** Answers the embedder: /tokenize counts characters, /embeddings echoes. */
+  function stubEmbedder() {
+    const calls: { url: string; body: unknown }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        const body = init.body ? JSON.parse(String(init.body)) : null;
+        calls.push({ url, body });
+        if (url.endsWith("/tokenize")) {
+          return new Response(JSON.stringify({ tokens: Array.from(String(body.content), (_, i) => i) }), { status: 200 });
+        }
+        if (url.endsWith("/detokenize")) {
+          return new Response(JSON.stringify({ content: "x".repeat(body.tokens.length) }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ data: [{ embedding: [0.1], index: 0 }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    return calls;
+  }
+
+  // The route is mounted at /embed/v1/[...path], so `path` never carries the
+  // version segment — same as the llamacpp cases above.
+  async function embeddings(body: unknown, path = ["embeddings"]) {
+    const mod = await import("@/app/setup-api/local-ai/embed/v1/[...path]/route");
+    return await mod.POST(
+      new Request(`http://localhost/setup-api/local-ai/embed/v1/${path.join("/")}`, {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+      }),
+      { params: Promise.resolve({ path }) },
+    );
+  }
+
+  it("wakes the embedder, prefixes a query and strips input_type before forwarding", async () => {
+    const calls = stubEmbedder();
+
+    const res = await embeddings({ model: "qwen3-embedding-0.6b", input: ["tunnel link"], input_type: "query" });
+
+    expect(res.status).toBe(200);
+    expect(mockEnsureLocalAiReady).toHaveBeenCalledWith("embed");
+    expect(mockBeginLocalAiUse).toHaveBeenCalledWith("embed");
+    const upstream = calls.find((c) => c.url === "http://127.0.0.1:8081/v1/embeddings");
+    expect(upstream?.body).toEqual({ model: "qwen3-embedding-0.6b", input: [`${QUERY_PREFIX}tunnel link`] });
+    // Short inputs never cost a tokenizer round trip.
+    expect(calls.some((c) => c.url.endsWith("/tokenize"))).toBe(false);
+  });
+
+  it("passes documents through bare — the index side of an asymmetric model", async () => {
+    const calls = stubEmbedder();
+
+    await embeddings({ model: "m", input: ["ping"], input_type: "document" });
+
+    const upstream = calls.find((c) => c.url === "http://127.0.0.1:8081/v1/embeddings");
+    expect(upstream?.body).toEqual({ model: "m", input: ["ping"] });
+  });
+
+  it("trims an input that would overflow the batch instead of letting the server refuse it", async () => {
+    const calls = stubEmbedder();
+    // 1,200 characters tokenizes (in the stub) to 1,200 tokens: over 1024 - 8.
+    const long = "y".repeat(1200);
+
+    await embeddings({ model: "m", input: [long, "fine"], input_type: "document" });
+
+    const upstream = calls.find((c) => c.url === "http://127.0.0.1:8081/v1/embeddings");
+    const sent = upstream?.body as { input: string[] };
+    expect(sent.input[0]).toHaveLength(1024 - 8);
+    expect(sent.input[1]).toBe("fine");
+    expect(calls.filter((c) => c.url.endsWith("/tokenize"))).toHaveLength(1);
+  });
+
+  it("refuses an oversized embeddings body rather than forwarding it unprefixed", async () => {
+    stubEmbedder();
+    const mod = await import("@/app/setup-api/local-ai/embed/v1/[...path]/route");
+    const res = await mod.POST(
+      new Request("http://localhost/setup-api/local-ai/embed/v1/embeddings", {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json", "Content-Length": String(50 * 1024 * 1024) }),
+        body: "{}",
+      }),
+      { params: Promise.resolve({ path: ["embeddings"] }) },
+    );
+    expect(res.status).toBe(413);
+    expect(mockEndLocalAiUse).toHaveBeenCalledWith("embed");
+  });
+
+  it("leaves a non-embeddings path streaming, untouched", async () => {
+    const calls = stubEmbedder();
+    const mod = await import("@/app/setup-api/local-ai/embed/v1/[...path]/route");
+    await mod.GET(
+      new Request("http://localhost/setup-api/local-ai/embed/v1/models", { headers: authHeaders() }),
+      { params: Promise.resolve({ path: ["models"] }) },
+    );
+    expect(calls[0].url).toBe("http://127.0.0.1:8081/v1/models");
+  });
+
+  it("answers 502 when the embedder cannot be woken, so OpenClaw falls back to keyword search", async () => {
+    stubEmbedder();
+    mockEnsureLocalAiReady.mockRejectedValueOnce(new Error("Not enough free memory to wake the memory embedder"));
+
+    const res = await embeddings({ model: "m", input: ["q"], input_type: "query" });
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: "Not enough free memory to wake the memory embedder" });
+  });
+
+  it("requires the service bearer like every other proxy", async () => {
+    stubEmbedder();
+    const mod = await import("@/app/setup-api/local-ai/embed/v1/[...path]/route");
+    const res = await mod.POST(
+      new Request("http://localhost/setup-api/local-ai/embed/v1/embeddings", {
+        method: "POST",
+        body: JSON.stringify({ input: ["q"] }),
+      }),
+      { params: Promise.resolve({ path: ["embeddings"] }) },
+    );
+    expect(res.status).toBe(401);
+    expect(mockEnsureLocalAiReady).not.toHaveBeenCalled();
   });
 });

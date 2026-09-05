@@ -55,6 +55,14 @@ const DATA_KEEP: ReadonlyArray<{ rel: string; keep?: ReadonlySet<string> }> = [
     rel: "llamacpp",
     keep: new Set(["models"]),
   },
+  {
+    // The memory-search embedder's GGUF (639 MB), for the same reason as the
+    // Gemma one above: a reset box has no internet to fetch it again, and
+    // weights are cache, not owner state. Its server.log is wiped with the
+    // rest — that log is of the owner's own documents being embedded.
+    rel: "embed",
+    keep: new Set(["models"]),
+  },
 ];
 const DATA_KEEP_NAMES = new Set(DATA_KEEP.map((entry) => entry.rel));
 

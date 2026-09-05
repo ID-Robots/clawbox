@@ -670,6 +670,7 @@ EXPECTED_ACTIVE_SERVICES=(
 EXPECTED_INSTALLED_SERVICES=(
   clawbox-heartbeat.service
   clawbox-browser.service
+  clawbox-embed.service
   clawbox-tunnel.service
   "clawbox-root-update@.service"
   clawbox-ap-watchdog.service
@@ -928,6 +929,31 @@ get_env_setting_or_default() {
   fi
 }
 
+# A Hugging Face repo id or file name read out of .env, checked BEFORE it is
+# spliced into an as_clawbox_login command string. That helper hands its
+# argument to `su -c`, so a value carrying shell syntax would run as the
+# clawbox user the moment a root-invoked step read the pin — and the same
+# value becomes MODEL_PATH and the download's argv, where a `..` segment
+# reaches past the models directory and a leading dash turns into an `hf`
+# option. The allow-list is exactly what a repo id (owner/name) or a GGUF
+# name (with an optional subfolder) is made of; anything else is refused with
+# the key named, since get_env_setting_or_default takes the line as written.
+# Usage: require_safe_hf_ref KEY VALUE
+require_safe_hf_ref() {
+  local key="$1"
+  local value="$2"
+  # ASCII ranges only: in a UTF-8 locale [A-Z] can admit other scripts.
+  local LC_ALL=C
+  if [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+    case "/$value/" in
+      */../*) ;;
+      *) return 0 ;;
+    esac
+  fi
+  echo "Error: ${key}=$(printf '%q' "$value") in .env is not a Hugging Face repo id or file name (letters, digits, . _ / -; no '..' segment; no leading '-'). Refusing to use it — fix the pin and re-run." >&2
+  return 1
+}
+
 ensure_llamacpp_model_cached() {
   local ENV_FILE="$PROJECT_DIR/.env"
   local MODEL_DIR="$PROJECT_DIR/data/llamacpp/models"
@@ -941,6 +967,9 @@ ensure_llamacpp_model_cached() {
 
   HF_REPO=$(get_env_setting_or_default "$ENV_FILE" "LLAMACPP_HF_REPO" "google/gemma-4-E2B-it-qat-q4_0-gguf")
   HF_FILE=$(get_env_setting_or_default "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-E2B_q4_0-it.gguf")
+  # Both are about to be interpolated into an as_clawbox_login command string.
+  require_safe_hf_ref "LLAMACPP_HF_REPO" "$HF_REPO" || return 1
+  require_safe_hf_ref "LLAMACPP_HF_FILE" "$HF_FILE" || return 1
   MODEL_PATH="$MODEL_DIR/$HF_FILE"
 
   mkdir -p "$MODEL_DIR"
@@ -1175,6 +1204,14 @@ free_memory_for_build() {
     echo "  Stopping ollama.service..."
     systemctl stop ollama.service 2>/dev/null \
       || echo "  Warning: could not stop ollama.service" >&2
+  fi
+  # The memory embedder is a system unit of its own (~2 GB on the GPU while
+  # awake) and outlives the web server whose idle timer would otherwise stop
+  # it, so the build has to ask for its memory back explicitly.
+  if systemctl cat clawbox-embed.service >/dev/null 2>&1; then
+    echo "  Stopping clawbox-embed.service..."
+    systemctl stop clawbox-embed.service 2>/dev/null \
+      || echo "  Warning: could not stop clawbox-embed.service" >&2
   fi
 
   # The voice engines are USER units, so they need the clawbox user's session
@@ -2312,6 +2349,64 @@ step_llamacpp_model() {
     return 0
   fi
   ensure_llamacpp_model_cached
+}
+
+# Cache the memory-search embedder's GGUF (data/embed/models) so the unit never
+# has to download it inside a proxied request: OpenClaw gives a document batch
+# 120 s and a query 60 s, and a 640 MB fetch on a slow link fits neither.
+# Fast no-op when the file is there, which is what makes it safe on every
+# update. The same download the unit's start script would do on its own —
+# scripts/start-embed-server.sh — done here as root, ahead of time.
+ensure_embed_model_cached() {
+  local ENV_FILE="$PROJECT_DIR/.env"
+  local MODEL_DIR="$PROJECT_DIR/data/embed/models"
+  local HF_REPO HF_FILE MODEL_PATH
+  # Keep the defaults in step with src/lib/embed-server.ts.
+  HF_REPO=$(get_env_setting_or_default "$ENV_FILE" "EMBED_HF_REPO" "Qwen/Qwen3-Embedding-0.6B-GGUF")
+  HF_FILE=$(get_env_setting_or_default "$ENV_FILE" "EMBED_HF_FILE" "Qwen3-Embedding-0.6B-Q8_0.gguf")
+  # Both are about to be interpolated into an as_clawbox_login command string.
+  require_safe_hf_ref "EMBED_HF_REPO" "$HF_REPO" || return 1
+  require_safe_hf_ref "EMBED_HF_FILE" "$HF_FILE" || return 1
+  MODEL_PATH="$MODEL_DIR/$HF_FILE"
+  mkdir -p "$MODEL_DIR"
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/embed"
+  if [ -f "$MODEL_PATH" ]; then
+    echo "  Memory-search model already cached (${HF_FILE})"
+    return 0
+  fi
+  echo "  Downloading the memory-search model (${HF_FILE}, ~639 MB)..."
+  if ! as_clawbox_login "hf download \"$HF_REPO\" \"$HF_FILE\" --local-dir \"$MODEL_DIR\""; then
+    echo "Error: failed to download the memory-search model" >&2
+    return 1
+  fi
+  if [ ! -f "$MODEL_PATH" ]; then
+    echo "Error: download completed but ${MODEL_PATH} was not found" >&2
+    return 1
+  fi
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/embed"
+  echo "  Memory-search model cached for offline use"
+}
+
+# Gated on the OpenClaw harness, unlike step_llamacpp_model: memory search is
+# an OpenClaw feature, and a hermes box has no core to point at the 639 MB
+# this would fetch.
+step_embed_model() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping the memory-search model cache"
+    return 0
+  fi
+  if ! has_openclaw_harness; then
+    echo "  Memory search is an OpenClaw feature; this edition does not include it."
+    return 0
+  fi
+  # `hf` is installed by step_llamacpp_install. Without it there is nothing
+  # this step can do — say so instead of failing on a missing binary; the
+  # unit's start script fetches the model on first use once it exists.
+  if ! as_clawbox_login "command -v hf" &>/dev/null; then
+    echo "  Hugging Face CLI not installed — skipping the memory-search model cache"
+    return 0
+  fi
+  ensure_embed_model_cached
 }
 
 # The OpenClaw gateway is an UNAUTHENTICATED agent control surface on
@@ -3741,6 +3836,23 @@ step_directories_permissions() {
   ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "131072"
+  # The memory-search embedder (config/clawbox-embed.service). Keep in step
+  # with src/lib/embed-server.ts and scripts/start-embed-server.sh —
+  # src/tests/unit/embed-server-pin.test.ts fails if they disagree.
+  ensure_env_setting "$ENV_FILE" "EMBED_BASE_URL" "http://127.0.0.1:8081/v1"
+  ensure_env_setting "$ENV_FILE" "EMBED_MODEL" "qwen3-embedding-0.6b"
+  ensure_env_setting "$ENV_FILE" "EMBED_HF_REPO" "Qwen/Qwen3-Embedding-0.6B-GGUF"
+  ensure_env_setting "$ENV_FILE" "EMBED_HF_FILE" "Qwen3-Embedding-0.6B-Q8_0.gguf"
+  # -c/-b/-ub as one number; 1024 covers every measured document twice over
+  # and the proxy trims the rare longer one. 2048 for a box whose notes are
+  # mostly CJK (a 1,600-character chunk can be 1,600 tokens) — ~0.6 GB more.
+  ensure_env_setting "$ENV_FILE" "EMBED_BATCH" "1024"
+  # 99 = the whole model on the GPU (a query answers in ~50 ms, a document
+  # chunk in ~53 ms). 0 = CPU only: 1.4 GB RSS of which only 0.7 GB is
+  # anonymous, queries FASTER (27 ms), but indexing 13x slower (692 ms/chunk).
+  ensure_env_setting "$ENV_FILE" "EMBED_N_GPU_LAYERS" "99"
+  ensure_env_setting "$ENV_FILE" "EMBED_CACHE_TYPE_K" "q8_0"
+  ensure_env_setting "$ENV_FILE" "EMBED_CACHE_TYPE_V" "q8_0"
   echo "  Done"
 }
 
@@ -4249,6 +4361,10 @@ step_systemd_services() {
   for svc in "${ALL_SERVICES[@]}"; do
     [[ "$svc" == *@* ]] && continue
     [[ "$svc" == "clawbox-browser.service" ]] && continue
+    # On demand only: the local-AI proxy starts the memory embedder on the
+    # first search and stops it ten idle minutes later. It has no [Install]
+    # section, and enabling it would mean 2 GB resident from boot for nothing.
+    [[ "$svc" == "clawbox-embed.service" ]] && continue
     [[ "$svc" == "clawbox-tunnel.service" ]] && continue
     [[ "$svc" == "clawbox-heartbeat.service" ]] && continue
     # Timer-driven one-shot (no [Install]); enabled via its .timer below.
@@ -4527,7 +4643,17 @@ step_post_update() {
   # Without this the embedding model is fresh-install-only: nothing in the
   # update path pulls it, so a box that missed it when it was built stayed on
   # lexical FTS. Non-fatal in the register of its neighbours.
+  # After step_systemd_services and step_resource_limits above: the helper
+  # reaches the embedder through the proxy, which starts clawbox-embed.service
+  # through a sudoers grant those two steps install.
   ensure_local_embeddings || echo "  Warning: local embeddings check failed (non-fatal)"
+  # The embedder used to live inside ollama, which may still be holding the
+  # old copy (2.8 GB). `stop`, never `disable`: the runtime's own standby
+  # convention, and the chat path can still wake it on demand. After the
+  # helper, so nothing re-embeds through ollama on the way out.
+  if systemctl cat ollama.service >/dev/null 2>&1; then
+    systemctl stop ollama.service 2>/dev/null || true
+  fi
   step_llamacpp_model || echo "  Warning: llamacpp_model step failed (non-fatal)"
   # Hermes re-provisioning is deliberately NOT called here. The in-app updater
   # dispatches `hermes_edition` as its own step immediately after this one, so a
@@ -4884,75 +5010,41 @@ step_jtop_install() {
 
 # ── Local embedding model ────────────────────────────────────────────────────
 
-# Is the Ollama API answering? Waits up to $1 seconds (default 30).
-#
-# NEVER starts a daemon the owner switched OFF. Local AI's off switch is
-# `systemctl disable --now ollama.service` (src/lib/local-models.ts), while the
-# runtime's idle standby is `stop` and deliberately never `disable`
-# (src/lib/local-ai-runtime.ts). So `is-active` alone cannot tell "asleep" from
-# "switched off for good", and `is-enabled` is the only thing that can —
-# starting on is-active would quietly reverse the owner's own decision, which is
-# the one thing a "install what is missing" pass must never do.
-#
-# The URL is the one ensure-local-embeddings.sh itself probes, read from the
-# same variable, so this can never certify a daemon the helper then cannot
-# reach — `localhost` and `127.0.0.1` are not the same address on a box whose
-# resolver answers ::1 first.
-ollama_wait_ready() {
-  local limit="${1:-30}" waited=0
-  local url="${OLLAMA_TAGS_URL:-http://localhost:11434/api/tags}"
-  systemctl cat ollama.service >/dev/null 2>&1 || return 1
-  # Activity FIRST, and the boot setting only if it is down.
-  #
-  # The rule this enforces is "never START an engine the owner switched off" —
-  # not "never use one". `systemctl disable` without --now leaves the service
-  # RUNNING until the next boot, so asking is-enabled first refused a reachable
-  # Ollama and skipped a repair that would have started nothing.
-  if ! systemctl is-active --quiet ollama.service 2>/dev/null; then
-    # Down, so waking it is a decision — and the boot setting is the only thing
-    # that can tell the idle standby (`stop`, never `disable`) apart from the
-    # owner's switch (`disable --now`).
-    #
-    # 2, not 1: "switched off" is not "unreachable", and the callers print a
-    # connectivity diagnostic on 1 that would contradict the line above it.
-    if ! systemctl is-enabled --quiet ollama.service 2>/dev/null; then
-      echo "  Ollama is switched off on this box - leaving it that way."
-      return 2
-    fi
-    systemctl start ollama.service >/dev/null 2>&1 || true
-  fi
-  while :; do
-    curl -fsS --max-time 2 "$url" >/dev/null 2>&1 && return 0
-    [ "$waited" -ge "$limit" ] && return 1
-    sleep 2
-    waited=$((waited + 2))
-  done
-}
 
-# Make sure this box has its local embedding model, on an UPDATE as well as on a
-# fresh install.
+# Make sure this box's memory search runs on the embedder it ships, on an
+# UPDATE as well as on a fresh install.
 #
-# step_ollama_install pulls it when the box is first built, and
-# gateway-pre-start.sh re-checks it detached on every gateway start — but
-# nothing ran it on an update, and the boot check only helps if it happens to
-# find ollama awake. A box that was offline when it was flashed, or whose ollama
-# was still binding its port in the seconds after `systemctl restart ollama`,
-# therefore kept semantic memory on lexical FTS for ever with no route back.
+# The model comes first, as root (step_embed_model — a fast no-op when it is on
+# disk): the helper below runs under a 600 s ceiling and reaches the embedder
+# THROUGH the web server's proxy, and a first request that had to download
+# 640 MB would not fit OpenClaw's own timeouts either. Then the helper points
+# OpenClaw at the proxy and reindexes. It waits for the web server itself, so
+# on a fresh install this runs AFTER step_start_services; gateway-pre-start.sh
+# launches the same helper detached on every gateway start, so a box that
+# misses this pass still self-heals.
 #
-# Bounded and non-fatal by construction. post_update holds the gateway quiesced
-# and carries a 900 s budget of its own, so a first-time ~639 MB pull gets ten
-# minutes here and no more; the helper's 6 h backoff and the detached run at
-# gateway start remain the long tail. It returns 0 on every path — it is called
-# bare under `set -euo pipefail`, and a missing embedding model must never be
-# the reason an update stops.
+# Bounded and non-fatal by construction. post_update holds a 900 s budget of
+# its own, so the helper gets ten minutes here and no more; its own retry
+# rules and the detached run at gateway start remain the long tail. It returns
+# 0 on every path — it is called bare under `set -euo pipefail`, and a missing
+# embedding model must never be the reason an update stops.
+#
+# The verdict afterwards is asked of the CORE — `openclaw memory status --deep
+# --json`, the call src/lib/clawkeep-memory.ts makes — never re-derived from
+# openclaw.json (TASK-659): a config read can only prove what was WRITTEN, not
+# what the core does with it. One thing the status does not carry is the
+# provider's URL, and `openai-compatible` is one id for two things: our own
+# embedder behind the loopback proxy, and a server across the room the owner
+# chose. So that one case reads memory.search.remote.baseUrl from the config,
+# by the same loopback rule providerLocation() applies in clawkeep-memory.ts,
+# and the installer and the Memory Shard panel cannot disagree about "local".
 ensure_local_embeddings() {
   local helper="$PROJECT_DIR/scripts/ensure-local-embeddings.sh"
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping the local embedding model"
     return 0
   fi
-  # Same answer, and the same reasoning, as the guard inside step_ollama_install:
-  # a hermes box has no core to point at the model it would spend 639 MB on.
+  # A hermes box has no core to point at the model it would spend 639 MB on.
   if ! has_openclaw_harness; then
     echo "  Memory search is an OpenClaw feature; this edition does not include it."
     return 0
@@ -4961,131 +5053,31 @@ ensure_local_embeddings() {
     echo "  Warning: $helper is missing or not executable - semantic memory stays on lexical FTS" >&2
     return 0
   fi
-  local ready_rc=0
-  ollama_wait_ready 30 || ready_rc=$?
-  if [ "$ready_rc" -ne 0 ]; then
-    # Only rc 1 is a connectivity problem; rc 2 has already said, accurately,
-    # that the owner switched the engine off.
-    if [ "$ready_rc" -eq 1 ]; then
-      echo "  Ollama is not reachable - semantic memory stays on lexical FTS for now"
-    fi
-    return 0
-  fi
+  step_embed_model || echo "  Warning: memory-search model cache failed (non-fatal; the embedder fetches it on first use)"
   as_clawbox_login "timeout -k 10 600 $helper" || true
-  return 0
-}
-
-step_ollama_install() {
-  if is_test_mode; then
-    echo "  CLAWBOX_TEST_MODE=1, skipping Ollama install (400MB+ download, not needed for install flow tests)"
-    return 0
+  # The helper exits 0 on every soft failure by design, so its exit code says
+  # nothing about the outcome; ask the core. Bounded and best-effort: a CLI
+  # that hangs, is absent or answers nothing must neither stall nor abort the
+  # run, and "could not read an embedder" is reported as itself, never as a
+  # verdict. -k 5: `timeout` alone sends SIGTERM only, and
+  # collectMemoryStatusJson() escalates to SIGKILL after 5 s; a CLI that
+  # ignores SIGTERM must not hang here when it would not hang there. The
+  # status is the verdict, not just the bytes: assignment in if-condition
+  # position, so a non-zero exit discards output that describes nothing anyone
+  # should vouch for, and errexit stays suppressed.
+  local EMBED_JSON EMBED_STATE
+  if ! EMBED_JSON="$(as_clawbox timeout -k 5 60 "$OPENCLAW_BIN" memory status --agent main --deep --json 2>/dev/null)"; then
+    EMBED_JSON=""
   fi
-  if command -v ollama &>/dev/null; then
-    echo "  Ollama already installed"
+  # `command -v` first, and a state of its own: without the interpreter the
+  # parse below fails and the catch-all would tell the operator the CORE did
+  # not answer, about a core that answered perfectly.
+  if ! command -v python3 >/dev/null 2>&1; then
+    EMBED_STATE="noparser"
   else
-    echo "  Installing Ollama..."
-    curl -fsSL https://ollama.com/install.sh | sh
-  fi
-  # Ensure the service is enabled and running
-  systemctl enable ollama 2>/dev/null || true
-  systemctl start ollama 2>/dev/null || true
-  # Apply Jetson memory optimizations. Root-owned copy again, same reason as in
-  # step_performance_mode: this runs as root, and /home/clawbox/clawbox/scripts
-  # is clawbox-writable, so sourcing the repo copy here would be a root path
-  # through a file the web server can rewrite. TASK-445.
-  install_root_libexec
-  "$ROOT_LIBEXEC_DIR/optimize-ollama.sh"
-  echo "  Ollama installed and running"
-
-  # Local embedding model for semantic memory. OpenClaw's memory search
-  # defaults to OpenAI embeddings, which need an OPENAI_API_KEY the box often
-  # doesn't have (ChatGPT-OAuth / DeepSeek users) — and on the boxes that do
-  # have one it means every indexed note gets embedded by a third party.
-  # ensure-local-embeddings.sh is the single implementation of "pull the model,
-  # point memorySearch at it, reindex"; gateway-pre-start.sh runs the same
-  # script on every boot so a box that misses this pull still self-heals.
-  # Best-effort: a failure must not abort the install (memory falls back to
-  # lexical FTS).
-  local ENSURE_EMBEDDINGS="$PROJECT_DIR/scripts/ensure-local-embeddings.sh" ready_rc=0
-  if ! has_openclaw_harness; then
-    # Above the helper, not below it. A hermes box has no core and no
-    # openclaw.json, so ensure-local-embeddings.sh finds no provider anywhere,
-    # falls through its "deliberate choice" guard and pulls a ~640 MB model
-    # whose config write then fails soft by design -- and the report below then
-    # told the same operator, in the next line, that this edition does not have
-    # the feature. Nothing is lost by skipping it: gateway-pre-start.sh runs the
-    # helper only on the OpenClaw gateway, which hermes does not have.
-    # Same answer src/app/setup-api/local-models/route.ts gives the UI.
-    echo "  Memory search is an OpenClaw feature; this edition does not include it."
-  elif [ -x "$ENSURE_EMBEDDINGS" ]; then
-    # Wait for the daemon the lines above just restarted. Without this the
-    # helper's single 5-second curl could arrive while ollama was still binding
-    # its port, and its "not reachable" branch is a silent no-op: no state
-    # written, no retry, no provisioning failure recorded — a box that simply
-    # lost a race kept lexical FTS and looked healthy doing it.
-    # "not reachable", not "did not answer": the post-run check below owns that
-    # second phrase for a DIFFERENT failure — a core that answered and could not
-    # be parsed — and two unrelated "did not answer" sentences in one run send
-    # the operator to the wrong box. Same vocabulary the helper itself uses.
-    ready_rc=0
-    ollama_wait_ready 30 || ready_rc=$?
-    if [ "$ready_rc" -eq 1 ]; then
-      echo "  Ollama is not reachable yet; the helper below will report what it found"
-    fi
-    as_clawbox_login "$ENSURE_EMBEDDINGS" || true
-    # The helper exits 0 on every soft failure by design (a missing Ollama must
-    # not abort an install), so its exit code says nothing about the outcome.
-    #
-    # Ask the CORE which embedder it resolved instead of re-deriving it from
-    # openclaw.json. `openclaw memory status --agent main --deep --json` is the
-    # core's own answer, and it is the call src/lib/clawkeep-memory.ts already
-    # makes; the provider is read with the same rule providerLocation() uses
-    # there, so ClawBox cannot tell the operator one thing at install time and
-    # the owner another in the Memory Shard panel.
-    #
-    # Re-deriving it is what produced TASK-659: OpenClaw 2 reads memory.search
-    # and ignores agents.defaults.memorySearch, a v1 core does the reverse, and
-    # a check that took "whichever block names a provider" printed "ready,
-    # needs no API key" over a v2 box that was on the default cloud embedder. A
-    # config read can only ever prove what was WRITTEN, never what the core
-    # does with it -- it cannot see a dimension mismatch or a fail-closed index.
-    #
-    # Measured on a shipped Orin: rc=0 in ~8 s for 3.3 KB of JSON. What it
-    # replaces is a sub-second local read of openclaw.json, so this run costs
-    # ~8 s more -- worth it, because a config read can only prove what was
-    # written and this answer comes from the thing that has to use it. Bounded
-    # and best-effort throughout: a CLI that hangs, is absent or answers nothing
-    # must neither stall nor abort the install, and "could not read an embedder"
-    # is reported as itself rather than as a verdict.
-    #
-    # -k 5: `timeout` alone sends SIGTERM only, and collectMemoryStatusJson()
-    # in src/lib/clawkeep-memory.ts escalates to SIGKILL after 5 s. A CLI that
-    # ignores SIGTERM must not hang here when it would not hang there.
-    local EMBED_JSON EMBED_STATE
-    # The status is the verdict, not just the bytes. A `--deep` run that fails
-    # its provider probe after emitting the shallow status, a core that reports
-    # and then exits on an unrelated warning, and `timeout` killing the CLI
-    # after a complete document has been written all leave parseable JSON on
-    # stdout that describes nothing anyone should vouch for. Throwing the
-    # status away with `|| true` is how TASK-659 would re-enter through the
-    # exit code -- and collectMemoryStatusJson() rejects on `code !== 0`
-    # (src/lib/clawkeep-memory.ts), so trusting it here would put the installer
-    # and the Memory Shard panel back into disagreement. Assignment in
-    # if-condition position, so errexit stays suppressed.
-    if ! EMBED_JSON="$(as_clawbox timeout -k 5 60 "$OPENCLAW_BIN" memory status --agent main --deep --json 2>/dev/null)"; then
-      EMBED_JSON=""
-    fi
-    # `command -v` first, and a state of its own. `--step ollama_install` runs
-    # standalone -- step_apt_update, which installs python3, is not on that
-    # path -- so without the interpreter the parse below fails and the catch-all
-    # would tell the operator the CORE did not answer, about a core that
-    # answered perfectly. A warning that names the wrong thing sends them to the
-    # wrong box. Nothing here can abort: `command -v` in if-condition position.
-    if ! command -v python3 >/dev/null 2>&1; then
-      EMBED_STATE="noparser"
-    else
-      EMBED_STATE="$(python3 - "$EMBED_JSON" <<'PY' 2>/dev/null || true
+    EMBED_STATE="$(python3 - "$EMBED_JSON" "$CLAWBOX_HOME/.openclaw/openclaw.json" <<'PY' 2>/dev/null || true
 import json, sys
+from urllib.parse import urlparse
 try:
     doc = json.loads(sys.argv[1])
 except Exception:
@@ -5112,52 +5104,90 @@ if provider == "none":
     print("disabled")
 elif provider in ("ollama", "local"):
     print("local:%s" % model)
+elif provider == "openai-compatible":
+    base = ""
+    try:
+        node = json.load(open(sys.argv[2]))
+        for part in ("memory", "search", "remote", "baseUrl"):
+            node = node.get(part) if isinstance(node, dict) else None
+        base = node if isinstance(node, str) else ""
+    except Exception:
+        base = ""
+    if not base:
+        # The same answer providerLocation() gives: no address is not "on this
+        # box", and not "cloud" either — it is a state nobody should vouch for.
+        print("unknown")
+    elif (urlparse(base).hostname or "") in ("127.0.0.1", "localhost", "::1"):
+        print("local:%s" % model)
+    else:
+        print("cloud:%s" % provider)
 else:
     print("cloud:%s" % provider)
 PY
 )"
-    fi
-    case "$EMBED_STATE" in
-      local:qwen3-embedding:0.6b)
-        echo "  Local embeddings ready (qwen3-embedding:0.6b, semantic memory needs no API key)"
-        ;;
-      local:)
-        # provider says on-device and keyless, which is true and worth saying,
-        # but the core named no model. "ready on , not qwen3-embedding:0.6b" is
-        # a sentence with a hole in it that still claims READY over a box whose
-        # index cannot be matched to anything.
-        echo "  Local embeddings are on-device and keyless, but the core named no model, so this run cannot say whether the index matches qwen3-embedding:0.6b (non-fatal)"
-        ;;
-      local:*)
-        # On-device and keyless, so not a warning -- but the index belongs to
-        # a different model than ClawBox provisions, and the two have
-        # different vector dimensions.
-        echo "  Local embeddings ready on ${EMBED_STATE#local:}, not qwen3-embedding:0.6b (on-device, no API key; the index belongs to that model)"
-        ;;
-      cloud:*)
-        echo "  WARN: semantic memory is on a CLOUD embedder (${EMBED_STATE#cloud:}) — every indexed note is embedded off the box and it needs that provider's API key; the Memory Shard app moves it back on-device (non-fatal)"
-        ;;
-      noparser)
-        # Named as the installer's own gap, not the core's.
-        echo "  WARN: python3 is not installed on this box, so this run cannot read the embedder answer the core gave; the Memory Shard app shows the live one (non-fatal)"
-        ;;
-      disabled)
-        echo "  WARN: memory search is switched off on this box (the core reports provider \"none\"); semantic memory stays on lexical FTS (non-fatal)"
-        ;;
-      *)
-        # Three states share this line, and only two of them are "did not
-        # answer": the CLI was missing, failed or timed out; its output could
-        # not be parsed; or the core answered and named no provider at all --
-        # providerLocation()'s own "unknown". Claiming the core did not answer
-        # was wrong about the third.
-        echo "  WARN: could not read an embedder from the core (openclaw memory status did not answer, or named no provider), so this run publishes no embedding verdict; the Memory Shard app shows the live one (non-fatal)"
-        ;;
-    esac
-  elif ollama pull qwen3-embedding:0.6b >/dev/null 2>&1; then
-    echo "  Pulled local embedding model qwen3-embedding:0.6b (semantic memory, no API key)"
-  else
-    echo "  WARN: could not pull qwen3-embedding:0.6b; semantic memory falls back to lexical FTS until available (non-fatal)"
   fi
+  case "$EMBED_STATE" in
+    unknown)
+      echo "  WARN: memory search is on an OpenAI-compatible embedder with no address recorded, so this run cannot say whether it is on this box; the Memory Shard app shows the real state"
+      ;;
+    local:qwen3-embedding-0.6b)
+      echo "  Local embeddings ready (qwen3-embedding-0.6b via llama.cpp, semantic memory needs no API key)"
+      ;;
+    local:)
+      # On-device and keyless, which is true and worth saying, but the core
+      # named no model: "ready on , not qwen3-embedding-0.6b" is a sentence
+      # with a hole in it that still claims READY over an index that cannot
+      # be matched to anything.
+      echo "  Local embeddings are on-device and keyless, but the core named no model, so this run cannot say whether the index matches qwen3-embedding-0.6b"
+      ;;
+    local:*)
+      # On-device and keyless, so not a warning -- but the index belongs to a
+      # different model than ClawBox provisions.
+      echo "  Local embeddings ready on ${EMBED_STATE#local:}, not qwen3-embedding-0.6b (on-device, no API key; the index belongs to that model)"
+      ;;
+    cloud:*)
+      echo "  WARN: semantic memory is on a CLOUD embedder (${EMBED_STATE#cloud:}) — every indexed note is embedded off the box and it needs that provider's key; the Memory Shard app can move it onto this box"
+      ;;
+    noparser)
+      # Named as the installer's own gap, not the core's.
+      echo "  WARN: python3 is not installed on this box, so this run cannot read the embedder answer the core gave; the Memory Shard app shows the real state"
+      ;;
+    disabled)
+      echo "  WARN: memory search is switched off on this box (the core reports provider \"none\"); semantic memory stays on lexical FTS (the Memory Shard app can switch it on)"
+      ;;
+    *)
+      # Three states share this line, and only two of them are "did not
+      # answer": the CLI was missing, failed or timed out; its output could
+      # not be parsed; or the core answered and named no provider at all --
+      # providerLocation()'s own "unknown".
+      echo "  WARN: could not read an embedder from the core (openclaw memory status did not answer, or named no provider), so this run puts no verdict on semantic memory; the Memory Shard app shows the real state"
+      ;;
+  esac
+  return 0
+}
+
+step_ollama_install() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping Ollama install (400MB+ download, not needed for install flow tests)"
+    return 0
+  fi
+  if command -v ollama &>/dev/null; then
+    echo "  Ollama already installed"
+  else
+    echo "  Installing Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh
+  fi
+  # Ensure the service is enabled and running
+  systemctl enable ollama 2>/dev/null || true
+  systemctl start ollama 2>/dev/null || true
+  # Apply Jetson memory optimizations. Root-owned copy again, same reason as in
+  # step_performance_mode: this runs as root, and /home/clawbox/clawbox/scripts
+  # is clawbox-writable, so sourcing the repo copy here would be a root path
+  # through a file the web server can rewrite. TASK-445.
+  install_root_libexec
+  "$ROOT_LIBEXEC_DIR/optimize-ollama.sh"
+  echo "  Ollama installed and running"
+
 }
 
 # Install a prebuilt llama.cpp build, but only if it is genuinely usable here.
@@ -6458,6 +6488,7 @@ step_validate_services() {
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
   bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install llamacpp_model
+  embed_model
   chromium_install ai_tools_install coding_harness vnc_install vnc_refresh
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models openclaw_tts
   # Edition steps must be dispatchable or no in-app update can ever re-bake the
@@ -6542,7 +6573,7 @@ fi
 # only on the hermes and dual editions. Edition-aware rather than a constant:
 # the openclaw constant made those editions print "[27/26]" on their last step,
 # and an upper bound would leave openclaw finishing at "[26/27]".
-TOTAL_STEPS=26
+TOTAL_STEPS=28
 if has_hermes_harness; then TOTAL_STEPS=$((TOTAL_STEPS + 1)); fi
 step=0
 log() {
@@ -6627,6 +6658,9 @@ step_ollama_install
 log "Installing llama.cpp runtime..."
 step_llamacpp_install
 
+log "Caching the memory-search model..."
+step_embed_model || echo "  Warning: memory-search model cache failed (non-fatal; the embedder fetches it on first use)"
+
 log "Installing Chromium..."
 step_chromium_install
 
@@ -6663,6 +6697,11 @@ ensure_clawbox_bashrc_path
 
 log "Starting services..."
 step_start_services
+
+# After the web server is up: the helper reaches the embedder through its
+# proxy, which is what wakes the unit, and it waits for that proxy itself.
+log "Pointing memory search at the on-box embedder..."
+ensure_local_embeddings || echo "  Warning: local embeddings check failed (non-fatal)"
 
 # Hermes harness editions (hermes + dual): seed shared identity, configure the
 # dashboard auth provider, (re)start the dashboard + auth proxy. Runs after
