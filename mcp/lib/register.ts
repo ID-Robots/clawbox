@@ -73,7 +73,27 @@ export interface RegisteredToolInfo {
   opts: ToolOpts;
 }
 
-const DEFAULT_MAX_CHARS = 4_000;
+export const DEFAULT_MAX_CHARS = 4_000;
+
+/**
+ * The cap for a tool whose answer is a LIST of what is on the device.
+ *
+ * 8,000 rather than the 6,000 `skill_list` and `ui_list_apps` carried since
+ * they were written: measured against a real Hermes box (90 installed rows —
+ * 82 bundled, 3 from the store, 5 made on the device — emitting 3,165
+ * characters), 6,000 left room for only 46 further store installs, because
+ * #582 grew every store row by a third (the lock id leads and a differing card
+ * name is spelled out).
+ *
+ * Not larger, and this is the trade: both tools are `profile: "core"`, the
+ * trimmed surface a 4-8B on-device model gets, so every character here is
+ * context that model does not spend on the question. Past a certain length a
+ * list of near-identical rows is worse for it than a shorter list plus an
+ * honest count — which is what both tools now emit, so the cap is no longer
+ * what stops the answer breaking, only what it costs. 8,000 is `skill_info`'s
+ * budget, the other core tool that returns something long.
+ */
+export const LIST_MAX_CHARS = 8_000;
 // An image bigger than this eats a small model's whole context window.
 const MAX_IMAGE_BASE64 = 1024 * 1024;
 
@@ -96,7 +116,14 @@ export interface Registrar {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ToolHandler = (args: any) => Promise<ToolResult> | ToolResult;
 
-function capResult(result: ToolResult, maxChars: number): ToolResult {
+/**
+ * Apply a tool's output cap, exactly as the dispatcher does before the result
+ * reaches the agent. Exported so the test registrar can put a handler's return
+ * value through the same gate — a suite that inspects the UNCAPPED string is
+ * not looking at what the agent sees, and an output that outgrew its cap then
+ * passes every assertion about it.
+ */
+export function capResult(result: ToolResult, maxChars: number): ToolResult {
   const content = result.content.map((part): ContentPart => {
     if (part.type === "text") return { type: "text", text: capText(part.text, maxChars) };
     if (part.data.length > MAX_IMAGE_BASE64) {
