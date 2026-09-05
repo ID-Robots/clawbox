@@ -21,7 +21,8 @@ vi.mock("@/lib/hermes-config-yaml", () => ({
   readHermesConfigValue: readMock,
   resolveHermesConfigValue: resolveMock,
 }));
-vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
+const invalidateMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: invalidateMock }));
 vi.mock("@/lib/local-ai-token", () => ({ getLocalAiToken: () => "local-token-xyz" }));
 // Mirrors the REAL url builders byte-for-byte — the previous mock answered a
 // /v1 Ollama URL the real builder never produced, so this suite asserted a
@@ -378,6 +379,45 @@ describe("registering the local model with Hermes", () => {
     cliMock.mockResolvedValue({ code: 0, stdout: "http://127.0.0.1/v1", stderr: "" });
 
     await expect(removeLocalAiFromHermes()).rejects.toThrow(/still registered/i);
+  });
+
+  it("drops the model-options memo even when the patch itself threw", async () => {
+    // `applyViaCli` walks the unsets one spawn at a time and does not catch, and
+    // `runHermesCli` REJECTS on a timeout — so keys 1-3 can land and key 4 take
+    // the whole call down. `withProviderMcpRefresh` re-reads the provider set in
+    // a `finally` precisely because "the write threw" is not "nothing was
+    // written", and that re-read only sees the new catalogue once the memo has
+    // been dropped. Left to the success path, the enum would go on offering a
+    // provider whose endpoint is already out of the file.
+    deviceConfig({
+      [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+    });
+    patchMock.mockRejectedValue(new Error("hermes timed out"));
+
+    await expect(removeLocalAiFromHermes()).rejects.toThrow(/timed out/);
+    expect(invalidateMock).toHaveBeenCalled();
+  });
+
+  it("does not spend CLI spawns on an outcome a leftover already decided", async () => {
+    // One key that demonstrably survived makes "still registered" certain, so
+    // asking Hermes about the others buys nothing and costs a serial 15-second
+    // budget each in front of a click the owner is holding open.
+    const file = deviceConfig({
+      [`providers.${HERMES_LOCAL_PROVIDER}.models`]: NON_SCALAR,
+    });
+    patchMock.mockImplementation(async (patch: { unset?: string[] }) => {
+      for (const key of patch.unset ?? []) {
+        if (!key.endsWith(".models")) delete file[key];
+      }
+      return { mode: "cli", backupPath: null };
+    });
+    resolveMock.mockImplementation(async (key: string) =>
+      key.endsWith(".models") ? { state: "present" } : { state: "unreadable" },
+    );
+    cliMock.mockReset();
+
+    await expect(removeLocalAiFromHermes()).rejects.toThrow(/still registered/i);
+    expect(cliMock).not.toHaveBeenCalled();
   });
 
   it("refuses when Hermes' own reader cannot answer either", async () => {

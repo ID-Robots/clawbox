@@ -583,3 +583,53 @@ describe("getTopLevelScalar and a document PyYAML will not load", () => {
     expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value, readable: true });
   });
 });
+
+/**
+ * A block the line editor cannot INDEX must stop the write, not be written over.
+ *
+ * The walk descends exactly two columns per level and skips every line deeper
+ * than the level it is scanning, so a block written at any other indent — a
+ * hand edit, or any writer that dumps at `indent=4` — yields no entries at all.
+ * Silently, in both directions:
+ *
+ *  - `unsetYamlPath` removes nothing and returns the text unchanged, and
+ *    `patchText`'s own verification passes on the same blind spot, so the CLI
+ *    fallback that COULD do the removal is never entered;
+ *  - `setYamlPath` appends a SECOND `clawlocal:` at two spaces, and the
+ *    verification passes on that too — writing a config.yaml with a duplicate
+ *    key into the file that holds the provider api_keys.
+ *
+ * Refusing is what hands the job to `hermes config set/unset`, which loads the
+ * file with PyYAML and does not care how it is indented.
+ */
+describe("a block this editor cannot index", () => {
+  const FOUR_SPACE = "providers:\n    clawlocal:\n        base_url: http://127.0.0.1/v1\n";
+
+  it("refuses the unset instead of silently changing nothing", () => {
+    expect(() => unsetYamlPath(FOUR_SPACE, ["providers", "clawlocal", "base_url"]))
+      .toThrow(YamlEditUnsupported);
+  });
+
+  it("refuses the set instead of appending a duplicate key", () => {
+    expect(() => setYamlPath(FOUR_SPACE, ["providers", "clawlocal", "api_key"], "sk-new"))
+      .toThrow(YamlEditUnsupported);
+  });
+
+  it("refuses a root mapping that is not at column zero", () => {
+    const indented = "  providers:\n    clawlocal:\n      base_url: http://127.0.0.1/v1\n";
+    expect(() => setYamlPath(indented, ["model", "provider"], "openrouter")).toThrow(YamlEditUnsupported);
+  });
+
+  it("still writes, and still creates, on an ordinary two-space file", () => {
+    const ok = "providers:\n  clawlocal:\n    base_url: http://127.0.0.1/v1\nmodel:\n  provider: openrouter\n";
+    expect(getYamlPath(setYamlPath(ok, ["providers", "clawlocal", "api_key"], "sk-new"),
+      ["providers", "clawlocal", "api_key"])).toBe("sk-new");
+    // A key whose parent does not exist yet is created, not refused.
+    expect(getYamlPath(setYamlPath(ok, ["security", "tirith_enabled"], "true"),
+      ["security", "tirith_enabled"])).toBe("true");
+    // An empty parent block is an answer, not an unreadable one.
+    expect(getYamlPath(setYamlPath("providers:\nmodel:\n  provider: x\n", ["providers", "clawlocal", "api_key"], "k"),
+      ["providers", "clawlocal", "api_key"])).toBe("k");
+    expect(unsetYamlPath(ok, ["providers", "clawlocal", "base_url"])).not.toContain("base_url");
+  });
+});

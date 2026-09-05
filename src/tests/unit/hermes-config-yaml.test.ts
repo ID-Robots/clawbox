@@ -298,11 +298,116 @@ describe("resolveHermesConfigValue over the shapes a removal leaves behind", () 
     expect(await readBack("", "providers.clawlocal.base_url")).toEqual({ state: "absent" });
   });
 
+  it("says unreadable for a document PyYAML itself refuses", async () => {
+    // The whole-file fact that IS evidence about every key: Hermes' bridge and
+    // `hermes config get` both load config.yaml with PyYAML, so when PyYAML
+    // raises, nothing in the file is in effect and no line in it describes what
+    // the gateway is running. The module already implements that doctrine for
+    // the top-level reader; this one answered a confident `absent` — which,
+    // over a removal, is a 200 "it is gone" about a file nobody can load. The
+    // damage is deliberately somewhere ELSE than the path being read.
+    const tab = "providers:\n  openrouter:\n    api_key:\tsk-x\nmodel:\n  provider: openrouter\n";
+    expect(await readBack(tab, "providers.clawlocal.base_url")).toEqual({ state: "unreadable" });
+
+    const unterminated = 'providers:\n  openrouter:\n    api_key: "sk-x\nmodel:\n  provider: openrouter\n';
+    expect(await readBack(unterminated, "providers.clawlocal.base_url")).toEqual({ state: "unreadable" });
+  });
+
   it("keeps readHermesConfigValue's two-state contract", async () => {
     await fs.writeFile(configPath, "providers:\n  clawlocal:\n    models:\n      - gemma4\n", { mode: 0o600 });
     const { readHermesConfigValue } = await loadModule();
     // A block is not a scalar, so the scalar reader still answers null — the
     // signature every other caller reads.
     expect(await readHermesConfigValue("providers.clawlocal.models")).toBeNull();
+  });
+});
+
+/**
+ * The false-failure direction, on the file this module was measured against.
+ *
+ * The reader refuses a block it cannot index, and every refusal costs a
+ * `hermes config get` spawn on the removal path. This pins that an ORDINARY
+ * config — the real 3175-byte fixture with a provider block written into it —
+ * still answers every removal key without a single throw, before and after the
+ * unset, so a later change to the walk cannot quietly add six CLI spawns to
+ * every normal "turn Local AI off".
+ */
+describe("an ordinary config still reads without asking the CLI", () => {
+  const KEYS = [
+    "providers.clawlocal.base_url",
+    "providers.clawlocal.api_key",
+    "providers.clawlocal.api_mode",
+    "providers.clawlocal.models",
+    "model.provider",
+    "model.default",
+  ];
+
+  it("answers every removal key before and after the unset", async () => {
+    const { patchHermesConfig, resolveHermesConfigValue } = await loadModule();
+    await patchHermesConfig({
+      set: {
+        "providers.clawlocal.base_url": "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+        "providers.clawlocal.api_key": "local-token-xyz",
+        "providers.clawlocal.api_mode": "openai",
+        "providers.clawlocal.models": "gemma4-e2b-it-q4_0",
+        "model.provider": "clawlocal",
+        "model.default": "gemma4-e2b-it-q4_0",
+      },
+    });
+
+    for (const key of KEYS) {
+      expect((await resolveHermesConfigValue(key)).state, key).toBe("value");
+    }
+
+    const result = await patchHermesConfig({ unset: KEYS });
+    expect(result.mode).toBe("merge");
+
+    for (const key of KEYS) {
+      expect((await resolveHermesConfigValue(key)).state, key).toBe("absent");
+    }
+    // The comment banner the whole module exists to protect is still there.
+    expect(commentLines(await fs.readFile(configPath, "utf-8"))).toBe(36);
+    expect(cliMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A file the line editor cannot INDEX must reach the CLI, which can do the job.
+ *
+ * `unsetYamlPath` changed nothing on such a file and `patchText`'s own
+ * verification passed on the same blind spot, so `patchHermesConfig` reported a
+ * successful merge over a file it never touched — and the read-back, refusing
+ * the same shape, then answered "still registered" for ever. The removal has to
+ * fall through to `hermes config unset`, which loads with PyYAML and does not
+ * care how the file is indented.
+ */
+describe("patchHermesConfig on a config the line editor cannot index", () => {
+  const FOUR_SPACE = "providers:\n    clawlocal:\n        base_url: http://127.0.0.1/v1\n";
+
+  it("sends the unset to the CLI instead of reporting a merge that did nothing", async () => {
+    await fs.writeFile(configPath, FOUR_SPACE, { mode: 0o600 });
+    const { patchHermesConfig } = await loadModule();
+
+    const result = await patchHermesConfig({ unset: ["providers.clawlocal.base_url"] });
+
+    expect(result.mode).toBe("cli");
+    expect(cliMock).toHaveBeenCalledWith(
+      ["config", "unset", "providers.clawlocal.base_url"],
+      expect.anything(),
+    );
+    expect(await fs.readFile(configPath, "utf-8")).toBe(FOUR_SPACE);
+  });
+
+  it("sends the set to the CLI instead of writing a duplicate key", async () => {
+    await fs.writeFile(configPath, FOUR_SPACE, { mode: 0o600 });
+    const { patchHermesConfig } = await loadModule();
+
+    const result = await patchHermesConfig({ set: { "providers.clawlocal.api_key": "sk-new" } });
+
+    expect(result.mode).toBe("cli");
+    const after = await fs.readFile(configPath, "utf-8");
+    expect(after).toBe(FOUR_SPACE);
+    // The shape that used to be written into the credential file.
+    expect(after.match(/clawlocal:/g)?.length).toBe(1);
   });
 });
