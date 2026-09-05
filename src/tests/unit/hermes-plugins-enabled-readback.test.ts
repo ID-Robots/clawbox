@@ -816,6 +816,42 @@ describe("a failure that establishes nothing takes nothing away", () => {
     }
   });
 
+  it("keeps drawing when plugins.disabled holds a residue hermes ignores", async () => {
+    // The mirror of the case above, in the direction that costs a customer
+    // their pictures. `_get_disabled_set()` gates on the SAME type as the
+    // allow-list — `set(disabled) if isinstance(disabled, list) else set()`
+    // (hermes_cli/plugins_cmd.py:1257-1269, read on the pinned 0.20.5 build) —
+    // so a deny-list stored as a STRING denies nothing and Hermes loads the
+    // plugin. Reading the names recovered out of that residue as a real denial
+    // would withdraw `image_gen.provider` from a box that is drawing today, on
+    // every Save, with nothing on the device to put it back: the false failure
+    // this block forbids, arriving through a misread ANSWER rather than a
+    // failed question.
+    for (const residue of [`["${HERMES_IMAGE_PLUGIN_NAME}"]`, HERMES_IMAGE_PLUGIN_NAME]) {
+      cliMock.mockReset();
+      drawsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+      boxThatDraws(async (args) => {
+        if (isPluginsListing(args)) {
+          return { code: 2, stdout: "", stderr: "Error: no such option: --json" };
+        }
+        if (args[1] === "get" && args[2] === "plugins.enabled") {
+          return { code: 0, stdout: JSON.stringify([HERMES_IMAGE_PLUGIN_NAME]), stderr: "" };
+        }
+        if (args[1] === "get" && args[2] === "plugins.disabled") {
+          // A `hermes config set plugins.disabled '["clawai"]'` whose coercion
+          // missed, or `disabled: clawai` hand-edited into config.yaml.
+          return { code: 0, stdout: JSON.stringify(residue), stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      });
+
+      await applyClawaiToHermes("claw_token_abc", "flash");
+
+      expect(unsets(), `${residue} must not withdraw`).not.toContain("image_gen.provider");
+      expect(claimedItCanDraw(), `${residue} must keep the claim`).toBe(true);
+    }
+  });
+
   it("does not read an unfamiliar status as a NO", async () => {
     // `not-enabled` is the one verdict that takes a working box's claim away,
     // so it is a CLOSED list — `disabled`, `not enabled`, `not-enabled`, what

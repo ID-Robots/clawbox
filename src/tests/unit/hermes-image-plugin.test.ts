@@ -188,12 +188,15 @@ describe("plugins.enabled", () => {
   });
 
   it("leaves a shape it cannot read names out of alone", () => {
-    // Not repaired and not replaced: the caller refuses the feature instead,
-    // the same call `scripts/register-mcp.sh` makes on a list it cannot parse.
+    // A JSON value that is not a list names no plugin, so there is nothing to
+    // preserve: it is REPLACED, and the caller journals the old shape first.
     for (const stored of [7, null, true]) {
       expect(asJson(stored).kind, JSON.stringify(stored)).toBe("residue");
       expect(mergePluginsEnabled(asJson(stored))).toEqual([HERMES_IMAGE_PLUGIN_NAME]);
     }
+    // Stdout that is not JSON is different: nothing was read, so nothing is
+    // repaired and nothing is replaced — the same call
+    // `scripts/register-mcp.sh` makes on a list it cannot parse.
     expect(decodePluginsEnabledJson("not json at all").kind).toBe("unreadable");
     expect(mergePluginsEnabled(decodePluginsEnabledJson("not json at all"))).toBeNull();
   });

@@ -1082,8 +1082,9 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
   // `CLAWBOX_AI_PROXY_URL` moves in a release. Written ahead of the proof
   // because held behind it they were skipped whenever the listing could not be
   // asked, leaving a box that still claims `clawai` posting to the address of
-  // the release before. (They are still skipped when the READ above throws —
-  // nothing here runs then — which is the honest limit of the hoist.)
+  // the release before. (They are still skipped whenever the read OR the proof
+  // throws — nothing below the block above runs then — which is the honest
+  // limit of the hoist.)
   const describes: string[][] = [
     ["config", "set", `image_gen.${HERMES_IMAGE_PLUGIN_NAME}.model`, CLAWBOX_AI_IMAGE_MODEL_ID],
     ["config", "set", `image_gen.${HERMES_IMAGE_PLUGIN_NAME}.base_url`, CLAWBOX_AI_PROXY_URL],
@@ -1470,9 +1471,15 @@ async function readPluginsDisabledFromCli(): Promise<Set<string> | null> {
   }
   const state = decodePluginsEnabledJson(read.stdout);
   // The same decoder, and the same reading of silence: a command that printed
-  // nothing has not said the deny-list is empty. A `residue` is a value Hermes
-  // itself reads as no deny-list at all (`isinstance(disabled, list)`), so it
-  // is an honest empty here.
+  // nothing has not said the deny-list is empty.
   if (state.kind === "unreadable") return null;
-  return new Set(state.names);
+  // A RESIDUE DENIES NOTHING, so its recovered names are not a deny-list.
+  // `_get_disabled_set()` gates on the same type as the allow-list —
+  // `set(disabled) if isinstance(disabled, list) else set()`
+  // (hermes_cli/plugins_cmd.py:1257-1269, read on the pinned 0.20.5 build) —
+  // so a `plugins.disabled` stored as a STRING is a value Hermes loads the
+  // plugin over. Returning the names recovered out of it would withdraw
+  // `image_gen.provider` from a box that is drawing today; the honest empty is
+  // the only reading that matches what Hermes does.
+  return state.kind === "residue" ? new Set() : new Set(state.names);
 }
