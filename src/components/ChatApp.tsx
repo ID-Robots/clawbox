@@ -506,7 +506,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     }
 
     await dispatchSend(text, wirePayload, idempotencyKey)
-  }, [input, sending, pendingImages, status, dispatchSend])
+  }, [input, sending, pendingImages, status, dispatchSend, applyStreaming])
 
   // Drain queued sends on connect; flush them as system errors on error.
   // Sequential dispatch preserves user-typed order — chat.send acks fast

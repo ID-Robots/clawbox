@@ -1693,7 +1693,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }])
     })
   // `sessionEpoch` is bumped by switchSession so a new tab's session gets the level too.
-  }, [status, headerProvider, headerModel, thinkingLevel, adapter, caps, sessionEpoch])
+  }, [status, headerProvider, headerModel, thinkingLevel, adapter, caps, sessionEpoch, applyThinkingLevel])
 
   // Snap thinkingLevel to the active provider's persisted choice (or its
   // default) whenever the active provider changes. Without this the
@@ -1711,7 +1711,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const cfg = getProviderReasoningConfig(headerProvider, headerModel)
     const persisted = readPersistedThinkingLevel(headerProvider, cfg)
     if (thinkingLevelRef.current !== persisted) applyThinkingLevel(persisted)
-  }, [headerProvider, headerModel])
+  }, [headerProvider, headerModel, applyThinkingLevel])
 
   const handleThinkingLevelChange = useCallback((next: string) => {
     const cfg = getProviderReasoningConfig(headerProvider, headerModel)
@@ -1731,7 +1731,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (headerProvider) {
       try { window.localStorage?.setItem(`${PERSIST_KEY_PREFIX}:${headerProvider}`, normalized) } catch { /* localStorage unavailable */ }
     }
-  }, [headerProvider, headerModel])
+  }, [headerProvider, headerModel, applyThinkingLevel])
 
   // Connect to gateway
   const retryCountRef = useRef(0)
@@ -2463,7 +2463,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       console.error('Failed to load history:', err)
       if (mightAutoGreet) setIsBootstrappingHistory(false)
     }
-  }, [adapter, caps])
+  }, [adapter, caps, applyStreaming])
 
   useEffect(() => { messagesRef.current = messages }, [messages])
 
@@ -2521,7 +2521,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
-  }, [clearToolCalls, clearClarifies])
+  }, [clearToolCalls, clearClarifies, applyStreaming])
 
   const resetSession = useCallback(async () => {
     await adapter.resetSession()
@@ -3936,7 +3936,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // where the batch card appears.
     void settleEmailDrafts()
     runIdRef.current = null
-  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts, settleRun])
+  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts, settleRun, applyStreaming])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[], voice = false) => {
@@ -3974,7 +3974,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       return
     }
     void dispatchTurn(text, sendAttachments, idempotencyKey)
-  }, [caps, status, dispatchTurn])
+  }, [caps, status, dispatchTurn, applyStreaming])
 
   // Send a line the UI composed itself — a voice transcript, or the question
   // that follows a skill change. Both can arrive while the agent is already
