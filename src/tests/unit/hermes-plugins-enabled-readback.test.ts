@@ -753,23 +753,38 @@ describe("a failure that establishes nothing takes nothing away", () => {
     // The other half of the same exemption, and the reason it cannot be an
     // unconditional yes: this build can still be asked the typed questions, and
     // a `plugins.enabled` that reads back as a STRING is Hermes loading no user
-    // plugin at all. Arming on an exit code here would re-open TASK-701's own
-    // symptom for one build class.
-    box({
-      value: undefined,
-      onSet: { code: 0, stdout: "", stderr: STORING_AS_STRING },
-    });
-    const stored = cliMock.getMockImplementation()!;
-    cliMock.mockImplementation(async (args: string[]) => {
+    // plugin at all.
+    //
+    // The write lands as text SILENTLY — exit 0, clean stderr, the older CLI
+    // with no coercion warning — so `hermesStoredValueAsText` sees nothing and
+    // the typed read-back is the only witness left. Arming on the exit code
+    // here is TASK-701's own symptom, re-opened for one build class.
+    let written = false;
+    boxThatDraws(async (args) => {
+      const residue = `["${HERMES_IMAGE_PLUGIN_NAME}"]`;
       if (isPluginsListing(args)) {
         return { code: 2, stdout: "", stderr: "Error: no such option: --json" };
       }
-      return stored(args);
+      if (args[1] === "set" && args[2] === "plugins.enabled") {
+        written = true;
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        if (!written) return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
+        // A STRING that spells a list: `_get_enabled_set` reads it as empty.
+        return { code: 0, stdout: JSON.stringify(residue), stderr: "" };
+      }
+      if (args[1] === "get" && args[2] === "plugins.disabled") {
+        return { code: 1, stdout: "", stderr: "Config key not set: plugins.disabled" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
     });
 
     await applyClawaiToHermes("claw_token_abc", "flash");
 
     expect(claimedItCanDraw()).toBe(false);
+    // The residue is an ANSWER, so the stale claim goes too.
+    expect(unsets()).toContain("image_gen.provider");
   });
 
   it("does not arm a build with no listing while plugins.disabled names us", async () => {
