@@ -1687,7 +1687,10 @@ function normalizeTeam(raw: unknown): RunTeam | null {
   if (!raw || typeof raw !== "object") return null;
   const t = raw as Record<string, unknown>;
   if (typeof t.id !== "string" || !t.id) return null;
-  if (t.role !== "planner" && t.role !== "worker") return null;
+  // Every role the team has: a reviewer run reloaded without its team would
+  // be resumed and settled as a project run — icon, review pass, pull
+  // request — in a folder that is the team's.
+  if (t.role !== "planner" && t.role !== "worker" && t.role !== "reviewer") return null;
   return { id: t.id, role: t.role, taskId: typeof t.taskId === "string" ? t.taskId : null };
 }
 

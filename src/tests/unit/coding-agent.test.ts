@@ -2094,6 +2094,25 @@ describe("the run's plan", () => {
   });
 });
 
+describe("a team run reloaded from disk", () => {
+  it("keeps its team, whichever role it had — a reviewer included", async () => {
+    const base = { task: "t", directory: home, projectId: null, source: "agent", status: "completed", startedAt: 1, completedAt: 2, sessionId: null, model: null, summary: null, error: null, progress: [], filesTouched: [], commands: [], permissionDenials: [], numTurns: 0, tokensUsed: 0 };
+    fs.writeFileSync(runsFile(), JSON.stringify([
+      { ...base, id: "run-teamplan1", team: { id: "team-1", role: "planner", taskId: null } },
+      { ...base, id: "run-teamwork1", team: { id: "team-1", role: "worker", taskId: "t1" } },
+      { ...base, id: "run-teamrevw1", team: { id: "team-1", role: "reviewer", taskId: "t1" } },
+      { ...base, id: "run-teamnone1", team: { id: "team-1", role: "auditor", taskId: "t1" } },
+    ]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    expect(lib.getRun("run-teamplan1")?.team).toEqual({ id: "team-1", role: "planner", taskId: null });
+    expect(lib.getRun("run-teamwork1")?.team).toEqual({ id: "team-1", role: "worker", taskId: "t1" });
+    expect(lib.getRun("run-teamrevw1")?.team).toEqual({ id: "team-1", role: "reviewer", taskId: "t1" });
+    // A role the team does not have is not a team.
+    expect(lib.getRun("run-teamnone1")?.team).toBeNull();
+  });
+});
+
 describe("a run's commit", () => {
   it("records why the work could not be committed, on the record, and clears it when it is", async () => {
     writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });
