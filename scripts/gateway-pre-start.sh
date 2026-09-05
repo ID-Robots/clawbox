@@ -3277,11 +3277,14 @@ CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 # how CommonMark defines one — an opener and a closer alike. Matching only at
 # column 0 is not a stricter rule, it is a WRONG one: an indented closing fence
 # then goes unseen, the next opener is paired with the previous opener, and the
-# prose between two examples is marked as fenced. Measured on this template with
-# two two-space-indented closers — which render correctly on GitHub and are
-# invisible in review — `## Browser (real Chromium on the device)` and
-# `## Apps and UI` were enumerated by nothing and delivered to no box, exit 0,
-# not one word on stderr. The interval form `{0,3}` is not available: mawk 1.3.4
+# prose between two examples is marked as fenced. Measured on a COPY of this
+# template carrying two two-space-indented closers — which render correctly on
+# GitHub and are invisible in review — `## Browser (real Chromium on the
+# device)` and `## Apps and UI` were enumerated by nothing and delivered to no
+# box, exit 0, not one word on stderr. (A copy: the shipped file has exactly one
+# fenced block and it is in the LAST section, so its own closers cannot reach
+# those two headings. The shape is what matters, and the day an example lands
+# above them it would.) The interval form `{0,3}` is not available: mawk 1.3.4
 # does not merely reject it, it aborts with `REcompile() - panic`.
 #
 # A delimiter also closes only a fence opened with the SAME character, and only
@@ -3294,14 +3297,32 @@ CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 # is what lets a ```` block quote a ``` one, which is how this template shows
 # markdown inside markdown.
 #
-# CommonMark's third closer rule — that a closer carries no info string, so
-# "```markdown" cannot close "```text" — is deliberately NOT applied. It is the
-# one rule of the three that can only ever turn "unbalanced" into "balanced",
-# and balanced is the answer that HIDES lines. Measured: with it, a guide
-# carrying one stray ``` had the sections appended below it swallowed by that
-# stray on the next boot and appended again, and again — the unbounded growth
-# this whole block exists to stop. The other two rules lean the other way, and
-# leaning toward "read it as prose" is the whole design.
+# CommonMark's THIRD closer rule — that a closer carries no info string, so
+# "```md" cannot close "```text" — is applied to the TEMPLATE and not to the
+# destinations, and that asymmetry is the point rather than an oversight. It
+# changes which delimiter becomes the closer, so it moves the answer in BOTH
+# directions depending on the file, and the two files want opposite things:
+#
+#   The template is OURS — shipped, reviewed, and pinned by a unit test that
+#   compares this enumerator against a fence-blind list of every `## ` line. It
+#   should be parsed by the book, and anything the book cannot parse cleanly
+#   should be REFUSED out loud. Without the rule it is not: a `` ```text ``
+#   example closed by a `` ```md `` line (a copy-paste slip that renders
+#   correctly on GitHub) pairs opener-with-content, the pairing still comes out
+#   even, and `## Real Heading` below it is enumerated by nothing. Measured on
+#   exactly that shape: `Appended to CLAWBOX.md: First`, exit 0, not one word on
+#   stderr, and the section never reaches a box. That is this card's own defect.
+#
+#   A destination is the OWNER's and the agent's, edited by hand and by a model,
+#   and there the unaffordable outcome is not a wrong parse but an UNBOUNDED
+#   one: a heading wrongly hidden is judged missing and re-appended on every
+#   boot. Measured with the rule applied there too: a CLAWBOX.md carrying one
+#   stray ``` grew 8793 -> 11731 bytes over two boots, because the rule stopped
+#   the appended section's own `` ```text `` from closing the stray and let a
+#   later bare ``` close it instead — swallowing everything appended in between.
+#   Lenient, the same file is unbalanced, read as prose, and stable from boot 1.
+#
+# So: strict on the file we control, lenient on the files we do not.
 #
 # And a fence hides only what it CLOSES, which is the whole reason these read
 # the file twice instead of toggling as they go. An opener with no closer is
@@ -3321,6 +3342,7 @@ CLAWBOX_FENCE_AWK='
     for (i = 1; i <= fences; i++) {
       if (!open) { open = i; continue }
       if (fchar[i] != fchar[open] || flen[i] < flen[open]) continue
+      if (strict && finfo[i]) continue
       pairs++; from[pairs] = fence[open]; to[pairs] = fence[i]; open = 0
     }
     unbalanced = (open != 0)
@@ -3337,6 +3359,10 @@ CLAWBOX_FENCE_AWK='
       while (substr(mark, run + 1, 1) == char) run++
       fences++
       fence[fences] = NR; fchar[fences] = char; flen[fences] = run
+      # An info string ("```text"), which an opener may carry and a closer may
+      # not. `mark` has already had its trailing whitespace trimmed, so anything
+      # past the delimiter run is real text.
+      finfo[fences] = (length(mark) > run)
     }
   }
 '
@@ -3344,18 +3370,20 @@ CLAWBOX_FENCE_AWK='
 # Do this file'"'"'s fences balance? 0 yes, 1 no, 2 could not be read.
 #
 # Asked once per file rather than folded into the helpers, because the answer is
-# a fact about the FILE and the helpers are called once per heading. It is the
-# same pairing the helpers use, not a second rule that could drift from it.
+# a fact about the FILE and the helpers are called once per heading. `$2`
+# non-empty asks the STRICT reading, and every caller passes what the helpers
+# that go on to read the same file use — the answer must come from the same
+# pairing those helpers apply, not a second rule that could drift from it.
 clawbox_fences_balanced() {
   [ -r "$1" ] || return 2
-  awk "$CLAWBOX_FENCE_AWK"'
+  awk -v strict="${2-}" "$CLAWBOX_FENCE_AWK"'
     END { clawbox_fences(); exit(unbalanced ? 1 : 0) }
   ' "$1"
 }
 
-# Every `## ` heading in a markdown file, in order.
+# Every `## ` heading in a markdown file, in order. Template-side, so strict.
 clawbox_guide_headings() {
-  awk "$CLAWBOX_FENCE_AWK"'
+  awk -v strict=1 "$CLAWBOX_FENCE_AWK"'
     END {
       clawbox_fences()
       for (i = 1; i <= NR; i++)
@@ -3368,7 +3396,10 @@ clawbox_guide_headings() {
 #
 # One helper for BOTH destinations — CLAWBOX.md's sections and AGENTS.md's two
 # markers — so the two files cannot come to disagree about what "already there"
-# means. The AGENTS.md blocks used `grep -qF`, a SUBSTRING match, which read
+# means. No `strict`, deliberately: these are the owner's and the agent's files,
+# where the lenient closer is the reading that leans toward "unbalanced, so read
+# it as prose and hide nothing", and hiding nothing is the only answer that
+# cannot make a section be re-appended on every boot. See the rule above. The AGENTS.md blocks used `grep -qF`, a SUBSTRING match, which read
 # `### ClawBox integration notes` as the marker and withheld the pointer for
 # good; whole-line is the correction. And whole-line is exactly what a bare
 # `grep -qxF` cannot do here, because a CRLF file stores the marker as
@@ -3403,7 +3434,7 @@ clawbox_file_has_heading() {
 # dropped, because the append supplies its own separator and carrying the
 # template's too ends the topped-up guide on a dangling rule.
 clawbox_guide_section() {
-  heading="$2" awk "$CLAWBOX_FENCE_AWK"'
+  heading="$2" awk -v strict=1 "$CLAWBOX_FENCE_AWK"'
     # The only helper that reproduces lines rather than matching them, so it is
     # the only one that keeps a second copy of the file in memory. The shared
     # prologue builds `text[]`, which is trimmed; a section must be appended to
@@ -3599,7 +3630,7 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
     # box, permanently. Refusing is the same call the "no headings at all" arm
     # below already makes about the same kind of half-deployed file.
     CLAWBOX_GUIDE_FENCES=0
-    clawbox_fences_balanced "$CLAWBOX_GUIDE_SRC" || CLAWBOX_GUIDE_FENCES=$?
+    clawbox_fences_balanced "$CLAWBOX_GUIDE_SRC" strict || CLAWBOX_GUIDE_FENCES=$?
     # The DESTINATION is the owner's and the agent's, so it is not refused —
     # only reported. Reading its fences as prose means a heading quoted inside
     # one counts as present and that section is withheld, which is this card's
@@ -3608,7 +3639,7 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
     CLAWBOX_DST_FENCES=0
     clawbox_fences_balanced "$CLAWBOX_GUIDE_DST" || CLAWBOX_DST_FENCES=$?
     if [ "$CLAWBOX_DST_FENCES" = 1 ]; then
-      echo "  WARNING: the \`\`\` fences in $CLAWBOX_GUIDE_DST do not balance; a heading quoted inside one will be read as present and its section withheld" >&2
+      echo "  WARNING: the \`\`\` fences in $CLAWBOX_GUIDE_DST do not balance; a heading quoted inside one will be read as present and its section withheld. Close the fence, or delete the file and the next gateway start re-seeds it" >&2
     fi
     if [ "$CLAWBOX_GUIDE_FENCES" = 1 ]; then
       echo "  WARNING: the \`\`\` fences in $CLAWBOX_GUIDE_SRC do not balance; CLAWBOX.md not topped up (a quoted heading would be appended as a section)" >&2
@@ -3752,9 +3783,30 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
       echo "  WARNING: $4" >&2
     fi
   }
-  if [ -f "$CLAWBOX_AGENTS_MD" ] && [ ! -r "$CLAWBOX_AGENTS_MD" ]; then
+  # The same two sentences CLAWBOX.md gets above, because this is the file the
+  # harness injects into EVERY session and a withheld rule here is TASK-612's
+  # failure mode returning.
+  #
+  # Nothing here creates AGENTS.md — the harness owns that — so there is no seed
+  # arm and no dangling-symlink case to answer: `-e` is false for a dangling
+  # link, which lands on "no AGENTS.md yet", which is correct.
+  if [ -e "$CLAWBOX_AGENTS_MD" ] && [ ! -f "$CLAWBOX_AGENTS_MD" ]; then
+    # A directory, socket or FIFO in AGENTS.md's place: `-f` alone reads that as
+    # "there is no AGENTS.md" and both blocks below are skipped in silence, boot
+    # after boot, with the pointer and the rule never delivered.
+    echo "  WARNING: $CLAWBOX_AGENTS_MD exists and is not a regular file; leaving it as it is" >&2
+  elif [ -f "$CLAWBOX_AGENTS_MD" ] && [ ! -r "$CLAWBOX_AGENTS_MD" ]; then
     echo "  WARNING: could not read $CLAWBOX_AGENTS_MD; leaving it as it is" >&2
   elif [ -f "$CLAWBOX_AGENTS_MD" ]; then
+    # An AGENTS.md whose own fences do not balance is read as prose, so a marker
+    # QUOTED inside a fence — the agent showing the owner what ClawBox appends —
+    # counts as present and its block is withheld for good. Nothing else here
+    # would catch it, so the operator gets the sentence instead of silence.
+    CLAWBOX_AGENTS_FENCES=0
+    clawbox_fences_balanced "$CLAWBOX_AGENTS_MD" || CLAWBOX_AGENTS_FENCES=$?
+    if [ "$CLAWBOX_AGENTS_FENCES" = 1 ]; then
+      echo "  WARNING: the \`\`\` fences in $CLAWBOX_AGENTS_MD do not balance; a marker quoted inside one will be read as present and its block withheld. Close the fence" >&2
+    fi
     printf -v CLAWBOX_AGENTS_POINTER_TEXT '\n\n%s\n\nSee `CLAWBOX.md` for device-specific conventions: where user-installed skills live, how to control the desktop Chromium via `browser_*` tools, how to install/uninstall skills through the App Store, and which system actions are the owner'"'"'s.\n' "$CLAWBOX_AGENTS_POINTER"
     clawbox_agents_append "$CLAWBOX_AGENTS_POINTER" "$CLAWBOX_AGENTS_POINTER_TEXT" \
       "Appended CLAWBOX.md reference to AGENTS.md" \

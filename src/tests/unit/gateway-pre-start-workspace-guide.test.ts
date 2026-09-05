@@ -121,13 +121,14 @@ function runHelper(fn: string, file: string): string[] {
 }
 
 /** The same call, for the helpers whose ANSWER is their exit status. */
-function helperStatus(fn: string, file: string): number | null {
+function helperStatus(fn: string, file: string, ...args: string[]): number | null {
+  const call = [fn, file, ...args].map((a) => JSON.stringify(a)).join(" ");
   const script = [
     "set -euo pipefail",
     `CLAWBOX_ROOT=${JSON.stringify(dir)}`,
     `CLAWBOX_WORKSPACE=${JSON.stringify(path.join(dir, "no-such-workspace"))}`,
     seedingBlock(),
-    `${fn} ${JSON.stringify(file)} || exit $?`,
+    `${call} || exit $?`,
   ].join("\n");
   return spawnSync("bash", ["-c", script], { encoding: "utf-8" }).status;
 }
@@ -606,8 +607,10 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
       // `## ` line — which is exactly `headings()`, so this case would go green
       // over a template the block then REFUSES to top up from: no section
       // reaches any box again, on every boot, with a journal line for a signal.
-      // Balance is what makes the agreement above mean anything.
-      expect(helperStatus("clawbox_fences_balanced", TEMPLATE)).toBe(0);
+      // Balance is what makes the agreement above mean anything, and it is
+      // asked the way the top-up asks it about the template: `strict`, the
+      // reading `clawbox_guide_headings` itself uses.
+      expect(helperStatus("clawbox_fences_balanced", TEMPLATE, "strict")).toBe(0);
     });
 
     it("gives an old guide every heading the shipped template carries", () => {
@@ -860,6 +863,45 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
       for (const heading of ["First", "Second", "Third"]) {
         expect(readFileSync(guide, "utf-8")).toContain(`\n---\n\n## ${heading}\n`);
       }
+    });
+
+    it("delivers the section below an example closed by an info-string delimiter", () => {
+      // CommonMark's third closer rule: a CLOSING fence may not carry an info
+      // string, so "```md" inside a "```text" example is content, not the end
+      // of it. Without the rule the opener pairs with that quoted line, the
+      // pairing still comes out even — so nothing warns — and the heading below
+      // is enumerated by nothing. Measured on this fixture before the rule:
+      //
+      //   Appended to CLAWBOX.md: First          ← exit 0, nothing on stderr
+      //
+      // `## Real Heading` reaching no box, silently, which is this card's own
+      // defect arriving through the fence rule written to prevent it. The rule
+      // is applied to the TEMPLATE only — on the owner's own files the lenient
+      // reading is the one that cannot re-append a section on every boot, which
+      // the stray-fence case below pins.
+      const info = path.join(dir, "info-closer-template.md");
+      writeFileSync(
+        info,
+        [
+          "# Guide", "",
+          "## First", "", "Body one.", "",
+          "```text", "example", "```md", "still inside the example", "```", "",
+          "## Real Heading", "", "Body two.", "",
+          "```py", "code", "```js", "still inside the example", "```", "",
+        ].join("\n"),
+      );
+      writeFileSync(guide, "# Guide\n");
+
+      const { stdout, stderr } = run(info);
+
+      expect(stdout).toMatch(/Appended to CLAWBOX\.md: First, Real Heading$/m);
+      expect(stderr).not.toMatch(/WARNING/);
+      expect(readFileSync(guide, "utf-8")).toContain("\n---\n\n## Real Heading\n");
+      // …and the example it sits below arrived whole, rather than cut where the
+      // mis-paired closer put a separator.
+      expect(readFileSync(guide, "utf-8")).toContain(
+        "```text\nexample\n```md\nstill inside the example\n```\n",
+      );
     });
 
     it("refuses to top up from a template whose fences do not balance", () => {
@@ -1126,6 +1168,38 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     expect(second.stdout).not.toMatch(/Appended/);
     expect(first.stderr).toMatch(/could not read .*AGENTS\.md/);
     expect(readFileSync(agents, "utf-8")).toBe(existing);
+  });
+
+  it("says so when AGENTS.md is not a regular file, instead of skipping it in silence", () => {
+    // `-f` alone reads a DIRECTORY in AGENTS.md's place as "there is no
+    // AGENTS.md", so both blocks were skipped with exit 0 and no output at all,
+    // boot after boot, and the pointer and the rule never reached the file the
+    // harness injects into every session. The CLAWBOX.md sibling was made loud
+    // about the same shape; this is that guard's other half.
+    mkdirSync(agents, { recursive: true });
+
+    const first = run();
+    const second = run();
+
+    expect(first.stdout).not.toMatch(/Appended/);
+    expect(second.stdout).not.toMatch(/Appended/);
+    expect(first.stderr).toMatch(/AGENTS\.md exists and is not a regular file/);
+    // Nothing was written INTO the directory either.
+    expect(readdirSync(agents)).toEqual([]);
+  });
+
+  it("says so when AGENTS.md's own fences do not balance", () => {
+    // Read as prose, a marker quoted inside a fence counts as present and its
+    // block is withheld — for good, on the one file the harness loads every
+    // session. Nothing else here would catch it, so the operator gets the
+    // sentence rather than silence. The block is still delivered, because the
+    // markers are genuinely absent from this file.
+    writeFileSync(agents, "# AGENTS\n\nBe helpful.\n\n```\n");
+
+    const { stderr } = run();
+
+    expect(stderr).toMatch(/fences in .*AGENTS\.md do not balance/);
+    expect(stderr).toMatch(/read as present and its block withheld/);
   });
 
   it("does not re-append to a CRLF AGENTS.md on every boot", () => {
