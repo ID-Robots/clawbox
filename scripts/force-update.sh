@@ -20,6 +20,13 @@
 
 set -euo pipefail
 
+# Environment:
+#   CLAWBOX_ROOT / CLAWBOX_BRANCH — as below.
+#   CLAWBOX_GIT_RETRIES     — attempts for the fetch (default: 3).
+#   CLAWBOX_GIT_RETRY_DELAY — seconds before the first retry, doubling (default: 3).
+#   A value that is not a whole number is replaced with the default and a line
+#   is printed saying so. Same two knobs, same rule, as install.sh.
+
 PROJECT_DIR="${CLAWBOX_ROOT:-/home/clawbox/clawbox}"
 TARGET_BRANCH="${CLAWBOX_BRANCH:-main}"
 UPSTREAM="origin/${TARGET_BRANCH}"
@@ -83,9 +90,13 @@ fetch_with_retry() {
   # Both knobs are operator input and both are used as numbers — see
   # install.sh's git_with_retry: a non-numeric `max` makes the break
   # unreachable and a non-numeric `delay` is an unbound-variable error under
-  # `set -u`.
-  case "$max" in ''|*[!0-9]*) max=3 ;; esac
-  case "$delay" in ''|*[!0-9]*) delay=3 ;; esac
+  # `set -u`. Replaced with the default, and said out loud.
+  case "$max" in
+    ''|*[!0-9]*) echo "[force-update] CLAWBOX_GIT_RETRIES is not a number, using 3" >&2; max=3 ;;
+  esac
+  case "$delay" in
+    ''|*[!0-9]*) echo "[force-update] CLAWBOX_GIT_RETRY_DELAY is not a number, using 3" >&2; delay=3 ;;
+  esac
   while :; do
     if out="$(run_as_clawbox "$GIT fetch origin" 2>&1)"; then
       [ -z "$out" ] || printf '%s\n' "$out" >&2

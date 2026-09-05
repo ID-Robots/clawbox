@@ -104,18 +104,46 @@ function runFetch(refusals: number): { status: number; output: string; attempts:
   return { status: r.status ?? -1, output: `${r.stdout ?? ""}${r.stderr ?? ""}`, attempts };
 }
 
-/**
- * The retry knobs as an operator may actually have exported them.
- *
- * `git` always refuses here, so a loop that never breaks never returns — which
- * is why this runs under `timeout`: rc 124 is the DEFECT being measured, not a
- * hung suite.
- */
-function runFetchWithKnobs(knobs: Record<string, string>): {
+/** Run one extracted-function script under a wall-clock bound, and report what stopped it. */
+function runBounded(script: string, knobs: Record<string, string>): {
   status: number;
   output: string;
   attempts: number;
+  harnessError: string | null;
 } {
+  const r = spawnSync("timeout", ["10", "bash", "-c", script], {
+    encoding: "utf-8",
+    // Far above what the runaway loop writes in ten seconds (~200 KB/s
+    // measured), so spawnSync's 1 MB default cannot be what ends the run.
+    maxBuffer: 64 * 1024 * 1024,
+    env: testEnv({ PATH: process.env.PATH ?? "", ...knobs }),
+  });
+  const attempts = fs
+    .readFileSync(attemptLog, "utf-8")
+    .split("\n")
+    .filter(Boolean).length;
+  return {
+    status: r.status ?? -1,
+    output: `${r.stdout ?? ""}${r.stderr ?? ""}`,
+    attempts,
+    // `timeout` missing, or the buffer blown after all: either would otherwise
+    // read as a clean run with an unexpected status.
+    harnessError: r.error ? String(r.error) : null,
+  };
+}
+
+/**
+ * The retry knobs as an operator may actually have exported them.
+ *
+ * `git` always refuses here, so a loop that never breaks never returns on its
+ * own and something has to stop it. `maxBuffer` is raised well past what the
+ * runaway loop can produce in the window so that the thing which stops it is
+ * `timeout` — rc 124 — and not spawnSync's 1 MB default cutting the child off
+ * with `ENOBUFS` and a null status. That distinction is the whole reason the
+ * "never exited" assertion below can fail at all: with the default buffer it
+ * passes on the defective code.
+ */
+function runFetchWithKnobs(knobs: Record<string, string>): ReturnType<typeof runBounded> {
   const script = [
     "set -euo pipefail",
     `ATTEMPTS=${JSON.stringify(attemptLog)}`,
@@ -130,23 +158,11 @@ function runFetchWithKnobs(knobs: Record<string, string>): {
     `git_with_retry -C ${JSON.stringify(tmp)} fetch origin || echo "rc=$?"`,
   ].join("\n");
 
-  const r = spawnSync("timeout", ["10", "bash", "-c", script], {
-    encoding: "utf-8",
-    env: testEnv({ PATH: process.env.PATH ?? "", ...knobs }),
-  });
-  const attempts = fs
-    .readFileSync(attemptLog, "utf-8")
-    .split("\n")
-    .filter(Boolean).length;
-  return { status: r.status ?? -1, output: `${r.stdout ?? ""}${r.stderr ?? ""}`, attempts };
+  return runBounded(script, knobs);
 }
 
 /** force-update.sh's inline twin, with `run_as_clawbox` and `sleep` stubbed. */
-function runForceFetch(gitSays: string, knobs: Record<string, string> = {}): {
-  status: number;
-  output: string;
-  attempts: number;
-} {
+function runForceFetch(gitSays: string, knobs: Record<string, string> = {}): ReturnType<typeof runBounded> {
   const script = [
     "set -euo pipefail",
     `ATTEMPTS=${JSON.stringify(attemptLog)}`,
@@ -162,15 +178,7 @@ function runForceFetch(gitSays: string, knobs: Record<string, string> = {}): {
     'fetch_with_retry || echo "rc=$?"',
   ].join("\n");
 
-  const r = spawnSync("timeout", ["10", "bash", "-c", script], {
-    encoding: "utf-8",
-    env: testEnv({ PATH: process.env.PATH ?? "", ...knobs }),
-  });
-  const attempts = fs
-    .readFileSync(attemptLog, "utf-8")
-    .split("\n")
-    .filter(Boolean).length;
-  return { status: r.status ?? -1, output: `${r.stdout ?? ""}${r.stderr ?? ""}`, attempts };
+  return runBounded(script, knobs);
 }
 
 d("a retry knob an operator got wrong cannot hang the update", () => {
@@ -181,7 +189,8 @@ d("a retry knob an operator got wrong cannot hang the update", () => {
     // refusal that will not clear. rc 124 below is `timeout` killing it.
     const r = runFetchWithKnobs({ CLAWBOX_GIT_RETRIES: "invalid" });
 
-    expect(r.status, "the retry loop never exited").not.toBe(124);
+    expect(r.harnessError).toBeNull();
+    expect(r.status, "`timeout` had to kill the retry loop").not.toBe(124);
     expect(r.attempts).toBe(3);
     expect(r.output).toContain("attempt 1/3");
     expect(r.output).not.toMatch(/integer expression expected/);
@@ -192,8 +201,9 @@ d("a retry knob an operator got wrong cannot hang the update", () => {
     // garbage delay makes `sleep` fail and takes the whole install.sh down.
     const r = runFetchWithKnobs({ CLAWBOX_GIT_RETRY_DELAY: "soon" });
 
-    expect(r.status).not.toBe(124);
+    expect(r.harnessError).toBeNull();
     expect(r.output).toContain("retrying in 3s");
+    expect(r.output).not.toMatch(/unbound variable/);
   });
 
   it("keeps a deliberate override working", () => {
@@ -209,8 +219,19 @@ d("scripts/force-update.sh retries the same way, or does not retry at all", () =
   it("clamps a non-numeric attempt count instead of looping for ever", () => {
     const r = runForceFetch(ANON_REFUSAL, { CLAWBOX_GIT_RETRIES: "invalid" });
 
-    expect(r.status, "the retry loop never exited").not.toBe(124);
+    expect(r.harnessError).toBeNull();
+    expect(r.status, "`timeout` had to kill the retry loop").not.toBe(124);
     expect(r.attempts).toBe(3);
+  });
+
+  it("classifies with the SAME list install.sh uses, character for character", () => {
+    // Two copies exist because install.sh is an installer, not a library, and
+    // cannot be sourced from a standalone recovery script. Nothing else stops
+    // them drifting: each is extracted separately by the tests above, so either
+    // could be edited alone and stay green while the two scripts disagreed
+    // about which failures are worth asking again.
+    expect(extractShellFunctionFrom(FORCE_UPDATE_SH, "git_retryable_failure"))
+      .toBe(extractShellFunction("git_retryable_failure"));
   });
 
   it("retries GitHub's anonymous refusal", () => {

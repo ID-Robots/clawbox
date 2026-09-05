@@ -15,7 +15,10 @@
 #   CLAWBOX_GIT_RETRIES  — attempts per git network call (default: 3). GitHub
 #                          refuses anonymous fetches from an address that has
 #                          made too many, ~2 in 3 when measured (TASK-655).
-#   CLAWBOX_GIT_RETRY_DELAY — seconds before the first retry, doubling (default: 3)
+#                          A value that is not a whole number is replaced with
+#                          the default and a line is printed saying so.
+#   CLAWBOX_GIT_RETRY_DELAY — seconds before the first retry, doubling (default: 3).
+#                          Same rule for a value that is not a whole number.
 set -euo pipefail
 
 # ── Require root ─────────────────────────────────────────────────────────────
@@ -62,13 +65,21 @@ git_with_retry() {
   local out rc=0 verb
   # Both knobs are operator input and both are used as NUMBERS. A non-numeric
   # `max` makes `[ "$attempt" -ge "$max" ]` fail on every iteration — "integer
-  # expression expected" — so the break is never reached and the loop runs
-  # until something else kills it (8672 attempts, measured). A non-numeric
-  # `delay` makes `$((delay * 2))` an unbound-variable error under `set -u` and
-  # takes install.sh down mid-update. Clamp both to the default rather than
-  # trusting a value nothing in this repository sets.
-  case "$max" in ''|*[!0-9]*) max=3 ;; esac
-  case "$delay" in ''|*[!0-9]*) delay=3 ;; esac
+  # expression expected" — so the break is never reached and the loop does not
+  # end on its own; the regression test has to kill it on a wall clock. A
+  # non-numeric `delay` makes `$((delay * 2))` an unbound-variable error under
+  # `set -u` and takes install.sh down mid-update.
+  #
+  # Replaced with the default rather than trusted, and SAID so: a knob that is
+  # silently ignored is the same class of quiet wrong answer this whole change
+  # is about. Only the shape is checked — `0` is a legitimate "do not retry"
+  # and survives, and a numeric-but-large value is the operator's own call.
+  case "$max" in
+    ''|*[!0-9]*) echo "  CLAWBOX_GIT_RETRIES is not a number, using 3" >&2; max=3 ;;
+  esac
+  case "$delay" in
+    ''|*[!0-9]*) echo "  CLAWBOX_GIT_RETRY_DELAY is not a number, using 3" >&2; delay=3 ;;
+  esac
   # The subcommand, not "$1": every caller here leads with -c/-C, so naming the
   # first argument produced "git -C attempt 1/3 failed" in the journal.
   verb="$(printf '%s\n' "$@" | grep -m1 -E '^(fetch|clone|pull|push|ls-remote)$' || true)"

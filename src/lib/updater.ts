@@ -181,7 +181,10 @@ function errorText(err: unknown): string {
  * a whole run, so it gets the full three attempts. The VERSION CHECK is polled
  * by four surfaces: a long retry there is dead time on every poll, and the
  * refusal it is answering is caused by too many anonymous requests from this
- * address — which a blanket 3x would feed. It asks twice, briefly.
+ * address — which a blanket 3x would feed. It asks twice, briefly, and it
+ * spends those two asks on the call it reads the answer from rather than
+ * splitting them: hence the third budget below, which is what the advisory tag
+ * fetch gets so the check's total stays where it was.
  */
 const REMOTE_FETCH_ATTEMPTS = 3;
 const REMOTE_CHECK_ATTEMPTS = 2;
@@ -2096,10 +2099,11 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     hasHermes ? readHermesVersion() : Promise.resolve(null),
   ]);
   const { target: pinnedBranchTarget, remote: pinnedRemote } = await getPinnedBranchTarget(PROJECT_DIR);
-  // Two independent reads of the same remote — the tag list (getTargetVersion,
-  // an `ls-remote` over the GET that keeps answering) and the pinned branch's
-  // fetch (the POST GitHub refuses). Either failing means this check did not
-  // see the remote, so the worse of the two is what the device reports.
+  // Two independent reads of the same remote — the tag list (getTargetVersion's
+  // `ls-remote`, a GET to /info/refs) and the pinned branch's fetch (a POST to
+  // /git-upload-pack). BOTH can be refused; the POST far more often, which is
+  // what the card measured. Either failing means this check did not see the
+  // remote, so the worse of the two is what the device reports.
   const remote = !pinnedRemote.reachable ? pinnedRemote : lastTagRemote;
 
   // rawVersion is the installed release (e.g. "v3.1.0"); extract the base tag
@@ -2154,7 +2158,10 @@ export async function getTargetVersion(): Promise<string | null> {
     const tagFetch = await reachOrigin(
       PROJECT_DIR,
       ["fetch", "--quiet", "--tags", "origin"],
-      { timeout: 20_000, attempts: REMOTE_ADVISORY_ATTEMPTS },
+      // The delay is explicit even at one attempt: dropping it would fall back
+      // to the UPDATE path's 4 s budget, so raising REMOTE_ADVISORY_ATTEMPTS
+      // later would silently put a 4 s sleep on every polled version check.
+      { timeout: 20_000, attempts: REMOTE_ADVISORY_ATTEMPTS, retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS },
     );
     if (!tagFetch.reachable) console.warn(`[Updater] advisory tag fetch did not land: ${tagFetch.reason}`);
     // The AUTHORITATIVE call, and so the one that is retried. It used to get a

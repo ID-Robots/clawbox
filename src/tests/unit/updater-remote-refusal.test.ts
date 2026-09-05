@@ -53,6 +53,7 @@ vi.mock("@/lib/port-probe", async (orig) => ({
 const { mockRunHermesCli } = vi.hoisted(() => ({ mockRunHermesCli: vi.fn() }));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: mockRunHermesCli }));
 
+import { saveEnv } from "@/tests/helpers/env";
 import { get, set, setMany } from "@/lib/config-store";
 import { waitForPortOpen } from "@/lib/port-probe";
 
@@ -75,10 +76,17 @@ type Answer = Result | Result[];
 let argvLog: string[] = [];
 
 function install(results: Record<string, Answer>): void {
+  // Sequences are consumed by `shift`, so each `install()` gets its OWN copy.
+  // Sharing one array with the caller's literal would hand a second `install()`
+  // in the same case an already-drained queue that then silently repeats its
+  // last entry — a passing test measuring a scenario other than the one it reads
+  // as. Every fixture helper in this file is a candidate for exactly that.
+  const queues = new Map<string, Result[]>();
+  for (const [k, v] of Object.entries(results)) if (Array.isArray(v)) queues.set(k, [...v]);
   const answer = (key: string): Result | undefined => {
     for (const k of Object.keys(results)) {
       if (!key.includes(k)) continue;
-      const value = results[k];
+      const value = queues.get(k) ?? results[k];
       if (!Array.isArray(value)) return value;
       return value.length > 1 ? value.shift() : value[0];
     }
@@ -137,10 +145,21 @@ function countArgv(fragment: string): number {
   return argvLog.filter((line) => line.includes(fragment)).length;
 }
 
+/** Restores every knob below to what it was, rather than deleting it. */
+let restoreEnv: () => void = () => {};
+
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   argvLog = [];
+  restoreEnv = saveEnv(
+    "CLAWBOX_EDITION",
+    "GATEWAY_HEALTH_WAIT_MS",
+    "GATEWAY_RECOVERY_WAIT_MS",
+    "GATEWAY_WAIT_INTERVAL_MS",
+    "UPDATER_REMOTE_RETRY_DELAY_MS",
+    "UPDATER_REMOTE_CHECK_RETRY_DELAY_MS",
+  );
   process.env.CLAWBOX_EDITION = "openclaw";
   process.env.GATEWAY_HEALTH_WAIT_MS = "1";
   process.env.GATEWAY_RECOVERY_WAIT_MS = "1";
@@ -169,20 +188,23 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete process.env.CLAWBOX_EDITION;
-  delete process.env.GATEWAY_HEALTH_WAIT_MS;
-  delete process.env.GATEWAY_RECOVERY_WAIT_MS;
-  delete process.env.GATEWAY_WAIT_INTERVAL_MS;
-  delete process.env.UPDATER_REMOTE_RETRY_DELAY_MS;
-  delete process.env.UPDATER_REMOTE_CHECK_RETRY_DELAY_MS;
+  // Restored, not deleted: vitest reuses a worker across files, so a `delete`
+  // takes the variable away from every file that runs after this one in the
+  // same worker. See src/tests/helpers/env.ts.
+  restoreEnv();
 });
 
 describe("a refused anonymous fetch is not 'up to date'", () => {
   /**
-   * The exact field state the box was in on 2026-09-02: `git ls-remote`'s GET
-   * to /info/refs still answers (the card measured that it "always succeeds"),
-   * while the fetch's POST is refused — so the refs on disk are whatever the
-   * last successful fetch left, and HEAD equals the STALE origin/beta.
+   * The field state the box was in on 2026-09-02: the fetch's POST to
+   * /git-upload-pack is refused while `ls-remote`'s GET to /info/refs answers —
+   * so the refs on disk are whatever the last successful fetch left, and HEAD
+   * equals the STALE origin/beta.
+   *
+   * The GET answering is what the card measured that day, NOT a property of the
+   * endpoint: it is refused too, which is why it is retried and why
+   * "still says the remote is unreachable when every ls-remote is refused"
+   * exists below.
    */
   function boxWithRefusedFetch(): void {
     install({
