@@ -39,9 +39,9 @@ function answer(handler: (args: string[]) => { stdout?: string; stderr?: string;
   });
 }
 
-async function readUnit() {
+async function readUnit(scope: "user" | "system" = "user") {
   const { readUnitState } = await import("@/lib/local-models");
-  return readUnitState("kokoro-tts.service", "user");
+  return readUnitState("kokoro-tts.service", scope);
 }
 
 describe("readUnitState", () => {
@@ -91,5 +91,21 @@ describe("readUnitState", () => {
     answer(() => ({ stdout: "", stderr: "", fail: true }));
 
     expect(await readUnit()).toMatchObject({ present: false, answered: false });
+  });
+
+  it("asks a SYSTEM unit exactly the same way", async () => {
+    // The embedder's unit is a system one and the whole question is the same,
+    // so the two scopes must not answer "absent" differently. They used to:
+    // the system branch went through the module's generic command helper,
+    // which drops stderr, so on the older systemd only the user scope could
+    // tell an absent unit from a wedged one.
+    answer((args) => {
+      expect(args, "a system-scope query must not carry --user").not.toContain("--user");
+      return args.includes("is-active")
+        ? { stdout: "inactive\n", fail: true }
+        : { stdout: "", stderr: "Failed to get unit file state for x.service: No such file or directory\n", fail: true };
+    });
+
+    expect(await readUnit("system")).toMatchObject({ present: false, answered: true });
   });
 });

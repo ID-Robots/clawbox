@@ -212,8 +212,8 @@ async function run(cmd: string, args: string[], timeout = 5000): Promise<string 
     const { stdout } = await execFileAsync(cmd, args, { timeout });
     return stdout;
   } catch (err) {
-    // systemctl exits non-zero for "inactive"/"disabled" and still prints the
-    // word we want, so a failure with usable stdout is a real answer.
+    // A non-zero exit that still printed is a real answer — `pgrep` exits 1
+    // with the matches it found on stdout when some of them have gone.
     const out = (err as { stdout?: string })?.stdout;
     return typeof out === "string" && out.trim() ? out : null;
   }
@@ -245,14 +245,26 @@ function userSystemctlEnv(): NodeJS.ProcessEnv {
  */
 const UNIT_FILE_ABSENT = /unit file state/i;
 
-async function runUserSystemctl(args: string[]): Promise<string | null> {
+/**
+ * One `systemctl` question, in either scope, with "there is no such unit"
+ * preserved whichever stream it arrives on.
+ *
+ * Not `run()`: that helper serves every command this module shells out to, and
+ * carrying stderr into a `pgrep` or `nvidia-smi` answer would be nonsense. The
+ * carry-through is specific to systemctl's own message, so it lives with the
+ * one caller that can read it.
+ */
+async function systemctlAnswer(scope: "user" | "system", args: string[]): Promise<string | null> {
+  const argv = scope === "user" ? ["--user", ...args] : args;
   try {
-    const { stdout } = await execFileAsync("/usr/bin/systemctl", ["--user", ...args], {
+    const { stdout } = await execFileAsync("/usr/bin/systemctl", argv, {
       timeout: 5000,
-      env: userSystemctlEnv(),
+      ...(scope === "user" ? { env: userSystemctlEnv() } : {}),
     });
     return stdout;
   } catch (err) {
+    // systemctl exits non-zero for "inactive"/"disabled"/"not-found" and still
+    // prints the word we want, so a failure with usable stdout is a real answer.
     const out = (err as { stdout?: string })?.stdout;
     if (typeof out === "string" && out.trim()) return out;
     const errOut = (err as { stderr?: string })?.stderr;
@@ -294,12 +306,8 @@ export async function readUnitState(unit: string, scope: "user" | "system"): Pro
   // ahead of the reply's own speech budget rather than inside it). Asked
   // together the worst case is one timeout, not two.
   const [isActive, isEnabled] = await Promise.all([
-    scope === "user"
-      ? runUserSystemctl(["is-active", unit])
-      : run("/usr/bin/systemctl", ["is-active", unit]),
-    scope === "user"
-      ? runUserSystemctl(["is-enabled", unit])
-      : run("/usr/bin/systemctl", ["is-enabled", unit]),
+    systemctlAnswer(scope, ["is-active", unit]),
+    systemctlAnswer(scope, ["is-enabled", unit]),
   ]);
   const enabledWord = (isEnabled ?? "").trim();
   // `is-enabled` answers "there is no such unit" in TWO shapes, and the version
