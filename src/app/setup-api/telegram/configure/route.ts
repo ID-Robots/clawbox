@@ -12,7 +12,7 @@ import {
   ensureHermesGateway,
   setHermesTelegramToken,
 } from "@/lib/hermes-telegram";
-import { approvalBotToken } from "@/lib/email-approval";
+import { readApprovalBotToken } from "@/lib/email-approval";
 import { readActiveTelegramBot, telegramBotId } from "@/lib/telegram-bot-identity";
 
 export const dynamic = "force-dynamic";
@@ -93,7 +93,28 @@ export async function POST(request: Request) {
     // other getUpdates request", approvals stop arriving, and every queued email
     // waits on a question nobody is ever asked. By bot id, as next door: a
     // rotated secret is the same stream.
-    const approvalId = telegramBotId(await approvalBotToken());
+    //
+    // Read tri-state, and REFUSED when ClawBox's own store could not be read.
+    // The plain reader answers `{}` to an EACCES, an EIO or a config.json
+    // caught mid-restore, `approvalId` is then null and the guard is skipped
+    // in silence — this PR's own doctrine, applied to both harness stores and
+    // missed on the guard it adds. Refusing costs the owner one retry on the
+    // main bot; not refusing costs the household its email approvals, because
+    // ClawBox's poller and the harness gateway end up on one getUpdates
+    // stream. Unlike the unknown BELOW, this one is not a lockout: it does not
+    // stand between the owner and a first bot on a box whose store reads fine.
+    const approval = await readApprovalBotToken();
+    if (!approval.known) {
+      return NextResponse.json(
+        {
+          error:
+            "Could not read this device's saved settings, so this token cannot be confirmed as different from the bot that approves your email drafts. See the ClawBox service log.",
+          kind: "bot_unknown",
+        },
+        { status: 503 },
+      );
+    }
+    const approvalId = telegramBotId(approval.token);
     if (approvalId !== null && approvalId === telegramBotId(botToken)) {
       return NextResponse.json(
         {

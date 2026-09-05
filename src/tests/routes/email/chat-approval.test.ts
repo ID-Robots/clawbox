@@ -16,6 +16,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/config-store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/config-store")>()),
   get: vi.fn(),
+  // The tri-state read the approvals-token reader uses: `known: false` says the
+  // store could not be read, which is what makes a save gate refuse rather than
+  // skip itself. Driven off the same fixture as `get`.
+  getKnown: vi.fn(),
   set: vi.fn(),
 }));
 vi.mock("@/lib/email-approval-telegram", async (importOriginal) => ({
@@ -27,6 +31,10 @@ vi.mock("@/lib/email-approval-telegram", async (importOriginal) => ({
 vi.mock("@/lib/harness", () => ({
   getActiveHarness: vi.fn(async () => "openclaw"),
   getEdition: vi.fn(() => "openclaw"),
+  // `defaulted: false` — this fixture IS the edition lock speaking. Left
+  // defaulted, the guard would read both stores as possible and this suite
+  // would be asserting the missing-lock path instead of the OpenClaw one.
+  getEditionSource: vi.fn(() => ({ edition: "openclaw", defaulted: false })),
 }));
 vi.mock("@/lib/openclaw-config", () => ({
   readTelegramAllowFrom: vi.fn(async () => ["6001"]),
@@ -86,6 +94,10 @@ beforeEach(async () => {
 
   stored = {};
   vi.mocked(configStore.get).mockImplementation(async (key: string) => stored[key]);
+  vi.mocked(configStore.getKnown).mockImplementation(async (key: string) => ({
+    value: stored[key],
+    known: true,
+  }));
   vi.mocked(configStore.set).mockImplementation(async (key: string, value: unknown) => {
     if (value === undefined) delete stored[key];
     else stored[key] = value;

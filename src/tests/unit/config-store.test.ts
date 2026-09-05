@@ -192,6 +192,35 @@ describe("config-store", () => {
     });
   });
 
+  // JSON that parses fine and is not an object. `get` then indexed `null` and
+  // threw a TypeError out of whichever route touched the store next — a 500
+  // with nothing in it that names the file. Every reader here treats it as an
+  // unreadable store instead.
+  describe("a config.json that is not a JSON object", () => {
+    it.each(["null", "42", '"a string"', "[1, 2]"])("reads %s as an unreadable store", async (raw) => {
+      await fs.writeFile(CONFIG_PATH, raw, "utf-8");
+
+      await expect(configStore.get("any_key")).resolves.toBeUndefined();
+      await expect(configStore.getAll()).resolves.toEqual({});
+      await expect(configStore.getKnown("any_key")).resolves.toEqual({ value: undefined, known: false });
+    });
+  });
+
+  describe("getKnown", () => {
+    it("says known for a store it could read, absent file included", async () => {
+      await expect(configStore.getKnown("nothing")).resolves.toEqual({ value: undefined, known: true });
+
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ present: "v" }), "utf-8");
+      await expect(configStore.getKnown("present")).resolves.toEqual({ value: "v", known: true });
+    });
+
+    it("says known:false for a store it could not parse", async () => {
+      await fs.writeFile(CONFIG_PATH, "{ half written", "utf-8");
+
+      await expect(configStore.getKnown("present")).resolves.toEqual({ value: undefined, known: false });
+    });
+  });
+
   describe("DATA_DIR and CONFIG_ROOT exports", () => {
     it("exports DATA_DIR constant", () => {
       expect(configStore.DATA_DIR).toBe(DATA_DIR);

@@ -9,12 +9,48 @@ const CONFIG_PATH = path.join(DATA_DIR, "config.json");
 
 function readConfig(): Record<string, unknown> {
   try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    if (!fs.existsSync(CONFIG_PATH)) return {};
-    const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
-    return JSON.parse(raw);
+    return readConfigStrict();
   } catch {
     return {};
+  }
+}
+
+/**
+ * The same read, without the swallow.
+ *
+ * `readConfig()` answers `{}` to a missing file, an EACCES, an EIO and a
+ * half-written JSON alike, which is fine for the settings it was written for
+ * and wrong for a caller deciding whether two bots collide: "we could not read
+ * the file" is not evidence that a key is unset. Only an ABSENT file is that,
+ * and only that case returns here — everything else throws, so the caller can
+ * answer "we could not find out" instead of guessing.
+ *
+ * A file holding valid JSON that is not an object (`null`, a number, an array)
+ * is a read failure too: `config[key]` on `null` throws a TypeError from
+ * whichever route touched it next, which is a 500 with no explanation.
+ */
+function readConfigStrict(): Record<string, unknown> {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(CONFIG_PATH)) return {};
+  const parsed: unknown = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("data/config.json does not hold a JSON object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/** One key, tri-state: `known: false` when the store could not be read. */
+export async function getKnown(key: string): Promise<{ value: unknown; known: boolean }> {
+  try {
+    return { value: readConfigStrict()[key], known: true };
+  } catch (err) {
+    // The message only: a JSON parse error quotes a window of the INPUT, and
+    // this file holds the mailbox password and both bot tokens.
+    console.error(
+      "[config-store] data/config.json could not be read:",
+      err instanceof Error ? err.message : err,
+    );
+    return { value: undefined, known: false };
   }
 }
 

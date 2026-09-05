@@ -28,14 +28,16 @@ vi.mock("@/lib/openclaw-config", () => ({
 // The route now also refuses the approvals bot's own token (the reverse of the
 // guard in /setup-api/email/chat-approval). Mocked at the reader so this suite
 // does not drag the whole email-approval module's config-store surface in.
-vi.mock("@/lib/email-approval", () => ({ approvalBotToken: vi.fn(async () => null) }));
+vi.mock("@/lib/email-approval", () => ({
+  readApprovalBotToken: vi.fn(async () => ({ token: null, known: true })),
+}));
 
 import { get, set } from "@/lib/config-store";
-import { approvalBotToken } from "@/lib/email-approval";
+import { readApprovalBotToken } from "@/lib/email-approval";
 import { GatewayNotReadyError, setTelegramToken, restartGateway, clearTelegramPairingState, readConfigStrict } from "@/lib/openclaw-config";
 
 const mockReadConfigStrict = vi.mocked(readConfigStrict);
-const mockApprovalBotToken = vi.mocked(approvalBotToken);
+const mockApprovalBotToken = vi.mocked(readApprovalBotToken);
 const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
 const mockSetTelegramToken = vi.mocked(setTelegramToken);
@@ -63,7 +65,7 @@ describe("POST /setup-api/telegram/configure", () => {
     mockRestartGateway.mockResolvedValue();
     mockClearPairing.mockResolvedValue();
     mockReadConfigStrict.mockResolvedValue({});
-    mockApprovalBotToken.mockResolvedValue(null);
+    mockApprovalBotToken.mockResolvedValue({ token: null, known: true });
 
     const mod = await import("@/app/setup-api/telegram/configure/route");
     telegramConfigurePost = mod.POST;
@@ -215,13 +217,29 @@ describe("POST /setup-api/telegram/configure", () => {
   // reverse, so the main bot could be pointed at the approvals bot and both
   // pollers would fight over one getUpdates stream.
   it("refuses the approvals bot's own token, by bot id", async () => {
-    mockApprovalBotToken.mockResolvedValue("777777:ApprovalsBotSecret_0");
+    mockApprovalBotToken.mockResolvedValue({ token: "777777:ApprovalsBotSecret_0", known: true });
 
     const res = await telegramConfigurePost(jsonRequest({ botToken: "777777:ApprovalsBotSecret_1" }));
     const body = await res.json();
 
     expect(res.status).toBe(400);
     expect(body.kind).toBe("same_bot");
+    expect(mockSet).not.toHaveBeenCalledWith("telegram_bot_token", expect.anything());
+    expect(mockSetTelegramToken).not.toHaveBeenCalled();
+    expect(mockClearPairing).not.toHaveBeenCalled();
+  });
+
+  // The guard above rests on ClawBox's own store, whose plain reader answers
+  // `{}` to an EACCES, an EIO or a config.json caught mid-restore — so the
+  // guard was skipped in silence exactly when it could not prove anything.
+  it("refuses the save when the approvals bot's token cannot be read", async () => {
+    mockApprovalBotToken.mockResolvedValue({ token: null, known: false });
+
+    const res = await telegramConfigurePost(jsonRequest({ botToken: "777777:ApprovalsBotSecret_1" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(503);
+    expect(body.kind).toBe("bot_unknown");
     expect(mockSet).not.toHaveBeenCalledWith("telegram_bot_token", expect.anything());
     expect(mockSetTelegramToken).not.toHaveBeenCalled();
     expect(mockClearPairing).not.toHaveBeenCalled();
