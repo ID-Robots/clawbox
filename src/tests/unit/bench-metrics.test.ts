@@ -1,0 +1,102 @@
+/**
+ * The bench loop's figures are pure functions over what it sampled and
+ * captured: parallelism from the samples, cost from the per-model usage and
+ * the pricing table, a cycle's summary, and the change against the cycle
+ * before. Pinned here so the report never says what the numbers do not.
+ */
+import { describe, expect, it } from "vitest";
+import { costOfUsage, formatUsd, loadPricing, ratesFor } from "../../../bench/lib/cost.mjs";
+import { deltaByTask, formatMs, formatTokens, hints, parallelism, summarizeCycle, taskFigures } from "../../../bench/lib/metrics.mjs";
+
+const PRICING = { currency: "USD", models: { "deepseek-v4-pro[1m]": { input: 1, output: 2, cacheRead: 0.1 }, "deepseek-v4-flash": { input: 0.1, output: 0.2 } } };
+
+describe("cost", () => {
+  it("prices each model's tokens per million, cache rates falling back to input, and flags a model the table lacks", () => {
+    const cost = costOfUsage({
+      "deepseek-v4-pro[1m]": { input: 1_000_000, output: 500_000, cacheRead: 2_000_000, cacheWrite: 100_000, messages: 10 },
+      "deepseek-v4-flash": { input: 3_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0, messages: 4 },
+      "gpt-mystery": { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, messages: 1 },
+    }, PRICING);
+    // pro: 1 + 1 + 0.2 + 0.1 (cacheWrite at input's rate) = 2.3; flash: 0.3 + 0.2 = 0.5
+    expect(cost.byModel["deepseek-v4-pro[1m]"]).toEqual({ usd: 2.3, priced: true, tokens: 3_600_000 });
+    expect(cost.byModel["deepseek-v4-flash"]).toEqual({ usd: 0.5, priced: true, tokens: 4_000_000 });
+    expect(cost.byModel["gpt-mystery"]).toEqual({ usd: null, priced: false, tokens: 20 });
+    expect(cost.totalUsd).toBe(2.8);
+    expect(cost.unpriced).toEqual(["gpt-mystery"]);
+    expect(cost.tokens).toBe(7_600_020);
+  });
+
+  it("answers nothing for no usage, and rates only for a complete row", () => {
+    expect(costOfUsage(null, PRICING)).toEqual({ totalUsd: 0, byModel: {}, unpriced: [], tokens: 0 });
+    expect(ratesFor(PRICING, "deepseek-v4-flash")).toEqual({ input: 0.1, output: 0.2, cacheRead: 0.1, cacheWrite: 0.1 });
+    expect(ratesFor({ models: { broken: { input: "1" } } }, "broken")).toBeNull();
+    expect(loadPricing("/nonexistent/pricing.json")).toEqual({ currency: "USD", models: {} });
+  });
+
+  it("prints money the way the report reads it", () => {
+    expect(formatUsd(1.234)).toBe("$1.23");
+    expect(formatUsd(0.0456)).toBe("$0.046");
+    expect(formatUsd(0.0012)).toBe("$0.0012");
+    expect(formatUsd(null)).toBe("n/a");
+  });
+});
+
+describe("parallelism", () => {
+  it("reads the peak, the helper-seconds and the share of the clock with a helper out from the samples", () => {
+    const t0 = 1_000_000;
+    const samples = [
+      { t: t0, subagentsActive: 0 },
+      { t: t0 + 10_000, subagentsActive: 2 },
+      { t: t0 + 20_000, subagentsActive: 1 },
+      { t: t0 + 30_000, subagentsActive: 0 },
+      { t: t0 + 40_000, subagentsActive: 0 },
+    ];
+    const p = parallelism(samples, 40_000);
+    expect(p).toEqual({ samples: 5, peakActive: 2, helperSeconds: 30, helperShare: 0.5, agentSecondsPerWallSecond: 1.75 });
+  });
+
+  it("is the main loop alone with no samples or no helpers", () => {
+    expect(parallelism([], 0)).toEqual({ samples: 0, peakActive: 0, helperSeconds: 0, helperShare: 0, agentSecondsPerWallSecond: 1 });
+    expect(parallelism([{ t: 1, subagentsActive: 0 }, { t: 60_001, subagentsActive: 0 }], 60_000).agentSecondsPerWallSecond).toBe(1);
+  });
+});
+
+describe("a cycle's figures", () => {
+  const line = (over: Record<string, unknown>) => ({
+    task: "m-01", tier: "M", runId: "run-1", outcome: "completed", score: 90, wallMs: 300_000, numTurns: 20, tokensUsed: 1_000_000, thinkingTokens: 100_000,
+    filesTouched: 8, permissionDenials: 0, subagentsTotal: 2, subagentsByType: { explorer: 1, reviewer: 1 }, modelsUsed: ["deepseek-v4-pro[1m]"], usageByModel: null, ...over,
+  });
+  const fig = (over: Record<string, unknown>, parallel = parallelism([], 0)) =>
+    taskFigures({ line: line(over), cost: costOfUsage({ "deepseek-v4-flash": { input: 1_000_000, output: 0 } }, PRICING), parallel, cycle: "c1" });
+
+  it("sums a cycle and reads the change per task against the cycle before", () => {
+    const before = [fig({ task: "a", wallMs: 100_000, tokensUsed: 1000, score: 80 }), fig({ task: "b", outcome: "failed", score: 20 })];
+    const after = [fig({ task: "a", wallMs: 50_000, tokensUsed: 1500, score: 90 }), fig({ task: "b", score: 70 }), fig({ task: "c" })];
+    const summary = summarizeCycle(after);
+    expect(summary).toMatchObject({ runs: 3, completed: 3, successRate: 1, meanScore: 83.3, costUsd: 0.3, unpriced: [] });
+    const d = deltaByTask(before, after);
+    expect(d[0]).toMatchObject({ task: "a", wallMs: { before: 100_000, after: 50_000, pct: -50 }, tokensUsed: { pct: 50 }, score: { pct: 12.5 } });
+    expect(d[1].outcome).toEqual({ before: "failed", after: "completed" });
+    expect(d[2]).toEqual({ task: "c", fresh: true });
+  });
+
+  it("hints at what to look at, and only from the numbers", () => {
+    const quiet = fig({ task: "long", wallMs: 20 * 60_000, subagentsTotal: 0, subagentsByType: {} });
+    const refused = fig({ task: "refused", permissionDenials: 2 });
+    const thinker = fig({ task: "thinker", thinkingTokens: 500_000 });
+    const fine = fig({ task: "fine" });
+    const out = hints([quiet, refused, thinker, fine]);
+    expect(out).toEqual([
+      expect.stringMatching(/^long: 20 min with no helper/),
+      expect.stringMatching(/^refused: 2 refused action/),
+      expect.stringMatching(/^thinker: 50% of the tokens were thinking/),
+    ]);
+  });
+
+  it("formats time and tokens the way the tables read", () => {
+    expect(formatMs(65_000)).toBe("1m 5s");
+    expect(formatMs(4_000)).toBe("4s");
+    expect(formatTokens(1_234_567)).toBe("1.23M");
+    expect(formatTokens(45_600)).toBe("46k");
+  });
+});

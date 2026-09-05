@@ -1,0 +1,9 @@
+{
+  "_comment": "USD per MILLION tokens, by model id as the transcript names it. PLACEHOLDERS: set these to the prices of the plan this box is on (ClawBox AI's DeepSeek tiers) — the loop prices every run from these and flags a model that is not listed rather than guessing. cacheRead/cacheWrite default to input's rate when absent.",
+  "currency": "USD",
+  "models": {
+    "deepseek-v4-pro": { "input": 1.0, "output": 2.0, "cacheRead": 0.1, "cacheWrite": 1.0 },
+    "deepseek-v4-pro[1m]": { "input": 1.0, "output": 2.0, "cacheRead": 0.1, "cacheWrite": 1.0 },
+    "deepseek-v4-flash": { "input": 0.1, "output": 0.2, "cacheRead": 0.01, "cacheWrite": 0.1 }
+  }
+}
