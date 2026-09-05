@@ -147,7 +147,20 @@ describe("only the owner may change how email is approved", () => {
   it("lets a signed-in browser read the state", async () => {
     const res = await GET(request({ cookie: ownerCookie() }));
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ enabled: false, botConfigured: false, ownerChats: 1 });
+    expect(await res.json()).toMatchObject({ enabled: false, botConfigured: false, unknown: false, ownerChats: 1 });
+  });
+
+  // An unreadable store is not "there is no approvals bot". It is the fault
+  // this route's own POST answers 503 `bot_unknown` on, and telling the panel
+  // `botConfigured: false` over it invites the owner to connect a bot that may
+  // already be there.
+  it("says the state is unknown when the store could not be read", async () => {
+    vi.mocked(configStore.getKnown).mockResolvedValue({ value: undefined, known: false });
+
+    const res = await GET(request({ cookie: ownerCookie() }));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ botConfigured: false, unknown: true });
   });
 });
 

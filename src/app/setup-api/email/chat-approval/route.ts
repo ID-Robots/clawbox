@@ -24,6 +24,7 @@ import {
   approvalBotToken,
   chatApprovalEnabled,
   ownerChatIds,
+  readApprovalBotToken,
   startApprovalPoller,
   stopApprovalPoller,
 } from "@/lib/email-approval";
@@ -51,11 +52,19 @@ function forbidden() {
 
 /** What the panel needs to draw the section: state, bot name, and a count. */
 async function snapshot() {
-  const token = await approvalBotToken();
+  // The tri-state, not the collapsed one. An unreadable store is not "there is
+  // no approvals bot" — it is the same fault this route's own POST answers 503
+  // `bot_unknown` on, and answering `botConfigured: false` over it invites the
+  // owner to connect a bot that may already be there. Nothing renders `unknown`
+  // yet (that needs a UI state and ten locales), but the fact is in the
+  // response beside `configured` here exactly as it is on /telegram/status and
+  // /telegram/pairing, instead of only in the journal.
+  const { token, known } = await readApprovalBotToken();
   const username = await configGet(BOT_USERNAME_KEY);
   return {
     enabled: await chatApprovalEnabled(),
     botConfigured: token !== null,
+    unknown: !known,
     botUsername: typeof username === "string" ? username : null,
     // A count, not the ids. The panel needs to warn "nobody is paired with this
     // ClawBox on Telegram yet, so nobody can be asked"; it does not need to
