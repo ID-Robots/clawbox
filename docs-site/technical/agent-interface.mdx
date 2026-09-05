@@ -26,6 +26,8 @@ startup from the device's edition lock.
 | Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own |
 | Coordinate browser control (`browser_click`/`type`/`keypress`/`scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Field guide (`clawbox_context`) | the OpenClaw sections of `Clawbox.md` | the Hermes sections — identity, its own skills and model, its dashboard |
+
+`Clawbox.md` is one file with two kinds of fenced block. `<!-- edition:… -->` follows the **active harness**, so it selects the tool sections above. `<!-- ships:… -->` follows the **install**, so a `dual` device is served the OpenClaw *and* the Hermes device facts — the gateway it really has and the Hermes dashboard it really has — while still getting only the active harness's toolbelt.
 | Everything else | yes | yes |
 
 ## Tool catalog

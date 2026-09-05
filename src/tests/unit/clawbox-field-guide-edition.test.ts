@@ -159,6 +159,35 @@ describe("the Hermes guide describes a Hermes box", () => {
     expect(served("hermes")).toMatch(/brain of a \*\*Hermes ClawBox\*\*/);
   });
 
+  /**
+   * The quoted block under "First-contact" — the one the agent is told to say
+   * on a fresh box, and the only part of this document meant to be spoken
+   * almost verbatim.
+   */
+  const introScript = (edition: Ed, install: Install = edition): string => {
+    const guide = served(edition, install);
+    const start = guide.search(/^## First-contact/m);
+    expect(start, "the first-contact section moved").toBeGreaterThan(-1);
+    return guide
+      .slice(start)
+      .split("\n")
+      .filter((line) => line.startsWith("> "))
+      .join("\n");
+  };
+
+  it("names no capability-gated tool in the script it is told to say verbatim", () => {
+    // `logs_tail` and `disk_usage`/`disk_cleanup` are registered only when the
+    // startup probe passes; `coding_agent_*` and `email_*` only when the owner
+    // switched them on. The toolbelt above may list them with their caveat —
+    // the introduction may not, because it is read out as a promise.
+    const script = introScript("hermes");
+    // Guards the guard: an empty slice would pass every assertion below.
+    expect(script.length).toBeGreaterThan(200);
+    for (const gated of [/service logs/i, /coding agent/i, /\bemail\b/i, /\bdisk\b/i]) {
+      expect(script, `intro promises ${gated}`).not.toMatch(gated);
+    }
+  });
+
   it("promises none of the missing abilities in the introduction script either", () => {
     // The one block designed to be spoken verbatim on a fresh box. It named
     // shell, files, the app store and web search in ENGLISH, which the symbol
