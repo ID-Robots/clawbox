@@ -94,10 +94,12 @@ beforeEach(async () => {
   process.env.HOME = home;
   // This file DELETES under whatever path the real openclawSkillRoot()
   // resolves, so the two spellings of OpenClaw's home are both nailed down.
-  // `CLAWBOX_OPENCLAW_HOME` outranks `OPENCLAW_HOME` — and install.sh bakes it
-  // into the web-server unit, so a suite run on a device inherits it — which
-  // would send these cases at the box's real workspace with the suite still
-  // green. Cleared here as well as floored in vitest.config.ts.
+  // `CLAWBOX_OPENCLAW_HOME` outranks `OPENCLAW_HOME` — and a device carries it
+  // (`install-x64.sh:1104` bakes it into the web-server unit, `updater.ts:971`
+  // exports it into every gateway pre-start child), so a suite run there
+  // inherits it — which would send these cases at the box's real workspace
+  // with the suite still green. Cleared here as well as floored in
+  // vitest.config.ts.
   delete process.env.CLAWBOX_OPENCLAW_HOME;
   // vitest.config.ts floors OPENCLAW_HOME at a tmp path so no test reads a
   // real box's openclaw.json; a test that needs one points it at its own
@@ -227,11 +229,19 @@ describe("POST /setup-api/apps/uninstall on an OpenClaw device", () => {
 
     expect(status).toBe(200);
     expect(body.ok).toBe(true);
-    // No skill half to report on, so nothing is claimed about one.
+    // ...and it SAYS the skill half was not attempted, instead of answering a
+    // bare `{ok:true, skillRemoved:null}`. `null` alone means "there is no
+    // skill half here to report on", and that is not what happened: one id can
+    // be both a web app and a store skill — `webapp_create` REPLACES
+    // `installed_meta[<id>]` with no collision check — and with the config
+    // unreadable this route cannot tell the two apart. Unchecked, the answer
+    // was a false success over a skill folder still on disk and still loaded,
+    // with the desktop entry the owner would have retried from already gone.
     expect(body.skillRemoved).toBeNull();
+    expect(body.skillHalfChecked).toBe(false);
     await expect(fs.stat(webappDir())).rejects.toThrow();
-    // ...and the skills root was never resolved, so nothing under it was
-    // touched and the OpenClaw config was left alone.
+    // ...and the skills root could not be resolved, so the skill half did not
+    // run: nothing under it was touched and the OpenClaw config was left alone.
     await expect(fs.stat(clawdSkill())).resolves.toBeTruthy();
     expect(clearSkillEntry).not.toHaveBeenCalled();
   });
@@ -258,8 +268,10 @@ describe("POST /setup-api/apps/uninstall on an OpenClaw device", () => {
   });
 
   it("follows OPENCLAW_HOME, not $HOME, to the config that names the workspace", async () => {
-    // install.sh sets HOME and CLAWBOX_OPENCLAW_HOME side by side, so the two
-    // agree on a shipped box by convention only. A helper that reads
+    // `install-x64.sh:1100,1104` sets HOME and CLAWBOX_OPENCLAW_HOME side by
+    // side (on ARM `install.sh` sets neither and both sides fall back to
+    // `$HOME/.openclaw`), so the two agree on a shipped box by convention
+    // only. A helper that reads
     // $HOME/.openclaw while the module's own CONFIG_PATH honours the override
     // resolves the DELETE target from a file that is not this box's config —
     // TASK-551's shape, one level down.

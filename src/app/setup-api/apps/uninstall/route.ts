@@ -86,6 +86,19 @@ export async function POST(req: Request) {
     // instead of through the edition.
     const isWebapp = await isRegisteredWebapp(appId);
     let skillRoot: string | null = null;
+    // Set only on the one branch that removes a web app WITHOUT having been
+    // able to look at the skill half. `skillRemoved: null` cannot carry it:
+    // that value means "there is no skill half here to report on", and the
+    // whole reason this branch exists is that an id can be both a web app and
+    // a store skill, which is precisely what an unreadable config makes
+    // unknowable. Left unsaid, the answer is a bare `{ok:true}` over a skill
+    // folder still on disk and still loaded, with the desktop entry the owner
+    // would have retried from already gone — this route's own defect, one
+    // condition narrower. Refusing instead is the worse trade (a `dual` box
+    // with a permanently invalid openclaw.json could never remove the agent's
+    // own web apps), so the route says what it could not check and lets the
+    // caller relay it.
+    let skillHalfChecked = true;
     try {
       skillRoot = openclawSkillRoot();
     } catch (err) {
@@ -100,6 +113,7 @@ export async function POST(req: Request) {
           appId,
         }, { status: 503 });
       }
+      skillHalfChecked = false;
     }
     // What actually happened to the skill half, so the answer can say it.
     //   true  — a skill directory was there and is gone
@@ -260,7 +274,14 @@ export async function POST(req: Request) {
     // watched skill root, so the agent drops the skill on its next turn. The
     // skill-info cache rescans behind this reply.
     refreshSkillsCache();
-    return NextResponse.json({ ok: true, appId, skillRemoved });
+    // The field is present only when it is false, so an older MCP or desktop
+    // reading `undefined` degrades to exactly today's answer.
+    return NextResponse.json({
+      ok: true,
+      appId,
+      skillRemoved,
+      ...(skillHalfChecked ? {} : { skillHalfChecked: false }),
+    });
   } catch (err) {
     console.error("[uninstall] Uninstall failed:", err instanceof Error ? err.message : err);
     // The same failure contract the two refusals above carry, and the same

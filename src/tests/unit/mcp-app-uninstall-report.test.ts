@@ -130,4 +130,49 @@ describe("app_uninstall — what the agent is told", () => {
     if (out.isError) throw new Error("unreachable");
     expect(out.text).toBe(`Removed "${APP}" from the desktop.`);
   });
+
+  it("says the skill half was NOT LOOKED AT when the config could not be read", async () => {
+    // A web app removed while openclaw.json is unreadable: the route does not
+    // refuse (a `dual` box's idle harness must not strand the agent's own
+    // pages) and cannot look at the skill half either, so its `null` here is
+    // "could not check", not "there was none" — an id can be both. Reported as
+    // a plain removal it is the same false success this whole PR is about, one
+    // condition narrower.
+    apiPost.mockResolvedValue({ ok: true, appId: APP, skillRemoved: null, skillHalfChecked: false });
+
+    const out = await uninstall();
+
+    expect(out.isError).toBe(false);
+    if (out.isError) throw new Error("unreachable");
+    expect(out.text).toMatch(/could not be read/i);
+    expect(out.text).toMatch(/still/i);
+    expect(out.text).not.toBe(`Removed "${APP}" from the desktop.`);
+  });
+
+  it("does not send the agent to a health check over a 500 that answered precisely", async () => {
+    // The outer catch reports whether the skill folder had already gone. Both
+    // `rules` entries are 503, so a 500 fell through to the generic
+    // ENDPOINT_DOWN — "call clawbox_health, then retry once" — over a route
+    // that had just said the app is only PARTLY gone.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        500,
+        JSON.stringify({
+          ok: false,
+          error: "The uninstall failed after the app's skill folder had already been removed, so the app is only partly gone. Try again.",
+          code: "uninstall_failed",
+          retryable: true,
+          skillRemoved: true,
+        }),
+      ),
+    );
+
+    const out = await uninstall();
+
+    expect(out.isError).toBe(true);
+    if (!out.isError) throw new Error("unreachable");
+    expect(out.error.message).not.toMatch(/did not complete this request/i);
+    expect(out.error.message).toMatch(/partly/i);
+    expect(out.error.next).toMatch(/app_uninstall/);
+  });
 });

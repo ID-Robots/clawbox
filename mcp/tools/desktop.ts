@@ -372,9 +372,23 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
               message: "The ClawBox could not finish the removal, so nothing was removed and the app is still on the desktop.",
               next: "Wait a few seconds and call app_uninstall once more. If it refuses again, tell the user the app is still installed and what the device said.",
             },
+            // The route's outer catch (500 `uninstall_failed`) says whether the
+            // skill folder had already gone before the failure. Unmapped it
+            // fell through to the generic ENDPOINT_DOWN — "call clawbox_health,
+            // then retry once" — sending the agent to a health check over a
+            // route that had just answered precisely, and saying nothing about
+            // the app being half removed. `matchRule` compares the status
+            // before the body, so the two 503s above cannot swallow this.
+            {
+              status: 500,
+              match: /"code"\s*:\s*"uninstall_failed"/,
+              code: "ENDPOINT_DOWN",
+              message: "The ClawBox failed part-way through the uninstall, so the app may be partly removed: its skill folder may already be gone while the app is still on the desktop.",
+              next: "Call app_uninstall once more — the rest of the cleanup is repeatable. If it fails again, tell the user the app may be only partly removed and quote what the device said.",
+            },
           ],
         },
-      )) as { skillRemoved?: boolean | null } | undefined;
+      )) as { skillRemoved?: boolean | null; skillHalfChecked?: boolean } | undefined;
       // Anything but a 2xx has thrown by here, so the desktop entry IS gone.
       // The SKILL half depends on what was there. `skillRemoved: false` — the
       // id is in the desktop's list and no skill of that name was on disk — is
@@ -384,6 +398,18 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
       // web app), and says nothing about skills for the same reason: an
       // absence report about something that never existed reads as a partial
       // failure.
+      // `skillHalfChecked: false` is the one answer where `null` does NOT mean
+      // "no skill half to report on": the device's OpenClaw configuration
+      // could not be read, so the route removed the web app and never got to
+      // look for a skill of the same id (one id can be both). Saying "Removed"
+      // and no more would be a false success over a skill still on disk and
+      // still loaded, so the agent gets the fact to relay. Undefined-safe, so
+      // an older route degrades to the plain sentence below.
+      if (removed?.skillHalfChecked === false) {
+        return text(
+          `Removed "${app_id}" from the desktop. The device's OpenClaw configuration could not be read, so its skills were not checked: if this app also had a skill of that name, it is still installed. Tell the user, and try again once the device has settled.`,
+        );
+      }
       if (removed?.skillRemoved === false) {
         return text(
           `Removed "${app_id}" from the desktop. There was no skill of that name on disk, so nothing was removed from the agent's skills.`,
