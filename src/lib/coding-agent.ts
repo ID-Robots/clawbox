@@ -3617,10 +3617,11 @@ async function registerProjectApp(run: CodingRun): Promise<void> {
   try {
     const manifest = await readClawboxManifest(run.directory);
     if (!manifest?.port) return;
-    if (await registerServerApp({ id, manifest })) {
-      pushProgress(run, `On the desktop as "${manifest.name}", served at /apps/${id}/ from port ${manifest.port}`);
-      persist(true);
-    }
+    const outcome = await registerServerApp({ id, directory: run.directory, manifest });
+    pushProgress(run, outcome.ok
+      ? `On the desktop as "${manifest.name}", served at /apps/${id}/ from port ${manifest.port}`
+      : `Not on the desktop yet: clawbox.json names port ${manifest.port}, but ${outcome.detail.charAt(0).toLowerCase()}${outcome.detail.slice(1)}`);
+    persist(true);
   } catch (err) {
     console.error("[coding-agent] project app:", err instanceof Error ? err.message : err);
   }

@@ -83,7 +83,7 @@ describe("ImportProjectPanel", () => {
     expect(screen.getAllByTestId("coding-agent-import-repo")).toHaveLength(2);
   });
 
-  it("copies a folder the owner typed, on submit and on Enter", async () => {
+  it("copies a folder the owner typed on submit", async () => {
     const onImported = vi.fn();
     render(<ImportProjectPanel onImported={onImported} onClose={() => {}} initialTab="folder" />);
     const submit = screen.getByTestId("coding-agent-import-folder-submit");
@@ -95,12 +95,25 @@ describe("ImportProjectPanel", () => {
     expect(posts).toEqual([{ url: "/setup-api/coding-agent/projects/import", body: { source: "folder", path: "~/old-site" } }]);
   });
 
+  it("offers Retry when the listing fails, and reloads on it", async () => {
+    stubFetch({ status: 500, body: { error: "gh blew up", kind: "failed" } }, { status: 200, body: {} });
+    render(<ImportProjectPanel onImported={() => {}} onClose={() => {}} />);
+    expect(await screen.findByText("gh blew up")).toBeInTheDocument();
+    stubFetch({ status: 200, body: { login: "yalexx", repos: REPOS, truncated: false } }, { status: 200, body: {} });
+    fireEvent.click(screen.getByText(t("retry")));
+    expect(await screen.findAllByTestId("coding-agent-import-repo")).toHaveLength(2);
+  });
+
   it("switches between the two halves and closes", async () => {
     const onClose = vi.fn();
     render(<ImportProjectPanel onImported={() => {}} onClose={onClose} />);
     await screen.findAllByTestId("coding-agent-import-repo");
+    // A tab list assistive tech can follow: each tab names its panel.
+    expect(screen.getByTestId("coding-agent-import-tab-github")).toHaveAttribute("aria-controls", "coding-agent-import-panel-github");
+    expect(screen.getByTestId("coding-agent-import-github")).toHaveAttribute("role", "tabpanel");
     fireEvent.click(screen.getByTestId("coding-agent-import-tab-folder"));
     expect(screen.getByTestId("coding-agent-import-folder")).toBeInTheDocument();
+    expect(screen.getByTestId("coding-agent-import-folder")).toHaveAttribute("aria-labelledby", "coding-agent-import-tab-folder");
     expect(screen.queryByTestId("coding-agent-import-github")).toBeNull();
     fireEvent.click(screen.getByTestId("coding-agent-import-close"));
     expect(onClose).toHaveBeenCalled();

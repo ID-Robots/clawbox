@@ -13,15 +13,20 @@
  * origin, so `/apps/tinder-clone/` is right on the LAN, over mDNS, through
  * any tunnel, and after every reset.
  *
- * WHICH PORT
+ * WHICH PORT, AND WHOSE
  *
- * The project's clawbox.json (`port`, src/lib/clawbox-manifest.ts) is the
- * declaration; `registerServerApp` copies it into the app's
- * data/webapps/<id>/meta.json when the run settles, so the proxy has one
- * place to read at request time and production-server.js's upgrade router
- * (plain CJS, no imports from here) can mirror the same read for the app's
- * websockets. The manifest is the fallback, for a project that carries one
- * but has not been registered yet.
+ * A project's clawbox.json declares its `port` (src/lib/clawbox-manifest.ts);
+ * `registerServerApp` copies it — with the project folder — into the app's
+ * data/webapps/<id>/meta.json, and ONLY a registered app is proxied. The
+ * manifest alone is not enough, because the proxy forwards unauthenticated
+ * requests (see below) and a manifest is a file a run or an imported
+ * repository can write: one naming port 2375 would have put the Docker API
+ * on the tunnel. So every registration and every proxied request checks
+ * that the port's LISTENER is the project's own — a process of this user
+ * whose working directory is inside the project folder (`ss -ltnp`, then
+ * /proc/<pid>/cwd; a listener of another user shows no pid and is refused
+ * outright). Verdicts are cached briefly. production-server.js mirrors the
+ * same read for the app's websockets.
  *
  * WHAT PROTECTS THE DESKTOP
  *
@@ -31,12 +36,12 @@
  * webapp does not fit, because a sandboxed frame's navigation carries no
  * cookies and the document itself must be authenticated. So the containment
  * is the response's own `Content-Security-Policy: sandbox …` (no
- * allow-same-origin): the document gets an opaque origin, its fetches carry
- * no cookie, and the desktop's cookie is out of its reach. Its own requests
- * back to `/apps/<id>/…` — assets, its API — are let through by the
- * middleware WITHOUT a cookie for that reason (a document navigation still
- * needs one), which exposes the app's routes to whoever has the address
- * exactly as its port on 0.0.0.0 is exposed on the LAN today.
+ * allow-same-origin) on EVERY proxied response: the document gets an opaque
+ * origin, its fetches carry no cookie, and the desktop's cookie is out of
+ * its reach. Its own requests back to `/apps/<id>/…` — assets, its API —
+ * are let through by the middleware WITHOUT a cookie for that reason (a
+ * document navigation still needs one), which exposes the app's routes to
+ * whoever has the address — the reason the listener check above exists.
  *
  * THE BASE PATH
  *
@@ -48,22 +53,36 @@
  */
 import fs from "fs";
 import path from "path";
-import { APP_ID_RE, webappPath, writeWebappIndex } from "@/lib/code-projects";
+import { runChild } from "@/lib/child-run";
+import { APP_ID_RE, projectPath, webappPath, writeWebappIndex } from "@/lib/code-projects";
 import { get as configGet } from "@/lib/config-store";
-import { appProxyPath, type ClawboxManifest, isProxyablePort, readClawboxManifest } from "@/lib/clawbox-manifest";
+import { isInside } from "@/lib/file-guard";
+import { appProxyPath, type ClawboxManifest, isProxyablePort } from "@/lib/clawbox-manifest";
 import { pushPendingAction } from "@/lib/pending-actions";
 import { registerWebappInPreferences } from "@/lib/webapp-registry";
 
 export const APP_PROXY_PREFIX = "/apps/";
 
-/** The sandbox every proxied document is served under — everything but allow-same-origin. */
+/** The sandbox every proxied response is served under — everything but allow-same-origin. */
 export const APP_PROXY_CSP = "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads allow-pointer-lock allow-orientation-lock";
+
+/** How long a listener verdict is trusted: an "owned" one for this long, a refusal for a fraction of it, so a server just started is picked up on the next try. */
+export const LISTENER_CHECK_TTL_MS = 30_000;
+const LISTENER_REFUSAL_TTL_MS = 3_000;
 
 export interface AppProxyTarget {
   id: string;
   port: number;
   stripBasePath: boolean;
+  /** The project folder the listener must run from. */
+  directory: string;
 }
+
+export type ListenerVerdict = "owned" | "not_listening" | "not_owned" | "unverifiable";
+
+export type AppProxyResolution =
+  | { ok: true; target: AppProxyTarget }
+  | { ok: false; reason: "unregistered" | ListenerVerdict; detail: string };
 
 /** `/apps/<id>/rest` → the id and the rest, or null when the path is not one of ours. */
 export function parseAppProxyPath(pathname: string): { id: string; rest: string } | null {
@@ -86,8 +105,11 @@ export function isDocumentRequest(headers: Headers): boolean {
 
 interface StoredMeta {
   name?: unknown;
+  color?: unknown;
+  icon?: unknown;
   port?: unknown;
   stripBasePath?: unknown;
+  directory?: unknown;
 }
 
 async function readMeta(id: string): Promise<StoredMeta | null> {
@@ -108,25 +130,93 @@ async function readMeta(id: string): Promise<StoredMeta | null> {
  */
 export const PROJECT_FOLDER_CONFIG_KEY = "coding_agent_default_directory";
 
-/** The project folder an app id names: `<project folder>/<id>`, when there is a project folder. */
+/**
+ * The folder an app id names when its registration predates the `directory`
+ * field: `<project folder>/<id>`, or the code project of that id. Null when
+ * neither is a folder.
+ */
 export async function projectFolderFor(id: string): Promise<string | null> {
   if (!APP_ID_RE.test(id)) return null;
   const root = await configGet(PROJECT_FOLDER_CONFIG_KEY);
-  return typeof root === "string" && path.isAbsolute(root) ? path.join(root, id) : null;
+  const candidates = [
+    ...(typeof root === "string" && path.isAbsolute(root) ? [path.join(root, id)] : []),
+    projectPath(id),
+  ];
+  for (const dir of candidates) {
+    const stat = await fs.promises.stat(dir).catch(() => null);
+    if (stat?.isDirectory()) return dir;
+  }
+  return null;
+}
+
+// ── Whose listener is it ─────────────────────────────────────────────────────
+
+const verdicts = new Map<string, { verdict: ListenerVerdict; at: number }>();
+
+/** For the tests: forget every cached verdict. */
+export function _resetListenerCacheForTests(): void {
+  verdicts.clear();
 }
 
 /**
- * Where `/apps/<id>/` goes: the registered meta's port first, the project's
- * manifest second, nothing otherwise.
+ * Does a process of THIS user, running from inside `directory`, listen on
+ * `port`? `ss -ltnp` names the pid of a listener the caller may see — its
+ * own processes, which is what a run's server is — and nothing for another
+ * user's, which is how the box's own port 80 and a root daemon are refused.
  */
-export async function resolveAppProxyTarget(id: string): Promise<AppProxyTarget | null> {
-  if (!APP_ID_RE.test(id)) return null;
+export async function listenerOwnedBy(port: number, directory: string): Promise<ListenerVerdict> {
+  const key = `${port}:${directory}`;
+  const cached = verdicts.get(key);
+  const now = Date.now();
+  if (cached && now - cached.at < (cached.verdict === "owned" ? LISTENER_CHECK_TTL_MS : LISTENER_REFUSAL_TTL_MS)) return cached.verdict;
+  const verdict = await checkListener(port, directory);
+  verdicts.set(key, { verdict, at: now });
+  return verdict;
+}
+
+async function checkListener(port: number, directory: string): Promise<ListenerVerdict> {
+  if (!isProxyablePort(port)) return "not_owned";
+  const r = await runChild("ss", ["-H", "-l", "-t", "-n", "-p", `sport = :${port}`], {
+    timeoutMs: 5_000,
+    env: { PATH: process.env.PATH ?? "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" },
+  });
+  if (r.code !== 0) return "unverifiable";
+  const lines = r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return "not_listening";
+  const pids = [...new Set([...r.stdout.matchAll(/pid=(\d+)/g)].map((m) => Number(m[1])))];
+  if (pids.length === 0) return "not_owned";
+  const real = await fs.promises.realpath(directory).catch(() => directory);
+  for (const pid of pids) {
+    const cwd = await fs.promises.readlink(`/proc/${pid}/cwd`).catch(() => null);
+    if (cwd && isInside(cwd, real)) return "owned";
+  }
+  return "not_owned";
+}
+
+/** The sentence for a listener verdict, for the owner. */
+export function listenerRefusal(verdict: Exclude<ListenerVerdict, "owned">, port: number): string {
+  switch (verdict) {
+    case "not_listening": return `Nothing is listening on port ${port}. Start the app in its project folder — its clawbox.json says how.`;
+    case "not_owned": return `Port ${port} is not served by the project: the box proxies only a server started from inside the project folder, by this user.`;
+    case "unverifiable": return `The box could not tell who is listening on port ${port} (the socket listing failed).`;
+  }
+}
+
+/**
+ * Where `/apps/<id>/` goes: a REGISTERED app (meta.json carries the port),
+ * whose listener runs from its project folder right now.
+ */
+export async function resolveAppProxyTarget(id: string): Promise<AppProxyResolution> {
+  if (!APP_ID_RE.test(id)) return { ok: false, reason: "unregistered", detail: "No app is served under this name." };
   const meta = await readMeta(id);
-  if (meta && isProxyablePort(meta.port)) return { id, port: meta.port, stripBasePath: meta.stripBasePath === true };
-  const folder = await projectFolderFor(id);
-  const manifest = folder ? await readClawboxManifest(folder) : null;
-  if (manifest?.port) return { id, port: manifest.port, stripBasePath: manifest.stripBasePath };
-  return null;
+  if (!meta || !isProxyablePort(meta.port)) {
+    return { ok: false, reason: "unregistered", detail: "No app is served under this name. A project declares its server's port in clawbox.json and is put on the desktop from the Coding Agent." };
+  }
+  const directory = typeof meta.directory === "string" && path.isAbsolute(meta.directory) ? meta.directory : await projectFolderFor(id);
+  if (!directory) return { ok: false, reason: "not_owned", detail: listenerRefusal("not_owned", meta.port) };
+  const verdict = await listenerOwnedBy(meta.port, directory);
+  if (verdict !== "owned") return { ok: false, reason: verdict, detail: listenerRefusal(verdict, meta.port) };
+  return { ok: true, target: { id, port: meta.port, stripBasePath: meta.stripBasePath === true, directory } };
 }
 
 /** The one-file stub the webapp route still serves for the id: it sends the frame to the proxied path. */
@@ -135,15 +225,19 @@ export function serverAppStubHtml(name: string, id: string): string {
   return `<!doctype html><html><head><meta charset="utf-8"><title>${safeName}</title><style>body{background:#1a1a2e;color:#e0e0e0;font-family:system-ui,sans-serif;display:grid;place-items:center;height:100vh;margin:0}a{color:#f97316}</style></head><body><p>Opening ${safeName}… <a href="${appProxyPath(id)}" target="_top">Open</a></p><script>location.replace(${JSON.stringify(appProxyPath(id))});</script></body></html>`;
 }
 
+export type RegisterOutcome = { ok: true } | { ok: false; reason: Exclude<ListenerVerdict, "owned"> | "failed"; detail: string };
+
 /**
  * Put a project with a server on the desktop: its icon opens
- * `/apps/<id>/`, and the port lands in meta.json for the proxy to read.
- * Never throws — an app that cannot be registered is a line in the log,
- * not a failed run.
+ * `/apps/<id>/`, and the port and the folder land in meta.json for the
+ * proxy to read — AFTER the listener has been found to be the project's
+ * own. Never throws.
  */
-export async function registerServerApp(input: { id: string; manifest: ClawboxManifest }): Promise<boolean> {
-  const { id, manifest } = input;
-  if (!APP_ID_RE.test(id) || !manifest.port) return false;
+export async function registerServerApp(input: { id: string; directory: string; manifest: ClawboxManifest }): Promise<RegisterOutcome> {
+  const { id, directory, manifest } = input;
+  if (!APP_ID_RE.test(id) || !manifest.port) return { ok: false, reason: "failed", detail: "The manifest names no port." };
+  const verdict = await listenerOwnedBy(manifest.port, directory);
+  if (verdict !== "owned") return { ok: false, reason: verdict, detail: listenerRefusal(verdict, manifest.port) };
   try {
     const existing = await readMeta(id);
     await writeWebappIndex(id, serverAppStubHtml(manifest.name, id));
@@ -151,9 +245,10 @@ export async function registerServerApp(input: { id: string; manifest: ClawboxMa
       path.join(webappPath(id), "meta.json"),
       JSON.stringify({
         name: manifest.name,
-        color: typeof (existing as { color?: unknown } | null)?.color === "string" ? (existing as { color: string }).color : "#f97316",
-        icon: typeof (existing as { icon?: unknown } | null)?.icon === "string" ? (existing as { icon: string }).icon : "",
+        color: typeof existing?.color === "string" ? existing.color : "#f97316",
+        icon: typeof existing?.icon === "string" ? existing.icon : "",
         port: manifest.port,
+        directory: path.resolve(directory),
         ...(manifest.stripBasePath ? { stripBasePath: true } : {}),
       }),
       "utf-8",
@@ -163,9 +258,10 @@ export async function registerServerApp(input: { id: string; manifest: ClawboxMa
       description: manifest.description ?? undefined,
     });
     await pushPendingAction({ type: "register_webapp", appId: id, name: manifest.name, color: "#f97316", url: appProxyPath(id) }).catch(() => undefined);
-    return true;
+    return { ok: true };
   } catch (err) {
-    console.error(`[app-proxy] could not register ${id}:`, err instanceof Error ? err.message : err);
-    return false;
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(`[app-proxy] could not register ${id}: ${detail}`);
+    return { ok: false, reason: "failed", detail: `Registering the app failed: ${detail}`.slice(0, 300) };
   }
 }

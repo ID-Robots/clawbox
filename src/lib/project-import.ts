@@ -147,33 +147,39 @@ export function repoFromApi(raw: Record<string, unknown>): Omit<GitHubRepo, "cla
   };
 }
 
+/** How many owners are searched for manifests per listing: the code search allows ten calls a minute. */
+export const MANIFEST_SEARCH_OWNERS_MAX = 5;
+
 /**
- * Which of the owner's repositories carry a clawbox.json, by one code
- * search over every owner in the listing. `null` when GitHub would not say
- * (the code search is rate-limited apart from everything else, and refuses
- * an account that has not verified an email): the rows then show no chip
- * rather than a wrong one.
+ * Which repositories carry a clawbox.json at their root, one code search
+ * PER OWNER (GitHub's code search takes one `user:` qualifier), the first
+ * MANIFEST_SEARCH_OWNERS_MAX owners of the listing. `searched` says whose
+ * repositories were asked about: a row of an owner beyond the cap, or of
+ * a search GitHub refused (it is rate-limited apart from everything else,
+ * and refuses an account without a verified email), shows no chip rather
+ * than a wrong one.
  */
-export async function findClawboxRepos(owners: string[]): Promise<Set<string> | null> {
-  if (owners.length === 0) return new Set();
-  const qualifiers = [...new Set(owners)].slice(0, 10).map((o) => `user:${o}`).join(" ");
-  const q = `filename:${CLAWBOX_MANIFEST_FILE} ${qualifiers}`;
-  const r = await run("gh", ["api", "-X", "GET", "search/code", "-f", `q=${q}`, "-f", "per_page=100"]);
-  if (r.code !== 0) return null;
-  try {
-    const parsed = JSON.parse(r.stdout) as { items?: { name?: unknown; path?: unknown; repository?: { full_name?: unknown } }[] };
-    const found = new Set<string>();
-    for (const item of parsed.items ?? []) {
-      // The file at the ROOT and nothing else: a clawbox.json three folders
-      // deep is somebody's fixture, not the repository's manifest.
-      if (item.path !== CLAWBOX_MANIFEST_FILE) continue;
-      const full = item.repository?.full_name;
-      if (typeof full === "string") found.add(full);
+export async function findClawboxRepos(owners: string[]): Promise<{ found: Set<string>; searched: Set<string> }> {
+  const found = new Set<string>();
+  const searched = new Set<string>();
+  for (const owner of [...new Set(owners)].slice(0, MANIFEST_SEARCH_OWNERS_MAX)) {
+    const r = await run("gh", ["api", "-X", "GET", "search/code", "-f", `q=filename:${CLAWBOX_MANIFEST_FILE} user:${owner}`, "-f", "per_page=100"]);
+    if (r.code !== 0) continue;
+    try {
+      const parsed = JSON.parse(r.stdout) as { items?: { name?: unknown; path?: unknown; repository?: { full_name?: unknown } }[] };
+      for (const item of parsed.items ?? []) {
+        // The file at the ROOT and nothing else: a clawbox.json three folders
+        // deep is somebody's fixture, not the repository's manifest.
+        if (item.path !== CLAWBOX_MANIFEST_FILE) continue;
+        const full = item.repository?.full_name;
+        if (typeof full === "string") found.add(full);
+      }
+      searched.add(owner);
+    } catch {
+      // GitHub answered with something other than a search result: unknown.
     }
-    return found;
-  } catch {
-    return null;
   }
+  return { found, searched };
 }
 
 /** The repositories the connected account can see, newest push first. */
@@ -202,7 +208,7 @@ export async function listGitHubRepos(): Promise<GitHubReposOutcome> {
     if (page === REPOS_MAX_PAGES) truncated = true;
   }
   const apps = await findClawboxRepos(rows.map((r) => r.owner));
-  const repos: GitHubRepo[] = rows.map((r) => ({ ...r, clawboxApp: apps === null ? null : apps.has(r.fullName) }));
+  const repos: GitHubRepo[] = rows.map((r) => ({ ...r, clawboxApp: apps.searched.has(r.owner) ? apps.found.has(r.fullName) : null }));
   return { ok: true, login: status.login, repos, truncated };
 }
 
@@ -215,16 +221,89 @@ export type ImportReason =
   | "not_found"
   | "not_a_folder"
   | "refused"
+  | "too_big"
+  | "no_space"
   | "no_gh"
   | "not_connected"
   | "gh_unreachable"
   | "failed";
 
+/** The most a project import may weigh, and the most files it may hold. */
+export const IMPORT_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+export const IMPORT_MAX_FILES = 100_000;
+/** Free space the disk must keep AFTER the import: a full disk takes the box's own data with it. */
+export const IMPORT_FREE_RESERVE_BYTES = 512 * 1024 * 1024;
+
+/** Bytes free on the disk `dir` sits on, or null when the disk will not say. */
+export async function freeBytes(dir: string): Promise<number | null> {
+  try {
+    const st = await fs.promises.statfs(dir);
+    return Number(st.bavail) * Number(st.bsize);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a folder weighs, without following links and without node_modules
+ * — stopping as soon as a cap is passed, so a huge tree costs a bounded
+ * walk. `over` says which cap it passed.
+ */
+export async function measureFolder(root: string): Promise<{ bytes: number; files: number; over: "bytes" | "files" | null }> {
+  let bytes = 0;
+  let files = 0;
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop() as string;
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        if (IMPORT_SKIPPED_FOLDERS.includes(e.name)) continue;
+        stack.push(path.join(dir, e.name));
+        continue;
+      }
+      if (!e.isFile()) continue;
+      files += 1;
+      if (files > IMPORT_MAX_FILES) return { bytes, files, over: "files" };
+      const st = await fs.promises.lstat(path.join(dir, e.name)).catch(() => null);
+      bytes += st?.size ?? 0;
+      if (bytes > IMPORT_MAX_BYTES) return { bytes, files, over: "bytes" };
+    }
+  }
+  return { bytes, files, over: null };
+}
+
+function humanSize(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  return `${Math.max(1, Math.round(bytes / 1024 ** 2))} MB`;
+}
+
+/** Room for `bytes` more on the project folder's disk, keeping the reserve, or the refusal. */
+async function roomFor(projectsRoot: string, bytes: number): Promise<{ ok: false; reason: ImportReason; detail: string } | null> {
+  const free = await freeBytes(projectsRoot);
+  if (free === null) return null;
+  if (free - bytes < IMPORT_FREE_RESERVE_BYTES) {
+    return { ok: false, reason: "no_space", detail: `Not enough space: the import needs about ${humanSize(bytes)} and the disk has ${humanSize(Math.max(0, free - IMPORT_FREE_RESERVE_BYTES))} to spare.` };
+  }
+  return null;
+}
+
 export type ImportOutcome =
   | { ok: true; directory: string; folder: string; initialized: boolean; skipped: string[] }
   | { ok: false; reason: ImportReason; detail: string };
 
-/** A free name in the project folder, or the refusal. */
+/**
+ * A free name in the project folder, CLAIMED: the folder is made here, with
+ * a `mkdir` that fails when it exists, so two imports of one name cannot
+ * both pass a check and then clean each other's work away — the loser is
+ * refused at the claim. The winner copies or clones INTO the empty folder
+ * it owns, and removes only that on failure.
+ */
 async function claimTarget(projectsRoot: string, folder: string): Promise<{ ok: true; directory: string } | { ok: false; reason: ImportReason; detail: string }> {
   const directory = path.resolve(projectsRoot, folder);
   // Directly inside the project folder and nothing else — the name was made
@@ -232,8 +311,15 @@ async function claimTarget(projectsRoot: string, folder: string): Promise<{ ok: 
   if (!directory.startsWith(projectsRoot + path.sep) || path.dirname(directory) !== projectsRoot) {
     return { ok: false, reason: "invalid", detail: "The project's name is not one the project folder can hold." };
   }
-  const existing = await fs.promises.lstat(directory).catch(() => null);
-  if (existing) return { ok: false, reason: "exists", detail: `There is already a "${folder}" in your project folder. Rename or remove it first.` };
+  await fs.promises.mkdir(projectsRoot, { recursive: true }).catch(() => undefined);
+  try {
+    await fs.promises.mkdir(directory);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+      return { ok: false, reason: "exists", detail: `There is already a "${folder}" in your project folder. Rename or remove it first.` };
+    }
+    return { ok: false, reason: "failed", detail: `Could not make the project folder: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300) };
+  }
   return { ok: true, directory };
 }
 
@@ -296,6 +382,12 @@ export async function importFolder(input: { source: string; projectsRoot: string
     return { ok: false, reason: "refused", detail: "That folder contains your project folder; the copy would never end." };
   }
 
+  const measured = await measureFolder(real);
+  if (measured.over === "bytes") return { ok: false, reason: "too_big", detail: `That folder is over ${humanSize(IMPORT_MAX_BYTES)} (node_modules aside); a project import is capped there.` };
+  if (measured.over === "files") return { ok: false, reason: "too_big", detail: `That folder holds more than ${IMPORT_MAX_FILES.toLocaleString("en-US")} files (node_modules aside); a project import is capped there.` };
+  const room = await roomFor(projectsRoot, measured.bytes);
+  if (room) return room;
+
   const folder = importFolderName(source);
   const target = await claimTarget(projectsRoot, folder);
   if (!target.ok) return target;
@@ -304,7 +396,9 @@ export async function importFolder(input: { source: string; projectsRoot: string
   try {
     await fs.promises.cp(real, target.directory, {
       recursive: true,
-      errorOnExist: true,
+      // Into the empty folder the claim made: nothing is there to overwrite,
+      // and `force: false` keeps it that way should anything appear.
+      errorOnExist: false,
       force: false,
       // A link inside the source is copied as a link, never followed: a link
       // to /etc or to the checkout would otherwise become a copy of it.
@@ -323,7 +417,7 @@ export async function importFolder(input: { source: string; projectsRoot: string
     return { ok: false, reason: "failed", detail: `Copying the folder failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400) };
   }
   const repo = await ensureRepository(target.directory, source);
-  if (repo.detail) console.error(`[coding-agent] import of ${forLog(source)}: ${forLog(repo.detail)}`);
+  if (repo.detail) console.error(`[coding-agent] a folder import's repository could not be made: ${forLog(repo.detail)}`);
   return { ok: true, directory: target.directory, folder, initialized: repo.initialized, skipped };
 }
 
@@ -342,13 +436,29 @@ export async function importGitHubRepo(input: { fullName: string; projectsRoot: 
   if (!status.connected) return { ok: false, reason: "not_connected", detail: "Connect a GitHub account in the Coding Agent's settings first." };
 
   const folder = importFolderName(fullName.split("/")[1]);
+  // A taken name is refused before GitHub is asked anything; the claim
+  // below is still the one that counts.
+  if (await fs.promises.lstat(path.resolve(projectsRoot, folder)).catch(() => null)) {
+    return { ok: false, reason: "exists", detail: `There is already a "${folder}" in your project folder. Rename or remove it first.` };
+  }
+
+  // What it weighs, from GitHub (kilobytes, packed): a checkout is larger,
+  // so twice that is asked of the disk.
+  const sized = await run("gh", ["api", `repos/${fullName}`, "--jq", ".size"]);
+  const packedKb = sized.code === 0 ? Number(sized.stdout.trim()) : NaN;
+  if (Number.isFinite(packedKb)) {
+    const needed = packedKb * 1024 * 2;
+    if (needed > IMPORT_MAX_BYTES) return { ok: false, reason: "too_big", detail: `That repository is about ${humanSize(packedKb * 1024)} packed; a project import is capped at ${humanSize(IMPORT_MAX_BYTES)}.` };
+    const room = await roomFor(projectsRoot, needed);
+    if (room) return room;
+  }
+
   const target = await claimTarget(projectsRoot, folder);
   if (!target.ok) return target;
-  await fs.promises.mkdir(projectsRoot, { recursive: true }).catch(() => undefined);
 
   // `gh repo clone` rather than a bare git clone: it knows the account's
-  // protocol and lends the credential on every gh version, and it takes the
-  // owner/name form the listing gave.
+  // protocol and lends the credential on every gh version, it takes the
+  // owner/name form the listing gave, and git clones into an empty folder.
   const r = await run("gh", ["repo", "clone", fullName, target.directory, "--", "--quiet"], { cwd: projectsRoot, timeoutMs: CLONE_TIMEOUT_MS });
   if (r.code !== 0) {
     await fs.promises.rm(target.directory, { recursive: true, force: true }).catch(() => undefined);

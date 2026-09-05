@@ -103,8 +103,10 @@ or a port is dead the next morning. Three things make it work:
    base: "/apps/<folder>/"; Express: app.use("/apps/<folder>", router).
    An app that must serve at "/" with relative links may say
    "stripBasePath": true in the manifest instead.
-3. Keep the server listening on 0.0.0.0 at that port, and say in the reply
-   which port it serves on and that it opens at /apps/<folder>/.
+3. Keep the server listening on 127.0.0.1 at that port, started from inside
+   the project folder (the box proxies only a server of the project's own,
+   and nothing else needs to reach the port), and say in the reply which
+   port it serves on and that it opens at /apps/<folder>/.
 
 Never write location.hostname or a port into an HTML redirect: the desktop
 frames /apps/<folder>/ itself. To stop or restart a server YOU started,

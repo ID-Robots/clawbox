@@ -70,26 +70,33 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
   const [importing, setImporting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const loadRepos = useCallback(async () => {
-    setRepos({ kind: "loading" });
+  // The listing as a value: the effect below and the Retry button both ask
+  // for it and set the state when it ARRIVES — never in the effect's own
+  // body, which is what the hooks rule refuses.
+  const fetchRepos = useCallback(async (): Promise<ReposState> => {
     try {
       const res = await fetch("/setup-api/coding-agent/github-repos", { cache: "no-store" });
       const data = await res.json().catch(() => ({})) as { login?: string; repos?: ImportableRepo[]; truncated?: boolean; error?: string; kind?: string };
-      if (res.ok) {
-        setRepos({ kind: "ready", login: data.login ?? "", repos: Array.isArray(data.repos) ? data.repos : [], truncated: data.truncated === true });
-      } else if (data.kind === "not_connected" || data.kind === "no_gh") {
-        setRepos({ kind: "not_connected" });
-      } else {
-        setRepos({ kind: "error", message: data.error || t("codingAgent.importFailed") });
-      }
+      if (res.ok) return { kind: "ready", login: data.login ?? "", repos: Array.isArray(data.repos) ? data.repos : [], truncated: data.truncated === true };
+      if (data.kind === "not_connected" || data.kind === "no_gh") return { kind: "not_connected" };
+      return { kind: "error", message: data.error || t("codingAgent.importFailed") };
     } catch {
-      setRepos({ kind: "error", message: t("codingAgent.importFailed") });
+      return { kind: "error", message: t("codingAgent.importFailed") };
     }
     // `t` changes with the language; the listing does not depend on it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => { void loadRepos(); }, [loadRepos]);
+  useEffect(() => {
+    let live = true;
+    void fetchRepos().then((state) => { if (live) setRepos(state); });
+    return () => { live = false; };
+  }, [fetchRepos]);
+
+  const retry = () => {
+    setRepos({ kind: "loading" });
+    void fetchRepos().then(setRepos);
+  };
 
   const shown = useMemo(() => {
     if (repos.kind !== "ready") return [];
@@ -145,10 +152,10 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
       </div>
 
       <div className={`${SEGMENTED_TRACK} mt-3`} role="tablist">
-        <button type="button" role="tab" aria-selected={tab === "github"} onClick={() => setTab("github")} className={tab === "github" ? SEGMENT_ON : SEGMENT_OFF} data-testid="coding-agent-import-tab-github">
+        <button type="button" role="tab" id="coding-agent-import-tab-github" aria-controls="coding-agent-import-panel-github" aria-selected={tab === "github"} onClick={() => setTab("github")} className={tab === "github" ? SEGMENT_ON : SEGMENT_OFF} data-testid="coding-agent-import-tab-github">
           {t("codingAgent.importFromGitHub")}
         </button>
-        <button type="button" role="tab" aria-selected={tab === "folder"} onClick={() => setTab("folder")} className={tab === "folder" ? SEGMENT_ON : SEGMENT_OFF} data-testid="coding-agent-import-tab-folder">
+        <button type="button" role="tab" id="coding-agent-import-tab-folder" aria-controls="coding-agent-import-panel-folder" aria-selected={tab === "folder"} onClick={() => setTab("folder")} className={tab === "folder" ? SEGMENT_ON : SEGMENT_OFF} data-testid="coding-agent-import-tab-folder">
           {t("codingAgent.importFromFolder")}
         </button>
       </div>
@@ -158,7 +165,7 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
       )}
 
       {tab === "github" && (
-        <div className="mt-3" data-testid="coding-agent-import-github">
+        <div className="mt-3" role="tabpanel" id="coding-agent-import-panel-github" aria-labelledby="coding-agent-import-tab-github" data-testid="coding-agent-import-github">
           {repos.kind === "loading" && (
             <p className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.importReposLoading")}</p>
           )}
@@ -173,7 +180,7 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
           {repos.kind === "error" && (
             <div className="flex flex-wrap items-center gap-2">
               <p className="text-[11px] text-red-400" role="alert">{repos.message}</p>
-              <button type="button" onClick={() => void loadRepos()} className={BTN_SECONDARY}>{t("retry")}</button>
+              <button type="button" onClick={retry} className={BTN_SECONDARY}>{t("retry")}</button>
             </div>
           )}
           {repos.kind === "ready" && (
@@ -235,6 +242,9 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
       {tab === "folder" && (
         <form
           className="mt-3"
+          role="tabpanel"
+          id="coding-agent-import-panel-folder"
+          aria-labelledby="coding-agent-import-tab-folder"
           data-testid="coding-agent-import-folder"
           onSubmit={(e) => {
             e.preventDefault();

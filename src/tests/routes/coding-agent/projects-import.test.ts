@@ -104,7 +104,7 @@ describe("the import", () => {
   it("maps every refusal to its status, with the sentence for the owner", async () => {
     const cases: [string, number][] = [
       ["no_project_folder", 409], ["invalid", 400], ["exists", 409], ["not_found", 404], ["not_a_folder", 400],
-      ["refused", 403], ["no_gh", 409], ["not_connected", 409], ["gh_unreachable", 503], ["failed", 500],
+      ["refused", 403], ["too_big", 413], ["no_space", 507], ["no_gh", 409], ["not_connected", 409], ["gh_unreachable", 503], ["failed", 500],
     ];
     for (const [reason, status] of cases) {
       importFolder.mockResolvedValueOnce({ ok: false, reason, detail: `because ${reason}` });

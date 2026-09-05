@@ -44,17 +44,43 @@ const UPGRADE_ROUTES = [
 ];
 
 // A project's own server under /apps/<id>/ (src/lib/app-proxy.ts): the
-// port is in the app's data/webapps/<id>/meta.json, written when the run
-// settled, or in the project's clawbox.json. Mirrored here in CJS because
+// port and the project folder are in the app's data/webapps/<id>/meta.json,
+// written when the app was registered. Mirrored here in CJS because
 // upgrades never reach Next.js. No auth, like the middleware's rule for the
 // app's own requests: the document that opens the socket has an opaque
-// origin and carries no cookie.
+// origin and carries no cookie — which is why, exactly as the proxy does,
+// the port's LISTENER must be the project's own (a process of this user
+// running from inside the project folder) before anything is forwarded.
 const APP_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+const APP_LISTENER_TTL_MS = 30_000;
+const appListenerVerdicts = new Map();
 function readJsonSync(file) {
   try { return JSON.parse(fs.readFileSync(file, "utf-8")); } catch { return null; }
 }
 function isProxyablePort(port) {
   return typeof port === "number" && Number.isInteger(port) && port >= 1024 && port <= 65535;
+}
+function appListenerOwned(port, directory) {
+  const key = `${port}:${directory}`;
+  const cached = appListenerVerdicts.get(key);
+  if (cached && Date.now() - cached.at < (cached.owned ? APP_LISTENER_TTL_MS : 3000)) return cached.owned;
+  let owned = false;
+  try {
+    const out = require("child_process").execFileSync("ss", ["-H", "-l", "-t", "-n", "-p", `sport = :${port}`], { encoding: "utf-8", timeout: 5000, env: { PATH: process.env.PATH || "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" } });
+    let real = directory;
+    try { real = fs.realpathSync(directory); } catch {}
+    for (const m of out.matchAll(/pid=(\d+)/g)) {
+      try {
+        const cwd = fs.readlinkSync(`/proc/${m[1]}/cwd`);
+        const rel = path.relative(real, cwd);
+        if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) { owned = true; break; }
+      } catch {}
+    }
+  } catch {
+    owned = false;
+  }
+  appListenerVerdicts.set(key, { owned, at: Date.now() });
+  return owned;
 }
 function resolveAppPort(reqUrl) {
   const m = /^\/apps\/([^/?]+)/.exec(reqUrl);
@@ -62,12 +88,9 @@ function resolveAppPort(reqUrl) {
   const id = m[1];
   const root = process.env.CLAWBOX_ROOT || __dirname;
   const meta = readJsonSync(path.join(root, "data", "webapps", id, "meta.json"));
-  if (meta && isProxyablePort(meta.port)) return { port: meta.port, strip: meta.stripBasePath === true, id };
-  const config = readJsonSync(path.join(root, "data", "config.json"));
-  const projects = config && typeof config.coding_agent_default_directory === "string" ? config.coding_agent_default_directory : null;
-  const manifest = projects ? readJsonSync(path.join(projects, id, "clawbox.json")) : null;
-  if (manifest && isProxyablePort(manifest.port)) return { port: manifest.port, strip: manifest.stripBasePath === true, id };
-  return null;
+  if (!meta || !isProxyablePort(meta.port) || typeof meta.directory !== "string" || !path.isAbsolute(meta.directory)) return null;
+  if (!appListenerOwned(meta.port, meta.directory)) return null;
+  return { port: meta.port, strip: meta.stripBasePath === true, id };
 }
 
 function resolveUpgradeTarget(reqUrl) {

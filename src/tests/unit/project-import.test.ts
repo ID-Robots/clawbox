@@ -178,8 +178,12 @@ describe("listGitHubRepos", () => {
     ghAnswers.set("api user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member&page=1", {
       code: 0, stdout: page([repo("yalexx/tinder-clone", { description: "Swipe", private: true }), repo("ID-Robots/clawbox"), { junk: true }]),
     });
-    ghAnswers.set("api -X GET search/code", {
-      code: 0, stdout: JSON.stringify({ items: [{ name: "clawbox.json", path: "clawbox.json", repository: { full_name: "yalexx/tinder-clone" } }, { name: "clawbox.json", path: "fixtures/clawbox.json", repository: { full_name: "ID-Robots/clawbox" } }] }),
+    // One search PER OWNER: GitHub's code search takes one user: qualifier.
+    ghAnswers.set("api -X GET search/code -f q=filename:clawbox.json user:yalexx", {
+      code: 0, stdout: JSON.stringify({ items: [{ name: "clawbox.json", path: "clawbox.json", repository: { full_name: "yalexx/tinder-clone" } }] }),
+    });
+    ghAnswers.set("api -X GET search/code -f q=filename:clawbox.json user:ID-Robots", {
+      code: 0, stdout: JSON.stringify({ items: [{ name: "clawbox.json", path: "fixtures/clawbox.json", repository: { full_name: "ID-Robots/clawbox" } }] }),
     });
     const out = await lib.listGitHubRepos();
     expect(out.ok).toBe(true);
@@ -191,14 +195,26 @@ describe("listGitHubRepos", () => {
       // A clawbox.json three folders deep is a fixture, not the manifest.
       { fullName: "ID-Robots/clawbox", name: "clawbox", owner: "ID-Robots", description: null, private: false, pushedAt: "2026-09-01T00:00:00Z", defaultBranch: "main", clawboxApp: false, folder: "clawbox" },
     ]);
-    // One search over every owner in the listing.
-    const search = ghCalls.find((c) => c.includes("search/code"))!;
-    expect(search.join(" ")).toContain("q=filename:clawbox.json user:yalexx user:ID-Robots");
+    const searches = ghCalls.filter((c) => c.includes("search/code")).map((c) => c.join(" "));
+    expect(searches).toEqual([
+      expect.stringContaining("q=filename:clawbox.json user:yalexx"),
+      expect.stringContaining("q=filename:clawbox.json user:ID-Robots"),
+    ]);
+  });
+
+  it("searches the first few owners only, and says nothing about the rest", async () => {
+    const owners = ["a1", "a2", "a3", "a4", "a5", "a6", "a7"];
+    ghAnswers.set("api user/repos", { code: 0, stdout: page(owners.map((o) => repo(`${o}/r`))) });
+    for (const o of owners) ghAnswers.set(`api -X GET search/code -f q=filename:clawbox.json user:${o}`, { code: 0, stdout: JSON.stringify({ items: [{ path: "clawbox.json", repository: { full_name: `${o}/r` } }] }) });
+    const out = await lib.listGitHubRepos();
+    if (!out.ok) throw new Error("unreachable");
+    expect(out.repos.map((r) => r.clawboxApp)).toEqual([true, true, true, true, true, null, null]);
+    expect(ghCalls.filter((c) => c.includes("search/code"))).toHaveLength(lib.MANIFEST_SEARCH_OWNERS_MAX);
   });
 
   it("says null for the app flag when the code search would not answer", async () => {
     ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("yalexx/a")]) });
-    ghAnswers.set("api -X GET search/code", { code: 1, stderr: "rate limited" });
+    ghAnswers.set("api -X GET search/code -f q=filename:clawbox.json user:yalexx", { code: 1, stderr: "rate limited" });
     const out = await lib.listGitHubRepos();
     if (!out.ok) throw new Error("unreachable");
     expect(out.repos[0].clawboxApp).toBeNull();
@@ -220,7 +236,9 @@ describe("importGitHubRepo", () => {
     ghAnswers.set("repo clone yalexx/tinder-clone", { code: 0 });
     const out = await lib.importGitHubRepo({ fullName: "yalexx/tinder-clone", projectsRoot: projects });
     expect(out).toMatchObject({ ok: true, folder: "tinder-clone", directory: path.join(projects, "tinder-clone"), initialized: false });
-    expect(ghCalls[0]).toEqual(["repo", "clone", "yalexx/tinder-clone", path.join(projects, "tinder-clone"), "--", "--quiet"]);
+    // GitHub is asked what it weighs first, then the clone.
+    expect(ghCalls.map((c) => c[0])).toEqual(["api", "repo"]);
+    expect(ghCalls[1]).toEqual(["repo", "clone", "yalexx/tinder-clone", path.join(projects, "tinder-clone"), "--", "--quiet"]);
   });
 
   it("refuses a name that is not owner/name, a taken folder, and a disconnected account", async () => {
@@ -240,5 +258,19 @@ describe("importGitHubRepo", () => {
     if (out.ok) throw new Error("unreachable");
     expect(out.detail).toContain("Could not resolve");
     expect(fs.existsSync(path.join(projects, "gone"))).toBe(false);
+  });
+});
+
+describe("what an import may weigh", () => {
+  it("measures a folder without node_modules and without following links, and knows the disk's room", async () => {
+    const src = path.join(home, "weighed");
+    fs.mkdirSync(path.join(src, "node_modules", "big"), { recursive: true });
+    fs.writeFileSync(path.join(src, "a.txt"), "x".repeat(1000));
+    fs.writeFileSync(path.join(src, "node_modules", "big", "b.txt"), "y".repeat(100_000));
+    fs.symlinkSync(home, path.join(src, "loop"));
+    expect(await lib.measureFolder(src)).toEqual({ bytes: 1000, files: 1, over: null });
+    const free = await lib.freeBytes(home);
+    expect(free === null || free > 0).toBe(true);
+    expect(lib.IMPORT_MAX_BYTES).toBeGreaterThan(lib.IMPORT_FREE_RESERVE_BYTES);
   });
 });

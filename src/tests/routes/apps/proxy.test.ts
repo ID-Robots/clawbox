@@ -27,10 +27,11 @@ let base: string;
 let root: string;
 let restore: () => void;
 
+/** Register the app on the test's own server: this process listens, from the repository, so the "project" is the working directory. */
 function meta(id: string, extra: Record<string, unknown> = {}) {
   const dir = path.join(root, "data", "webapps", id);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify({ name: id, color: "#f97316", icon: "", port, ...extra }));
+  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify({ name: id, color: "#f97316", icon: "", port, directory: process.cwd(), ...extra }));
 }
 
 function req(pathname: string, init: { method?: string; body?: string; headers?: Record<string, string>; cookie?: string } = {}): NextRequest {
@@ -63,6 +64,7 @@ beforeEach(async () => {
   port = (server.address() as AddressInfo).port;
   vi.resetModules();
   routes = await import("@/app/apps/[id]/[[...path]]/route");
+  (await import("@/lib/app-proxy"))._resetListenerCacheForTests();
 });
 
 afterEach(async () => {
@@ -92,11 +94,12 @@ describe("the app proxy", () => {
     expect(seen.map((s) => s.url)).toEqual(["/", "/css/a.css"]);
   });
 
-  it("serves a document under the CSP sandbox, framed, and leaves other types alone", async () => {
+  it("serves every response under the CSP sandbox — a document whatever its declared type — and framed", async () => {
     meta("site");
     handler = (r, res) => {
       if (r.url?.endsWith(".json")) { res.writeHead(200, { "content-type": "application/json", "x-frame-options": "DENY" }); res.end("{}"); return; }
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "x-frame-options": "DENY", "content-security-policy": "img-src 'self'" });
+      // An app may spell its type any way it likes; the sandbox does not depend on reading it.
+      res.writeHead(200, { "content-type": "Text/HTML; charset=utf-8", "x-frame-options": "DENY", "content-security-policy": "img-src 'self'" });
       res.end("<h1>hi</h1>");
     };
     const html = await routes.GET(req("/apps/site/"), ctx("site"));
@@ -108,7 +111,7 @@ describe("the app proxy", () => {
     expect(csp).not.toContain("allow-same-origin");
     expect(await html.text()).toBe("<h1>hi</h1>");
     const json = await routes.GET(req("/apps/site/data.json"), ctx("site", ["data.json"]));
-    expect(json.headers.get("content-security-policy")).toBeNull();
+    expect(json.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
     expect(json.headers.get("x-frame-options")).toBeNull();
   });
 
@@ -127,10 +130,17 @@ describe("the app proxy", () => {
     expect(redirected.headers.get("location")).toBe("/apps/site/login");
   });
 
-  it("answers 404 for a name nothing declares, and 502 with the remedy when the app is not listening", async () => {
+  it("answers 404 for a name nothing registers, 502 when the listener is not the project's own, and 502 with the remedy when the app is not listening", async () => {
     const missing = await routes.GET(req("/apps/nothing/"), ctx("nothing"));
     expect(missing.status).toBe(404);
     expect(await missing.text()).toContain("clawbox.json");
+    // Registered for a folder this process does not run from — a manifest
+    // pointing the proxy at somebody else's port.
+    meta("site", { directory: path.join(base, "elsewhere") });
+    const foreign = await routes.GET(req("/apps/site/"), ctx("site"));
+    expect(foreign.status).toBe(502);
+    expect(await foreign.text()).toContain("not served by the project");
+    (await import("@/lib/app-proxy"))._resetListenerCacheForTests();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     meta("site");
     const down = await routes.GET(req("/apps/site/"), ctx("site"));

@@ -8,9 +8,21 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
+import http from "http";
 import os from "os";
 import path from "path";
+import type { AddressInfo } from "net";
 import { saveEnv } from "@/tests/helpers/env";
+
+// Starts real listeners and asks `ss` about them: not a 5 s job on a loaded runner.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+/** A listener of THIS process — whose working directory is the repository — on a free port. */
+async function listen(): Promise<{ port: number; close: () => Promise<void> }> {
+  const server = http.createServer((_req, res) => { res.end("ok"); });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { port: (server.address() as AddressInfo).port, close: () => new Promise((resolve) => server.close(() => resolve())) };
+}
 
 const pushed = vi.hoisted(() => [] as Record<string, unknown>[]);
 vi.mock("@/lib/pending-actions", () => ({ pushPendingAction: async (a: Record<string, unknown>) => { pushed.push(a); return a; } }));
@@ -36,6 +48,7 @@ beforeEach(async () => {
   pushed.length = 0;
   vi.resetModules();
   lib = await import("@/lib/app-proxy");
+  lib._resetListenerCacheForTests();
 });
 
 afterEach(() => {
@@ -70,51 +83,132 @@ describe("the path and the request", () => {
   });
 });
 
+describe("whose listener it is", () => {
+  it("owns a listener of this process running from the project folder, and refuses everything else", async () => {
+    const mine = await listen();
+    try {
+      // The repository is this process's working directory: a "project" that
+      // contains it is owned, one that does not is not.
+      expect(await lib.listenerOwnedBy(mine.port, process.cwd())).toBe("owned");
+      lib._resetListenerCacheForTests();
+      expect(await lib.listenerOwnedBy(mine.port, projects)).toBe("not_owned");
+    } finally {
+      await mine.close();
+    }
+    lib._resetListenerCacheForTests();
+    // Nothing listens there now.
+    expect(await lib.listenerOwnedBy(mine.port, process.cwd())).toBe("not_listening");
+    expect(lib.listenerRefusal("not_listening", mine.port)).toContain(`port ${mine.port}`);
+  });
+
+  it("remembers an owned verdict, and forgets a refusal quickly", async () => {
+    const mine = await listen();
+    try {
+      expect(await lib.listenerOwnedBy(mine.port, process.cwd())).toBe("owned");
+      await mine.close();
+      // Cached: still owned within the TTL, even though the server is gone.
+      expect(await lib.listenerOwnedBy(mine.port, process.cwd())).toBe("owned");
+    } finally {
+      await mine.close().catch(() => undefined);
+    }
+  });
+});
+
 describe("resolveAppProxyTarget", () => {
-  it("takes the registered meta's port first, the project's manifest second, and nothing otherwise", async () => {
-    expect(await lib.resolveAppProxyTarget("nothing")).toBeNull();
+  it("serves a REGISTERED app whose listener is the project's own, and nothing on a manifest alone", async () => {
+    expect(await lib.resolveAppProxyTarget("nothing")).toMatchObject({ ok: false, reason: "unregistered" });
+    // A manifest naming a port is not a registration: a repository could
+    // carry one pointing at any local service.
     fs.mkdirSync(path.join(projects, "site"), { recursive: true });
-    fs.writeFileSync(path.join(projects, "site", "clawbox.json"), JSON.stringify({ name: "Site", port: 4230, stripBasePath: true }));
-    expect(await lib.resolveAppProxyTarget("site")).toEqual({ id: "site", port: 4230, stripBasePath: true });
-    fs.mkdirSync(path.join(root, "data", "webapps", "site"), { recursive: true });
-    fs.writeFileSync(path.join(root, "data", "webapps", "site", "meta.json"), JSON.stringify({ name: "Site", port: 5000 }));
-    expect(await lib.resolveAppProxyTarget("site")).toEqual({ id: "site", port: 5000, stripBasePath: false });
-    // A meta without a port is a one-file webapp, and the manifest still answers.
-    fs.writeFileSync(path.join(root, "data", "webapps", "site", "meta.json"), JSON.stringify({ name: "Site" }));
-    expect(await lib.resolveAppProxyTarget("site")).toEqual({ id: "site", port: 4230, stripBasePath: true });
+    fs.writeFileSync(path.join(projects, "site", "clawbox.json"), JSON.stringify({ name: "Site", port: 4230 }));
+    expect(await lib.resolveAppProxyTarget("site")).toMatchObject({ ok: false, reason: "unregistered" });
+
+    const mine = await listen();
+    try {
+      fs.mkdirSync(path.join(root, "data", "webapps", "site"), { recursive: true });
+      fs.writeFileSync(path.join(root, "data", "webapps", "site", "meta.json"), JSON.stringify({ name: "Site", port: mine.port, directory: process.cwd(), stripBasePath: true }));
+      expect(await lib.resolveAppProxyTarget("site")).toEqual({ ok: true, target: { id: "site", port: mine.port, stripBasePath: true, directory: process.cwd() } });
+      // Registered for a folder the listener does not run from: refused.
+      lib._resetListenerCacheForTests();
+      fs.writeFileSync(path.join(root, "data", "webapps", "site", "meta.json"), JSON.stringify({ name: "Site", port: mine.port, directory: projects }));
+      expect(await lib.resolveAppProxyTarget("site")).toMatchObject({ ok: false, reason: "not_owned" });
+    } finally {
+      await mine.close();
+    }
     // Never a port the box itself listens on, nor an id that is not one.
-    fs.writeFileSync(path.join(root, "data", "webapps", "site", "meta.json"), JSON.stringify({ name: "Site", port: 80 }));
-    fs.writeFileSync(path.join(projects, "site", "clawbox.json"), JSON.stringify({ name: "Site", port: 80 }));
-    expect(await lib.resolveAppProxyTarget("site")).toBeNull();
-    expect(await lib.resolveAppProxyTarget("../site")).toBeNull();
+    fs.writeFileSync(path.join(root, "data", "webapps", "site", "meta.json"), JSON.stringify({ name: "Site", port: 80, directory: process.cwd() }));
+    expect(await lib.resolveAppProxyTarget("site")).toMatchObject({ ok: false, reason: "unregistered" });
+    expect(await lib.resolveAppProxyTarget("../site")).toMatchObject({ ok: false, reason: "unregistered" });
+  });
+
+  it("falls back to the project folder of the id for a registration without one", async () => {
+    const mine = await listen();
+    try {
+      fs.mkdirSync(path.join(root, "data", "webapps", "old"), { recursive: true });
+      fs.writeFileSync(path.join(root, "data", "webapps", "old", "meta.json"), JSON.stringify({ name: "Old", port: mine.port }));
+      // No such project folder: nothing to own it.
+      expect(await lib.resolveAppProxyTarget("old")).toMatchObject({ ok: false, reason: "not_owned" });
+      expect(await lib.projectFolderFor("old")).toBeNull();
+      fs.mkdirSync(path.join(projects, "old"), { recursive: true });
+      expect(await lib.projectFolderFor("old")).toBe(path.join(projects, "old"));
+      // …and a code project of that id counts too.
+      fs.mkdirSync(path.join(root, "data", "code-projects", "cp"), { recursive: true });
+      expect(await lib.projectFolderFor("cp")).toBe(path.join(root, "data", "code-projects", "cp"));
+    } finally {
+      await mine.close();
+    }
   });
 });
 
 describe("registerServerApp", () => {
-  it("writes the stub and the port, registers the desktop icon on /apps/<id>/, and nudges the desktop", async () => {
-    const manifest = { name: "Tinder Clone", description: "Swipe", kind: "server" as const, port: 4230, start: null, stripBasePath: false };
-    expect(await lib.registerServerApp({ id: "tinder-clone", manifest })).toBe(true);
-    const dir = path.join(root, "data", "webapps", "tinder-clone");
-    expect(JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf-8"))).toEqual({ name: "Tinder Clone", color: "#f97316", icon: "", port: 4230 });
-    const html = fs.readFileSync(path.join(dir, "index.html"), "utf-8");
-    expect(html).toContain('location.replace("/apps/tinder-clone/")');
-    expect(html).not.toMatch(/location\.hostname|:4230/);
-    const config = JSON.parse(fs.readFileSync(path.join(root, "data", "config.json"), "utf-8"));
-    expect(config["pref:installed_apps"]).toEqual(["tinder-clone"]);
-    expect(config["pref:installed_meta"]["tinder-clone"]).toMatchObject({ name: "Tinder Clone", webappUrl: "/apps/tinder-clone/" });
-    expect(pushed).toEqual([expect.objectContaining({ type: "register_webapp", appId: "tinder-clone", url: "/apps/tinder-clone/" })]);
-    expect(await lib.resolveAppProxyTarget("tinder-clone")).toEqual({ id: "tinder-clone", port: 4230, stripBasePath: false });
+  const manifest = (port: number) => ({ name: "Tinder Clone", description: "Swipe", kind: "server" as const, port, start: null, stripBasePath: false });
+
+  it("writes the stub, the port and the folder, registers the desktop icon on /apps/<id>/, and nudges the desktop", async () => {
+    const mine = await listen();
+    try {
+      expect(await lib.registerServerApp({ id: "tinder-clone", directory: process.cwd(), manifest: manifest(mine.port) })).toEqual({ ok: true });
+      const dir = path.join(root, "data", "webapps", "tinder-clone");
+      expect(JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf-8"))).toEqual({ name: "Tinder Clone", color: "#f97316", icon: "", port: mine.port, directory: process.cwd() });
+      const html = fs.readFileSync(path.join(dir, "index.html"), "utf-8");
+      expect(html).toContain('location.replace("/apps/tinder-clone/")');
+      expect(html).not.toMatch(/location\.hostname|:4230/);
+      const config = JSON.parse(fs.readFileSync(path.join(root, "data", "config.json"), "utf-8"));
+      expect(config["pref:installed_apps"]).toEqual(["tinder-clone"]);
+      expect(config["pref:installed_meta"]["tinder-clone"]).toMatchObject({ name: "Tinder Clone", webappUrl: "/apps/tinder-clone/" });
+      expect(pushed).toEqual([expect.objectContaining({ type: "register_webapp", appId: "tinder-clone", url: "/apps/tinder-clone/" })]);
+      expect(await lib.resolveAppProxyTarget("tinder-clone")).toEqual({ ok: true, target: { id: "tinder-clone", port: mine.port, stripBasePath: false, directory: process.cwd() } });
+    } finally {
+      await mine.close();
+    }
   });
 
-  it("keeps an earlier registration's colour and icon, and does nothing for a manifest without a port", async () => {
-    const dir = path.join(root, "data", "webapps", "site");
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify({ name: "Old", color: "#123456", icon: "/x.png" }));
-    const manifest = { name: "Site", description: null, kind: null, port: 3000, start: null, stripBasePath: true };
-    expect(await lib.registerServerApp({ id: "site", manifest })).toBe(true);
-    expect(JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf-8"))).toEqual({ name: "Site", color: "#123456", icon: "/x.png", port: 3000, stripBasePath: true });
-    expect(await lib.registerServerApp({ id: "plain", manifest: { ...manifest, port: null } })).toBe(false);
-    expect(fs.existsSync(path.join(root, "data", "webapps", "plain"))).toBe(false);
+  it("registers nothing when the port is not the project's own, and says which way it is not", async () => {
+    const mine = await listen();
+    try {
+      const out = await lib.registerServerApp({ id: "other", directory: projects, manifest: manifest(mine.port) });
+      expect(out).toMatchObject({ ok: false, reason: "not_owned" });
+    } finally {
+      await mine.close();
+    }
+    lib._resetListenerCacheForTests();
+    expect(await lib.registerServerApp({ id: "quiet", directory: process.cwd(), manifest: manifest(mine.port) })).toMatchObject({ ok: false, reason: "not_listening" });
+    expect(fs.existsSync(path.join(root, "data", "webapps", "other"))).toBe(false);
+    expect(fs.existsSync(path.join(root, "data", "webapps", "quiet"))).toBe(false);
+    expect(pushed).toEqual([]);
+    expect(await lib.registerServerApp({ id: "plain", directory: process.cwd(), manifest: { ...manifest(3000), port: null } })).toMatchObject({ ok: false, reason: "failed" });
+  });
+
+  it("keeps an earlier registration's colour and icon", async () => {
+    const mine = await listen();
+    try {
+      const dir = path.join(root, "data", "webapps", "site");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify({ name: "Old", color: "#123456", icon: "/x.png" }));
+      expect(await lib.registerServerApp({ id: "site", directory: process.cwd(), manifest: { ...manifest(mine.port), stripBasePath: true } })).toEqual({ ok: true });
+      expect(JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf-8"))).toEqual({ name: "Tinder Clone", color: "#123456", icon: "/x.png", port: mine.port, directory: process.cwd(), stripBasePath: true });
+    } finally {
+      await mine.close();
+    }
   });
 
   it("escapes the name in the stub", () => {

@@ -161,13 +161,22 @@ export { NEW_APP_NAME_MAX };
  * spelling against the one the desktop matches on.
  */
 /**
- * Open a project's app: the desktop window when it is registered there, the
- * box's own /apps/<folder>/ in a tab when its manifest names a port and the
- * desktop has not picked it up yet (src/lib/app-proxy.ts).
+ * Put a project whose clawbox.json names a port on the desktop — the box
+ * checks that the project's own server is listening first
+ * (src/lib/app-proxy.ts) — and answer the refusal's sentence when it is not.
  */
-function openProjectApp(project: Pick<Project, "folder" | "onDesktop" | "app">): void {
-  if (project.onDesktop) dispatchOpenApp(installedAppId(project.folder));
-  else if (project.app?.port) window.open(`/apps/${project.folder}/`, "_blank", "noopener");
+async function addProjectToDesktop(directory: string): Promise<string | null> {
+  try {
+    const res = await fetch("/setup-api/coding-agent/projects/desktop", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ directory }),
+    });
+    const data = await res.json().catch(() => ({})) as { error?: string };
+    return res.ok ? null : (data.error || "Could not add the app to the desktop.");
+  } catch {
+    return "Could not add the app to the desktop.";
+  }
 }
 
 export function installedAppId(folder: string): string {
@@ -452,6 +461,20 @@ export default function CodingAgentApp() {
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  /**
+   * The Open button of a project row and page: the desktop window when the
+   * app is registered there; otherwise — a clawbox.json naming a port — the
+   * box is asked to put it on the desktop first, and the row's next read
+   * shows Open.
+   */
+  const openOrAddProject = async (project: Pick<Project, "folder" | "directory" | "onDesktop" | "app">) => {
+    if (project.onDesktop) { dispatchOpenApp(installedAppId(project.folder)); return; }
+    if (!project.app?.port) return;
+    const failed = await addProjectToDesktop(project.directory);
+    window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: failed ? { message: failed, type: "error" } : { message: t("codingAgent.addedToDesktop", { name: project.app.name }), type: "success" } }));
+    if (!failed) void load();
+  };
 
   // The settings live in another window now. Re-read the box when Settings
   // says it saved something — the chip, the checklist and a run's Backup
@@ -1589,13 +1612,13 @@ export default function CodingAgentApp() {
                         // `installed-<folder>` (page.tsx, getAllApps); the
                         // bare folder name matches no app there, and the
                         // click did nothing at all. A project whose manifest
-                        // declares a port but is not on the desktop yet opens
-                        // at the box's own /apps/<folder>/ in a tab.
-                        onClick={(e) => { e.stopPropagation(); openProjectApp(project); }}
+                        // declares a port but is not on the desktop yet is
+                        // put there first (the box checks its server is up).
+                        onClick={(e) => { e.stopPropagation(); void openOrAddProject(project); }}
                         data-testid={`coding-agent-open-${project.folder}`}
                         className={BTN_SECONDARY}
                       >
-                        {t("codingAgent.open")}
+                        {project.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
                       </button>
                     )}
                     <span className="material-symbols-rounded text-[var(--text-muted)] opacity-60 shrink-0 self-center" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
@@ -1759,10 +1782,11 @@ export default function CodingAgentApp() {
                   {project && (project.onDesktop || project.app?.port) && (
                     <button
                       type="button"
-                      onClick={() => openProjectApp(project)}
+                      onClick={() => void openOrAddProject(project)}
                       className={BTN_SECONDARY}
+                      data-testid="coding-agent-project-open-app"
                     >
-                      {t("codingAgent.open")}
+                      {project.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
                     </button>
                   )}
                 </div>
