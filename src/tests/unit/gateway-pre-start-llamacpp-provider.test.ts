@@ -64,9 +64,23 @@ type ProviderDef = {
 
 const TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+/** Tuning the block reads from the environment; never inherited (see migrate). */
+const AMBIENT_KEYS = [
+  "LLAMACPP_CONTEXT_WINDOW",
+  "LLAMACPP_MAX_TOKENS",
+  "CLAWBOX_LOCAL_AI_PROXY_BASE_URL",
+  "CLAWBOX_PORT",
+  "PORT",
+] as const;
+
 function writeToken(value: string | null): void {
   if (value === null) return;
   writeFileSync(path.join(root, "data", ".local-ai-token"), value);
+}
+
+/** The shipped `$CLAWBOX_ROOT/.env` that install.sh's ensure_env_setting writes. */
+function writeEnvFile(body: string): void {
+  writeFileSync(path.join(root, ".env"), body);
 }
 
 /**
@@ -88,9 +102,16 @@ function migrate(cfg: Config, env: Record<string, string> = {}): { cfg: Config; 
     POLICY,
     "print(json.dumps({'cfg': cfg, 'changed': changed}))",
   ].join("\n");
+  // The block reads its tuning from the environment, so a developer or CI job
+  // that happens to export LLAMACPP_CONTEXT_WINDOW would fail every
+  // default-asserting case here while the script is perfectly correct. Drop
+  // the ambient values and let each case state its own — the same reason
+  // gateway-pre-start-clawai-images.test.ts clears its override.
+  const inherited = { ...process.env };
+  for (const key of AMBIENT_KEYS) delete inherited[key];
   const lines = execFileSync("python3", ["-c", program, file], {
     encoding: "utf-8",
-    env: { ...process.env, CLAWBOX_ROOT: root, ...env },
+    env: { ...inherited, CLAWBOX_ROOT: root, ...env },
   }).trim().split("\n");
   return { ...JSON.parse(lines[lines.length - 1]), log: lines.slice(0, -1).join("\n") };
 }
@@ -307,17 +328,23 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
     expect(llamacppProvider(cfg).models?.[0]?.id).toBe("gemma4-e2b-it-q4_0");
   });
 
-  it("preserves an existing but EMPTY llamacpp provider entry", () => {
-    // {} is falsy, so a .get() check would silently overwrite an operator's
-    // deliberate empty entry, contrary to the migration's preservation contract.
+  it("completes an existing but EMPTY llamacpp entry instead of leaving a config the gateway rejects", () => {
+    // Key presence alone treated `{}` as a deliberate operator choice, but
+    // OpenClaw's ModelDefinitionSchema requires a baseUrl and at least one
+    // model on a custom provider: an empty entry fails validation outright, so
+    // preserving it leaves a box whose gateway cannot load its config at all —
+    // strictly worse than the "Unknown model" this migration exists to fix.
     writeToken(TOKEN);
     const { cfg, changed } = migrate({
       models: { providers: { llamacpp: {} } },
       agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
     });
 
-    expect(changed).toBe(false);
-    expect(llamacppProvider(cfg)).toEqual({});
+    expect(changed).toBe(true);
+    const p = llamacppProvider(cfg);
+    expect(p.baseUrl).toBe("http://127.0.0.1/setup-api/local-ai/llamacpp/v1");
+    expect(p.apiKey).toBe(TOKEN);
+    expect(p.models?.[0]?.id).toBe("gemma4-e2b-it-q4_0");
   });
 
   it("survives a non-numeric LLAMACPP_CONTEXT_WINDOW instead of aborting pre-start", () => {
@@ -336,5 +363,159 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
     const ctx = llamacppProvider(cfg).models?.[0]?.contextWindow;
     expect(typeof ctx).toBe("number");
     expect(ctx).toBeGreaterThan(0);
+  });
+
+  // --- TASK-643: the review findings on #562 -----------------------------
+
+  it("refuses a bare `llamacpp/` ref rather than writing a model row with an empty id", () => {
+    // ModelDefinitionSchema requires id.min(1). Writing {id:"",name:""} makes
+    // the WHOLE openclaw.json fail validation, so a box that merely could not
+    // answer ends up with a gateway that cannot load at all.
+    writeToken(TOKEN);
+    const { cfg, changed, log } = migrate({
+      models: { providers: {} },
+      agents: { defaults: { model: { primary: "llamacpp/" } } },
+    });
+
+    expect(changed).toBe(false);
+    expect(llamacppProvider(cfg)).toEqual({});
+    expect(log).toContain("Skipped llamacpp provider repair");
+  });
+
+  it("skips an empty id but still repairs a usable one beside it", () => {
+    writeToken(TOKEN);
+    const { cfg, changed } = migrate({
+      models: { providers: {} },
+      agents: { defaults: { model: { primary: "llamacpp/", fallbacks: ["llamacpp/gemma4-e2b-it-q4_0"] } } },
+    });
+
+    expect(changed).toBe(true);
+    expect(llamacppProvider(cfg).models?.map((m) => m.id)).toEqual(["gemma4-e2b-it-q4_0"]);
+  });
+
+  it("registers a row for every distinct llamacpp id, not only the first", () => {
+    // A second llamacpp id in the fallbacks stays "Unknown model" — the exact
+    // failure this migration exists to remove.
+    writeToken(TOKEN);
+    const { cfg } = migrate({
+      models: { providers: {} },
+      agents: {
+        defaults: {
+          model: {
+            primary: "llamacpp/gemma4-e2b-it-q4_0",
+            fallbacks: ["llamacpp/qwen3-1.7b-q4", "clawai/x", " llamacpp/gemma4-e2b-it-q4_0 "],
+          },
+        },
+      },
+    });
+
+    expect(llamacppProvider(cfg).models?.map((m) => m.id))
+      .toEqual(["gemma4-e2b-it-q4_0", "qwen3-1.7b-q4"]);
+  });
+
+  it("reads the tuning from the shipped .env, which the gateway unit does not load", () => {
+    // clawbox-gateway.service loads network.env and discord.env only, while
+    // install.sh's ensure_env_setting writes LLAMACPP_* into
+    // $CLAWBOX_ROOT/.env. Read from os.environ alone, the repair ALWAYS wrote
+    // 131072 while llama-server (started under clawbox-setup, which does load
+    // .env) ran at the configured size: compaction never fires and long
+    // sessions die with context-exceeded.
+    writeToken(TOKEN);
+    writeEnvFile("LLAMACPP_CONTEXT_WINDOW=32768\nLLAMACPP_MAX_TOKENS=4096\n");
+    const { cfg } = migrate({
+      models: { providers: {} },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(llamacppProvider(cfg).models?.[0]?.contextWindow).toBe(32768);
+    expect(llamacppProvider(cfg).models?.[0]?.maxTokens).toBe(4096);
+  });
+
+  it("lets the process environment win over the .env file", () => {
+    writeToken(TOKEN);
+    writeEnvFile("LLAMACPP_CONTEXT_WINDOW=32768\n");
+    const { cfg } = migrate(
+      {
+        models: { providers: {} },
+        agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+      },
+      { LLAMACPP_CONTEXT_WINDOW: "65536" },
+    );
+
+    expect(llamacppProvider(cfg).models?.[0]?.contextWindow).toBe(65536);
+  });
+
+  it("takes the local-AI proxy authority from the .env too", () => {
+    writeToken(TOKEN);
+    writeEnvFile('CLAWBOX_LOCAL_AI_PROXY_BASE_URL="http://10.42.0.1:8080/"\n');
+    const { cfg } = migrate({
+      models: { providers: {} },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(llamacppProvider(cfg).baseUrl)
+      .toBe("http://10.42.0.1:8080/setup-api/local-ai/llamacpp/v1");
+  });
+
+  it("honours LLAMACPP_MAX_TOKENS the way src/lib/llamacpp.ts does", () => {
+    writeToken(TOKEN);
+    const explicit = migrate(
+      { models: { providers: {} }, agents: { defaults: { model: { primary: "llamacpp/m" } } } },
+      { LLAMACPP_CONTEXT_WINDOW: "32768", LLAMACPP_MAX_TOKENS: "2048" },
+    );
+    expect(llamacppProvider(explicit.cfg).models?.[0]?.maxTokens).toBe(2048);
+
+    // Unusable value falls back to the context window, as getLlamaCppMaxTokens does.
+    const junk = migrate(
+      { models: { providers: {} }, agents: { defaults: { model: { primary: "llamacpp/m" } } } },
+      { LLAMACPP_CONTEXT_WINDOW: "32768", LLAMACPP_MAX_TOKENS: "nope" },
+    );
+    expect(llamacppProvider(junk.cfg).models?.[0]?.maxTokens).toBe(32768);
+  });
+
+  it("accepts the numeric spellings the TypeScript side accepts", () => {
+    // Number("32768.0") and Number("1e5") both start llama-server at that size
+    // on the TS path; python int() raises on both, the except swallowed it and
+    // the provider silently got 131072 instead.
+    writeToken(TOKEN);
+    const dotted = migrate(
+      { models: { providers: {} }, agents: { defaults: { model: { primary: "llamacpp/m" } } } },
+      { LLAMACPP_CONTEXT_WINDOW: "32768.0" },
+    );
+    expect(llamacppProvider(dotted.cfg).models?.[0]?.contextWindow).toBe(32768);
+
+    const exponent = migrate(
+      { models: { providers: {} }, agents: { defaults: { model: { primary: "llamacpp/m" } } } },
+      { LLAMACPP_CONTEXT_WINDOW: "1e5" },
+    );
+    expect(llamacppProvider(exponent.cfg).models?.[0]?.contextWindow).toBe(100000);
+  });
+
+  it("survives models.providers = null instead of aborting ExecStartPre", () => {
+    // set -euo pipefail: a TypeError here means the gateway never reaches
+    // ExecStart at all.
+    writeToken(TOKEN);
+    const { cfg, changed } = migrate({
+      models: { providers: null },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(changed).toBe(true);
+    expect(llamacppProvider(cfg).models?.[0]?.id).toBe("gemma4-e2b-it-q4_0");
+  });
+
+  it("leaves a usable operator entry alone but completes a half-written one", () => {
+    writeToken(TOKEN);
+    const partial = migrate({
+      models: { providers: { llamacpp: { baseUrl: "http://127.0.0.1:8080/v1", apiKey: "operators-own" } } },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    // The operator's own baseUrl and key survive; only the schema-required
+    // models list is filled in, so the config validates.
+    expect(partial.changed).toBe(true);
+    expect(llamacppProvider(partial.cfg).baseUrl).toBe("http://127.0.0.1:8080/v1");
+    expect(llamacppProvider(partial.cfg).apiKey).toBe("operators-own");
+    expect(llamacppProvider(partial.cfg).models?.[0]?.id).toBe("gemma4-e2b-it-q4_0");
   });
 });
