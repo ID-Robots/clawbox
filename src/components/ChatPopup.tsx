@@ -4129,10 +4129,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [input, adapter, syncDrawingTabs])
 
   // A wait nobody is watching is a paid generation still running. Closing the
-  // popup ends it, the same way it drops the agent's image wait just above.
+  // popup ends it, the same way it drops the agent's image wait just above —
+  // and so does UNMOUNTING while open, which the `isOpen` branch alone never
+  // saw: an effect keyed on it only fires when the flag changes, so a popup
+  // taken off the page mid-generation left the request running and billed.
+  // The controllers take themselves out of the map in `generatePicture`'s
+  // `finally`, which runs whether the request was aborted or not.
   useEffect(() => {
-    if (isOpen) return
-    for (const controller of drawingRef.current.values()) controller.abort()
+    const abortAll = () => {
+      for (const controller of drawingRef.current.values()) controller.abort()
+    }
+    if (isOpen) return abortAll
+    abortAll()
   }, [isOpen])
 
   const sendMessage = useCallback(() => {

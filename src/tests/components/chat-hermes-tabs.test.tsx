@@ -442,6 +442,10 @@ describe("what a screen reader is told about a tab", () => {
     expect(screen.queryByText(translations.en["chat.generatingImage"])).toBeNull();
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "a blue whale" } });
     await waitFor(() => expect(screen.getByTestId("generate-image")).not.toBeDisabled());
+    // And the button works, rather than merely looking enabled: the guard is
+    // one generation PER CONVERSATION now, so this tab may ask for its own.
+    fireEvent.click(screen.getByTestId("generate-image"));
+    await waitFor(() => expect(box.imagePrompts).toEqual(["a red maple leaf", "a blue whale"]));
 
     // Back where it was asked for, the wait is still on screen and the button
     // is still held — one generation per conversation, as before.
