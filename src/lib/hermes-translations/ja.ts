@@ -665,7 +665,7 @@ export const ja: Record<string, string> = {
   "codingAgent.team.status.failed": "失敗",
   "codingAgent.team.status.stopped": "停止",
   "codingAgent.team.task.pending": "待機中",
-  "codingAgent.team.task.in_progress": "進行中",
+  "codingAgent.team.task.inProgress": "進行中",
   "codingAgent.team.task.complete": "完了",
   "codingAgent.team.task.failed": "失敗",
   "codingAgent.team.task.rejected": "却下",

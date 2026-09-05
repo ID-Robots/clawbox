@@ -659,7 +659,7 @@ export const sv: Record<string, string> = {
   "codingAgent.team.status.failed": "Misslyckades",
   "codingAgent.team.status.stopped": "Stoppat",
   "codingAgent.team.task.pending": "Väntar",
-  "codingAgent.team.task.in_progress": "Pågår",
+  "codingAgent.team.task.inProgress": "Pågår",
   "codingAgent.team.task.complete": "Klar",
   "codingAgent.team.task.failed": "Misslyckad",
   "codingAgent.team.task.rejected": "Avvisad",

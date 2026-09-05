@@ -658,7 +658,7 @@ export const es: Record<string, string> = {
   "codingAgent.team.status.failed": "Fallido",
   "codingAgent.team.status.stopped": "Detenido",
   "codingAgent.team.task.pending": "Pendiente",
-  "codingAgent.team.task.in_progress": "En curso",
+  "codingAgent.team.task.inProgress": "En curso",
   "codingAgent.team.task.complete": "Completada",
   "codingAgent.team.task.failed": "Fallida",
   "codingAgent.team.task.rejected": "Rechazada",

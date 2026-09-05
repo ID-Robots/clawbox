@@ -674,7 +674,7 @@ export const zh: Record<string, string> = {
   "codingAgent.team.status.failed": "失败",
   "codingAgent.team.status.stopped": "已停止",
   "codingAgent.team.task.pending": "待处理",
-  "codingAgent.team.task.in_progress": "进行中",
+  "codingAgent.team.task.inProgress": "进行中",
   "codingAgent.team.task.complete": "已完成",
   "codingAgent.team.task.failed": "失败",
   "codingAgent.team.task.rejected": "已拒绝",

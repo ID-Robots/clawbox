@@ -60,6 +60,15 @@ const STATUS_TONE: Record<TeamView["status"], string> = {
   stopped: "text-[var(--text-muted)] border-white/20",
 };
 
+/** The translation key for a task status: keys are camelCase, statuses are the brief's. */
+const TASK_KEY: Record<TeamTaskView["status"], string> = {
+  pending: "pending",
+  in_progress: "inProgress",
+  complete: "complete",
+  failed: "failed",
+  rejected: "rejected",
+};
+
 const TASK_TONE: Record<TeamTaskView["status"], string> = {
   pending: "text-[var(--text-muted)] border-white/20",
   in_progress: "text-amber-400 border-amber-400/40",
@@ -235,7 +244,7 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-mono text-[11px] text-[var(--text-muted)]">{task.task_id}</span>
                     <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${TASK_TONE[task.status]}`}>
-                      {t(`codingAgent.team.task.${task.status}`)}
+                      {t(`codingAgent.team.task.${TASK_KEY[task.status]}`)}
                     </span>
                     {task.review && (
                       <span className={`text-[10px] font-semibold uppercase tracking-wider ${task.review.verdict === "accepted" ? "text-emerald-400" : "text-red-300"}`}>

@@ -193,7 +193,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.team.status.failed": "Failed",
   "codingAgent.team.status.stopped": "Stopped",
   "codingAgent.team.task.pending": "Pending",
-  "codingAgent.team.task.in_progress": "In progress",
+  "codingAgent.team.task.inProgress": "In progress",
   "codingAgent.team.task.complete": "Complete",
   "codingAgent.team.task.failed": "Failed",
   "codingAgent.team.task.rejected": "Rejected",

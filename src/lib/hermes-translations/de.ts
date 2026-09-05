@@ -662,7 +662,7 @@ export const de: Record<string, string> = {
   "codingAgent.team.status.failed": "Fehlgeschlagen",
   "codingAgent.team.status.stopped": "Angehalten",
   "codingAgent.team.task.pending": "Offen",
-  "codingAgent.team.task.in_progress": "In Arbeit",
+  "codingAgent.team.task.inProgress": "In Arbeit",
   "codingAgent.team.task.complete": "Erledigt",
   "codingAgent.team.task.failed": "Fehlgeschlagen",
   "codingAgent.team.task.rejected": "Abgelehnt",

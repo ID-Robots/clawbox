@@ -650,7 +650,7 @@ export const bg: Record<string, string> = {
   "codingAgent.team.status.failed": "Неуспешно",
   "codingAgent.team.status.stopped": "Спряно",
   "codingAgent.team.task.pending": "Чака",
-  "codingAgent.team.task.in_progress": "В процес",
+  "codingAgent.team.task.inProgress": "В процес",
   "codingAgent.team.task.complete": "Завършена",
   "codingAgent.team.task.failed": "Неуспешна",
   "codingAgent.team.task.rejected": "Отхвърлена",

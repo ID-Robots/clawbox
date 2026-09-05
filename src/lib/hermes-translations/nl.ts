@@ -663,7 +663,7 @@ export const nl: Record<string, string> = {
   "codingAgent.team.status.failed": "Mislukt",
   "codingAgent.team.status.stopped": "Gestopt",
   "codingAgent.team.task.pending": "Wachtend",
-  "codingAgent.team.task.in_progress": "Bezig",
+  "codingAgent.team.task.inProgress": "Bezig",
   "codingAgent.team.task.complete": "Voltooid",
   "codingAgent.team.task.failed": "Mislukt",
   "codingAgent.team.task.rejected": "Afgewezen",
