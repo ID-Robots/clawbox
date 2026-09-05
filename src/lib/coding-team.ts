@@ -34,13 +34,17 @@ import {
   getRun,
   isCodingAgentEnabled,
   MAX_TASK_CHARS,
+  MAX_TEAM_WORKERS,
   resolveWorkingDirectory,
   startRun,
   stopRun,
+  teamSpawnSlot,
   waitForRun,
   type CodingRun,
   type CodingRunSource,
 } from "@/lib/coding-agent";
+import { addWorkerWorktree, changedFiles, ensureTeamBranch, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
+import { parseVerdict, REVIEWER_BRIEF, reviewerTask } from "@/lib/coding-team-reviewer";
 import { isLive } from "@/lib/coding-agent-status";
 import {
   allComplete,
@@ -51,11 +55,16 @@ import {
   readyTasks,
   saveBoard,
   setTeamStatus,
+  teamAgents,
   TEAM_ID_RE,
   type Actor,
+  type TeamAgents,
   type TeamBoard,
   type TeamTask,
 } from "@/lib/coding-team-board";
+
+/** The board as the routes and the app read it: with who worked, counted. */
+export type TeamView = TeamBoard & { agents: TeamAgents };
 import { TeamBus } from "@/lib/coding-team-bus";
 import { parsePlan, PLANNER_BRIEF } from "@/lib/coding-team-planner";
 
@@ -63,6 +72,8 @@ import { parsePlan, PLANNER_BRIEF } from "@/lib/coding-team-planner";
 export const MAX_ALERTS = 3;
 /** How long the orchestrator waits on one run per poll; the runner caps a wait anyway. */
 const WAIT_SLICE_MS = 60_000;
+/** How long the loop waits for a slot (memory, the cap) before looking again. */
+const SLOT_WAIT_MS = 15_000;
 /** A planner or a worker that has not settled by then is stopped and the team failed. */
 export const RUN_BUDGET_MS = 60 * 60_000;
 /** Sibling results quoted into a worker's task are cut here each. */
@@ -85,7 +96,8 @@ interface LiveTeam {
   board: TeamBoard;
   bus: TeamBus;
   stopRequested: boolean;
-  currentRunId: string | null;
+  /** Every run of the team still going — several workers at once. */
+  currentRunIds: Set<string>;
   done: Promise<void>;
 }
 
@@ -109,7 +121,7 @@ export function activeTeamId(): string | null {
  * team is working (one team, one worker at a time — the box has one shell
  * budget), and for a folder a run could not be pointed at.
  */
-export async function startTeam(input: StartTeamInput): Promise<TeamBoard> {
+export async function startTeam(input: StartTeamInput): Promise<TeamView> {
   if (!(await isCodingAgentEnabled())) {
     throw new CodingAgentError("disabled", "The coding agent is switched off. Turn it on in the Coding Agent app first.");
   }
@@ -125,7 +137,7 @@ export async function startTeam(input: StartTeamInput): Promise<TeamBoard> {
   const board = createBoard({ goal, projectId, directory, source: input.source }, input.source === "owner" ? OWNER : SYSTEM);
   saveBoard(board);
   const bus = new TeamBus(board);
-  const team: LiveTeam = { board, bus, stopRequested: false, currentRunId: null, done: Promise.resolve() };
+  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), done: Promise.resolve() };
   live.set(board.id, team);
   team.done = runTeam(team, input.source)
     .catch((err) => {
@@ -142,20 +154,20 @@ export async function startTeam(input: StartTeamInput): Promise<TeamBoard> {
 }
 
 /** Stop a team: the owner's gesture. The worker in flight is stopped too. */
-export function stopTeam(id: string): TeamBoard {
+export function stopTeam(id: string): TeamView {
   const team = live.get(id);
   if (!team) {
     const board = loadBoard(id);
     if (!board) throw new CodingAgentError("not_found", "There is no coding team with that id.");
-    if (isSettledStatus(board.status)) return board;
+    if (isSettledStatus(board.status)) return snapshot(board);
     // A team from before a restart: settle it now.
     setTeamStatus(board, SYSTEM, "failed", "The web server restarted while the team was working.");
     saveBoard(board);
-    return board;
+    return snapshot(board);
   }
   team.stopRequested = true;
-  if (team.currentRunId) {
-    try { stopRun(team.currentRunId); } catch { /* already settled */ }
+  for (const runId of team.currentRunIds) {
+    try { stopRun(runId); } catch { /* already settled */ }
   }
   if (!isSettledStatus(team.board.status)) {
     setTeamStatus(team.board, OWNER, "stopped", "Stopped by the owner");
@@ -164,21 +176,21 @@ export function stopTeam(id: string): TeamBoard {
   return snapshot(team.board);
 }
 
-export function getTeam(id: string): TeamBoard | null {
+export function getTeam(id: string): TeamView | null {
   if (!TEAM_ID_RE.test(id)) return null;
   const team = live.get(id);
   if (team) return snapshot(team.board);
   const board = loadBoard(id);
   if (!board) return null;
-  return settleOrphan(board);
+  return snapshot(settleOrphan(board));
 }
 
-export function listTeams(limit = 20): TeamBoard[] {
+export function listTeams(limit = 20): TeamView[] {
   return listBoards().slice(0, limit).map((b) => live.get(b.id)?.board ?? settleOrphan(b)).map(snapshot);
 }
 
 /** The team a run belongs to, for the run page's chip. */
-export function teamOfRun(run: Pick<CodingRun, "team">): TeamBoard | null {
+export function teamOfRun(run: Pick<CodingRun, "team">): TeamView | null {
   return run.team ? getTeam(run.team.id) : null;
 }
 
@@ -203,6 +215,7 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     extraBrief: PLANNER_BRIEF,
   });
   board.plannerRunId = planner.id;
+  board.runs.push({ id: planner.id, role: "planner", taskId: null });
   saveBoard(board);
   const planned = await settle(team, planner.id);
   if (team.stopRequested) return;
@@ -218,24 +231,65 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     return;
   }
   for (const task of plan.tasks) bus.send(PLANNER, { type: "task", ...task });
+
+  // The team's own branch in a folder project: workers get worktrees off it
+  // and their branches merge back into it. A code project sits inside the
+  // ClawBox checkout under rules of its own, so its workers work in place,
+  // one at a time, as v0 did.
+  if (!board.projectId) {
+    const branched = await ensureTeamBranch(board.directory, board.id);
+    if (!branched.ok) {
+      setTeamStatus(board, SYSTEM, "failed", branched.detail);
+      saveBoard(board);
+      return;
+    }
+    board.branch = branched.branch;
+    board.base = branched.base;
+  }
   setTeamStatus(board, SYSTEM, "working");
   saveBoard(board);
 
-  // 2. Workers, one at a time, each task when its dependencies are done.
+  // 2. Workers: every task whose dependencies are done gets a worker as soon
+  //    as the box has room for one (MAX_TEAM_WORKERS, the memory guard),
+  //    and they settle in whatever order they finish. In place (no team
+  //    branch) there is one slot: two workers in one checkout write over
+  //    each other.
+  const inFlight = new Map<string, Promise<void>>();
+  const slots = board.branch ? MAX_TEAM_WORKERS : 1;
   while (!team.stopRequested) {
     if (board.alerts >= MAX_ALERTS) {
       setTeamStatus(board, SYSTEM, "failed", `Stopped after ${board.alerts} alerts.`);
       saveBoard(board);
-      return;
+      break;
     }
-    const [next] = readyTasks(board);
-    if (!next) {
+    const ready = readyTasks(board).filter((t) => !inFlight.has(t.task_id));
+    let waitingForRoom = false;
+    for (const task of ready) {
+      if (inFlight.size >= slots) break;
+      if (inFlight.size >= 1) {
+        const slot = await teamSpawnSlot({ id: board.id, role: "worker", taskId: task.task_id });
+        if (!slot.ok) { waitingForRoom = slot.wait; break; }
+      }
+      const work = workTask(team, task, source)
+        .catch((err) => {
+          bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Task ${task.task_id} could not be worked: ${err instanceof Error ? err.message : String(err)}` });
+        })
+        .finally(() => { inFlight.delete(task.task_id); });
+      inFlight.set(task.task_id, work);
+    }
+    if (inFlight.size === 0) {
       if (isExhausted(board)) break;
+      if (!waitingForRoom) break;
+      await sleep(SLOT_WAIT_MS);
       continue;
     }
-    await workTask(team, next, source);
+    // Something is working: wake on the first settle, or after a while to
+    // try for another slot (memory frees up as a worker ends).
+    await Promise.race([...inFlight.values(), sleep(SLOT_WAIT_MS)]);
   }
+  await Promise.allSettled([...inFlight.values()]);
   if (team.stopRequested) return;
+  if (isSettledStatus(board.status)) return;
 
   // 3. The verdict on the team.
   if (allComplete(board)) {
@@ -250,53 +304,143 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
 
 async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource): Promise<void> {
   const { board, bus } = team;
-  const run = await startRun({
-    task: workerTask(board, task),
-    projectId: board.projectId,
-    directory: board.directory,
-    source,
-    team: { id: board.id, role: "worker", taskId: task.task_id },
-    extraBrief: WORKER_BRIEF,
-  });
+
+  // Its own worktree and branch, when the team has a branch to fork from.
+  let directory = board.directory;
+  let worktree: { path: string; branch: string } | null = null;
+  if (board.branch) {
+    const made = await addWorkerWorktree(board.directory, board.id, task.task_id, task.attempts + 1);
+    if (!made.ok) throw new Error(`No worktree for ${task.task_id}: ${made.detail}`);
+    worktree = { path: made.path, branch: made.branch };
+    directory = made.path;
+  }
+
+  let run: CodingRun;
+  try {
+    run = await startRun({
+      task: workerTask(board, task),
+      projectId: worktree ? null : board.projectId,
+      directory,
+      source,
+      team: { id: board.id, role: "worker", taskId: task.task_id },
+      extraBrief: WORKER_BRIEF,
+    });
+  } catch (err) {
+    if (worktree) await removeWorktree(board.directory, worktree.path);
+    throw err;
+  }
   const me = worker(run.id);
   bus.send(SYSTEM, { type: "assign", task_id: task.task_id, worker_id: run.id });
+  const row = board.tasks.find((t) => t.task_id === task.task_id);
+  if (row) { row.worktree = worktree?.path ?? null; row.branch = worktree?.branch ?? null; row.reviewRunId = null; }
+  board.runs.push({ id: run.id, role: "worker", taskId: task.task_id });
+  saveBoard(board);
   bus.send(me, { type: "status_update", task_id: task.task_id, status: "in_progress", worker_id: run.id });
 
   const settled = await settle(team, run.id);
-  if (team.stopRequested) return;
+  if (team.stopRequested) {
+    if (worktree) await removeWorktree(board.directory, worktree.path);
+    return;
+  }
   const ok = settled?.status === "completed";
-  const result = settled?.summary?.trim() || settled?.error || (ok ? "(no summary)" : `The run ended ${settled?.status ?? "without a record"}.`);
+  let result = settled?.summary?.trim() || settled?.error || (ok ? "(no summary)" : `The run ended ${settled?.status ?? "without a record"}.`);
+
+  // The worker's commits come home. A merge git cannot do alone is not
+  // guessed at: the task is REJECTED with the conflict named and offered
+  // once more, and the next attempt starts from the merged state.
+  let files: string[] = settled?.filesTouched ?? [];
+  let mergeRefusal: string | null = null;
+  if (worktree) {
+    if (ok) {
+      // What the branch changed; a worker that committed nothing has no
+      // branch diff, and what it touched uncommitted is still what it touched.
+      const diffed = await changedFiles(board.directory, worktree.branch);
+      if (diffed.length) files = diffed;
+      const merged = await mergeWorkerBranch(board.directory, worktree.branch, `Coding team ${board.id}: ${task.task_id} — ${firstLine(task.task_description, 72)}`);
+      if (!merged.ok) {
+        mergeRefusal = `${merged.conflict ? "MERGE CONFLICT" : "MERGE FAILED"}: ${firstLine(merged.detail, 300)}`;
+        result = `${result}\n\n${mergeRefusal}`;
+        bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `${merged.conflict ? "Merge conflict" : "Merge failed"} for ${task.task_id} (${run.id}): ${firstLine(merged.detail, 200)}` });
+      }
+    }
+    await removeWorktree(board.directory, worktree.path);
+  }
   bus.send(me, { type: "result", task_id: task.task_id, result, worker_id: run.id });
   bus.send(me, { type: "status_update", task_id: task.task_id, status: ok ? "complete" : "failed", worker_id: run.id });
+  if (mergeRefusal) {
+    bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes: `${mergeRefusal} The work could not be merged; redo the task on the current files.` });
+    return;
+  }
 
   // Guardrails: what the worker did, against what it was asked.
   if (settled) {
     if (settled.permissionDenials > 0) {
       bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Worker ${run.id} was refused ${settled.permissionDenials} action(s): ${settled.deniedActions.slice(0, 3).join("; ")}` });
     }
-    const strayed = outsideHint(settled.filesTouched, task.files_hint);
+    const strayed = outsideHint(files, task.files_hint);
     if (strayed.length) {
       bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Worker ${run.id} touched files outside its task: ${strayed.slice(0, 5).join(", ")}` });
     }
   }
 
-  // The review loop, v0: a rule — accepted when the run completed with no
-  // refusals and no straying; otherwise rejected, which re-posts the task
-  // once. v1 puts the review pass's findings here.
+  // The review loop: the rule first (v0 — a refusal or a stray file is a
+  // rejection without a model), then the REVIEWER, a read-only run on the
+  // merged work that answers a verdict. A review that was not done is not
+  // an acceptance: a garbled answer falls back to the rule with an alert.
   if (ok) {
-    const clean = settled && settled.permissionDenials === 0 && outsideHint(settled.filesTouched, task.files_hint).length === 0;
-    bus.send(REVIEWER, {
-      type: "review",
-      task_id: task.task_id,
-      verdict: clean ? "accepted" : "rejected",
-      notes: clean ? "" : "The worker was refused an action or strayed outside its files; the task is offered once more.",
-    });
+    const clean = settled && settled.permissionDenials === 0 && outsideHint(files, task.files_hint).length === 0;
+    if (!clean) {
+      bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes: "The worker was refused an action or strayed outside its files; the task is offered once more." });
+      return;
+    }
+    const verdict = await reviewTask(team, task, source, { files, report: result });
+    if (team.stopRequested) return;
+    bus.send(REVIEWER, { type: "review", task_id: task.task_id, ...verdict });
   }
+}
+
+/** The reviewer's run and its verdict; the rule's acceptance when the run cannot say. */
+async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSource, work: { files: string[]; report: string }): Promise<{ verdict: "accepted" | "rejected"; notes: string }> {
+  const { board, bus } = team;
+  let run: CodingRun;
+  try {
+    run = await startRun({
+      task: reviewerTask({ taskId: task.task_id, description: task.task_description, files: work.files, report: work.report, goal: board.goal }),
+      projectId: board.projectId,
+      directory: board.directory,
+      source,
+      team: { id: board.id, role: "reviewer", taskId: task.task_id },
+      readOnly: true,
+      extraBrief: REVIEWER_BRIEF,
+    });
+  } catch (err) {
+    bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `No reviewer for ${task.task_id}: ${err instanceof Error ? err.message : String(err)}` });
+    return { verdict: "accepted", notes: "Accepted by rule: the reviewer could not start." };
+  }
+  const row = board.tasks.find((t) => t.task_id === task.task_id);
+  if (row) row.reviewRunId = run.id;
+  board.runs.push({ id: run.id, role: "reviewer", taskId: task.task_id });
+  saveBoard(board);
+  const settled = await settle(team, run.id);
+  if (settled?.status !== "completed") {
+    bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `The reviewer of ${task.task_id} (${run.id}) ended ${settled?.status ?? "without a record"}.` });
+    return { verdict: "accepted", notes: "Accepted by rule: the reviewer did not finish." };
+  }
+  const parsed = parseVerdict(settled.summary);
+  if (!parsed.ok) {
+    bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `The reviewer of ${task.task_id} gave no verdict: ${parsed.reason}` });
+    return { verdict: "accepted", notes: `Accepted by rule: ${parsed.reason}` };
+  }
+  return parsed.verdict;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Wait for a run to settle, in slices, honouring a stop and the budget. */
 async function settle(team: LiveTeam, runId: string): Promise<CodingRun | null> {
-  team.currentRunId = runId;
+  team.currentRunIds.add(runId);
   const started = Date.now();
   try {
     for (;;) {
@@ -314,7 +458,7 @@ async function settle(team: LiveTeam, runId: string): Promise<CodingRun | null> 
       }
     }
   } finally {
-    team.currentRunId = null;
+    team.currentRunIds.delete(runId);
   }
 }
 
@@ -362,8 +506,9 @@ function settleOrphan(board: TeamBoard): TeamBoard {
   return board;
 }
 
-function snapshot(board: TeamBoard): TeamBoard {
-  return JSON.parse(JSON.stringify(board)) as TeamBoard;
+/** The board as the routes answer it, with the agent count worked out from it. */
+function snapshot(board: TeamBoard): TeamView {
+  return { ...(JSON.parse(JSON.stringify(board)) as TeamBoard), agents: teamAgents(board) };
 }
 
 function firstLine(text: string, max: number): string {

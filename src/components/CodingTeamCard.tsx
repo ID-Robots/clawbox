@@ -24,6 +24,8 @@ export interface TeamTaskView {
   depends_on: string[];
   review: { verdict: "accepted" | "rejected"; notes: string; at: number } | null;
   attempts: number;
+  /** The reviewer run that ruled on the current attempt. */
+  reviewRunId?: string | null;
 }
 
 export interface TeamView {
@@ -33,6 +35,11 @@ export interface TeamView {
   directory: string;
   status: "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
   plannerRunId: string | null;
+  /** The team's branch in the project and what it forked from; null when the team works in place. */
+  branch?: string | null;
+  base?: string | null;
+  /** Who worked, counted by the server from the board's cast list. */
+  agents?: { planner: number; workers: number; reviewers: number; total: number };
   tasks: TeamTaskView[];
   log: { ts: number; actor: { kind: string; id?: string }; type: string; message: string }[];
   alerts: number;
@@ -191,6 +198,17 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
         )}
       </div>
       <p className="mt-1 text-[11px] text-[var(--text-muted)] leading-relaxed">{t("codingAgent.team.help")}</p>
+      {/* Who worked, and where: the owner asked to see how many agents a
+          run had. Planner, workers (an attempt is a new worker), reviewers. */}
+      {team && team.agents && team.agents.total > 0 && (
+        <p className="mt-1.5 text-[11px] text-[var(--text-secondary)]" data-testid="coding-team-agents">
+          <span className="material-symbols-rounded align-[-2px] mr-1" style={{ fontSize: 14 }} aria-hidden="true">smart_toy</span>
+          {t("codingAgent.team.agents", { total: team.agents.total, planner: team.agents.planner, workers: team.agents.workers, reviewers: team.agents.reviewers })}
+          {team.branch && (
+            <span className="text-[var(--text-muted)]"> · {t("codingAgent.team.branch", { branch: team.branch, base: team.base ?? "" })}</span>
+          )}
+        </p>
+      )}
 
       {/* Asking for a team happens in the chat, the way every other task
           does: the Create App card, on this project, with the team switch
@@ -244,8 +262,13 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
                       <span className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.team.after", { ids: task.depends_on.join(", ") })}</span>
                     )}
                     {task.assigned_to && (
-                      <button type="button" onClick={() => onOpenRun(task.assigned_to!)} data-testid={`coding-team-worker-${task.task_id}`} className="ml-auto text-[11px] font-mono text-[var(--text-muted)] underline decoration-white/20 hover:text-white">
+                      <button type="button" onClick={() => onOpenRun(task.assigned_to!)} data-testid={`coding-team-worker-${task.task_id}`} title={t("codingAgent.team.roleWorker", { task: task.task_id })} className="ml-auto text-[11px] font-mono text-[var(--text-muted)] underline decoration-white/20 hover:text-white">
                         {task.assigned_to}
+                      </button>
+                    )}
+                    {task.reviewRunId && (
+                      <button type="button" onClick={() => onOpenRun(task.reviewRunId!)} data-testid={`coding-team-reviewer-${task.task_id}`} title={t("codingAgent.team.roleReviewer", { task: task.task_id })} className="text-[11px] font-mono text-[var(--text-muted)] underline decoration-white/20 hover:text-white">
+                        <span className="material-symbols-rounded align-[-2px] mr-0.5" style={{ fontSize: 12 }} aria-hidden="true">rate_review</span>{task.reviewRunId}
                       </button>
                     )}
                   </div>

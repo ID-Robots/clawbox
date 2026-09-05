@@ -48,7 +48,8 @@ export interface TreeFile {
 export type TreeRefusal = { ok: false; status: 403 | 404 };
 
 /** Folders a project explorer has no business opening. */
-const SKIPPED_DIRS = new Set([".git"]);
+// `.clawbox` holds a coding team's worker worktrees (coding-team-worktree.ts): the project's own files, twice over.
+const SKIPPED_DIRS = new Set([".git", ".clawbox"]);
 /** A folder lists this many entries at most. */
 export const MAX_TREE_ENTRIES = 1000;
 /** A file is read up to here; the rest is cut and said so. */

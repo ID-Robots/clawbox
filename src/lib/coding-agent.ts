@@ -71,6 +71,7 @@ import { randomBytes } from "crypto";
 import { CONFIG_ROOT, DATA_DIR, get as configGet, getAll as configGetAll, set as configSet } from "@/lib/config-store";
 import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, removeArtifacts, writeRunReport } from "@/lib/coding-agent-artifacts";
 import { type CodingRunStatus, isCodingRunStatus, isHeld, isLive } from "@/lib/coding-agent-status";
+import { memAvailableMb } from "@/lib/mem-available";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
 import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, WEBAPPS_DIR } from "@/lib/code-projects";
@@ -303,6 +304,42 @@ export const MAX_DIRECTORY_CHARS = 512;
 /** Runs at once. A Jetson has one coding agent's worth of memory to spare,
  *  and two runs in one folder would edit each other's files. */
 export const MAX_CONCURRENT_RUNS = 1;
+
+/**
+ * A coding TEAM may have several of its runs going at once — its workers in
+ * their own git worktrees — up to this many, and only while the box has
+ * `TEAM_SPAWN_MIN_AVAILABLE_MB` of MemAvailable to spare for each one after
+ * the first. Measured on this Orin Nano: a `claude -p` run with its MCP
+ * server is ~600 MB resident, and three beside the web server, the gateway
+ * and the desktop's Chromium leave ~1.5 GB of a 7.6 GB board. A run that is
+ * not the team's still waits for the team, and the team waits for it: the
+ * one-run-at-a-time rule is between STRANGERS.
+ */
+export const MAX_TEAM_WORKERS = 3;
+export const TEAM_SPAWN_MIN_AVAILABLE_MB = (() => {
+  const raw = Number(process.env.CODING_TEAM_MIN_AVAILABLE_MB || 1_200);
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 1_200;
+})();
+
+/**
+ * Whether one more run of `team` may start beside the runs already live.
+ * The orchestrator asks this before it dispatches a worker, so a full board
+ * or a tight box makes it WAIT rather than fail; assertCanSpawn asks it
+ * again at the spawn, which is the gate.
+ */
+export async function teamSpawnSlot(team: RunTeam): Promise<{ ok: true } | { ok: false; reason: string; wait: boolean }> {
+  const active = loadRuns().filter((r) => isLive(r.status));
+  const stranger = active.find((r) => r.team?.id !== team.id);
+  if (stranger) return { ok: false, wait: false, reason: `A coding run is already in progress (${stranger.id}). Wait for it or stop it first.` };
+  if (active.length >= MAX_TEAM_WORKERS) return { ok: false, wait: true, reason: `The team already has ${active.length} runs going.` };
+  if (active.length >= 1) {
+    const mb = await memAvailableMb();
+    if (mb !== null && mb < TEAM_SPAWN_MIN_AVAILABLE_MB) {
+      return { ok: false, wait: true, reason: `Not enough free memory for another run beside the ${active.length} going (${mb} MB free, ${TEAM_SPAWN_MIN_AVAILABLE_MB} MB needed).` };
+    }
+  }
+  return { ok: true };
+}
 /** Longest a status request may block waiting for a run to finish. */
 export const MAX_WAIT_MS = 120_000;
 /** Runs kept in data/coding-agent-runs.json, newest first. */
@@ -799,7 +836,7 @@ export interface StartRunInput {
 /** A run's place in a coding team. */
 export interface RunTeam {
   id: string;
-  role: "planner" | "worker";
+  role: "planner" | "worker" | "reviewer";
   taskId: string | null;
 }
 
@@ -4110,7 +4147,7 @@ function spawnRun(
 
 export async function startRun(input: StartRunInput): Promise<CodingRun> {
   const task = normalizeTask(input.task);
-  await assertCanSpawn();
+  await assertCanSpawn(input.team ?? null);
   const setprivPath = await requireSetpriv();
 
   let resumeSessionId: string | null = null;
@@ -4174,7 +4211,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   // request needs them and no history has to be rewritten afterwards. A review
   // pass is deliberately excluded — it resumes in the same folder and belongs
   // on the same branch, which it is already on.
-  if (!run.reviewOf && !run.readOnly && (await getAutoPr())) {
+  // A team's run is excluded too: a worker already sits on its own branch
+  // in its own worktree (coding-team-worktree.ts), and a second branch
+  // under it would take the commits away from the merge the team makes.
+  if (!run.reviewOf && !run.readOnly && !run.team && (await getAutoPr())) {
     const branched = await startRunBranch({
       directory: run.directory,
       runId: run.id,
@@ -4447,7 +4487,7 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   if (run.status !== "paused") {
     throw new CodingAgentError("invalid", "Only a paused run can be resumed in place. Start a new run instead.");
   }
-  await assertCanSpawn();
+  await assertCanSpawn(run.team ?? null);
   const setprivPath = await requireSetpriv();
   // The pause gap is not working time: shift the start forward by it, so the
   // elapsed clock and the ETA speak of effort, not of the night in between.
@@ -4504,7 +4544,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (run.status === "running") return cloneRun(run);
   if (run.status !== "draft") throw new CodingAgentError("invalid", "Only a drafted run can be started this way.");
-  await assertCanSpawn();
+  await assertCanSpawn(run.team ?? null);
   const setprivPath = await requireSetpriv();
   // The folder must still be there — it was only checked when drafted.
   run.directory = await realDirectory(run.directory);
@@ -4539,12 +4579,18 @@ export function deleteDraftRun(id: string): void {
 }
 
 /** The gates every spawn passes: the owner's switch, readiness, the slot. */
-async function assertCanSpawn(): Promise<void> {
+async function assertCanSpawn(team: RunTeam | null = null): Promise<void> {
   if (!(await isCodingAgentEnabled())) {
     throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
   }
   const readiness = await checkReadiness();
   if (!readiness.ready) throw new CodingAgentError("not_ready", readiness.problems.join(" "));
+  if (team) {
+    // A team's own runs share the box, up to MAX_TEAM_WORKERS and the memory guard.
+    const slot = await teamSpawnSlot(team);
+    if (!slot.ok) throw new CodingAgentError("busy", slot.reason);
+    return;
+  }
   const active = loadRuns().filter((r) => isLive(r.status));
   if (active.length >= MAX_CONCURRENT_RUNS) {
     throw new CodingAgentError("busy", `A coding run is already in progress (${active[0].id}). Wait for it or stop it first.`);
