@@ -49,6 +49,10 @@ let editionFile: string;
 let hermesBin: string;
 /** What the fake `hermes plugins doctor` prints; the reconcile reads it back. */
 let doctorOutput: string;
+/** …and what it prints on stderr, which the capture folds in with 2>&1. */
+let doctorStderr: string;
+/** …and its exit status, which is what `--ci` turns into the verdict. */
+let doctorRc: number;
 
 /**
  * A `hermes` that records its calls and answers `plugins doctor` with whatever
@@ -63,7 +67,12 @@ function writeHermesStub() {
       'printf "%s\\n" "$*" >> "$HERMES_CALLS"',
       'if [ "$1" = "plugins" ] && [ "$2" = "doctor" ]; then',
       '  cat "$HERMES_DOCTOR_OUT"',
-      "  exit 0",
+      // The reconcile captures with 2>&1, so stderr is part of what the arms
+      // read. Without a way to stage it, every fixture is tidy verdict-shaped
+      // stdout and a suite can go green over an arm that cannot tell the
+      // doctor's own "  ERROR: …" from a Python logging line.
+      '  [ -s "$HERMES_DOCTOR_ERR" ] && cat "$HERMES_DOCTOR_ERR" >&2',
+      '  exit "${HERMES_DOCTOR_RC:-0}"',
       "fi",
       "exit 0",
     ].join("\n"),
@@ -73,6 +82,7 @@ function writeHermesStub() {
 
 function run(extra: Record<string, string> = {}, root = REPO) {
   fs.writeFileSync(path.join(home, "doctor-out"), doctorOutput);
+  fs.writeFileSync(path.join(home, "doctor-err"), doctorStderr);
   const r = spawnSync("bash", [SCRIPT], {
     encoding: "utf-8",
     env: testEnv({
@@ -85,6 +95,8 @@ function run(extra: Record<string, string> = {}, root = REPO) {
       CLAWBOX_EDITION_FILE: editionFile,
       HERMES_CALLS: path.join(home, "calls.log"),
       HERMES_DOCTOR_OUT: path.join(home, "doctor-out"),
+      HERMES_DOCTOR_ERR: path.join(home, "doctor-err"),
+      HERMES_DOCTOR_RC: String(doctorRc),
       ...extra,
     }),
   });
@@ -130,6 +142,8 @@ beforeEach(() => {
   editionFile = path.join(home, "edition.env");
   hermesBin = path.join(home, "fake-hermes");
   doctorOutput = "  OK: registration passed\n  registrations: 0 tool(s), 1 hook(s)\n";
+  doctorStderr = "";
+  doctorRc = 0;
 
   fs.mkdirSync(path.join(home, ".hermes"), { recursive: true });
   fs.writeFileSync(editionFile, "CLAWBOX_EDITION=hermes\n");
@@ -157,6 +171,51 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     const installed = fs.readFileSync(path.join(pluginsDir, PLUGIN, "__init__.py"), "utf-8");
     expect(installed).toBe(shipped);
     expect(installed).toContain("transform_llm_output");
+  });
+
+  it("declares in the manifest exactly the hooks it registers", () => {
+    // Measured on the Hermes box, read-only, 2026-09-04: with no
+    // `provides_hooks` the shipped plugin.yaml makes `hermes plugins doctor`
+    // print, on every web-server boot,
+    //   WARN: registration adds hook 'transform_llm_output' not listed in provides_hooks
+    // beside its OK line — a permanent warning about a plugin that is working,
+    // in the log where the line that matters has to be readable. The key is the
+    // harness's own manifest field (hermes_cli/plugins.py: the allowed-key list
+    // and `provides_hooks: List[str]`, read at manifest parse), and
+    // `transform_llm_output` is in its VALID_HOOKS, so declaring it cannot turn
+    // the warning into an error.
+    //
+    // Pinned against `register()` rather than restated: the doctor compares the
+    // two sets in both directions (plugin_dev.py warns for a declared hook that
+    // is not registered as well as for a registered one that is not declared),
+    // so a manifest that names the wrong hook is the same defect with the
+    // opposite sign.
+    const dir = path.join(REPO, "scripts/hermes-plugins", PLUGIN);
+    const manifest = execFileSync(
+      "python3",
+      ["-c", "import json,sys,yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1])) or {}))", path.join(dir, "plugin.yaml")],
+      { encoding: "utf-8" },
+    );
+    // De-duplicated on both sides. The scan is a regex over the module TEXT —
+    // docstrings and comments included, and this package documents itself — so
+    // an example call in a docstring, or a hook registered on two code paths,
+    // would otherwise fail the pin on a plugin that is perfectly correct.
+    const unique = (names: string[]) => [...new Set(names)].sort();
+    const declared = unique((JSON.parse(manifest) as { provides_hooks?: string[] }).provides_hooks ?? []);
+    // Every module in the package, not just __init__.py: a hook registered from
+    // a sibling would otherwise be invisible to the pin while the "found at
+    // least one" guard below still passed on the one it did see.
+    const registered = unique(
+      fs.readdirSync(dir)
+        .filter((f) => f.endsWith(".py"))
+        .flatMap((f) => [
+          ...fs.readFileSync(path.join(dir, f), "utf-8")
+            .matchAll(/register_hook\(\s*["']([a-z0-9_]+)["']/g),
+        ].map((m) => m[1])),
+    );
+
+    expect(registered.length).toBeGreaterThan(0);
+    expect(declared).toEqual(registered);
   });
 
   it("MERGES into plugins.enabled — the ClawAI image backend must survive", () => {
@@ -286,12 +345,36 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
   it("verifies the plugin LOADED on every boot, not once at install", () => {
     run();
     const calls = fs.readFileSync(path.join(home, "calls.log"), "utf-8");
-    expect(calls).toContain(`plugins doctor ${PLUGIN}`);
+    // `--ci` INCLUDED in the assertion, not just the subcommand: the whole
+    // verdict below is the CLI's own exit status, and without the flag the
+    // doctor exits 0 over an error report. A substring match on
+    // `plugins doctor <id>` is satisfied by a call that never asks for it.
+    expect(calls).toContain(`plugins doctor ${PLUGIN} --ci`);
 
     // Second boot, nothing to write — the check still runs.
     fs.writeFileSync(path.join(home, "calls.log"), "");
     run();
-    expect(fs.readFileSync(path.join(home, "calls.log"), "utf-8")).toContain(`plugins doctor ${PLUGIN}`);
+    expect(fs.readFileSync(path.join(home, "calls.log"), "utf-8")).toContain(
+      `plugins doctor ${PLUGIN} --ci`,
+    );
+  });
+
+  it("treats a hermes too old for --ci as unknown, not as a defect", () => {
+    // argparse's shape for an unrecognised flag: usage on stderr, exit 2, and
+    // no report at all. It must reach the NOTE arm — saying "directives will
+    // still reach channels" about a box whose hook is registered and working is
+    // the false failure this block's own comment forbids.
+    doctorRc = 2;
+    doctorOutput = "";
+    doctorStderr = [
+      "usage: hermes plugins doctor [-h] [target]",
+      "hermes plugins doctor: error: unrecognized arguments: --ci",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/NOTE.*could not verify/);
+    expect(r.stdout).not.toMatch(/WARNING/);
   });
 
   it("says so when the plugin registered no hook", () => {
@@ -303,6 +386,229 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
     expect(r.stdout).toContain("0 hook(s)");
+  });
+
+  it("does not call a doctor that REFUSED the plugin a success", () => {
+    // `registrations:` is printed whatever the verdict — the count line is
+    // unconditional in plugin_dev.py, while the "OK:" line is not. So a plugin
+    // whose hook callback the doctor refuses ("must accept **kwargs for forward
+    // compatibility" is an error, not a warning) still prints "1 hook(s)", and
+    // the boot log used to call that a healthy registration. The verdict comes
+    // from the CLI's own `--ci` exit status, not from a word grepped out of its
+    // prose.
+    doctorRc = 1;
+    doctorOutput = [
+      "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+      "  ERROR: hook callback 'transform_llm_output' for 'transform_llm_output' must accept **kwargs for forward compatibility",
+      "  registrations: 0 tool(s), 1 hook(s)",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/WARNING.*REFUSED/);
+    // The reason that triggered the branch survives into the line. The banner
+    // plus the manifest line is ~110 characters before any verdict, so a
+    // head-of-output window would have cut exactly this off.
+    expect(r.stdout).toContain("must accept **kwargs");
+  });
+
+  it("asks the CLI for its verdict instead of grepping its prose for ERROR", () => {
+    // The doctor imports the whole agent in a blank sandboxed HERMES_HOME, and
+    // the capture is 2>&1. Python's logging default format is
+    // `%(levelname)s:%(name)s:%(message)s`, so one missing optional dependency
+    // in that empty home puts a literal `ERROR:` on stderr. A substring match
+    // would turn a healthy, registered hook into a per-boot "EMAIL: directives
+    // will still reach channels" — the false failure the NOTE arm below exists
+    // to avoid.
+    doctorRc = 0;
+    doctorStderr = "ERROR:hermes_cli.telemetry:could not reach the catalog index\n";
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("loaded and registered its outbound hook");
+    expect(r.stdout).not.toMatch(/WARNING/);
+  });
+
+  it("does not call an EXTRA hook a missing one", () => {
+    // The count was never the question, and reading it as one cuts both ways:
+    // `*"1 hook(s)"*` also matched "11 hook(s)" (a false SUCCESS), and pinning
+    // the number made a plugin that registers ours plus a second hook read as a
+    // failed registration (a false FAILURE, on a box where the directives are
+    // being stripped correctly). With the manifest declaring our hook, the
+    // doctor answers the real question by name and the count is not consulted.
+    doctorOutput = [
+      "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+      "  WARN: registration adds hook 'telemetry_x' not listed in provides_hooks",
+      "  OK: runtime discovery, manifest parsing, import, and registration passed",
+      "  registrations: 0 tool(s), 2 hook(s)",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("loaded and registered its outbound hook");
+    expect(r.stdout).not.toMatch(/WARNING/);
+  });
+
+  it("does not read 11 hook(s) as the one hook it asked for", () => {
+    // The original finding, kept as its own case: eleven hooks and no
+    // "declares … did not add it" line means ours IS among them, so this is a
+    // healthy box — and beta called it healthy too, for the wrong reason (the
+    // substring). What must never happen is the count deciding anything.
+    doctorOutput = "  OK: registration passed\n  registrations: 0 tool(s), 11 hook(s)\n";
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("loaded and registered its outbound hook");
+    expect(r.stdout).not.toMatch(/WARNING/);
+  });
+
+  it("still matches the one hook when the count line is wrapped or reordered", () => {
+    // This output goes through rich.Console, which wraps at 80 columns off a
+    // tty — and the manifest WARN visibly wrapped on the box. Anchoring the
+    // healthy match on the neighbouring "tool(s), " token would make a reflow
+    // read as a failed registration.
+    for (const line of [
+      "  registrations: 0 tool(s),\n1 hook(s)",
+      "  registrations: 1 hook(s), 0 tool(s)",
+    ]) {
+      doctorOutput = `  OK: registration passed\n${line}\n`;
+      const r = run();
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("loaded and registered its outbound hook");
+    }
+  });
+
+  it("reads the one line that names OUR hook as the name check it is", () => {
+    // The Hermes equivalent of the OpenClaw twin's `"reply_payload_sending" in
+    // names`. The doctor warns in BOTH directions and only one of them means
+    // anything here: `manifest declares hook 'transform_llm_output' but
+    // registration did not add it` (plugin_dev.py:342) says ours is missing.
+    // The other — `registration adds hook X not listed in provides_hooks`
+    // (:343) — says we registered something EXTRA, which is not a defect at
+    // all. Note that only the :343 text contains the string `provides_hooks`,
+    // so a branch keyed on that word sees exactly the harmless direction and
+    // never the harmful one.
+    //
+    // This catches what no count can: a register() that adds a DIFFERENT valid
+    // hook still prints "1 hook(s)" with no error, and the directives reach
+    // channels.
+    doctorOutput = [
+      "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+      "  WARN: registration adds hook 'reply_payload_sending' not listed in provides_hooks",
+      "  WARN: manifest declares hook 'transform_llm_output' but registration did not add it",
+      "  OK: runtime discovery, manifest parsing, import, and registration passed",
+      "  registrations: 0 tool(s), 1 hook(s)",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
+    expect(r.stdout).toContain("transform_llm_output");
+    expect(r.stdout).not.toContain("loaded and registered its outbound hook");
+  });
+
+  it("quotes the doctor's own finding, not a flush-left logging line", () => {
+    // The capture is 2>&1 and the doctor imports the whole agent in a blank
+    // sandboxed HERMES_HOME, so one missing optional dependency puts Python's
+    // default `%(levelname)s:%(name)s:%(message)s` on stderr FLUSH LEFT. The
+    // doctor prints its OWN findings indented two spaces ("  WARN: …",
+    // "  ERROR: …"), so requiring at least one leading space is what keeps the
+    // ERRORS-first preference on verdict lines.
+    //
+    // Unanchored, the logging line wins that preference and the boot log hands
+    // the operator a cause the branch did not fire on — while dropping the one
+    // sentence that names the hook. That is the same "names the wrong cause"
+    // shape the rest of this change exists to end.
+    doctorRc = 0;
+    doctorStderr = "ERROR:hermes_cli.telemetry:could not reach the catalog index\n";
+    doctorOutput = [
+      "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+      "  WARN: manifest declares hook 'transform_llm_output' but registration did not add it",
+      "  registrations: 0 tool(s), 0 hook(s)",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
+    expect(r.stdout).toContain("transform_llm_output");
+    expect(r.stdout).not.toContain("hermes_cli.telemetry");
+  });
+
+  it("still reads it when rich wraps the sentence across two lines", () => {
+    // `rich.Console` wraps at 80 columns off a tty, and the manifest WARN
+    // visibly wrapped on the box — so the sentence the verdict depends on
+    // arrives in two pieces. Matching the raw capture is how a reflow becomes a
+    // false verdict; the whole report is flattened to single spaces first.
+    doctorOutput = [
+      "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+      "  WARN: manifest declares hook 'transform_llm_output' but registration",
+      "did not add it",
+      "  registrations: 0 tool(s), 1 hook(s)",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
+  });
+
+  it("does not call a healthy report a refusal over an unrelated exit code", () => {
+    // `--ci` is documented as "exit non-zero when validation reports an error"
+    // and raises SystemExit(1) for exactly that. Another non-zero code over a
+    // report that says the plugin is fine — a BrokenPipeError at interpreter
+    // flush, a teardown raise on a loaded Jetson, a SIGINT during a restart —
+    // says nothing about the hook, and beta logged success for this same input.
+    doctorRc = 120;
+    doctorOutput = [
+      "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+      "  OK: runtime discovery, manifest parsing, import, and registration passed",
+      "  registrations: 0 tool(s), 1 hook(s)",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/NOTE.*unknown here/);
+    expect(r.stdout).not.toMatch(/WARNING/);
+  });
+
+  it("quotes the ERROR that produced the refusal, not the warnings ahead of it", () => {
+    // Report order can put several WARN findings before the ERROR that makes
+    // `--ci` exit 1, and quoting those instead drops the one sentence that says
+    // what to fix — in the branch that needs it most.
+    doctorRc = 1;
+    doctorOutput = [
+      "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+      "  WARN: registration adds hook 'a' not listed in provides_hooks",
+      "  WARN: registration adds hook 'b' not listed in provides_hooks",
+      "  WARN: registration adds hook 'c' not listed in provides_hooks",
+      "  ERROR: registered unknown hook 'not_a_real_hook'",
+      "  registrations: 0 tool(s), 4 hook(s)",
+      "",
+    ].join("\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/WARNING.*REFUSED/);
+    expect(r.stdout).toContain("registered unknown hook");
+  });
+
+  it("still calls a clean one-hook registration a success", () => {
+    // The healthy shapes, including the five-line one measured on the box
+    // BEFORE this PR — every already-deployed box prints that until the new
+    // manifest lands, and it must not read as a defect on the boot that
+    // installs it.
+    for (const output of [
+      "  OK: registration passed\n  registrations: 0 tool(s), 1 hook(s)\n",
+      [
+        "Plugin Doctor: /home/x/.hermes/plugins/clawbox_email_directives",
+        "  manifest: clawbox_email_directives 1.0.0 (standalone)",
+        "  OK: runtime discovery, manifest parsing, import, and registration passed",
+        "  registrations: 0 tool(s), 1 hook(s)",
+        "",
+      ].join("\n"),
+    ]) {
+      doctorOutput = output;
+      const r = run();
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("loaded and registered its outbound hook");
+      expect(r.stdout).not.toMatch(/WARNING/);
+    }
   });
 
   it("says so when the doctor cannot load the plugin at all, and carries the reason", () => {
