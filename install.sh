@@ -5130,7 +5130,13 @@ step_gateway_legacy_state_recovery() {
 
   as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
   systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
-  systemctl start clawbox-gateway.service || true
+  # `restart`, as the first attempt above already does. This branch is reached
+  # when the gateway is not LISTENING, which is not the same as not running: a
+  # unit that is active and refusing to bind — the symptom this whole function
+  # exists for — makes `start` a no-op, so the files just quarantined would
+  # never be re-read and the port check below would fail over a recovery that
+  # was never attempted.
+  systemctl restart clawbox-gateway.service || true
   sleep 12
 
   if gateway_port_listening; then
