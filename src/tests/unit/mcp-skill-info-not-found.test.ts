@@ -8,8 +8,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * once and never rebuilds, and `related_skills` chips address skills by bare
  * name, which is not a key of that snapshot at all. So `skill_info` was left
  * guessing from empty fields whether the record it held was a sparse skill or no
- * skill, and a phase-2 timeout — the route's own 45 s cap — was guessed the same
- * way as a refusal: "No skill with that id — the device knows nothing about it."
+ * skill, and a phase-2 timeout — the route's own CLI cap, see
+ * SKILL_DOCS_CLI_TIMEOUT_MS — was guessed the same way as a refusal:
+ * "No skill with that id — the device knows nothing about it."
  *
  * `catalogMiss` says which records are placeholders, and Hermes settles the
  * rest: a refusal (404 from `hermes skills inspect`) is not-found, a FAILURE is
@@ -118,10 +119,13 @@ describe("skill_info — an id nothing on the device backs", () => {
   });
 
   it("does not call a skill imaginary because the docs call timed out", async () => {
-    // The route caps `hermes skills inspect` at 45 s and answers 504 cli_timeout;
-    // a browse.sh row over the unauthenticated GitHub API measures ~60 s on this
-    // hardware, so this is the ordinary case, not the exotic one. It says nothing
-    // about whether the skill exists.
+    // The route caps `hermes skills inspect` and answers 504 cli_timeout when it
+    // runs out; a browse.sh row over the unauthenticated GitHub API measures
+    // ~60 s on this hardware, so a docs lookup that does not deliver is the
+    // ordinary case, not the exotic one. The numbers live in one place —
+    // SKILL_DOCS_CLI_TIMEOUT_MS and its client sibling — and are deliberately
+    // not repeated here. Either way it says nothing about whether the skill
+    // exists.
     twoPhases(
       UNBACKED,
       new ApiError(504, JSON.stringify({ error: "Could not load the full documentation", code: "cli_timeout" })),
@@ -266,10 +270,15 @@ describe("skill_info — an id Hermes could not narrow down", () => {
  * lookup into a failed `skill_info` over a skill the catalogue proved exists,
  * discarding phase 1's metadata.
  *
- * And it is the ORDINARY case: this tool caps phase 2 at 30 s while the route
- * caps the CLI at 45 s, and the route's own comment says a browse.sh/github row
- * measures ~60 s on a loaded box — so the tool's own fetch is what gives up,
- * every time, and the route's 504 can essentially never reach it.
+ * And it is the ORDINARY case: a browse.sh/github row measures ~60 s on a loaded
+ * box, so a docs lookup that does not deliver is what usually happens here.
+ * WHICH side gives up first is #692's subject, not this file's: the client
+ * budget is now deliberately wider than the route's CLI cap
+ * (SKILL_DOCS_CLIENT_TIMEOUT_MS against SKILL_DOCS_CLI_TIMEOUT_MS) so the
+ * route's own 504 wins the race and the agent is told the DOCUMENTATION timed
+ * out rather than being handed a bare aborted fetch. Do not re-narrow the
+ * client budget on the strength of a number copied into this comment — the
+ * measurements are on those two constants.
  */
 describe("skill_info — a docs lookup that failed is not a verdict on the skill", () => {
   const BACKED = {
@@ -300,6 +309,29 @@ describe("skill_info — a docs lookup that failed is not a verdict on the skill
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(out.text).toContain("browse-sh/example.com/thing");
+  });
+
+  it("does not offer a retry for a panel that will be too large every time", async () => {
+    // The reason phase 2 takes ONE rule and not the whole of CATALOG_RULES.
+    // `hermes skills inspect` printing past MAX_OUTPUT_BYTES is a permanent
+    // condition — the route answers `502 {code:"too_large"}` and the next run
+    // produces the same bytes — and describeDocsFailure() is the only place
+    // that knows to say so. Handing phase 2 every catalogue rule intercepted
+    // this code first and re-worded it as "offer to try again", which is a
+    // retry that can never succeed.
+    twoPhases(
+      BACKED,
+      new ApiError(502, JSON.stringify({ error: "hermes output exceeded the size limit", code: "too_large" })),
+    );
+
+    const out = await skills().call("skill_info", { id: "browse-sh/example.com/thing" });
+
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    const body = JSON.parse(out.text);
+    expect(body.documentation_unavailable).toBe(true);
+    expect(body.documentation_note).toMatch(/retrying will not change it/i);
+    expect(body.documentation_note).not.toMatch(/try again/i);
   });
 
   it("says the documentation is missing rather than letting it read as absent", async () => {
