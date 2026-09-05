@@ -8,11 +8,13 @@
 
 import { apiGet, apiPost, CLAWBOX_ROOT } from "../lib/api";
 import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
+import { fitRows } from "../lib/guard";
 import { json, text, type Registrar } from "../lib/register";
 import { INSTALLED_APP_ID_RE, zBool, zConfirm, zEnumOf, zInstalledAppId, zInt, zOptText, zSlug, zText } from "../lib/schema";
 import { builtInApps, openedAppNotice, UNKNOWN_HARNESS_NOTE, type McpContext } from "../lib/context";
 import { HARNESS_ONLY_APP_IDS, isInstalledAppVisible } from "../../src/lib/desktop-app-editions";
 import type { InstalledHermesSkill } from "../../src/lib/hermes-skills";
+import { SKILL_LIST_MAX_CHARS } from "./skills";
 
 const UI_PICKUP_DELAY_MS = 2_500;
 
@@ -114,6 +116,16 @@ const WEBAPP_RULES: ErrorRule[] = [
   },
 ];
 
+/**
+ * What one `agent_skills` row costs beyond its own characters once
+ * JSON.stringify(…, null, 2) has wrapped it: two quotes, four spaces of indent,
+ * a comma and a newline.
+ */
+const SKILLS_ROW_OVERHEAD = 8;
+
+/** Reserved for the `agent_skills_not_listed` field an omission adds. */
+const OMISSION_FIELD_BUDGET = 60;
+
 export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
   // The APP harness, not the tool-set edition: an unreadable edition lock
   // resolves the tool set to hermes (the smaller, nested one) and must not
@@ -194,12 +206,13 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     "ui_list_apps",
     "List what is available on this ClawBox desktop: the built-in apps, and everything the user has installed or you have built. Call this before ui_open_app so you use an id that exists here.",
     {},
-    // 6,000, the cap skill_list already carries for this exact volume. A stock
-    // Hermes device ships ~77 skills, and capText() hard-SLICES at the cap:
-    // 4,000 cut the JSON mid-object and told the agent to "narrow the query" on
-    // a tool that takes no arguments. The rows below are compact for the same
-    // reason — one line each rather than a pretty-printed object per skill.
-    { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: 6_000 },
+    // The cap skill_list carries, for the same volume and the same reason. This
+    // answer is JSON, so capText()'s hard slice does not merely shorten it — it
+    // stops mid-object and the agent has no app list at all, on a tool that
+    // takes no arguments and cannot "narrow the query". The rows below are
+    // compact for the same reason, and the skills list is bounded to what fits
+    // rather than left to the slicer.
+    { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: SKILL_LIST_MAX_CHARS },
     async () => {
       const builtIn = apps.map((a) => ({ id: a.id, name: a.name, what: a.description }));
       const installed = (await installedAppIds(ctx.appHarness)).map((id) => ({ id: `installed-${id}`, name: id }));
@@ -219,10 +232,30 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
         // tool's output cap and truncated the JSON mid-object.
         skills = (body?.skills ?? []).map((s) => (s.name === s.id ? s.id : `${s.id} (${s.name})`));
       }
+      // The apps are what this tool is FOR — ui_open_app takes their ids — so
+      // the skills give way when the answer will not fit, never the other way
+      // round. Measured against the rest of the payload rather than guessed at,
+      // because a built-in list differs per harness and an installed app's row
+      // is as long as its id.
+      const envelope = json({
+        built_in: builtIn,
+        installed_apps: installed,
+        ...(ctx.edition === "hermes" ? { agent_skills: [] } : {}),
+        ...(ctx.appHarness === null ? { note: UNKNOWN_HARNESS_NOTE } : {}),
+      }).content[0];
+      const spent = envelope.type === "text" ? envelope.text.length : 0;
+      const fitted = fitRows(
+        skills,
+        SKILL_LIST_MAX_CHARS - spent - OMISSION_FIELD_BUDGET,
+        SKILLS_ROW_OVERHEAD,
+      );
       return json({
         built_in: builtIn,
         installed_apps: installed,
-        ...(ctx.edition === "hermes" ? { agent_skills: skills } : {}),
+        ...(ctx.edition === "hermes" ? { agent_skills: fitted.kept } : {}),
+        ...(ctx.edition === "hermes" && fitted.omitted
+          ? { agent_skills_not_listed: fitted.omitted }
+          : {}),
         // Said out loud rather than five apps quietly missing from the list:
         // the agent cannot tell "this box has no dashboard" from "nobody could
         // say" unless one of them is written down.

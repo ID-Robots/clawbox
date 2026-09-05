@@ -59,6 +59,7 @@ import type { McpContext } from "../../../mcp/lib/context";
 import { captureRegistrar } from "../helpers/mcp-registrar";
 
 const INSTALLED = "/setup-api/hermes/skills/installed";
+const UNINSTALL = "/setup-api/hermes/skills/uninstall";
 const PREFERENCES = "/setup-api/preferences";
 
 interface Row {
@@ -226,5 +227,59 @@ describe("ui_list_apps — the desktop list still parses on a stocked device", (
     const body = JSON.parse(out.text) as { agent_skills?: string[]; agent_skills_not_listed?: number };
     const listed = body.agent_skills?.length ?? 0;
     expect(listed + (body.agent_skills_not_listed ?? 0)).toBe(STOCKED.length);
+  });
+});
+
+describe("skill_uninstall — the answer is about what the DEVICE removed", () => {
+  const HUB: Row = { id: "publisher-weather", name: "weather", identifier: "publisher-weather", origin: "hub" };
+
+  /** Installed list per round (the last repeats), and the route's own answer. */
+  function uninstalling(rounds: Row[][], ok: { id?: string; requested?: string }) {
+    let i = 0;
+    apiGet.mockImplementation(async (route: string) => {
+      if (route !== INSTALLED) throw new Error(`unexpected GET ${route}`);
+      const rows = rounds[Math.min(i, rounds.length - 1)];
+      i += 1;
+      return rows === null ? Promise.reject(new Error("unreadable")) : { skills: rows };
+    });
+    apiPost.mockImplementation(async (route: string) => {
+      expect(route).toBe(UNINSTALL);
+      return ok;
+    });
+  }
+
+  it("reports the lock key the route says it removed, not the one read beforehand", async () => {
+    // The pre-read and the POST are two moments. If the lock moved between them
+    // the route resolves the argument to a DIFFERENT key and removes that one —
+    // and its answer is the only thing that knows which. Judging by the
+    // pre-read then checks the post-condition against a skill nobody touched.
+    uninstalling([[HUB], []], { id: "publisher-weather-2", requested: HUB.id });
+
+    const out = await skills().call("skill_uninstall", { name: HUB.id });
+
+    expect(out.isError, JSON.stringify(out)).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toContain("publisher-weather-2");
+  });
+
+  it("does not call a removal confirmed when the list could not be read back", async () => {
+    // The route's 200 is not proof — the CLI prints its refusal and exits 0,
+    // which is why this tool reads the list again. When THAT read fails the
+    // answer has to say so: `after` is null, every check below it is skipped,
+    // and the tool used to answer a flat "Removed the skill".
+    let call = 0;
+    apiGet.mockImplementation(async (route: string) => {
+      if (route !== INSTALLED) throw new Error(`unexpected GET ${route}`);
+      call += 1;
+      if (call === 1) return { skills: [HUB] };
+      throw new Error("the device could not list its skills");
+    });
+    apiPost.mockImplementation(async () => ({ id: HUB.id, requested: HUB.id }));
+
+    const out = await skills().call("skill_uninstall", { name: HUB.id });
+
+    expect(out.isError, JSON.stringify(out)).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/could not (be )?(read|check|confirm)|not confirmed|unconfirmed/i);
   });
 });
