@@ -506,6 +506,7 @@ export const zh: Record<string, string> = {
   "skills.installUnknownOutcome": "设备返回的内容过长无法读取，因此无法确定“{name}”是否已安装。请先查看“已安装”标签页再重试。",
   "skills.uninstallUnknownOutcome": "设备返回的内容过长无法读取，因此无法确定“{name}”是否已删除。请先查看“已安装”标签页再重试。",
   "skills.detailFailed": "无法加载该技能的详细信息。请重试。",
+  "skills.detailNotFound": "此技能不在本设备上，也不在技能商店中，因此没有可显示的内容。",
   "skills.detailUnavailable": "本设备未安装 Hermes，因此无法加载该技能的详细信息。",
   "skills.detailDocsFailed": "无法加载该技能的完整文档。上方内容来自本设备。",
   "skills.skillDisabled": "已停用",

@@ -241,6 +241,20 @@ export interface HermesSkillDetail {
   bodyTruncated: boolean;
   /** True when a `&docs=1` fetch would add documentation we don't have yet. */
   needsRemoteDocs: boolean;
+  /**
+   * True when NOTHING on this device backed the record: not the installed
+   * skills, not the catalogue, not the bundled `official` files. Phase 1 fills
+   * every field from the catalogue row, so without one the answer is a
+   * placeholder built from the requested id — the name is the id echoed back.
+   *
+   * It is not evidence that the skill does not exist: this device's catalogue is
+   * a snapshot that ClawBox never rebuilds once it exists, and a bare NAME (what
+   * a `related_skills` chip carries) is not a key of it at all. Only Hermes can
+   * refuse an id, which is what phase 2 asks it to do — so this flag is what
+   * turns phase 2's 404 from "the documentation failed" into "there is no such
+   * skill", for the browser and for the agent alike.
+   */
+  catalogMiss?: boolean;
   headings?: { level: 2 | 3; text: string; slug: string }[];
 }
 

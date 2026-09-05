@@ -506,6 +506,7 @@ export const it: Record<string, string> = {
   "skills.installUnknownOutcome": "La risposta del dispositivo era troppo lunga da leggere, quindi non si sa se «{name}» sia stata installata. Controlli la scheda Installate prima di riprovare.",
   "skills.uninstallUnknownOutcome": "La risposta del dispositivo era troppo lunga da leggere, quindi non si sa se «{name}» sia stata rimossa. Controlli la scheda Installate prima di riprovare.",
   "skills.detailFailed": "Non è stato possibile caricare i dettagli di questa competenza. Riprovi.",
+  "skills.detailNotFound": "Questa skill non è su questo dispositivo né nello store delle skill, quindi non c’è nulla da mostrare.",
   "skills.detailUnavailable": "Hermes non è installato su questo dispositivo, quindi i dettagli di questa competenza non possono essere caricati.",
   "skills.detailDocsFailed": "Non è stato possibile caricare la documentazione completa di questa competenza. I dati qui sopra provengono dal dispositivo.",
   "skills.skillDisabled": "Disattivata",

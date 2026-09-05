@@ -396,10 +396,27 @@ async function localDetail(id: string, fromInstalled: boolean): Promise<NextResp
   }
 
   // Catalog metadata only — the body needs the CLI (phase 2).
+  //
+  // With NO record this whole object is a placeholder: every field below reads
+  // `record?.…`, so an id nothing on this device knows produced a
+  // complete-looking skill whose name was the request echoed back —
+  // `?id=totally-made-up-skill-xyz-42` answered 200 with a skill. `catalogMiss`
+  // is that fact, put on the wire.
+  //
+  // It is a flag and not a 404 because this device cannot refuse an id. Its
+  // catalogue is a snapshot the browse route builds once and never rebuilds, so
+  // a skill published since is real and absent from it; and the store opens
+  // details by publisher-written bare NAME too (the related-skill chips), which
+  // is not a key of the index at all. `hermes skills inspect` resolves both —
+  // it is the authority on what exists, and phase 2 already answers its refusal
+  // as a 404. So phase 1 says "nothing here backs this", phase 2 asks Hermes,
+  // and the two together are what let the browser and the agent say "no such
+  // skill" without this device ever guessing it.
   const sourceUrl = record?.sourceUrl;
   const detail: HermesSkillDetail = {
     id,
     name: record?.name || id.split("/").pop() || id,
+    catalogMiss: record ? undefined : true,
     description: record?.description,
     provenanceNote: record?.provenanceNote,
     source: record?.source,
