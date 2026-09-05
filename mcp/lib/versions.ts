@@ -53,8 +53,13 @@ export interface VersionsPayload {
  * payload is read per request (cached for 60 s in `getVersionInfo()`).
  */
 export function shipsOpenclaw(payload: VersionsPayload | null | undefined, ctx: McpContext): boolean {
-  if (payload?.edition === "dual" || ctx.install === "dual") return true;
-  return (payload?.edition ?? ctx.install) !== "hermes" && ctx.edition !== "hermes";
+  // Resolve the install FIRST, then ask whether it is dual — asking `ctx.install
+  // === "dual"` on its own would let the stale snapshot outvote a payload that
+  // now says `hermes`, which is the one direction this whole predicate exists
+  // to get right.
+  const install = payload?.edition ?? ctx.install;
+  if (install === "dual") return true;
+  return install !== "hermes" && ctx.edition !== "hermes";
 }
 
 /** The versions payload as the agent on this device should see it. */

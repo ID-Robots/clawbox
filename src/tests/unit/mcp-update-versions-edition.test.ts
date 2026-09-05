@@ -230,6 +230,19 @@ describe("device_status — an OpenClaw pin delta is an update waiting on the SK
 });
 
 describe("shipsOpenclaw fails closed when the edition lock cannot be read", () => {
+  it("lets a payload that now says hermes outvote a stale dual snapshot", () => {
+    // `ctx.install` is read once when the MCP child spawns. A box relocked to
+    // hermes after that answers `edition: "hermes"` from the route while the
+    // context still says `dual` — and `dual` is the value that returns true
+    // outright, so checking it before resolving the install would keep the
+    // block on the one box that just stopped having an OpenClaw.
+    apiGet.mockResolvedValue(payload("hermes"));
+
+    return updateCheck("hermes", "dual").then((body) => {
+      expect(body).not.toHaveProperty("openclaw");
+    });
+  });
+
   it("keeps the block off on a Hermes box whose lock resolved to the openclaw default", async () => {
     // `mcp/lib/edition.ts` resolves an unreadable /etc/clawbox/edition.env to
     // the SMALLER hermes tool set while `readEdition()` — behind both
