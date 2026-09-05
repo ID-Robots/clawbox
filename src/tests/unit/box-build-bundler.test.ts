@@ -87,6 +87,20 @@ describe("link-standalone-next.sh", () => {
     }
   });
 
+  it("fails when the project has no real next package to link — the traced copy is never waved through", () => {
+    const { base, project, standalone } = fixture("directory");
+    try {
+      fs.rmSync(path.join(project, "node_modules", "next"), { recursive: true, force: true });
+      const r = run(standalone, project);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain("no ");
+      // The traced copy is left where it was, for the failure to be read.
+      expect(fs.existsSync(path.join(standalone, "node_modules", "next", "package.json"))).toBe(true);
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it("fails when the standalone tree has no node_modules directory to link into", () => {
     const { base, project, standalone } = fixture("directory");
     try {

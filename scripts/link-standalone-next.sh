@@ -21,9 +21,11 @@ set -u
 SDIR="${1:?standalone dir}"
 PROJECT="${2:-$(pwd)}"
 REAL="$PROJECT/node_modules/next"
+# The build just ran WITH this package; its absence is a broken tree, not
+# a case to wave through with the traced copy the server cannot start on.
 if [ ! -d "$REAL" ]; then
-  echo "link-standalone-next: no $REAL to link — leaving the traced copy" >&2
-  exit 0
+  echo "link-standalone-next: no $REAL to link" >&2
+  exit 1
 fi
 if [ ! -d "$SDIR/node_modules" ]; then
   echo "link-standalone-next: $SDIR/node_modules is not a directory" >&2
