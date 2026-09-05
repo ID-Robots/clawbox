@@ -9,36 +9,100 @@ set -u
 
 IFACE="${1:-}"
 ACTION="${2:-}"
+# NetworkManager passes no NETWORK_INTERFACE to a dispatcher, and the radio is
+# not always wlP1p1s0 — install.sh auto-detects it and persists the real name
+# here precisely because of that, and documents an operator override. Sourced
+# the way scripts/clawbox-firewall.sh sources it: the file is ROOT-owned, so
+# unlike the clawbox-writable data/*.env it is safe to source as root.
+if [ -r /etc/clawbox/network.env ]; then
+  # shellcheck disable=SC1091
+  . /etc/clawbox/network.env
+fi
 WIFI_IFACE="${NETWORK_INTERFACE:-wlP1p1s0}"
 AP_PROFILE="ClawBox-Setup"
 LOG_TAG="clawbox-failover"
-CLAWBOX_ROOT="${CLAWBOX_ROOT:-/home/clawbox/clawbox}"
+# Root-owned, root-installed: NetworkManager runs this as root, and the
+# checkout is clawbox-owned and group-writable. See the waiter's own header and
+# install.sh's ROOT_LIBEXEC_DIR block (TASK-445).
+WAITER="${CLAWBOX_ONLINE_WAITER:-/usr/local/libexec/clawbox/gateway-restart-when-online.sh}"
 
 log() { logger -t "$LOG_TAG" -- "$*"; }
 
 # Hand the gateway restart to the waiter, DETACHED.
 #
 # The restart is never immediate any more (GH #529): a gateway bounced into a
-# network with no route loses its Telegram accounts to the account supervisor,
-# which gives up after its restart budget and leaves them stopped for the life
-# of the process — with no CLI verb to start them again. The waiter defers the
-# restart until a public route is proven, and a restart that lands then is also
-# what revives the suppressed accounts. See scripts/gateway-restart-when-online.sh.
+# network with no route loses its Telegram accounts to OpenClaw's account
+# supervisor, which gives up after its restart budget and leaves them stopped
+# for the life of the process — with no CLI verb to start them again. The
+# waiter defers the restart until a public route is proven, and a restart that
+# lands then is also what revives the suppressed accounts.
 #
 # Detached because NetworkManager runs dispatcher scripts serially and kills a
 # slow one: this script must return at once, and the waiting must not happen in
 # it. The waiter takes its own lock, so overlapping events do not stack.
+#
+# The launch is REPORTED, not fire-and-forget into /dev/null: NM runs
+# dispatchers with a minimal PATH (the reason 99-clawbox-avahi-reload resolves
+# avahi-daemon absolutely), so a missing setsid or a fork failure would
+# otherwise leave no trace anywhere of a restart that never happened.
 restart_gateway_when_online() {
-  local waiter="$CLAWBOX_ROOT/scripts/gateway-restart-when-online.sh"
-  if [ ! -x "$waiter" ]; then
-    log "WARN: $waiter missing — gateway not restarted for: $1"
+  if [ ! -x "$WAITER" ]; then
+    log "WARN: $WAITER missing or not executable — gateway not restarted for: $1"
     return
   fi
-  setsid nohup bash "$waiter" "$1" >/dev/null 2>&1 &
+  # PATH first so a test harness can stand in for it, then the absolute paths,
+  # because a dispatcher's PATH is NM's and not a login shell's.
+  local setsid_bin=""
+  setsid_bin="$(command -v setsid 2>/dev/null || true)"
+  if [ -z "$setsid_bin" ]; then
+    for candidate in /usr/bin/setsid /bin/setsid; do
+      [ -x "$candidate" ] && setsid_bin="$candidate" && break
+    done
+  fi
+  if [ -n "$setsid_bin" ]; then
+    "$setsid_bin" "$WAITER" "$1" </dev/null >/dev/null 2>&1 &
+  else
+    # Still detached from this shell, but inside the dispatcher's process
+    # group, so NetworkManager's own timeout can take it with it. Said out
+    # loud: a restart that silently never happened is what GH #529 was.
+    log "WARN: setsid not found — the deferred restart may be killed with the dispatcher"
+    "$WAITER" "$1" </dev/null >/dev/null 2>&1 &
+  fi
+  log "Deferred restart dispatched: $1"
 }
 
-# React to ethernet up/down, and to the WiFi radio coming up.
+# The AP is not a network this box got onto — it is the one it is offering.
+# start-ap.sh brings up a `shared` profile with no default route, and
+# ap-watchdog.sh re-raises it every ~20 s while setup is incomplete, so without
+# this every one of those would start a full wait, hold the lock, and drop a
+# genuine Ethernet request in the meantime.
+if [ "${CONNECTION_ID:-}" = "$AP_PROFILE" ]; then
+  exit 0
+fi
+
+# React to ethernet up/down, to the WiFi radio coming up, and — the harness's
+# own answer to the question this script asks — to NetworkManager's
+# connectivity and DHCP events.
 #
+# `connectivity-change` carries CONNECTIVITY_STATE and is what NM emits when an
+# upstream router reboots with the box's carrier intact: the most common real
+# shape of "the accounts got suppressed and never came back", and one that
+# produces no up/down at all. `dhcp4-change` is the lease landing a second
+# after an association, which the up event is too early for. This repo already
+# subscribes to both actions in config/99-clawbox-avahi-reload.
+case "$ACTION" in
+  connectivity-change)
+    if [ "${CONNECTIVITY_STATE:-}" = "FULL" ]; then
+      restart_gateway_when_online "NetworkManager reports full connectivity"
+    fi
+    exit 0
+    ;;
+  dhcp4-change)
+    restart_gateway_when_online "DHCP lease on '$IFACE'"
+    exit 0
+    ;;
+esac
+
 # The WiFi arm is the recovery half: after a failover the box's route comes back
 # on the wireless interface, and with only the ethernet arm nothing ever asked
 # for the restart that revives the channel accounts.
@@ -122,7 +186,7 @@ log "Failover failed — no saved WiFi profile would connect; starting hotspot a
 # Stranded recovery: no saved WiFi reachable, so bring the captive-portal
 # hotspot back up. start-ap.sh honours the user's configured SSID/password
 # and falls back to ClawBox-Setup if none is set.
-START_AP="$CLAWBOX_ROOT/scripts/start-ap.sh"
+START_AP="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/scripts/start-ap.sh"
 if [ -x "$START_AP" ]; then
   bash "$START_AP" >/dev/null 2>&1 &
   log "Recovery AP launch dispatched"

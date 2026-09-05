@@ -4474,8 +4474,12 @@ install_root_libexec() {
   done
   # Everything the web server may invoke as root via a NOPASSWD grant. Same
   # rule as above: the copy that runs must not be the one clawbox can rewrite.
+  # gateway-restart-when-online.sh is launched BY ROOT from the NetworkManager
+  # dispatcher on every network event, so it belongs here for exactly the reason
+  # this block exists: the copy that runs must not be the one clawbox can
+  # rewrite. See scripts/nm-dispatcher-failover.sh.
   for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
-             clawbox-resource-limits.sh; do
+             clawbox-resource-limits.sh gateway-restart-when-online.sh; do
     if [ -f "$PROJECT_DIR/scripts/$src" ]; then
       install_root_file "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src"
     fi
@@ -4974,6 +4978,19 @@ step_nm_dispatcher() {
   cp "$SRC" "$DEST"
   chown root:root "$DEST"
   chmod 0755 "$DEST"
+  # The dispatcher is useless without the waiter it defers the gateway restart
+  # to, and the waiter must be the ROOT-OWNED copy — root runs it. Installed
+  # here as well as in install_root_libexec so an in-app UPDATE, which runs
+  # step_nm_dispatcher from step_post_update, gets both halves together rather
+  # than a new dispatcher pointing at nothing.
+  local WAITER_SRC="$PROJECT_DIR/scripts/gateway-restart-when-online.sh"
+  if [ -f "$WAITER_SRC" ]; then
+    install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR"
+    install_root_file "$WAITER_SRC" "$ROOT_LIBEXEC_DIR/gateway-restart-when-online.sh"
+    echo "  Deferred gateway-restart helper installed"
+  else
+    echo "  Warning: $WAITER_SRC missing — the failover will not restart the gateway"
+  fi
   echo "  NetworkManager failover dispatcher installed"
 }
 

@@ -54,8 +54,12 @@ interface BoxOptions {
   defaultRoute?: boolean;
   /** Whether `ping` succeeds. */
   pingWorks?: boolean;
-  /** Whether the gateway unit is active. */
-  gatewayActive?: boolean;
+  /** Whether the gateway unit exists at all (false = the Hermes edition). */
+  unitExists?: boolean;
+  /** Whether `curl` is on PATH for the HTTPS half of the probe. */
+  curlWorks?: boolean;
+  /** Drop a re-arm marker once, from inside the poll loop. */
+  rearmMidWait?: boolean;
 }
 
 /** A fake CLAWBOX_ROOT plus a PATH of stubs, so nothing touches a real radio. */
@@ -66,9 +70,13 @@ function makeBox(opts: BoxOptions = {}): void {
   mkdirSync(path.join(root, "scripts"), { recursive: true });
   mkdirSync(bin, { recursive: true });
 
-  // The shipped waiter, where the dispatcher looks for it.
-  copyFileSync(WAITER, path.join(root, "scripts", "gateway-restart-when-online.sh"));
-  chmodSync(path.join(root, "scripts", "gateway-restart-when-online.sh"), 0o755);
+  // The shipped waiter. On a box it is installed ROOT-OWNED under
+  // /usr/local/libexec/clawbox and the dispatcher is pointed there; the sandbox
+  // stands in for that path through CLAWBOX_ONLINE_WAITER.
+  mkdirSync(path.join(root, "libexec"), { recursive: true });
+  mkdirSync(path.join(root, "run"), { recursive: true });
+  copyFileSync(WAITER, path.join(root, "libexec", "gateway-restart-when-online.sh"));
+  chmodSync(path.join(root, "libexec", "gateway-restart-when-online.sh"), 0o755);
 
   const stub = (name: string, body: string) => {
     const file = path.join(bin, name);
@@ -84,7 +92,7 @@ function makeBox(opts: BoxOptions = {}): void {
   stub("nmcli", `
 echo "nmcli $*" >> ${JSON.stringify(calls)}
 case "$*" in
-  *"networking connectivity check"*)
+  *"networking connectivity"*)
     q=${JSON.stringify(path.join(root, "connectivity"))}
     head -n 1 "$q"
     if [ "$(wc -l < "$q")" -gt 1 ]; then tail -n +2 "$q" > "$q.next" && mv "$q.next" "$q"; fi
@@ -100,10 +108,18 @@ ${opts.defaultRoute ? 'echo "default via 192.0.2.1 dev eth0"' : "true"}`);
 echo "ping $*" >> ${JSON.stringify(calls)}
 exit ${opts.pingWorks ? 0 : 1}`);
 
+  // The updater's own second half: ICMP is blocked on plenty of real networks.
+  stub("curl", `
+echo "curl $*" >> ${JSON.stringify(calls)}
+exit ${opts.curlWorks ? 0 : 1}`);
+
   stub("systemctl", `
 echo "systemctl $*" >> ${JSON.stringify(calls)}
 case "$1" in
-  is-active) exit ${opts.gatewayActive === false ? 1 : 0} ;;
+  # try-restart is a no-op on a stopped unit and reports success either way —
+  # exactly what the real one does, and why the script uses it.
+  try-restart) exit 0 ;;
+  list-unit-files) exit ${opts.unitExists === false ? 1 : 0} ;;
   *) exit 0 ;;
 esac`);
 
@@ -111,8 +127,15 @@ esac`);
 shift 2 2>/dev/null || true
 echo "log $*" >> ${JSON.stringify(root + "/journal.log")}`);
 
-  // Real `sleep` would make a 120 s wait a 120 s test.
-  stub("sleep", "true");
+  // Real `sleep` would make a 120 s wait a 120 s test. It is also the only
+  // hook a test has INSIDE the poll loop, which is where a second network
+  // event would really arrive.
+  stub("sleep", opts.rearmMidWait
+    ? `f=${JSON.stringify(path.join(root, "run", "gateway-online-restart.rearm"))}
+m=${JSON.stringify(path.join(root, "rearmed"))}
+if [ ! -e "$m" ]; then : > "$m"; : > "$f"; fi
+true`
+    : "true");
   // The dispatcher launches the waiter DETACHED, so a test that let it run
   // would be racing it. Record the request instead: the dispatcher's contract
   // is that it asks and returns, and the waiter's own decisions are exercised
@@ -127,8 +150,12 @@ function env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
     CLAWBOX_ROOT: root,
+    CLAWBOX_ONLINE_WAITER: path.join(root, "libexec", "gateway-restart-when-online.sh"),
+    CLAWBOX_RUN_DIR: path.join(root, "run"),
     CLAWBOX_ONLINE_TIMEOUT: "2",
     CLAWBOX_ONLINE_POLL: "1",
+    // The unit-existence gate is the Hermes arm; the cases that care set it.
+    CLAWBOX_SKIP_UNIT_CHECK: "1",
     NETWORK_INTERFACE: "wlan0",
     ...extra,
   };
@@ -139,9 +166,9 @@ function runDispatcher(iface: string, action: string): void {
   expect(r.status).toBe(0);
 }
 
-function runWaiter(reason = "test"): { stdout: string } {
-  const r = spawnSync("bash", [path.join(root, "scripts", "gateway-restart-when-online.sh"), reason], {
-    env: env(),
+function runWaiter(reason = "test", extraEnv: Record<string, string> = {}): { stdout: string } {
+  const r = spawnSync("bash", [path.join(root, "libexec", "gateway-restart-when-online.sh"), reason], {
+    env: env(extraEnv),
     encoding: "utf-8",
     timeout: 25_000,
   });
@@ -159,7 +186,7 @@ function journal(): string {
 }
 
 function restarts(): number {
-  return calls().split("\n").filter((l) => l.startsWith("systemctl restart")).length;
+  return calls().split("\n").filter((l) => l.startsWith("systemctl try-restart")).length;
 }
 
 /**
@@ -196,16 +223,71 @@ describe("Ethernet failover does not restart the gateway into a dead network", (
     expect(journal()).toContain("NOT restarting");
   });
 
-  it("does not restart on a captive portal or a link with no internet", () => {
-    // `portal` and `limited` are precisely "carrier is up, the internet is
-    // not" — the state that makes a restart harmful rather than useless.
+  it("does not restart on a captive portal that really has no way out", () => {
+    // `portal` and `limited` are "carrier is up, the internet is not" — the
+    // state that makes a restart harmful rather than merely useless.
     for (const state of ["portal", "limited"]) {
-      makeBox({ connectivity: [state], defaultRoute: true, pingWorks: true });
+      makeBox({ connectivity: [state], defaultRoute: true, pingWorks: false, curlWorks: false });
       runWaiter(`Ethernet 'eth0' down (${state})`);
       expect(restarts()).toBe(0);
       rmSync(root, { recursive: true, force: true });
-      makeBox();
     }
+    makeBox();
+  });
+
+  it("does NOT take NetworkManager's word for it when the box can really reach out", () => {
+    // Connectivity checking is ENABLED on the Ubuntu/JetPack base, pointed at
+    // connectivity-check.ubuntu.com. Any LAN that blocks or hijacks that URL —
+    // a corporate egress filter, a Pi-hole, an ISP NXDOMAIN redirector — parks
+    // NM at `portal` or `limited` permanently while the box reaches Telegram
+    // and Anthropic perfectly well. Treating that as offline would mean the
+    // gateway is never restarted again: GH #529 back through another door.
+    makeBox({ connectivity: ["portal"], defaultRoute: true, pingWorks: true });
+
+    runWaiter("Ethernet 'eth0' up behind a captive-portal check");
+
+    expect(calls()).toContain("ping");
+    expect(restarts()).toBe(1);
+  });
+
+  it("falls back to HTTPS when ICMP is blocked, as the updater does", () => {
+    makeBox({ connectivity: ["limited"], defaultRoute: true, pingWorks: false, curlWorks: true });
+
+    runWaiter("Ethernet 'eth0' up on an ICMP-filtered network");
+
+    expect(calls()).toContain("curl");
+    expect(restarts()).toBe(1);
+  });
+
+  it("does not spend a probe when there is no default route at all", () => {
+    makeBox({ connectivity: ["none"], defaultRoute: false, pingWorks: true });
+
+    runWaiter("Ethernet 'eth0' down");
+
+    expect(calls()).not.toContain("ping");
+    expect(restarts()).toBe(0);
+  });
+
+  it("does nothing at all on an edition with no gateway unit", () => {
+    // Hermes stops, disables and MASKS clawbox-gateway.service, and its agent
+    // never has sockets to drop. A two-minute wait there is pure journal noise.
+    makeBox({ connectivity: ["none"], unitExists: false });
+
+    runWaiter("Ethernet 'eth0' down", { CLAWBOX_SKIP_UNIT_CHECK: "0" });
+
+    expect(restarts()).toBe(0);
+    expect(journal()).toBe("");
+  });
+
+  it("takes a request that arrived while it was waiting rather than losing it", () => {
+    // `flock -n` turns an overlapping event into a no-op with no memory of it,
+    // so a waiter could time out one second before the route landed having
+    // ignored the very event that would have succeeded.
+    makeBox({ connectivity: ["none"], defaultRoute: false, rearmMidWait: true });
+
+    runWaiter("Ethernet 'eth0' down");
+
+    expect(journal()).toContain("extending the wait");
   });
 
   it("restarts as soon as the route returns, which is what revives the suppressed accounts", () => {
@@ -217,8 +299,8 @@ describe("Ethernet failover does not restart the gateway into a dead network", (
     runWaiter("Ethernet 'eth0' down");
 
     expect(restarts()).toBe(1);
-    expect(calls()).toContain("systemctl restart clawbox-gateway.service");
-    expect(journal()).toContain("suppressed channel accounts start again");
+    expect(calls()).toContain("systemctl try-restart clawbox-gateway.service");
+    expect(journal()).toContain("channel accounts its supervisor gave up on");
   });
 
   it("accepts a route NetworkManager itself cannot judge, when the box can really reach out", () => {
@@ -231,13 +313,22 @@ describe("Ethernet failover does not restart the gateway into a dead network", (
     expect(restarts()).toBe(1);
   });
 
-  it("does not start a gateway the owner stopped", () => {
-    makeBox({ connectivity: ["full"], gatewayActive: false });
+  it("asks with try-restart, which cannot start a gateway the owner stopped", () => {
+    // The probe and the action are two commands and the gap is a whole wait
+    // long. `restart` would START a unit that is stopped — deliberately by the
+    // owner, or masked by the Hermes edition — which install.sh forbids in
+    // writing for this same unit. `is-active` would be wrong twice over: it
+    // also reports non-zero for `activating`, and this unit's RestartSec plus a
+    // cold-Jetson TimeoutStartSec make that window minutes long.
+    makeBox({ connectivity: ["full"] });
 
     runWaiter("Ethernet 'eth0' up");
 
-    expect(restarts()).toBe(0);
-    expect(journal()).toContain("is not running");
+    expect(calls()).toContain("systemctl try-restart clawbox-gateway.service");
+    expect(calls()).not.toContain("systemctl restart ");
+    expect(calls()).not.toContain("systemctl is-active");
+    // Asked, not "restarted": the exit code says the request was accepted.
+    expect(journal()).toContain("asked systemd to restart");
   });
 
   it("lets one waiter hold the wait, so a flapping carrier cannot stack restarts", async () => {
@@ -246,17 +337,20 @@ describe("Ethernet failover does not restart the gateway into a dead network", (
     // restarts the moment the route returned, which is its own way of tripping
     // the account supervisor.
     makeBox({ connectivity: ["full"] });
-    const lock = path.join(root, "data", "gateway-online-restart.lock");
+    const lock = path.join(root, "run", "gateway-online-restart.lock");
     const holder = spawn("flock", ["-n", lock, "-c", "sleep 20"], { stdio: "ignore" });
     try {
       await new Promise((resolve) => setTimeout(resolve, 500));
-      const r = spawnSync("bash", [path.join(root, "scripts", "gateway-restart-when-online.sh"), "second"], {
+      const r = spawnSync("bash", [path.join(root, "libexec", "gateway-restart-when-online.sh"), "second"], {
         env: env(),
         encoding: "utf-8",
         timeout: 25_000,
       });
       expect(r.status).toBe(0);
       expect(journal()).toContain("already pending");
+      // ...and the dropped request is REMEMBERED, so the holder does not time
+      // out one second before the route lands having ignored it.
+      expect(existsSync(path.join(root, "run", "gateway-online-restart.rearm"))).toBe(true);
       expect(restarts()).toBe(0);
     } finally {
       holder.kill();
