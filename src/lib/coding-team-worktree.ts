@@ -150,6 +150,21 @@ export function mergeWorkerBranch(dir: string, branch: string, message: string):
   return withDirLock(dir, async () => {
     const ahead = await git(dir, ["rev-list", "--count", `HEAD..${branch}`]);
     if (ok(ahead) && out(ahead) === "0") return { ok: true, merged: false };
+    // Whatever landed in the team's checkout uncommitted while the workers
+    // were out — the favicons the box draws at a run's start above all —
+    // goes on the team branch first: a merge refuses to overwrite an
+    // untracked file a worker's branch also brought, and "MERGE FAILED …
+    // untracked working tree files would be overwritten" rejected finished
+    // work for that (team-8l9oudxd, t1, 2026-09-05). An identical file then
+    // merges as one; a different one conflicts honestly, below.
+    const stray = await git(dir, ["status", "--porcelain", "--untracked-files=all"]);
+    if (!ok(stray)) return { ok: false, conflict: false, detail: failureDetail(stray, "Reading the team checkout before the merge") };
+    if (out(stray)) {
+      const added = await git(dir, ["add", "-A"]);
+      if (!ok(added)) return { ok: false, conflict: false, detail: failureDetail(added, "Staging the team checkout's files before the merge") };
+      const kept = await git(dir, ["-c", "user.name=ClawBox Coding Agent", "-c", "user.email=coding-agent@clawbox.local", "commit", "-q", "--no-verify", "-m", "Coding team: files present in the checkout before a merge"]);
+      if (!ok(kept)) return { ok: false, conflict: false, detail: failureDetail(kept, "Committing the team checkout's files before the merge") };
+    }
     const merged = await git(dir, ["merge", "--no-ff", "--no-edit", "-m", message, branch]);
     if (ok(merged)) return { ok: true, merged: true };
     const conflict = /CONFLICT|Automatic merge failed/i.test(merged.stdout + merged.stderr);

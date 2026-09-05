@@ -747,6 +747,8 @@ export interface CodingRun {
    * pattern and a leak nobody can see.
    */
   leftover: boolean;
+  /** Why the run's work could not be committed at settle — null when it was, or when there was nothing to commit. A team acts on it: a worker whose commit failed has no branch to merge. */
+  commitError: string | null;
 }
 
 /** Which media a run may ask this box for — read once, at its start. */
@@ -1793,6 +1795,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     },
     pgid: typeof raw.pgid === "number" && raw.pgid > 0 ? raw.pgid : null,
     leftover: raw.leftover === true,
+    commitError: typeof raw.commitError === "string" ? raw.commitError : null,
   };
 }
 
@@ -3488,14 +3491,22 @@ async function recordRunWork(run: CodingRun): Promise<void> {
     });
     if (outcome.committed) {
       run.commit = outcome.sha;
+      run.commitError = null;
       pushProgress(run, `Committed as ${outcome.sha}${outcome.initialized ? " (new repository)" : ""}`);
       console.error(`[coding-agent] ${run.id} committed ${outcome.sha}`);
     } else if (outcome.reason !== "no_changes") {
+      // On the record, not only in the log: a team reads it before it
+      // merges, since a worker whose commit failed has no branch to merge.
+      run.commitError = (outcome.detail ?? outcome.reason).slice(0, MAX_ERROR_CHARS);
       pushProgress(run, `Not committed: ${outcome.detail ?? outcome.reason}`);
       console.error(`[coding-agent] ${run.id} not committed: ${outcome.reason}`);
+    } else {
+      run.commitError = null;
     }
     persist(true);
   } catch (err) {
+    run.commitError = (err instanceof Error ? err.message : String(err)).slice(0, MAX_ERROR_CHARS);
+    persist(true);
     console.error("[coding-agent] commit failed:", err instanceof Error ? err.message : err);
   }
 }
@@ -3537,16 +3548,16 @@ async function drawProjectIcon(run: CodingRun): Promise<{ icon: string; favicon:
   });
 }
 
-/** The start-of-run hook: only when the owner left pictures on, and never for a review. */
+/** The start-of-run hook: only when the owner left pictures on, never for a review, and never for a team's worker or reviewer — their folder is a worktree named after a task, not a project. */
 function startProjectIcon(run: CodingRun): void {
-  if (!run.media.images || run.reviewOf) return;
+  if (!run.media.images || run.reviewOf || (run.team && run.team.role !== "planner")) return;
   void drawProjectIcon(run).catch(() => {
     // ensureProjectIcon already logged; a missing icon never reaches the run.
   });
 }
 
-async function recordAndReview(run: CodingRun, ended: "stop" | "pause" | null): Promise<void> {
-  await recordRunWork(run);
+/** After the commit and the wake: the project's assets, the review pass, the pull request. */
+async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Promise<void> {
   await commitProjectAssets(run);
   const review = ended !== null ? "skipped" : await maybeStartReviewPass(run);
   // After the review pass is decided, not before: when one is starting, the
@@ -3861,6 +3872,8 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutc
   if (finished.status !== "completed") return "skipped";
   if (finished.reviewOf !== null) return "skipped";
   if (finished.readOnly) return "skipped";
+  // A team's worker is reviewed by the team's own reviewer, on the merged work.
+  if (finished.team) return "skipped";
   if (finished.filesTouched.length === 0) return "skipped";
   try {
     if (!(await getReviewPass())) return "skipped";
@@ -4014,13 +4027,29 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // attempt's words; never throwing, so the record settles regardless.
   if (run.summary) writeRunReport(run.id, run.summary);
 
-  pushProgress(run, run.status === "paused" ? "Paused — resume to continue" : `Finished: ${run.status}`);
-  persist(true);
-  wakeWaiters(run.id);
-  console.error(`[coding-agent] ${run.id} ${run.status} after ${Math.round((run.completedAt - run.startedAt) / 1000)}s (${run.numTurns} turns)`);
-  // History first, then the notice: by the time the owner is told a run
-  // finished, its work is already recoverable.
-  void recordAndReview(run, state.endRequested);
+  // The COMMIT before anyone is told. Waiters — the team orchestrator above
+  // all — act on "finished" at once: a worker's worktree was merged and
+  // removed the moment its run settled, while the commit was still on its
+  // way, so the branch stayed at the scaffold and the reviewer rejected work
+  // that had been done (team-8l9oudxd, t1 and t2, 2026-09-05). So the
+  // record is committed first; "Finished" is said and the waiters woken only
+  // once the work is recoverable; the assets, the review pass and the pull
+  // request follow on their own, as before.
+  const settled = run.status;
+  void (async () => {
+    await recordRunWork(run);
+    pushProgress(run, settled === "paused" ? "Paused — resume to continue" : `Finished: ${settled}`);
+    persist(true);
+    wakeWaiters(run.id);
+    console.error(`[coding-agent] ${run.id} ${settled} after ${Math.round(((run.completedAt ?? Date.now()) - run.startedAt) / 1000)}s (${run.numTurns} turns)`);
+    // A team's worker or reviewer ends here: its worktree is the
+    // orchestrator's to merge and remove the moment it is woken, its
+    // review is the team's own reviewer's, and it never opens a pull
+    // request — the assets, review pass and PR below would run in a folder
+    // that is gone. The planner works in the project itself and keeps them.
+    if (run.team && run.team.role !== "planner") return;
+    await reviewAndShip(run, state.endRequested);
+  })();
   // A pause is the owner's own gesture — no finish notice for it.
   if (run.status !== "paused") void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
     console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
@@ -4368,6 +4397,7 @@ function newRunRecord(fields: {
     mediaGenerated: { images: 0, audio: 0 },
     pgid: null,
     leftover: false,
+    commitError: null,
   };
 }
 

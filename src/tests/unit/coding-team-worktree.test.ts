@@ -60,6 +60,27 @@ describe("a coding team's git plumbing", () => {
     expect(git(dir, "branch", "--list", "clawbox/team-abc-t1-1")).toContain("t1-1");
   });
 
+  it("commits what lay uncommitted in the checkout before a merge, so a file the worker also brought does not block it", async () => {
+    const made = await ensureTeamBranch(dir, "team-x");
+    expect(made.ok).toBe(true);
+    const wt = await addWorkerWorktree(dir, "team-x", "t1", 1);
+    if (!wt.ok) throw new Error(wt.detail);
+    // The worker writes its file AND a favicon; meanwhile the box drew the
+    // same favicon into the team's checkout, uncommitted.
+    fs.writeFileSync(path.join(wt.path, "index.html"), "<h1>hi</h1>\n");
+    fs.writeFileSync(path.join(wt.path, "favicon.ico"), "icon-bytes");
+    git(wt.path, "add", "-A");
+    git(wt.path, "commit", "-q", "-m", "worker: index and favicon");
+    fs.writeFileSync(path.join(dir, "favicon.ico"), "icon-bytes");
+    const merged = await mergeWorkerBranch(dir, wt.branch, "merge t1");
+    expect(merged).toEqual({ ok: true, merged: true });
+    expect(fs.readFileSync(path.join(dir, "index.html"), "utf8")).toBe("<h1>hi</h1>\n");
+    expect(fs.readFileSync(path.join(dir, "favicon.ico"), "utf8")).toBe("icon-bytes");
+    // The stray file went on the team branch in a commit of its own, before the merge.
+    expect(git(dir, "log", "--oneline", "-3")).toMatch(/files present in the checkout before a merge/);
+    expect(git(dir, "status", "--porcelain")).toBe("");
+  });
+
   it("reports a branch that added nothing, and aborts a conflict instead of guessing", async () => {
     await ensureTeamBranch(dir, "team-abc");
     const idle = await addWorkerWorktree(dir, "team-abc", "t1", 1);

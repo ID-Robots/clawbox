@@ -15,12 +15,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { enable, codingStatus, startRun, stopRun, getRun, waitForCommit, baseUrl } from "./lib/box.mjs";
+import { enable, codingStatus, startRun, stopRun, getRun, waitForCommit, waitForIdle, baseUrl } from "./lib/box.mjs";
 import { captureRun } from "./lib/capture.mjs";
 import { costOfUsage, formatUsd, loadPricing } from "./lib/cost.mjs";
 import crypto from "node:crypto";
 import { deltaByTask, formatMs, formatTokens, hints, parallelism, summarizeCycle, taskFigures } from "./lib/metrics.mjs";
 import { appendFigure, readFigures as readFiguresFile } from "./lib/figures-file.mjs";
+import { outsidePath } from "./lib/outside.mjs";
 
 const BENCH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const TASKS_DIR = path.join(BENCH_DIR, "tasks");
@@ -72,8 +73,8 @@ function seedProject(task, projectsRoot, stamp) {
   fs.mkdirSync(workdir, { recursive: true });
   if (task.seedDir) fs.cpSync(task.seedDir, workdir, { recursive: true });
   for (const [rel, content] of Object.entries(task.outside ?? {})) {
-    // The task names the file from its own folder (`../shared-config/…`).
-    const dest = path.resolve(workdir, rel);
+    // Beside the project, never in it: see bench/lib/outside.mjs.
+    const dest = outsidePath(workdir, rel);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, content);
   }
@@ -175,7 +176,16 @@ async function runCycle({ args, suite, tasks, label, projectsRoot, pricing }) {
   for (const { task, rep } of plan) {
     const workdir = seedProject(task, projectsRoot, stamp());
     console.log(`\n▶ ${task.id} rep ${rep} as project ${path.basename(workdir)}`);
-    const started = await startRun({ task: task.brief, directory: workdir });
+    // One run at a time on the box, and a completed run is followed by its
+    // automatic review pass: wait for the box to be idle before each task,
+    // and once more on a busy refusal, rather than ending the cycle on it.
+    if (!(await waitForIdle())) console.error("  the box was still busy after ten minutes; trying anyway");
+    let started = await startRun({ task: task.brief, directory: workdir });
+    if (started.status === 409 && started.json?.kind === "busy") {
+      console.error("  busy — waiting for the run in progress");
+      await waitForIdle();
+      started = await startRun({ task: task.brief, directory: workdir });
+    }
     if (started.status !== 202 || !started.json?.run) {
       console.error(`  run refused: ${started.status} ${started.text.slice(0, 300)}`);
       // A run that never started spent nothing: zero usage priced as zero,

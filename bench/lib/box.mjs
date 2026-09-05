@@ -114,6 +114,26 @@ export async function startRun({ task, directory, projectId, resumeRunId }) {
 // built before the rename.
 export const stopRun = (id) => post("/setup-api/coding-agent/stop", { runId: id, id });
 
+/** The runs going right now — a task's own, and the review pass that follows it. */
+export async function liveRuns() {
+  const res = await request("GET", "/setup-api/coding-agent/runs");
+  const runs = Array.isArray(res.json?.runs) ? res.json.runs : [];
+  return runs.filter((r) => r.status === "running");
+}
+
+/** Wait until nothing is running on the box, up to `deadlineMs`; true when idle. */
+export async function waitForIdle(deadlineMs = 10 * 60_000, everyMs = 5_000) {
+  const until = Date.now() + deadlineMs;
+  for (;;) {
+    // A poll that failed is not an answer: asked again, never read as idle.
+    let live = null;
+    try { live = await liveRuns(); } catch { /* asked again below */ }
+    if (live !== null && live.length === 0) return true;
+    if (Date.now() >= until) return false;
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
+}
+
 export const getRun = (id, waitSeconds = 0) =>
   get(`/setup-api/coding-agent/runs?id=${encodeURIComponent(id)}${waitSeconds > 0 ? `&wait=${waitSeconds}` : ""}`);
 

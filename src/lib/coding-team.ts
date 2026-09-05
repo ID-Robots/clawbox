@@ -82,6 +82,7 @@ const RESULT_QUOTE_CHARS = 400;
 export const WORKER_BRIEF = [
   "You are ONE WORKER of a small coding team. The task you were given is one part of a larger goal; other workers do the other parts in their own sessions, before or after you.",
   "Do your task and only your task: do not redo, undo or 'improve' the parts that belong to others, and stay inside the files your task names unless the task cannot be done otherwise — say so in your report if you had to.",
+  "Scratch files — a page or script you write only to verify your work, notes to yourself — go in your evidence folder, never in the project: a file outside your task's files counts as straying, even a temporary one.",
   "Your final message is read by the team's reviewer and quoted to the next worker: state what you changed (file names), how it can be checked, and anything you could not finish.",
 ].join(" ");
 
@@ -397,7 +398,14 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   let files: string[] = settled?.filesTouched ?? [];
   let mergeRefusal: string | null = null;
   if (worktree) {
-    if (ok) {
+    if (ok && settled?.commitError) {
+      // The runner could not commit the worker's work: there is nothing on
+      // the branch to merge, and merging the scaffold would count the task
+      // done with none of it. Rejected with the reason, offered once more.
+      mergeRefusal = `NOT COMMITTED: ${firstLine(settled.commitError, 300)}`;
+      result = `${result}\n\n${mergeRefusal}`;
+      bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Commit failed for ${task.task_id} (${run.id}): ${firstLine(settled.commitError, 200)}` });
+    } else if (ok) {
       // What the branch changed; a worker that committed nothing has no
       // branch diff, and what it touched uncommitted is still what it touched.
       const diffed = await changedFiles(board.directory, worktree.branch);
@@ -414,7 +422,7 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   bus.send(me, { type: "result", task_id: task.task_id, result, worker_id: run.id });
   bus.send(me, { type: "status_update", task_id: task.task_id, status: ok ? "complete" : "failed", worker_id: run.id });
   if (mergeRefusal) {
-    bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes: `${mergeRefusal} The work could not be merged; redo the task on the current files.` });
+    bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes: `${mergeRefusal} The work could not be ${mergeRefusal.startsWith("NOT COMMITTED") ? "committed" : "merged"}; redo the task on the current files.` });
     return;
   }
 
