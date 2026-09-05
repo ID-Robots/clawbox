@@ -119,7 +119,7 @@ async function fetchBotProbe(token: string): Promise<BotProbe> {
 
 interface HermesDiscordProbe {
   registered: boolean | null;
-  gateway: { installed: boolean; running: boolean };
+  gateway: { installed: boolean; running: boolean; answered?: boolean };
   snapshot: HermesGatewaySnapshot;
   access: HermesDiscordAccess;
 }
@@ -217,7 +217,12 @@ export async function GET() {
         // somebody is allowed to talk to it. It used to be
         // `configured && gateway.running`, which is why a bot that could not
         // connect at all was reported as live.
-        receiving: state === "connected",
+        //
+        // `null` when Hermes could not be ASKED: a failed gateway probe comes
+        // back as `running: false`, `mapDiscordConnectionState` has no unknown
+        // member and answers "offline" on it, and a panel that draws a dot from
+        // this field would then accuse a healthy bot.
+        receiving: gateway.answered === false ? null : state === "connected",
         // Discord itself said the stored token is dead — the one state the UI
         // must surface even while everything else looks configured.
         tokenRejected: bot.rejected || snapshot.platform?.errorCode === DISCORD_AUTH_ERROR_CODE,
@@ -264,8 +269,12 @@ export async function GET() {
       verified: channel !== null,
       state,
       // Same rule as Hermes, and it is the rule that matters: "receiving" may
-      // be true ONLY when the transport is genuinely up.
-      receiving: state === "connected",
+      // be true ONLY when the transport is genuinely up — and `null`, never
+      // false, when `state` is null. That null is documented four lines up as
+      // UNKNOWN, and flattening it here is how a gateway restart (every Save
+      // triggers one) painted "set up, but not receiving" over a Discord bot
+      // that was answering in a guild.
+      receiving: state === null ? null : state === "connected",
       // OpenClaw gates who may talk to the bot through its own owner-approved
       // DM pairing, which ClawBox does not write — so there is no allowlist to
       // offer here and no "denied" state to report.

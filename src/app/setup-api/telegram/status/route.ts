@@ -2,8 +2,12 @@ import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesGatewayStatus, hermesTelegramRegistered } from "@/lib/hermes-telegram";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
+import { readCachedChannelStatus } from "@/lib/openclaw-channels";
 
 export const dynamic = "force-dynamic";
+
+/** The channel id `openclaw channels status` knows Telegram by. */
+const TELEGRAM_CHANNEL_ID = "telegram";
 
 interface TelegramBotInfo {
   username?: string;
@@ -70,7 +74,7 @@ async function fetchBotInfo(token: string): Promise<TelegramBotInfo | null> {
 
 interface HermesTelegramProbe {
   registered: boolean | null;
-  gateway: { installed: boolean; running: boolean };
+  gateway: { installed: boolean; running: boolean; answered?: boolean };
 }
 
 const HERMES_PROBE_TTL = 15_000;
@@ -153,8 +157,14 @@ export async function GET() {
         configured,
         // Whether the answer came from Hermes or from the stored token alone.
         verified: registered !== null,
-        // Telegram is only LIVE when something is listening for updates.
-        receiving: configured && gateway.running,
+        // Telegram is only LIVE when something is listening for updates —
+        // and `null` when the gateway could not be ASKED. A failed probe comes
+        // back as `running: false` (the right shape for "may I start it?", the
+        // wrong one for "is it up?"), and every Telegram save restarts the
+        // gateway, so the read right after one lands inside that window: the
+        // panel would have asserted "set up, but not receiving" over a box
+        // that is fine, at exactly the moment the owner is watching it.
+        receiving: gateway.answered === false ? null : configured && gateway.running,
         gateway,
         ...info,
       });
@@ -168,8 +178,37 @@ export async function GET() {
     // data/config.json, was told to set up the bot it already answers on.
     const { token, known } = await readActiveTelegramBot(harness);
     if (!token) return NextResponse.json({ configured: false, unknown: !known });
-    const info = await fetchBotInfo(token);
-    return NextResponse.json({ configured: true, ...info });
+    // Whether anything is LISTENING, asked of the harness's own answer rather
+    // than inferred: `openclaw channels status --channel telegram --json`
+    // through the ONE shared memo `readCachedChannelStatus` owns (15 s success
+    // / 3 s failure, in-flight coalesced, invalidated by every channel write) —
+    // the same mechanism the Discord route one file over already uses, and the
+    // reason this costs ~20 ms rather than a CLI boot.
+    //
+    // Without it this branch published no `receiving` at all, so the Channels
+    // hub drew its emerald dot for a Telegram bot on a box whose gateway was
+    // stopped — the false success this route exists to answer, on the edition
+    // most boxes ship with.
+    //
+    // `null` is "the gateway could not be asked", NEVER "not receiving": a
+    // panel that read a failed probe as a definite no would accuse a healthy
+    // bot every time a save restarted the gateway.
+    //
+    // Paired with the bot lookup because the two are independent — one asks the
+    // gateway, the other asks Telegram, and both need only the token. In series
+    // a cold status probe delayed the lookup by its whole duration; the Hermes
+    // branch above pairs its own two for the same reason (`probeHermes`).
+    const [channel, info] = await Promise.all([
+      readCachedChannelStatus(TELEGRAM_CHANNEL_ID),
+      fetchBotInfo(token),
+    ]);
+    return NextResponse.json({
+      configured: true,
+      // The same field, with the same meaning, as the Hermes branch above.
+      verified: channel !== null,
+      receiving: channel === null ? null : channel.running && channel.connected,
+      ...info,
+    });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Status check failed" },

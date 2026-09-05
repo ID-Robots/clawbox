@@ -474,6 +474,22 @@ export interface HermesGatewayStatus {
   running: boolean;
   /** Which systemd scope holds the unit — a system unit needs root to control. */
   scope: "system" | "user" | null;
+  /**
+   * Did Hermes actually ANSWER, or is this the "we could not ask" shape?
+   *
+   * `readHermesGatewayStatus` swallows a failed probe into
+   * `{ installed: false, running: false }` — the right thing for a caller that
+   * only wants to know whether it may start the gateway, and a lie for one
+   * asking whether it is RUNNING. The flag was already computed here to pick
+   * the 3 s failure TTL over the 15 s one and then dropped; it is carried out
+   * now so a route can answer "could not say" instead of "not running", which
+   * is what the channel rows draw their dot from.
+   *
+   * OPTIONAL, and read as `answered !== false`: a value built before this
+   * field existed — a test fixture, a stored shape — is an answer, and only an
+   * explicit `false` is not. Absence must not invent an unknown.
+   */
+  answered?: boolean;
 }
 
 // `hermes gateway status` has no machine format either. Its three shapes:
@@ -488,16 +504,19 @@ const MANUAL_RUNNING_RE = /✓[^\n]*Gateway is running/i;
 
 /** Parse `hermes gateway status`. */
 export function parseHermesGatewayStatus(stdout: string): HermesGatewayStatus {
+  // Everything this parses is output Hermes actually produced, so it is always
+  // an ANSWER. Only `readHermesGatewayStatus`'s catch makes an unanswered one.
   const verdict = stdout.match(SERVICE_VERDICT_RE);
   if (verdict) {
     return {
       installed: true,
       running: verdict[2].toLowerCase() === "running",
       scope: verdict[1].toLowerCase() === "system" ? "system" : "user",
+      answered: true,
     };
   }
   // No service unit. A bare process may still be serving (`hermes gateway run`).
-  return { installed: false, running: MANUAL_RUNNING_RE.test(stdout), scope: null };
+  return { installed: false, running: MANUAL_RUNNING_RE.test(stdout), scope: null, answered: true };
 }
 
 /**
@@ -531,7 +550,7 @@ export async function readHermesGatewayStatus(
     // already aborted before it spawns, so this covers both an abort that lands
     // mid-probe and one that landed before it started.)
     if (signal?.aborted) throw err;
-    return { value: { installed: false, running: false, scope: null }, answered: false };
+    return { value: { installed: false, running: false, scope: null, answered: false }, answered: false };
   }
 }
 

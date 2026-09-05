@@ -144,7 +144,10 @@ describe("GET /setup-api/discord/status — OpenClaw connection state", () => {
 
     expect(res.status).toBe(200);
     expect(body.state).toBeNull();
-    expect(body.receiving).toBe(false);
+    // `null`, not false. The distinction two lines up is the whole point: a
+    // caller that draws a dot from `receiving` would otherwise accuse a healthy
+    // bot every time a Save restarted the gateway.
+    expect(body.receiving).toBeNull();
     expect(body.configured).toBe(true);
   });
 
