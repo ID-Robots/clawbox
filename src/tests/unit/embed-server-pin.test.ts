@@ -107,9 +107,13 @@ describe("the unit runs the script, and the script runs an embedder", () => {
     // ("Permission denied") on any box that took the branch through git —
     // install.sh chmods nothing here. Seen on a box the moment beta carried
     // this unit. Every unit's script is held to it, not only this one.
+    // EVERY Exec* directive (Start, StartPre, StartPost, Stop, StopPost,
+    // Reload, Condition), after systemd's command-line prefixes (`-@:+!`),
+    // and only a script that is the COMMAND: one run through `/bin/bash …`
+    // or `/usr/bin/env node …` needs no mode bit and is left alone.
     const scripts = new Set<string>();
     for (const unit of fs.readdirSync(path.join(ROOT, "config")).filter((f) => f.endsWith(".service"))) {
-      for (const m of read(`config/${unit}`).matchAll(/^Exec(?:Start|StartPre|StartPost|Stop)=-?\/home\/clawbox\/clawbox\/(scripts\/\S+)/gm)) {
+      for (const m of read(`config/${unit}`).matchAll(/^\s*Exec[A-Za-z]*=[-@:+!]*\/home\/clawbox\/clawbox\/(scripts\/\S+)/gm)) {
         scripts.add(m[1]);
       }
     }
