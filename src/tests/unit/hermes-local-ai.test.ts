@@ -401,7 +401,9 @@ describe("registering the local model with Hermes", () => {
   it("does not spend CLI spawns on an outcome a leftover already decided", async () => {
     // One key that demonstrably survived makes "still registered" certain, so
     // asking Hermes about the others buys nothing and costs a serial 15-second
-    // budget each in front of a click the owner is holding open.
+    // budget each in front of a click the owner is holding open. The SELECTION
+    // is readable here, so its own three-state read spends no spawn either and
+    // this stays an assertion about the read-back loop.
     const file = deviceConfig({
       [`providers.${HERMES_LOCAL_PROVIDER}.models`]: NON_SCALAR,
     });
@@ -411,9 +413,10 @@ describe("registering the local model with Hermes", () => {
       }
       return { mode: "cli", backupPath: null };
     });
-    resolveMock.mockImplementation(async (key: string) =>
-      key.endsWith(".models") ? { state: "present" } : { state: "unreadable" },
-    );
+    resolveMock.mockImplementation(async (key: string) => {
+      if (key.endsWith(".models")) return { state: "present" };
+      return key.startsWith("model.") ? { state: "absent" } : { state: "unreadable" };
+    });
     cliMock.mockReset();
 
     await expect(removeLocalAiFromHermes()).rejects.toThrow(/still registered/i);
@@ -423,12 +426,17 @@ describe("registering the local model with Hermes", () => {
   it("refuses when Hermes' own reader cannot answer either", async () => {
     // Both readers silent is the only genuinely unknowable state, and it is the
     // one this sentence is for: a `hermes` shim mid-`step_hermes_install`
-    // rebuild exits 127 without reaching argparse.
+    // rebuild exits 127 without reaching argparse. Scoped to the READ-BACK: the
+    // selection is answered here, so what cannot be settled is only whether the
+    // write landed. (The other half — a selection neither reader can resolve —
+    // is refused before the write, in hermes-local-ai-unindexable-config.)
     deviceConfig({
       [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
     });
     patchMock.mockResolvedValue({ mode: "cli", backupPath: null });
-    resolveMock.mockResolvedValue({ state: "unreadable" });
+    resolveMock.mockImplementation(async (key: string) =>
+      key.startsWith("model.") ? { state: "absent" } : { state: "unreadable" },
+    );
     cliMock.mockResolvedValue({ code: 127, stdout: "", stderr: "" });
 
     await expect(removeLocalAiFromHermes()).rejects.toThrow(/could not be read back/i);

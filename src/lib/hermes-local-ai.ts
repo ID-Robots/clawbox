@@ -1,7 +1,12 @@
 import { runHermesCli } from "@/lib/hermes-cli";
 import { hermesCliAnswered } from "@/lib/hermes-cli-answered";
 import { get } from "@/lib/config-store";
-import { patchHermesConfig, readHermesConfigValue, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
+import {
+  patchHermesConfig,
+  readHermesConfigValue,
+  resolveHermesConfigValue,
+  type HermesConfigRead,
+} from "@/lib/hermes-config-yaml";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { withProviderMcpRefresh } from "@/lib/provider-mcp-refresh";
 import { getLocalAiToken } from "@/lib/local-ai-token";
@@ -230,16 +235,58 @@ type LocalCatalogueState = "absent" | "scalar" | "foreign" | "unknown";
  */
 type HermesKeyPresence = "present" | "absent" | "unknown";
 
-async function cliKeyPresence(key: string): Promise<HermesKeyPresence> {
+type HermesCliRead =
+  | { presence: "present"; value: string }
+  | { presence: "absent" | "unknown" };
+
+/**
+ * The one spawn behind both readers below.
+ *
+ * NOT to be pointed at a credential key. It carries the value out, and this
+ * file also names `providers.<slug>.api_key`; the two callers that read a value
+ * ask only for `model.provider` and `model.default`, which name a provider slug
+ * and a model id. `cliKeyPresence` is what every other key goes through, and it
+ * drops the value on the floor.
+ */
+async function cliKeyRead(key: string): Promise<HermesCliRead> {
   // `runHermesCli` REJECTS for a missing binary, a timeout and its own SIGKILL.
   // None of those is an answer either, and the callers here all treat "could
   // not ask" the same way, so it is folded in rather than thrown.
   const answer = await runHermesCli(["config", "get", key], { timeoutMs: 15_000 }).catch(() => null);
-  if (!answer || !hermesCliAnswered(answer)) return "unknown";
-  if (answer.code === 0) return "present";
+  if (!answer || !hermesCliAnswered(answer)) return { presence: "unknown" };
+  if (answer.code === 0) return { presence: "present", value: (answer.stdout ?? "").trim() };
   return /config key not set/i.test(`${answer.stdout ?? ""}\n${answer.stderr ?? ""}`)
-    ? "absent"
-    : "unknown";
+    ? { presence: "absent" }
+    : { presence: "unknown" };
+}
+
+async function cliKeyPresence(key: string): Promise<HermesKeyPresence> {
+  return (await cliKeyRead(key)).presence;
+}
+
+/**
+ * What one key is SET TO, asking Hermes' own reader for the shapes ours has to
+ * decline — with "nobody could say" kept apart from "nothing is set there".
+ *
+ * `readHermesConfigValue` collapses both into `null`, and the difference is the
+ * whole of TASK-545's remaining half: on a config.yaml our line editor cannot
+ * index, reading "could not be read" as "the local model is not the selection"
+ * left `model.provider: clawlocal` in the file with its providers block removed
+ * — the state this module's header describes, where every chat turn 502s with
+ * `Unknown provider 'clawlocal'` — while the route answered `{success:true}`.
+ */
+async function selectionValue(key: string): Promise<{ known: boolean; value: string | null }> {
+  const read = await resolveHermesConfigValue(key).catch(
+    (): HermesConfigRead => ({ state: "unreadable" }),
+  );
+  if (read.state === "value") return { known: true, value: read.value };
+  // `absent` is nothing there; `present` is a non-scalar under a key that is a
+  // scalar wherever Hermes wrote it. Neither can be a provider slug, and both
+  // are answers.
+  if (read.state !== "unreadable") return { known: true, value: null };
+  const cli = await cliKeyRead(key);
+  if (cli.presence === "unknown") return { known: false, value: null };
+  return { known: true, value: cli.presence === "present" ? cli.value : null };
 }
 
 async function localCatalogueState(): Promise<LocalCatalogueState> {
@@ -377,9 +424,23 @@ export async function removeLocalAiFromHermes(): Promise<{ wasDefault: boolean; 
 }
 
 async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | null }> {
-  const activeProvider = await readHermesConfigValue("model.provider").catch(() => null);
-  const wasDefault = activeProvider === HERMES_LOCAL_PROVIDER;
-  const model = wasDefault ? await readHermesConfigValue("model.default").catch(() => null) : null;
+  // BEFORE the write, and three-state. There is no safe unset list to send
+  // while this is unknown: putting `model.provider` on it blind would drop the
+  // owner's cloud selection on a Local AI toggle-off, and leaving it off is the
+  // 502-per-turn state above. Refusing here costs nothing that a retry cannot
+  // redo — nothing has been written yet, so Local AI stays registered and the
+  // box goes on working — whereas the same doubt one step later would leave the
+  // providers block half removed around a selection nobody could read.
+  const selection = await selectionValue("model.provider");
+  if (!selection.known) {
+    console.error("[hermes-local-ai] the active provider could not be read; nothing was removed");
+    throw new HermesLocalRemovalError(
+      "The Hermes config could not be read, so the removal was not attempted.",
+      false,
+    );
+  }
+  const wasDefault = selection.value === HERMES_LOCAL_PROVIDER;
+  const model = wasDefault ? (await selectionValue("model.default")).value : null;
 
   // `models` rides with the endpoint it describes. Left behind, it is a
   // `providers.clawlocal` block naming a model with nowhere to send it — and
