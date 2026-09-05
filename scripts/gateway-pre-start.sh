@@ -2275,6 +2275,55 @@ elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
   fi
 fi
 
+# ── Capability consent for the OTHER ClawBox-managed plugins ────────────────
+#
+# The block above is the codex half of this, and has been here since OpenClaw 2
+# added declared-capability consent. The gateway refuses readiness for ANY
+# enabled plugin whose declared surface has not been consented to, and ClawBox
+# installs four more: deepseek (the provider ClawBox AI rides on), discord and
+# whatsapp (installed by the Settings panel when the owner asks for that
+# channel) and clawbox-email-directives (ours, copied out of the checkout
+# below).
+#
+# WHY IT MATTERS THAT THIS IS THE BOOT PATH. src/lib/updater.ts repairs the same
+# state from the gateway's journal, but only during an update. A box that is
+# already down — the 2026-09-01 outage was exactly this, on discord — gets a
+# reboot from its owner long before it gets an update, and every boot runs this
+# script. Without this block the reboot changed nothing and the gateway came
+# back to the same refusal (TASK-603).
+#
+# `enable` is the idempotent consent verb, as for codex: it records the current
+# reviewed surface when needed and leaves an already-consented plugin alone.
+# Only for entries openclaw.json ALREADY says to load, so this can never switch
+# a channel on — a plugin the owner disabled stays disabled, and one he never
+# asked for is never enabled by a boot script. Time-boxed and non-fatal,
+# because this is a blocking ExecStartPre.
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+  MANAGED_ENABLED_PLUGINS="$(python3 - "$OPENCLAW_CONFIG" <<'MANAGEDPY' || true
+import json, sys
+MANAGED = ("deepseek", "discord", "whatsapp", "clawbox-email-directives")
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        entries = (json.load(fh).get("plugins") or {}).get("entries") or {}
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(0)
+if not isinstance(entries, dict):
+    raise SystemExit(0)
+for name in MANAGED:
+    entry = entries.get(name)
+    if isinstance(entry, dict) and entry.get("enabled") is True:
+        print(name)
+MANAGEDPY
+)"
+  for MANAGED_PLUGIN in $MANAGED_ENABLED_PLUGINS; do
+    if timeout 60 "$OPENCLAW_BIN" plugins enable "$MANAGED_PLUGIN" --accept-capabilities </dev/null >/dev/null 2>&1; then
+      echo "  $MANAGED_PLUGIN plugin capabilities accepted/current"
+    else
+      echo "  WARN: could not confirm $MANAGED_PLUGIN plugin capabilities; gateway readiness may remain blocked"
+    fi
+  done
+fi
+
 # Codex reads its ChatGPT session from a Codex CLI-style auth.json. Without
 # one the app-server falls back to api.openai.com with no bearer -> 401
 # "Missing bearer or basic authentication in header", which is what users hit

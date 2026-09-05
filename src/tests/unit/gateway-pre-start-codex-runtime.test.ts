@@ -93,14 +93,28 @@ function extractPluginResolver(): string {
 const PLUGIN_RESOLVER = extractPluginResolver();
 
 /** Pull the package-health/repair/consent command flow out verbatim. */
+const MANAGED_CONSENT_MARKER = "# \u2500\u2500 Capability consent for the OTHER ClawBox-managed plugins";
+
 function extractPluginFlow(): string {
   const start = SCRIPT_SOURCE.indexOf('CODEX_SHOULD_LOAD="$NEEDS_CODEX_PLUGIN"');
-  const end = SCRIPT_SOURCE.indexOf("# Codex reads its ChatGPT session", start);
+  // Ends where the block for the OTHER managed plugins begins: that one has its
+  // own extraction and its own harness below, and it reads openclaw.json, which
+  // this fragment's environment does not set.
+  const end = SCRIPT_SOURCE.indexOf(MANAGED_CONSENT_MARKER, start);
   if (start < 0 || end < 0) throw new Error("Codex plugin command flow not found");
   return SCRIPT_SOURCE.slice(start, end);
 }
 
+/** The boot-path consent pass for deepseek / discord / whatsapp / our own plugin. */
+function extractManagedConsentFlow(): string {
+  const start = SCRIPT_SOURCE.indexOf(MANAGED_CONSENT_MARKER);
+  const end = SCRIPT_SOURCE.indexOf("# Codex reads its ChatGPT session", start);
+  if (start < 0 || end < 0) throw new Error("Managed-plugin consent flow not found");
+  return SCRIPT_SOURCE.slice(start, end);
+}
+
 const PLUGIN_FLOW = extractPluginFlow();
+const MANAGED_CONSENT_FLOW = extractManagedConsentFlow();
 
 let dir: string;
 
@@ -206,6 +220,89 @@ function runPluginFlow(options: PluginFlowOptions): string[] {
     ? readFileSync(log, "utf-8").trim().split("\n").filter(Boolean)
     : [];
 }
+
+/**
+ * Run the boot-path consent pass for the managed plugins that are NOT codex.
+ *
+ * TASK-603. The codex arm above has consented its one plugin on every boot
+ * since OpenClaw 2 introduced declared-capability consent; the gateway refuses
+ * readiness for any enabled plugin in that state, and ClawBox installs four
+ * more. The 2026-09-01 outage was `discord`, and a reboot — the owner's first
+ * move on a box that will not come up — changed nothing.
+ */
+function runManagedConsentFlow(options: {
+  v2?: boolean;
+  entries?: Record<string, unknown>;
+  writeConfig?: boolean;
+}): string[] {
+  const config = path.join(dir, "managed-consent.json");
+  if (options.writeConfig !== false) {
+    writeFileSync(config, JSON.stringify({ plugins: { entries: options.entries ?? {} } }));
+  }
+
+  const log = path.join(dir, "managed-consent.log");
+  const fakeOpenClaw = path.join(dir, "openclaw-managed");
+  writeFileSync(fakeOpenClaw, '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "$CODEX_TEST_LOG"\n');
+  chmodSync(fakeOpenClaw, 0o755);
+
+  execFileSync("bash", ["-c", `set -euo pipefail\n${MANAGED_CONSENT_FLOW}`], {
+    env: {
+      ...process.env,
+      CLAWBOX_OPENCLAW_V2: options.v2 === false ? "0" : "1",
+      OPENCLAW_CONFIG: config,
+      OPENCLAW_BIN: fakeOpenClaw,
+      CODEX_TEST_LOG: log,
+    },
+    stdio: "pipe",
+  });
+
+  return existsSync(log)
+    ? readFileSync(log, "utf-8").trim().split("\n").filter(Boolean)
+    : [];
+}
+
+describe("gateway-pre-start.sh managed-plugin capability consent", () => {
+  it("consents every managed plugin openclaw.json says to load", () => {
+    expect(runManagedConsentFlow({
+      entries: {
+        deepseek: { enabled: true },
+        discord: { enabled: true },
+        whatsapp: { enabled: true },
+        "clawbox-email-directives": { enabled: true },
+      },
+    })).toEqual([
+      "plugins enable deepseek --accept-capabilities",
+      "plugins enable discord --accept-capabilities",
+      "plugins enable whatsapp --accept-capabilities",
+      "plugins enable clawbox-email-directives --accept-capabilities",
+    ]);
+  });
+
+  it("never switches a plugin ON — only entries already enabled are consented", () => {
+    // `plugins enable` writes `plugins.entries.<id>.enabled = true`, so a boot
+    // script that ran it over an absent or disabled entry would be turning a
+    // channel on behind the owner. Consent is for what the box already loads.
+    expect(runManagedConsentFlow({
+      entries: { discord: { enabled: false }, whatsapp: {} },
+    })).toEqual([]);
+  });
+
+  it("leaves a plugin ClawBox does not manage alone", () => {
+    expect(runManagedConsentFlow({ entries: { weatherbot: { enabled: true } } })).toEqual([]);
+  });
+
+  it("does nothing on OpenClaw 1, which has no capability consent", () => {
+    expect(runManagedConsentFlow({ v2: false, entries: { discord: { enabled: true } } }))
+      .toEqual([]);
+  });
+
+  it("survives a missing or unparseable config rather than failing the pre-start", () => {
+    // This is a blocking ExecStartPre under `set -euo pipefail`: a throw here
+    // is a box with no gateway, which is strictly worse than an unconsented
+    // plugin the journal will name.
+    expect(runManagedConsentFlow({ writeConfig: false })).toEqual([]);
+  });
+});
 
 /** Resolve a plugin exposed only through OpenClaw's own global registry. */
 function resolveRegistryOnlyPlugin(): string {

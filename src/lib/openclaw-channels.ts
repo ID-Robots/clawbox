@@ -66,6 +66,42 @@ export const OFFICIAL_CHANNEL_PLUGINS: Readonly<Record<string, string>> = Object
  */
 export const PLUGIN_INSTALL_TIMEOUT_MS = 180_000;
 
+/**
+ * Record consent for the plugin's declared capability surface.
+ *
+ * OpenClaw 2 refuses both verbs without it. `resolvePluginCapabilityConsent`
+ * (the core's `dist/capability-consent-*.js`) throws `Plugin "<id>" requires
+ * capability consent. Use openclaw plugins install or openclaw plugins enable
+ * with --accept-capabilities, then retry.` unless the install record already
+ * carries an accepted surface hash for the manifest on disk — and the only
+ * other way to satisfy it is an interactive consent callback, which a spawned
+ * CLI does not have. So without the flag a first install cannot succeed at
+ * all: the owner's Discord save answered `install_failed`, and where the
+ * package landed anyway the gateway refused readiness with that same sentence
+ * for as long as the entry said to load the plugin (TASK-603).
+ *
+ * ClawBox already passes it everywhere else it drives this CLI — codex and the
+ * DeepSeek provider in `scripts/gateway-pre-start.sh`, codex again in
+ * `updater.ts`, the DeepSeek provider in `openclaw-deepseek-plugin.ts`. The
+ * channel plugins were the ones left out.
+ *
+ * WHAT THIS PATH DOES NOT COVER, deliberately. A plugin ALREADY installed and
+ * already switched on in the config skips both verbs below, so a save cannot
+ * re-consent a surface that widened under it — and it should not have to: a
+ * surface widens when the package version changes, which happens in
+ * `install.sh`'s plugin refresh (which now carries the flag) and is repaired
+ * from the gateway's own refusal by `gateway-pre-start.sh` on every boot and by
+ * `updater.ts` during an update. Running the CLI unconditionally here would buy
+ * a ~10-12 s cold start on every channel save to cover a case those three
+ * already own.
+ *
+ * It is not a widening of what ClawBox trusts: the specs in
+ * `OFFICIAL_CHANNEL_PLUGINS` are OpenClaw's own published packages, chosen by
+ * this module rather than by the caller, and installing one at all is already
+ * the owner's decision — the Settings panel that asked for the channel.
+ */
+const ACCEPT_CAPABILITIES = "--accept-capabilities";
+
 /** Ceiling for `plugins list` / `plugins enable` — CLI cold start is ~10-12 s. */
 const PLUGIN_QUERY_TIMEOUT_MS = 45_000;
 
@@ -222,7 +258,7 @@ export async function ensureChannelPlugin(
   let installed = false;
   if (!owner) {
     try {
-      await spawnOpenclawCli(["plugins", "install", spec], {
+      await spawnOpenclawCli(["plugins", "install", spec, ACCEPT_CAPABILITIES], {
         timeoutMs: options.timeoutMs ?? PLUGIN_INSTALL_TIMEOUT_MS,
       });
       installed = true;
@@ -248,7 +284,7 @@ export async function ensureChannelPlugin(
   const pluginId = typeof owner?.id === "string" ? owner.id : channelId;
   if (!(await pluginEnabledInConfig(pluginId))) {
     try {
-      await spawnOpenclawCli(["plugins", "enable", pluginId], {
+      await spawnOpenclawCli(["plugins", "enable", pluginId, ACCEPT_CAPABILITIES], {
         timeoutMs: PLUGIN_QUERY_TIMEOUT_MS,
       });
     } catch (err) {
