@@ -166,9 +166,15 @@ describe("assets declared to the browser are reachable without a session", () =>
     // no file in public/ and falls through to the gateway catch-all — served,
     // unauthenticated, with the SPA shell. That bypass has been shipped twice
     // (/Login, /ASSETS/x.css); this pins it for the entries added here.
-    for (const lookalike of ["/ICON-192.PNG", "/Icon-512.png", "/icon-192.png/", "/favicon-32X32.png"]) {
+    for (const lookalike of ["/ICON-192.PNG", "/Icon-512.png", "/favicon-32X32.png"]) {
       expect((await get(lookalike)).status, lookalike).toBe(307);
     }
+    // A trailing slash never reaches the gate at all — middleware's own
+    // trailing-slash redirect (308) runs first for page paths — so what
+    // matters is only that it is not SERVED as the icon.
+    const trailing = await get("/icon-192.png/");
+    expect(trailing.status).toBe(308);
+    expect(trailing.headers.get("Location"), "redirected to the exact path, still gated").toContain("/icon-192.png");
   });
 
   it("admits a HEAD as well as a GET — a browser asks before it fetches", async () => {
