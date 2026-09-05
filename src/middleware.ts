@@ -388,8 +388,15 @@ export async function middleware(request: NextRequest) {
   {
     const raw = request.nextUrl.pathname;
     if (raw.length > 1 && raw.endsWith("/") && !isAppProxyPath(raw) && !raw.startsWith("/setup-api/") && !raw.startsWith("/api/") && !raw.startsWith("/_next/")) {
-      const url = request.nextUrl.clone();
-      url.pathname = raw.replace(/\/+$/, "") || "/";
+      // A PLAIN `URL`, never `request.nextUrl.clone()`: `NextURL` records the
+      // trailing slash in a `trailingSlash` flag when it parses the URL, its
+      // `pathname` setter writes the pathname and leaves that flag set, and
+      // `href`/`toString()` — what `NextResponse.redirect` serialises — re-add
+      // the slash from the flag. The Location therefore came back as the path
+      // being redirected AWAY from, i.e. an infinite 308 loop on every page
+      // path typed with a slash. A plain `URL` carries no such flag.
+      const url = new URL(request.nextUrl.href);
+      url.pathname = url.pathname.replace(/\/+$/, "") || "/";
       return NextResponse.redirect(url, 308);
     }
   }
