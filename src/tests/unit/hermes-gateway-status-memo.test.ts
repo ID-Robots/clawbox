@@ -75,7 +75,10 @@ describe("hermesGatewayStatus memo", () => {
     runHermesCliMock.mockRejectedValue(new Error("hermes: command not found"));
 
     const failed = await lib.hermesGatewayStatus();
-    expect(failed).toEqual({ installed: false, running: false, scope: null });
+    // `answered: false` is the whole point of the shorter window, and it is
+    // carried out to the routes now so one can say "could not ask" rather than
+    // publishing a definite "not running".
+    expect(failed).toEqual({ installed: false, running: false, scope: null, answered: false });
     expect(runHermesCliMock).toHaveBeenCalledTimes(1);
 
     // Inside the failure window the box must not re-enter a wedged CLI...
@@ -164,6 +167,7 @@ describe("hermesGatewayStatus memo", () => {
       installed: false,
       running: false,
       scope: null,
+      answered: false,
     });
   });
 

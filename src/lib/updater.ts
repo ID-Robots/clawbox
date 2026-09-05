@@ -809,8 +809,12 @@ const GATEWAY_PRE_START_TIMEOUT_MS = 600_000;
 const ROOT_STEP_SETTLE_TIMEOUT_MS = Number(process.env.ROOT_STEP_SETTLE_TIMEOUT_MS || "7200000");
 const LEGACY_GATEWAY_BLOCKER_RE =
   /installs\.json|conflicting plugin install metadata|carl_pir|belongs to agent piper/i;
-const CODEX_CAPABILITY_CONSENT_RE =
-  /Plugin\s+["']?codex["']?\s+requires capability consent/i;
+// The core names the plugin in its refusal — `Plugin "discord" requires
+// capability consent…` — so the id is captured rather than hard-coded, and
+// `managedPluginNeedingConsent` decides whether it is one ClawBox may answer
+// for. Not global: `.match()` and `.test()` share this object.
+const PLUGIN_CAPABILITY_CONSENT_RE =
+  /Plugin\s+["']?([A-Za-z0-9@._/-]+?)["']?\s+requires capability consent/i;
 const CURRENT_GATEWAY_PRE_START = path.join(PROJECT_DIR, "scripts", "gateway-pre-start.sh");
 const GATEWAY_QUIESCED_ROOT_STEPS = new Set(["openclaw_install", "post_update"]);
 
@@ -1013,10 +1017,138 @@ async function runCurrentGatewayPreStart(): Promise<void> {
   });
 }
 
-/** Accept only the ClawBox-managed plugin named by a concrete gateway error. */
-async function repairCodexCapabilityConsent(journal: string): Promise<void> {
-  if (!CODEX_CAPABILITY_CONSENT_RE.test(journal)) return;
-  if (!(await codexCapabilityRepairIsAllowed())) return;
+/**
+ * The plugins ClawBox installs, and may therefore consent for.
+ *
+ * The whitelist is the point. Consenting on the owner's behalf is only
+ * defensible for a package ClawBox chose, pinned and installed — codex and the
+ * DeepSeek provider from `scripts/gateway-pre-start.sh`, discord and whatsapp
+ * from `openclaw-channels.ts` when the owner asked for that channel in
+ * Settings, and `clawbox-email-directives`, which is ClawBox's own plugin
+ * copied out of the checkout. A plugin the owner installed from the Terminal
+ * has an owner who can answer for it, and the updater must not answer in his
+ * place — which is also why this is not `openclaw update repair
+ * --accept-capabilities`, the harness's own command for this recovery: that one
+ * consents for everything blocked, including his.
+ */
+const CLAWBOX_MANAGED_PLUGIN_IDS: ReadonlySet<string> = new Set([
+  "codex",
+  "deepseek",
+  "discord",
+  "whatsapp",
+  "clawbox-email-directives",
+]);
+
+/**
+ * `@openclaw/discord` and `openclaw-discord` are the same plugin as `discord`.
+ *
+ * The core names its own normalised plugin id in the refusal, which on a
+ * measured box is the bare one — but `ensureChannelPlugin` already handles a
+ * registry that calls the Discord plugin `openclaw-discord`
+ * (`openclaw-channels.ts`, and a test pins it), so the membership test must not
+ * be the thing that decides a box gets no repair.
+ */
+function normalizeManagedPluginId(id: string): string {
+  return id.replace(/^@openclaw\//, "").replace(/^openclaw-/, "");
+}
+
+/** Every plugin a consent refusal in this journal names, split by who owns it. */
+function pluginsNeedingConsent(journal: string): { managed: string[]; unmanaged: string[] } {
+  // A GLOBAL copy of the shared pattern, built here so the shared one keeps a
+  // stable `lastIndex` for its `.test()` callers. Reading only the FIRST match
+  // was a live dead end: the journal tail spans the whole boot (`-b`) and the
+  // gateway restarts several times during an update, so a stale `codex` line
+  // ahead of a live `discord` one had the repair fix codex while
+  // `getGatewayFailureDetail` — which scans in REVERSE — handed the owner the
+  // discord sentence.
+  const namesRe = new RegExp(PLUGIN_CAPABILITY_CONSENT_RE.source, "gi");
+  // KEYED by the normalised id, VALUED by the first raw id seen for it. One
+  // boot's journal can name the same plugin twice under different spellings —
+  // `codex` from one start, `@openclaw/codex` from another — and a set of raw
+  // ids would then repair it twice, giving the pinned force-install two
+  // separate six-minute budgets back to back on a Jetson. The repair runs
+  // under the raw name because that is what the registry answers to.
+  const managed = new Map<string, string>();
+  const unmanaged = new Map<string, string>();
+  for (const match of journal.matchAll(namesRe)) {
+    const id = match[1];
+    const key = normalizeManagedPluginId(id);
+    const bucket = CLAWBOX_MANAGED_PLUGIN_IDS.has(key) ? managed : unmanaged;
+    if (!bucket.has(key)) bucket.set(key, id);
+  }
+  return { managed: [...managed.values()], unmanaged: [...unmanaged.values()] };
+}
+
+/**
+ * Respect an owner-disabled plugin even if the journal still mentions it.
+ *
+ * The sibling of `codexCapabilityRepairIsAllowed`, and needed for the same
+ * reason. `plugins enable` is not a consent-only verb — it writes
+ * `plugins.entries.<id>.enabled = true` — and the journal tail is the whole
+ * boot, captured BEFORE the pre-start runs. So an owner who opened the Terminal
+ * and ran `openclaw plugins disable discord` to get his box back would have had
+ * the channel switched on again, with consent granted in his name, by the very
+ * next update. Explicitly `false` is the only answer that stops the repair;
+ * absent or unreadable is not an opt-out.
+ */
+async function pluginConsentRepairIsAllowed(pluginId: string): Promise<boolean> {
+  const cfg = await readOpenclawConfigForRepair();
+  if (!cfg) return true;
+  const plugins = cfg.plugins && typeof cfg.plugins === "object"
+    ? cfg.plugins as Record<string, unknown>
+    : {};
+  const entries = plugins.entries && typeof plugins.entries === "object"
+    ? plugins.entries as Record<string, unknown>
+    : {};
+  // Matched on the NORMALISED id, not the literal one. The journal names the
+  // core's own plugin id while `plugins.entries` can be keyed under the alias
+  // `ensureChannelPlugin` writes (`openclaw-discord`), and a lookup that missed
+  // the alias would read an owner's explicit `enabled: false` as "no opinion"
+  // and switch his channel back on.
+  const wanted = normalizeManagedPluginId(pluginId);
+  return !Object.entries(entries).some(([key, entry]) =>
+    normalizeManagedPluginId(key) === wanted
+    && !!entry
+    && typeof entry === "object"
+    && (entry as Record<string, unknown>).enabled === false,
+  );
+}
+
+/**
+ * Accept every ClawBox-managed plugin a concrete gateway error names.
+ *
+ * WHY THIS IS NOT CODEX-ONLY ANY MORE (TASK-603). The gateway refuses readiness
+ * for ANY enabled plugin whose declared capability surface has not been
+ * consented to, and it names the plugin in the refusal. Until now this repair
+ * matched the literal word `codex`, so a box blocked on `discord` or `whatsapp`
+ * — the channel plugins the Settings panel installs — went through the whole
+ * recovery untouched and ended at `getGatewayFailureDetail`, which handed the
+ * owner the core's own sentence: "rerun with --accept-capabilities". That is
+ * advice about a CLI he never ran, over a box that will not come back until
+ * somebody runs it for him. This is the tool doing the thing itself.
+ */
+async function repairPluginCapabilityConsent(journal: string): Promise<void> {
+  const { managed, unmanaged } = pluginsNeedingConsent(journal);
+  for (const pluginId of unmanaged) {
+    // Said out loud rather than skipped in silence: this is the one case where
+    // the owner still has to run the CLI himself, and the update log is where
+    // he or a support session will look for why nothing happened.
+    console.info(
+      `[Updater] "${pluginId}" needs capability consent and is not a ClawBox-managed plugin — leaving it to its owner`,
+    );
+  }
+  for (const pluginId of managed) {
+    if (normalizeManagedPluginId(pluginId) === "codex") {
+      if (await codexCapabilityRepairIsAllowed()) await repairCodexCapabilityConsent();
+      continue;
+    }
+    if (!(await pluginConsentRepairIsAllowed(pluginId))) continue;
+    await recordPluginCapabilityConsent(pluginId);
+  }
+}
+
+/** The pinned force-install that repairs a partial Codex project AND consents it. */
+async function repairCodexCapabilityConsent(): Promise<void> {
   let target = OPENCLAW_VERSION_FALLBACK;
   try {
     target = (await readFile(OPENCLAW_TARGET_FILE, "utf-8")).trim().split(/\s+/)[0] || target;
@@ -1050,15 +1182,66 @@ async function repairCodexCapabilityConsent(journal: string): Promise<void> {
   }
 }
 
-/** Respect an owner-disabled unused Codex plugin even if old logs mention it. */
-async function codexCapabilityRepairIsAllowed(): Promise<boolean> {
+/**
+ * Record consent for an already-installed managed plugin.
+ *
+ * `plugins enable` rather than a reinstall, for the reason
+ * `scripts/gateway-pre-start.sh` gives at its own codex consent branch: it is
+ * the idempotent local operation that records the current reviewed surface and
+ * leaves an already-consented plugin alone, and it touches no registry — which
+ * matters here, because this runs mid-update on a box whose network may be
+ * exactly why the update is being repaired. The Codex arm above reinstalls
+ * instead only because a v1 migration can leave that ONE plugin as a project
+ * declaration with no `node_modules`, a state its own pin repairs.
+ *
+ * LIMIT, deliberately not papered over: if a managed plugin is in that partial
+ * state, `enable` answers "Plugin not found" and this warns rather than
+ * fetching an unpinned package from npm mid-update. The gateway's own refusal
+ * then still reaches the owner through `getGatewayFailureDetail`; what he does
+ * not get is a silent claim that ClawBox repaired it.
+ */
+async function recordPluginCapabilityConsent(pluginId: string): Promise<void> {
+  try {
+    await execFile(
+      OPENCLAW_BIN,
+      ["plugins", "enable", pluginId, "--accept-capabilities"],
+      { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
+    );
+  } catch (err) {
+    // Best effort, like the Codex branch above: the clean restart and the
+    // positive port probe decide the result, and this must not replace a
+    // preceding pre-start failure.
+    console.warn(
+      `[Updater] capability consent for "${pluginId}" did not complete:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
+ * openclaw.json as the consent repairs read it, or null when it cannot be read.
+ *
+ * Null is "no explicit opt-out on record", never "switched off": a missing or
+ * malformed config must not be what stops a box from coming back.
+ */
+async function readOpenclawConfigForRepair(): Promise<Record<string, unknown> | null> {
   const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
   const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
     || process.env.OPENCLAW_HOME
     || path.join(home, ".openclaw");
   const configPath = process.env.OPENCLAW_CONFIG || path.join(openclawHome, "openclaw.json");
   try {
-    const cfg = JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>;
+    return JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** Respect an owner-disabled unused Codex plugin even if old logs mention it. */
+async function codexCapabilityRepairIsAllowed(): Promise<boolean> {
+  try {
+    const cfg = await readOpenclawConfigForRepair();
+    if (!cfg) return true;
     const plugins = cfg.plugins && typeof cfg.plugins === "object"
       ? cfg.plugins as Record<string, unknown>
       : {};
@@ -1138,7 +1321,7 @@ function getGatewayFailureDetail(logText: string): string | null {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  for (const pattern of [CODEX_CAPABILITY_CONSENT_RE, /SQLite transaction lock wait failed/i]) {
+  for (const pattern of [PLUGIN_CAPABILITY_CONSENT_RE, /SQLite transaction lock wait failed/i]) {
     const match = [...lines].reverse().find((line) => pattern.test(line));
     if (match) return match;
   }
@@ -1180,10 +1363,10 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
       // If an earlier pre-start migration fails, still record the narrowly
       // scoped consent named by the existing journal. Do not restart after a
       // partial pre-start; propagate its failure once the repair is recorded.
-      await repairCodexCapabilityConsent(journal);
+      await repairPluginCapabilityConsent(journal);
       throw err;
     }
-    await repairCodexCapabilityConsent(journal);
+    await repairPluginCapabilityConsent(journal);
     await runOpenclawDoctorFix();
   });
   // `awaitReady: false` on both restarts in this function, and only here: the
@@ -1664,9 +1847,13 @@ export async function getVersionInfo(): Promise<VersionInfo> {
       target: openclawTarget && openclawCurrent && openclawCurrent.includes(openclawTarget) ? null : openclawTarget,
       updateAvailable: !!(openclawTarget && openclawCurrent && !openclawCurrent.includes(openclawTarget)),
     },
-    // Hermes ships from its own upstream installer, not from a ClawBox pin, so
-    // there is no target to converge on and nothing to offer an update for —
-    // only the installed version is reportable.
+    // Hermes IS pinned by ClawBox — `HERMES_PIN_COMMIT` in install.sh, which
+    // `step_hermes_install` re-checks and repairs on every update, exactly as
+    // `config/openclaw-target.txt` does for OpenClaw. What it has no target for
+    // is this payload: the pin is a 40-char commit SHA and `hermes --version`
+    // answers a release string, so there is nothing here the two can be
+    // compared on. `target: null` therefore means "not comparable", not
+    // "installed from somewhere ClawBox does not control".
     ...(hasHermes
       ? { hermes: { current: hermesCurrent, target: null, updateAvailable: false } }
       : {}),

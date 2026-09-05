@@ -146,73 +146,103 @@ export default function AiProviderList() {
           ))}
         </div>
       ) : (
-        <ul className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]">
+        /* A CONTAINER, not the viewport. The defect is about how wide this
+           PANE is: Settings caps it at `max-w-xl` (576 px) and draws it inside
+           a ChromeWindow the owner can drag down to 300 px, so a `sm:`
+           breakpoint — which asks the viewport — is answered "wide" on a
+           desktop whose provider rows are 300 px across. `@container` is what
+           the rest of this codebase already uses for exactly this (the Coding
+           Agent panel, the skills store). `@md` is 28 rem: below it the icon,
+           the name, the Default pill, the Make-default button and the 44 px
+           switch cannot share a line without the name giving way. */
+        <ul className="@container rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]">
           {rows.map((row) => {
             const busy = toggling === row.id || settingDefault === row.id;
             const canMakeDefault = row.enabled && row.state === "connected" && !row.isDefault;
             return (
-              <li key={row.id} className="flex items-center gap-3 px-3 py-2.5" data-testid={`ai-provider-${row.id}`}>
-                <span className={`flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06] ${row.enabled ? "" : "opacity-40"}`}>
-                  <AIProviderIcon provider={row.id} size={20} />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="flex items-center gap-2">
-                    <span className={`text-sm font-medium truncate ${row.enabled ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`}>
-                      {row.label}
+              /* Stacked below `sm:`, one line above it. At 390 px the row had
+                 an icon, a name, a Default pill, a Make-default button and a
+                 44 px switch competing for ~290 px, so the only thing that
+                 could give — the name — gave: "OpenAI G…", "Anthropic Cla…".
+                 The controls go under the name at phone widths instead, and
+                 the name is allowed to wrap there rather than be clipped. */
+              <li key={row.id} className="flex flex-col @md:flex-row @md:items-center gap-2 @md:gap-3 px-3 py-2.5" data-testid={`ai-provider-${row.id}`}>
+                <span className="flex items-center gap-3 min-w-0 @md:flex-1">
+                  <span className={`flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06] ${row.enabled ? "" : "opacity-40"}`}>
+                    <AIProviderIcon provider={row.id} size={20} />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex flex-wrap @md:flex-nowrap items-center gap-2">
+                      <span
+                        data-testid={`ai-provider-name-${row.id}`}
+                        /* `break-words` beside the wrap: on Hermes the label is
+                           whatever the dashboard reports, so an unbroken one
+                           has to be allowed to break rather than be hard-clipped
+                           with no ellipsis to say so. `min-w-0` is what lets it:
+                           `overflow-wrap: break-word` does NOT reduce a flex
+                           item's min-content width, so without it the item
+                           refuses to shrink and the long word overflows the
+                           pane instead of wrapping inside it. */
+                        className={`min-w-0 text-sm font-medium break-words @md:truncate ${row.enabled ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`}
+                      >
+                        {row.label}
+                      </span>
+                      {row.isDefault && (
+                        <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--coral-bright)] border-[var(--coral-bright)]/40" data-testid={`ai-provider-default-${row.id}`}>
+                          {t("settings.providers.default")}
+                        </span>
+                      )}
                     </span>
+                    {row.enabled
+                      ? <ProviderConnectionLabel state={row.state} className="text-[11px]" />
+                      : <span className="block text-[11px] text-[var(--text-muted)]">{t("settings.providers.switchedOff")}</span>}
+                    {/* Visible, not only a hover title: on a phone there is no
+                        hover, and a dimmed switch with no reason looks broken.
+                        The switch names this line as its description. */}
                     {row.isDefault && (
-                      <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--coral-bright)] border-[var(--coral-bright)]/40" data-testid={`ai-provider-default-${row.id}`}>
-                        {t("settings.providers.default")}
+                      <span
+                        id={`ai-provider-locked-${row.id}`}
+                        className="block text-[11px] text-[var(--text-secondary)]"
+                        data-testid={`ai-provider-locked-hint-${row.id}`}
+                      >
+                        {t("settings.providers.lockedHint")}
                       </span>
                     )}
                   </span>
-                  {row.enabled
-                    ? <ProviderConnectionLabel state={row.state} className="text-[11px]" />
-                    : <span className="block text-[11px] text-[var(--text-muted)]">{t("settings.providers.switchedOff")}</span>}
-                  {/* Visible, not only a hover title: on a phone there is no
-                      hover, and a dimmed switch with no reason looks broken.
-                      The switch names this line as its description. */}
-                  {row.isDefault && (
-                    <span
-                      id={`ai-provider-locked-${row.id}`}
-                      className="block text-[11px] text-[var(--text-secondary)]"
-                      data-testid={`ai-provider-locked-hint-${row.id}`}
-                    >
-                      {t("settings.providers.lockedHint")}
-                    </span>
-                  )}
                 </span>
 
-                {canMakeDefault && (
+                <span className="flex items-center gap-3 shrink-0 self-start @md:self-auto" data-testid={`ai-provider-controls-${row.id}`}>
+                  {canMakeDefault && (
+                    <button
+                      type="button"
+                      onClick={() => void setDefault(row.id)}
+                      disabled={busy}
+                      data-testid={`ai-provider-make-default-${row.id}`}
+                      className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 shrink-0"
+                    >
+                      {t("settings.providers.makeDefault")}
+                    </button>
+                  )}
+
+                  {/* The default cannot be switched off — the hint says what to do instead. */}
                   <button
                     type="button"
-                    onClick={() => void setDefault(row.id)}
-                    disabled={busy}
-                    data-testid={`ai-provider-make-default-${row.id}`}
-                    className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 shrink-0"
+                    role="switch"
+                    aria-checked={row.enabled}
+                    aria-label={t("settings.providers.enable", { name: row.label })}
+                    aria-busy={busy}
+                    aria-describedby={row.isDefault ? `ai-provider-locked-${row.id}` : undefined}
+                    disabled={busy || row.isDefault}
+                    title={row.isDefault ? t("settings.providers.lockedHint") : undefined}
+                    onClick={() => void setEnabled(row, !row.enabled)}
+                    data-testid={`ai-provider-switch-${row.id}`}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ${
+                      row.enabled ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+                    }`}
                   >
-                    {t("settings.providers.makeDefault")}
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${row.enabled ? "translate-x-6" : "translate-x-1"}`} />
                   </button>
-                )}
-
-                {/* The default cannot be switched off — the hint says what to do instead. */}
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={row.enabled}
-                  aria-label={t("settings.providers.enable", { name: row.label })}
-                  aria-busy={busy}
-                  aria-describedby={row.isDefault ? `ai-provider-locked-${row.id}` : undefined}
-                  disabled={busy || row.isDefault}
-                  title={row.isDefault ? t("settings.providers.lockedHint") : undefined}
-                  onClick={() => void setEnabled(row, !row.enabled)}
-                  data-testid={`ai-provider-switch-${row.id}`}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ${
-                    row.enabled ? "bg-[var(--coral-bright)]" : "bg-gray-600"
-                  }`}
-                >
-                  <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${row.enabled ? "translate-x-6" : "translate-x-1"}`} />
-                </button>
+                </span>
               </li>
             );
           })}

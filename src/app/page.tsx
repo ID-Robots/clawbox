@@ -41,6 +41,7 @@ import { cleanVersion } from "@/lib/version-utils";
 import { fetchHarness } from "@/lib/client-harness";
 import { samePairingToken } from "@/lib/telegram-pairing-token";
 import type { InstalledMeta } from "@/lib/store-categories";
+import { SKILL_CHANGE_EVENT, announceSkillChange, installedAppRemovedDetail } from "@/lib/skill-change-message";
 import { apps, type AppDef } from "@/lib/desktop-apps";
 import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
 import {
@@ -615,14 +616,14 @@ function ChromeDesktopInner() {
   // the user can watch the agent's response.
   useEffect(() => {
     const handler = () => setChatOpen(true);
-    window.addEventListener('clawbox-skill-installed', handler);
+    window.addEventListener(SKILL_CHANGE_EVENT, handler);
     window.addEventListener(FIX_ERROR_EVENT, handler);
     window.addEventListener(CHAT_MESSAGE_EVENT, handler);
     // The Coding Agent's "Create app" button: the chat has to be open before
     // the card inside it can be seen.
     window.addEventListener(NEW_APP_EVENT, handler);
     return () => {
-      window.removeEventListener('clawbox-skill-installed', handler);
+      window.removeEventListener(SKILL_CHANGE_EVENT, handler);
       window.removeEventListener(FIX_ERROR_EVENT, handler);
       window.removeEventListener(CHAT_MESSAGE_EVENT, handler);
       window.removeEventListener(NEW_APP_EVENT, handler);
@@ -1057,9 +1058,20 @@ function ChromeDesktopInner() {
     uninstallConfirmRef.current = uninstallConfirm;
   }, [uninstallConfirm]);
 
+  // Same reason, for the same callback: it needs the removed app's meta to say
+  // WHAT it removed, and taking `installedMeta` as a dependency would rebuild
+  // the callback on every install. Captured before the request is issued, so
+  // neither the prune below nor a preferences reload in flight can take it
+  // away.
+  const installedMetaRef = useRef<Record<string, InstalledMeta>>({});
+  useEffect(() => {
+    installedMetaRef.current = installedMeta;
+  }, [installedMeta]);
+
   const confirmUninstallApp = useCallback(async () => {
     const appId = uninstallConfirmRef.current;
     if (!appId) return;
+    const removedMeta = installedMetaRef.current[appId];
     // Remove skill files and reload gateway.
     //
     // The desktop only takes the app off itself once the route has said it
@@ -1074,6 +1086,10 @@ function ChromeDesktopInner() {
     // is safe: a second uninstall of an app already gone answers `ok:true`.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10_000);
+    // Read inside the try, said outside it: the route reports whether a store
+    // skill of the same id went with the tile, and the sentence that mentions
+    // it is dispatched after the state cleanup below.
+    let skillRemoved: boolean | null | undefined;
     try {
       const res = await fetch("/setup-api/apps/uninstall", {
         method: "POST",
@@ -1096,6 +1112,7 @@ function ChromeDesktopInner() {
       // desktop, so the cleanup below is right — but saying nothing would put
       // this route's own defect back in the one surface the owner watches.
       const removed = await res.json().catch(() => null);
+      skillRemoved = removed?.skillRemoved;
       if (removed?.skillHalfChecked === false) {
         window.dispatchEvent(new CustomEvent("clawbox:toast", {
           detail: {
@@ -1147,8 +1164,16 @@ function ChromeDesktopInner() {
       return next;
     });
     setUninstallConfirm(null);
-    // Refresh agent session with updated skills
-    window.dispatchEvent(new CustomEvent('clawbox-skill-installed', { detail: { action: 'uninstall', id: appId } }));
+    // Tell the chat what was actually removed. A webapp is not a skill — on
+    // Hermes it is the ONLY installed app an owner can remove
+    // (`isInstalledAppVisible` hides every other kind there) and "skill" is a
+    // live separate concept with its own store, so the old wording sent the
+    // agent to check a list the app was never in. `installedAppRemovedDetail`
+    // reads the meta captured above, which is still the pre-prune copy.
+    // `removed?.skillRemoved` is the route's own answer to "did a store skill
+    // of this id go too" — one id can be both, and a line that mentions only
+    // the tile hides a capability the owner has just lost.
+    announceSkillChange(installedAppRemovedDetail(appId, removedMeta, skillRemoved));
   }, []);
 
   // Get all apps including installed ones

@@ -24,17 +24,20 @@ describe("the box's build", () => {
   it("bundles with webpack, not Turbopack", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf-8")) as { scripts: Record<string, string> };
     expect(pkg.scripts.build).toBe("next build --webpack");
+    expect(pkg.scripts.postbuild).toBe("bash scripts/postbuild.sh");
     // The dev server may keep Turbopack: it never runs on the box.
-    expect(pkg.scripts.postbuild).toContain("write-build-info.mjs");
+    const postbuild = fs.readFileSync(path.join(ROOT, "scripts", "postbuild.sh"), "utf-8");
     // The webpack standalone build's traced copy of `next` misses
     // lib/metadata/get-metadata-route (the server dies on it at start —
     // both e2e suites did, 2026-09-05); postbuild points the standalone
     // tree at the real package through a script that fails the build when
-    // it cannot.
-    expect(pkg.scripts.postbuild).toContain('bash scripts/link-standalone-next.sh "$SDIR" || exit 1');
-    // The playwright copy has the same guard: through a symlinked standalone
-    // node_modules its rm removed the real package too (2026-09-05).
-    expect(pkg.scripts.postbuild).toContain('if [ -d "$SDIR/node_modules" ] && [ ! -L "$SDIR/node_modules" ]; then for pwp in playwright playwright-core;');
+    // it cannot (set -e in postbuild.sh propagates it)…
+    expect(postbuild).toContain("set -euo pipefail");
+    expect(postbuild).toContain('bash scripts/link-standalone-next.sh "$LINK_TREE"');
+    // …and the playwright copy runs only into a node_modules directory of
+    // the standalone tree's own: through a symlinked one its rm removed the
+    // real package too (2026-09-05).
+    expect(postbuild).toContain('if [ ! -L "$SDIR/node_modules" ]; then');
   });
 
   it("is run by the updater with two webpack workers, so its peak stays where it was measured", () => {

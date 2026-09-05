@@ -50,9 +50,11 @@ vi.mock("@/lib/coding-pr", async (importOriginal) => ({
   ...github,
 }));
 const commitRunWork = vi.hoisted(() => vi.fn());
+const newestCommitSince = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-git", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-git")>()),
   commitRunWork,
+  newestCommitSince,
 }));
 
 const snap = (over: Partial<PrSnapshot> = {}): PrSnapshot => ({
@@ -305,6 +307,7 @@ describe("the pull request across the owner's gestures", () => {
     github.readPullRequest.mockResolvedValue({ error: "not in this test" });
     github.mergePullRequest.mockResolvedValue({ ok: false, detail: "not in this test" });
     commitRunWork.mockResolvedValue({ committed: true, sha: "abc1234", initialized: false });
+    newestCommitSince.mockResolvedValue(null);
     vi.resetModules();
     lib = await import("@/lib/coding-agent");
   });
@@ -346,6 +349,22 @@ describe("the pull request across the owner's gestures", () => {
     expect(started.pr?.detail).toBe("Pushing the branch was refused.");
     expect(started.progress.join("\n")).toMatch(/No pull request: Pushing the branch was refused/);
     await finished(started.id);
+  });
+
+  it("opens the pull request for a run that committed its work itself", async () => {
+    // The settle finds nothing to stage (the run committed through its
+    // shell); the newest commit since it started is its own, and that is
+    // what the pull request carries — not "Nothing was committed".
+    commitRunWork.mockResolvedValue({ committed: false, reason: "no_changes" });
+    newestCommitSince.mockResolvedValue("own1234");
+    installFakeWrapper(finishingBody());
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    const done = await finished(started.id);
+    expect(done.status).toBe("completed");
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.pr?.phase).toBe("waiting"); }, { timeout: 5000 });
+    expect(lib.getRun(started.id)?.commit).toBe("own1234");
+    expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/Committed by the run itself as own1234/);
+    expect(github.openPullRequest).toHaveBeenCalledWith(expect.objectContaining({ branch: runBranchName(started.id) }));
   });
 
   it("keeps the pull request 'opening' through a pause and opens it when the resumed run completes", async () => {

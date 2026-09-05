@@ -324,6 +324,57 @@ describe("middleware", () => {
       await expect(response.json()).resolves.toEqual({ error: "Authentication required" });
     });
 
+    it("answers the /setup-api ROOT as the API namespace, not as a page", async () => {
+      // TASK-631. Every gate here tested `startsWith("/setup-api/")`, WITH the
+      // slash, so the namespace root itself was treated as an ordinary page:
+      // an unauthenticated caller got a redirect to /login, and an
+      // authenticated one fell through to the gateway catch-all, which answers
+      // a navigation with the Control UI shell and the gateway token in it.
+      // The root belongs to the same namespace as everything under it.
+      process.env.SESSION_SECRET = "test-secret";
+      markSetupComplete();
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const response = await mod.middleware(createRequest("/setup-api"));
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toEqual({ error: "Authentication required" });
+    });
+
+    it("lets an anonymous /login-api/* path through to the route, which now 404s it", async () => {
+      // The one namespace where an ANONYMOUS caller reached the gateway shell:
+      // `/login-api` is in PUBLIC_PREFIXES (the login POST needs it), so
+      // `GET /login-api/nope` was `NextResponse.next()` → the catch-all →
+      // `serveGatewayHTML` → 200 Control UI. No token (`serveGatewayHTML`
+      // injects only for an owner session), so not a credential leak — but it
+      // is the only one of the five that answered a stranger with a 200 HTML
+      // page, and the route's namespace gate is what turns it into a 404.
+      // Middleware's own behaviour is deliberately unchanged here: taking
+      // /login-api out of PUBLIC_PREFIXES would break signing in.
+      process.env.SESSION_SECRET = "test-secret";
+      markSetupComplete();
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const response = await mod.middleware(createRequest("/login-api/nope"));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("location")).toBeNull();
+    });
+
+    it("does not fold /setupsomething into the /setup-api namespace", async () => {
+      // The matching is on a segment boundary in both directions: `/setup-api`
+      // must not fold into `/setup` (the original auth-bypass) and a path that
+      // merely starts with the same letters must not fold into either.
+      process.env.SESSION_SECRET = "test-secret";
+      markSetupComplete();
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const response = await mod.middleware(createRequest("/setup-apiary"));
+      expect(response.status).toBe(307);
+      expect(response.headers.get("location")).toContain("/login");
+    });
+
     it.each(["/login", "/setup", "/setup-api/setup/status", "/_next/chunk.js", "/fonts/test.woff", "/images/logo.png", "/manifest.json", "/sw.js", "/favicon.ico", "/portal/subscribe"])("allows public path %s", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();

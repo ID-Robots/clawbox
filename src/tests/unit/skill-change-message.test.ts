@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildSkillChangeMessage } from "@/lib/skill-change-message";
+import {
+  buildSkillChangeMessage,
+  installedAppKind,
+  installedAppRemovedDetail,
+} from "@/lib/skill-change-message";
 
 /**
  * The wording is the whole product here: after a skill change the owner sees
@@ -56,5 +60,142 @@ describe("buildSkillChangeMessage", () => {
     // stripped it before display, so the bubble and the wire disagreed. What
     // the owner reads is now exactly what the agent is asked.
     expect(buildSkillChangeMessage({ action: "install", name: "X" })).not.toContain("[System:");
+  });
+});
+
+/**
+ * TASK-544 — every branch said "skill", and the desktop's uninstall path sends
+ * this event for anything with a tile on it, including a WEBAPP.
+ *
+ * On Hermes that made it wrong every time: `isInstalledAppVisible` hides every
+ * non-webapp there, so a webapp is the only installed app an owner can remove,
+ * while "skill" is a live separate concept with its own store and its own
+ * `skill_uninstall`. The agent was asked to confirm a skill was gone, looked in
+ * the skill list, and answered about the wrong thing — or, on an id collision,
+ * confirmed the removal of a skill that is still installed.
+ */
+describe("buildSkillChangeMessage — what was removed decides what it is called", () => {
+  it("calls a removed webapp an app, and points at the desktop", () => {
+    const msg = buildSkillChangeMessage({ action: "uninstall", name: "Pomodoro", kind: "app" });
+
+    expect(msg).toContain('"Pomodoro"');
+    expect(msg).toMatch(/app/);
+    expect(msg).not.toMatch(/skill/);
+    // `ui_list_apps` is where the agent can actually check.
+    expect(msg).toMatch(/desktop/i);
+  });
+
+  it("carries the id the agent's own lists report, beside the name the owner read", () => {
+    // `ui_list_apps` emits an installed app as `{ id: "installed-<id>", name:
+    // <id> }` and `skill_list` leads with the lock id — the display name is in
+    // neither, so a sentence carrying only the name asks the agent to verify
+    // against a string it can never find, and "confirmed, it's gone" is a guess.
+    const app = buildSkillChangeMessage({ action: "uninstall", name: "Pomodoro", id: "pomodoro-timer", kind: "app" });
+    expect(app).toContain('"Pomodoro"');
+    expect(app).toContain("pomodoro-timer");
+
+    const skill = buildSkillChangeMessage({ action: "uninstall", name: "QR Code Decode", id: "qr-code-decode", kind: "skill" });
+    expect(skill).toContain('"QR Code Decode"');
+    expect(skill).toContain("qr-code-decode");
+  });
+
+  it("does not repeat the id when it is the name", () => {
+    const msg = buildSkillChangeMessage({ action: "uninstall", name: "pdf-tools", id: "pdf-tools", kind: "skill" });
+
+    expect(msg).toBe('I just removed the "pdf-tools" skill. Can you confirm it is gone?');
+  });
+
+  it("says the skill went too when one id was both", () => {
+    // `webapp_create` replaces `installed_meta[<id>]` for any id with no
+    // collision check, and the uninstall route removes BOTH halves. A line
+    // that mentions only the tile hides a capability the owner just lost.
+    const msg = buildSkillChangeMessage({
+      action: "uninstall",
+      name: "Notes",
+      id: "notes",
+      kind: "app",
+      alsoSkill: true,
+    });
+
+    expect(msg).toMatch(/skill/);
+    expect(msg).toMatch(/both are gone/i);
+  });
+
+  it("puts no undefined in the owner's bubble for a kind it does not know", () => {
+    // `kind` arrives from an untyped CustomEvent.detail.
+    const msg = buildSkillChangeMessage({ action: "install", name: "X", kind: "webapp" as never });
+
+    expect(msg).not.toMatch(/undefined/);
+    expect(msg).toContain("skill");
+  });
+
+  it("still calls a removed skill a skill", () => {
+    const msg = buildSkillChangeMessage({ action: "uninstall", name: "PDF Tools", kind: "skill" });
+
+    expect(msg).toContain("skill");
+    expect(msg).not.toMatch(/\bapp\b/);
+  });
+
+  it("reads an event with no kind as a skill, the way every sender meant it before", () => {
+    // An older tab left open across an update still emits the two-field shape.
+    expect(buildSkillChangeMessage({ action: "uninstall", id: "pdf-tools" })).toContain("skill");
+  });
+
+  it.each(["install", "enable", "disable"])("names an app an app on %s too", (action) => {
+    // Defensive: no sender emits `kind: "app"` with these actions today —
+    // `register_webapp` announces nothing (the agent made the webapp itself)
+    // and the enable/disable toggle is unreachable for a webapp. Kept so a
+    // future sender gets the right noun rather than the historical one.
+    const msg = buildSkillChangeMessage({ action, name: "Pomodoro", kind: "app" });
+
+    expect(msg).toMatch(/\bapp\b/);
+    expect(msg).not.toMatch(/skill/);
+  });
+
+  it("never claims the session was refreshed on the app branches either", () => {
+    for (const action of ["install", "uninstall", "enable", "disable"]) {
+      expect(buildSkillChangeMessage({ action, name: "X", kind: "app" })).not.toMatch(/refresh|restart/i);
+    }
+  });
+});
+
+describe("what the desktop sends when it removes an installed app", () => {
+  it("calls a webapp an app", () => {
+    expect(installedAppKind({ webappUrl: "/webapps/pomodoro/index.html" })).toBe("app");
+  });
+
+  it("calls everything else a skill — including an app whose meta the desktop lost", () => {
+    expect(installedAppKind({})).toBe("skill");
+    expect(installedAppKind(undefined)).toBe("skill");
+  });
+
+  it("sends the name off the tile the owner clicked, and the slug beside it", () => {
+    const detail = installedAppRemovedDetail("pomodoro-timer", {
+      name: "Pomodoro",
+      webappUrl: "/webapps/pomodoro/index.html",
+    });
+
+    expect(detail).toEqual({ action: "uninstall", id: "pomodoro-timer", name: "Pomodoro", kind: "app" });
+    expect(buildSkillChangeMessage(detail)).toContain('"Pomodoro"');
+    expect(buildSkillChangeMessage(detail)).toContain("pomodoro-timer");
+  });
+
+  it("carries the route's skillRemoved only when it really said yes", () => {
+    const meta = { name: "Notes", webappUrl: "/webapps/notes/index.html" };
+
+    expect(installedAppRemovedDetail("notes", meta, true).alsoSkill).toBe(true);
+    // `null` is the route saying it could not look — not a removal to announce.
+    expect(installedAppRemovedDetail("notes", meta, null).alsoSkill).toBeUndefined();
+    expect(installedAppRemovedDetail("notes", meta, false).alsoSkill).toBeUndefined();
+    expect(installedAppRemovedDetail("notes", meta).alsoSkill).toBeUndefined();
+    // And never on a skill: there is no second half to have gone.
+    expect(installedAppRemovedDetail("pdf-tools", { name: "PDF" }, true).alsoSkill).toBeUndefined();
+  });
+
+  it("falls back to the id when there is no meta to read a name from", () => {
+    const detail = installedAppRemovedDetail("pdf-tools", undefined);
+
+    expect(detail).toEqual({ action: "uninstall", id: "pdf-tools", kind: "skill" });
+    expect(buildSkillChangeMessage(detail)).toContain('"pdf-tools"');
   });
 });

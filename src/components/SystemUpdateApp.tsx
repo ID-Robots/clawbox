@@ -8,9 +8,30 @@ import type { StepStatus, UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
 
-interface VersionInfo {
-  clawbox: { current: string; target: string | null; updateAvailable?: boolean };
-  openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
+export interface ComponentVersion {
+  current: string | null;
+  target: string | null;
+  updateAvailable?: boolean;
+}
+
+export interface VersionInfo {
+  clawbox: ComponentVersion & { current: string };
+  openclaw: ComponentVersion;
+  // Both optional: a device that has not been updated yet still answers
+  // /update/versions with the old two-key shape, and the Hermes block is
+  // present only on the SKUs that ship Hermes.
+  hermes?: ComponentVersion;
+  edition?: "openclaw" | "hermes" | "dual";
+}
+
+/**
+ * Whether an OpenClaw row is about software this device has. The `hermes` SKU
+ * ships none; `dual` has one even while Hermes is the harness answering. A
+ * payload from a server that predates the `edition` field reads as OpenClaw,
+ * which is what those builds were.
+ */
+export function shipsOpenclaw(versions: VersionInfo | null): boolean {
+  return versions?.edition !== "hermes";
 }
 
 interface BranchInfo {
@@ -334,7 +355,11 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       case "available": {
         const updates: string[] = [];
         if (versions && componentNeedsUpdate(versions.clawbox)) updates.push("ClawBox");
-        if (versions && componentNeedsUpdate(versions.openclaw)) updates.push("OpenClaw");
+        // Guarded by the edition, not only by `updateAvailable`: on the Hermes
+        // SKU that flag is false today only because `openclaw.current` is null,
+        // and a headline offering an OpenClaw update on a box that ships no
+        // OpenClaw is not something to leave resting on that.
+        if (versions && shipsOpenclaw(versions) && componentNeedsUpdate(versions.openclaw)) updates.push("OpenClaw");
         return {
           icon: "system_update", iconClass: "text-emerald-300",
           headline: `${updates.length} update${updates.length === 1 ? "" : "s"} available`,
@@ -447,14 +472,14 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
           </div>
 
           {/* COMPONENTS
-              Only ClawBox is exposed as a standalone update target. OpenClaw
-              is pinned by ClawBox (config/openclaw-target.txt) and bumped
-              automatically inside the full ClawBox update — see
+              Only ClawBox is exposed as a standalone update target. The agent
+              harness is pinned by ClawBox (config/openclaw-target.txt) and
+              bumped automatically inside the full ClawBox update — see
               install.sh::step_openclaw_install. Surfacing a separate
               OpenClaw card would let customers bypass the pin and pick
               whatever was last published to npm, which is what we just
-              moved away from. The OpenClaw version is still shown in the
-              ClawBox card's release notes / version-info section. */}
+              moved away from. The installed harness version is reported
+              below the card instead: read-only, no second update button. */}
           {versions && status !== "updating" && status !== "completed" && status !== "failed" && (
             <div className="grid grid-cols-1 gap-3">
               <ComponentCard
@@ -467,6 +492,11 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
               />
             </div>
           )}
+
+          {/* Outside the gate above: "Update complete" is exactly when an owner
+              wants to read the version their agent came back on, and the
+              components block is hidden in that state. */}
+          {versions && <AgentVersions versions={versions} />}
 
           {/* PROGRESS */}
           {(status === "updating" || status === "completed" || status === "failed") && (
@@ -682,6 +712,72 @@ function ConfirmModal({
             {confirmLabel}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The harness this box actually runs, read-only.
+ *
+ * TASK-548: this screen is where an owner goes to ask "what version am I on",
+ * and it named only ClawBox — so a Hermes owner could read their agent's
+ * version in Settings -> About and nowhere here. The rows follow the same
+ * per-edition rule About uses: OpenClaw unless the SKU is `hermes`, Hermes
+ * whenever the payload carries it.
+ *
+ * BOTH harnesses are pinned by ClawBox and bumped inside the full update —
+ * OpenClaw by `config/openclaw-target.txt`, Hermes by `HERMES_PIN_COMMIT` in
+ * install.sh, which `step_hermes_install` re-checks on every update — so the
+ * note is the same for both. There is no way for an owner to update either one
+ * on its own, and telling them otherwise sends them looking for a button that
+ * does not exist.
+ *
+ * `format` per row, not one shared call: `hermes.current` has already been
+ * normalised server-side by `parseHermesVersion`, whose whole reason for
+ * existing is that `cleanVersion`'s rules are shaped for OpenClaw/git-describe
+ * output. Running the second parser over the first one's result turned
+ * "Hermes Agent (dev build)" into "Hermes Agent" here while About, reading the
+ * same field raw, kept it — two windows the desktop can show side by side.
+ */
+function AgentVersions({ versions }: { versions: VersionInfo }) {
+  const rows: { name: string; version: string | null; note: string }[] = [];
+  if (shipsOpenclaw(versions)) {
+    rows.push({
+      name: "OpenClaw",
+      version: cleanVersion(versions.openclaw.current) || versions.openclaw.current,
+      note: "Pinned by ClawBox — updated with it",
+    });
+  }
+  if (versions.hermes) {
+    rows.push({
+      name: "Hermes",
+      version: versions.hermes.current,
+      note: "Pinned by ClawBox — updated with it",
+    });
+  }
+  if (!rows.length) return null;
+
+  return (
+    <div className={CARD} data-testid="agent-versions">
+      <div className="text-base font-semibold text-gray-100">Agent</div>
+      <p className="text-xs text-[var(--text-muted)] mt-0.5 mb-3">The assistant harness running on this device</p>
+      <div className="space-y-2">
+        {rows.map((row) => (
+          <div key={row.name} className="flex items-baseline justify-between gap-3 text-xs">
+            <div className="min-w-0">
+              <div className="text-sm text-gray-100">{row.name}</div>
+              <div className="text-[11px] text-[var(--text-muted)]">{row.note}</div>
+            </div>
+            {/* "—", not "not installed": a null version here means the probe
+                failed, never that the harness is absent. The payload only
+                carries a `hermes` block on a box that HAS Hermes, and
+                `hermes --version` does not answer while step_hermes_install is
+                moving the checkout aside mid-update. ComponentCard below says
+                the same nothing the same way. */}
+            <div className="min-w-0 font-mono text-gray-100 truncate">{row.version || "—"}</div>
+          </div>
+        ))}
       </div>
     </div>
   );

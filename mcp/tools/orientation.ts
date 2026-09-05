@@ -123,6 +123,85 @@ function loadFieldGuide(): string | null {
   }
 }
 
+// The name class is deliberately wider than the two values that exist: a typo
+// this pattern does NOT match is not a fence at all, so its block would be
+// served to every box with the marker still in the text. Recognising it is what
+// lets the unknown-name case fail closed.
+const BLOCK_OPEN = /^<!--\s*(edition|ships):([a-z0-9_-]+)\s*-->\s*$/;
+const BLOCK_CLOSE = /^<!--\s*\/(edition|ships)\s*-->\s*$/;
+
+/**
+ * The field guide with the blocks that do not apply to this box removed.
+ *
+ * TASK-540: `clawbox_context` served Clawbox.md verbatim, so a Hermes agent was
+ * oriented by an OpenClaw script — told it was "the brain of an OpenClaw
+ * ClawBox", handed the address of a gateway that is masked on that SKU and the
+ * path of a config file that does not exist there, and offered `bash`,
+ * `write_file`, `web_search` and the rest of the coding family, none of which
+ * is registered on Hermes (`mcp/tools/coding.ts`). `mcp/clawbox-mcp.ts`
+ * `instructionsFor()` had already branched the server's own stub per edition
+ * for exactly this reason; the field guide is the half that had not.
+ *
+ * ONE document, fenced in place, rather than a second file: two files drift
+ * within a release, and the shared four fifths of this guide is the part that
+ * has to stay identical. Everything outside a fence is served to every box.
+ *
+ * TWO fence families, because the guide answers two different questions and
+ * `dual` separates them:
+ *   - `edition:` — the ACTIVE HARNESS, i.e. whose tool set the agent reading
+ *     this was given. `ctx.edition` resolves `dual` to one of the two.
+ *   - `ships:`   — what the DEVICE HAS INSTALLED. A dual box has an OpenClaw
+ *     gateway and a Hermes dashboard, and both blocks are served there. Keying
+ *     the gateway's address on the harness would have told a dual box running
+ *     Hermes that its gateway is gone while it is up and listening.
+ *
+ * Nesting is tracked with a stack: a close restores the enclosing block rather
+ * than declaring the rest of the file unconditional, so a Hermes note added
+ * inside an OpenClaw section cannot hand the OpenClaw remainder to every box.
+ * An unmatched close is ignored; `src/tests/unit/clawbox-field-guide-edition.test.ts`
+ * fails CI on either malformation.
+ *
+ * Fails CLOSED on an unknown name: it matches no box and its block is dropped
+ * everywhere, which costs some text. Serving a block whose audience could not
+ * be established is how the Hermes agent was told it had a gateway.
+ */
+export function fieldGuideForEdition(
+  markdown: string,
+  edition: Ed,
+  install: "openclaw" | "hermes" | "dual" = edition,
+): string {
+  const applies = (family: string, name: string): boolean => {
+    // The name is validated FIRST. `install === "dual"` answers true for every
+    // `ships:` block, so without this an unknown audience would be served on
+    // exactly the SKU that has both harnesses to be wrong about.
+    if (name !== "openclaw" && name !== "hermes") return false;
+    return family === "edition" ? name === edition : name === install || install === "dual";
+  };
+  const kept: string[] = [];
+  const stack: { family: string; keep: boolean }[] = [];
+  for (const line of markdown.split("\n")) {
+    const open = BLOCK_OPEN.exec(line);
+    if (open) {
+      stack.push({ family: open[1], keep: applies(open[1], open[2]) });
+      continue;
+    }
+    const close = BLOCK_CLOSE.exec(line);
+    if (close) {
+      // A `</ships>` closing an `edition:` block is a malformed document. Pop
+      // only a matching frame: leaving the mismatched one open drops the rest
+      // of the file for the wrong audience rather than serving it, and the
+      // suite's well-nesting assertion fails CI on the file itself.
+      if (stack.length && stack[stack.length - 1].family === close[1]) stack.pop();
+      continue;
+    }
+    if (stack.some((frame) => !frame.keep)) continue;
+    kept.push(line);
+  }
+  // A dropped block leaves the blank lines that surrounded it behind. Markdown
+  // does not care, but the agent pays for every one of them.
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
 interface StatsPayload {
   memory?: { usedPercent?: number };
   storage?: { mountpoint?: string; size?: string; used?: string; avail?: string; usePercent?: number }[];
@@ -406,7 +485,8 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: 24_000 },
     async () => {
-      const guide = loadFieldGuide();
+      const raw = loadFieldGuide();
+      const guide = raw === null ? null : fieldGuideForEdition(raw, ctx.edition, ctx.install);
       const parts: string[] = [];
       if (guide && guide.trim()) parts.push(guide);
       else parts.push(`(The device field guide is not installed on this ClawBox.)`);

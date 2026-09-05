@@ -144,6 +144,7 @@ import {
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
   runOpenclawDoctorFix,
+  spawnOpenclawCli,
   applyModelOverrideToAllAgentSessions,
   inferConfiguredLocalModel,
   setProviderPlugins,
@@ -755,5 +756,154 @@ describe("POST /setup-api/ai-models/configure and the gateway doctor --fix stopp
     expect(res.status).toBe(500);
     expect(runOpenclawDoctorFix).not.toHaveBeenCalled();
     expect(restartGateway).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * TASK-662 (the #584 follow-up). `models auth paste-api-key` REPLACES whatever
+ * sits at `--profile-id`, and ClawBox overrides the CLI's own default
+ * (`<provider>:manual`, chosen so a paste never lands on another credential)
+ * with `<provider>:default`. For Anthropic that is the id this route's OWN
+ * subscription lane writes the Claude OAuth bundle to, so connecting Claude by
+ * subscription and pasting an Anthropic key afterwards destroyed the sign-in
+ * with a clean "saved" — a false success over a credential the owner may have
+ * no way to re-create. On OpenAI the same collision needs a migrated box:
+ * `doctor --fix` renames an OpenClaw 1 `openai-codex:*` profile to
+ * `openai:<suffix>`, landing the sign-in at exactly the id the key lane targets.
+ */
+describe("POST /setup-api/ai-models/configure over an existing sign-in", () => {
+  let configurePost: (request: Request) => Promise<Response>;
+
+  beforeEach(async () => {
+    configurePost = await primeConfigureRoute();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * `openclaw models auth list --json` as the store answers it — the shape
+   * measured on 2026.8.1: `{profiles: [{id, provider, type, label,
+   * expiresAt}]}`.
+   *
+   * openclaw.json's `auth.profiles` metadata is deliberately left EMPTY in
+   * these cases. It is what the first draft of this guard read, and it is a
+   * false negative for the credential most worth protecting: `models auth
+   * login` — the Terminal sign-in — writes the store and never
+   * `applyAuthProfileConfig`, so a profile created that way is invisible
+   * there. If the guard ever goes back to the config, these tests go red.
+   */
+  function profilesInStore(profiles: { id: string; provider: string; type: string }[]) {
+    vi.mocked(spawnOpenclawCli).mockImplementation(async (args) =>
+      Array.isArray(args) && args.includes("list") && args.includes("auth")
+        ? JSON.stringify({ profiles })
+        : "",
+    );
+  }
+
+  /** Did the save reach the CLI verb that would have replaced the credential? */
+  function pasteWasSpawned(): boolean {
+    return vi.mocked(spawnOpenclawCli).mock.calls.some(
+      ([args]) => Array.isArray(args) && args.includes("paste-api-key"),
+    );
+  }
+
+  it.each([
+    ["anthropic", "anthropic:default"],
+    ["openai", "openai:default"],
+  ])("refuses an %s API key that would replace the sign-in at %s", async (provider, profileId) => {
+    profilesInStore([{ id: profileId, provider, type: "oauth" }]);
+
+    const res = await configurePost(jsonRequest({ provider, apiKey: "sk-a-real-key" }));
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("sign_in_would_be_lost");
+    expect(body.profileId).toBe(profileId);
+    // The sentence has to be followable literally: it names the slot and the
+    // native verb that clears it.
+    expect(body.error).toContain(profileId);
+    // Followable literally, against the SAME store the guard read: without the
+    // selector the CLI takes the configured default agent, so on a
+    // multi-agent box the owner clears a different store and the refusal
+    // never goes away.
+    expect(body.error).toContain(`openclaw models auth logout --agent main ${profileId}`);
+    // A refusal is not a failure: nothing may have been written on the way to it.
+    expect(pasteWasSpawned()).toBe(false);
+    expectNoSideEffects();
+  });
+
+  it("saves normally over an API-KEY profile at the same id", async () => {
+    // Replacing one API key with another is exactly what the owner asked for.
+    // The guard is about credentials that cannot be pasted back.
+    profilesInStore([{ id: "anthropic:default", provider: "anthropic", type: "api_key" }]);
+
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-a-real-key" }));
+
+    expect(res.status).toBe(200);
+    expect(pasteWasSpawned()).toBe(true);
+  });
+
+  it("reads and writes the SAME agent's credential store", async () => {
+    // `--agent` omitted means "the configured default agent", which is not
+    // necessarily the one ClawBox operates on — and a guard that read one
+    // store while the paste wrote another would be no guard at all. The auth
+    // order over these same profiles already pins it.
+    profilesInStore([{ id: "anthropic:default", provider: "anthropic", type: "api_key" }]);
+
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-a-real-key" }));
+    expect(res.status).toBe(200);
+
+    const args = vi.mocked(spawnOpenclawCli).mock.calls.map(([a]) => a as string[]);
+    const read = args.find((a) => a.includes("auth") && a.includes("list"));
+    const paste = args.find((a) => a.includes("paste-api-key"));
+    for (const call of [read, paste]) {
+      expect(call).toBeDefined();
+      expect(call).toContain("--agent");
+      expect(call?.[(call?.indexOf("--agent") ?? -1) + 1]).toBe("main");
+    }
+  });
+
+  it("fails open on a store that answers something other than a profile list", async () => {
+    // `JSON.parse("null")` succeeds and `null.profiles` throws, which the
+    // handler's catch would turn into a 500 over a save that is perfectly
+    // good. A guard that cannot read the box does not refuse.
+    vi.mocked(spawnOpenclawCli).mockImplementation(async (args) =>
+      Array.isArray(args) && args.includes("list") && args.includes("auth") ? "null" : "",
+    );
+
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-a-real-key" }));
+
+    expect(res.status).toBe(200);
+    expect(pasteWasSpawned()).toBe(true);
+  });
+
+  it("never asks the store on a lane that has no sign-in to lose", async () => {
+    // The read is one CLI cold start on the wizard's critical path, and the
+    // two local providers and the ClawBox AI profile have no OAuth flow at
+    // all. Spending it there would be a slower wizard for nothing.
+    profilesInStore([{ id: "anthropic:default", provider: "anthropic", type: "oauth" }]);
+
+    for (const provider of ["llamacpp", "openrouter"]) {
+      vi.mocked(spawnOpenclawCli).mockClear();
+      const res = await configurePost(jsonRequest({ provider, apiKey: "sk-or-a-real-key" }));
+      expect(res.status).toBe(200);
+      expect(
+        vi.mocked(spawnOpenclawCli).mock.calls.some(
+          ([args]) => Array.isArray(args) && args.includes("auth") && args.includes("list"),
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it("does not refuse the sign-in lane itself", async () => {
+    // Signing in again over an existing sign-in is a refresh, not a loss.
+    profilesInStore([{ id: "anthropic:default", provider: "anthropic", type: "oauth" }]);
+
+    const res = await configurePost(subscribe());
+
+    expect(res.status).toBe(200);
   });
 });

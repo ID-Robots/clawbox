@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getGatewayToken } from "@/lib/gateway-proxy";
 import { getGatewayServiceHealth, type GatewayServiceHealth } from "@/lib/gateway-health";
 import { envPort } from "@/lib/port-probe";
+import { readEditionSource } from "@/lib/edition-source";
 
 export const dynamic = "force-dynamic";
 
@@ -92,12 +93,63 @@ function escapeHtml(value: string): string {
 }
 
 function gatewayOfflineResponse(health: GatewayServiceHealth) {
-  const breaker = health.breakerActive
+  // A unit systemd cannot LOAD is not a unit that is down, and this page used to
+  // tell both stories the same way: "OpenClaw Gateway Offline … not running on
+  // port 18789", with a Retry that can never succeed and a restart command
+  // systemctl refuses outright on a masked unit.
+  //
+  // The BRANCH is systemd's own LoadState, so it is right on a device whose
+  // edition lock cannot be read; only the WORDING consults the edition, and
+  // only where it can say something true.
+  //
+  // `unloadableState` rather than a boolean so the state itself is in scope
+  // below: `masked` is the one value that licenses a claim about WHY (the
+  // Hermes SKU's step_edition_gateway_state, or an update/factory reset holding
+  // the lock), and `not-found` / `error` / `bad-setting` are units that will not
+  // start for reasons this page has not measured.
+  const unloadableState = health.unitLoaded === false ? health.loadState : null;
+  const breaker = health.breakerActive && unloadableState === null
     ? `<p class="breaker" role="alert"><strong>Automatic restart breaker activated.</strong> Repair the configuration, then run <code>sudo systemctl reset-failed clawbox-gateway &amp;&amp; sudo systemctl restart clawbox-gateway</code>.</p>`
     : "";
   const finalError = health.finalStartupError
     ? `<pre>${escapeHtml(health.finalStartupError)}</pre>`
     : "";
+
+  // `readEditionSource`, not `readEdition`/`openclawIsAbsent`: those collapse
+  // "the device said openclaw" and "nothing on this device said anything, so I
+  // guessed openclaw" into one value. A Hermes box whose root-owned lock cannot
+  // be read would then be handed the OpenClaw sentence — the exact false claim
+  // the device-derived branch above exists to avoid — so a guessed edition
+  // names no cause at all.
+  const { edition, defaulted } = readEditionSource();
+  const hermesEdition = !defaulted && edition === "hermes";
+
+  let status = 503;
+  let heading = "OpenClaw Gateway Offline";
+  let detail = `The gateway service is not running on port ${GATEWAY_PORT}.`;
+  // Retrying a device that has no gateway unit at all only repaints the same
+  // page; while the mask is an update's lock it clears on its own, so the button
+  // stays for that case and goes for the SKU that will never have one.
+  let retry = true;
+
+  if (unloadableState !== null) {
+    if (hermesEdition) {
+      // 404, like every other OpenClaw-only path on this SKU (`/api/*`,
+      // `/assets/*`, `/chat`): 503 would tell a monitor or a service worker to
+      // re-poll a condition that cannot change.
+      status = 404;
+      heading = "OpenClaw Is Not Installed";
+      detail = "This device runs the Hermes agent. The OpenClaw gateway is not installed here — open the Hermes app from the desktop instead.";
+      retry = false;
+    } else {
+      heading = "Gateway Unavailable";
+      detail = unloadableState === "masked" && !defaulted
+        ? "The gateway service is masked, so it cannot start. An update or factory reset holds that lock while it runs."
+        : `systemd cannot load <code>clawbox-gateway.service</code> (<code>${escapeHtml(unloadableState)}</code>), so it cannot be started from here.`;
+    }
+  }
+
+  const retryButton = retry ? `<button onclick="location.reload()">Retry</button>` : "";
   const html = `<!DOCTYPE html>
 <html><head><style>
   body { margin:0; height:100vh; display:flex; align-items:center; justify-content:center;
@@ -116,15 +168,15 @@ function gatewayOfflineResponse(health: GatewayServiceHealth) {
   button:hover { background:#334155; }
 </style></head><body>
 <div class="box">
-  <h2>OpenClaw Gateway Offline</h2>
-  <p>The gateway service is not running on port ${GATEWAY_PORT}.</p>
+  <h2>${heading}</h2>
+  <p>${detail}</p>
   ${breaker}
   ${finalError}
-  <button onclick="location.reload()">Retry</button>
+  ${retryButton}
 </div>
 </body></html>`;
   return new NextResponse(html, {
-    status: 503,
+    status,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store, no-cache",

@@ -76,6 +76,7 @@ import {
   chatgptModelRef,
   chatgptRuntimeArmOp,
   chatgptRuntimeEntryPath,
+  isOauthProfile,
   openaiAuthOrder,
 } from "@/lib/chatgpt-subscription";
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
@@ -388,10 +389,124 @@ async function writeAuthProfiles(authProfiles: AuthProfilesFile) {
  * never argv.
  */
 async function pasteAuthApiKey(provider: string, profileId: string, key: string): Promise<void> {
+  // The sign-in guard is NOT here, deliberately: see `assertNoSignInAt`. By
+  // the time this runs the request has already written its own
+  // `auth.profiles.<key>` metadata, and on the ClawBox AI lane that metadata
+  // says `oauth` — a guard reading the box at this point would refuse the very
+  // save that wrote it. It is asked once, of the store as it was BEFORE this
+  // request touched anything.
   await spawnOpenclawCli(
-    ["models", "auth", "paste-api-key", "--provider", provider, "--profile-id", profileId],
+    [
+      "models", "auth", "paste-api-key",
+      // `--agent` omitted means "the configured default agent", which is not
+      // necessarily the one ClawBox operates on. `applyOpenAiAuthOrder` already
+      // pins CLAWBOX_AGENT_ID for the order over these same profiles, and
+      // `assertNoSignInAt` reads with the same pin — a guard that read one
+      // store while the paste wrote another would be no guard at all.
+      "--agent", CLAWBOX_AGENT_ID,
+      "--provider", provider,
+      "--profile-id", profileId,
+    ],
     { stdinData: key + "\n", timeoutMs: 60_000 },
   );
+}
+
+/** A pasted API key would have replaced a subscription sign-in. */
+class SignInWouldBeLostError extends Error {
+  constructor(readonly profileId: string) {
+    super(`auth profile ${profileId} holds a sign-in`);
+    this.name = "SignInWouldBeLostError";
+  }
+}
+
+/**
+ * Refuse a save whose API key would delete a subscription sign-in.
+ *
+ * `models auth paste-api-key` REPLACES whatever sits at `--profile-id`; there
+ * is no merge and no refusal of its own. The CLI's default id is
+ * `<provider>:manual`, chosen so a pasted key never lands on another
+ * credential — ClawBox overrides it to `<provider>:default`, and that override
+ * is what makes a collision possible at all. Measured with `openclaw models
+ * auth list --json` on an OpenClaw box: `anthropic:default` is `oauth` there
+ * TODAY, because this route's own subscription lane writes the OAuth bundle to
+ * it (PROVIDERS has no `subscriptionOverride` for anthropic) and its API-key
+ * lane pastes to the same id. The OpenAI shape needs a migration —
+ * `doctor --fix` renames an OpenClaw 1 `openai-codex:*` profile to
+ * `openai:<suffix>`, landing the ChatGPT sign-in where the key lane targets
+ * (TASK-662, the #584 follow-up).
+ *
+ * ASKED OF THE STORE, not of openclaw.json's `auth.profiles` metadata. The
+ * metadata is a false negative for the one credential most worth protecting:
+ * `models auth login` — the Terminal sign-in — persists to the agent
+ * credential store and never calls `applyAuthProfileConfig`, so a profile
+ * created that way is invisible in the config. `models auth list --json` is
+ * the store's own reader and is what `models auth logout` — the verb this
+ * refusal names — acts on, so the guard and its remedy cannot disagree. It
+ * costs one CLI cold start, which is why it is skipped for the providers that
+ * have no sign-in lane at all.
+ *
+ * ASKED ONCE, BEFORE ANY WRITE. Later in the same request the save writes
+ * `auth.profiles.<key>` itself — `{mode: "oauth"}` on the ClawBox AI lane —
+ * so a guard consulted at paste time would refuse the save that wrote it.
+ *
+ * REFUSED rather than written under a second id. `applyAuthProfileConfig` does
+ * record an order preferring a newly pasted peer, so a second profile is not
+ * the false success it first looked like; the reason to refuse anyway is
+ * narrower and worth stating plainly. A second id silently changes which
+ * credential answers, on a box where ClawBox writes a STORE-level order for
+ * openai (`applyOpenAiAuthOrder`) that outranks the config one and names only
+ * the ids it knows about — so "both survive" would be true for anthropic and
+ * argued for openai. One sentence the owner can act on beats a credential
+ * shuffle he was not shown.
+ *
+ * Fails OPEN: a store that cannot be read does not refuse a save the owner
+ * asked for. The failure is logged, and the paste that follows is the same one
+ * beta performed unconditionally.
+ */
+async function assertNoSignInAt(profileId: string): Promise<void> {
+  // Nothing to lose where there is no OpenClaw auth store: the Hermes SKU
+  // keeps its credentials in the harness's own config and never reaches
+  // `paste-api-key` at all.
+  if (openclawIsAbsent()) return;
+  let raw: string;
+  try {
+    // Same agent as the paste this guards and as the auth order beside it: the
+    // store `--agent` selects is the whole subject of the question.
+    raw = await spawnOpenclawCli(
+      ["models", "auth", "list", "--agent", CLAWBOX_AGENT_ID, "--json"],
+      { captureStdout: true, timeoutMs: 60_000 },
+    );
+  } catch (err) {
+    console.warn(
+      "[configure] could not read the auth profiles before pasting a key:",
+      err instanceof Error ? logSafe(err.message) : err,
+    );
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    console.warn("[configure] `models auth list --json` was not JSON; the key paste is unguarded");
+    return;
+  }
+  // `JSON.parse("null")` succeeds and `null.profiles` throws, which the
+  // handler's own catch would turn into a 500 — the opposite of the fail-open
+  // this guard promises, over a save that is perfectly good.
+  if (!parsed || typeof parsed !== "object") return;
+  const profiles = (parsed as { profiles?: unknown }).profiles;
+  if (!Array.isArray(profiles)) return;
+  // The store's own shape, measured on 2026.8.1:
+  // `{profiles: [{id, provider, type, label, expiresAt}]}`, `type` being
+  // `oauth` or `api_key`. Any OAuth row AT THIS ID counts, whatever provider it
+  // names: the paste replaces the row, so what it would destroy is the
+  // question, not who owns it.
+  const holdsSignIn = profiles.some((row) => {
+    if (!row || typeof row !== "object") return false;
+    const entry = row as { id?: unknown; type?: unknown };
+    return entry.id === profileId && isOauthProfile({ mode: String(entry.type ?? "") });
+  });
+  if (holdsSignIn) throw new SignInWouldBeLostError(profileId);
 }
 
 /**
@@ -1795,6 +1910,25 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // key; the auth mode is what tells the two apart from here on.
     const isChatgptSubscription = authMode === "subscription" && ocProvider === CHATGPT_PROVIDER;
 
+    // BEFORE anything is written, and before this request has put anything of
+    // its own in the store — a refusal is not a failure and must not leave a
+    // trail, and by the time the save reaches the paste it has unpaired
+    // ClawKeep on an account switch, enabled provider plugins and written the
+    // profile metadata. The throw is mapped to a 409 by this handler's own
+    // catch.
+    //
+    // Skipped where no sign-in lane exists: the two local providers have none,
+    // OpenRouter is deliberately absent from OAUTH_PROVIDERS (see the
+    // openrouter branch below — every save that reaches it is key-based), and
+    // the ClawBox AI profile is written by this route alone. It is one CLI cold
+    // start, and this is the wizard's critical path.
+    if (
+      authMode !== "subscription"
+      && !isOllama && !isLlamaCpp && !isClawAI && !isOpenRouter
+    ) {
+      await assertNoSignInAt(config.profileKey);
+    }
+
     // Codex (OpenAI subscription) authenticates with a JWT id_token, and the
     // gateway synthesizes ~/.codex/auth.json from `id` (falling back to
     // `access`). If neither is JWT-shaped, that synthesis produces an invalid
@@ -2988,6 +3122,35 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       .join(" ");
     return NextResponse.json({ success: true, ...(warning ? { warning } : {}) });
   } catch (err) {
+    // The one refusal that is not a failure: the save was REFUSED before
+    // anything was written, and the owner can act on it. Its own status and
+    // code, and the sentence names the credential slot so the Terminal
+    // instruction can be followed literally. Answered before the sanitising
+    // branch below, which would otherwise turn it into "check your
+    // credentials" over a key that is perfectly good (TASK-662).
+    if (err instanceof SignInWouldBeLostError) {
+      console.warn(
+        `[configure] refused an API key that would replace the sign-in at ${err.profileId}`,
+      );
+      return NextResponse.json(
+        {
+          error: "This box is signed in to that provider, and the sign-in is stored in the same "
+            + `credential slot (${err.profileId}). Saving an API key here would delete it. `
+            + "Remove the sign-in first — in the Terminal: "
+            // The same `--agent` the guard read with and the paste writes to.
+            // Without it the CLI takes the configured default agent, so on a
+            // multi-agent box the owner's command clears a different store and
+            // the refusal never goes away. Argument order is the command's own
+            // (`models auth logout [options] <profileId>`, read from its
+            // --help on 2026.8.1).
+            + `openclaw models auth logout --agent ${CLAWBOX_AGENT_ID} ${err.profileId}`
+            + " — then paste the key.",
+          code: "sign_in_would_be_lost",
+          profileId: err.profileId,
+        },
+        { status: 409 },
+      );
+    }
     // Never surface the raw error: it can carry CLI internals and filesystem
     // paths. Log it server-side for diagnosis and return a generic, actionable
     // message (mirrors the sanitized gateway-restart branch above).

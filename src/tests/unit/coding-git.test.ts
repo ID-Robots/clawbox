@@ -152,6 +152,31 @@ describe("recording a run's work", () => {
   });
 });
 
+describe("newestCommitSince", () => {
+  it("answers the run's own commit when it landed after the run started, and nothing otherwise", async () => {
+    const { newestCommitSince } = await import("@/lib/coding-git");
+    const dir = path.join(root, "own");
+    fs.mkdirSync(dir, { recursive: true });
+    // No repository: nothing to answer.
+    expect(await newestCommitSince(dir, Date.now())).toBeNull();
+    git(dir, "init", "--quiet");
+    git(dir, "config", "user.name", "T");
+    git(dir, "config", "user.email", "t@example.com");
+    fs.writeFileSync(path.join(dir, "a.txt"), "a");
+    git(dir, "add", "-A");
+    git(dir, "commit", "--quiet", "-m", "theirs");
+    const sha = git(dir, "rev-parse", "--short", "HEAD");
+    // Committed a moment ago: a run that started an hour ago owns it…
+    expect(await newestCommitSince(dir, Date.now() - 3600_000)).toBe(sha);
+    // …a run that starts in a day does not (a minute of slack aside).
+    expect(await newestCommitSince(dir, Date.now() + 86_400_000)).toBeNull();
+    // A folder INSIDE a repository is not its own: no answer.
+    const nested = path.join(dir, "sub");
+    fs.mkdirSync(nested);
+    expect(await newestCommitSince(nested, Date.now() - 3600_000)).toBeNull();
+  });
+});
+
 describe("the commit message", () => {
   it("carries the task, the summary and the run id", () => {
     const msg = buildCommitMessage({ runId: "run-k3x9q2ab", task: "Add a dark mode toggle\nand keep it accessible", summary: "Edited two files." });

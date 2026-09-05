@@ -33,6 +33,7 @@ import {
   rankFacets,
 } from '@/lib/hermes-skill-facets';
 import { type SkillsCopy, useCopy } from './hermes-skills/copy';
+import { announceSkillChange } from '@/lib/skill-change-message';
 import {
   Alert,
   EmptyState,
@@ -104,7 +105,19 @@ function outcomeOf(err: unknown): 'failed' | 'unknown' {
  * detail cache is keyed by registry identifier, so invalidating only the lock
  * name left a removed skill still reading as installed on its Browse card.
  */
-type UninstallTarget = { name: string; key: string; identifier?: string };
+type UninstallTarget = {
+  /** The lock key — `hermes skills uninstall`'s positional argument. */
+  name: string;
+  key: string;
+  identifier?: string;
+  /**
+   * What the owner READ on the card. A ClawHub row's display name ("QR Code
+   * Decode") is not its lock key ("qr-code-decode"), and the install path
+   * announces the display name — so without this the same skill appeared in
+   * the owner's own transcript under two different names.
+   */
+  label?: string;
+};
 
 /** The fields of an install/uninstall refusal the card reads. */
 type RefusalBody = {
@@ -312,7 +325,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
       // rule is shared with the agent's skill_list/skill_uninstall so the page
       // and the assistant cannot answer one device state two ways.
       if (!match || !isRemovableOrigin(match.origin)) return null;
-      return { name: match.id, key: skill.id, identifier: match.identifier || skill.id };
+      return { name: match.id, key: skill.id, identifier: match.identifier || skill.id, label: match.name || match.id };
     },
     [installed.skills],
   );
@@ -409,6 +422,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         // it has to be told to run again.
         detail.refresh(key);
         setLive(COPY.liveInstalled(skill.name));
+        announceSkillChange({ action: 'install', name: skill.name, id: key, kind: 'skill' });
         await installed.refresh();
       } catch (err) {
         const outcome = outcomeOf(err);
@@ -429,7 +443,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
   );
 
   const doUninstall = useCallback(
-    async ({ name, key, identifier }: UninstallTarget) => {
+    async ({ name, key, identifier, label }: UninstallTarget) => {
       setConfirmUninstall(null);
       setProgress((p) => ({ ...p, [key]: { status: 'working' } }));
       setLive(COPY.liveRemoving(name));
@@ -467,6 +481,10 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         // whatever the button tracked progress under.
         detail.refresh(key, name, identifier);
         setLive(COPY.liveRemoved(name));
+        // The display name in the sentence, the lock key beside it: the lock
+        // key is the string `skill_list` and `skill_uninstall` resolve, so it
+        // is what the agent can actually verify against.
+        announceSkillChange({ action: 'uninstall', name: label ?? name, id: name, kind: 'skill' });
         await installed.refresh();
       } catch (err) {
         const outcome = outcomeOf(err);
@@ -593,7 +611,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         <GhostButton
           tone="danger"
           onClick={() =>
-            setConfirmUninstall({ name: skill.id, key: skill.id, identifier: skill.identifier })
+            setConfirmUninstall({ name: skill.id, key: skill.id, identifier: skill.identifier, label: skill.name || skill.id })
           }
         >
           {COPY.remove}

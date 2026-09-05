@@ -12,7 +12,41 @@ export interface GatewayServiceHealth {
   result: string | null;
   restartCount: number | null;
   finalStartupError: string | null;
+  /**
+   * systemd's own `LoadState` for the unit — "loaded" when there is a unit file
+   * to start, "masked"/"not-found" when there is not.
+   *
+   * `null` means systemctl did not answer, which is not evidence either way.
+   */
+  loadState: string | null;
+  /**
+   * Whether systemd has a unit to start at all: `false` for masked and
+   * not-found, `null` when the question could not be asked.
+   *
+   * Read off the DEVICE rather than inferred from the edition. The Hermes SKU
+   * masks the unit to /dev/null (install.sh step_edition_gateway_state) and an
+   * update or factory reset masks it on any SKU while it holds the lock — and
+   * `systemctl restart` refuses a masked unit in both cases, so advice built on
+   * a guessed edition would be wrong on the box whose lock file cannot be read.
+   */
+  unitLoaded: boolean | null;
 }
+
+/**
+ * The properties `systemctl show` is asked for.
+ *
+ * Exported so the query and the parser cannot drift: a parser that reads a
+ * property this list omits answers `undefined` forever, silently, and the
+ * branch that depends on it never runs.
+ */
+export const GATEWAY_SHOW_PROPERTIES = [
+  "LoadState",
+  "ActiveState",
+  "SubState",
+  "Result",
+  "NRestarts",
+  "InvocationID",
+] as const;
 
 export function parseGatewaySystemctlProperties(output: string): Omit<GatewayServiceHealth, "finalStartupError"> {
   const properties: Record<string, string> = Object.fromEntries(
@@ -26,6 +60,7 @@ export function parseGatewaySystemctlProperties(output: string): Omit<GatewaySer
       }),
   );
   const restartCount = Number.parseInt(properties.NRestarts ?? "", 10);
+  const loadState = properties.LoadState || null;
   return {
     active: properties.ActiveState === "active",
     // systemd 249 (Ubuntu 22.04) exposes rate limiting through the documented
@@ -35,6 +70,12 @@ export function parseGatewaySystemctlProperties(output: string): Omit<GatewaySer
     subState: properties.SubState || null,
     result: properties.Result || null,
     restartCount: Number.isFinite(restartCount) ? restartCount : null,
+    loadState,
+    // Only "loaded" is a unit systemd can act on. "masked" and "not-found" are
+    // the two this device produces; every other LoadState ("error",
+    // "bad-setting", "stub") is also a unit that will not start, so the test is
+    // written as "loaded or nothing" rather than as a list of bad values.
+    unitLoaded: loadState === null ? null : loadState === "loaded",
   };
 }
 
@@ -86,7 +127,7 @@ export async function getGatewayServiceHealth(): Promise<GatewayServiceHealth> {
       [
         "show",
         GATEWAY_UNIT,
-        "--property=ActiveState,SubState,Result,NRestarts,InvocationID",
+        `--property=${GATEWAY_SHOW_PROPERTIES.join(",")}`,
         "--no-pager",
       ],
       { timeout: 2_000 },
@@ -124,6 +165,11 @@ export async function getGatewayServiceHealth(): Promise<GatewayServiceHealth> {
       result: null,
       restartCount: null,
       finalStartupError: null,
+      loadState: null,
+      // systemctl itself did not answer. Not knowing whether the unit exists is
+      // not the same as knowing it does not, so the caller keeps its ordinary
+      // "offline" page rather than claiming the gateway is not installed.
+      unitLoaded: null,
     };
   }
 }

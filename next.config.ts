@@ -60,6 +60,19 @@ const nextConfig: NextConfig = {
   // are still open — Next copies those two traces with no error handling,
   // where the page traces are wrapped — and closing them means keeping the
   // paths out of the trace at the source, not another glob.
+  //
+  // How wide the instrumentation half is, measured on Next 16.3.3 (TASK-725):
+  // src/instrumentation-node.ts resolves path.join(CONFIG_ROOT, 'scripts',
+  // 'terminal-server.mjs') and CONFIG_ROOT is read from the environment
+  // (src/lib/config-store.ts), so @vercel/nft cannot resolve it and emits the
+  // WHOLE project directory as an asset directory. instrumentation.js.nft.json
+  // listed 6186 files — src/, scripts/, bench/, docs-site/, e2e/, .git … and,
+  // during an update, all 4202 files of the previous build parked at
+  // `.next-old`. That is where `.next/standalone/.next-old/standalone/server.js`
+  // comes from, which scripts/postbuild.sh now removes and refuses to mistake
+  // for this build's entry. Narrowing the sweep is a separate change: parts of
+  // it are load-bearing today (`.next/standalone/scripts` comes from it, and
+  // system-profile.ts resolves scripts/ from the process cwd).
   outputFileTracingExcludes: {
     // No "./" prefix: Next matches these globs relative to the tracing root,
     // and "./data/**" silently matched nothing — the build kept dying on

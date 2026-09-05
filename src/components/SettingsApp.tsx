@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import SystemUpdateApp, { componentNeedsUpdate } from "@/components/SystemUpdateApp";
+import SystemUpdateApp, { componentNeedsUpdate, shipsOpenclaw, type VersionInfo } from "@/components/SystemUpdateApp";
 import Image from "next/image";
 import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
@@ -582,14 +582,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
      itself — its run, the beta channel, the branch pin, the force — is the
      System Update page (SystemUpdateApp, embedded), not state of this
      component any more. ── */
-  const [versionInfo, setVersionInfo] = useState<{
-    clawbox: { current: string; target: string | null; updateAvailable?: boolean };
-    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
-    // Both optional: a device that has not been updated yet still answers
-    // /update/versions with the old two-key shape.
-    hermes?: { current: string | null; target: string | null; updateAvailable?: boolean };
-    edition?: "openclaw" | "hermes" | "dual";
-  } | null>(null);
+  // The shape and the per-edition rule come from SystemUpdateApp, the other
+  // reader of this payload. They were restated here, and the two panels had
+  // already drifted three ways by the time TASK-548 lined them up.
+  const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
 
   // Load version info on mount
   useEffect(() => {
@@ -1263,6 +1259,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [tgConfiguring, setTgConfiguring] = useState(false);
   const [tgStatus, setTgStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [tgConfigured, setTgConfigured] = useState<boolean | null>(null);
+  /**
+   * Whether Telegram is actually RECEIVING, as `/setup-api/telegram/status`
+   * reports it — `configured && gateway.running` on Hermes.
+   *
+   * TRI-STATE, and the third state is the point: the OpenClaw branch of that
+   * route answers `{ configured: true, ...info }` with no `receiving` key at
+   * all, so a missing field means "this box cannot say", never "no". Reading
+   * it as false would blank the dot on every OpenClaw box — the same false
+   * failure inverted.
+   */
+  const [tgReceiving, setTgReceiving] = useState<boolean | null>(null);
   const [tgBotInfo, setTgBotInfo] = useState<{ username?: string; firstName?: string; link?: string } | null>(null);
   const [tgReconfigure, setTgReconfigure] = useState(false);
   // Promise the overlay awaits before declaring "ready". Resolves when
@@ -1304,6 +1311,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       const d = await r.json();
       if (!isCurrent()) return;
       setTgConfigured(d.configured ?? false);
+      setTgReceiving(typeof d.receiving === "boolean" ? d.receiving : null);
       if (d.configured && d.username) {
         setTgBotInfo({ username: d.username, firstName: d.firstName, link: d.link });
       } else {
@@ -2341,6 +2349,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [dcSaving, setDcSaving] = useState(false);
   const [dcStatus, setDcStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [dcConfigured, setDcConfigured] = useState<boolean | null>(null);
+  /** As `/setup-api/discord/status` reports it (`state === "connected"`). Tri-state, see `tgReceiving`. */
+  const [dcReceiving, setDcReceiving] = useState<boolean | null>(null);
   const [dcBotName, setDcBotName] = useState<string | null>(null);
   // Discord itself said the stored token is dead — surfaced even while the
   // section otherwise reads "configured", because nothing else would explain a
@@ -2379,6 +2389,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       const d = await r.json();
       if (!isCurrent()) return;
       setDcConfigured(d.configured ?? false);
+      setDcReceiving(typeof d.receiving === "boolean" ? d.receiving : null);
       setDcBotName(typeof d.username === "string" ? d.username : null);
       setDcTokenRejected(d.tokenRejected === true);
       setDcState(isDiscordState(d.state) ? d.state : null);
@@ -3685,7 +3696,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]" data-testid="settings-channels-list">
                 {CHANNEL_ITEMS.map((item) => {
                   const state = channelState(item.id);
-                  const connected = state === "connected";
+                  // The account IS set up in both states; only one of them is
+                  // carrying traffic. The icon follows the account, the dot
+                  // follows the traffic.
+                  const configured = state === "connected" || state === "silent";
                   const { subtitle } = sectionStatus(item.id);
                   const refreshChannel = {
                     telegram: refreshTelegramStatus,
@@ -3716,7 +3730,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                             row's accessible name began "chat", "send", "mail",
                             "forum" — read out before the channel's own name. */}
                         <span className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06]" aria-hidden="true">
-                          <span className="material-symbols-rounded" style={{ fontSize: 20, color: connected ? "var(--coral-bright)" : "var(--text-muted)" }}>
+                          <span className="material-symbols-rounded" style={{ fontSize: 20, color: configured ? "var(--coral-bright)" : "var(--text-muted)" }}>
                             {item.icon}
                           </span>
                         </span>
@@ -3740,14 +3754,22 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                                 : (subtitle ?? t(item.hintKey))}
                           </span>
                         </span>
-                        {/* A mark per state: set up, still asking, and asked but
-                            unanswered. "Still asking" used to look exactly like
-                            "nothing there", which is the bug this row had. The
-                            dot means the channel is CONFIGURED, not that traffic
-                            is flowing — `channelConnected` does not read the
-                            routes' `receiving` field (TASK-693). */}
-                        {connected ? (
+                        {/* A mark per state: receiving, set up but silent,
+                            still asking, and asked but unanswered. "Still
+                            asking" used to look exactly like "nothing there",
+                            which is the bug this row had; the emerald dot used
+                            to mean CONFIGURED, which is the one this one fixes
+                            — on Discord it sat beside the word "Offline" in the
+                            same row. The dot is decoration (`aria-hidden`), so
+                            the state reaches assistive tech through the
+                            subtitle above it, which every branch words. */}
+                        {state === "connected" ? (
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" aria-hidden="true" />
+                        ) : state === "silent" ? (
+                          /* Full opacity, like the emerald beside it: the two
+                             "we cannot say" dots are the faded ones
+                             (`white/25`), and this is a definite answer. */
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" aria-hidden="true" />
                         ) : state === "unknown" ? (
                           <span
                             className="w-1.5 h-1.5 rounded-full bg-white/25 shrink-0 animate-pulse motion-reduce:animate-none"
@@ -5751,7 +5773,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     actually runs instead; `dual` has both, so it shows both.
                     A server that predates the `edition` field falls through to
                     the OpenClaw row exactly as before. */}
-                {versionInfo?.edition !== "hermes" && (
+                {shipsOpenclaw(versionInfo) && (
                   <div className="flex justify-between text-sm">
                     <span className="text-[var(--text-muted)]">OpenClaw</span>
                     <span className="text-[var(--text-primary)]">{cleanVersion(versionInfo?.openclaw.current) ?? t("settings.notInstalled")}</span>
@@ -5873,16 +5895,46 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   };
 
   /**
+   * Is this channel actually RECEIVING — as its own status route reports it,
+   * not as ClawBox infers it?
+   *
+   * `null` means the route did not say, and that is a real third answer rather
+   * than a no: the OpenClaw branch of `/setup-api/telegram/status` publishes no
+   * `receiving` key, and neither does `/setup-api/email/status`, whose mailbox
+   * modes are a different question ("answer senders" is `inbound`, and a box
+   * that only sends is not broken). Treating a missing field as false would
+   * blank the dot on every OpenClaw box.
+   */
+  const channelReceiving = (id: ChannelSection): boolean | null => {
+    switch (id) {
+      case "telegram": return tgReceiving;
+      case "email": return null;
+      case "whatsapp": return waStatus?.receiving ?? null;
+      case "discord": return dcReceiving;
+    }
+  };
+
+  /**
    * The states a channel row may honestly be in.
    *
    * `unknown` and `unreachable` are both "we cannot say", but only one of them
    * is still being worked on: pulsing at the owner after the read has already
    * failed would be its own small lie.
+   *
+   * `silent` is CONFIGURED AND NOT RECEIVING, and it is the state this hub
+   * shipped without: a Hermes box with the bot saved and `hermes gateway`
+   * stopped drew the emerald dot anyway, and on Discord that dot sat in the
+   * same row as the subtitle "Offline", contradicting the words beside it. It
+   * is deliberately NOT counted as disconnected — the account is set up, and
+   * the "N connected" count still asks `channelConnected`.
    */
   const channelState = (
     id: ChannelSection,
-  ): "connected" | "not-configured" | "unknown" | "unreachable" => {
-    if (channelStatusKnown(id)) return channelConnected(id) ? "connected" : "not-configured";
+  ): "connected" | "silent" | "not-configured" | "unknown" | "unreachable" => {
+    if (channelStatusKnown(id)) {
+      if (!channelConnected(id)) return "not-configured";
+      return channelReceiving(id) === false ? "silent" : "connected";
+    }
     // Nothing known, and a read is outstanding (or has never run) — including
     // one a Retry just started. Only once it has settled with nothing to show
     // may the row say the channel could not be read.
@@ -5940,6 +5992,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       case "telegram": {
         if (tgConfigured === null) return { subtitle: null };
         if (!tgConfigured) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        // A channel that is set up and not listening outranks the bot's name,
+        // the way Discord's own states already outrank it below: this line is
+        // what carries the fact to a screen reader, since the dot is
+        // decoration. WhatsApp and Discord already word their own.
+        if (tgReceiving === false) return { subtitle: t("settings.channelNotReceiving") };
         return { subtitle: tgBotInfo?.username ? `@${tgBotInfo.username}` : (t("settings.botConnected") || "Connected") };
       }
       case "email": {

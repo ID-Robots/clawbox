@@ -92,7 +92,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 |---|---|
 | `device_status` | Edition, agent, the device's **default** AI provider/model/thinking (`ai.device_default` — a chat may run a per-session override, and `ai.current_chat` says the tool cannot see it), configured context/output limits, free disk, update waiting. One call, independent timeouts, dead legs report `"unknown"`. |
 | `clawbox_health` | Is the device API reachable and is our token accepted. Separates auth from connectivity. |
-| `clawbox_context` | The device field guide plus the webapp storage/styling rules. |
+| `clawbox_context` | The device field guide plus the webapp storage/styling rules. The guide is one file, `Clawbox.md`, filtered before it is served: `<!-- edition:… -->` blocks follow the ACTIVE HARNESS (tool sets) and `<!-- ships:… -->` blocks follow the INSTALL (what the device has), so a `dual` box is told about both harnesses and a Hermes agent is never handed the OpenClaw toolbelt. |
 
 ### Hermes skills (Hermes only)
 `skill_search` · `skill_info` · `skill_install` · `skill_list` · `skill_uninstall`
