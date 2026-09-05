@@ -100,7 +100,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("a project's page carries its files and changes, and a run's page its breadcrumb, browser preview and live view", async ({ page }) => {
-  const saves: unknown[] = [];
+  saves.length = 0;
   await page.goto("/");
   await expect(page.getByTestId("desktop-root")).toBeVisible();
   await page.getByTestId("shelf-app-coding").click();
