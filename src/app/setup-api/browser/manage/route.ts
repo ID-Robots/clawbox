@@ -8,6 +8,7 @@ import fs from "fs/promises";
 import path from "path";
 import type { OpenClawConfig } from "@/lib/openclaw-config";
 import { openclawIsAbsent, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
+import { CONFIG_ROOT } from "@/lib/config-store";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { findClawboxBrowserPids, terminateClawboxBrowser, terminateForeignCdpBrowser } from "@/lib/process-match";
 import { findPlaywrightChromium } from "@/lib/cdp-probe";
@@ -60,7 +61,17 @@ function integrationIsAlwaysOn(): boolean {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 async function installPlaywrightChromium(): Promise<void> {
-  const playwrightBin = path.join(process.cwd(), "node_modules", ".bin", "playwright");
+  // The checkout, not the cwd. In production the cwd is `.next/standalone`
+  // (Next's standalone server.js chdirs there) and scripts/postbuild.sh copies
+  // only the `playwright` and `playwright-core` PACKAGES into that tree — it
+  // creates no `node_modules/.bin` — so this path was a guaranteed ENOENT on
+  // every box. The caller swallows that into a console.warn and still answers
+  // `{ ok: true }` off whatever apt/snap Chromium is around, which on Ubuntu
+  // 24.04 is the snap wrapper `isServiceSafeChromium()` refuses: the one
+  // browser that would have worked could never be installed. Measured
+  // read-only on the OpenClaw box 2026-09-05 — present and executable in the
+  // checkout, absent under `.next/standalone`.
+  const playwrightBin = path.join(CONFIG_ROOT, "node_modules", ".bin", "playwright");
   await fs.access(playwrightBin, fsConstants.X_OK);
   await exec(playwrightBin, ["install", "chromium"], {
     timeout: 300000,

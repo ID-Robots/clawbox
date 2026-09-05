@@ -56,7 +56,9 @@ import { openclawIsAbsent, readConfig, restartGateway, runOpenclawConfigSet } fr
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { findPlaywrightChromium } from "@/lib/cdp-probe";
 import fs from "fs/promises";
+import path from "path";
 import { promisify } from "util";
+import { CONFIG_ROOT } from "@/lib/config-store";
 
 describe("/setup-api/browser/manage", () => {
   let GET: () => Promise<Response>;
@@ -264,6 +266,34 @@ describe("/setup-api/browser/manage", () => {
       const res = await POST(req);
       // Will fail since all install methods fail
       expect(res.status).toBe(500);
+    });
+
+    /**
+     * TASK-682 — the Playwright CLI is looked for in the CHECKOUT, not the cwd.
+     *
+     * In production the cwd is `.next/standalone` (Next's standalone server.js
+     * chdirs there) and scripts/postbuild.sh copies only the `playwright` and
+     * `playwright-core` PACKAGES into that tree — no `node_modules/.bin`. So
+     * `path.join(process.cwd(), "node_modules", ".bin", "playwright")` was a
+     * guaranteed ENOENT on every box, the failure was swallowed into a
+     * console.warn, and the route still answered `{ ok: true }` off whatever
+     * apt/snap Chromium was around. Measured read-only on the OpenClaw box
+     * 2026-09-05: `node_modules/.bin/playwright` is present and executable in
+     * the checkout, and absent under `.next/standalone`.
+     */
+    it("looks for the Playwright CLI in the checkout, not in the build output", async () => {
+      const mockExec = vi.fn().mockRejectedValue(new Error("install failed"));
+      vi.mocked(promisify).mockReturnValue(mockExec as never);
+      const req = new Request("http://localhost/setup-api/browser/manage", {
+        method: "POST",
+        body: JSON.stringify({ action: "install-chromium" }),
+      });
+      await POST(req);
+
+      const looked = vi.mocked(fs.access).mock.calls.map(([p]) => String(p));
+      expect(looked).toContain(
+        path.join(CONFIG_ROOT, "node_modules", ".bin", "playwright"),
+      );
     });
 
     it("handles enable action without chromium", async () => {

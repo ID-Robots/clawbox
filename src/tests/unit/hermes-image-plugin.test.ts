@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { saveEnv } from "@/tests/helpers/env";
 import fs from "fs";
 import os from "os";
@@ -8,6 +8,7 @@ import {
   HERMES_IMAGE_PLUGIN_NAME,
   hermesImagePluginDir,
   hermesImagePluginInstalled,
+  hermesImagePluginSourceDir,
   installHermesImagePlugin,
   mergePluginsEnabled,
   decodePluginsEnabledJson,
@@ -39,6 +40,37 @@ describe("installing the ClawBox AI image backend", () => {
   afterEach(() => {
     restoreEnv();
     fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  /**
+   * On a box the source of this plugin is the CHECKOUT, and the production
+   * server's cwd is not the checkout: Next's standalone `server.js` chdirs into
+   * `.next/standalone`. Reading it from the cwd installed whatever @vercel/nft
+   * had traced into the build output — a copy that only refreshes on a full
+   * rebuild, so an update that shipped a fixed plugin could install the old one.
+   *
+   * The RESOLVED PATH is what is pinned, not a filesystem outcome: on a box
+   * `/home/clawbox/clawbox/scripts/hermes-plugins/...` exists, so a case that
+   * asserted the install fails would pass on this PC and fail on the hardware
+   * ClawBox is tested on.
+   */
+  it("resolves the plugin source from the install root, never from the cwd", () => {
+    process.env.CLAWBOX_ROOT = "/srv/clawbox-elsewhere";
+    expect(hermesImagePluginSourceDir()).toBe(
+      path.join("/srv/clawbox-elsewhere", "scripts", "hermes-plugins", "image_gen", HERMES_IMAGE_PLUGIN_NAME),
+    );
+
+    // With no CLAWBOX_ROOT, production resolves the install path — not the cwd,
+    // which under the standalone server is `.next/standalone`.
+    delete process.env.CLAWBOX_ROOT;
+    vi.stubEnv("NODE_ENV", "production");
+    try {
+      expect(hermesImagePluginSourceDir()).toBe(
+        path.join("/home/clawbox/clawbox", "scripts", "hermes-plugins", "image_gen", HERMES_IMAGE_PLUGIN_NAME),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("puts the manifest and the entry point where Hermes discovers plugins", async () => {
