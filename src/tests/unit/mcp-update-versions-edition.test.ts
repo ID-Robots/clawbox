@@ -170,6 +170,39 @@ describe("update_check and device_status agree about the OpenClaw block", () => 
   });
 });
 
+describe("device_status names the harness this box actually runs", () => {
+  const versions = (edition: Install) =>
+    apiTry.mockImplementation(async (route: unknown) =>
+      route === "/setup-api/update/versions" ? payload(edition) : null,
+    );
+
+  async function update(edition: "openclaw" | "hermes", install: Install) {
+    versions(install);
+    const { update: block } = await deviceStatus(edition, install);
+    if (typeof block === "string") throw new Error("versions leg returned nothing");
+    return block;
+  }
+
+  it("reports the Hermes version on the Hermes SKU", async () => {
+    // The tool the server's instructions tell every model to call FIRST. With
+    // no answer here, "what version of Hermes am I running" is answered from
+    // training memory.
+    expect(await update("hermes", "hermes")).toMatchObject({
+      hermes: { current: "0.20.5", target: null, updateAvailable: false },
+    });
+  });
+
+  it("reports it on dual too, beside the OpenClaw block", async () => {
+    const block = await update("hermes", "dual");
+    expect(block).toHaveProperty("hermes");
+    expect(block).toHaveProperty("openclaw");
+  });
+
+  it("says nothing about Hermes on a SKU that does not ship it", async () => {
+    expect(await update("openclaw", "openclaw")).not.toHaveProperty("hermes");
+  });
+});
+
 describe("device_status — an OpenClaw pin delta is an update waiting on the SKUs that have one", () => {
   const versions = (edition: Install) =>
     apiTry.mockImplementation(async (route: unknown) =>
