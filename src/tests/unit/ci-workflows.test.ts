@@ -96,19 +96,34 @@ describe("the checks CI runs, and their blocking status", () => {
   const tests = read(".github/workflows/pr-tests-coverage.yml");
 
   /**
-   * One step of a job, from its `- name:` to the next one.
+   * One step of a job, from its `- name:` to the next one, COMMENTS REMOVED.
    *
    * Bounded at the NEXT step, or the slice runs to end-of-file and every
    * assertion below is satisfied by some other step's keys — measured: without
    * the bound, moving `continue-on-error` to the Test step left the lint case
    * green.
+   *
+   * And the comments go, because that bound puts a step's DOCUMENTATION inside
+   * the PREVIOUS step's slice: a comment block sits above the `- name:` it
+   * describes. This workflow's lint comment names `continue-on-error` twice, so
+   * over the raw slice the `Test` step read as advisory and could not be pinned
+   * at all — which is why `continue-on-error: true` on it left every case here
+   * green. The same coupling let any harmless comment false-fail the step above
+   * it, with a message accusing a step nobody touched.
+   *
+   * Anchored on the `run:` LINE where the step has one, for the mirror-image
+   * reason: `indexOf` takes the first occurrence anywhere in the file, and a
+   * comment that quotes a command would anchor the slice on some other step.
+   * The multi-line lint step writes `run: |` and names its command below, so
+   * the bare command stays as the fallback.
    */
   function step(command: string): string {
-    const at = tests.indexOf(command);
+    const at = [tests.indexOf(`run: ${command}`), tests.indexOf(command)].find((i) => i > -1) ?? -1;
     expect(at, `${command} appears nowhere in the workflow`).toBeGreaterThan(-1);
     const start = tests.lastIndexOf("- name:", at);
     const next = tests.indexOf("- name:", start + 1);
-    return tests.slice(start, next === -1 ? undefined : next);
+    return tests.slice(start, next === -1 ? undefined : next)
+      .split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
   }
 
   /**
@@ -138,6 +153,22 @@ describe("the checks CI runs, and their blocking status", () => {
 
   it("checks the MCP tool contract, blocking", () => {
     runsBlocking("bun run check:mcp-tools");
+  });
+
+  it("runs the suite itself, blocking", () => {
+    // The step this whole workflow exists for, and the one the pinning test did
+    // not pin: `continue-on-error: true` here keeps the job green, so
+    // `needs.test.result` reaches the `comment` job as `success` and the PR
+    // comment renders "Tests — Result: passed" over a red suite of 11 000+
+    // tests. Measured on the first revision of this guard: adding that key to
+    // the Test step left all eleven cases green.
+    runsBlocking("bun run test:coverage:ci");
+  });
+
+  it("checks the sudoers allow-list, blocking", () => {
+    // A privilege boundary, and the third blocking step here. It was as
+    // unpinned as the suite was.
+    runsBlocking("bun run check:sudoers");
   });
 
   it("runs eslint, and says out loud that it is advisory", () => {
@@ -198,6 +229,26 @@ describe("the checks CI runs, and their blocking status", () => {
     // `paths:`/`paths-ignore:`/`types:` filter would exempt whole classes of PR
     // from every check above, and nothing else here would notice.
     expect(tests.slice(0, jobsAt)).toMatch(/\non:\n {2}pull_request:\n(?! {4})/);
+  });
+
+  it("does not report a suite that never ran as a suite that failed", () => {
+    // The other direction of the same untrustworthy sentence. `needs.test.result`
+    // is the JOB's verdict, so a blocking step ahead of vitest — sudoers, the
+    // MCP typecheck, the MCP tool contract — failing rendered
+    // "## ❌ Tests — Result: **failed**" over a suite that never started: a
+    // false failure over an operation never attempted, and the mirror image of
+    // the "passed" the case above closes.
+    //
+    // The step's own outcome is what settles it, so it has to be an id, an
+    // output, and a branch — all three, or the comment silently falls back to
+    // the job verdict.
+    expect(step("bun run test:coverage:ci")).toMatch(/^\s+id: suite$/m);
+    expect(tests).toMatch(/^\s+suite: \$\{\{ steps\.suite\.outcome \}\}$/m);
+    expect(tests).toMatch(/SUITE_OUTCOME: \$\{\{ needs\.test\.outputs\.suite \}\}/);
+    // Only an outcome the suite itself produced may be read as a verdict;
+    // skipped, cancelled and an unevaluated output must not become "failed".
+    expect(tests).toMatch(/SUITE_OUTCOME === 'success' \|\| process\.env\.SUITE_OUTCOME === 'failure'/);
+    expect(tests).toContain("did not run");
   });
 
   it("runs the advisory step after the suite it must not delay", () => {

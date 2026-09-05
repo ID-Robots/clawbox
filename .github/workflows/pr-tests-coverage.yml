@@ -22,6 +22,14 @@ jobs:
     # day" true without weakening the 5 s default everywhere else. TASK-702.
     timeout-minutes: 30
     outputs:
+      # Whether the SUITE itself reported, as distinct from whether the job
+      # passed. A blocking step before it — sudoers, MCP typecheck, MCP tool
+      # contract — failing means vitest never ran, and the comment below used to
+      # render "Tests — Result: failed" over an operation never attempted. Read
+      # as: success / failure / anything else, where anything else (skipped,
+      # cancelled, or an outcome the runner could not evaluate) is "did not
+      # report" rather than a verdict invented here.
+      suite: ${{ steps.suite.outcome }}
       found: ${{ steps.coverage.outputs.found }}
       statements: ${{ steps.coverage.outputs.statements }}
       branches: ${{ steps.coverage.outputs.branches }}
@@ -72,6 +80,7 @@ jobs:
       # Writing the other ~590 files and printing the table bought nothing but a
       # few seconds and 600 lines of job log nobody scrolls through.
       - name: Test
+        id: suite
         run: bun run test:coverage:ci
 
       # ADVISORY, deliberately, and this is the decision the card asked for:
@@ -92,8 +101,12 @@ jobs:
       # crashed one would otherwise write the same "no summary line" sentence,
       # and the day the ratchet succeeds every PR would read like a broken step.
       #
-      # AFTER the suite: it is the only non-blocking step here, and running it
-      # first delayed the verdict a reviewer is actually waiting for.
+      # AFTER the suite, for the step LOG rather than for the verdict: the
+      # `comment` job `needs: test` and so waits for this step either way
+      # (measured at 1m56s for `bun run lint`), which is why moving it does not
+      # deliver the PR comment any sooner. What it buys is that the suite's own
+      # output and annotations land first, instead of a reader scrolling past
+      # 141 advisory lint problems to reach the failure they came for.
       - name: Lint (advisory)
         if: always()
         continue-on-error: true
@@ -151,6 +164,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           TEST_RESULT: ${{ needs.test.result }}
+          SUITE_OUTCOME: ${{ needs.test.outputs.suite }}
           COVERAGE_FOUND: ${{ needs.test.outputs.found }}
           COVERAGE_STATEMENTS: ${{ needs.test.outputs.statements }}
           COVERAGE_BRANCHES: ${{ needs.test.outputs.branches }}
@@ -164,9 +178,19 @@ jobs:
             const e2eStart = '<!-- clawbox-ci-e2e:start -->';
             const e2eEnd = '<!-- clawbox-ci-e2e:end -->';
             const ok = process.env.TEST_RESULT === 'success';
-            const icon = ok ? '✅' : '❌';
+            // "failed" is a claim about the SUITE, so only say it when the suite
+            // actually reported one. A blocking step before it — sudoers, MCP
+            // typecheck, MCP tool contract — failing leaves vitest unrun, and
+            // reporting that as "Tests failed" is a false failure over an
+            // operation never attempted; so is a cancelled job.
+            const ran = process.env.SUITE_OUTCOME === 'success' || process.env.SUITE_OUTCOME === 'failure';
+            const verdict = ok ? 'passed' : ran ? 'failed' : 'did not run';
+            const icon = ok ? '✅' : ran ? '❌' : '⚠️';
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            let section = `## ${icon} Tests\n- Result: **${ok ? 'passed' : 'failed'}**\n- [View run](${runUrl})`;
+            let section = `## ${icon} Tests\n- Result: **${verdict}**\n- [View run](${runUrl})`;
+            if (!ok && !ran) {
+              section += `\n- The suite never reported: a blocking check ahead of it (sudoers, MCP typecheck, MCP tool contract) failed, or the job was cancelled.`;
+            }
             if (process.env.COVERAGE_FOUND === 'true') {
               section += `\n- Coverage: statements **${process.env.COVERAGE_STATEMENTS}%**, branches **${process.env.COVERAGE_BRANCHES}%**, functions **${process.env.COVERAGE_FUNCTIONS}%**, lines **${process.env.COVERAGE_LINES}%**`;
             }
