@@ -108,9 +108,13 @@ export async function GET(request: Request) {
     // hid a household member's access request from everyone. Worse than beta,
     // which raised a 500 here and left the poller's list alone.
     //
-    // Nothing below needs the credential: the pairing store and the allowlist
-    // are separate files the harness writes, so the honest answer to "we could
-    // not read the token" is still to say what is waiting.
+    // The path the poller takes needs no credential: `?poll=1` and the approved
+    // list are plain reads of the pairing store and the allowlist, separate
+    // files the harness writes. So the honest answer to "we could not read the
+    // token" is still to say what is waiting. (`?pending=1` — the Settings
+    // "Check" button, an explicit gesture — spawns the harness's own CLI, which
+    // on the same broken box may fail and 500; that is a stated failure the
+    // owner asked for, not a silent empty list on a 20 s poll.)
     if (!state.configured && !state.unknown) {
       return NextResponse.json(
         { configured: false, unknown: false, approved: [], pending: [] },
