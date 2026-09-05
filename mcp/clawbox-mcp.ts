@@ -129,15 +129,13 @@ function instructionsFor(edition: Ed, profile: Profile): string {
  * Build a fully-registered server. Exported so mcp/check-tools.ts can build one
  * per edition and diff the tool lists without connecting a transport.
  */
-export async function buildServer(edition: Ed, profile: Profile) {
+export async function buildServer(edition: Ed, profile: Profile, appHarness: Ed | null) {
   // The app list is a different question from the tool set — see
-  // `resolveAppHarness`. Resolved here, once, beside the edition probe.
-  const ctx = await buildContext(
-    edition,
-    installEdition(),
-    profile,
-    await resolveAppHarness(API_BASE, authHeader()),
-  );
+  // `resolveAppHarness` — but it is answered by the SAME probe, taken once in
+  // `main()` and handed down. Asking again here made a dual box put two
+  // requests to /setup-api/harness/active at every startup, each with its own
+  // 3 s timeout, and let the two collapse a silence in opposite directions.
+  const ctx = await buildContext(edition, installEdition(), profile, appHarness);
   const server = new McpServer(
     { name: "clawbox", version: VERSION },
     { instructions: instructionsFor(edition, profile) },
@@ -168,9 +166,11 @@ export async function buildServer(edition: Ed, profile: Profile) {
 }
 
 async function main(): Promise<void> {
-  const edition = await resolveEdition(API_BASE, authHeader());
+  // ONE probe of /setup-api/harness/active, for both questions it settles.
+  const appHarness = await resolveAppHarness(API_BASE, authHeader());
+  const edition = resolveEdition(appHarness);
   const { profile, model } = await resolveProfile(edition);
-  const { server, reg, ctx } = await buildServer(edition, profile);
+  const { server, reg, ctx } = await buildServer(edition, profile, appHarness);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // The model is named because "why do I only have 16 tools?" is the first

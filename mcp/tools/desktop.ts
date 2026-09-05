@@ -9,8 +9,8 @@
 import { apiGet, apiPost, CLAWBOX_ROOT } from "../lib/api";
 import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
-import { INSTALLED_APP_ID_RE, zBool, zConfirm, zEnumOf, zInt, zOptText, zSlug, zText } from "../lib/schema";
-import { builtInApps, type McpContext } from "../lib/context";
+import { INSTALLED_APP_ID_RE, zBool, zConfirm, zEnumOf, zInstalledAppId, zInt, zOptText, zSlug, zText } from "../lib/schema";
+import { builtInApps, openedAppNotice, type McpContext } from "../lib/context";
 import { isInstalledAppVisible } from "../../src/lib/desktop-app-editions";
 import type { InstalledHermesSkill } from "../../src/lib/hermes-skills";
 
@@ -172,17 +172,9 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
       if (app_id === "browser") {
         return text("Opened the Browser Setup panel. That is the settings panel — to actually browse the web, use browser_open.");
       }
-      const known = apps.find((a) => a.id === app_id);
-      // An `external` app is not a desktop window: the desktop calls
-      // window.open() for it, from a poll rather than a click, so the browser's
-      // popup blocker can drop it with nothing to report back here. Claiming it
-      // opened would be a false success on the one path the agent cannot see.
-      if (known?.external) {
-        return text(
-          `Asked the desktop to open ${known.name}. It opens in a new browser tab, so ask the user to look at the screen — and to allow the popup if their browser blocked it.`,
-        );
-      }
-      return text(`Opened ${known?.name ?? app_id} on the desktop.`);
+      // The same sentence `clawbox app open` prints, from one place — an
+      // `external` app is hedged about on both surfaces or on neither.
+      return text(openedAppNotice(apps.find((a) => a.id === app_id), app_id));
     },
   );
 
@@ -310,7 +302,12 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     ctx.edition === "hermes"
       ? "Remove an app icon from the ClawBox desktop: a web app you built, or something the user installed. It does NOT remove one of your own skills — use skill_uninstall for those. Call ui_list_apps first to get the id, and ask the user to confirm."
       : "Remove an app the user installed from the ClawBox app store, or a web app you built, from the desktop. Call ui_list_apps first to get the id, and ask the user to confirm.",
-    { app_id: zSlug("App id, as ui_list_apps reports it without the installed- prefix") },
+    // The producers' alphabet, not zSlug's: `ui_open_app` and `clawbox app
+    // open` accept `Foo_Bar` and `_drafts`, so removal must too — an app the
+    // agent can create and open and cannot delete is the worse half of the
+    // defect this file's widening fixed. The membership check below is
+    // deliberately unfiltered for the same reason.
+    { app_id: zInstalledAppId("App id, as ui_list_apps reports it without the installed- prefix") },
     { editions: ["openclaw", "hermes"], readOnly: false, destructive: true },
     async ({ app_id }: { app_id: string }) => {
       // Unfiltered: removing an app this harness cannot open is legitimate.

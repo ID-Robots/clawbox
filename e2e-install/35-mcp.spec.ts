@@ -60,7 +60,22 @@ test.describe("clawbox-cli (MCP user-space wrapper)", () => {
     expect(out).toMatch(
       new RegExp(`^Built-in apps \\(${edition} edition[,)]`, "im"),
     );
-    const harness = /^Built-in apps \([^,)]+(?:, running (\w+))?\)/im.exec(out)?.[1] ?? edition;
+    // The harness the header NAMED, or null when it named none. Not `?? edition`:
+    // on the `dual` SKU the edition is not a harness, so that fallback ran the
+    // OpenClaw assertions below over a header that had just said "harness
+    // undetermined" — asserting `openclaw —` and `store —` are listed on a box
+    // that could not say which harness it was running.
+    const harness = /^Built-in apps \([^,)]+(?:, running (\w+))?\)/im.exec(out)?.[1]
+      ?? (edition === "dual" ? null : edition);
+    // A dual box that cannot name its harness is a FAULT on an installed image,
+    // not a shape to branch on: /setup-api/harness/active is served by the same
+    // web server this CLI just reached, so a silence here means the box came up
+    // wrong. Fail with the header rather than picking an arm.
+    expect(
+      harness,
+      `a ${edition} box must name the harness its app list follows; header was: `
+      + `${/^Built-in apps \(.*\):/im.exec(out)?.[0] ?? "(no header)"}`,
+    ).not.toBeNull();
 
     // Common apps — listed on every edition.
     for (const id of ["settings", "terminal", "files", "browser", "vnc"]) {

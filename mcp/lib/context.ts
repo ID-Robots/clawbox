@@ -63,6 +63,30 @@ export function builtInApps(edition: Ed | null): DesktopApp[] {
     .map(([id, def]) => ({ id, ...def }));
 }
 
+/**
+ * What may honestly be said after the open action has been posted.
+ *
+ * ONE sentence for both surfaces. `ui_open_app` and `clawbox app open` push the
+ * same action into the same fire-and-forget ring (`ui:pending-actions`), which
+ * the desktop POLLS — so neither of them learns what became of it, and an
+ * `external` app is opened with `window.open()` from that poll rather than from
+ * a click, where a popup blocker can drop it silently. Claiming it appeared is
+ * a false success on the one path the agent cannot see; saying so is what lets
+ * the agent ask the owner to look. Kept here, beside the `external` flag, so
+ * the CLI and the tool cannot answer the same question two ways — which is the
+ * defect TASK-541 is about.
+ *
+ * @param app the built-in app, or undefined for an installed one (never
+ *            external: an installed app is FRAMED in the desktop).
+ * @param fallbackId what to call it when the registry has no row.
+ */
+export function openedAppNotice(app: DesktopApp | undefined, fallbackId: string): string {
+  return app?.external
+    ? `Asked the desktop to open ${app.name}. It opens in a new browser tab, so ask the user to`
+      + " look at the screen — and to allow the popup if their browser blocked it."
+    : `Opened ${app?.name ?? fallbackId} on the desktop.`;
+}
+
 export interface Capabilities {
   /** Binary that can grab display :0, or null when none is installed. */
   screenGrabber: string | null;

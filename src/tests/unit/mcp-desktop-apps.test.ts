@@ -163,6 +163,27 @@ describe("ui_open_app accepts every id it advertises", () => {
       expect(INSTALLED_APP_ID_RE.test(`installed-${id}`), `${id} must be refused`).toBe(false);
     }
   });
+
+  it("lets an id it can OPEN also be REMOVED", async () => {
+    // Widening what can be listed and opened without widening what can be
+    // removed leaves the owner with an app the agent created, shows and opens
+    // and cannot delete — `app_uninstall`'s own membership check is
+    // deliberately unfiltered so that removal always works, and a narrower
+    // schema in front of it refuses the call before the handler ever runs.
+    const h = captureRegistrar("hermes");
+    registerDesktopTools(h.reg, ctx("hermes"));
+    const appId = h.get("app_uninstall").shape.app_id;
+    for (const id of ["Foo_Bar", "weather", "A1_b-c", "_drafts"]) {
+      expect(appId.safeParse(id).success, `${id} must be removable`).toBe(true);
+      // The same alphabet on both surfaces, stated as the invariant rather than
+      // as two lists that happen to agree today.
+      expect(INSTALLED_APP_ID_RE.test(`installed-${id}`), `${id} must be openable`).toBe(true);
+    }
+    // Still a closed alphabet: the value reaches /setup-api/apps/uninstall.
+    for (const id of ["../etc", "a/b", "a b", "a.b", "", "-lead", "x".repeat(65)]) {
+      expect(appId.safeParse(id).success, `${id} must be refused`).toBe(false);
+    }
+  });
 });
 
 describe("an installed app the desktop would not open", () => {

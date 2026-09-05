@@ -76,8 +76,30 @@ export function zOptText(max: number, description: string) {
  * — an unbounded id in an injection check is not a guard — and no such app has
  * ever been installed, so the trade is a 65-character webapp nobody can open
  * from a tool against a rule that cannot be walked past.
+ *
+ * ONE ALPHABET, TWO SPELLINGS, built from the same source below: the surfaces
+ * that OPEN an app take the prefixed form, and the one that REMOVES it takes
+ * the bare id (`ui_list_apps` reports it without the prefix). Widening the one
+ * without the other left the agent able to create, list and open an app it
+ * could not delete.
  */
-export const INSTALLED_APP_ID_RE = /^installed-[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/;
+const INSTALLED_APP_ID_BODY = "[A-Za-z0-9_][A-Za-z0-9_-]{0,63}";
+
+export const INSTALLED_APP_ID_RE = new RegExp(`^installed-${INSTALLED_APP_ID_BODY}$`);
+
+/** The same id WITHOUT the `installed-` prefix, as `ui_list_apps` reports it. */
+export const RAW_INSTALLED_APP_ID_RE = new RegExp(`^${INSTALLED_APP_ID_BODY}$`);
+
+/** An installed-app id as a tool argument, in the producers' own alphabet. */
+export function zInstalledAppId(description: string) {
+  return z
+    .string()
+    .regex(
+      RAW_INSTALLED_APP_ID_RE,
+      "letters, digits, underscores and hyphens, not starting with a hyphen, at most 64 characters",
+    )
+    .describe(description);
+}
 
 export function zSlug(description: string) {
   return z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, "lowercase letters, digits and hyphens only").describe(description);

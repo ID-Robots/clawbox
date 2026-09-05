@@ -19,7 +19,7 @@ import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { installEdition, resolveAppHarness, type Ed } from "./lib/edition";
-import { builtInApps } from "./lib/context";
+import { builtInApps, openedAppNotice } from "./lib/context";
 import { HARNESS_ONLY_APP_IDS, isInstalledAppVisible } from "../src/lib/desktop-app-editions";
 import { INSTALLED_APP_ID_RE } from "./lib/schema";
 
@@ -78,12 +78,14 @@ function getApiToken(): string {
  * CLI was the one giving a different answer.
  *
  * `resolveAppHarness` is that same resolution: a locked edition decides on its
- * own, only `dual` asks the device which harness is active, and an unreadable
- * lock or a device that does not answer is NULL rather than a guess — see the
- * note there on why an app gate cannot fail closed onto one harness. The
- * bearer is OPTIONAL — `app list` has always worked without a token, and the
- * cost is only that a session-gated device leaves the dual question
- * unresolved rather than answering it.
+ * own, and `dual` — or a lock that cannot be read — asks the device which
+ * harness is active, because /setup-api/harness/active is the very route the
+ * desktop grid is built from and it always answers. Only a device that does
+ * NOT answer is NULL rather than a guess — see the note there on why an app
+ * gate cannot fail closed onto one harness. The bearer is OPTIONAL — `app
+ * list` has always worked without a token, and the cost is only that a
+ * session-gated device leaves the question unresolved rather than answering
+ * it.
  */
 function openHarness(): Promise<Ed | null> {
   const token = findApiToken();
@@ -231,7 +233,8 @@ async function main() {
     // other harness's apps — a false success on the CLI sibling of the list
     // `app list` below prints from.
     const harness = await openHarness();
-    const openable = builtInApps(harness).map((a) => a.id);
+    const builtIn = builtInApps(harness);
+    const openable = builtIn.map((a) => a.id);
     const isInstalled = appId.startsWith("installed-");
     if (isInstalled) {
       // The shape check, exactly where ui_open_app applies it: an installed id
@@ -283,7 +286,12 @@ async function main() {
       key: "ui:pending-action",
       value: JSON.stringify({ type: "open_app", appId, ts: Date.now() }),
     });
-    console.log(`✅ Opening ${appId} on desktop.`);
+    // The tick is a CLAIM, and for an `external` app it is not true: the
+    // desktop window.open()s that one from its poll, where a popup blocker
+    // drops it silently. `ui_open_app` hedges; this posts the same action to
+    // the same ring, so it says the same thing — from the same function.
+    const known = builtIn.find((a) => a.id === appId);
+    console.log(known?.external ? openedAppNotice(known, appId) : `✅ Opening ${appId} on desktop.`);
 
   } else if (cmd === "app" && sub === "list") {
     // The list is HARNESS-dependent: a Hermes device has no OpenClaw chat app

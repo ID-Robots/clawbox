@@ -111,11 +111,26 @@ beforeEach(() => {
 });
 
 /**
+ * The ceiling on ONE `bun` spawn, comfortably under vitest's own per-test
+ * default so this file's failure is "the CLI hung" rather than "the test timed
+ * out". See `cli()`.
+ */
+const CLI_TIMEOUT_MS = 4_000;
+
+/**
  * Run the CLI against the stub device.
  *
  * ASYNC, never `spawnSync`: the stub server lives in THIS process, so blocking
  * the event loop until the child exits would leave the child's own request
  * unanswered forever — the two would wait for each other.
+ *
+ * KILLED ON ITS OWN CLOCK. `mcp/clawbox-cli.ts`'s `api()` calls fetch with no
+ * `signal`, so a device that accepts the connection and never answers blocks
+ * the child indefinitely. Resolving only on `close` then hands the timeout to
+ * vitest, which fails the test WITHOUT cancelling this promise or killing
+ * `bun` — the worker keeps the child through teardown and the run reports a
+ * generic timeout over a hung CLI. This is the only test of the CLI gate, so
+ * it must not be the thing that hangs.
  */
 function cli(
   args: string[],
@@ -138,10 +153,22 @@ function cli(
     });
     let stdout = "";
     let stderr = "";
+    // SIGKILL, not SIGTERM: the point is that the child is wedged, and a
+    // handler that never runs would leave it alive exactly as before.
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(
+        `clawbox ${args.join(" ")} did not exit within ${CLI_TIMEOUT_MS}ms; killed.`
+        + ` stdout: ${stdout.trim() || "(none)"} stderr: ${stderr.trim() || "(none)"}`,
+      ));
+    }, CLI_TIMEOUT_MS);
     child.stdout.on("data", (c: Buffer) => { stdout += c.toString(); });
     child.stderr.on("data", (c: Buffer) => { stderr += c.toString(); });
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ status: code ?? -1, stdout, stderr }));
+    child.on("error", (err) => { clearTimeout(timer); reject(err); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ status: code ?? -1, stdout, stderr });
+    });
   });
 }
 
@@ -210,10 +237,13 @@ d("clawbox app open — when the harness cannot be determined", () => {
   // A lock file that EXISTS and carries no edition: a truncated write, a
   // permission change, a partial reflash. The MCP resolves that to the smaller
   // TOOL SET on purpose — an unreadable lock must not hand a device the shell
-  // and file tools. Apps are not a subset of one another, though: answering
-  // "hermes" there hides `store`, `openclaw` and `memory-shard` from a box
-  // that has them and ticks off `hermes` on a box that may not. The desktop's
-  // own rule for an unknown harness is to hide BOTH sets and say so.
+  // and file tools. The APP question is a different one, and it has an oracle:
+  // /setup-api/harness/active always answers (getActiveHarness() falls through
+  // readEdition(), whose default is "openclaw"), and it is the same route the
+  // desktop grid and /app/<id> are built from. So the lock's state is not what
+  // decides here — the DEVICE'S SILENCE is, and only then are both harness-only
+  // sets hidden, the way the desktop hides them while its own fetch is in
+  // flight.
   const NO_EDITION = "# ClawBox edition lock\n# (truncated)\n";
 
   it("keeps offering the apps that exist on either harness", async () => {
@@ -222,10 +252,35 @@ d("clawbox app open — when the harness cannot be determined", () => {
     expect(posted).toContainEqual(expect.objectContaining({ appId: "settings" }));
   });
 
-  it("refuses BOTH harnesses' own apps rather than guessing one", async () => {
-    for (const appId of ["hermes", "hermes-skills", "store", "openclaw", "memory-shard"]) {
+  it("asks the device rather than hiding apps the box is showing", async () => {
+    // The unreadable lock alone is NOT "undetermined". The desktop renders
+    // twelve apps in this state, and telling the agent that three of them
+    // cannot be placed — while the owner is looking at them — is the two
+    // surfaces disagreeing, which is the defect this whole change is about.
+    activeHarness = "openclaw";
+    for (const appId of ["store", "openclaw", "memory-shard"]) {
       posted = [];
       const r = await cli(["app", "open", appId], "openclaw", { lockBody: NO_EDITION });
+      expect(r.status, `${appId} must open: ${r.stderr}`).toBe(0);
+      expect(posted).toContainEqual(expect.objectContaining({ appId }));
+    }
+    // …and the other harness's are still refused, because the device named one.
+    const other = await cli(["app", "open", "hermes"], "openclaw", { lockBody: NO_EDITION });
+    expect(other.status).toBe(1);
+
+    const list = await cli(["app", "list"], "openclaw", { lockBody: NO_EDITION });
+    expect(list.stdout).toContain("store —");
+    expect(list.stdout).not.toContain("hermes —");
+  });
+
+  it("refuses BOTH harnesses' own apps when the device cannot answer", async () => {
+    // A dual box mid-update: the web server is restarting, so
+    // /setup-api/harness/active does not answer. Defaulting to one harness
+    // would tell the agent as a durable fact that the box has no dashboard.
+    const dead = "http://127.0.0.1:9";
+    for (const appId of ["hermes", "hermes-skills", "store", "openclaw", "memory-shard"]) {
+      posted = [];
+      const r = await cli(["app", "open", appId], "dual", { apiBase: dead });
       expect(r.status, `${appId} must be refused`).toBe(1);
       // Not "there is no such app": the device may well have it. Ticking off an
       // open the desktop then drops is the false success this gate exists for.
@@ -234,27 +289,14 @@ d("clawbox app open — when the harness cannot be determined", () => {
     }
   });
 
-  it("lists neither harness's own apps, and says why", async () => {
-    const r = await cli(["app", "list"], "openclaw", { lockBody: NO_EDITION });
-    expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout).toContain("settings —");
+  it("lists neither harness's own apps when the device cannot answer, and says why", async () => {
+    const list = await cli(["app", "list"], "dual", { apiBase: "http://127.0.0.1:9" });
+    expect(list.status, list.stderr).toBe(0);
+    expect(list.stdout).toContain("settings —");
     for (const appId of ["hermes —", "store —", "openclaw —", "memory-shard —"]) {
-      expect(r.stdout).not.toContain(appId);
+      expect(list.stdout).not.toContain(appId);
     }
-    expect(r.stdout).toMatch(/harness/i);
-  });
-
-  it("does not report a harness it never resolved when the device cannot answer", async () => {
-    // A dual box mid-update: the web server is restarting, so
-    // /setup-api/harness/active does not answer. Defaulting to one harness
-    // would tell the agent as a durable fact that the box has no dashboard.
-    const dead = "http://127.0.0.1:9";
-    const open = await cli(["app", "open", "hermes"], "dual", { apiBase: dead });
-    expect(open.status).toBe(1);
-    expect(open.stderr).toMatch(/which harness/i);
-    const list = await cli(["app", "list"], "dual", { apiBase: dead });
-    expect(list.stdout).not.toContain("hermes —");
-    expect(list.stdout).not.toContain("store —");
+    expect(list.stdout).toMatch(/harness/i);
   });
 
   it("prints nothing about registering a tool set", async () => {
@@ -263,6 +305,43 @@ d("clawbox app open — when the harness cannot be determined", () => {
     // this run may not even be reading.
     const r = await cli(["app", "list"], "openclaw", { lockBody: NO_EDITION });
     expect(`${r.stdout}${r.stderr}`).not.toMatch(/tool set|clawbox-mcp/i);
+  });
+});
+
+d("clawbox app open — what it may claim happened", () => {
+  it("does not report an EXTERNAL app as opened", async () => {
+    // `openclaw` and `hermes` are `external: true`: the desktop opens them with
+    // window.open() from a POLL rather than a click, so a popup blocker drops
+    // the tab with nothing to report back. `ui_open_app` hedges for exactly
+    // that reason; the CLI posts the same action to the same ring, so a tick
+    // here is the same false success on the one path the agent cannot see —
+    // and "one question, three surfaces" is this whole file's subject.
+    activeHarness = "hermes";
+    const r = await cli(["app", "open", "hermes"], "dual");
+    expect(r.status, r.stderr).toBe(0);
+    expect(posted.at(-1)).toMatchObject({ type: "open_app", appId: "hermes" });
+    expect(r.stdout).not.toMatch(/✅ Opening/);
+    expect(r.stdout).toMatch(/new browser tab/);
+    expect(r.stdout).toMatch(/popup/i);
+  });
+
+  it("still reports an ordinary desktop window as opened", async () => {
+    // The counterweight: a real window IS placed by the desktop, and hedging
+    // over every app would make the honest note meaningless.
+    const r = await cli(["app", "open", "terminal"], "openclaw");
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/✅ Opening terminal/);
+    expect(r.stdout).not.toMatch(/popup/i);
+  });
+
+  it("reports an installed web app as opened", async () => {
+    // An installed app is framed IN the desktop, not window.open()ed, so it is
+    // not external and the tick is true.
+    installedApps = ["notes"];
+    installedMeta = { notes: { webappUrl: "/setup-api/webapps?app=notes" } };
+    const r = await cli(["app", "open", "installed-notes"], "openclaw");
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/✅ Opening installed-notes/);
   });
 });
 
@@ -283,7 +362,11 @@ d("clawbox app list — the same answer as the gate", () => {
     expect(r.stdout).not.toContain("hermes —");
   });
 
-  it("names every app it would open, and no app it would refuse", async () => {
+  // One `bun` spawn per listed id, in series — eleven on a Hermes box, each
+  // paying bun's own start. That is well past vitest's 5 s default, and a
+  // ceiling derived from the work (rather than inherited) is what keeps the
+  // failure honest: `CLI_TIMEOUT_MS` still fails a single hung child first.
+  it("names every app it would open, and no app it would refuse", { timeout: 60_000 }, async () => {
     // The two commands are one gate: a list that offers what `open` refuses is
     // the false success this pair exists to prevent.
     activeHarness = "hermes";

@@ -58,12 +58,24 @@ function lockUnreadable(): boolean {
  *
  * A locked edition ("openclaw" / "hermes") wins outright — that install only
  * has one harness on disk. Only the unlocked premium "dual" edition has a
- * runtime choice, and there the device's own /setup-api/harness/active is the
- * single source of truth; a failure there falls back to "openclaw", the default
- * harness src/lib/harness.ts also degrades to.
+ * runtime choice, and there `appHarness` — what the device itself said — is the
+ * single source of truth; a null falls back to "openclaw", the default harness
+ * src/lib/harness.ts also degrades to.
+ *
+ * ASKS THE DEVICE NOTHING. It takes the answer `resolveAppHarness` already got,
+ * so a startup makes ONE probe and the tool set and the app list cannot be
+ * built from two different replies — a dual box whose first probe said `hermes`
+ * and whose second timed out registered the Hermes tool set beside an app list
+ * that hid both dashboards, for the life of that stdio child. Synchronous now,
+ * which is what makes a second probe impossible rather than merely unlikely.
  */
-export async function resolveEdition(apiBase: string, authHeader: string | null): Promise<Ed> {
+export function resolveEdition(appHarness: Ed | null): Ed {
   if (lockUnreadable()) {
+    // FAIL CLOSED, whatever the device answered. This is the one place the two
+    // questions genuinely differ: the app list may take the device's word here
+    // (the desktop's own route does), but OpenClaw is the larger tool surface
+    // and the only one carrying the shell and file tools, so an unreadable lock
+    // must not hand them out.
     console.error(
       "[clawbox-mcp] /etc/clawbox/edition.env exists but no edition could be read from it. "
       + "Registering the SMALLER Hermes tool set: the shell and file tools stay off until the lock is readable.",
@@ -72,9 +84,9 @@ export async function resolveEdition(apiBase: string, authHeader: string | null)
   }
   const installed = readEdition();
   if (installed === "openclaw" || installed === "hermes") return installed;
-  // Dual box whose API is not up yet — register the default harness's tools
-  // rather than an empty or half-wrong set.
-  return (await askActiveHarness(apiBase, authHeader)) ?? "openclaw";
+  // Dual box whose API was not up — register the default harness's tools rather
+  // than an empty or half-wrong set.
+  return appHarness ?? "openclaw";
 }
 
 /**
@@ -94,6 +106,17 @@ export async function resolveEdition(apiBase: string, authHeader: string | null)
  * — the answer `hiddenAppIdsForHarness(null)` already gives the desktop while
  * its own fetch is in flight.
  *
+ * AN UNREADABLE LOCK IS ASKED ABOUT, not answered here. `/setup-api/harness/
+ * active` always answers — `getActiveHarness()` falls through `lockedHarness()`
+ * to `readEdition()`, whose default for an unreadable lock is "openclaw"
+ * (src/lib/harness.ts) — so the desktop grid and `/app/<id>` show twelve apps
+ * in that state while an early return of null told the agent three of them
+ * could not be placed, with the owner looking at them on screen. The device's
+ * own route is the oracle for the APP question exactly as it is for `dual`;
+ * null is kept for the one case that establishes nothing, a device that did not
+ * answer at all. (The TOOL SET still fails closed on that lock — see
+ * `resolveEdition`.)
+ *
  * No console line: this is asked by the CLI as well as the MCP, and one
  * invocation of `clawbox app list` registers no tools.
  */
@@ -101,8 +124,7 @@ export async function resolveAppHarness(
   apiBase: string,
   authHeader: string | null,
 ): Promise<Ed | null> {
-  if (lockUnreadable()) return null;
-  const installed = readEdition();
+  const installed = lockUnreadable() ? null : readEdition();
   if (installed === "openclaw" || installed === "hermes") return installed;
   return askActiveHarness(apiBase, authHeader);
 }
