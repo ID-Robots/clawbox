@@ -27,6 +27,8 @@ export function shapes(
   setWithRefWrite: Setter<string>,
   setConciseRefWrite: Setter<string>,
   setCompoundRefWrite: Setter<string>,
+  setThroughProperty: Setter<string>,
+  catalog: { setSort: (next: string) => void },
   streamingRef: { current: string },
 ): void {
   // The defect as it shipped: a sibling setter called from inside an updater.
@@ -66,7 +68,6 @@ export function shapes(
   // visited only the children caught it; without them the body IS the
   // assignment and that walk saw nothing. Adding the brackets here would make
   // this case pass against the defect it exists to pin.
-  // eslint-disable-next-line no-return-assign
   setConciseRefWrite((prev) => streamingRef.current = prev);
 
   // The compound form. `someRef.current += 1` is the generation-counter idiom
@@ -78,9 +79,22 @@ export function shapes(
     return "";
   });
 
+  // A setter reached through a PROPERTY, in the nested position. This is live
+  // style in this repo, not a hypothetical: `HermesSkillsStore.tsx` calls
+  // `catalog.setSort(...)` / `catalog.setQuery(...)` — state writers returned
+  // on a hook's object — and a bare-identifier rule reports nothing for them.
+  // The nested position is where the defect lives, so it is the position that
+  // may not be blind.
+  setThroughProperty((prev) => {
+    catalog.setSort("name");
+    return prev;
+  });
+
   // NOT offenders, and here so the rule is known to leave them alone: a timer
-  // callback is not an updater (React never re-runs it), and a method call is
-  // not a state writer.
+  // callback is not an updater (React never re-runs it), and neither of these
+  // sits inside an updater to begin with — the property rule above applies in
+  // the nested position only, so a `localStorage.setItem` at the top level of a
+  // component is not a finding.
   setTimeout(() => setMessages((msgs) => msgs), 0);
   localStorage.setItem("clawbox:fixture", QUOTES.source);
 }

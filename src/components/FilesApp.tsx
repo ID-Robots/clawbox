@@ -139,14 +139,21 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
     return window.localStorage.getItem("clawbox.files.showHidden") === "1";
   });
 
+  // The ref carries the current choice so the toggle can compute the next one
+  // without a dependency, which is what the updater was being used for. A
+  // React state updater is a pure function of the previous state — React is
+  // entitled to run it twice — and this one wrote localStorage from inside it,
+  // so the write happened once per render attempt rather than once per click.
+  // It is idempotent, which is exactly why it went unnoticed. See
+  // src/tests/unit/state-updater-purity.test.ts.
+  const showHiddenRef = useRef(showHidden);
   const toggleShowHidden = useCallback(() => {
-    setShowHidden((v) => {
-      const next = !v;
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem("clawbox.files.showHidden", next ? "1" : "0");
-      }
-      return next;
-    });
+    const next = !showHiddenRef.current;
+    showHiddenRef.current = next;
+    setShowHidden(next);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("clawbox.files.showHidden", next ? "1" : "0");
+    }
   }, []);
   const [selected, setSelected] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogState>({ type: null });

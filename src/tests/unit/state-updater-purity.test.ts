@@ -86,6 +86,28 @@ function calleeName(node: ts.CallExpression): string | null {
   return ts.isIdentifier(node.expression) ? node.expression.text : null;
 }
 
+/**
+ * The same, plus the property form `a.foo(...)` — for the NESTED position only.
+ *
+ * The two positions are deliberately not symmetric. Opening an updater on
+ * `a.setX(fn)` would treat every `foo.setSomething(callback)` in the tree as a
+ * React updater, which is a wide guess; but the nested position is where the
+ * defect lives, and a setter reached through a property is live style here —
+ * `HermesSkillsStore.tsx` calls `catalog.setSort(...)` and `catalog.setQuery(...)`,
+ * state writers returned on a hook's object. Reporting `ctx.setSort()` inside
+ * an updater is the same finding as reporting `setSort()`, and inside an
+ * updater a `localStorage.setItem` or an `el.setAttribute` is an impurity too,
+ * so the wider net costs nothing here.
+ *
+ * `obj["setX"](...)` is still not followed: it is not written in this tree and
+ * the string form would need the same care `isCurrentAccess` takes.
+ */
+function nestedWriterName(node: ts.CallExpression): string | null {
+  if (ts.isIdentifier(node.expression)) return node.expression.text;
+  if (ts.isPropertyAccessExpression(node.expression)) return node.expression.name.text;
+  return null;
+}
+
 function sourceFiles(dir: string): string[] {
   const out: string[] = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -124,8 +146,10 @@ function impureUpdaters(relativePath: string): string[] {
     const hits: string[] = [];
     const visit = (node: ts.Node) => {
       if (ts.isCallExpression(node)) {
-        const name = calleeName(node);
-        if (name && isStateWriter(name)) hits.push(`${name}()`);
+        const name = nestedWriterName(node);
+        // Reported as WRITTEN — `catalog.setSort()`, not `setSort()` — so the
+        // message names the call the reader has to go and find.
+        if (name && isStateWriter(name)) hits.push(`${node.expression.getText(file)}()`);
       }
       // EVERY assignment operator, not just `=`. `someRef.current += 1` is the
       // generation-counter idiom this codebase uses in thirteen places,
@@ -191,12 +215,12 @@ describe("no state write inside a state updater", () => {
     // WHAT A GREEN TICK HERE DOES NOT PROVE, so the next reader does not read
     // it as absence. The rule is syntactic and cannot follow a name: a setter
     // reached through an alias (`const append = setMessages`) or an updater
-    // declared as a variable and passed in by name are both invisible, and so
-    // is a setter reached through a property (`ctx.setSort(…)`). And it detects
-    // state writes and ref writes only — an updater whose one side effect is a
-    // `localStorage.setItem`, a `fetch` or an `audio.play()` is impure and is
-    // not reported. Chasing those by AST costs more than it buys; saying so
-    // costs a paragraph.
+    // declared as a variable and passed in by name are both invisible. A setter
+    // reached through a property (`ctx.setSort(…)`) IS seen in the nested
+    // position — where the defect lives — but does not open an updater. And it
+    // detects state writes and ref writes only — an updater whose one side
+    // effect is a `fetch` or an `audio.play()` is impure and is not reported.
+    // Chasing those by AST costs more than it buys; saying so costs a paragraph.
     //
     // In the other direction it is deliberately over-eager: any single-argument
     // call to a `set*`/`apply*` identifier taking a function is treated as an

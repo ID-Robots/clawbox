@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { StoreApp } from "./AppStore";
 import * as kv from "@/lib/client-kv";
 import { useT } from "@/lib/i18n";
@@ -87,6 +87,7 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
   const { t } = useT();
   const SETTINGS_KEY = `clawbox-app-settings-${appId}`;
   const [settings, setSettings] = useState<Record<string, string | boolean>>({});
+  const settingsRef = useRef(settings);
   const [saving, setSaving] = useState(false);
   // "connected" = backend actually wrote the skill's config (the button then
   // says "Saved to skill config" — that is a file write, never a probed
@@ -156,7 +157,10 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
   useEffect(() => {
     kv.init().then(() => {
       const stored = kv.getJSON<Record<string, string | boolean>>(SETTINGS_KEY);
-      if (stored) setSettings(stored);
+      if (stored) {
+        settingsRef.current = stored;
+        setSettings(stored);
+      }
     });
   }, [SETTINGS_KEY]);
 
@@ -170,12 +174,17 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
     || storeApp.url;
   const hubIsClawhub = !!hubUrl && hubUrl.startsWith("https://clawhub.ai/");
 
+  // Persisted OUTSIDE the updater. A React state updater is a pure function of
+  // the previous state and React may run it twice, so `kv.setJSON` was called
+  // once per render attempt rather than once per edit. The ref is advanced
+  // before every write — including the load above — so the next edit still
+  // builds on the newest settings without the callback taking a dependency on
+  // them. See src/tests/unit/state-updater-purity.test.ts.
   const updateSetting = useCallback((key: string, value: string | boolean) => {
-    setSettings(prev => {
-      const next = { ...prev, [key]: value };
-      kv.setJSON(SETTINGS_KEY, next);
-      return next;
-    });
+    const next = { ...settingsRef.current, [key]: value };
+    settingsRef.current = next;
+    setSettings(next);
+    kv.setJSON(SETTINGS_KEY, next);
     setSaveResult("idle");
   }, [SETTINGS_KEY]);
 
