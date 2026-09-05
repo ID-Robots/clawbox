@@ -227,12 +227,19 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
           timeoutMs: 10_000,
         }).catch(() => null);
         skillsRead = body !== null;
-        // BOTH names, in skill_list's own shape: the lock id leads, because it
-        // is the one string skill_uninstall resolves, and the display name is
-        // added only when it differs. Printing the display name alone put the
-        // two agent-facing lists on different strings for one skill; printing a
-        // pretty-printed {id, name} pair for each of ~82 rows overran this
-        // tool's output cap and truncated the JSON mid-object.
+        // BOTH names, in skill_list's own shape — for any name short enough to
+        // print whole: the lock id leads, because it is the one string
+        // skill_uninstall resolves, and the display name is added only when it
+        // differs. Printing the display name alone put the two agent-facing
+        // lists on different strings for one skill; printing a pretty-printed
+        // {id, name} pair for each of ~82 rows overran this tool's output cap
+        // and truncated the JSON mid-object.
+        //
+        // The name is NOT flattened or bounded here as skill_list now does it,
+        // and does not need to be: these rows are JSON-escaped, so a newline in
+        // a card name cannot forge a row, and a row too long for the budget is
+        // skipped whole by fitRows. A very long name is therefore the one case
+        // where the two lists print different strings.
         skills = (body?.skills ?? []).map((s) => (s.name === s.id ? s.id : `${s.id} (${s.name})`));
       }
       // Fit the answer by MEASURING it, never by modelling the serializer.
@@ -282,9 +289,12 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
       // Deliberately left: a compact `JSON.stringify(app)` badly underestimates
       // what the pretty-printed object costs, so that seed would keep almost
       // everything and buy nothing, and a seed worth having needs a measured
-      // per-app cost. `installed_apps` is the one list here that grows without
-      // bound over a device's life, so it is worth doing properly rather than
-      // approximately.
+      // per-app cost. The option that needs NO cost model is a binary search
+      // for the cut point — it measures the real render() exactly as this loop
+      // does and turns O(n) renders into O(log n) with nothing to estimate
+      // wrong. `installed_apps` is the one list here that grows without bound
+      // over a device's life, so that is the shape to reach for when it starts
+      // to matter.
       let keptApps = installed;
       let out = render(keptSkills, keptApps);
       while (size(out) > LIST_MAX_CHARS && (keptSkills.length || keptApps.length)) {

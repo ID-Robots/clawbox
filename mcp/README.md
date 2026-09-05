@@ -667,9 +667,9 @@ to the approved senders (`src/lib/coding-agent-notify.ts`).
    A tool whose answer is a LIST bounds its own rows against its cap and says
    how many it left out — `skill_list` drops built-in skills first, then the
    ones made on the device, and only then store skills (the ids
-   `skill_uninstall` resolves, so they are the last to go), stating the count
-   for each group; `ui_list_apps` drops skills before apps and never a
-   built-in app, also stating the count —
+   `skill_uninstall` resolves, so they are the last to go), saying how many
+   store-or-device-made skills and how many built-ins it dropped; `ui_list_apps`
+   drops skills before apps and never a built-in app, also stating the count —
    because the cap's own enforcement is a hard slice: it cuts a JSON answer
    mid-object and an id mid-word, and its "narrow the query" is advice a tool
    with no arguments cannot take. `ui_list_apps` MEASURES its finished JSON

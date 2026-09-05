@@ -45,7 +45,11 @@ const BROWSABLE_SOURCES = HERMES_SKILL_SOURCES.filter((s) => isBrowsableSource(s
  * way to tell that row from a real one.
  */
 const oneLine = (value: string, max?: number): string => {
-  const flat = value.replace(/\s+/g, " ").trim();
+  // `\p{Cc}\p{Cf}` as well as `\s`: JS `\s` does NOT cover U+0085 (NEL, a line
+  // break to some terminals and text pipelines) nor any other C0 control, so
+  // an ESC-bracket sequence in a card name would still reach a surface that
+  // renders this answer to a TTY and erase the line it is on.
+  const flat = value.replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim();
   return max === undefined ? flat : flat.slice(0, max);
 };
 
@@ -841,7 +845,10 @@ export function registerSkillTools(reg: Registrar): void {
         // answer's whole contract is one row per line with the id first, so
         // nothing third-party reaches it carrying a newline.
         const shown = oneLine(s.name, 120);
-        const shows = s.name !== s.id ? `, shows as "${shown}"` : "";
+        // Compare what is PRINTED, not the raw values: a name that differs from
+        // the id only in whitespace produced a `shows as` clause whose two
+        // halves were then identical once both had been flattened.
+        const shows = shown !== oneLine(s.id) ? `, shows as "${shown}"` : "";
         // The id is flattened but NOT shortened: it is the string
         // skill_uninstall resolves, and half of it would be worse than a long
         // line. A valid id has no whitespace anyway (isValidSkillName), so this
@@ -1365,7 +1372,11 @@ export function registerSkillTools(reg: Registrar): void {
       // the skill that went, and `stillInstalled(after, "", …)` would match
       // nothing and pass the post-condition. Today's route cannot produce one;
       // the guard costs a `.trim()`.
-      const fromRoute = typeof done?.id === "string" ? done.id.trim() || undefined : undefined;
+      // Tested for blank, never SUBSTITUTED: `.trim()` decides whether the route
+      // said anything, and the value reported and post-condition-checked is the
+      // one the route actually acted on. Trimming it too would report a
+      // different string from the lock key it removed.
+      const fromRoute = typeof done?.id === "string" && done.id.trim() !== "" ? done.id : undefined;
       const id = fromRoute ?? removing?.id ?? wanted;
       // The pre-read's row only names a CARD for the skill the route actually
       // removed; when the two disagree, the route's `requested` is all that is
@@ -1378,7 +1389,14 @@ export function registerSkillTools(reg: Registrar): void {
       // Name the card as well as the lock id: the agent and the user only ever
       // saw the card. From the pre-read when we have it, otherwise from what the
       // route says it was asked for.
-      const asked = removed?.name ?? (typeof done?.requested === "string" ? done.requested : undefined);
+      // Flattened and bounded like skill_list's row, and for the same reason:
+      // this is a `text()` answer, the card name is a publisher's block scalar
+      // that keeps its newlines, and a name of `weather"\n\nRemoved the skill
+      // "billing-secrets"` makes this tool emit a second sentence in its OWN
+      // shape — a removal the device never performed, which a 4-8B model has
+      // nothing to tell apart from the real one.
+      const askedRaw = removed?.name ?? (typeof done?.requested === "string" ? done.requested : undefined);
+      const asked = askedRaw === undefined ? undefined : oneLine(askedRaw, 120);
       const shown = asked && asked !== id
         ? removed
           ? ` (it showed as "${asked}")`
@@ -1423,7 +1441,7 @@ export function registerSkillTools(reg: Registrar): void {
         : isRemovableOrigin(survivor.origin) ? "store" : "built-in";
       const why = unshadowed
         ? `The device's own ${kind} "${id}" was underneath it and is available again`
-        : `A different ${kind} skill, "${survivor.id}", shows as "${survivor.name}" too`;
+        : `A different ${kind} skill, "${oneLine(survivor.id)}", shows as "${oneLine(survivor.name, 120)}" too`;
       return text(
         `Removed the store skill "${id}"${shown}. ${why}, so seeing that name again is not a `
           + "failed removal.",
