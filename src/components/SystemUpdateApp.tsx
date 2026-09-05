@@ -22,6 +22,13 @@ export interface VersionInfo {
   // present only on the SKUs that ship Hermes.
   hermes?: ComponentVersion;
   edition?: "openclaw" | "hermes" | "dual";
+  /**
+   * Whether the device actually reached its update remote. Optional for the
+   * same reason as the two above — a payload from a server that predates the
+   * field must keep rendering exactly as it did, so ABSENT means "not known",
+   * never "unreachable".
+   */
+  remote?: { reachable: boolean; refusedAnonymously?: boolean; reason?: string };
 }
 
 /**
@@ -315,6 +322,19 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
     // realign" (hwtest-round1, 2026-08-24). Drift offers the update instead,
     // and the banner below says which drift.
     if (driftDetected) return "drift";
+    // Last, and only where the screen would otherwise say "You're up to date".
+    //
+    // A device GitHub refused produces the same payload as a current one: the
+    // fetch fails, HEAD is compared against the STALE `origin/<branch>` the
+    // last successful fetch left, and there is no delta. Reporting that as
+    // "Every component is on the latest release" is the lie TASK-655 was filed
+    // for, and a box behind a refused address can sit on it for weeks.
+    //
+    // Below the two tests above on purpose: an offer and a drift are LOCAL
+    // evidence that there is something to do, and they stay actionable — a
+    // refused remote must not take the Update button away from a box that
+    // already knows it needs one.
+    if (versions.remote && !versions.remote.reachable) return "fetch-error";
     return "up-to-date";
   }, [updateStarted, updateError, updateState, versions, versionsError, driftDetected]);
 
@@ -330,7 +350,10 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       case "fetch-error":
         return {
           icon: "cloud_off", iconClass: "text-amber-300",
-          headline: "Couldn't reach the update server", subhead: versionsError ?? "Check the device's internet connection and try again.",
+          headline: "Couldn't reach the update server",
+          subhead: versionsError
+            ?? versions?.remote?.reason
+            ?? "Check the device's internet connection and try again.",
           tone: "warn" as const,
         };
       case "up-to-date":

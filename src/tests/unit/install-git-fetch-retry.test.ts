@@ -80,8 +80,8 @@ function runFetch(refusals: number): { status: number; output: string; attempts:
     "  return 0",
     "}",
     "sleep() { :; }",
-    extractShellFunction("git_fetch_with_retry"),
-    `git_fetch_with_retry ${JSON.stringify(tmp)} origin`,
+    extractShellFunction("git_with_retry"),
+    `git_with_retry -C ${JSON.stringify(tmp)} fetch origin`,
   ].join("\n");
 
   const r = spawnSync("bash", ["-c", script], {
@@ -123,7 +123,7 @@ d("install.sh survives GitHub refusing an anonymous fetch", () => {
   it("is what sync_repo_to_update_target fetches through", () => {
     const sync = extractShellFunction("sync_repo_to_update_target");
 
-    expect(sync).toContain("git_fetch_with_retry");
+    expect(sync).toContain("git_with_retry");
     // The bare one-shot fetch is what step 0 died on; it must not survive
     // beside the retrying one.
     expect(sync).not.toMatch(/^\s*git -c safe\.directory=.*fetch origin\s*$/m);

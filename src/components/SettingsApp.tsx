@@ -6034,7 +6034,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         // never offers an update the page then denies (a `v` prefix, a
         // target older than current).
         const needs = componentNeedsUpdate(cb);
-        return { subtitle: needs && cb.target ? `${cleanVersion(cb.current) ?? cb.current} → ${cleanVersion(cb.target) ?? cb.target}` : t("settings.upToDate") };
+        if (needs && cb.target) {
+          return { subtitle: `${cleanVersion(cb.current) ?? cb.current} → ${cleanVersion(cb.target) ?? cb.target}` };
+        }
+        // A device that could not reach its update remote compared HEAD against
+        // the STALE refs the last successful fetch left, so "no delta" is not
+        // evidence of anything. Say nothing rather than repeat the claim the
+        // Update page has already stopped making (TASK-655) — no subtitle needs
+        // no string in ten locales, and the page beside it gives the reason.
+        if (versionInfo?.remote && !versionInfo.remote.reachable) return { subtitle: null };
+        return { subtitle: t("settings.upToDate") };
       }
       case "about":
         return { subtitle: versionInfo?.clawbox?.current ? cleanVersion(versionInfo.clawbox.current) : null };

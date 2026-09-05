@@ -92,7 +92,13 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
     echo "[bootstrap] WARN: cannot tell which branch this checkout belongs to; running the on-disk copy."
   else
     echo "[bootstrap] Refreshing install.sh from origin/${_br} before running..."
-    git -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>/dev/null || true
+    # Tolerated, but no longer silent: the reset below uses whatever refs are on
+    # disk, so a refused fetch means the "refreshing" line above just re-ran the
+    # copy already there. GitHub refuses anonymous fetches from an address that
+    # has made too many, and every ClawBox fetches anonymously (TASK-655).
+    if ! GIT_TERMINAL_PROMPT=0 git -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>/dev/null; then
+      echo "[bootstrap] WARN: could not fetch origin (GitHub may be refusing anonymous requests from this address); running the refs already on disk."
+    fi
     if git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
       chown -R clawbox:clawbox "$_b" 2>/dev/null || true
       # Re-record what root is allowed to run, BEFORE re-exec'ing into it. The
@@ -2211,6 +2217,53 @@ persist_update_branch_pin() {
   chmod 644 "$pin_file"
 }
 
+# Retry a git call that talks to a remote.
+#
+# Measured on the dev network 2026-09-02 (TASK-655): GitHub answers git's
+# protocol-v2 POST to /git-upload-pack with `HTTP 401` and a body reading
+# "Repository not found." — for a PUBLIC repository — once an address has used
+# up its anonymous allowance. git reports it as
+# `fatal: could not read Username for 'https://github.com'`, which names
+# credentials no ClawBox has, and roughly one attempt in three got through.
+# One in-app update needs three separate fetches to succeed in a row, so a
+# single refusal ended the update at step 0 with a message about a password.
+#
+# git owns no retry of its own — neither 2.34 (the boxes) nor 2.43 has a
+# `fetch.retry`/`http.retry` knob — so it lives here. GIT_TERMINAL_PROMPT=0
+# IS git's own switch and is used rather than reimplemented: without it the
+# same call blocks on a username prompt whenever a tty is attached.
+#
+# Output is captured and re-emitted at the end of each attempt rather than
+# streamed, so the classification below has the text to read. That costs live
+# progress on a long clone; install.sh's output is read from the journal after
+# the fact, so the trade is the honest message.
+git_with_retry() {
+  local attempt=1 max="${CLAWBOX_GIT_RETRIES:-3}" delay="${CLAWBOX_GIT_RETRY_DELAY:-5}"
+  local out rc=0
+  while :; do
+    if out="$(GIT_TERMINAL_PROMPT=0 git "$@" 2>&1)"; then
+      [ -z "$out" ] || printf '%s\n' "$out"
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$attempt" -ge "$max" ] && break
+    echo "  git ${1:-} attempt $attempt/$max failed, retrying in ${delay}s..." >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+  printf '%s\n' "$out" >&2
+  case "$out" in
+    *"could not read Username"*|*"could not read Password"*|*"Repository not found"*|*"Authentication failed"*|*"terminal prompts disabled"*)
+      echo "Error: GitHub refused this ClawBox's anonymous request for the update repository after $max attempts." >&2
+      echo "       The repository is public and this device needs no password — GitHub answers 401 to anonymous git" >&2
+      echo "       requests from an address that has made too many. Wait a few minutes and run the update again." >&2
+      ;;
+  esac
+  return "$rc"
+}
+
 sync_repo_to_update_target() {
   local target_branch="$1"
   local upstream_branch="$2"
@@ -2220,7 +2273,7 @@ sync_repo_to_update_target() {
     exit 1
   fi
 
-  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
+  git_with_retry -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
   # Discard local working-tree changes before switching branches. The later
   # `reset --hard` would blow them away anyway; doing it up-front avoids
   # `git checkout` aborting with "local changes would be overwritten" when
@@ -2262,7 +2315,7 @@ step_git_pull() {
   local fresh_clone=0
   if [ ! -d "$PROJECT_DIR/.git" ]; then
     echo "  Cloning from $REPO_URL (branch: $REPO_BRANCH)..."
-    git clone --branch "$REPO_BRANCH" "$REPO_URL" "$PROJECT_DIR"
+    git_with_retry clone --branch "$REPO_BRANCH" "$REPO_URL" "$PROJECT_DIR"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
     fresh_clone=1
   fi
