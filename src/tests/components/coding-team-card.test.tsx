@@ -96,6 +96,25 @@ describe("with no team yet", () => {
 });
 
 describe("with a team working here", () => {
+  it("says who worked and on which branch, and links each task's reviewer beside its worker", async () => {
+    teams = [{
+      ...WORKING,
+      branch: "clawbox/team-k3x9q2ab",
+      base: "master",
+      agents: { planner: 1, workers: 2, reviewers: 1, total: 4 },
+      tasks: [{ ...WORKING.tasks[0], reviewRunId: "run-00000004" }, WORKING.tasks[1]],
+    }];
+    stub();
+    const onOpenRun = vi.fn();
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={onOpenRun} onPlan={vi.fn()} />);
+    const agents = await screen.findByTestId("coding-team-agents");
+    expect(agents.textContent).toContain(t("codingAgent.team.agents", { total: 4, planner: 1, workers: 2, reviewers: 1 }));
+    expect(agents.textContent).toContain(t("codingAgent.team.branch", { branch: "clawbox/team-k3x9q2ab", base: "master" }));
+    fireEvent.click(screen.getByTestId("coding-team-reviewer-t1"));
+    expect(onOpenRun).toHaveBeenCalledWith("run-00000004");
+    expect(screen.queryByTestId("coding-team-reviewer-t2")).toBeNull();
+  });
+
   it("shows the board: status, progress, alerts, each task with its worker, result and verdict; opens runs; shows the log on request; stops", async () => {
     teams = [WORKING, { ...WORKING, id: "team-older0001", status: "done", directory: DIR }, { ...WORKING, id: "team-elsewhere", directory: "/other" }];
     stub();
