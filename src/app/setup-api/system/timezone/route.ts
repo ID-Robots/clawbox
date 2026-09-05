@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
+import { randomUUID } from "crypto";
 import { get, set } from "@/lib/config-store";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
@@ -134,19 +135,29 @@ export async function POST(request: Request) {
   // link, truncates whatever it points at and leaves the link in place.
   // `rename` replaces the node without opening it, is atomic against the root
   // reader, and heals the path so the next request is a normal one. `wx` on the
-  // temp refuses to follow or reuse anything already sitting there, and a fresh
-  // file is what makes `mode` apply at all (it is ignored when the destination
-  // exists — see the same reasoning in src/lib/config-store.ts).
+  // temp refuses to reuse or follow anything sitting there, and a fresh file is
+  // what makes `mode` apply at all (it is ignored when the destination exists —
+  // see the same reasoning in src/lib/config-store.ts).
+  //
+  // The temp name is UNIQUE PER REQUEST, not a fixed `.tmp`. TimezoneAdopter
+  // fires this route on every desktop load, so two tabs are two overlapping
+  // requests, and this sequence awaits between its steps: with a shared name
+  // one request unlinks the other's temp — a 500 over a perfectly healthy
+  // `data/` — or worse, renames the OTHER request's zone into place and then
+  // reports its own as applied, leaving the store, both harness keys, the reply
+  // and the device clock disagreeing with nothing raised. That is the exact
+  // false success this card exists to remove. A fixed `.tmp` is safe only for a
+  // fully synchronous read-modify-write, which src/lib/email-pending.ts spells
+  // out; this is not one.
   //
   // A read-only, full or otherwise refusing `data/` used to escape as a bare
   // 500 with no shape and no log line. Nothing has been recorded and no root
   // step has run yet at this point, so the honest answer is that the zone was
   // not saved — and returning here keeps it that way.
   const envPath = timezoneEnvPath();
-  const tmpPath = `${envPath}.tmp`;
+  const tmpPath = `${envPath}.${randomUUID()}.tmp`;
   try {
     await fs.mkdir(path.dirname(envPath), { recursive: true });
-    await fs.rm(tmpPath, { force: true });
     await fs.writeFile(tmpPath, `TIMEZONE=${tz}\n`, { mode: 0o600, flag: "wx" });
     await fs.rename(tmpPath, envPath);
   } catch (err) {

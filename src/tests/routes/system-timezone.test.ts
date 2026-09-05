@@ -217,9 +217,10 @@ describe("/setup-api/system/timezone", () => {
 
   it("reports a failed write of timezone.env in its own error shape", async () => {
     // A real filesystem refusal, not a mock: `data/timezone.env` is a directory
-    // here, so `fs.writeFile` rejects with EISDIR exactly as a read-only or
-    // full `data/` would. Nothing has been recorded and no root step has run at
-    // that point, so the caller must be told the zone was NOT saved.
+    // here, so the write lands in the temp fine and `fs.rename` onto it rejects
+    // with EISDIR — the same catch a read-only or full `data/` reaches. Nothing
+    // has been recorded and no root step has run at that point, so the caller
+    // must be told the zone was NOT saved.
     await fs.rm(TZ_ENV_PATH, { force: true });
     await fs.mkdir(TZ_ENV_PATH, { recursive: true });
     try {
@@ -248,7 +249,15 @@ describe("/setup-api/system/timezone", () => {
     await fs.writeFile(target, "not the timezone\n");
     const plants: [string, () => Promise<void>][] = [
       ["symlink", async () => { await fs.symlink(target, TZ_ENV_PATH); }],
-      ["FIFO", async () => { spawnSync("mkfifo", [TZ_ENV_PATH]); }],
+      // The status is CHECKED: without a FIFO the POST just writes to a clean
+      // path and every assertion below still holds, so the one shape that
+      // hangs for ever would be skipped green.
+      ["FIFO", async () => {
+        const made = spawnSync("mkfifo", [TZ_ENV_PATH]);
+        expect(made.error ?? null, "mkfifo did not run").toBeNull();
+        expect(made.status, "mkfifo failed").toBe(0);
+        expect((await fs.lstat(TZ_ENV_PATH)).isFIFO()).toBe(true);
+      }],
     ];
 
     for (const [name, plant] of plants) {
@@ -267,6 +276,27 @@ describe("/setup-api/system/timezone", () => {
       expect(await fs.readFile(target, "utf-8"), name).toBe("not the timezone\n");
     }
     await fs.rm(target, { force: true });
+  });
+
+  it("does not let two overlapping requests write each other's zone", async () => {
+    // TimezoneAdopter fires this route on every desktop load, so two tabs are
+    // two overlapping requests, and the write sequence awaits between its
+    // steps. A temp path shared between them makes one unlink the other's file
+    // — a 500 over a healthy data/ — or rename the OTHER request's zone into
+    // place and then report its own as applied, leaving the store, the reply
+    // and the file the root step reads all disagreeing.
+    await fs.rm(TZ_ENV_PATH, { force: true });
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    const results = await Promise.all(
+      Array.from({ length: 12 }, () => mod.POST(post({ timezone: "Europe/Sofia" }))),
+    );
+
+    expect(results.map((r) => r.status)).toEqual(Array(12).fill(200));
+    expect(await fs.readFile(TZ_ENV_PATH, "utf-8")).toBe("TIMEZONE=Europe/Sofia\n");
+    const leftovers = (await fs.readdir(path.dirname(TZ_ENV_PATH)))
+      .filter((f) => f.startsWith("timezone.env") && f !== "timezone.env");
+    expect(leftovers).toEqual([]);
   });
 
   it("leaves no temp file behind when the write cannot land", async () => {

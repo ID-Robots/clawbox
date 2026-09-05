@@ -73,7 +73,8 @@ afterEach(() => {
  * What `read_configured_timezone` makes of the file on disk.
  *
  * `code` is the outcome that matters: 0 with a zone, 1 for "nothing recorded"
- * (a no-op), 2 for "a value was recorded and this device will not take it".
+ * (a no-op), 2 for "a value was recorded and this device will not take it",
+ * 3 for "data/timezone.env is not the plain file the route writes".
  */
 function readConfigured(contents: string | null): { code: number; value: string } {
   if (contents !== null) fs.writeFileSync(tzEnv, contents);
