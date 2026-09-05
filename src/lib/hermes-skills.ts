@@ -310,6 +310,30 @@ export interface BrowseResponse {
 }
 
 /**
+ * How long the inspect route lets `hermes skills inspect` run for the phase-2
+ * documentation fetch before it gives up and answers `cli_timeout`.
+ *
+ * 60 s, not the 45 s it used to be: that path goes over the unauthenticated
+ * GitHub API and the route's own note measured it at ~60 s on a loaded box, so
+ * the cap was cutting off fetches that were about to succeed. It matches the
+ * budget the catalog-index builds in hermes-skill-index.ts already take.
+ */
+export const SKILL_DOCS_CLI_TIMEOUT_MS = 60_000;
+
+/**
+ * What a CLIENT of `inspect?docs=1` has to allow: the cap above plus the queue
+ * wait and HTTP overhead around it (runSkillsCli admits two children at a time
+ * and the wait is NOT part of the CLI's own timeout).
+ *
+ * The margin is the point. The MCP tool allowed the request 30 s against a
+ * 45 s cap, so it aborted first every single time the route was slow enough to
+ * matter and the agent got "the ClawBox service did not answer in time" —
+ * never the route's 504, the one answer that says the DOCUMENTATION failed and
+ * the metadata is sound. Equal values would race for the same reason.
+ */
+export const SKILL_DOCS_CLIENT_TIMEOUT_MS = SKILL_DOCS_CLI_TIMEOUT_MS + 10_000;
+
+/**
  * Why a skills route's CLI call could not answer. The route's `error` sentence
  * is English composed on the server, for the log and for a caller with no
  * locale. The store — and the MCP tool's rules — read the CODE, the way the

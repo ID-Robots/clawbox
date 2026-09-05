@@ -122,8 +122,9 @@ describe("skill_info — a documentation fetch that failed is not an empty READM
     // ...but it has to carry the failure, in words the agent can repeat.
     expect(out.text).toMatch(/documentation/i);
     expect(out.text).toMatch(/could not|failed|not be/i);
-    // And it must not be presented as a skill that has no documentation.
-    expect(out.text).toMatch(/too slow|in time|timed out|deadline/i);
+    // Naming the deadline is what separates "the source was slow" from "the
+    // device broke", which are different things to tell the user.
+    expect(out.text).toMatch(/within \d+ seconds/i);
   });
 
   it("says so for a documentation fetch that failed for any other reason", async () => {
@@ -140,6 +141,9 @@ describe("skill_info — a documentation fetch that failed is not an empty READM
     if (out.isError) return;
     expect(out.text).toMatch(/documentation/i);
     expect(out.text).toMatch(/could not|failed|not be/i);
+    // A device that broke is not a source that was slow, and the note must not
+    // invent a deadline that was never reached.
+    expect(out.text).not.toMatch(/within \d+ seconds/i);
   });
 
   it("keeps quiet when the documentation arrived", async () => {
