@@ -270,6 +270,41 @@ describe("skill_info — a documentation fetch that failed is not an empty READM
     expect(out.error.next).toContain("official/pdf");
   });
 
+  it("does not read a code-less 404 as the CLI saying the skill is unknown", async () => {
+    // A device build that predates this route answers 404 with no code at all.
+    // Reading that as the CLI's own lookup verdict puts "do not guess ids" back
+    // on a request nothing ever answered — the defect this file exists for, in
+    // its last branch.
+    apiGet.mockImplementation(async (route: string, opts: { query?: Record<string, unknown> }) => {
+      if (route !== INSPECT) throw new Error(`unexpected GET ${route}`);
+      if (opts?.query?.docs) throw new ApiError(404, "<!doctype html>");
+      return { skill: { id: ID, name: "pdf-tools", needsRemoteDocs: true } };
+    });
+
+    const out = await skills().call("skill_info", { id: ID });
+
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).not.toBe("NOT_FOUND");
+    expect(out.error.next).toMatch(/not that the skill is missing/i);
+  });
+
+  it("still reads the route's own not_found code as the CLI's verdict", async () => {
+    apiGet.mockImplementation(async (route: string, opts: { query?: Record<string, unknown> }) => {
+      if (route !== INSPECT) throw new Error(`unexpected GET ${route}`);
+      if (opts?.query?.docs) {
+        throw new ApiError(404, JSON.stringify({ error: "Skill not found", code: "not_found" }));
+      }
+      return { skill: { id: ID, name: "pdf-tools", needsRemoteDocs: true } };
+    });
+
+    const out = await skills().call("skill_info", { id: ID });
+
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("NOT_FOUND");
+  });
+
   it("rethrows an off-Hermes refusal rather than calling it a documentation failure", async () => {
     // NOT_SUPPORTED_HERE is the whole tool failing. Reporting it as "the
     // documentation could not be fetched, everything else is accurate" would

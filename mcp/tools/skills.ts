@@ -20,6 +20,7 @@ import {
   isValidQuery,
   isValidSkillName,
   matchRemovableSkill,
+  REQUEST_REFUSAL,
   SKILL_DOCS_CLI_TIMEOUT_MS,
   SKILL_DOCS_CLIENT_TIMEOUT_MS,
   type CliFailureCode,
@@ -852,17 +853,23 @@ export function registerSkillTools(reg: Registrar): void {
     const retry = `${closing}, and offer to try again.`;
     const final = `${closing}. Retrying will not change it.`;
     let code: CliFailureCode | null = null;
-    let status = 0;
+    // The route's own "the CLI does not know that id" verdict, which is the one
+    // failure here that is ABOUT the skill rather than about the fetch. Read
+    // from the BODY's code, never from the bare 404: a device build that
+    // predates this route answers 404 with no code at all, and reading that as
+    // a lookup miss puts "do not guess ids" back on a request that was never
+    // answered (CodeRabbit, #692).
+    let lookupMiss = false;
     if (err instanceof ApiError) {
-      status = err.status;
       try {
         const body = JSON.parse(err.body) as { code?: unknown };
         if (isCliFailureCode(body.code)) code = body.code;
+        lookupMiss = err.status === 404 && body.code === REQUEST_REFUSAL.notFound;
       } catch {
         // A body that is not JSON, or a device build older than the codes.
       }
       // A 504 from this route is the documentation deadline by construction.
-      if (!code && status === 504) code = "cli_timeout";
+      if (!code && err.status === 504) code = "cli_timeout";
     }
     if (code === "cli_timeout") {
       // The ROUTE's own deadline: the number is real, and it is the source
@@ -895,7 +902,7 @@ export function registerSkillTools(reg: Registrar): void {
         code: "TOO_LARGE",
       };
     }
-    if (status === 404) {
+    if (lookupMiss) {
       // The CLI's own verdict: it does not know that id. Not a fetch that
       // failed — a lookup that answered.
       return {
