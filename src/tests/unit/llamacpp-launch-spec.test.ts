@@ -33,29 +33,33 @@ describe("getLlamaCppLaunchSpec", () => {
     return await import("@/lib/llamacpp-server");
   }
 
+  /** The device's own project directory — CONFIG_ROOT's production default. */
+  const BOX_ROOT = "/home/clawbox/clawbox";
+  /** A root no cwd can be, so the pair discriminates wherever it runs. */
+  const OTHER_ROOT = "/srv/clawbox-elsewhere";
+
   it("resolves the launcher script from the checkout, not from the cwd", async () => {
     // TWO checkouts, one process. A cwd-based spec answers the same path for
     // both, whatever the cwd happens to be, so one of these two lines fails for
     // it wherever the suite runs.
     //
-    // Pinned that way rather than against `process.cwd()` itself: on a box the
-    // checkout IS the cwd (`/home/clawbox/clawbox`, CONFIG_ROOT's production
-    // default) and vitest runs from the project root, so a
-    // `not.toBe(join(process.cwd(), …))` line compares a string with itself and
-    // goes RED over correct code — on the one platform the working rules say to
-    // run the suites on, and on no other. The guard against a cwd reader must
-    // not itself depend on the cwd.
-    const box = await loadWithRoot("/home/clawbox/clawbox");
+    // Pinned that way rather than against `process.cwd()` itself: on a device
+    // the checkout IS the cwd (`/home/clawbox/clawbox`) and vitest runs from the
+    // project root, so a `not.toBe(join(process.cwd(), …))` line compares a
+    // string with itself and goes RED over correct code — on the hardware these
+    // suites are run on, and on no other machine. A guard against a cwd reader
+    // must not itself depend on the cwd.
+    const box = await loadWithRoot(BOX_ROOT);
     const boxSpec = box.getLlamaCppLaunchSpec("gemma4-e2b-it-q4_0");
-    const elsewhere = await loadWithRoot("/srv/clawbox-elsewhere");
+    const elsewhere = await loadWithRoot(OTHER_ROOT);
     const elsewhereSpec = elsewhere.getLlamaCppLaunchSpec("gemma4-e2b-it-q4_0");
 
-    expect(boxSpec.scriptPath).toBe(path.join("/home/clawbox/clawbox", "scripts", "start-llamacpp.sh"));
-    expect(elsewhereSpec.scriptPath).toBe(path.join("/srv/clawbox-elsewhere", "scripts", "start-llamacpp.sh"));
+    expect(boxSpec.scriptPath).toBe(path.join(BOX_ROOT, "scripts", "start-llamacpp.sh"));
+    expect(elsewhereSpec.scriptPath).toBe(path.join(OTHER_ROOT, "scripts", "start-llamacpp.sh"));
   });
 
   it("keeps the script and the runtime files it writes in one tree", async () => {
-    const root = "/srv/clawbox-elsewhere";
+    const root = OTHER_ROOT;
     const { getLlamaCppLaunchSpec } = await loadWithRoot(root);
 
     const spec = getLlamaCppLaunchSpec("gemma4-e2b-it-q4_0");
