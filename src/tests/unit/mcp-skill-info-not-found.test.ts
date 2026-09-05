@@ -132,7 +132,10 @@ describe("skill_info — an id nothing on the device backs", () => {
     expect(out.isError).toBe(true);
     if (!out.isError) return;
     expect(out.error.code).not.toBe("NOT_FOUND");
-    expect(out.error.next).toMatch(/do not tell them the skill does not exist/i);
+    // The SUBSTANCE, not the pronoun: #692 words the same instruction as
+    // "the user" and this branch wrote "them". What must hold is that the
+    // next step forbids reporting the skill as missing.
+    expect(out.error.next).toMatch(/do not tell (them|the user) the skill does not exist/i);
   });
 
   it("still describes a skill the catalogue does back", async () => {
@@ -322,7 +325,10 @@ describe("skill_info — a docs lookup that failed is not a verdict on the skill
     expect(out.isError).toBe(true);
     if (!out.isError) return;
     expect(out.error.code).not.toBe("NOT_FOUND");
-    expect(out.error.next).toMatch(/do not tell them the skill does not exist/i);
+    // The SUBSTANCE, not the pronoun: #692 words the same instruction as
+    // "the user" and this branch wrote "them". What must hold is that the
+    // next step forbids reporting the skill as missing.
+    expect(out.error.next).toMatch(/do not tell (them|the user) the skill does not exist/i);
   });
 });
 
@@ -358,7 +364,10 @@ describe("skill_info — what phase 2 alone can report", () => {
     expect(out.isError).toBe(true);
     if (!out.isError) return;
     expect(out.error.code).not.toBe("NOT_FOUND");
-    expect(out.error.next).toMatch(/do not tell them the skill does not exist/i);
+    // The SUBSTANCE, not the pronoun: #692 words the same instruction as
+    // "the user" and this branch wrote "them". What must hold is that the
+    // next step forbids reporting the skill as missing.
+    expect(out.error.next).toMatch(/do not tell (them|the user) the skill does not exist/i);
   });
 
   it("says the documentation is unavailable when Hermes refused it for a real skill", async () => {

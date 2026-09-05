@@ -973,7 +973,23 @@ export function registerSkillTools(reg: Registrar): void {
         try {
           phase2 = await skillsGet<InspectDocs>(
             "/setup-api/hermes/skills/inspect",
-            { query: { id, docs: 1 }, timeoutMs: SKILL_DOCS_CLIENT_TIMEOUT_MS },
+            {
+              query: { id, docs: 1 },
+              timeoutMs: SKILL_DOCS_CLIENT_TIMEOUT_MS,
+              // The SAME rules phase 1 carries. Phase 2 is the only phase that
+              // SPAWNS the CLI, so it is the only one that can answer
+              // `502 {code:"cli_missing"}` — a Hermes install that is not
+              // there. Unmapped it fell through to describeDocsFailure() and
+              // came back as "the device could not fetch it, offer to try
+              // again", which is the wrong advice for a permanent device
+              // state; mapped, it is the NOT_SUPPORTED_HERE the edition guard
+              // already raises for the same family of fact, and the catch
+              // below re-throws it rather than filing it as a docs failure.
+              // `cli_timeout` and `cli_failed` map to TIMEOUT and INTERNAL,
+              // which are NOT re-thrown and still settle as documentation
+              // failures with phase 1's metadata intact.
+              rules: CATALOG_RULES,
+            },
           );
         } catch (err) {
           // Not every failure here is ABOUT the documentation. An off-Hermes
@@ -1011,9 +1027,30 @@ export function registerSkillTools(reg: Registrar): void {
       // above has already given the Hermes CLI its chance to resolve it, so a
       // record that STILL carries no description, no documentation and no
       // provenance is not a sparse skill — it is a skill that does not exist.
+      //
+      // ASKED of the route where it answers (TASK-547): `catalogMiss` says in
+      // one field what the four-field test below infers — nothing in the
+      // catalogue and nothing on disk backed this record — and it is the
+      // route's own verdict rather than a guess from what the record happens to
+      // carry. It matters because the catalogue is a snapshot the browse route
+      // builds once and never rebuilds, so a real skill published since is
+      // missing from it, and `related_skills` chips address skills by bare NAME,
+      // which is not a key of it at all. The inferred test stays as the fallback
+      // for a device build that predates the field — absent is not `false`.
       const source = typeof detail.source === "string" ? detail.source : "";
       const trust = typeof detail.trust === "string" ? detail.trust : "";
-      if (!description && !documentation && !source && !trust) {
+      const inferredEmpty = !description && !documentation && !source && !trust;
+      const routeSaidUnbacked = detail.catalogMiss === true;
+      const unbacked = detail.catalogMiss === undefined ? inferredEmpty : routeSaidUnbacked;
+      // Where the ROUTE said `catalogMiss`, a phase 2 that ANSWERED settles the
+      // question in the skill's favour, whatever the delta carried: the route
+      // builds a delta off a real Hermes panel, so a panel with no Description
+      // row and no prose preview is still Hermes saying the skill exists. Only
+      // a phase 2 that refused or failed can leave the record unexplained.
+      // The inferred path keeps its own rule, because a build that predates
+      // `catalogMiss` has nothing else to go on.
+      const phase2Settled = routeSaidUnbacked && !docsFailure;
+      if (unbacked && !phase2Settled) {
         // The guard's premise, stated above, is that phase 2 HAS run: only a
         // lookup that ANSWERED and added nothing proves the skill is not
         // there. A phase 2 that never answered proves nothing, and "do not
@@ -1057,7 +1094,16 @@ export function registerSkillTools(reg: Registrar): void {
         needs_commands: (requirements?.commands ?? []).map((c) => c.name),
         needs_secrets: (requirements?.secrets ?? []).map((sec) => sec.label),
         documentation: framed(documentation.length > 4_000 ? `${documentation.slice(0, 4_000)}…` : documentation),
-        ...(docsFailure ? { documentation_note: docsFailure.note } : {}),
+        // The FLAG beside the sentence (TASK-547). An empty `documentation`
+        // reads as "this skill has none", and after the fix above that is
+        // exactly how a record whose docs lookup timed out — or whose docs
+        // Hermes refused while the CATALOGUE still backs the record — arrives
+        // here with nothing to show. A model that skims past prose still sees
+        // a boolean; `documentation_note` says which of the two it was and
+        // what to do about it.
+        ...(docsFailure
+          ? { documentation_unavailable: true, documentation_note: docsFailure.note }
+          : {}),
       });
     },
   );
