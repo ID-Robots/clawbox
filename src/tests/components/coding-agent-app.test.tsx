@@ -1430,6 +1430,26 @@ describe("the workspace, the breadcrumb and the live view", () => {
     expect(await screen.findByTestId("coding-agent-open-settings")).toBeInTheDocument();
   });
 
+  it("keeps the header row on the setup wizard even in a wide window — the wizard has no rail, and Settings is the way out", async () => {
+    const RO = class {
+      private cb: ResizeObserverCallback;
+      constructor(cb: ResizeObserverCallback) { this.cb = cb; }
+      observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
+      unobserve() {}
+      disconnect() {}
+    };
+    vi.stubGlobal("ResizeObserver", RO);
+    try {
+      stubFetch({ enabled: false, readiness: READY, setupComplete: false }, [], { projects: [] });
+      render(<CodingAgentApp />);
+      expect(await screen.findByTestId("coding-agent-open-settings")).toBeInTheDocument();
+      expect(screen.getByTestId("coding-agent-state")).toHaveTextContent(t("codingAgent.stateOff"));
+      expect(screen.queryByTestId("coding-agent-sidebar")).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps the header row in a narrow window, where there is no rail to carry it", async () => {
     stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
     render(<CodingAgentApp />);

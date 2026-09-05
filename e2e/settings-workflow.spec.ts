@@ -247,8 +247,11 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   await expect(codingAgent.getByTestId("coding-agent-effort-max")).toBeVisible();
   await agentSwitch.click();
   await expect(agentSwitch).toHaveAttribute("aria-checked", "true");
-  // The header's state chip (a narrow window only) reads the status the panel just published.
-  if (!hasRail) await expect(stateChip).toContainText("On");
+  // The header's state chip reads the status the panel just published —
+  // where the window still draws the row: the wizard is gone now that the
+  // switch is on, so a wide window has its rail instead of the row.
+  await page.waitForTimeout(1000);
+  if ((await rail.count()) === 0) await expect(stateChip).toContainText("On");
 });
 
 // The other half of the Voice tab's contract: a cloud voice this box cannot

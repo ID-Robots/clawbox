@@ -1222,9 +1222,11 @@ export default function CodingAgentApp() {
             repeat the rail's New/Home/Settings and cost the page a row it
             needs for files — and the window's own title bar already names
             the app. The owner asked for no name and no state chip in the
-            rail either; the switch is one tap away in Settings. `liveMode`
-            has no chrome at all. */}
-        {!wide && !liveMode && (
+            rail either; the switch is one tap away in Settings. The setup
+            WIZARD has no rail at any width, so it keeps the row: without it
+            a wide window on the wizard had no way to Settings at all.
+            `liveMode` has no chrome at all. */}
+        {(!wide || view.face === "wizard") && !liveMode && (
         <div className="flex items-center justify-between gap-4 pb-3 mb-1 border-b border-white/[0.06]">
           <div className="flex items-center gap-2 min-w-0">
             <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }} aria-hidden="true">smart_toy</span>
