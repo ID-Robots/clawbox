@@ -497,15 +497,16 @@ describe("a run", () => {
     await again._resetCodingAgentStateForTests();
   });
 
-  it("has stopped writing in the project folder once its state is reset", async () => {
-    // The settle path — the commit, then the review decision and the pull
-    // request — is fired and forgotten from finishRun, so a run reporting
-    // itself finished said nothing about it and nothing could wait for it.
-    // CI failed three times on that (PRs #639, #643 and #648, none of which
-    // touch this code) with
+  it("has stopped writing in the project folder once a killed run's state is reset", async () => {
+    // A run that is still going when the teardown arrives is SIGKILLed by the
+    // reset — and settles from its own child's `close` handler, after it. So
+    // the commit, the review decision and the pull request all begin once the
+    // reset has returned, and the removal below runs into a `git init` that is
+    // still creating .git. That is how CI failed on #639, #643 and #648 with
     //   ENOTEMPTY: directory not empty, rmdir '.../code-projects/site/.git'
-    // — a `git init` from that path still creating .git inside the tree the
-    // teardown below was removing around it.
+    // (#665 has since moved a NATURALLY finished run's commit ahead of its
+    // waiters, which closes the other half of the same defect; a killed run
+    // has no waiter to be ahead of.)
     //
     // Pictures off: the icon draw has a budget of its own and is deliberately
     // left running (see commitProjectAssets), so it is not what this asserts.
@@ -515,19 +516,26 @@ describe("a run", () => {
       coding_agent_enabled: true,
       coding_agent_generate_images: false,
     });
+    // Changes something, then stays up: the settle path only commits a run
+    // that touched a file, and the run has to be live at the reset.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${ASSISTANT}' | sed "s|__DIR__|$PWD|"`,
+      `echo '${TOOL_RESULTS}'`,
+      "sleep 30",
+    ].join("\n"));
     const project = makeProject("site");
     const run = await lib.startRun({ task: "one", projectId: "site", source: "agent" });
-    await finished(run.id);
+    await vi.waitFor(() => {
+      expect(lib.getRun(run.id)?.filesTouched.length).toBeGreaterThan(0);
+    }, { timeout: 10_000 });
 
     await lib._resetCodingAgentStateForTests();
 
     const settled = entriesUnder(project);
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     expect(entriesUnder(project)).toEqual(settled);
-    // Its own budget: a real setpriv spawn and a real git init/add/commit
-    // ahead of a deliberate 1.5 s wait is not a 5 s test on a loaded runner,
-    // and this must not depend on another PR raising the file's default.
-  }, 20_000);
+  });
 
   it("reads a corrupt runs file as empty rather than failing", async () => {
     fs.writeFileSync(runsFile(), "{ not json");
