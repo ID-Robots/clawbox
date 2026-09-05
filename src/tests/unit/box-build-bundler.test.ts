@@ -32,6 +32,9 @@ describe("the box's build", () => {
     // tree at the real package through a script that fails the build when
     // it cannot.
     expect(pkg.scripts.postbuild).toContain('bash scripts/link-standalone-next.sh "$SDIR" || exit 1');
+    // The playwright copy has the same guard: through a symlinked standalone
+    // node_modules its rm removed the real package too (2026-09-05).
+    expect(pkg.scripts.postbuild).toContain('if [ -d "$SDIR/node_modules" ] && [ ! -L "$SDIR/node_modules" ]; then for pwp in playwright playwright-core;');
   });
 
   it("is run by the updater with two webpack workers, so its peak stays where it was measured", () => {
