@@ -77,8 +77,23 @@ export async function get(key: string): Promise<unknown> {
   return config[key];
 }
 
+/**
+ * A write reads the whole store first, so it may NOT read it forgivingly.
+ *
+ * `writeConfig` temp-writes and renames, which needs write permission on
+ * `data/` and not on the file — so building the new object out of `readConfig()`'s
+ * `{}` succeeded on a store nobody could read and REPLACED it with the one key
+ * being saved. A `data/config.json` left root-owned by a `sudo` script (the same
+ * provenance this module's readers now refuse to guess about) would lose the
+ * mailbox password, both bot tokens, the approved-sender names and the session
+ * generation the next time the owner touched any setting — reported as
+ * `success: true`, one `chmod` after they were all still there.
+ *
+ * So a write over an unreadable store throws. ENOENT still means `{}`: a box
+ * that has never saved anything is the ordinary first write.
+ */
 export async function set(key: string, value: unknown): Promise<void> {
-  const config = readConfig();
+  const config = readConfigStrict();
   if (value === undefined) {
     delete config[key];
   } else {
@@ -88,7 +103,7 @@ export async function set(key: string, value: unknown): Promise<void> {
 }
 
 export async function setMany(entries: Record<string, unknown>): Promise<void> {
-  const config = readConfig();
+  const config = readConfigStrict();
   for (const [key, value] of Object.entries(entries)) {
     if (value === undefined) {
       delete config[key];
