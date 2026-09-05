@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -25,6 +26,13 @@ import { DATA_DIR_PUBLIC_SUBTREES } from "@/lib/file-guard";
 
 const ROOT = process.cwd();
 const read = (rel: string) => fs.readFileSync(path.join(ROOT, rel), "utf-8");
+
+/** The scripts a unit file runs as the COMMAND of an Exec* line. */
+function execScripts(unit: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of unit.matchAll(/^\s*Exec[A-Za-z]*\s*=\s*[-@:+!]*\/home\/clawbox\/clawbox\/(scripts\/\S+)/gm)) out.add(m[1]);
+  return out;
+}
 
 const START = read("scripts/start-embed-server.sh");
 const INSTALL = read("install.sh");
@@ -98,6 +106,47 @@ describe("the unit runs the script, and the script runs an embedder", () => {
   it("is a system unit for the clawbox user with no [Install] section", () => {
     expect(UNIT).toContain("User=clawbox");
     expect(UNIT).toContain("ExecStart=/home/clawbox/clawbox/scripts/start-embed-server.sh");
+  });
+
+  it("reads every script a unit runs straight from an Exec* line, however the line is spelled", () => {
+    // The matcher the check below relies on, pinned on its own: EVERY Exec*
+    // directive, whitespace around `=` (systemd ignores it), systemd's
+    // command-line prefixes (`-@:+!`), and only a script that is the COMMAND
+    // — one run through `/bin/bash …` or `/usr/bin/env node …` needs no mode
+    // bit and is left alone.
+    const unit = [
+      "[Service]",
+      "ExecStartPre=-/home/clawbox/clawbox/scripts/pre.sh",
+      "ExecStart=/home/clawbox/clawbox/scripts/start.sh --flag",
+      "ExecReload = -/home/clawbox/clawbox/scripts/reload.sh",
+      "  ExecStopPost=+/home/clawbox/clawbox/scripts/after.sh",
+      "ExecCondition=!!/home/clawbox/clawbox/scripts/cond.sh",
+      "ExecStop=/bin/bash /home/clawbox/clawbox/scripts/wrapped.sh",
+      "ExecStart=/usr/bin/env node /home/clawbox/clawbox/scripts/tool.js",
+      "Environment=NOT_EXEC=/home/clawbox/clawbox/scripts/env.sh",
+    ].join("\n");
+    expect([...execScripts(unit)].sort()).toEqual([
+      "scripts/after.sh", "scripts/cond.sh", "scripts/pre.sh", "scripts/reload.sh", "scripts/start.sh",
+    ]);
+  });
+
+  it("every script a unit runs straight from Exec* is executable in git", () => {
+    // A launcher committed as 100644 is one every checkout writes without
+    // its mode bit, and systemd then fails the unit with 203/EXEC
+    // ("Permission denied") on any box that took the branch through git —
+    // install.sh chmods nothing here. Seen on a box the moment beta carried
+    // this unit. Every unit's script is held to it, not only this one.
+    const scripts = new Set<string>();
+    for (const unit of fs.readdirSync(path.join(ROOT, "config")).filter((f) => f.endsWith(".service"))) {
+      for (const script of execScripts(read(`config/${unit}`))) scripts.add(script);
+    }
+    expect(scripts.has("scripts/start-embed-server.sh")).toBe(true);
+    expect(scripts.size).toBeGreaterThan(3);
+    const modes = execFileSync("git", ["-C", ROOT, "ls-files", "-s", "--", ...scripts], { encoding: "utf8" })
+      .trim().split("\n").filter(Boolean)
+      .map((line) => ({ mode: line.split(" ")[0], file: line.split("\t")[1] }));
+    expect(modes.map((m) => m.file).sort()).toEqual([...scripts].sort());
+    expect(modes.filter((m) => m.mode !== "100755").map((m) => `${m.file} ${m.mode}`)).toEqual([]);
     expect(UNIT).toContain("Restart=no");
     expect(UNIT).toContain("MemoryAccounting=yes");
     // Enabled at boot it would be 2 GB resident for nothing: the proxy starts it.
