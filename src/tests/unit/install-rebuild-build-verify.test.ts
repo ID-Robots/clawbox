@@ -586,7 +586,13 @@ describe("step_build asks the same two questions", () => {
   });
 });
 
-describe("do_rebuild says who owns the build it parks", () => {
+// Linux only, and deliberately not made portable: what these cases pin is that
+// the stamp names a process the reader can still PROVE is alive, and the proof
+// is `/proc/sys/kernel/random/boot_id` plus field 22 of `/proc/<pid>/stat` —
+// the two facts production-server.js reads. On a platform with no procfs the
+// probe can only answer "stale", so the suite would fail over the machine it
+// ran on rather than over install.sh. The device and CI are both Linux.
+describe.skipIf(process.platform !== "linux")("do_rebuild says who owns the build it parks", () => {
   /**
    * The park is not a quiet moment. `set_previous_build_aside` renames `.next`
    * to `.next-old` and only then runs `bun run build`, so for the whole length
