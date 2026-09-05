@@ -37,6 +37,11 @@ async function isRegisteredWebapp(appId: string): Promise<boolean> {
 }
 
 export async function POST(req: Request) {
+  // Hoisted so the OUTER catch can say what landed. By the time anything below
+  // the skill removal can throw, that folder may already be gone, and a 500
+  // saying only "Uninstall failed" withholds the one fact the owner and the
+  // agent need to decide what to do next.
+  let skillRemoved: boolean | null = null;
   try {
     const { appId } = await req.json();
     if (!appId || typeof appId !== "string" || !/^(?!-)[A-Za-z0-9_-]+$/.test(appId)) {
@@ -63,20 +68,30 @@ export async function POST(req: Request) {
     // the answer says so. Retryable: the file is rewritten in place by
     // `openclaw config set`, so the next attempt a moment later reads it.
     //
-    // A WEB APP is asked about first, and never reaches that refusal: it has no
-    // skill half, so the OpenClaw configuration has nothing to say about
-    // removing it. Without that, an openclaw.json this box cannot read — on a
-    // licensed `dual` box, one belonging to a harness that is not even running
-    // — would block the removal of the agent's own web app, permanently if the
-    // file is invalid rather than half-written, where beta removed it.
+    // Being a WEB APP decides whether that refusal is FATAL — never whether
+    // the skill half runs. A registered webapp has no skill of its own, so an
+    // openclaw.json this box cannot read has nothing to say about removing it:
+    // without that exception, on a licensed `dual` box a config belonging to a
+    // harness that is not even running would block the removal of the agent's
+    // own web app, permanently if the file is invalid rather than half-written,
+    // where beta removed it.
+    //
+    // What must NOT follow is skipping the removal. Nothing stops a webapp id
+    // from also being a store slug — `webapp_create` REPLACES
+    // `installed_meta[<id>]` for any id (webapp-registry.ts), with no collision
+    // check, and `apps/install` writes meta only when there is none — so an id
+    // with both would have kept its skill folder and its `skills.entries.<id>`
+    // while the tile, the prefs, the KV and the icon went, and answered
+    // `{ok:true}`. That is this route's own defect reached through the meta
+    // instead of through the edition.
     const isWebapp = await isRegisteredWebapp(appId);
     let skillRoot: string | null = null;
-    if (!isWebapp) {
-      try {
-        skillRoot = openclawSkillRoot();
-      } catch (err) {
-        if (!(err instanceof OpenclawConfigUnreadableError)) throw err;
-        console.warn("[uninstall] Could not resolve the skills root:", err.message);
+    try {
+      skillRoot = openclawSkillRoot();
+    } catch (err) {
+      if (!(err instanceof OpenclawConfigUnreadableError)) throw err;
+      console.warn("[uninstall] Could not resolve the skills root:", err.message);
+      if (!isWebapp) {
         return NextResponse.json({
           ok: false,
           error: "The device's OpenClaw configuration could not be read, so nothing was removed. Try again in a moment.",
@@ -93,7 +108,6 @@ export async function POST(req: Request) {
     //           web app, which never had a skill of its own
     // `{ok:true}` alone said the same thing for all three, which is the half of
     // the wrong-directory delete that a guard on its own does not close.
-    let skillRemoved: boolean | null = null;
     if (skillRoot) {
       const skillDir = path.resolve(skillRoot, appId);
       if (!skillDir.startsWith(skillRoot + path.sep)) {
@@ -118,6 +132,13 @@ export async function POST(req: Request) {
           // and reports from, and dropping it over a skill still on disk is
           // the failure this route exists to stop making.
           console.warn("[uninstall] Failed to remove the skill directory:", err instanceof Error ? err.message : err);
+          // Part of the folder is probably gone, and `SKILL.md` is usually the
+          // first casualty — so the gateway's watcher drops the skill on its
+          // next scan while `apps/skill-info` keeps serving "installed and
+          // enabled" from its cache. Rescan before answering: this is the one
+          // path where the owner is actively looking for the truth. (Not on
+          // the refusal above — nothing was touched there.)
+          refreshSkillsCache();
           return NextResponse.json({
             ok: false,
             error: "The app's skill folder could not be fully removed, so the uninstall was stopped and part of the folder may already be gone. Try again; if it keeps failing, remove the folder from the Terminal.",
@@ -143,7 +164,27 @@ export async function POST(req: Request) {
     if (!webappDir.startsWith(webappRoot + path.sep)) {
       return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
     }
-    await fs.rm(webappDir, { recursive: true, force: true });
+    // Without `force`, so the removal itself says whether there was a webapp
+    // here — the fact the report below needs. Every other failure still throws,
+    // exactly as it did with `force`, which only ever swallowed ENOENT.
+    let webappRemoved = false;
+    try {
+      await fs.rm(webappDir, { recursive: true });
+      webappRemoved = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
+    }
+
+    // `false` is "this box has a skills root and nothing of that name was in
+    // it", and `mcp/tools/desktop.ts` says that out loud: "there was no skill
+    // of that name on disk". Over a WEB APP that is an absence report about
+    // something that never existed, which a small model relays as a partial
+    // failure — so a web app answers `null`, "no skill half to report on",
+    // whichever way it was recognised: its `installed_meta.webappUrl`, or the
+    // deployed directory this uninstall just removed (the meta can be missing,
+    // or unreadable for a moment, and `isRegisteredWebapp` is deliberately
+    // cautious there).
+    if (skillRemoved === false && (isWebapp || webappRemoved)) skillRemoved = null;
 
     // Remove cached icon from the same location the install/icon routes use
     // (DATA_DIR/icons). The old hardcoded ~/clawbox/data/icons path diverged
@@ -153,11 +194,12 @@ export async function POST(req: Request) {
 
     // The skill's `skills.entries.<id>` in openclaw.json goes too, or a later
     // install under the same id silently inherits `enabled: false`. Best
-    // effort, like the icon: the files are already gone. Same edition
-    // condition as the directory above — not because the call would write
-    // anything on a box with no config (it returns early on a missing entry,
-    // before `writeConfig` is reached), but because on the hermes SKU there is
-    // no OpenClaw configuration for this route to own, and a leftover
+    // effort, like the icon: the files are already gone. Same condition as the
+    // directory above, and for the same reason it is not the WEBAPP condition:
+    // an id that is both keeps its entry otherwise. Not because the call would
+    // write anything on a box with no config (it returns early on a missing
+    // entry, before `writeConfig` is reached), but because on the hermes SKU
+    // there is no OpenClaw configuration for this route to own, and a leftover
     // ~/.openclaw/openclaw.json on that SKU is not ours to rewrite.
     if (skillRoot) {
       await clearSkillEntry(appId).catch((err) => {
@@ -221,6 +263,20 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, appId, skillRemoved });
   } catch (err) {
     console.error("[uninstall] Uninstall failed:", err instanceof Error ? err.message : err);
-    return NextResponse.json({ error: "Uninstall failed" }, { status: 500 });
+    // The same failure contract the two refusals above carry, and the same
+    // rule: say what is true. Everything after the skill removal can still
+    // throw — an EACCES under data/webapps, say — and by then the skill folder
+    // may already be gone, so an opaque "Uninstall failed" hides the one fact
+    // that decides what to do next. Retryable because the rest of the cleanup
+    // is idempotent: a second attempt removes what is left.
+    return NextResponse.json({
+      ok: false,
+      error: skillRemoved === true
+        ? "The uninstall failed after the app's skill folder had already been removed, so the app is only partly gone. Try again."
+        : "The uninstall failed. Try again in a moment.",
+      code: "uninstall_failed",
+      retryable: true,
+      skillRemoved,
+    }, { status: 500 });
   }
 }

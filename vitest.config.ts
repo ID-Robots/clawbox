@@ -49,6 +49,18 @@ export default defineConfig({
       // file; the suite must see the same nothing everywhere. Tests that need
       // an openclaw.json point OPENCLAW_HOME at their own fixture dir.
       OPENCLAW_HOME: path.join(os.tmpdir(), `clawbox-test-openclaw-${process.pid}`),
+      // `CLAWBOX_OPENCLAW_HOME` OUTRANKS the line above wherever this repo
+      // resolves OpenClaw's home, and install.sh bakes it into the web-server
+      // unit — so on a device the floor was only half a floor: a suite run
+      // from a shell carrying it reads the box's real openclaw.json past the
+      // fixture, and `apps/uninstall`'s route tests would then `fs.rm` under
+      // the box's REAL workspace and stay green. Emptied rather than pointed
+      // somewhere, like OPENCLAW_STATE_DIR below and for the same reason:
+      // every reader spells it `CLAWBOX_OPENCLAW_HOME || OPENCLAW_HOME || …`,
+      // so "" neutralises an inherited value while leaving the floor above —
+      // and every test that points OPENCLAW_HOME at its own fixture — in
+      // charge.
+      CLAWBOX_OPENCLAW_HOME: "",
       // And for the override OpenClaw honours above its home: with
       // OPENCLAW_STATE_DIR exported on the runner, openclaw-state-store.ts
       // would read that machine's real state/openclaw.sqlite (the Telegram

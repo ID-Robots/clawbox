@@ -88,10 +88,17 @@ beforeEach(async () => {
   vi.clearAllMocks();
   clearSkillEntry.mockResolvedValue(false);
   stored = {};
-  restoreEnv = saveEnv("HOME", "CLAWBOX_EDITION", "OPENCLAW_HOME");
+  restoreEnv = saveEnv("HOME", "CLAWBOX_EDITION", "OPENCLAW_HOME", "CLAWBOX_OPENCLAW_HOME");
   home = await fs.mkdtemp(path.join(os.tmpdir(), "clawbox-uninst-"));
   dataDir = path.join(home, "clawbox", "data");
   process.env.HOME = home;
+  // This file DELETES under whatever path the real openclawSkillRoot()
+  // resolves, so the two spellings of OpenClaw's home are both nailed down.
+  // `CLAWBOX_OPENCLAW_HOME` outranks `OPENCLAW_HOME` — and install.sh bakes it
+  // into the web-server unit, so a suite run on a device inherits it — which
+  // would send these cases at the box's real workspace with the suite still
+  // green. Cleared here as well as floored in vitest.config.ts.
+  delete process.env.CLAWBOX_OPENCLAW_HOME;
   // vitest.config.ts floors OPENCLAW_HOME at a tmp path so no test reads a
   // real box's openclaw.json; a test that needs one points it at its own
   // fixture, which is what the module's CONFIG_PATH resolves.
@@ -227,6 +234,27 @@ describe("POST /setup-api/apps/uninstall on an OpenClaw device", () => {
     // touched and the OpenClaw config was left alone.
     await expect(fs.stat(clawdSkill())).resolves.toBeTruthy();
     expect(clearSkillEntry).not.toHaveBeenCalled();
+  });
+
+  it("removes the skill of an app the desktop ALSO knows as a web app", async () => {
+    // Being a web app must decide whether an unreadable config is fatal, not
+    // whether the skill half runs. Nothing stops one id from being both:
+    // `webapp_create` REPLACES `installed_meta[<id>]` for any id, with no
+    // collision check, and `apps/install` writes meta only when there is none.
+    // Skipping the skill half for such an id left the folder and its
+    // `skills.entries.<id>` behind — still loaded by the gateway — while the
+    // tile, the prefs, the KV and the icon went and the route answered
+    // `{ok:true}`: this route's own defect, reached through the meta instead of
+    // through the edition.
+    stored = { "pref:installed_meta": { [APP]: { name: "Notes", webappUrl: `/setup-api/webapps?app=${APP}` } } };
+
+    const { status, body } = await uninstall(APP);
+
+    expect(status).toBe(200);
+    expect(body.skillRemoved).toBe(true);
+    await expect(fs.stat(clawdSkill())).rejects.toThrow();
+    await expect(fs.stat(webappDir())).rejects.toThrow();
+    expect(clearSkillEntry).toHaveBeenCalledWith(APP);
   });
 
   it("follows OPENCLAW_HOME, not $HOME, to the config that names the workspace", async () => {

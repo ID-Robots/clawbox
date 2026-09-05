@@ -2798,18 +2798,25 @@ function readConfiguredWorkspace(): string | undefined {
  * reads it: `~` against `$HOME`, and a relative value against OpenClaw's home.
  *
  * The value is not guaranteed absolute — the owner writes it, or `openclaw
- * config set` does — and the two other places in this repo that resolve it
- * already say so and handle it: `gateway-pre-start.sh` (`expanduser`, then
- * `isabs ? ws : join(~/.openclaw, ws)`) and `openclawWorkspaceDir()` in
- * `src/lib/language-persona.ts`, which spells out the same rule and explains
- * why a guard and the write it guards must name one directory. This function
- * was the third reading and the only one that skipped it: `path.resolve(ws,
- * "skills")` on a bare name answers `<cwd>/<ws>/skills` — the Next.js server's
- * working directory — and on `~/…` a literal `~` folder under it. The gateway
- * loads the skill from the real workspace, so the uninstall would find nothing
- * at that address, answer `skillRemoved: false` and tell the owner there was
- * no skill of that name while it stays on disk and loaded. That is TASK-551's
- * own symptom, reached through the value rather than through the edition.
+ * config set` does — and this was the third reading of it in the repo and the
+ * only one that skipped that: `path.resolve(ws, "skills")` on a bare name
+ * answers `<cwd>/<ws>/skills` — the Next.js server's working directory — and on
+ * `~/…` a literal `~` folder under it. The gateway loads the skill from the
+ * real workspace, so the uninstall would find nothing at that address, answer
+ * `skillRemoved: false` and tell the owner there was no skill of that name
+ * while it stays on disk and loaded. That is TASK-551's own symptom, reached
+ * through the value rather than through the edition.
+ *
+ * Line for line the same expression as `openclawWorkspaceDir()` in
+ * `src/lib/language-persona.ts`, which spells out the rule and explains why a
+ * guard and the write it guards must name one directory.
+ * `scripts/gateway-pre-start.sh` agrees on the tilde and on preferring an
+ * absolute value, but joins a RELATIVE one — and its own default — against
+ * `$HOME/.openclaw` (`:3138,3147`) rather than the `CLAWBOX_OPENCLAW_HOME` /
+ * `OPENCLAW_HOME` override its config path already honours (`:27`). The two
+ * agree on every shipped box, because install.sh sets `HOME` and
+ * `CLAWBOX_OPENCLAW_HOME` side by side; they are not the same expression, and
+ * the shell side is out of this route's scope to change.
  */
 function resolveWorkspaceValue(workspace: string): string {
   const home = process.env.HOME || "/home/clawbox";

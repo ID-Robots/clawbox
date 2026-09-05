@@ -1061,8 +1061,14 @@ function ChromeDesktopInner() {
       }
     } catch (err) {
       console.warn("[uninstall] Failed to uninstall skill:", err);
+      // Worded as an unknown, not as a failure. The abort below is six times
+      // shorter than the 60 s the MCP tool gives the same route, and a skill
+      // folder with a large venv on a loaded Jetson can outrun it while the
+      // removal succeeds — so "couldn't uninstall" would be a false failure in
+      // the one surface the owner reads. A reload settles it, and a retry is
+      // harmless either way.
       window.dispatchEvent(new CustomEvent("clawbox:toast", {
-        detail: { message: "Couldn't reach the ClawBox to uninstall this app — please try again." },
+        detail: { message: "Couldn't confirm the uninstall — reload the page to see whether it went through." },
       }));
       setUninstallConfirm(null);
       return;

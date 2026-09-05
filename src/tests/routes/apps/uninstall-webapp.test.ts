@@ -95,13 +95,17 @@ describe("/setup-api/apps/uninstall — the deployed webapp goes with the app", 
     const res = await uninstall("qa-t453a-revalidate");
 
     expect(res.status).toBe(200);
-    // `skillRemoved` is false here: this fixture deploys a webapp and no skill
-    // directory, which is exactly the case the field exists to distinguish
-    // from a skill that was removed.
+    // `null`, not `false`: this fixture deploys a webapp and no skill
+    // directory, and a WEB APP has no skill half to report on. `false` is
+    // "this box has a skills root and nothing of that name was in it", which
+    // `mcp/tools/desktop.ts` states out loud as "there was no skill of that
+    // name on disk" — an absence report about something that never existed.
+    // The webapp is recognised here by the deployed directory this uninstall
+    // removed, since `installed_meta` is empty in this fixture.
     await expect(res.json()).resolves.toEqual({
       ok: true,
       appId: "qa-t453a-revalidate",
-      skillRemoved: false,
+      skillRemoved: null,
     });
     expect(fs.existsSync(dir)).toBe(false);
   });
