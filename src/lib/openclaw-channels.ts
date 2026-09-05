@@ -600,6 +600,15 @@ async function readChannelRowResult(
 // /discord/status grew the first one and /whatsapp/status never got it, which
 // is why one panel answered in 20 ms and the other in three and a half seconds
 // from the same command.
+//
+// One memo AND one CLI start (TASK-671). The first shape of this cache still
+// filled it one channel per start, so a cold Channels hub — or Settings on a
+// phone, which reads every channel on one mount — paid the cold start twice
+// over. `--channel` is optional and the un-filtered payload is keyed by channel
+// id, so one process start answers about all of them; measured on the box,
+// three runs each, 3.72/3.25/3.19 s un-filtered against 3.17/3.15/3.10 s
+// filtered. The whole cost is the CLI start, and one read now serves what two
+// used to.
 
 /**
  * How long one gateway ANSWER about a channel stands — including the answer
