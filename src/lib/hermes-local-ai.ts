@@ -8,6 +8,7 @@ import { getLocalAiToken } from "@/lib/local-ai-token";
 import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
 import { getLocalAiOpenAiBaseUrl, getLocalAiProxyRootUrl } from "@/lib/local-ai-runtime";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
+import { forgetProviderVerified } from "@/lib/provider-verified";
 
 /**
  * Register the on-device model with Hermes.
@@ -336,6 +337,12 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
   // Hermes renders a row for any entry that has models, so the picker would go
   // on offering the stopped model, which is the exact state this function
   // exists to end.
+  // The api_key goes with the endpoint, so an older turn's "this provider
+  // answered" mark stops describing anything. Switching Local AI off and on
+  // again re-registers the provider with a freshly read token; without this the
+  // row would come back reporting a verification from before the teardown.
+  // See src/lib/provider-verified.ts.
+  await forgetProviderVerified(HERMES_LOCAL_PROVIDER);
   const unset = ["base_url", "api_key", "api_mode", "models"].map(
     (key) => `providers.${HERMES_LOCAL_PROVIDER}.${key}`,
   );

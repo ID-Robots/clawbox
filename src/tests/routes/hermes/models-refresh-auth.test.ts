@@ -175,6 +175,9 @@ describe("the scoped reply and the device's reasoning level", () => {
 
     expect(row.verified).toBe(true);
     expect(row.verifiedAt).toBe("2026-09-02T19:53:34.000Z");
+    // Pinned by KEY: a reader looking up the wrong one would otherwise pass,
+    // because the mock answers any key.
+    expect(configGetMock).toHaveBeenCalledWith("provider_verified_at");
   });
 
   it("leaves a provider nothing has exercised at NOT CHECKED, never at not connected", async () => {

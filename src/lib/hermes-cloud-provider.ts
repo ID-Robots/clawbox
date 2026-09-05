@@ -76,14 +76,15 @@ export async function applyCloudProviderKeyToHermes(opts: {
   // into `ai_set_provider`'s enum. The wrapper samples that set either side of
   // the work below and asks the agent to re-advertise only when it actually
   // moved — see `provider-mcp-refresh.ts`.
-  const result = await withProviderMcpRefresh(() => applyCloudProviderKey(opts));
-  // The credential just CHANGED, so what an older turn proved is no longer
-  // about the key on disk: a rotated or corrected key inherits nothing from the
-  // one it replaced. Forget the mark and let the row go back to "not checked"
-  // until something answers again — see src/lib/provider-verified.ts.
+  // BEFORE the write, not after. The credential is about to change, so what an
+  // older turn proved stops being about the key on disk the moment `auth add`
+  // lands — and `applyCloudProviderKey` can still throw on a later step, which
+  // would leave the new key in place beside a mark asserting the old one
+  // worked. A mark lost to a write that failed is always safe: the next turn
+  // earns it straight back. See src/lib/provider-verified.ts.
   const slug = hermesKeyProviderFor(opts.openclawProvider);
   if (slug) await forgetProviderVerified(slug);
-  return result;
+  return withProviderMcpRefresh(() => applyCloudProviderKey(opts));
 }
 
 async function applyCloudProviderKey(opts: {

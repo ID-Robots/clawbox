@@ -119,9 +119,11 @@ export async function GET(request: Request) {
     }
 
     const payload = await getModelOptions({ refresh });
-    // What has actually ANSWERED on this box, from ClawBox's own store — one
-    // small read, no provider traffic. See src/lib/provider-verified.ts for why
-    // a completed turn is the evidence and a probe is not.
+    // What has actually ANSWERED on this box, from ClawBox's own store: a read
+    // of data/config.json plus one stat of Hermes' pooled credential store, per
+    // request on a polled route — and no provider traffic at all, which is the
+    // whole point. See src/lib/provider-verified.ts for why a completed turn is
+    // the evidence, a probe is not, and what this does and does not cover.
     const verifiedAt = await readProviderVerified();
     const models = unionModels(payload);
     const current = payload.current.model;
@@ -146,11 +148,18 @@ export async function GET(request: Request) {
         // reads `authenticated` as "this will answer" is the reason a bogus
         // provider looked healthy right up until the first turn 403'd.
         credentialPresent: row.authenticated,
-        // Hermes' own verdict still wins where it ever reports one. Otherwise
-        // a turn this provider served is the answer, and having served one can
-        // only mean true — a provider that never answered stays NULL, "not
-        // checked", never `false`: an offline box and a rate-limited
-        // subscription must not be painted as a broken credential.
+        // Hermes' own verdict still wins where it ever reports one — it comes
+        // from the harness and would be a real probe result, while ours is
+        // inference from a turn. In practice Hermes has never populated this
+        // field on any box measured (it is null on all 48 rows), so the
+        // precedence has never actually been exercised; if it starts reporting
+        // `false` transiently, that ordering is the first thing to revisit,
+        // because a working credential painted broken is the failure this field
+        // exists to prevent. Otherwise a turn this provider served is the
+        // answer, and having served one can only mean true — a provider that
+        // never answered stays NULL, "not checked", never `false`: an offline
+        // box and a rate-limited subscription must not be painted as a broken
+        // credential.
         verified: row.verified ?? (verifiedAt[row.id] ? true : null),
         ...(row.verified === null && verifiedAt[row.id] ? { verifiedAt: verifiedAt[row.id] } : {}),
         isUserDefined: row.isUserDefined,

@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync, utimesSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 /**
  * TASK-583 — `verified` is present on every provider row and null on all of
@@ -15,8 +18,23 @@ const setMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/config-store", () => ({ get: getMock, set: setMock }));
 
 let lib: typeof import("@/lib/provider-verified");
+let hermesHome: string;
+
+/** Hermes' pooled credential store, written at `at`. */
+function writeAuthStore(at: Date): void {
+  const file = path.join(hermesHome, "auth.json");
+  writeFileSync(file, "{}");
+  utimesSync(file, at, at);
+}
+
+afterEach(() => {
+  delete process.env.HERMES_HOME;
+  rmSync(hermesHome, { recursive: true, force: true });
+});
 
 beforeEach(async () => {
+  hermesHome = mkdtempSync(path.join(tmpdir(), "clawbox-verified-hermes-"));
+  process.env.HERMES_HOME = hermesHome;
   store.clear();
   getMock.mockReset();
   setMock.mockReset();
@@ -103,5 +121,73 @@ describe("provider-verified", () => {
     await lib.recordProviderVerified("");
 
     expect(setMock).not.toHaveBeenCalled();
+  });
+
+  it("drops a mark older than the last write to Hermes' own credential store", async () => {
+    // ClawBox is not the only writer: a key pasted into Hermes' own dashboard,
+    // or `hermes auth add` from the Terminal, never passes through this
+    // process. Without this the flag would outlive the credential it describes
+    // — a fact captured once and treated as current for the life of the box.
+    await lib.recordProviderVerified("anthropic", new Date("2026-09-02T19:00:00.000Z"));
+    writeAuthStore(new Date("2026-09-03T08:00:00.000Z"));
+
+    expect(await lib.readProviderVerified()).toEqual({});
+  });
+
+  it("keeps a mark earned after that write", async () => {
+    writeAuthStore(new Date("2026-09-03T08:00:00.000Z"));
+    await lib.recordProviderVerified("anthropic", new Date("2026-09-03T09:00:00.000Z"));
+
+    expect(await lib.readProviderVerified())
+      .toEqual({ anthropic: "2026-09-03T09:00:00.000Z" });
+  });
+
+  it("keeps every mark when the credential store cannot be asked", async () => {
+    // A box with no pooled credentials yet has nothing to invalidate, and "we
+    // could not look" must not read as "everything is stale".
+    await lib.recordProviderVerified("anthropic", new Date("2026-09-02T19:00:00.000Z"));
+
+    expect(await lib.readProviderVerified())
+      .toEqual({ anthropic: "2026-09-02T19:00:00.000Z" });
+  });
+
+  it("refuses a KIND that is not a real provider slug", async () => {
+    // `auto` and `custom` are kinds as well as words: a mark under either
+    // matches no row, describes no credential, and takes one of the slots.
+    await lib.recordProviderVerified("auto");
+    await lib.recordProviderVerified("custom");
+    await lib.recordProviderVerified("Anthropic");
+
+    expect(setMock).not.toHaveBeenCalled();
+  });
+
+  it("never moves a mark backwards when the clock is behind", async () => {
+    // A Jetson's RTC lags until NTP settles, and rewriting the mark with the
+    // earlier reading would make the panel's "verified <when>" older than the
+    // truth.
+    await lib.recordProviderVerified("anthropic", new Date("2026-09-02T19:00:00.000Z"));
+    setMock.mockClear();
+
+    await lib.recordProviderVerified("anthropic", new Date("2026-09-02T17:00:00.000Z"));
+
+    expect(setMock).not.toHaveBeenCalled();
+    expect(await lib.readProviderVerified())
+      .toEqual({ anthropic: "2026-09-02T19:00:00.000Z" });
+  });
+
+  it("does not let a concurrent record write a forget back into the store", async () => {
+    // Both writers are read-modify-writes of one map. Unserialised, the record
+    // writes back the snapshot it read before the delete and the forget is
+    // silently undone — the same reason provider-enablement serialises its own
+    // list.
+    await lib.recordProviderVerified("anthropic", new Date("2026-09-02T19:00:00.000Z"));
+
+    await Promise.all([
+      lib.forgetProviderVerified("anthropic"),
+      lib.recordProviderVerified("openai-codex", new Date("2026-09-02T21:00:00.000Z")),
+    ]);
+
+    expect(await lib.readProviderVerified())
+      .toEqual({ "openai-codex": "2026-09-02T21:00:00.000Z" });
   });
 });

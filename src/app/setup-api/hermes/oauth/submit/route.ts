@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
+import { forgetProviderVerified } from "@/lib/provider-verified";
 import {
   dashboardUnreachable,
   isValidProviderId,
@@ -74,6 +75,12 @@ export async function POST(request: Request) {
     // it booted — see `provider-mcp-refresh.ts`. Only on the terminal success:
     // a failed exchange credentialled nothing, and a reload respawns every MCP
     // child and invalidates the model's prompt cache.
+    // A new OAuth credential — a re-sign-in, or a different account entirely —
+    // makes any earlier "this provider served a turn" mark a statement about a
+    // credential that is gone. Forgotten here rather than before the exchange,
+    // because unlike a key paste this call only credentials anything on the
+    // terminal success. See src/lib/provider-verified.ts.
+    if (connected) await forgetProviderVerified(body.providerId);
     if (connected) {
       await refreshProviderToolsIfSetChanged(providersBefore, await readUsableProviderIds());
     }
