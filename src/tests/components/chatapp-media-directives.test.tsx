@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatApp from "@/components/ChatApp";
-import { resetHarnessCache } from "@/lib/client-harness";
 
 /**
  * TASK-698: the standalone full-screen chat (`/app/clawbox`, ChatApp) printed
@@ -9,14 +8,17 @@ import { resetHarnessCache } from "@/lib/client-harness";
  * absolute path under `~/.openclaw/media` in the transcript — where the mascot
  * chat (ChatPopup) turns the same line into the picture it names.
  *
- * The convention is documented in `src/lib/chat-media.ts`: a generated picture
- * or a spoken reply is NOT delivered as a structured attachment, it is named by
- * a directive line inside the reply text, and every client is expected to run
- * the split itself.
+ * The convention is documented in `src/lib/chat-media.ts`. A generated picture
+ * is NOT delivered as a structured attachment: it is named by a directive line
+ * inside the reply text, and every client is expected to run the split itself —
+ * OpenClaw's own Control UI does exactly that (its bundled
+ * `control-ui-boot-*.js` on the box carries the same split). A SPOKEN reply
+ * arrives the other way round, as a second assistant message carrying an
+ * `attachment` part, so both shapes are exercised below.
  *
  * Driven through a scripted gateway socket rather than asserted on source text:
- * ChatApp has its own `loadHistory`, its own live `final` handler and its own
- * streaming render, and all three have to agree.
+ * ChatApp has its own live `final` handler and its own streaming render beside
+ * the shared history projection, and all three have to agree.
  */
 
 const IMAGE_PATH =
@@ -116,9 +118,6 @@ function installFetch() {
       if (url.includes("/setup-api/gateway/ws-config")) {
         return { ok: true, json: async () => ({ token: "t", wsUrl: "ws://localhost/gw" }) };
       }
-      if (url.includes("/setup-api/harness/active")) {
-        return { ok: true, json: async () => ({ active: "openclaw", edition: "openclaw" }) };
-      }
       return { ok: true, json: async () => ({}) };
     }),
   );
@@ -131,7 +130,6 @@ async function socket() {
 
 beforeEach(() => {
   instances.length = 0;
-  resetHarnessCache();
   window.localStorage.clear();
   // jsdom has no layout engine, so the transcript's auto-scroll has nothing to
   // call. Unrelated to what is under test.
@@ -142,7 +140,6 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  resetHarnessCache();
 });
 
 describe("ChatApp lifts MEDIA: directives", () => {
@@ -195,17 +192,69 @@ describe("ChatApp lifts MEDIA: directives", () => {
     expect(document.body.textContent).not.toContain(streamPath);
   });
 
-  it("plays a spoken reply the directive names instead of dropping or printing it", async () => {
+  it("plays the spoken reply the harness attaches, and does not show the answer twice", async () => {
+    // The shape the box ACTUALLY produces, measured on hardware (TASK-381 and
+    // the note in lib/chat-media.ts): TTS is not a MEDIA: line at all. The
+    // harness appends a SECOND assistant message repeating the answer's text
+    // and carrying a structured `attachment` part. Rendered naively that is the
+    // answer twice with no way to hear it.
+    render(<ChatApp />);
+    await waitFor(() => expect(document.body.textContent).toContain(HISTORY_CAPTION));
+    const ws = await socket();
+
+    const spoken = "Said out loud.";
+    await act(async () => {
+      ws.pushChat("final", { role: "assistant", content: [{ type: "text", text: spoken }] });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(document.body.textContent).toContain(spoken));
+
+    await act(async () => {
+      ws.pushChat("final", {
+        role: "assistant",
+        content: [
+          { type: "text", text: spoken },
+          {
+            type: "attachment",
+            attachment: {
+              url: VOICE_PATH,
+              kind: "audio",
+              mimeType: "audio/wav",
+              label: "voice-6f1c1f1e.wav",
+            },
+          },
+        ],
+      });
+      await Promise.resolve();
+    });
+
+    const player = await waitFor(() => {
+      const found = document.querySelector("audio");
+      expect(found).not.toBeNull();
+      return found as HTMLAudioElement;
+    });
+    expect(player.getAttribute("src")).toContain(encodeURIComponent(VOICE_PATH));
+    expect(document.body.textContent).not.toContain(VOICE_PATH);
+    // One bubble, not two: the supplement is folded into the answer it repeats.
+    expect(document.body.textContent?.match(new RegExp(spoken, "g"))).toHaveLength(1);
+    // An accessible name is read out verbatim, so the path must not be in it.
+    expect(player.getAttribute("aria-label") ?? "").not.toContain(VOICE_PATH);
+  });
+
+  it("plays a spoken reply a MEDIA: directive names instead of dropping it", async () => {
+    // The other shape: a provider that names its output the way image
+    // generation does. Both are read — `splitAssistantMedia` lifts the
+    // directive, `extractAudioAttachments` the structured part.
     render(<ChatApp />);
     await waitFor(() => expect(document.body.textContent).toContain(HISTORY_CAPTION));
     const ws = await socket();
 
     await act(async () => {
-      ws.pushChat("final", { role: "assistant", content: `Said out loud.\n\nMEDIA:${VOICE_PATH}` });
+      ws.pushChat("final", { role: "assistant", content: `Here you go.\n\nMEDIA:${VOICE_PATH}` });
       await Promise.resolve();
     });
 
-    await waitFor(() => expect(document.body.textContent).toContain("Said out loud."));
+    await waitFor(() => expect(document.body.textContent).toContain("Here you go."));
     expect(document.body.textContent).not.toContain(VOICE_PATH);
     const player = await waitFor(() => {
       const found = document.querySelector("audio");
@@ -213,8 +262,39 @@ describe("ChatApp lifts MEDIA: directives", () => {
       return found as HTMLAudioElement;
     });
     expect(player.getAttribute("src")).toContain(encodeURIComponent(VOICE_PATH));
-    // An accessible name is read out verbatim, so the path must not be in it
-    // either — the leak the same review found on the mascot chat's player.
-    expect(player.getAttribute("aria-label") ?? "").not.toContain(VOICE_PATH);
+  });
+
+  it("caps and de-duplicates the clips one reply names", async () => {
+    // `boundedAudio` is the rule every transcript path applies
+    // (MAX_AUDIO_PER_MESSAGE = 4). Without it a repeated directive renders two
+    // players under the same React key and a reply naming ten fires ten
+    // `preload="metadata"` requests at the media route on a Jetson.
+    render(<ChatApp />);
+    await waitFor(() => expect(document.body.textContent).toContain(HISTORY_CAPTION));
+    const ws = await socket();
+
+    const clips = Array.from({ length: 6 }, (_, i) =>
+      `/home/clawbox/.openclaw/media/outbound/voice-${i}.wav`);
+    // Six distinct clips plus a repeat of the first — seven directive lines.
+    const lines = [...clips, clips[0]].map((path) => `MEDIA:${path}`).join("\n");
+    await act(async () => {
+      ws.pushChat("final", { role: "assistant", content: `Six of them.\n${lines}` });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(document.body.textContent).toContain("Six of them."));
+    await waitFor(() => expect(document.querySelectorAll("audio").length).toBeGreaterThan(0));
+    expect(document.querySelectorAll("audio").length).toBe(4);
+  });
+
+  it("lifts the picture out of a transcript replayed after a reconnect", async () => {
+    // The history path goes through the shared `projectGatewayHistory`, so a
+    // reload shows what the live turn showed rather than a second derivation.
+    render(<ChatApp />);
+    await waitFor(() => expect(document.body.textContent).toContain(HISTORY_CAPTION));
+    expect(screen.getByRole("img")).toHaveAttribute(
+      "src",
+      expect.stringContaining(encodeURIComponent(IMAGE_PATH)),
+    );
   });
 });
