@@ -39,10 +39,6 @@ vi.mock("@/lib/hermes-config-yaml", () => ({
   patchHermesConfig: patchMock,
   readHermesConfigValue: readConfigMock,
   resolveHermesConfigValue: resolveConfigMock,
-  // Listed because the module UNDER TEST throws it: a factory that omits an
-  // export makes it `undefined`, and `new undefined()` is a TypeError, not the
-  // failure the caller is meant to see.
-  HermesConfigWriteError: class HermesConfigWriteError extends Error {},
 }));
 vi.mock("@/lib/local-ai-token", () => ({ getLocalAiToken: () => "local-token-xyz" }));
 vi.mock("@/lib/local-ai-runtime", () => ({

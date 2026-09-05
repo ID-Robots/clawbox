@@ -1,7 +1,7 @@
 import { runHermesCli } from "@/lib/hermes-cli";
 import { hermesCliAnswered } from "@/lib/hermes-cli-answered";
 import { get } from "@/lib/config-store";
-import { HermesConfigWriteError, patchHermesConfig, readHermesConfigValue, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
+import { patchHermesConfig, readHermesConfigValue, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { withProviderMcpRefresh } from "@/lib/provider-mcp-refresh";
 import { getLocalAiToken } from "@/lib/local-ai-token";
@@ -33,6 +33,29 @@ export const HERMES_LOCAL_PROVIDER = "clawlocal";
 export type LocalAiProviderId = "llamacpp" | "ollama";
 
 export class HermesLocalApplyError extends Error {}
+
+/**
+ * A removal that did not land, carrying the selection state read BEFORE it ran.
+ *
+ * `wasDefault` — "the local model was this device's active provider" — is read
+ * at the top of `removeLocalAi`, and a partial unset can clear `model.provider`
+ * and still leave a `providers.clawlocal` key behind. This refusal is the last
+ * moment the fact exists: the retry reads a `model.provider` that is already
+ * gone, answers `false`, and re-enabling Local AI would then put the device on
+ * nothing instead of back on the model it was on. So it rides out with the
+ * error, and the route stores it either way.
+ *
+ * A plain `Error` and NOT a `HermesConfigWriteError` subclass, deliberately:
+ * nothing narrows on that class (the route catches whatever comes), and
+ * extending it would evaluate an imported class at MODULE LOAD time — which
+ * breaks every suite that mocks `hermes-config-yaml` without listing it, for a
+ * lineage no caller reads.
+ */
+export class HermesLocalRemovalError extends Error {
+  constructor(message: string, readonly wasDefault: boolean) {
+    super(message);
+  }
+}
 
 
 /**
@@ -189,15 +212,40 @@ function handRepairBack(): void {
  */
 type LocalCatalogueState = "absent" | "scalar" | "foreign" | "unknown";
 
+/**
+ * Is the key still in config.yaml, according to HERMES' OWN READER?
+ *
+ * `hermes config get <key>` loads the file with PyYAML, which is the same
+ * loader the gateway uses, so it answers for every shape — an emptied `{}`, a
+ * discovered `models` block, a duplicate key — that our line reader has to
+ * decline. Exit 0 is "there in some shape", "config key not set" is "not
+ * there", and anything else — including the 126/127 a `step_hermes_install`
+ * rebuild produces without ever reaching argparse — is the CLI failing to
+ * answer rather than answering "no".
+ *
+ * Never logs or returns the value: this file holds `TELEGRAM_BOT_TOKEN` and the
+ * provider `api_key`s, and the question here is only whether the key is there.
+ */
+type HermesKeyPresence = "present" | "absent" | "unknown";
+
+async function cliKeyPresence(key: string): Promise<HermesKeyPresence> {
+  // `runHermesCli` REJECTS for a missing binary, a timeout and its own SIGKILL.
+  // None of those is an answer either, and the callers here all treat "could
+  // not ask" the same way, so it is folded in rather than thrown.
+  const answer = await runHermesCli(["config", "get", key], { timeoutMs: 15_000 }).catch(() => null);
+  if (!answer || !hermesCliAnswered(answer)) return "unknown";
+  if (answer.code === 0) return "present";
+  return /config key not set/i.test(`${answer.stdout ?? ""}\n${answer.stderr ?? ""}`)
+    ? "absent"
+    : "unknown";
+}
+
 async function localCatalogueState(): Promise<LocalCatalogueState> {
   const key = `providers.${HERMES_LOCAL_PROVIDER}.models`;
   if ((await readHermesConfigValue(key)) !== null) return "scalar";
-  const declared = await runHermesCli(["config", "get", key], { timeoutMs: 15_000 });
-  if (!hermesCliAnswered(declared)) return "unknown";
-  if (declared.code === 0) return "foreign";
-  return /config key not set/i.test(`${declared.stdout ?? ""}\n${declared.stderr ?? ""}`)
-    ? "absent"
-    : "unknown";
+  const declared = await cliKeyPresence(key);
+  if (declared === "unknown") return "unknown";
+  return declared === "present" ? "foreign" : "absent";
 }
 
 /**
@@ -367,22 +415,48 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
   // because the line editor could not work with this file, so a read-back that
   // cannot resolve the path is the likely companion of the write that failed.
   // Reading that as "removed" would rebuild the false success one layer down.
-  // A key that still resolves to a scalar is a leftover; a key the file cannot
-  // answer for is unproven; only "absent" is removal.
+  //
+  // "present" is a leftover as much as "value" is: `providers.clawlocal.models`
+  // is a scalar only while WE own it, and Hermes' own discovery writes a nested
+  // block there — which the scalar reader answered `null` for, exactly as it
+  // does for a key that is gone.
   const leftovers: string[] = [];
   const unproven: string[] = [];
+  const unresolved: string[] = [];
   for (const key of unset) {
     const read = await resolveHermesConfigValue(key);
-    if (read.state === "value") leftovers.push(key);
-    else if (read.state === "unreadable") unproven.push(key);
+    if (read.state === "value" || read.state === "present") leftovers.push(key);
+    else if (read.state === "unreadable") unresolved.push(key);
+  }
+  if (unresolved.length > 0) {
+    // HARNESS FIRST, and it is what keeps this proof from inventing a failure.
+    // Our line reader is not the only reader of config.yaml: `hermes config
+    // get` is Hermes' own, loading the file with PyYAML exactly as the gateway
+    // does, and `localCatalogueState` above already trusts it for the shape
+    // question. Asking it is the difference between "the file is not
+    // line-editable" and "nobody can say whether the removal landed" — and
+    // answering the first as the second is a 502 the owner can never clear,
+    // because the retry the banner asks for reads the same file.
+    //
+    // In parallel, and only for the keys the file could not answer: this is the
+    // exotic branch, and six 15-second timeouts in series would sit in front of
+    // a click the owner is holding open.
+    const answers = await Promise.all(unresolved.map(cliKeyPresence));
+    unresolved.forEach((key, i) => {
+      if (answers[i] === "present") leftovers.push(key);
+      else if (answers[i] === "unknown") unproven.push(key);
+    });
   }
   if (leftovers.length > 0) {
     console.error("[hermes-local-ai] keys survived the removal:", leftovers.join(", "));
-    throw new HermesConfigWriteError("The local model is still registered with Hermes.");
+    throw new HermesLocalRemovalError("The local model is still registered with Hermes.", wasDefault);
   }
   if (unproven.length > 0) {
     console.error("[hermes-local-ai] removal could not be verified for:", unproven.join(", "));
-    throw new HermesConfigWriteError("The Hermes config could not be read back, so the removal is unproven.");
+    throw new HermesLocalRemovalError(
+      "The Hermes config could not be read back, so the removal is unproven.",
+      wasDefault,
+    );
   }
 
   invalidateModelOptions();

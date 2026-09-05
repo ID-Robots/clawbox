@@ -183,8 +183,7 @@ describe("POST /setup-api/local-ai", () => {
 
       expect(res.status).toBe(502);
       expect(body.success).toBeUndefined();
-      expect(body.code).toBe("hermes_unregister_failed");
-      expect(typeof body.error).toBe("string");
+      expect(body.error).toMatch(/removing it from Hermes could not be confirmed/);
       // The steps that DID run are not undone, and the answer must not claim
       // they failed: the runtime is stopped and our own flags are cleared, so a
       // retry only has the unregister left to do.
@@ -242,7 +241,6 @@ describe("POST /setup-api/local-ai", () => {
     const body = await res.json();
 
     expect(res.status).toBe(502);
-    expect(body.code).toBe("hermes_unregister_failed");
     // The panel paints `error` red on a non-2xx and never reads `warning`
     // there, so the fallback sentence has to ride in `error` or be lost.
     expect(body.error).toMatch(/removing it from Hermes could not be confirmed/);

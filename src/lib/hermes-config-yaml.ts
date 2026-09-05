@@ -47,7 +47,7 @@ import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { invalidateHermesConfigCache } from "@/lib/hermes-config-cache";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { hermesHome } from "@/lib/hermes-env";
-import { getTopLevelScalar, getYamlPath, setYamlPath, unsetYamlPath, YamlEditUnsupported } from "@/lib/yaml-block-edit";
+import { getTopLevelScalar, getYamlPath, readYamlPath, setYamlPath, unsetYamlPath, YamlEditUnsupported } from "@/lib/yaml-block-edit";
 
 export class HermesConfigWriteError extends Error {}
 
@@ -312,22 +312,27 @@ export async function readHermesConfigTopLevelScalar(
  * be read".
  *
  *   "value"      — the key resolves to a scalar, and here it is.
- *   "absent"     — the file parsed and the key is not there. A nested BLOCK
- *                  reads as absent too: `getYamlPath` answers only for scalars,
- *                  which is the same limit the writer works to.
+ *   "present"    — the key is written here in a shape that is not a scalar: a
+ *                  nested block or a list (which is what Hermes' own model
+ *                  discovery writes into `providers.<slug>.models`), or a key
+ *                  with no value at all. Still a key in the file.
+ *   "absent"     — the file parsed and the key is not there — including under a
+ *                  parent PyYAML has emptied to the inline `{}`, which is what
+ *                  a successful `hermes config unset` leaves behind.
  *   "unreadable" — the file could not be read (EACCES), or the path could not
- *                  be resolved in it (a flow mapping, a duplicate key). Not an
- *                  answer, and never to be treated as one.
+ *                  be resolved in it (a non-empty flow mapping, a duplicate
+ *                  key). Not an answer, and never to be treated as one.
  *
- * {@link readHermesConfigValue} collapses the last two into `null`, which is
- * right for "what is configured" and wrong for "did my write take": a caller
- * PROVING a removal must not read a failed question as a removed key. The CLI
- * fallback in {@link patchHermesConfig} is entered precisely BECAUSE the line
- * editor could not work with the file, so an unreadable read-back is the likely
- * case there rather than the exotic one.
+ * {@link readHermesConfigValue} collapses everything but `value` into `null`,
+ * which is right for "what is configured" and wrong for "did my write take": a
+ * caller PROVING a removal must read neither a failed question nor a shape it
+ * cannot name as a removed key. The CLI fallback in {@link patchHermesConfig}
+ * is entered precisely BECAUSE the line editor could not work with the file, so
+ * both are ordinary outcomes there rather than exotic ones.
  */
 export type HermesConfigRead =
   | { state: "value"; value: string }
+  | { state: "present" }
   | { state: "absent" }
   | { state: "unreadable" };
 
@@ -342,8 +347,7 @@ export async function resolveHermesConfigValue(key: string): Promise<HermesConfi
     return { state: "unreadable" };
   }
   try {
-    const value = getYamlPath(text, splitKey(key));
-    return value === null ? { state: "absent" } : { state: "value", value };
+    return readYamlPath(text, splitKey(key));
   } catch (err) {
     console.error(
       `[hermes-config-yaml] ${key} could not be resolved:`,
@@ -356,7 +360,7 @@ export async function resolveHermesConfigValue(key: string): Promise<HermesConfi
 export async function readHermesConfigValue(key: string): Promise<string | null> {
   // `null` means "unset" to every caller (hermes-local-ai reads it as "this
   // leaf is not a scalar" and as "not applied yet"), and this signature has no
-  // third state to give them. A caller that needs the third state asks
+  // other state to give them. A caller that needs the rest asks
   // `resolveHermesConfigValue` instead; the failure is logged there either way.
   const read = await resolveHermesConfigValue(key);
   return read.state === "value" ? read.value : null;

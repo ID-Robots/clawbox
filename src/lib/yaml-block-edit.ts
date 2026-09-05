@@ -396,6 +396,80 @@ export function getYamlPath(text: string, path: string[]): string | null {
   return value;
 }
 
+/** `{}` / `[ ]` — a collection written inline with no members in it. */
+const EMPTY_FLOW_RE = /^(?:\{\s*\}|\[\s*\])$/;
+
+/**
+ * Is the path THERE, and — when it is a scalar — what does it say?
+ *
+ *   "value"   — a scalar this reader can name.
+ *   "present" — the key is there in a shape that is not a scalar: a nested
+ *               block, a sequence, an empty flow collection, a bare `key:`, a
+ *               quoted value carrying an escape PyYAML resolves and this
+ *               reader does not.
+ *   "absent"  — the file parsed and the key is not in it.
+ *
+ * Separate from {@link getYamlPath} because that answers a different question
+ * — "give me the scalar to splice" — and gets THIS one wrong in both
+ * directions.
+ *
+ * It returns `null` for a key whose value is a block or a list, so a surviving
+ * `providers.clawlocal.models:` catalogue (the shape Hermes' own model
+ * discovery writes) reads as "not there". And it THROWS as soon as any segment
+ * on the way down carries an inline value — the empty flow mapping `{}`
+ * included, which is what PyYAML emits for a mapping it has just emptied. As
+ * `hermes config unset` is what empties one, `{}` is the ordinary shape of a
+ * removal that fully SUCCEEDED, and refusing over it turns that success into
+ * "we could not look".
+ *
+ * So an empty flow collection on the way down is an ANSWER here: a mapping
+ * with no members cannot hold a member by that name. Anything else inline is
+ * not — `clawlocal: {base_url: …}` may well hold the key, and this reader
+ * cannot say — and still raises, which the caller reads as "we could not
+ * look" rather than as a fact about the key.
+ */
+export type YamlPathRead =
+  | { state: "value"; value: string }
+  | { state: "present" }
+  | { state: "absent" };
+
+export function readYamlPath(text: string, path: string[]): YamlPathRead {
+  assertPath(path);
+  const { lines } = splitLines(text);
+  let start = 0;
+  let end = lines.length;
+  while (end > 0 && isSkippable(lines[end - 1])) end -= 1;
+  let indent = 0;
+
+  for (let depth = 0; depth < path.length; depth += 1) {
+    const entry = findEntry(lines, start, end, indent, path[depth]);
+    if (!entry) return { state: "absent" };
+
+    if (depth === path.length - 1) {
+      // A key with no inline text opens a block, a sequence, or nothing at all;
+      // whichever it is, the key IS written in this file.
+      if (entry.inline === "" || EMPTY_FLOW_RE.test(entry.inline)) return { state: "present" };
+      const split = splitTrailingComment(entry.inline);
+      if (!split.closed) return { state: "present" };
+      const value = parseYamlScalar(split.value);
+      return value === null ? { state: "present" } : { state: "value", value };
+    }
+
+    if (entry.inline !== "") {
+      if (EMPTY_FLOW_RE.test(entry.inline)) return { state: "absent" };
+      throw new YamlEditUnsupported(`cannot descend into inline value at ${path.slice(0, depth + 1).join(".")}`);
+    }
+    start = entry.childStart;
+    end = entry.childEnd;
+    indent += INDENT_STEP.length;
+  }
+
+  // Unreachable — the last iteration always returns — and thrown rather than
+  // answered so a future edit that makes it reachable cannot invent an
+  // "absent" nobody proved.
+  throw new YamlEditUnsupported(`could not resolve ${path.join(".")}`);
+}
+
 /** One top-level entry as {@link getTopLevelScalar} reads it. */
 export interface TopLevelScalar {
   /** The key's top-level scalar, or null when it has none we can read. */

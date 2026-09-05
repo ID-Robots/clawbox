@@ -5,7 +5,7 @@ import { get, setMany } from "@/lib/config-store";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { readConfig as readOpenClawConfig, inferConfiguredLocalModel, restartGateway, runOpenclawConfigSet, openclawIsAbsent } from "@/lib/openclaw-config";
 import { getActiveHarness } from "@/lib/harness";
-import { removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
+import { HermesLocalRemovalError, removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
 
 const CLAWBOX_HOME_DIR = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
 
@@ -112,12 +112,19 @@ export async function POST(request: Request) {
       // Local AI off while Hermes' own pickers went on offering the stopped
       // model, and the owner learned otherwise from a chat turn. The steps that
       // did run stand: a retry has only this one left to do.
+      // Recorded even when the removal FAILS. A partial unset can clear
+      // `model.provider` and leave a providers key, and the refusal is the last
+      // moment that fact exists: the retry reads a selection that is already
+      // gone, so the flag would be lost for good and re-enabling Local AI would
+      // leave the device on nothing.
+      let wasDefault = false;
       const removal = await removeLocalAiFromHermes().catch((err) => {
         console.error("[local-ai] Hermes local provider removal failed:", err);
+        if (err instanceof HermesLocalRemovalError) wasDefault = err.wasDefault;
         return null;
       });
       hermesUnregisterFailed = !removal;
-      if (removal?.wasDefault) {
+      if (removal?.wasDefault || wasDefault) {
         await setMany({ local_ai_was_default: true });
       }
     }
@@ -136,10 +143,7 @@ export async function POST(request: Request) {
       // because the route sees only that it threw.
       const failed = "Local AI was stopped, but removing it from Hermes could not be confirmed — it may still be offered as a provider. Try turning Local AI off again.";
       return NextResponse.json(
-        {
-          error: warning ? `${failed} ${warning}` : failed,
-          code: "hermes_unregister_failed",
-        },
+        { error: warning ? `${failed} ${warning}` : failed },
         { status: 502 },
       );
     }
