@@ -131,7 +131,10 @@ export async function POST(request: Request) {
       // The panel paints `error` red on a non-2xx and never looks at `warning`
       // there, so a box that hit both failures gets both sentences or it gets
       // one of them told wrongly.
-      const failed = "Local AI was stopped, but Hermes still lists it as a provider. Try turning Local AI off again.";
+      // Covers both refusals `removeLocalAiFromHermes` can raise — a key that
+      // demonstrably survived, and one the config could not be read back for —
+      // because the route sees only that it threw.
+      const failed = "Local AI was stopped, but removing it from Hermes could not be confirmed — it may still be offered as a provider. Try turning Local AI off again.";
       return NextResponse.json(
         {
           error: warning ? `${failed} ${warning}` : failed,

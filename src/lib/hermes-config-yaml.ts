@@ -307,19 +307,57 @@ export async function readHermesConfigTopLevelScalar(
 }
 
 /** Read one dotted key straight from the file. Returns null when unset. */
-export async function readHermesConfigValue(key: string): Promise<string | null> {
+/**
+ * What the file says about one key, with "not set" kept apart from "could not
+ * be read".
+ *
+ *   "value"      — the key resolves to a scalar, and here it is.
+ *   "absent"     — the file parsed and the key is not there. A nested BLOCK
+ *                  reads as absent too: `getYamlPath` answers only for scalars,
+ *                  which is the same limit the writer works to.
+ *   "unreadable" — the file could not be read (EACCES), or the path could not
+ *                  be resolved in it (a flow mapping, a duplicate key). Not an
+ *                  answer, and never to be treated as one.
+ *
+ * {@link readHermesConfigValue} collapses the last two into `null`, which is
+ * right for "what is configured" and wrong for "did my write take": a caller
+ * PROVING a removal must not read a failed question as a removed key. The CLI
+ * fallback in {@link patchHermesConfig} is entered precisely BECAUSE the line
+ * editor could not work with the file, so an unreadable read-back is the likely
+ * case there rather than the exotic one.
+ */
+export type HermesConfigRead =
+  | { state: "value"; value: string }
+  | { state: "absent" }
+  | { state: "unreadable" };
+
+export async function resolveHermesConfigValue(key: string): Promise<HermesConfigRead> {
+  let text: string;
   try {
-    const { text } = await readConfigText(hermesConfigPath());
-    return getYamlPath(text, splitKey(key));
+    ({ text } = await readConfigText(hermesConfigPath()));
   } catch (err) {
-    // `null` means "unset" to every caller (hermes-local-ai reads it as "this
-    // leaf is not a scalar" and as "not applied yet"), and this signature has
-    // no third state to give them. A value we could not RESOLVE is a different
-    // fact, so it is at least said out loud rather than passing silently for a
-    // key nobody set.
-    if (err instanceof YamlEditUnsupported) {
-      console.error(`[hermes-config-yaml] ${key} could not be resolved, reading as unset:`, err.message);
-    }
-    return null;
+    // ENOENT/ENOTDIR never reach here — readConfigText answers them with an
+    // empty file, which is genuinely "nothing configured".
+    console.error(`[hermes-config-yaml] ${key} could not be read:`, err instanceof Error ? err.message : err);
+    return { state: "unreadable" };
   }
+  try {
+    const value = getYamlPath(text, splitKey(key));
+    return value === null ? { state: "absent" } : { state: "value", value };
+  } catch (err) {
+    console.error(
+      `[hermes-config-yaml] ${key} could not be resolved:`,
+      err instanceof Error ? err.message : err,
+    );
+    return { state: "unreadable" };
+  }
+}
+
+export async function readHermesConfigValue(key: string): Promise<string | null> {
+  // `null` means "unset" to every caller (hermes-local-ai reads it as "this
+  // leaf is not a scalar" and as "not applied yet"), and this signature has no
+  // third state to give them. A caller that needs the third state asks
+  // `resolveHermesConfigValue` instead; the failure is logged there either way.
+  const read = await resolveHermesConfigValue(key);
+  return read.state === "value" ? read.value : null;
 }
