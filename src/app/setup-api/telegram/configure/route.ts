@@ -104,9 +104,9 @@ export async function POST(request: Request) {
     // stream. Unlike the unknown BELOW, this one is not a lockout: it does not
     // stand between the owner and a first bot on a box whose store reads fine.
     // Saving through an unreadable store would not have worked anyway —
-    // `set()` builds its write on `readConfig()`, so a store it could not read
-    // is a store this route would REPLACE with one holding the bot token and
-    // nothing else.
+    // `set()` now builds its write on `readConfigStrict()` and THROWS rather
+    // than replacing a store it could not read, so refusing here turns a 500
+    // that names nothing into a 503 that names the fault.
     const approval = await readApprovalBotToken();
     if (!approval.known) {
       return NextResponse.json(

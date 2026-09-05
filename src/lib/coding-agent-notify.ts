@@ -179,9 +179,18 @@ async function notifyTelegram(message: string): Promise<void> {
   // fresh data/config.json, has none. Gating on the mirror silenced the notice
   // on such a box — working bot, approved senders, nothing delivered — and said
   // so at INFO, so nothing ever told the owner.
-  const { token } = await readActiveTelegramBot("openclaw");
+  const { token, known } = await readActiveTelegramBot("openclaw");
   if (typeof token !== "string" || !token.trim()) {
-    console.info("[coding-agent] no Telegram bot is configured on this device; notice not sent");
+    // The third state matters in the log even though it cannot matter to the
+    // outcome: a notice is not a gate, so an unreadable store still costs only
+    // this one card — but logging "no bot is configured" for a store that could
+    // not be READ is the same false failure the comment above complains about,
+    // one fault further out, and it sends support looking at the pairing.
+    if (known) {
+      console.info("[coding-agent] no Telegram bot is configured on this device; notice not sent");
+    } else {
+      console.error("[coding-agent] this device's Telegram bot could not be read; notice not sent");
+    }
     return;
   }
   // Rebuild the token from the match rather than testing and reusing the
