@@ -1029,23 +1029,27 @@ function ChromeDesktopInner() {
   const confirmUninstallApp = useCallback(async () => {
     const appId = uninstallConfirmRef.current;
     if (!appId) return;
-    // Remove skill files and reload gateway
+    // Remove skill files and reload gateway.
+    //
+    // The desktop only takes the app off itself once the route has said it
+    // removed it. A refusal is the route saying it removed NOTHING — an
+    // OpenClaw config it could not read, a skill folder it could not delete —
+    // and a thrown fetch (a network drop, or the 10 s abort below) says
+    // nothing at all about whether the removal landed. Dropping the icon on
+    // either is a false success in the one place the owner can see it: the
+    // tile is what they retry from, the list here is display-only (see the
+    // usePreferenceWriter note above — the ROUTE owns `installed_apps`), so
+    // the next reload would put the icon back with no explanation. Retrying
+    // is safe: a second uninstall of an app already gone answers `ok:true`.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 10_000);
       const res = await fetch("/setup-api/apps/uninstall", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ appId }),
         signal: controller.signal,
       });
-      clearTimeout(timer);
-      // A refusal is the route saying it removed NOTHING — an OpenClaw config
-      // it could not read, a skill folder it could not delete. Taking the app
-      // off the desktop anyway would hide the only thing left to retry from,
-      // and the next reload would put the icon back with no explanation. (A
-      // thrown fetch is different and keeps the old behaviour: an abort at the
-      // deadline says nothing about whether the removal landed.)
       if (!res.ok) {
         const failure = await res.json().catch(() => null);
         const message = typeof failure?.error === "string"
@@ -1057,6 +1061,13 @@ function ChromeDesktopInner() {
       }
     } catch (err) {
       console.warn("[uninstall] Failed to uninstall skill:", err);
+      window.dispatchEvent(new CustomEvent("clawbox:toast", {
+        detail: { message: "Couldn't reach the ClawBox to uninstall this app — please try again." },
+      }));
+      setUninstallConfirm(null);
+      return;
+    } finally {
+      clearTimeout(timer);
     }
     setInstalledApps((prev) => prev.filter((id) => id !== appId));
     // Meta and the shelf-pin override go with the app: both used to outlive

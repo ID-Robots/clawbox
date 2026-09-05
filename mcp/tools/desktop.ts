@@ -349,7 +349,23 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
           // request. Call clawbox_health, then retry once" — which sends the
           // agent to a health check over a route that answered precisely, and
           // says nothing about the app still being installed.
+          //
+          // TWO rules, because the route's two refusals are not the same fact
+          // and one sentence for both is a false report either way. `fs.rm`
+          // deletes as it WALKS, so `skill_remove_failed` may already have
+          // removed part of the skill folder — telling the agent "nothing was
+          // removed" there is the same lie this PR removes from the route
+          // itself. `config_unreadable` really did touch nothing: it is
+          // answered before the first deletion. Matched on the body, in order,
+          // by `matchRule` (mcp/lib/errors.ts).
           rules: [
+            {
+              status: 503,
+              match: /"code"\s*:\s*"skill_remove_failed"/,
+              code: "ENDPOINT_DOWN",
+              message: "The ClawBox stopped part-way through the removal: the app's skill folder could not be fully removed and some of it may already be gone. The app is still on the desktop.",
+              next: "Wait a few seconds and call app_uninstall once more. If it refuses again, tell the user the app is still on the desktop, that part of its skill folder may already be deleted, and quote what the device said.",
+            },
             {
               status: 503,
               code: "ENDPOINT_DOWN",
