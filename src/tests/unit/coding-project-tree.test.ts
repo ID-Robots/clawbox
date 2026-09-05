@@ -68,6 +68,18 @@ describe("listing", () => {
     expect(out.entries.map((e) => e.name)).toEqual(["util.js"]);
   });
 
+  it("stops reading a folder past the cap and says so", async () => {
+    const { MAX_TREE_ENTRIES } = await import("@/lib/coding-project-tree");
+    const big = path.join(project, "generated");
+    fs.mkdirSync(big);
+    for (let i = 0; i < MAX_TREE_ENTRIES + 5; i++) fs.writeFileSync(path.join(big, `f${String(i).padStart(5, "0")}.txt`), "x");
+    const out = await listProjectDir(project, "generated");
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.entries).toHaveLength(MAX_TREE_ENTRIES);
+    expect(out.truncated).toBe(true);
+  });
+
   it("answers 404 alike for .git, a climb, an absolute path, a link that leaves, a file, and nothing there", async () => {
     for (const bad of [".git", ".git/objects", "../", "..", "/etc", "up", "up/outside.txt", "README.md", "nope", "secrets"]) {
       const out = await listProjectDir(project, bad);

@@ -91,38 +91,47 @@ export async function resolveInsideProject(
 export async function listProjectDir(projectDir: string, rel: string): Promise<({ ok: true } & TreeListing) | TreeRefusal> {
   const resolved = await resolveInsideProject(projectDir, rel);
   if (!resolved.ok) return resolved;
-  let dirents: import("fs").Dirent[];
+  // Read the folder entry by entry and stop past the cap: a generated
+  // folder with a hundred thousand files must not be allocated whole before
+  // the cap applies — this runs on the appliance itself.
+  const entries: TreeEntry[] = [];
+  let truncated = false;
   try {
     const stat = await fsp.stat(resolved.abs);
     if (!stat.isDirectory()) return { ok: false, status: 404 };
-    dirents = await fsp.readdir(resolved.abs, { withFileTypes: true });
+    const dir = await fsp.opendir(resolved.abs);
+    try {
+      for await (const d of dir) {
+        // `isDirectory()`/`isFile()` are both false for a symlink: a link is
+        // left out rather than followed, the way the Files app and the picker
+        // do it.
+        const isDir = d.isDirectory();
+        if (!isDir && !d.isFile()) continue;
+        if (isDir && SKIPPED_DIRS.has(d.name)) continue;
+        const abs = path.join(resolved.abs, d.name);
+        if (isProtectedFilePath(abs)) continue;
+        if (entries.length >= MAX_TREE_ENTRIES) { truncated = true; break; }
+        let size: number | null = null;
+        let modified: string | null = null;
+        try {
+          const s = await fsp.stat(abs);
+          size = isDir ? null : s.size;
+          modified = s.mtime.toISOString();
+        } catch {
+          // Listed by name alone.
+        }
+        entries.push({ name: d.name, type: isDir ? "directory" : "file", size, modified });
+      }
+    } finally {
+      // Left open by a `break`; closed twice is harmless.
+      await dir.close().catch(() => {});
+    }
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     return { ok: false, status: code === "EACCES" || code === "EPERM" ? 403 : 404 };
   }
-  const entries: TreeEntry[] = [];
-  for (const d of dirents) {
-    // `isDirectory()`/`isFile()` are both false for a symlink: a link is left
-    // out rather than followed, the way the Files app and the picker do it.
-    const isDir = d.isDirectory();
-    if (!isDir && !d.isFile()) continue;
-    if (isDir && SKIPPED_DIRS.has(d.name)) continue;
-    const abs = path.join(resolved.abs, d.name);
-    if (isProtectedFilePath(abs)) continue;
-    let size: number | null = null;
-    let modified: string | null = null;
-    try {
-      const s = await fsp.stat(abs);
-      size = isDir ? null : s.size;
-      modified = s.mtime.toISOString();
-    } catch {
-      // Listed by name alone.
-    }
-    entries.push({ name: d.name, type: isDir ? "directory" : "file", size, modified });
-  }
   entries.sort((a, b) => (a.type !== b.type ? (a.type === "directory" ? -1 : 1) : a.name.localeCompare(b.name)));
-  const truncated = entries.length > MAX_TREE_ENTRIES;
-  return { ok: true, path: resolved.rel, entries: truncated ? entries.slice(0, MAX_TREE_ENTRIES) : entries, truncated };
+  return { ok: true, path: resolved.rel, entries, truncated };
 }
 
 /** One file's text, cut at MAX_TREE_FILE_BYTES; a binary file is flagged and

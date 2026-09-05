@@ -60,7 +60,9 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
         <button
           type="button"
           role="tab"
+          id="coding-agent-workspace-tab-files"
           aria-selected={tab === "files"}
+          aria-controls="coding-agent-workspace-pane-files"
           onClick={() => setTab("files")}
           data-testid="coding-agent-workspace-files"
           className={tab === "files" ? SEGMENT_ON : SEGMENT_OFF}
@@ -71,7 +73,9 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
         <button
           type="button"
           role="tab"
+          id="coding-agent-workspace-tab-changes"
           aria-selected={tab === "changes"}
+          aria-controls="coding-agent-workspace-pane-changes"
           onClick={() => setTab("changes")}
           data-testid="coding-agent-workspace-changes"
           className={tab === "changes" ? SEGMENT_ON : SEGMENT_OFF}
@@ -82,8 +86,12 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
       </div>
       {/* Both panes stay mounted: a tree that was opened three folders deep
           would otherwise fold every time the owner glanced at the diff. */}
-      <div hidden={tab !== "files"}><FilesPane query={query} /></div>
-      <div hidden={tab !== "changes"}><ChangesPane query={query} live={live} initialRef={initialRef} active={tab === "changes"} /></div>
+      <div role="tabpanel" id="coding-agent-workspace-pane-files" aria-labelledby="coding-agent-workspace-tab-files" hidden={tab !== "files"}>
+        <FilesPane query={query} />
+      </div>
+      <div role="tabpanel" id="coding-agent-workspace-pane-changes" aria-labelledby="coding-agent-workspace-tab-changes" hidden={tab !== "changes"}>
+        <ChangesPane query={query} live={live} initialRef={initialRef} active={tab === "changes"} />
+      </div>
     </div>
   );
 }
@@ -115,12 +123,16 @@ function FilesPane({ query }: { query: string }) {
   useEffect(() => { void load(""); }, [load]);
 
   const toggle = (rel: string) => {
+    // The updater stays pure — React may run it twice — and the read
+    // happens once, here, only when the folder opens for the first time.
+    const opening = !open.has(rel);
     setOpen((prev) => {
       const next = new Set(prev);
       if (next.has(rel)) next.delete(rel);
-      else { next.add(rel); if (!listings[rel]) void load(rel); }
+      else next.add(rel);
       return next;
     });
+    if (opening && !listings[rel]) void load(rel);
   };
 
   const openFile = async (rel: string) => {
@@ -168,9 +180,12 @@ function FilesPane({ query }: { query: string }) {
             const icon = fileIcon(entry.name, entry.type);
             const current = file?.path === path;
             return (
-              <li key={path} role="treeitem" aria-expanded={isDir ? expanded : undefined} aria-selected={current || undefined}>
+              <li key={path} role="presentation">
                 <button
                   type="button"
+                  role="treeitem"
+                  aria-expanded={isDir ? expanded : undefined}
+                  aria-selected={current || undefined}
                   onClick={() => (isDir ? toggle(path) : void openFile(path))}
                   data-testid={`coding-agent-tree-${path}`}
                   title={path}

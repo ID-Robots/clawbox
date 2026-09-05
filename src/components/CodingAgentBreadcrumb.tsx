@@ -29,6 +29,8 @@ interface Props {
   /** What the arrow does — normally the second-to-last crumb's onClick. */
   onBack: () => void;
   backLabel: string;
+  /** Names the navigation landmark — "Breadcrumb", never the back action. */
+  navLabel: string;
   backTestId: string;
   /** Anything that sits at the right end of the row — a Live view toggle. */
   trailing?: React.ReactNode;
@@ -36,10 +38,10 @@ interface Props {
 
 const CRUMB = "max-w-[14rem] truncate rounded-md px-1.5 py-0.5 text-[12px]";
 
-export default function CodingAgentBreadcrumb({ crumbs, onBack, backLabel, backTestId, trailing }: Props) {
+export default function CodingAgentBreadcrumb({ crumbs, onBack, backLabel, navLabel, backTestId, trailing }: Props) {
   return (
     <nav
-      aria-label={backLabel}
+      aria-label={navLabel}
       data-testid="coding-agent-breadcrumb"
       className="mt-3 flex items-center gap-1 min-w-0"
     >

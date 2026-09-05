@@ -51,7 +51,16 @@ test.beforeEach(async ({ page }) => {
       telegram_configured: false,
     },
   });
-  // Registered after the helper's catch-all, so these answer first.
+  // Registered after the helper's catch-all, so these answer first. The
+  // helper's device has the agent switched off and its setup unfinished,
+  // which lands the app on its wizard; this one is on, ready and set up.
+  await page.route("**/setup-api/coding-agent/status*", (route) =>
+    route.fulfill({ json: {
+      enabled: true, ready: true, running: 0, setupComplete: true,
+      readiness: { ready: true, wrapperInstalled: true, claudeInstalled: true, clawaiConnected: true, problems: [] },
+      harnessCommand: "claude-ds", maxTaskChars: 4000, defaultDirectory: "/home/clawbox/projects",
+      effort: "ultracode", effortLevels: ["low", "xhigh", "max", "ultracode"], reviewPass: false,
+    } }));
   await page.route("**/setup-api/coding-agent/projects*", (route) =>
     route.fulfill({ json: { directory: "/home/clawbox/projects", projects: [PROJECT] } }));
   await page.route("**/setup-api/coding-agent/runs*", (route) => route.fulfill({ json: { runs: [RUN] } }));
@@ -108,7 +117,7 @@ test("a project's page carries its files and changes, and a run's page its bread
   await expect(win.getByTestId("coding-agent-file-view")).toContainText("<p>there</p>");
 
   await win.getByTestId("coding-agent-workspace-changes").click();
-  await expect(win.getByTestId("coding-agent-change-totals")).toContainText("1 files changed");
+  await expect(win.getByTestId("coding-agent-change-totals")).toContainText("Files changed: 1");
   await win.getByTestId("coding-agent-change-index.html").click();
   const diff = win.getByTestId("coding-agent-diff");
   await expect(diff).toContainText("+<h1>Hi</h1>");

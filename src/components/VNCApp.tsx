@@ -110,7 +110,7 @@ export default function VNCApp({ viewOnly = false, pasteButton = "overlay", ref 
       rfbRef.current.focusOnClick = !viewOnly;
     }
   }, [viewOnly]);
-  useImperativeHandle(ref, () => ({ openPaste: () => openPasteModalRef.current?.() }), []);
+  useImperativeHandle(ref, () => ({ openPaste: () => { if (!viewOnlyRef.current) openPasteModalRef.current?.(); } }), []);
   const writeAndPasteRef = useRef<((text: string) => Promise<boolean>) | null>(null);
   // Same trick for the noVNC `clipboard` event handler — it fires when the
   // guest copies, but the payload is Latin-1-mangled; we use the event as a
@@ -206,6 +206,8 @@ export default function VNCApp({ viewOnly = false, pasteButton = "overlay", ref 
   }, []);
 
   const activateVncInput = useCallback(() => {
+    // A picture only: nothing here may arm the keyboard forwarders.
+    if (viewOnlyRef.current) return;
     if (!vncFocusedRef.current) {
       releaseRemoteModifiers();
     }
@@ -590,6 +592,9 @@ export default function VNCApp({ viewOnly = false, pasteButton = "overlay", ref 
   // from the freshly-updated selection. xclip preserves UTF-8 (Cyrillic,
   // CJK, emoji); the basic-RFB clientCutText path mangles those.
   const writeAndPaste = useCallback(async (text: string): Promise<boolean> => {
+    // View-only never sends the host's clipboard to the guest, whatever
+    // shortcut asked — the screen is a picture and the paste is a write.
+    if (viewOnlyRef.current) return false;
     if (!text) return false;
     try {
       const result = await setupFetch<{ error?: string }>("/setup-api/vnc/clipboard", {

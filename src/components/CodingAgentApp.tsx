@@ -1239,6 +1239,7 @@ export default function CodingAgentApp() {
             ]}
             onBack={() => { disarmClear(); setPage("home"); }}
             backLabel={t("codingAgent.back")}
+            navLabel={t("codingAgent.breadcrumbLabel")}
             backTestId="coding-agent-settings-back"
           />
           <div className="mt-3" data-testid="coding-agent-embedded-settings">
@@ -1494,6 +1495,7 @@ export default function CodingAgentApp() {
                   ]}
                   onBack={() => { setOpenRunId(null); if (project) setOpenProjectDir(project.directory); }}
                   backLabel={project ? t("codingAgent.backTo", { name: project.name }) : t("codingAgent.back")}
+                navLabel={t("codingAgent.breadcrumbLabel")}
                   backTestId="coding-agent-run-back"
                   trailing={<>{runControls(run, "page")}{liveToggle(run)}</>}
                 />
@@ -1533,6 +1535,7 @@ export default function CodingAgentApp() {
                 ]}
                 onBack={() => { setOpenRunId(null); if (project) setOpenProjectDir(project.directory); }}
                 backLabel={project ? t("codingAgent.backTo", { name: project.name }) : t("codingAgent.back")}
+                navLabel={t("codingAgent.breadcrumbLabel")}
                 backTestId="coding-agent-run-back"
                 trailing={liveToggle(run)}
               />
@@ -1942,6 +1945,7 @@ export default function CodingAgentApp() {
               ]}
               onBack={() => setOpenProjectDir(null)}
               backLabel={t("codingAgent.back")}
+            navLabel={t("codingAgent.breadcrumbLabel")}
               backTestId="coding-agent-project-back"
             />
             <div className="mt-3" data-testid="coding-agent-project-page">
@@ -2007,7 +2011,7 @@ export default function CodingAgentApp() {
                 {github?.connected && (git?.lastCommit || p.lastCommit) && (
                   <button
                     type="button"
-                    onClick={() => void backup({ projectId: p.kind === "codeProject" ? p.folder : null, directory: p.directory }, `backup-project-${p.folder}`)}
+                    onClick={() => void backup({ projectId: p.kind === "codeProject" ? p.folder : null, directory: p.directory }, `project-${p.folder}`)}
                     disabled={busy === `backup-project-${p.folder}`}
                     data-testid="coding-agent-project-backup"
                     className={`${BTN_BASE} border border-emerald-400/40 bg-emerald-400/[0.07] text-emerald-400 hover:bg-emerald-400/[0.14]`}
@@ -2017,7 +2021,7 @@ export default function CodingAgentApp() {
                 )}
               </div>
               {/* The folder itself, and what changed in it. */}
-              <CodingProjectWorkspace query={projectQuery} live={projectLive} />
+              <CodingProjectWorkspace key={projectQuery} query={projectQuery} live={projectLive} />
               {/* A coding team on this folder: the goal, the board, the log. */}
               <CodingTeamCard directory={p.directory} projectId={p.kind === "codeProject" ? p.folder : null} onOpenRun={(id) => showRun(id)} />
             </div>
