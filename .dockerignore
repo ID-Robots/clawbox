@@ -3,6 +3,11 @@
 # would just double the disk footprint and cache mismatches.
 node_modules
 .next
+# The previous build install.sh parks during a rebuild (set_previous_build_aside).
+# `.next` above does not cover it — it is a sibling, not a child — so a dev
+# machine that has ever had a rebuild killed would ship a whole extra build tree
+# into the e2e-install context, stamp and all.
+.next-old
 .git/lfs
 .git/logs
 test-results
