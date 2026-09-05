@@ -54,8 +54,26 @@ import { hermesHome } from "@/lib/hermes-env";
  * 1024×1024, with `gpt-image-1-mini` — the id every plan is entitled to.
  */
 
-/** The plugin's name, which is also its directory and its registry key. */
+/** The plugin's name, which is also its directory and the loader's allow-list entry. */
 export const HERMES_IMAGE_PLUGIN_NAME = "clawai";
+
+/**
+ * The plugin's CANONICAL registry key — the second spelling of the same plugin.
+ *
+ * READ ON THE PINNED BUILD (0.20.5, Hermes box, read-only, 2026-09-05):
+ * `_resolve_plugin_key("clawai")` answers `image_gen/clawai`
+ * (`hermes_cli/plugins_cmd.py:1337-1362` — the category directory joined to the
+ * name), and `cmd_disable` (`:1710-1739`) writes THAT key into
+ * `plugins.disabled`, not the bare name. Hermes' own `_plugin_status`
+ * (`:1931-1937`) then tests BOTH — `if name in disabled or key in disabled` —
+ * which is why anything that asks Hermes is immune and anything that reads the
+ * key itself has to test both too.
+ *
+ * Exported because two readers need it and a second literal would drift:
+ * `hermes-clawai.ts`'s deny-list fallback, and `scripts/register-mcp.sh`'s boot
+ * re-arm through `CLAWBOX_IMAGE_PLUGIN_KEY`.
+ */
+export const HERMES_IMAGE_PLUGIN_KEY = `image_gen/${HERMES_IMAGE_PLUGIN_NAME}`;
 
 /** The two files that make a Hermes directory plugin: manifest and entry point. */
 const PLUGIN_FILES = ["plugin.yaml", "__init__.py"] as const;
@@ -145,7 +163,23 @@ export async function hermesImagePluginInstalled(): Promise<boolean> {
 export type PluginsEnabledState =
   | { kind: "list"; names: string[] }
   | { kind: "residue"; names: string[]; shape: string }
-  | { kind: "unreadable" };
+  | { kind: "unreadable"; reason: UnreadableReason };
+
+/**
+ * WHY nothing could be taken out of the value — two different facts that the
+ * operator's journal must not word as one.
+ *
+ *   silent      — the command exited 0 and printed NOTHING. Nothing was read,
+ *                 so naming a stored "value this build cannot read" would be a
+ *                 report of something that never happened.
+ *   unparsable  — stdout was there and was not JSON: a build that takes
+ *                 `--json` without honouring it, which really is a value this
+ *                 build cannot read.
+ *
+ * Both are left ALONE by every caller; they are kept apart so the case is
+ * greppable if it turns up in the field.
+ */
+export type UnreadableReason = "silent" | "unparsable";
 
 /**
  * Decode `hermes config get plugins.enabled --json`, STRICTLY.
@@ -170,12 +204,12 @@ export function decodePluginsEnabledJson(stdout: string): PluginsEnabledState {
   // writes it over whatever is really stored, unloading every plugin the
   // customer installed. That is `unreadable`, which the caller leaves alone.
   if (/^config key not set/i.test(text)) return { kind: "list", names: [] };
-  if (!text) return { kind: "unreadable" };
+  if (!text) return { kind: "unreadable", reason: "silent" };
   let value: unknown;
   try {
     value = JSON.parse(text);
   } catch {
-    return { kind: "unreadable" };
+    return { kind: "unreadable", reason: "unparsable" };
   }
   if (Array.isArray(value)) {
     // A non-string member can never match a plugin key, so it is dropped rather

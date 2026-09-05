@@ -308,6 +308,13 @@ export CLAWBOX_EMAIL_HOOK_PLUGIN=""
 # LINK path (src/lib/hermes-image-plugin.ts), not by this script — this is only
 # where they would be if the box has ever been linked.
 export CLAWBOX_IMAGE_PLUGIN="clawai"
+# The plugin's CANONICAL registry key — its second spelling, and the one
+# `hermes plugins disable clawai` writes into `plugins.disabled`
+# (`cmd_disable` -> `_resolve_plugin_key`, hermes_cli/plugins_cmd.py:1710-1739
+# and :1337-1362, read on the pinned 0.20.5 build). Hermes' own
+# `_plugin_status` tests both spellings; so must the re-arm's deny-list check.
+# Mirrors HERMES_IMAGE_PLUGIN_KEY in src/lib/hermes-image-plugin.ts.
+export CLAWBOX_IMAGE_PLUGIN_KEY="image_gen/clawai"
 export CLAWBOX_IMAGE_PLUGIN_ENTRY="$HERMES_PLUGINS_DIR/image_gen/clawai/__init__.py"
 
 python3 - <<'PY'
@@ -656,16 +663,24 @@ elif isinstance(plugins_cfg, dict):
 #      `hermes plugins disable clawai`, which condition 4 honours and which the
 #      link path reads back as proof; a real ClawBox switch for it belongs on
 #      the AI Models page, not in a boot script's inference.
-#   4. `plugins.disabled` does NOT name the backend. The deny-list WINS over
-#      `plugins.enabled` (`_plugin_status`, hermes_cli/plugins_cmd.py:1930-1936),
-#      so a name in it is loadable by every reading of the allow-list and loaded
-#      by none — and it is one of the two answers the link path withdraws the
-#      claim FOR. Repairing a type does not lift a denial, so re-arming without
-#      asking it would put back, unattended, the very claim a proof had just
-#      taken away. Weighed through the same reader as the allow-list, and a
+#   4. `plugins.disabled` does NOT name the backend, IN EITHER SPELLING. The
+#      deny-list WINS over `plugins.enabled` (`_plugin_status`,
+#      hermes_cli/plugins_cmd.py:1931-1937), so a name in it is loadable by
+#      every reading of the allow-list and loaded by none — and it is one of the
+#      two answers the link path withdraws the claim FOR. Repairing a type does
+#      not lift a denial, so re-arming without asking it would put back,
+#      unattended, the very claim a proof had just taken away. BOTH spellings
+#      because `hermes plugins disable clawai` stores the RESOLVED key
+#      `image_gen/clawai` (`cmd_disable` -> `_resolve_plugin_key`, :1710-1739
+#      and :1337-1362, read on the pinned 0.20.5 build) while the loader's
+#      allow-list carries the bare name — hermes' own `_plugin_status` tests
+#      both, and a check that knew only one would miss the deny-list in the one
+#      state the harness's own command produces. Weighed through the same
+#      reader as the allow-list, and a
 #      deny-list this script cannot read declines the re-arm rather than
 #      guessing: the cost is one Settings → Save, which asks Hermes itself.
 image_plugin = os.environ.get("CLAWBOX_IMAGE_PLUGIN") or ""
+image_plugin_key = os.environ.get("CLAWBOX_IMAGE_PLUGIN_KEY") or ""
 image_entry = os.environ.get("CLAWBOX_IMAGE_PLUGIN_ENTRY") or ""
 if repaired_enabled and image_plugin and image_plugin in (names or []):
     denied = config_name_list(plugins_cfg.get("disabled"))
@@ -680,7 +695,9 @@ if repaired_enabled and image_plugin and image_plugin in (names or []):
     elif denied is None:
         print("[register-mcp] WARNING: plugins.disabled is a shape this script cannot read; "
               "leaving image_gen.provider unset.", file=sys.stderr)
-    elif image_plugin in denied:
+    elif image_plugin in denied or (image_plugin_key and image_plugin_key in denied):
+        # BOTH spellings: `hermes plugins disable clawai` stores the resolved
+        # key, and hermes' own `_plugin_status` matches either.
         print("[register-mcp] plugins.disabled names the ClawAI image backend, so hermes "
               "loads it from no list; leaving image_gen.provider unset")
     elif not (image_entry and os.path.isfile(image_entry)):

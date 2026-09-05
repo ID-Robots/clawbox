@@ -117,9 +117,16 @@ function pluginsListing(stored: unknown): Reply {
   };
 }
 
-/** Is this argv the plugin listing? */
+/**
+ * Is this argv the plugin listing — asked MACHINE-READABLY?
+ *
+ * `--json` is asserted rather than ignored: without it the real CLI prints a
+ * rich table, which `hermesReportsPluginEnabled` reads as `cannot-ask`. A stub
+ * that answered JSON to both would keep every test in this file green while the
+ * flag was dropped from the call.
+ */
 function isPluginsListing(args: string[]): boolean {
-  return args[0] === "plugins" && args[1] === "list";
+  return args[0] === "plugins" && args[1] === "list" && args.includes("--json");
 }
 
 /** `hermes config get <key>` with no flag: a YAML block list, or raw text. */
@@ -144,6 +151,12 @@ function box(opts: { value: unknown; onSet?: Reply }): void {
   let stored = opts.value;
   cliMock.mockImplementation(async (args: string[]) => {
     if (isPluginsListing(args)) return pluginsListing(stored);
+    // No deny-list on this box, reported the way the CLI reports an unset key.
+    // Not an exit-0 silence: that is "the command said nothing", which no
+    // reader here may take for "nothing is denied".
+    if (args[1] === "get" && args[2] === "plugins.disabled") {
+      return { code: 1, stdout: "", stderr: "Config key not set: plugins.disabled" };
+    }
     if (args[1] === "get" && args[2] === "plugins.enabled") {
       if (stored === undefined) {
         return { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" };
@@ -608,6 +621,43 @@ describe("a failure that establishes nothing takes nothing away", () => {
     expect(unsets()).toContain("image_gen.provider");
   });
 
+  it("does not rewrite image_gen.model when it makes no claim", async () => {
+    // `image_gen.model` is the GLOBAL key, read by whichever backend is
+    // SELECTED; our own plugin reads `image_gen.clawai.model`. Written with the
+    // describing keys it was replaced on every AI-Models save — including here,
+    // where the listing answered nothing, no claim is made and the box keeps
+    // whatever provider it had. A customer on another backend lost their model
+    // to a link that concluded it could not turn ours on. It belongs with
+    // `image_gen.provider`: ours to name only when we become the backend.
+    boxThatDraws(async (args) => {
+      if (isPluginsListing(args)) return { code: 0, stdout: "", stderr: "" };
+      if (args[1] === "get" && args[2] === "plugins.enabled") {
+        return { code: 0, stdout: JSON.stringify([HERMES_IMAGE_PLUGIN_NAME]), stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(claimedItCanDraw()).toBe(false);
+    expect(unsets()).not.toContain("image_gen.provider");
+    expect(sets().some((v) => v.startsWith("image_gen.model="))).toBe(false);
+    // Our OWN backend is still described — that is ours either way, and it is
+    // what a re-link exists to repair when the proxy address moves.
+    expect(sets().some((v) => v.startsWith(`image_gen.${HERMES_IMAGE_PLUGIN_NAME}.base_url=`))).toBe(true);
+  });
+
+  it("writes image_gen.model when it does claim the backend", async () => {
+    // The counterweight: once we ARE the provider that key is ours to name, and
+    // a provider set without its model would point at whatever came before.
+    box({ value: [HERMES_IMAGE_PLUGIN_NAME] });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(claimedItCanDraw()).toBe(true);
+    expect(sets().some((s) => s.startsWith("image_gen.model="))).toBe(true);
+  });
+
   it("asks hermes on the no-write path even when the answer is yes", async () => {
     // The counterweight: the same no-write path on a box where the plugin IS
     // enabled must still reach `image_gen.provider`. A guard that answered
@@ -674,30 +724,117 @@ describe("a failure that establishes nothing takes nothing away", () => {
   });
 
   it("still links a FIRST box whose hermes has no `plugins list --json`", async () => {
-    // The feature now rests on one subcommand flag, and a build that lacks it
-    // could be asked nothing — so a box being linked for the FIRST time would
-    // silently never gain image generation, where beta gave it unconditionally.
-    // A flag that does not exist is a PERMANENT property of the build, not a
-    // moment, and it is the same exemption `config get --json` already gets:
-    // where no machine-readable question can be put, the box keeps the feature
-    // it would have had. (A box linked before keeps its claim either way —
-    // nothing here withdraws.)
+    // A build that answers `config get --json` but not `plugins list --json`.
+    // The key is UNSET — a genuine first link — so a write happens and the
+    // prover runs; without a fallback the listing answers nothing, the write
+    // path returns `!typed` = false, and the box silently never gains image
+    // generation, where beta gave it unconditionally.
+    //
+    // The proof it CAN still give is the typed read-back of the two keys
+    // Hermes gates on. `box()` is stateful, so after the write those answer
+    // the list just written and an unset deny-list.
+    box({ value: undefined });
+    const stored = cliMock.getMockImplementation()!;
     cliMock.mockImplementation(async (args: string[]) => {
       if (isPluginsListing(args)) {
         return { code: 2, stdout: "", stderr: "Error: no such option: --json" };
       }
-      if (args[1] === "get" && args[2] === "plugins.enabled") {
-        return args.includes("--json")
-          ? { code: 0, stdout: JSON.stringify([HERMES_IMAGE_PLUGIN_NAME]), stderr: "" }
-          : { code: 0, stdout: `- ${HERMES_IMAGE_PLUGIN_NAME}\n`, stderr: "" };
-      }
-      return { code: 0, stdout: "", stderr: "" };
+      return stored(args);
     });
 
     await applyClawaiToHermes("claw_token_abc", "flash");
 
+    expect(wrotePluginsEnabled(), "an unset key must be written").toBe(true);
     expect(claimedItCanDraw()).toBe(true);
     expect(unsets()).not.toContain("image_gen.provider");
+  });
+
+  it("does not arm a build with no listing when the write landed as TEXT", async () => {
+    // The other half of the same exemption, and the reason it cannot be an
+    // unconditional yes: this build can still be asked the typed questions, and
+    // a `plugins.enabled` that reads back as a STRING is Hermes loading no user
+    // plugin at all. Arming on an exit code here would re-open TASK-701's own
+    // symptom for one build class.
+    box({
+      value: undefined,
+      onSet: { code: 0, stdout: "", stderr: STORING_AS_STRING },
+    });
+    const stored = cliMock.getMockImplementation()!;
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (isPluginsListing(args)) {
+        return { code: 2, stdout: "", stderr: "Error: no such option: --json" };
+      }
+      return stored(args);
+    });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(claimedItCanDraw()).toBe(false);
+  });
+
+  it("does not arm a build with no listing while plugins.disabled names us", async () => {
+    // `plugins.disabled` is the deny-list the listing would have caught. On a
+    // build that cannot be asked for the listing it is read directly, in BOTH
+    // spellings hermes writes — `hermes plugins disable clawai` stores the
+    // resolved key `image_gen/clawai` (cmd_disable -> _resolve_plugin_key,
+    // read on the pinned 0.20.5 build).
+    for (const spelling of [HERMES_IMAGE_PLUGIN_NAME, `image_gen/${HERMES_IMAGE_PLUGIN_NAME}`]) {
+      cliMock.mockReset();
+      drawsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+      boxThatDraws(async (args) => {
+        if (isPluginsListing(args)) {
+          return { code: 2, stdout: "", stderr: "Error: no such option: --json" };
+        }
+        if (args[1] === "get" && args[2] === "plugins.enabled") {
+          return { code: 0, stdout: JSON.stringify([HERMES_IMAGE_PLUGIN_NAME]), stderr: "" };
+        }
+        if (args[1] === "get" && args[2] === "plugins.disabled") {
+          return { code: 0, stdout: JSON.stringify([spelling]), stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      });
+
+      await applyClawaiToHermes("claw_token_abc", "flash");
+
+      expect(claimedItCanDraw(), `${spelling} must deny the claim`).toBe(false);
+      expect(unsets(), `${spelling} must withdraw`).toContain("image_gen.provider");
+    }
+  });
+
+  it("does not read an unfamiliar status as a NO", async () => {
+    // `not-enabled` is the one verdict that takes a working box's claim away,
+    // so it is a CLOSED list — `disabled`, `not enabled`, `not-enabled`, what
+    // `_plugin_status` can return on the pinned 0.20.5 build
+    // (hermes_cli/plugins_cmd.py:1931-1937). This file already argues that CLI
+    // wording differs on builds moved off the pin by a hand-run `hermes
+    // update`; that applies to a status string as much as to argparse's errors.
+    // A wrong "cannot ask" hides nothing. A wrong "no" unsets image generation
+    // on a box where Hermes was loading the plugin all along, on every Save,
+    // with nothing on the device to put it back.
+    for (const status of ["enabled (user)", "active", "", undefined]) {
+      cliMock.mockReset();
+      drawsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+      boxThatDraws(async (args) => {
+        if (isPluginsListing(args)) {
+          return {
+            code: 0,
+            stdout: JSON.stringify([
+              { name: HERMES_IMAGE_PLUGIN_NAME, status, version: "1.0.0", description: "", source: "user" },
+            ]),
+            stderr: "",
+          };
+        }
+        if (args[1] === "get" && args[2] === "plugins.enabled") {
+          return { code: 0, stdout: JSON.stringify([HERMES_IMAGE_PLUGIN_NAME]), stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      });
+
+      await applyClawaiToHermes("claw_token_abc", "flash");
+
+      expect(unsets(), `status ${JSON.stringify(status)} must not withdraw`)
+        .not.toContain("image_gen.provider");
+    }
   });
 
   it("still withdraws on the one answer that establishes the plugin cannot load", async () => {

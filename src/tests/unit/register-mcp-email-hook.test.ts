@@ -567,6 +567,25 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(r.stdout).toMatch(/disabled/);
   });
 
+  it("arms nothing while plugins.disabled names the backend by its RESOLVED key", () => {
+    // The spelling `hermes plugins disable clawai` actually writes. Read on the
+    // pinned 0.20.5 build: `cmd_disable` (hermes_cli/plugins_cmd.py:1710-1739)
+    // stores `_resolve_plugin_key(name)`, which answers `image_gen/clawai` —
+    // the category directory joined to the name — and Hermes' own
+    // `_plugin_status` (:1931-1937) then tests BOTH spellings. A check that
+    // knew only the bare name would miss the deny-list in the one state an
+    // owner can actually produce with the harness's own command.
+    fs.writeFileSync(
+      configPath,
+      `plugins:\n  enabled: '["clawai"]'\n  disabled:\n    - image_gen/clawai\n`,
+    );
+    installImageBackend();
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(enabledPlugins()).toEqual(["clawai", PLUGIN]); // the type repair still happens
+    expect(imageProvider()).toBeUndefined();
+  });
+
   it("arms nothing when plugins.disabled is a shape it cannot read", () => {
     // Declining costs one Settings → Save, which re-asks Hermes directly.
     // Re-arming over a deny-list nobody could read would be a claim made on a
